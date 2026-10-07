@@ -1132,3 +1132,426 @@ async fn a_not_sent_input_is_offered_afresh_under_the_next_binding() {
     let attempt = ledger.rows().unwrap().row(1).unwrap().attempt.clone();
     assert_eq!(attempt.map(|attempt| attempt.binding), Some(binding));
 }
+
+// Tracked frames: exact parsing, provider witnesses, merged records, crash cuts and turn closes.
+mod tracked {
+    use std::fs;
+    use std::time::Instant;
+
+    use serde_json::{Value, json};
+
+    use super::super::actor::token::{self, Framed};
+    use super::super::actor::witness::{Tracked, scan_tracked};
+    use super::super::actor::{InputActor, Step};
+    use super::super::attempt::{
+        AttemptMeta, Disposition, Effect, Tracking, WitnessKind, fresh_token,
+    };
+    use super::super::durability_tests::supported::Recording;
+    use super::super::ledger::Ledger;
+    use super::super::rows::{AttemptEvidence, DoneReason, Entry, Row, RowState};
+    use super::{CHANNEL, CLAUDE_READY, CODEX_READY, FakePane, World, codex_turn, codex_world};
+    use crate::services::tui_o::shadow::ShadowProvider;
+
+    // Registers a sent attempt for `key` under `token`, anchored at the transcript's current end.
+    fn tracked(world: &World, ledger: &mut Ledger, key: u64, token: &str) -> String {
+        let frame = token::render(token, &format!("input {key}"));
+        let profile = token::profile(world.binding.provider);
+        let anchor = fs::metadata(&world.transcript).unwrap().len();
+        let meta = AttemptMeta {
+            generation: 1,
+            token: token.into(),
+            frame_digest: token::digest(profile, &frame).unwrap(),
+            frame_profile: Some(profile.into()),
+            execution_nonce: "test-nonce".into(),
+            source: world.binding.source.clone(),
+            anchor,
+            effect: Effect::Intent,
+            incarnation: None,
+            queue_end: None,
+        };
+        let evidence = AttemptEvidence {
+            binding: world.binding.clone(),
+            execution_nonce: meta.execution_nonce.clone(),
+            eof: anchor,
+            rendered_prompt: frame.clone(),
+            source_ids: vec![key],
+            record_end: None,
+            native_turn_id: None,
+        };
+        let tracking = Tracking {
+            attempt: Some(meta),
+            ..Tracking::default()
+        };
+        let injecting = RowState::Injecting;
+        (ledger.append_tracked(key, injecting, Some(evidence), &tracking)).unwrap();
+        let sent = Entry::Transition {
+            key,
+            state: RowState::AwaitTurn,
+            attempt: None,
+        };
+        ledger.append_entry(&sent, &[]).unwrap();
+        frame
+    }
+
+    fn inputs(keys: &[u64]) -> Vec<(u64, String)> {
+        keys.iter()
+            .map(|key| (*key, format!("input {key}")))
+            .collect()
+    }
+
+    fn ledger_of(world: &World, keys: &[u64]) -> Ledger {
+        let inputs = inputs(keys);
+        let inputs: Vec<(u64, &str)> = inputs.iter().map(|(k, t)| (*k, t.as_str())).collect();
+        world.ledger(&inputs)
+    }
+
+    fn kinds(seen: &Tracked) -> Vec<(u64, WitnessKind)> {
+        (seen.witnesses.iter())
+            .map(|(key, w)| (*key, w.kind))
+            .collect()
+    }
+
+    fn row(ledger: &Ledger, key: u64) -> Row {
+        ledger.rows().unwrap().row(key).unwrap().clone()
+    }
+
+    fn claude_user(uuid: &str, content: Value) -> Value {
+        json!({"type": "user", "uuid": uuid, "message": {"role": "user", "content": content}})
+    }
+
+    fn codex_user(text: &str) -> Value {
+        json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}]}})
+    }
+
+    // Only a whole start line, a body and the same token's end line make a frame.
+    #[test]
+    fn frames_parse_only_complete_marker_lines() {
+        let claude = token::profile(ShadowProvider::Claude);
+        let codex = token::profile(ShadowProvider::Codex);
+        let (a, b) = (fresh_token(), fresh_token());
+        let frame = token::render(&a, "첫 줄\n\tindented\n[adk:end]");
+        let digest = token::digest(claude, &frame).unwrap();
+        let own = Framed {
+            token: a.clone(),
+            digest: digest.clone(),
+        };
+        assert_eq!(token::frames(claude, &frame), vec![own]);
+        // Claude stores a tab as four spaces and either provider may store CRLF.
+        let stored = frame.replace('\t', "    ").replace('\n', "\r\n");
+        assert_eq!(token::frames(claude, &stored)[0].digest, digest);
+        let expanded = &token::frames(codex, &frame.replace('\t', "    "))[0];
+        assert_ne!(
+            Some(&expanded.digest),
+            token::digest(codex, &frame).as_ref()
+        );
+        assert_eq!(token::digest("unknown-profile", &frame), None);
+
+        let merged = format!("leader\n{frame}\n{}\ntail", token::render(&b, "second"));
+        let tokens: Vec<String> = (token::frames(claude, &merged).into_iter())
+            .map(|found| found.token)
+            .collect();
+        assert_eq!(tokens, [a.clone(), b.clone()]);
+        let interrupted = format!("[adk:tok={a}]\npartial\n{}", token::render(&b, "inner"));
+        let found = token::frames(claude, &interrupted);
+        assert_eq!((found.len(), found[0].token.as_str()), (1, b.as_str()));
+
+        let end = format!("[adk:end={a}]");
+        for text in [
+            format!("> {frame}"),
+            frame.replace(&end, ""),
+            frame.replace(&end, &format!("[adk:end={b}]")),
+            format!("[adk:tok={a}]\n{end}"),
+            format!("[adk:tok={0}]\nbody\n[adk:end={0}]", &a[..31]),
+            format!(
+                "[adk:tok={}]\nbody\n[adk:end={}]",
+                a.to_uppercase(),
+                a.to_uppercase()
+            ),
+            format!("[adk:tok={a}] \nbody\n{end}"),
+        ] {
+            assert!(token::frames(claude, &text).is_empty(), "{text}");
+        }
+    }
+
+    // Q, a delivered remove and a tool result keep a row queued; only a prompt attachment runs it.
+    #[test]
+    fn claude_queue_records_and_a_prompt_attachment_witness_in_order() {
+        let world = World::new(ShadowProvider::Claude);
+        let mut ledger = ledger_of(&world, &[1]);
+        let frame = tracked(&world, &mut ledger, 1, &fresh_token());
+        let attachment = |mode: &str| {
+            json!({"type": "attachment", "uuid": format!("a-{mode}"), "attachment":
+                {"type": "queued_command", "commandMode": mode, "prompt": frame}})
+        };
+        for record in [
+            json!({"type": "queue-operation", "operation": "enqueue", "content": frame}),
+            json!({"type": "queue-operation", "operation": "dequeue"}),
+            json!({"type": "queue-operation", "operation": "remove",
+                "reason": "absorbed_mid_turn", "content": frame}),
+            claude_user(
+                "u-tool",
+                json!([{"type": "tool_result", "tool_use_id": "call-1", "content": frame}]),
+            ),
+            attachment("task-notification"),
+            json!({"type": "user", "uuid": "u-meta", "isMeta": true, "message": {"content": frame}}),
+            attachment("prompt"),
+        ] {
+            world.append(record);
+        }
+        let seen = scan_tracked(&world.binding, &ledger.rows().unwrap()).unwrap();
+        use WitnessKind::{Attachment, Queued, Removed, Tool};
+        assert_eq!(
+            kinds(&seen),
+            [(1, Queued), (1, Removed), (1, Tool), (1, Attachment)]
+        );
+        assert!(seen.complete && seen.foreign == 0 && seen.altered.is_empty());
+        let mut states = Vec::new();
+        for (key, witness) in seen.witnesses {
+            ledger.append_witness(key, witness).unwrap();
+            states.push(row(&ledger, key).state);
+        }
+        let queued = RowState::Queued;
+        assert_eq!(states, [queued, queued, queued, RowState::Running]);
+    }
+
+    // Shared prompt ids join nothing: a row is named only by its own exact frame after its anchor.
+    #[test]
+    fn only_an_exact_registered_frame_after_its_anchor_names_a_row() {
+        let world = World::new(ShadowProvider::Claude);
+        let mut ledger = ledger_of(&world, &[1, 2, 3, 4]);
+        let queued = |uuid: &str, text: &str| {
+            json!({"type": "user", "uuid": uuid, "promptId": "p-shared", "promptSource": "queued",
+                "message": {"role": "user", "content": text}})
+        };
+        let one = tracked(&world, &mut ledger, 1, &fresh_token());
+        let two = tracked(&world, &mut ledger, 2, &fresh_token());
+        world.append(queued("u-2", &two));
+        let early = fresh_token();
+        world.append(claude_user(
+            "u-early",
+            json!(token::render(&early, "input 3")),
+        ));
+        tracked(&world, &mut ledger, 3, &early);
+        let four = tracked(&world, &mut ledger, 4, &fresh_token());
+        world.append(queued("u-1", &one));
+        world.append(claude_user(
+            "u-4",
+            json!(four.replace("input 4", "input 4!")),
+        ));
+        let stranger = token::render(&fresh_token(), "input 9");
+        world.append(claude_user("u-9", json!(stranger)));
+
+        let seen = scan_tracked(&world.binding, &ledger.rows().unwrap()).unwrap();
+        let user = WitnessKind::User;
+        assert_eq!(kinds(&seen), [(2, user), (1, user)]);
+        assert_eq!((seen.foreign, seen.altered.as_slice()), (2, [4].as_slice()));
+    }
+
+    // One Codex user carrying ten frames confirms ten rows once each and completes them together.
+    #[tokio::test]
+    async fn a_merged_codex_user_confirms_every_framed_row_once() {
+        let world = codex_world();
+        let keys: Vec<u64> = (1..=10).collect();
+        let mut ledger = ledger_of(&world, &keys);
+        let frames: Vec<String> = (keys.iter())
+            .map(|key| tracked(&world, &mut ledger, *key, &fresh_token()))
+            .collect();
+        codex_turn(&world, "task_started", "t-merged");
+        world.append(
+            json!({"type": "response_item", "payload": {"type": "message",
+            "role": "user", "content": [{"type": "input_text", "text": "leader typed this"},
+            {"type": "input_text", "text": frames.join("\n")}]}}),
+        );
+        let mut actor = InputActor::new(world.binding.clone(), FakePane::new(CODEX_READY));
+        let now = Instant::now();
+        let step = actor.step(&mut ledger, Some(&world.idle()), now).await;
+        assert_eq!(step.unwrap(), Step::Wait("turn_open"));
+        let rows = ledger.rows().unwrap();
+        for key in &keys {
+            let row = rows.row(*key).unwrap();
+            assert_eq!((row.state, row.witnesses.len()), (RowState::Running, 1));
+            let turn = row.witnesses[0].witness.turn_ref.as_deref();
+            assert_eq!(turn, Some("t-merged"));
+        }
+        assert_eq!(
+            rows.open_rows().count(),
+            keys.len(),
+            "a frame never makes a row"
+        );
+        let records = ledger.records().len();
+        let step = actor.step(&mut ledger, Some(&world.idle()), now).await;
+        assert_eq!(step.unwrap(), Step::Wait("turn_open"));
+        assert_eq!(ledger.records().len(), records, "a re-read appends nothing");
+
+        codex_turn(&world, "task_complete", "t-merged");
+        let step = actor.step(&mut ledger, Some(&world.idle()), now).await;
+        assert_eq!(step.unwrap(), Step::Idle);
+        for key in &keys {
+            let done = row(&ledger, *key);
+            assert_eq!(done.state, RowState::Done(DoneReason::Completed));
+            assert!(done.dispositions.is_empty());
+        }
+        assert!(actor.pane_submitted().is_empty());
+    }
+
+    // Three rows confirmed by one merged Claude user, ready for a step.
+    fn merged() -> (World, Ledger) {
+        let world = World::new(ShadowProvider::Claude);
+        let mut ledger = ledger_of(&world, &[1, 2, 3]);
+        let frames: Vec<String> = (1..=3)
+            .map(|key| tracked(&world, &mut ledger, key, &fresh_token()))
+            .collect();
+        world.append(claude_user("u-merged", json!(frames.join("\n"))));
+        (world, ledger)
+    }
+
+    // A failed append stops the step; the next read from the oldest anchor records only the rest.
+    #[tokio::test]
+    async fn a_failed_append_inside_a_merged_record_resumes_without_another_enter() {
+        let now = Instant::now();
+        let per_append = {
+            let (world, mut ledger) = merged();
+            let mut actor = InputActor::new(world.binding.clone(), FakePane::new(CLAUDE_READY));
+            let recording = Recording::start(&world.runtime);
+            recording.arm(None);
+            actor
+                .step(&mut ledger, Some(&world.idle()), now)
+                .await
+                .unwrap();
+            let events = recording.events().len();
+            assert_eq!(events % 3, 0, "three appends, one shape");
+            events / 3
+        };
+        for adopted in [true, false] {
+            let (world, mut ledger) = merged();
+            let mut actor = InputActor::new(world.binding.clone(), FakePane::new(CLAUDE_READY));
+            let recording = Recording::start(&world.runtime);
+            recording.arm(Some(per_append + 1));
+            assert!(
+                actor
+                    .step(&mut ledger, Some(&world.idle()), now)
+                    .await
+                    .is_err()
+            );
+            drop((recording, ledger));
+            if !adopted {
+                cut_tail(&world, 3);
+            }
+
+            let mut ledger = Ledger::open(&world.runtime, CHANNEL).unwrap();
+            let running = |ledger: &Ledger, key| row(ledger, key).state == RowState::Running;
+            assert!(running(&ledger, 1));
+            assert_eq!(running(&ledger, 2), adopted);
+            assert!(!running(&ledger, 3));
+            let mut actor = InputActor::new(world.binding.clone(), FakePane::new(CLAUDE_READY));
+            let step = actor.step(&mut ledger, Some(&world.idle()), now).await;
+            assert_eq!(step.unwrap(), Step::Wait("turn_open"));
+            for key in 1..=3 {
+                let row = row(&ledger, key);
+                assert_eq!((row.state, row.witnesses.len()), (RowState::Running, 1));
+            }
+            assert!(actor.pane_submitted().is_empty(), "no Enter after the cut");
+        }
+    }
+
+    // Cuts the last WAL line mid-record, as a power loss during append would.
+    fn cut_tail(world: &World, bytes: u64) {
+        let dir = world.runtime.join("input_ledger").join(CHANNEL.to_string());
+        let wal = (fs::read_dir(&dir).unwrap())
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .unwrap();
+        let file = fs::OpenOptions::new().write(true).open(&wal).unwrap();
+        let len = file.metadata().unwrap().len();
+        file.set_len(len - bytes).unwrap();
+    }
+
+    // A close ends only the rows confirmed in its own turn; an abort says so.
+    #[tokio::test]
+    async fn a_tracked_row_settles_only_at_its_own_turn_close() {
+        let now = Instant::now();
+        let world = World::new(ShadowProvider::Claude);
+        let mut ledger = ledger_of(&world, &[1]);
+        let frame = tracked(&world, &mut ledger, 1, &fresh_token());
+        let mut actor = InputActor::new(world.binding.clone(), FakePane::new(CLAUDE_READY));
+        world.append(claude_user("u-1", json!(frame)));
+        let step = actor.step(&mut ledger, Some(&world.idle()), now).await;
+        assert_eq!(step.unwrap(), Step::Wait("turn_open"));
+        world.append(claude_user(
+            "u-stop",
+            json!("[Request interrupted by user]"),
+        ));
+        let step = actor.step(&mut ledger, Some(&world.idle()), now).await;
+        assert_eq!(step.unwrap(), Step::Idle);
+        let stopped = row(&ledger, 1);
+        assert_eq!(stopped.state, RowState::Done(DoneReason::Completed));
+        assert_eq!(stopped.dispositions, [Disposition::Interrupted]);
+
+        // T1 was open before the anchors: its abort closes row 1 only; row 2 waits for T2.
+        let world = codex_world();
+        let mut ledger = ledger_of(&world, &[1, 2]);
+        codex_turn(&world, "task_started", "t1");
+        let early = tracked(&world, &mut ledger, 1, &fresh_token());
+        let late = tracked(&world, &mut ledger, 2, &fresh_token());
+        world.append(codex_user(&early));
+        codex_turn(&world, "turn_aborted", "t1");
+        codex_turn(&world, "task_started", "t2");
+        world.append(codex_user(&late));
+        let mut actor = InputActor::new(world.binding.clone(), FakePane::new(CODEX_READY));
+        let step = actor.step(&mut ledger, Some(&world.idle()), now).await;
+        assert_eq!(step.unwrap(), Step::Wait("turn_open"));
+        let aborted = row(&ledger, 1);
+        assert_eq!(aborted.state, RowState::Done(DoneReason::Completed));
+        assert_eq!(aborted.dispositions, [Disposition::Interrupted]);
+        assert_eq!(row(&ledger, 2).state, RowState::Running);
+        codex_turn(&world, "task_complete", "foreign");
+        let step = actor.step(&mut ledger, Some(&world.idle()), now).await;
+        assert_eq!(step.unwrap(), Step::Wait("turn_open"));
+        codex_turn(&world, "task_complete", "t2");
+        let step = actor.step(&mut ledger, Some(&world.idle()), now).await;
+        assert_eq!(step.unwrap(), Step::Idle);
+        let completed = row(&ledger, 2);
+        assert_eq!(completed.state, RowState::Done(DoneReason::Completed));
+        assert!(completed.dispositions.is_empty());
+        assert!(actor.pane_submitted().is_empty());
+
+        // An unnamed abort is no close: T2's close does not end the row confirmed in T1.
+        let world = codex_world();
+        let mut ledger = ledger_of(&world, &[1]);
+        codex_turn(&world, "task_started", "t1");
+        let frame = tracked(&world, &mut ledger, 1, &fresh_token());
+        world.append(codex_user(&frame));
+        world.append(json!({"type": "event_msg", "payload": {"type": "turn_aborted"}}));
+        codex_turn(&world, "task_started", "t2");
+        codex_turn(&world, "task_complete", "t2");
+        let mut actor = InputActor::new(world.binding.clone(), FakePane::new(CODEX_READY));
+        let step = actor.step(&mut ledger, Some(&world.idle()), now).await;
+        assert_eq!(step.unwrap(), Step::Wait("turn_open"));
+        assert_eq!(row(&ledger, 1).state, RowState::Running);
+    }
+
+    // A rewritten frame holds its unconfirmed row; a stranger's frame stops any new offer.
+    #[tokio::test]
+    async fn an_altered_frame_holds_its_row_and_a_foreign_one_stops_new_offers() {
+        let now = Instant::now();
+        let world = World::new(ShadowProvider::Claude);
+        let mut ledger = ledger_of(&world, &[1, 2]);
+        let frame = tracked(&world, &mut ledger, 2, &fresh_token());
+        world.append(claude_user(
+            "u-2",
+            json!(frame.replace("input 2", "input two")),
+        ));
+        world.append(claude_user(
+            "u-x",
+            json!(token::render(&fresh_token(), "x")),
+        ));
+        let mut actor = InputActor::new(world.binding.clone(), FakePane::new(CLAUDE_READY));
+        let step = actor.step(&mut ledger, Some(&world.idle()), now).await;
+        assert_eq!(step.unwrap(), Step::Wait("foreign_frame"));
+        let held = RowState::Held(super::super::rows::HeldReason::Ambiguous);
+        assert_eq!(row(&ledger, 2).state, held);
+        assert_eq!(row(&ledger, 1).state, RowState::Received);
+        assert!(actor.pane_submitted().is_empty());
+    }
+}

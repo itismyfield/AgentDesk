@@ -14,7 +14,7 @@ mod entrypoints;
 pub(in crate::services::discord) use entrypoints::*;
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owner(
+async fn start_reserved_headless_turn_admitted(
     ctx: &serenity::Context,
     channel_id: ChannelId,
     prompt: &str,
@@ -1019,73 +1019,82 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         tmux_session_name.as_deref(),
     )
     .await;
-    tokio::task::spawn_blocking(move || {
-        let _original_registration = producer_registration;
-        let _upload_lifetime = materialized_uploads;
-        let result = crate::services::platform::with_provider_execution_context(
-            provider_execution_context,
-            || {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    super::provider_dispatch::execute(
-                        super::provider_dispatch::StreamingTurn {
-                            pool: execution_pool.as_ref(),
-                            provider: &provider_for_blocking,
-                            prompt: &context_prompt,
-                            session_id: session_id_clone.as_deref(),
-                            working_dir: &current_path_clone,
-                            system_prompt: Some(&system_prompt_owned),
-                            allowed_tools: &allowed_tools,
-                            cancel: cancel_token_clone,
-                            remote_profile: remote_profile.as_ref(),
-                            tmux_session_name: tmux_session_name.as_deref(),
-                            teardown: teardown_clearance.as_ref(),
-                            host: &turn_host,
-                            channel_id: channel_id.get(),
-                            model: model_for_turn.as_deref(),
-                            native_fast_mode: native_fast_mode_override,
-                            codex_goals: codex_goals_override,
-                            compact_percent: compact_percent_for_claude,
-                            compact_lower_bound_tokens,
-                            compact_token_limit: compact_token_limit_for_codex,
-                            cache_ttl_minutes,
-                            dispatch_type: None,
-                            force_fresh: force_fresh_provider_session,
-                        },
-                        tx.clone(),
-                    )
-                }))
-            },
-        );
+    let provider_permit = crate::services::discord::input_runtime::fence::effect::current();
+    let _provider_task = tokio::task::spawn_blocking(move || {
+        crate::services::discord::input_runtime::fence::blocking(|| {
+            let _input_scope = crate::services::discord::input_runtime::fence::effect::worker_scope(
+                provider_permit,
+            );
+            let _original_registration = producer_registration;
+            let _upload_lifetime = materialized_uploads;
+            let result = crate::services::platform::with_provider_execution_context(
+                provider_execution_context,
+                || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        super::provider_dispatch::execute(
+                            super::provider_dispatch::StreamingTurn {
+                                pool: execution_pool.as_ref(),
+                                provider: &provider_for_blocking,
+                                prompt: &context_prompt,
+                                session_id: session_id_clone.as_deref(),
+                                working_dir: &current_path_clone,
+                                system_prompt: Some(&system_prompt_owned),
+                                allowed_tools: &allowed_tools,
+                                cancel: cancel_token_clone,
+                                remote_profile: remote_profile.as_ref(),
+                                tmux_session_name: tmux_session_name.as_deref(),
+                                teardown: teardown_clearance.as_ref(),
+                                host: &turn_host,
+                                channel_id: channel_id.get(),
+                                model: model_for_turn.as_deref(),
+                                native_fast_mode: native_fast_mode_override,
+                                codex_goals: codex_goals_override,
+                                compact_percent: compact_percent_for_claude,
+                                compact_lower_bound_tokens,
+                                compact_token_limit: compact_token_limit_for_codex,
+                                cache_ttl_minutes,
+                                dispatch_type: None,
+                                force_fresh: force_fresh_provider_session,
+                            },
+                            tx.clone(),
+                        )
+                    }))
+                },
+            );
 
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::warn!("  [headless streaming] Error: {}", error);
-                let _ = tx.send(StreamMessage::Error {
-                    message: error,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: None,
-                });
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!("  [headless streaming] Error: {}", error);
+                    let _ = tx.send(StreamMessage::Error {
+                        message: error,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: None,
+                    });
+                }
+                Err(panic_info) => {
+                    let msg = if let Some(value) = panic_info.downcast_ref::<String>() {
+                        value.clone()
+                    } else if let Some(value) = panic_info.downcast_ref::<&str>() {
+                        value.to_string()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    tracing::error!("  [headless streaming] PANIC: {}", msg);
+                    let _ = tx.send(StreamMessage::Error {
+                        message: format!("Internal error (panic): {}", msg),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: None,
+                    });
+                }
             }
-            Err(panic_info) => {
-                let msg = if let Some(value) = panic_info.downcast_ref::<String>() {
-                    value.clone()
-                } else if let Some(value) = panic_info.downcast_ref::<&str>() {
-                    value.to_string()
-                } else {
-                    "unknown panic".to_string()
-                };
-                tracing::error!("  [headless streaming] PANIC: {}", msg);
-                let _ = tx.send(StreamMessage::Error {
-                    message: format!("Internal error (panic): {}", msg),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: None,
-                });
-            }
-        }
+        })
     });
+
+    #[cfg(test)]
+    super::provider_dispatch::observe_input_effect_completion(channel_id.get(), _provider_task);
 
     if !inflight_state.silent_turn {
         super::typing_indicator::spawn_native_typing_indicator(

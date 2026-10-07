@@ -173,6 +173,13 @@ pub(super) fn run_bot_spawn_reachability_observation(
     });
 }
 
+/// Exclude Held rows before restart snapshot classification and compatibility backfill.
+fn deferred_restart_inflight_snapshot(provider: &ProviderKind) -> Vec<InflightTurnState> {
+    inflight::load_inflight_states_excluding(provider, |channel| {
+        crate::services::turn_orchestrator::input_fence::held(provider, channel)
+    })
+}
+
 /// Background: poll for the deferred restart marker for gateway and standby
 /// runtimes. The marker first fences admissions and cancels intake polling;
 /// health counters then provide the drain proof before the wrapper boots out.
@@ -250,7 +257,8 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                             &ids,
                         );
                     }
-                    let inflight_states_qe = inflight::load_inflight_states(&provider_for_deferred);
+                    let inflight_states_qe =
+                        deferred_restart_inflight_snapshot(&provider_for_deferred);
                     if !inflight_states_qe.is_empty() {
                         let ts2 = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(

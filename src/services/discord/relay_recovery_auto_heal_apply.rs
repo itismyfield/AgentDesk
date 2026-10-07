@@ -8,6 +8,8 @@ use super::auto_heal_attempts::{
 use super::auto_heal_confirm::{ReattachConfirmation, classify_reattach_confirmation};
 use super::*;
 
+/// A closed input gate turns the plan into a skip before any reservation or mutation; an
+/// admitted plan holds its effect until the apply settles.
 pub(super) async fn apply_relay_recovery_plan(
     registry: &HealthRegistry,
     shared: &Arc<SharedData>,
@@ -52,6 +54,41 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
     alert_enqueue: &dyn circuit_breaker::CircuitAlertEnqueue,
     apply_boundary: &dyn ReservedEpisodeApplyBoundary,
 ) -> RelayRecoveryResponse {
+    use crate::services::discord::input_runtime::fence;
+    let permit = match fence::effect::admit(provider, decision.channel_id) {
+        Ok(permit) => permit,
+        Err(failure) => {
+            if decision.auto_heal.eligible {
+                fence::record_failure(provider, decision.channel_id, &[], failure);
+                decision.auto_heal.eligible = false;
+                decision.auto_heal.skipped_reason = Some("input_fenced");
+            }
+            None
+        }
+    };
+    fence::effect::scope(
+        permit,
+        Box::pin(apply_admitted_relay_recovery_plan(
+            (registry, shared, provider),
+            decision,
+            now_ms,
+            source,
+            alert_enqueue,
+            apply_boundary,
+        )),
+    )
+    .await
+}
+
+async fn apply_admitted_relay_recovery_plan(
+    runtime: (&HealthRegistry, &Arc<SharedData>, &ProviderKind),
+    mut decision: RelayRecoveryDecision,
+    now_ms: i64,
+    source: RelayRecoveryApplySource,
+    alert_enqueue: &dyn circuit_breaker::CircuitAlertEnqueue,
+    apply_boundary: &dyn ReservedEpisodeApplyBoundary,
+) -> RelayRecoveryResponse {
+    let (registry, shared, provider) = runtime;
     if !decision.auto_heal.eligible {
         trace_relay_recovery_skipped(&decision, decision.auto_heal.skipped_reason);
         return RelayRecoveryResponse {

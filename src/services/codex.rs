@@ -9,6 +9,10 @@ mod followup_reader;
 mod startup_update_tests;
 #[cfg(unix)]
 use followup_reader::send_followup_to_tmux;
+#[cfg(all(test, unix))]
+mod herdr_guard_tests;
+#[cfg(unix)]
+pub(crate) mod herdr_turn;
 mod tui_session_launch;
 #[cfg(unix)]
 use tui_session_launch::prepare_codex_tui_launch_script;
@@ -387,68 +391,6 @@ fn codex_resume_help_mentions_hook_trust_bypass(help_text: &str) -> bool {
     help_text.contains("--dangerously-bypass-hook-trust")
 }
 
-fn codex_resume_supports_hook_trust_bypass(
-    codex_bin: &str,
-    resolution: &crate::services::platform::BinaryResolution,
-) -> bool {
-    let mut command = Command::new(codex_bin);
-    crate::services::platform::apply_binary_resolution(&mut command, resolution);
-    command
-        .args(["resume", "--help"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    match command.spawn() {
-        Ok(mut child) => {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            let status = loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => break status,
-                    Ok(None) => {
-                        if Instant::now() >= deadline {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            tracing::warn!(
-                                codex_bin,
-                                "timed out inspecting Codex resume help for hook trust bypass support"
-                            );
-                            return false;
-                        }
-                        std::thread::sleep(Duration::from_millis(25));
-                    }
-                    Err(error) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        tracing::warn!(
-                            codex_bin,
-                            error = %error,
-                            "could not wait for Codex resume help probe"
-                        );
-                        return false;
-                    }
-                }
-            };
-            let mut help_text = String::new();
-            if let Some(mut stdout) = child.stdout.take() {
-                let _ = stdout.read_to_string(&mut help_text);
-            }
-            if let Some(mut stderr) = child.stderr.take() {
-                let _ = stderr.read_to_string(&mut help_text);
-            }
-            status.success() && codex_resume_help_mentions_hook_trust_bypass(&help_text)
-        }
-        Err(error) => {
-            tracing::warn!(
-                codex_bin,
-                error = %error,
-                "could not inspect Codex resume help for hook trust bypass support"
-            );
-            false
-        }
-    }
-}
-
 /// Direct TUI hooks are on unless `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` is "0", "false", "off" or "no".
 pub(crate) fn codex_direct_tui_hook_overrides_enabled() -> bool {
     std::env::var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS").map_or(true, |value| {
@@ -521,6 +463,13 @@ fn base_tui_args(
 }
 
 pub(crate) fn build_codex_tui_args(options: &CodexLaunchOptions) -> Vec<String> {
+    let mut args = codex_tui_option_args(options);
+    args.extend(["--".to_string(), options.prompt.to_string()]);
+    args
+}
+
+/// The TUI argv up to its prompt; a Herdr launch types the prompt into the composer instead.
+fn codex_tui_option_args(options: &CodexLaunchOptions) -> Vec<String> {
     let mut args = Vec::new();
     if options.resume_session_id.is_some() {
         args.push("resume".to_string());
@@ -535,7 +484,6 @@ pub(crate) fn build_codex_tui_args(options: &CodexLaunchOptions) -> Vec<String> 
     if let Some(session_id) = options.resume_session_id.as_deref() {
         args.push(session_id.to_string());
     }
-    args.extend(["--".to_string(), options.prompt.to_string()]);
     args
 }
 
@@ -1710,6 +1658,10 @@ fn execute_streaming_local_tui_tmux(
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
+    // A Herdr channel is refused before the turn lock, warm follow-up or any session cleanup.
+    if crate::services::herdr_launch::herdr_configured_for_tui_launch(report_channel_id) {
+        return Err(crate::services::herdr_launch::HERDR_NOT_ADMITTED.to_string());
+    }
     let warm_followup_enabled =
         crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled();
     let turn_lock = warm_followup_enabled.then(|| codex_tui_session_turn_lock(tmux_session_name));
@@ -2211,6 +2163,10 @@ fn execute_streaming_local_tmux(
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
+    // A Herdr channel is refused before its wrapper session is read or cleaned up.
+    if crate::services::herdr_launch::herdr_configured_for_tui_launch(report_channel_id) {
+        return Err(crate::services::herdr_launch::HERDR_NOT_ADMITTED.to_string());
+    }
     let auth_overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
         ProviderKind::Codex,
         tmux_session_name,

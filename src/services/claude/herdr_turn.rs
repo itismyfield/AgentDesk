@@ -316,7 +316,8 @@ pub(crate) enum HoldRelease {
     Kept(String),
 }
 
-/// Ends execution `nonce`'s hold; an absent hold is already ended. Only a confirmed retire calls it.
+/// Ends execution `nonce`'s hold; an absent hold is already ended. A confirmed retire calls it,
+/// as does a Codex cold start once its launch's own source is bound.
 pub(crate) fn release_hold(nonce: &str) -> HoldRelease {
     let path = match hold_path(nonce) {
         Ok(path) => path,
@@ -368,7 +369,7 @@ pub(crate) fn input_held(nonce: &str) -> Result<bool, String> {
 }
 
 /// Refuses the turn while an earlier prompt may sit in the composer; nothing here clears it.
-fn not_held(nonce: &str) -> Result<(), String> {
+pub(crate) fn not_held(nonce: &str) -> Result<(), String> {
     match input_held(nonce)? {
         false => Ok(()),
         true => Err(format!(
@@ -378,7 +379,7 @@ fn not_held(nonce: &str) -> Result<(), String> {
 }
 
 /// Recorded and synced before the first write, so even a crash mid-send leaves it.
-fn hold(nonce: &str) -> Result<PathBuf, String> {
+pub(crate) fn hold(nonce: &str) -> Result<PathBuf, String> {
     use std::io::Write;
     let path = hold_path(nonce)?;
     let written = std::fs::create_dir_all(path.parent().unwrap_or(&path))
@@ -453,11 +454,12 @@ fn launch(turn: &HerdrTurn<'_>, session_id: Option<String>) -> HerdrLaunch {
         channel_id: Some(turn.channel_id),
         expected_native_session_id: session_id,
         resume: false,
+        provider_root: None,
     }
 }
 
 /// The nonce of a launch whose pane is recorded with its evidence; anything else stops the turn.
-fn launched(
+pub(crate) fn launched(
     outcome: Result<HerdrLaunchOutcome, crate::services::herdr_launch::HerdrLaunchError>,
 ) -> Result<String, String> {
     match outcome {
@@ -499,13 +501,13 @@ fn session_started(
 }
 
 /// The gated pane of a stored execution on this node's registered endpoint.
-fn gate(record: &HostedExecution) -> Result<HerdrTarget, String> {
+pub(crate) fn gate(record: &HostedExecution) -> Result<HerdrTarget, String> {
     herdr_endpoints()
         .target(record)
         .ok_or_else(|| "herdr turn: the execution is not on a registered endpoint".into())
 }
 
-async fn load(pool: &PgPool, owner: &HostedOwner) -> HostedLookup {
+pub(crate) async fn load(pool: &PgPool, owner: &HostedOwner) -> HostedLookup {
     let identity = CanonicalSessionIdentity {
         kind: SessionIdentityKind::DiscordChannel,
         discord_token_hash: &owner.discord_token_hash,

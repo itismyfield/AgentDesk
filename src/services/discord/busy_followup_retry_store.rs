@@ -209,6 +209,52 @@ pub(in crate::services::discord) async fn requeue_inflight_for_followup_retry(
     channel_id: ChannelId,
     inflight_state: &InflightTurnState,
 ) -> MailboxEnqueueOutcome {
+    let permit = match fence::effect::admit(provider, channel_id.get()) {
+        Ok(permit) => permit,
+        Err(failure) => {
+            use crate::services::turn_orchestrator::EnqueueRefusalReason as R;
+            return MailboxEnqueueOutcome {
+                refusal_reason: Some(match failure {
+                    fence::Failure::Mode(mode) => R::InputModeFenced(mode),
+                    fence::Failure::ActorUnreachable => R::ActorUnreachable,
+                    fence::Failure::LockTimeout => R::LockTimeout,
+                    _ => R::InputPersistence,
+                }),
+                ..Default::default()
+            };
+        }
+    };
+    if permit.is_none() && fence::effect::current().is_none() {
+        return Box::pin(requeue_admitted(
+            shared,
+            provider,
+            channel_id,
+            inflight_state,
+        ))
+        .await;
+    }
+    let (shared, provider, inflight_state) =
+        (shared.clone(), provider.clone(), inflight_state.clone());
+    fence::effect::run(permit, async move {
+        Box::pin(requeue_admitted(
+            &shared,
+            &provider,
+            channel_id,
+            &inflight_state,
+        ))
+        .await
+    })
+    .await
+}
+
+async fn requeue_admitted(
+    shared: &std::sync::Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    inflight_state: &InflightTurnState,
+) -> MailboxEnqueueOutcome {
+    #[cfg(test)]
+    tests::pause_root_retry(provider, channel_id).await;
     let user_msg_id = inflight_state.user_msg_id;
     let retry_user_msg_id = inflight_state.effective_busy_followup_retry_user_msg_id();
     if user_msg_id == 0 || inflight_state.user_text.trim().is_empty() {
@@ -583,6 +629,212 @@ fn clear_if_current_unfenced(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::FutureExt;
+
+    static ROOT_RETRY_PROBE: Mutex<
+        Option<(
+            ChannelId,
+            tokio::sync::oneshot::Sender<(bool, bool)>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    > = Mutex::new(None);
+    pub(super) async fn pause_root_retry(provider: &ProviderKind, channel: ChannelId) {
+        let probe = {
+            let mut slot = ROOT_RETRY_PROBE.lock().unwrap();
+            if slot.as_ref().is_some_and(|probe| probe.0 == channel) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered, resume)) = probe {
+            let named = fence::effect::current()
+                .is_some_and(|permit| permit.validate(provider, channel.get()).is_ok());
+            let _ = entered.send((named, fence::require_worker().is_ok()));
+            let _ = resume.await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn c1b_retry_root_cancel_releases_effect_before_any_mailbox_readmission() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = shared.provider.clone();
+        let channel = ChannelId::new(6_325_538);
+        let state = InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            6_325_533,
+            6_325_534,
+            7,
+            "cancel root retry".into(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        let gate = fence::Gate::protect(provider.clone(), channel.get()).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (_release, resume) = tokio::sync::oneshot::channel();
+        *ROOT_RETRY_PROBE.lock().unwrap() = Some((channel, entered, resume));
+        let mut retry = Box::pin(requeue_inflight_for_followup_retry(
+            &shared, &provider, channel, &state,
+        ));
+        let observed = tokio::select! {
+            observation = observed => observation.unwrap(),
+            _ = &mut retry => panic!("root retry must reach the rendezvous before mailbox re-admission"),
+        };
+        let closing = gate.close().unwrap();
+        assert!(
+            closing.drain().now_or_never().is_none(),
+            "root retry owns a preclose effect"
+        );
+        drop(retry);
+        tokio::time::timeout(Duration::from_secs(10), closing.drain())
+            .await
+            .unwrap();
+        assert_eq!(observed, (true, true));
+        assert!(shared.mailbox_peek(channel).is_none());
+        assert!(fence::effect::current().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn c1b_retry_requeues_all_sources_and_updates_binding_after_closing() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = shared.provider.clone();
+        let channel = ChannelId::new(6_325_603);
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            6_325_504,
+            6_325_505,
+            7,
+            "retry input".into(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        state.source_message_ids = vec![6_325_504, 6_325_506];
+        state.busy_followup_retry_user_msg_id = 6_325_506;
+        let gate = fence::Gate::protect(provider.clone(), channel.get()).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        let permit = gate.admit().unwrap();
+        let closing = gate.close().unwrap();
+        let refused =
+            requeue_inflight_for_followup_retry(&shared, &provider, channel, &state).await;
+        assert!(!refused.enqueued);
+        assert_eq!(
+            refused.refusal_reason,
+            Some(
+                crate::services::turn_orchestrator::EnqueueRefusalReason::InputModeFenced(
+                    fence::Mode::Closing
+                )
+            )
+        );
+        let work_shared = shared.clone();
+        let work_provider = provider.clone();
+        let result = fence::effect::run(Some(permit), async move {
+            bind_notice_if_absent(&work_provider, channel.get(), 6_325_506, 6_325_507).unwrap();
+            let queued =
+                requeue_inflight_for_followup_retry(&work_shared, &work_provider, channel, &state)
+                    .await;
+            assert!(queued.enqueued, "{queued:?}");
+            record_busy_retry(&work_provider, channel.get(), 6_325_506, 6_325_507).unwrap();
+            queued
+        })
+        .await;
+        assert!(result.enqueued);
+        closing.drain().await;
+        let snapshot = shared.mailbox(channel).snapshot().await;
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(
+            snapshot.intervention_queue[0].source_message_ids,
+            vec![
+                MessageId::new(6_325_504),
+                MessageId::new(6_325_506),
+                MessageId::new(6_325_505)
+            ]
+        );
+        let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
+            &provider,
+            &shared.token_hash,
+            channel,
+        );
+        assert_eq!(disk.len(), 1);
+        assert_eq!(
+            disk[0].source_message_ids,
+            snapshot.intervention_queue[0].source_message_ids
+        );
+        assert_eq!(
+            load(&provider, channel.get(), 6_325_506)
+                .unwrap()
+                .busy_retry_count,
+            1
+        );
+        shared.mailboxes.remove_fixture_for_test(channel);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn c1b_retry_root_admits_protected_open_without_scheduler_writes() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = shared.provider.clone();
+        let channel = ChannelId::new(6_325_513);
+        let state = InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            6_325_514,
+            6_325_515,
+            7,
+            "root retry input".into(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        let gate = fence::Gate::protect(provider.clone(), channel.get()).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        assert_eq!(fence::require_worker(), Err(fence::Failure::Busy));
+        let result = requeue_inflight_for_followup_retry(&shared, &provider, channel, &state).await;
+        assert!(
+            result.enqueued,
+            "root retry must run protected persistence on worker: {result:?}"
+        );
+        gate.close().unwrap().drain().await;
+        let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
+            &provider,
+            &shared.token_hash,
+            channel,
+        );
+        assert_eq!(disk.len(), 1);
+        assert_eq!(disk[0].source_message_ids, vec![MessageId::new(6_325_515)]);
+        assert!(fence::effect::current().is_none());
+        assert_eq!(fence::require_worker(), Err(fence::Failure::Busy));
+        shared.mailboxes.remove_fixture_for_test(channel);
+    }
 
     fn with_root(test: impl FnOnce()) {
         let _lock = crate::config::shared_test_env_lock()

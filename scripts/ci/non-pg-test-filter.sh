@@ -163,6 +163,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::intake_gate::stale_turn::host_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+  --skip services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
   --skip services::discord::router::message_handler::provider_dispatch::tests
@@ -894,6 +895,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::router::intake_gate::stale_turn::host_tests
   services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+  services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
   services::discord::router::message_handler::provider_dispatch::herdr_tests
   services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
   services::discord::router::message_handler::provider_dispatch::tests

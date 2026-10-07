@@ -193,8 +193,9 @@ pub(super) fn spawn_worker(
     abort_cleanup_fn: AbortCleanupFn,
     reclaim_orphan_fn: ReclaimOrphanFn,
 ) {
+    let effect = restore_gate::input_effect(&record);
     let active_guard = active_worker_guard_for_spawn(&record.provider, record.channel_id);
-    super::task_supervisor::spawn_observed("tui_direct_pending_start_worker", async move {
+    restore_gate::spawn_admitted(effect, async move {
         let _active_guard = active_guard;
         run_worker_inner(
             shared,

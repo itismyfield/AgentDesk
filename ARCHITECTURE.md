@@ -704,6 +704,8 @@ src/
 │   ├── codex/
 │   │   ├── c1_teardown_tests.rs
 │   │   ├── followup_reader.rs
+│   │   ├── herdr_guard_tests.rs
+│   │   ├── herdr_turn.rs
 │   │   ├── process_session_launch.rs
 │   │   ├── startup_update_tests.rs
 │   │   └── tui_session_launch.rs
@@ -916,7 +918,8 @@ src/
 │   │   │   │   ├── boot_custody_tests.rs
 │   │   │   │   ├── boot_reaper.rs
 │   │   │   │   ├── custody_notice.rs
-│   │   │   │   └── custody_notice_tests.rs
+│   │   │   │   ├── custody_notice_tests.rs
+│   │   │   │   └── input_fence_reaper_tests.rs
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── runtime_stamp/
@@ -955,6 +958,7 @@ src/
 │   │   │   ├── ownership_ops.rs
 │   │   │   ├── rebind_reap.rs
 │   │   │   ├── removal.rs
+│   │   │   ├── restart_mark_fence_tests.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
@@ -1108,6 +1112,7 @@ src/
 │   │   │   │   ├── episode_handoff.rs
 │   │   │   │   ├── herdr_withheld_tests.rs
 │   │   │   │   ├── live_bridge_guard.rs
+│   │   │   │   ├── live_bridge_guard_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── post_adoption_guard_tests.rs
 │   │   │   │   ├── test_barriers.rs
@@ -1162,6 +1167,7 @@ src/
 │   │   │   │   ├── circuit_breaker_apply.rs
 │   │   │   │   ├── host_deferred.rs
 │   │   │   │   ├── incarnation_follow_up.rs
+│   │   │   │   ├── input_fence.rs
 │   │   │   │   ├── orphan_token_finish.rs
 │   │   │   │   ├── retirement.rs
 │   │   │   │   └── unread_tail_seed.rs
@@ -1235,6 +1241,7 @@ src/
 │   │   │   │   ├── latency_spans.rs
 │   │   │   │   ├── pre_admission_control.rs
 │   │   │   │   ├── provider_dispatch.rs
+│   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
 │   │   │   │   ├── provider_isolation.rs
@@ -1289,12 +1296,14 @@ src/
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── queued_recovery.rs
+│   │   │   ├── queued_recovery_fence_tests.rs
 │   │   │   ├── recovery_flush.rs
 │   │   │   ├── relay_dlq_redelivery.rs
 │   │   │   ├── restored_state.rs
 │   │   │   ├── session_gc.rs
 │   │   │   ├── shared_data.rs
 │   │   │   ├── shutdown.rs
+│   │   │   ├── shutdown_input_fence_tests.rs
 │   │   │   ├── spawns.rs
 │   │   │   ├── spawns_tests.rs
 │   │   │   ├── startup_doctor.rs
@@ -1491,6 +1500,7 @@ src/
 │   │   ├── tui_direct_pending_start/
 │   │   │   ├── tests/
 │   │   │   │   ├── headless_row_tests.rs
+│   │   │   │   ├── input_effect_tests.rs
 │   │   │   │   └── retire_tests.rs
 │   │   │   ├── foreign_recovery.rs
 │   │   │   ├── restore_gate.rs
@@ -2199,9 +2209,11 @@ src/
 │   │   ├── actor/
 │   │   │   ├── gate.rs
 │   │   │   ├── pane.rs
+│   │   │   ├── token.rs
 │   │   │   └── witness.rs
 │   │   ├── actor.rs
 │   │   ├── actor_tests.rs
+│   │   ├── attempt.rs
 │   │   ├── blob.rs
 │   │   ├── bounded_tmux.rs
 │   │   ├── bounded_tmux_tests.rs
@@ -2258,6 +2270,7 @@ src/
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── clear_launch_tests.rs
+│   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deferred.rs
 │   │   │   ├── deferred_tests.rs

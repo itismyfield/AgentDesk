@@ -54,17 +54,17 @@ fn configured(channel: u64) -> bool {
     crate::config::session_hosts::herdr_endpoint(channel).is_some()
 }
 
-/// Whether the channel's O writer could take a Herdr turn now.
-pub(crate) fn o_writer_ready(channel: u64) -> bool {
-    o_ready_at(runtime_root().as_deref(), channel)
+/// Whether the channel's O writer could take a Herdr turn of `kind`'s provider now.
+pub(crate) fn o_writer_ready(channel: u64, kind: RuntimeHandoffKind) -> bool {
+    o_ready_at(runtime_root().as_deref(), channel, kind)
 }
 
 /// O owns the channel's output, its writer accepts work, and its store holds a binding
 /// checkpoint, which only a found baseline or an applied binding writes; the store is not opened.
-fn o_ready_at(runtime_root: Option<&Path>, channel: u64) -> bool {
+fn o_ready_at(runtime_root: Option<&Path>, channel: u64, kind: RuntimeHandoffKind) -> bool {
     #[cfg(test)]
     READINESS_READS.with(|reads| reads.set(reads.get() + 1));
-    let owned = peek_o_owns_tui_output_for_channel(channel, Some(RuntimeHandoffKind::ClaudeTui));
+    let owned = peek_o_owns_tui_output_for_channel(channel, Some(kind));
     let seeded = |root| {
         OStore::existing(root)
             .is_some_and(|store| matches!(store.peek_binding_checkpoint(channel), Ok(Some(_))))
@@ -143,6 +143,8 @@ pub(crate) struct HerdrLaunch {
     pub channel_id: Option<u64>,
     pub expected_native_session_id: Option<String>,
     pub resume: bool,
+    /// Where the provider's hooks may name a transcript; a Claude launch reads its own setting.
+    pub provider_root: Option<PathBuf>,
 }
 
 pub(crate) struct HerdrLaunchCommand {
@@ -316,8 +318,14 @@ pub(crate) async fn launch_herdr_session(
         HostedRecord::Unknown(_) => return Err(HerdrLaunchError::Occupied(None)),
     }
     let expected_native = launch.expected_native_session_id.as_deref();
-    let incarnation = herdr_incarnation(&owner, launch.channel_id, expected_native, launch.resume)
-        .map_err(HerdrLaunchError::Prepare)?;
+    let incarnation = herdr_incarnation(
+        &owner,
+        launch.channel_id,
+        expected_native,
+        launch.resume,
+        launch.provider_root,
+    )
+    .map_err(HerdrLaunchError::Prepare)?;
     let command = prepare(&incarnation).map_err(HerdrLaunchError::Prepare)?;
     launch_command_eligible(&command.cwd, &command.command)
         .map_err(HerdrLaunchError::Ineligible)?;
@@ -522,6 +530,7 @@ fn herdr_incarnation(
     channel_id: Option<u64>,
     expected_native_session_id: Option<&str>,
     resume: bool,
+    provider_root: Option<PathBuf>,
 ) -> Result<PreparedIncarnation, String> {
     let context = BindingContext {
         schema: 1,
@@ -534,9 +543,10 @@ fn herdr_incarnation(
         host: stable_host_identity(),
         expected_native_session_id: expected_native_session_id.map(str::to_owned),
         launch_mode: if resume { "resume" } else { "fresh" }.to_owned(),
-        provider_root: (owner.provider == "claude")
-            .then(configured_claude_projects_root)
-            .flatten(),
+        provider_root: match owner.provider.as_str() {
+            "claude" => configured_claude_projects_root(),
+            _ => provider_root,
+        },
         first_prompt_digest: None,
         source_policy: None,
     };

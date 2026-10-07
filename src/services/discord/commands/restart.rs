@@ -144,12 +144,14 @@ async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
 
     for attempt in 0..MAX_ATTEMPTS {
         match super::super::router::start_headless_turn(
-            ctx.serenity_context(),
+            (
+                ctx.serenity_context(),
+                &ctx.data().shared,
+                &ctx.data().token,
+            ),
             channel_id,
             RESTART_SEED_PROMPT,
             "/restart",
-            &ctx.data().shared,
-            &ctx.data().token,
             Some("/restart"),
             Some(metadata.clone()),
             channel_name_hint.clone(),

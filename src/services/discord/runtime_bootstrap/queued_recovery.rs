@@ -28,6 +28,10 @@ pub(super) async fn restore_queued_and_inflight_work(
     // persisted queue item look "already known" and incorrectly drop it.
     let (restored_queues, restored_overrides) = load_pending_queues(provider, &shared.token_hash);
     let restored_dispatch_markers = load_pending_dispatch_markers(provider, &shared.token_hash);
+    // Input-protected channels keep their files for the move or handback; nothing is installed.
+    let protected = |channel: ChannelId| {
+        crate::services::discord::input_runtime::fence::lookup(provider, channel.get()).is_some()
+    };
     let allowed_bot_ids_for_restore: Vec<u64> = {
         let settings = shared.settings.read().await;
         settings.allowed_bot_ids.clone()
@@ -35,6 +39,9 @@ pub(super) async fn restore_queued_and_inflight_work(
     let announce_bot_id_for_restore = super::resolve_announce_bot_user_id(shared).await;
     // P1-1: Restore dispatch_role_overrides from queue snapshots
     for (thread_channel_id, alt_channel_id) in &restored_overrides {
+        if protected(*thread_channel_id) {
+            continue;
+        }
         if !matches!(
             resolve_runtime_channel_binding_status(http, *thread_channel_id).await,
             RuntimeChannelBindingStatus::Owned
@@ -50,6 +57,9 @@ pub(super) async fn restore_queued_and_inflight_work(
         let Some(alt_channel_id) = marker.restored_override else {
             continue;
         };
+        if protected(marker.channel_id) {
+            continue;
+        }
         if !matches!(
             resolve_runtime_channel_binding_status(http, marker.channel_id).await,
             RuntimeChannelBindingStatus::Owned
@@ -75,6 +85,9 @@ pub(super) async fn restore_queued_and_inflight_work(
         let mut skipped_duplicate = 0usize;
         let mut skipped_persist_error = 0usize;
         for (channel_id, items) in restored_queues {
+            if protected(channel_id) {
+                continue;
+            }
             if !matches!(
                 resolve_runtime_channel_binding_status(http, channel_id).await,
                 RuntimeChannelBindingStatus::Owned
@@ -164,6 +177,9 @@ pub(super) async fn restore_queued_and_inflight_work(
         let mut skipped_duplicate = 0usize;
         let mut skipped_persist_error = 0usize;
         for marker in restored_dispatch_markers {
+            if protected(marker.channel_id) {
+                continue;
+            }
             if !matches!(
                 resolve_runtime_channel_binding_status(http, marker.channel_id).await,
                 RuntimeChannelBindingStatus::Owned
@@ -215,8 +231,9 @@ pub(super) async fn restore_queued_and_inflight_work(
     // dedup; the placeholder live-queue filter then sees the final
     // restored queue state before kickoff.
     let mut stale_cards_to_delete: Vec<(ChannelId, MessageId, MessageId)> = Vec::new();
-    let restored_queued_placeholders =
+    let mut restored_queued_placeholders =
         super::queued_placeholders_store::load_queued_placeholders(provider, &shared.token_hash);
+    restored_queued_placeholders.retain(|(channel, _), _| !protected(*channel));
     if !restored_queued_placeholders.is_empty() {
         let live_queue_ids = collect_live_queue_message_ids(shared).await;
         let filter_outcome =
@@ -248,3 +265,7 @@ pub(super) async fn restore_queued_and_inflight_work(
 
     stale_cards_to_delete
 }
+
+#[cfg(test)]
+#[path = "queued_recovery_fence_tests.rs"]
+mod fence_tests;

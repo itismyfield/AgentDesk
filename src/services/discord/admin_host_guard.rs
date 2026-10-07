@@ -125,8 +125,8 @@ pub(crate) enum HostAdapter {
     Herdr(Box<crate::services::session_host::HerdrClearPlan>, String),
 }
 
-/// A channel clear's target. With the Herdr turn switch off or no Herdr endpoint for the channel
-/// it is exactly [`managed_reset_refusal`]'s verdict, and `session_key` is never resolved.
+/// A channel clear's target. With the Claude and the provider's Herdr switches off, or no Herdr
+/// endpoint for the channel, it is exactly [`managed_reset_refusal`]'s verdict, key unresolved.
 pub(super) async fn clear_reset_target<F>(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -138,7 +138,8 @@ where
     F: std::future::Future<Output = Option<String>>,
 {
     #[cfg(unix)]
-    if crate::services::turn_host::herdr_turn_switched_on()
+    if (crate::services::turn_host::herdr_turn_switched_on()
+        || crate::services::turn_host::herdr_turn_switched_on_for(provider))
         && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some()
     {
         use crate::services::session_host::HerdrClearRefusal;
@@ -185,6 +186,9 @@ pub(crate) struct HerdrClearRead {
 }
 
 #[cfg(unix)]
+pub(crate) const HERDR_CODEX_CLEAR_UNSUPPORTED: &str = "herdr_native_clear_unsupported(codex)";
+
+#[cfg(unix)]
 pub(crate) async fn read_herdr_clear(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
@@ -193,6 +197,10 @@ pub(crate) async fn read_herdr_clear(
 ) -> Result<HerdrClearRead, String> {
     use crate::services::turn_host::{TurnHost, for_turn};
     let plan = match for_turn(pool, provider, channel, session_key).await {
+        // The native clear helper commits only on Claude's clear record; Codex has none yet.
+        TurnHost::Herdr(_) if *provider == ProviderKind::Codex => {
+            return Err(HERDR_CODEX_CLEAR_UNSUPPORTED.into());
+        }
         TurnHost::Herdr(plan) => plan,
         TurnHost::Refused(refusal) => return Err(refusal.to_string()),
         TurnHost::Tmux => return Err("herdr clear: the channel resolved to tmux".into()),

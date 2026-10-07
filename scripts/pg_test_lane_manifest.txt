@@ -139,6 +139,7 @@ src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs
 src/services/discord/router/message_handler/provider_dispatch.rs
+src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs
 src/services/discord/router/message_handler/provider_isolation_host_tests.rs
@@ -358,6 +359,7 @@ services::discord::router::intake_dispatch::tests
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
 services::discord::router::message_handler::provider_dispatch::tests
@@ -1218,6 +1220,17 @@ services::discord::router::message_handler::intake_turn::dispatch_stamp::postgre
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::race_loss_requeue_leaves_row_in_spawned_and_worker_closes_it_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_skipped_when_capability_not_ready_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_written_when_ready_capability_is_injected_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_after_the_first_write_still_binds_its_own_start_and_ends_the_hold_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_first_write_refused_before_any_key_releases_the_hold_for_the_next_prompt_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_launch_without_daemon_isolation_or_hooks_writes_no_pending_row_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_pending_pane_whose_own_start_was_logged_takes_no_second_first_prompt_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_release_is_not_durable_only_after_its_unlink_and_kept_only_without_it_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::an_unclear_first_write_keeps_the_hold_and_the_next_prompt_writes_nothing_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::cold_start_prompts_once_then_its_own_session_start_binds_it_and_ends_the_hold_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::o_posts_a_cold_start_once_across_its_attach_and_a_repeated_start_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::without_its_own_session_start_the_prompt_stays_held_and_is_never_resent_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_matched_bound_execution_takes_one_prompt_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_pending_execution_with_a_logged_start_takes_its_first_prompt_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg
