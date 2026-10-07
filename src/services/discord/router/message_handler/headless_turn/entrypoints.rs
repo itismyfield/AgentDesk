@@ -238,7 +238,7 @@ mod input_effect_tests {
         let mock = discord_mock::DiscordMockState::new();
         let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
         let ctx = discord_mock::serenity_context(proxy, gateway).await;
-        let channel = ChannelId::new(6_325_525);
+        let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let workspace = tempfile::tempdir().unwrap();
         crate::services::discord::host_defer_gate::tests::map_channel(&shared, channel, "").await;
         {
