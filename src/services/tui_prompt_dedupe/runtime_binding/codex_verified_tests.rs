@@ -171,6 +171,218 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn lifecycle_stop_preserves_proof_pending_and_cursors_without_permission() {
+    let h = Fixture::new("fresh", None);
+    h.header(ID, false);
+    h.send("session-start", ID, Value::Null, None);
+    let n = fs::metadata(h.path(ID)).unwrap().len();
+    assert!(advance_tmux_runtime_binding_offset(
+        &h.context.tmux_session,
+        h.path(ID).to_str().unwrap(),
+        n
+    ));
+    let fold = h.fold();
+    let binding = h.consumer().unwrap();
+    let marker = fs::read(h.marker()).unwrap();
+    let stop = h.send("Stop", ID, Value::Null, None);
+    assert!(matches!(stop, IngressOutcome::Proceed(_)), "{stop:?}");
+    assert_eq!(h.fold(), fold);
+    assert_eq!(h.consumer(), Some(binding.clone()));
+    assert_eq!(fs::read(h.marker()).unwrap(), marker);
+    codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
+    h.send("Stop", ID, Value::Null, None);
+    assert!(h.consumer().is_none(), "Stop cannot grant permission");
+    assert_eq!(h.fold(), fold);
+    assert_eq!(h.raw(), Some(binding.clone()));
+    codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Allowed);
+    h.send("user-prompt-submit", ID, json!("later prompt"), None);
+    codex_verified::resolve_registered_claims();
+    assert_eq!(h.fold(), fold);
+    assert_eq!(h.consumer(), Some(binding));
+}
+
+#[test]
+fn actual_rehydration_recovers_proof_only_restart_without_manual_registration() {
+    for permission in [DeliveryPermission::Allowed, DeliveryPermission::Unknown] {
+        let h = Fixture::new("fresh", None);
+        h.header(ID, false);
+        h.send("session-start", ID, Value::Null, None);
+        let fold = h.fold();
+        dedupe::reset_state_for_tests();
+        binding_events::forget_channel_for_tests(584_504);
+        fs::remove_file(h.marker()).unwrap();
+        codex_verified::set_permission_for_tests(&h.context, permission);
+        crate::services::tmux_common::write_tmux_runtime_kind_marker(
+            &h.context.tmux_session,
+            RuntimeHandoffKind::CodexTui,
+        )
+        .unwrap();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        crate::services::discord::run_codex_rehydrate_pass_for_tests(
+            &shared,
+            &h.context.tmux_session,
+        );
+        assert_eq!(h.fold(), fold, "recovery must not append ownership");
+        if permission == DeliveryPermission::Allowed {
+            h.assert_proof();
+            assert_eq!(
+                owner_channel_for_tmux_session(&h.context.tmux_session),
+                Some(584_504)
+            );
+        } else {
+            h.absent();
+        }
+    }
+}
+
+#[test]
+fn actual_watcher_restore_claims_only_a_proven_source_and_its_output_namespace() {
+    use crate::services::discord::commit_codex_watcher_restore_for_tests as claim;
+    use poise::serenity_prelude::ChannelId;
+    let h = Fixture::new("fresh", None);
+    h.header(ID, false);
+    let attempts = std::cell::Cell::new(0);
+    let call = |candidate: Option<TuiRuntimeBinding>, output: &str| {
+        claim(
+            &h.context.tmux_session,
+            ChannelId::new(584_504),
+            candidate,
+            output,
+            || {
+                attempts.set(attempts.get() + 1);
+                true
+            },
+        )
+    };
+    assert!(!call(Some(h.binding()), h.path(ID).to_str().unwrap()));
+    assert_eq!(attempts.get(), 0);
+    h.send("session-start", ID, Value::Null, None);
+    let native = h.consumer().unwrap();
+    assert!(call(Some(native.clone()), &native.output_path));
+    assert_eq!(attempts.get(), 1);
+    let relay = crate::services::tmux_common::session_temp_path(&h.context.tmux_session, "jsonl");
+    fs::write(&relay, "relay one\nrelay two\n").unwrap();
+    let mut with_relay = native.clone();
+    with_relay.relay_output_path = Some(relay.clone());
+    with_relay.relay_last_offset = Some(u64::MAX);
+    register_tmux_runtime_binding(&h.context.tmux_session, with_relay);
+    let linked = h.consumer().unwrap();
+    assert_eq!(
+        linked.relay_last_offset,
+        Some(0),
+        "spool EOF is not a checkpoint"
+    );
+    assert!(call(Some(linked.clone()), &relay));
+    assert_eq!(attempts.get(), 2);
+    let wrong = h.root.path().join("other-relay.jsonl");
+    fs::write(&wrong, "wrong\n").unwrap();
+    assert!(!call(Some(linked.clone()), wrong.to_str().unwrap()));
+    let mut wrong_source = linked.clone();
+    wrong_source.session_id = Some(CHILD.into());
+    assert!(!call(Some(wrong_source), &relay));
+    codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
+    assert!(!call(Some(linked), &relay));
+    assert_eq!(attempts.get(), 2);
+}
+
+#[test]
+fn restart_restores_native_and_relay_checkpoints_in_their_own_namespaces() {
+    for generic in [false, true] {
+        let h = Fixture::new("fresh", None);
+        h.header(ID, false);
+        h.send("session-start", ID, Value::Null, None);
+        let n = fs::metadata(h.path(ID)).unwrap().len();
+        let relay =
+            crate::services::tmux_common::session_temp_path(&h.context.tmux_session, "jsonl");
+        fs::write(&relay, "delivered\nunread relay bytes\n").unwrap();
+        let mut candidate = h.binding();
+        candidate.relay_output_path = Some(relay.clone());
+        candidate.relay_last_offset = Some(fs::metadata(&relay).unwrap().len());
+        register_tmux_runtime_binding(&h.context.tmux_session, candidate.clone());
+        assert!(advance_tmux_runtime_binding_offset(
+            &h.context.tmux_session,
+            h.path(ID).to_str().unwrap(),
+            n
+        ));
+        assert!(advance_tmux_runtime_binding_offset(
+            &h.context.tmux_session,
+            &relay,
+            10
+        ));
+        let before = h.consumer().unwrap();
+        assert_eq!(before.last_offset, n);
+        assert_eq!(before.relay_last_offset, Some(10));
+        let fold = h.fold();
+        dedupe::reset_state_for_tests();
+        binding_events::forget_channel_for_tests(584_504);
+        if generic {
+            register_tmux_runtime_binding(&h.context.tmux_session, candidate);
+        } else {
+            register_tmux_channel(&h.context.tmux_session, 584_504);
+            codex_verified::resolve_registered_claims();
+        }
+        assert_eq!(h.fold(), fold);
+        let restored = h.consumer().unwrap();
+        assert_eq!(restored.last_offset, n);
+        assert_eq!(restored.relay_last_offset, Some(10));
+        assert_eq!(restored.relay_output_path, Some(relay));
+        assert_ne!(restored.last_offset, restored.relay_last_offset.unwrap());
+    }
+}
+
+#[test]
+fn restart_refuses_unlinked_or_foreign_proof_cursors_and_replaced_relay_identity() {
+    for mutation in 0..6 {
+        let h = Fixture::new("fresh", None);
+        h.header(ID, false);
+        h.send("session-start", ID, Value::Null, None);
+        let n = fs::metadata(h.path(ID)).unwrap().len();
+        let relay =
+            crate::services::tmux_common::session_temp_path(&h.context.tmux_session, "jsonl");
+        fs::write(&relay, "delivered\nunread bytes\n").unwrap();
+        let mut candidate = h.binding();
+        candidate.relay_output_path = Some(relay.clone());
+        register_tmux_runtime_binding(&h.context.tmux_session, candidate);
+        assert!(advance_tmux_runtime_binding_offset(
+            &h.context.tmux_session,
+            h.path(ID).to_str().unwrap(),
+            n
+        ));
+        assert!(advance_tmux_runtime_binding_offset(
+            &h.context.tmux_session,
+            &relay,
+            10
+        ));
+        let mut marker: Value = serde_json::from_slice(&fs::read(h.marker()).unwrap()).unwrap();
+        match mutation {
+            0 => {
+                marker.as_object_mut().unwrap().remove("codex_ownership");
+            }
+            1 => marker["codex_ownership"]["execution_nonce"] = json!("b".repeat(32)),
+            2 => marker["codex_ownership"]["proof_seq"] = json!(9999),
+            3 => marker["codex_ownership"]["ino"] = json!(9999),
+            4 => marker["session_id"] = json!(CHILD),
+            _ => {
+                fs::rename(&relay, format!("{relay}.old")).unwrap();
+                fs::write(&relay, "fresh spool\n").unwrap();
+            }
+        }
+        fs::write(h.marker(), serde_json::to_vec(&marker).unwrap()).unwrap();
+        dedupe::reset_state_for_tests();
+        register_tmux_channel(&h.context.tmux_session, 584_504);
+        codex_verified::resolve_registered_claims();
+        let restored = h.consumer().unwrap();
+        if mutation < 5 {
+            assert_eq!(restored.last_offset, 0);
+            assert_eq!(restored.relay_last_offset, Some(0));
+        } else {
+            assert_eq!(restored.last_offset, n);
+            assert_eq!(restored.relay_last_offset, Some(0));
+        }
+    }
+}
+
+#[test]
 fn verified_source_less_equal_command_initial_ups_uses_exact_utf8() {
     let h = Fixture::new("fresh", None);
     h.header(ID, false);

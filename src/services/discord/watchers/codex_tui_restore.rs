@@ -86,11 +86,19 @@ pub(super) fn commit_live_direct_resume_fallback(
     tmux_session_name: &str,
     channel_id: ChannelId,
     fallback: Option<DirectResumeFallback>,
+    candidate: Option<TuiRuntimeBinding>,
+    watcher_output: &str,
     claim_watcher: impl FnOnce() -> bool,
 ) -> bool {
     #[cfg(not(unix))]
     {
-        let _ = (tmux_session_name, channel_id, fallback);
+        let _ = (
+            tmux_session_name,
+            channel_id,
+            fallback,
+            candidate,
+            watcher_output,
+        );
         claim_watcher()
     }
 
@@ -107,7 +115,24 @@ pub(super) fn commit_live_direct_resume_fallback(
                     last_offset: 0,
                     relay_last_offset: None,
                 };
-                dedupe::codex_verified_publication_allowed(authority, &unresolved)
+                if dedupe::codex_verified_publication_allowed(authority, &unresolved) {
+                    return claim_watcher();
+                }
+                let Some(candidate) = candidate else {
+                    return false;
+                };
+                if candidate.runtime_kind != RuntimeHandoffKind::CodexTui
+                    || !dedupe::codex_verified_publication_allowed(authority, &candidate)
+                {
+                    return false;
+                }
+                let Some(current) =
+                    dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
+                else {
+                    return false;
+                };
+                codex_bindings_same_source(&candidate, &current)
+                    && watcher_output_matches(tmux_session_name, watcher_output, &current)
                     && claim_watcher()
             });
         };
@@ -142,7 +167,9 @@ pub(super) fn commit_live_direct_resume_fallback(
                     Some(_) => return false,
                     None => current.binding,
                 };
-            if !dedupe::codex_verified_publication_allowed(authority, &binding) {
+            if !dedupe::codex_verified_publication_allowed(authority, &binding)
+                || !watcher_output_matches(tmux_session_name, watcher_output, &binding)
+            {
                 return false;
             }
             let verified = dedupe::codex_verified_marker_metadata(
@@ -170,6 +197,39 @@ pub(super) fn commit_live_direct_resume_fallback(
             })
         })
     }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn commit_codex_watcher_restore_for_tests(
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    candidate: Option<TuiRuntimeBinding>,
+    watcher_output: &str,
+    claim_watcher: impl FnOnce() -> bool,
+) -> bool {
+    commit_live_direct_resume_fallback(
+        tmux_session_name,
+        channel_id,
+        None,
+        candidate,
+        watcher_output,
+        claim_watcher,
+    )
+}
+
+#[cfg(unix)]
+fn watcher_output_matches(tmux: &str, output: &str, binding: &TuiRuntimeBinding) -> bool {
+    let output = std::path::Path::new(output);
+    if crate::services::codex_tui::session::codex_tui_rollout_paths_same(
+        output,
+        std::path::Path::new(&binding.output_path),
+    ) {
+        return true;
+    }
+    // Relay output belongs to this tmux namespace, independently of its native rollout.
+    let relay = tmux_common::session_temp_path(tmux, "jsonl");
+    output == std::path::Path::new(&relay)
+        && binding.relay_output_path.as_deref() == Some(relay.as_str())
 }
 
 #[cfg(unix)]
@@ -317,6 +377,8 @@ mod verified_watcher_claim_tests {
             &tmux,
             ChannelId::new(584_505),
             None,
+            None,
+            "",
             || {
                 claims.set(claims.get() + 1);
                 true
@@ -333,12 +395,35 @@ mod verified_watcher_claim_tests {
             &legacy,
             ChannelId::new(584_505),
             None,
+            None,
+            "",
             || {
                 claims.set(claims.get() + 1);
                 true
             },
         ));
         assert_eq!(claims.get(), 1);
+        let candidate = TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::CodexTui,
+            output_path: "/legacy/native.jsonl".into(),
+            relay_output_path: Some("/tmp/legacy-relay.jsonl".into()),
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: Some(0),
+        };
+        assert!(commit_live_direct_resume_fallback(
+            &legacy,
+            ChannelId::new(584_505),
+            None,
+            Some(candidate),
+            "/tmp/legacy-relay.jsonl",
+            || {
+                claims.set(claims.get() + 1);
+                true
+            },
+        ));
+        assert_eq!(claims.get(), 2);
     }
 }
 

@@ -164,6 +164,10 @@ pub(crate) mod terminal_delivery_custody;
 mod tui_direct_abort_marker;
 mod tui_direct_pending_start;
 mod tui_prompt_relay;
+#[cfg(all(test, unix))]
+pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
+#[cfg(all(test, unix))]
+pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
 mod tui_task_card;
 mod turn_bridge;
 #[allow(clippy::too_many_arguments)]

@@ -6,6 +6,8 @@ mod claude_source;
 pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, before_authority};
 pub(crate) use claude_source::{Persisted, Record, reclaim_with_current_prompt};
 mod binding_access;
+mod codex_cursor;
+pub(crate) use codex_cursor::advance_tmux_runtime_binding_offset_under_source_authority;
 mod codex_hook;
 pub use binding_access::register_provider_session;
 pub(crate) use binding_access::{
@@ -23,7 +25,8 @@ pub(crate) use codex_hook::{
     register_launched_tmux_runtime_binding_under_source_authority,
 };
 pub(crate) use codex_verified::{
-    observe_verified_codex_hook, resolve_registered_claims as resolve_codex_claims,
+    codex_verified_discovered_channel, observe_verified_codex_hook,
+    recover_discovered_codex_binding, resolve_registered_claims as resolve_codex_claims,
 };
 pub(crate) mod pane_registration;
 pub(crate) use adopt_skip::*;
@@ -158,22 +161,9 @@ fn publish_runtime_binding(
                 if !codex_verified::consumer_allowed(authority, &binding) {
                     return None;
                 }
+                let binding = codex_cursor::restore(authority, binding).ok()?;
+                codex_cursor::persist(authority, &binding).ok()?;
                 with_runtime_binding_state_under_source_authority(authority, |state| {
-                    // Discovery cannot advance delivery cursors for an already proven source.
-                    let binding = state
-                        .runtime_by_tmux
-                        .get(tmux_session_name)
-                        .map(|entry| &entry.value)
-                        .filter(|old| {
-                            old.output_path == binding.output_path
-                                && old.session_id == binding.session_id
-                        })
-                        .cloned()
-                        .unwrap_or(TuiRuntimeBinding {
-                            last_offset: 0,
-                            relay_last_offset: Some(0),
-                            ..binding
-                        });
                     state.runtime_by_tmux.insert(
                         tmux_session_name.to_owned(),
                         TimedValue {
@@ -889,6 +879,8 @@ pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
 }
 
 #[cfg(test)]
+mod codex_legacy_lock_tests;
+#[cfg(test)]
 mod codex_verified_tests;
 
 /// Live sessions of `kinds` with their cached owner channel, copied without purging relay state;
@@ -928,33 +920,6 @@ pub(crate) fn advance_tmux_runtime_binding_offset(
             output_path,
             last_offset,
         )
-    })
-}
-
-pub(crate) fn advance_tmux_runtime_binding_offset_under_source_authority(
-    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-    output_path: &str,
-    last_offset: u64,
-) -> bool {
-    let tmux_session_name = authority.session();
-    with_runtime_binding_state_under_source_authority(authority, |state| {
-        let Some(entry) = state.runtime_by_tmux.get_mut(tmux_session_name) else {
-            return false;
-        };
-        if entry.value.output_path == output_path {
-            entry.value.last_offset = last_offset;
-            if entry.value.relay_output_path.is_none() {
-                entry.value.relay_last_offset = Some(last_offset);
-            }
-            entry.recorded_at = Instant::now();
-            return true;
-        }
-        if entry.value.relay_output_path.as_deref() != Some(output_path) {
-            return false;
-        }
-        entry.value.relay_last_offset = Some(last_offset);
-        entry.recorded_at = Instant::now();
-        true
     })
 }
 

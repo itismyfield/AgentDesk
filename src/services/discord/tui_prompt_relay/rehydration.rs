@@ -459,7 +459,13 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
         }
 
         let authoritative_channel =
-            resolve_rehydrated_tmux_channel_id(&ProviderKind::Codex, &tmux_session_name);
+            resolve_rehydrated_tmux_channel_id(&ProviderKind::Codex, &tmux_session_name).or_else(
+                || {
+                    crate::services::tui_prompt_dedupe::codex_verified_discovered_channel(
+                        &tmux_session_name,
+                    )
+                },
+            );
         let Some(channel_id) = authoritative_channel.or_else(|| {
             crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux_session_name)
         }) else {
@@ -543,6 +549,14 @@ fn rehydrate_codex_tui_binding_transaction(
     allow_markerless_cwd_fallback: bool,
     observe_before_register: impl FnOnce(),
 ) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
+    // Restore durable claims before discovery asks the generic publication gate.
+    let recovered = crate::services::tui_prompt_dedupe::recover_discovered_codex_binding(
+        tmux_session_name,
+        channel_id,
+    );
+    if !recovered {
+        return None;
+    }
     crate::services::tui_prompt_dedupe::reconcile_rehydrated_tmux_runtime_binding(
         ProviderKind::Codex.as_str(),
         tmux_session_name,
@@ -626,6 +640,21 @@ fn rehydrate_codex_tui_binding_transaction(
             .map(|fresh| (fresh, true))
         },
     )
+}
+
+#[cfg(all(unix, test))]
+pub(crate) fn run_codex_rehydrate_pass_for_tests(
+    shared: &Arc<SharedData>,
+    tmux_session_name: &str,
+) {
+    struct RestoreView(Option<Vec<String>>);
+    impl Drop for RestoreView {
+        fn drop(&mut self) {
+            CODEX_PASS_TMUX_VIEW.set(self.0.take());
+        }
+    }
+    let _view = RestoreView(CODEX_PASS_TMUX_VIEW.replace(Some(vec![tmux_session_name.to_owned()])));
+    rehydrate_existing_codex_tui_bindings(shared);
 }
 
 /// One boot restore pass for a live pane, with no other pane's claims.

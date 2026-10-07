@@ -6,7 +6,7 @@ use super::super::binding_context::{
 use super::*;
 use crate::services::claude_tui::hook_server::{
     adoption_retry::{DurableKind, NotDurableReason},
-    observation_ingress::{IngressOutcome, NotApplicableReason, UnavailableReason},
+    observation_ingress::{IngressOutcome, NotApplicableReason, ProceedReason, UnavailableReason},
 };
 use crate::services::codex_tui::session::{
     self,
@@ -248,7 +248,7 @@ fn commit(
     })
 }
 
-fn proof_for_binding(
+pub(super) fn proof_for_binding(
     authority: &TmuxSourceAuthority<'_>,
     context: &BindingContext,
     binding: &TuiRuntimeBinding,
@@ -290,7 +290,7 @@ pub(super) fn publication_allowed(
     }
 }
 
-fn marker_proof(context: &BindingContext, proof: &VerifiedProof) -> serde_json::Value {
+pub(super) fn marker_proof(context: &BindingContext, proof: &VerifiedProof) -> serde_json::Value {
     serde_json::json!({"execution_nonce": context.execution_nonce, "proof_seq": proof.seq,
         "dev": proof.source.dev, "ino": proof.source.ino})
 }
@@ -373,17 +373,7 @@ pub(super) fn publish_proof(
         relay_last_offset: Some(0),
     };
     proof_for_binding(authority, context, &binding)?;
-    let previous = with_runtime_binding_state_under_source_authority(authority, |state| {
-        state
-            .runtime_by_tmux
-            .get(authority.session())
-            .map(|entry| entry.value.clone())
-    })
-    .filter(|old| {
-        old.output_path == binding.output_path
-            && old.session_id == binding.session_id
-            && consumer_allowed(authority, old)
-    });
+    let binding = super::codex_cursor::restore(authority, binding)?;
     session::write_codex_tui_rollout_marker_under_source_authority(
         authority,
         &proof.source.path,
@@ -391,8 +381,8 @@ pub(super) fn publish_proof(
         Some(0),
     )
     .map_err(io::Error::other)?;
+    super::codex_cursor::persist(authority, &binding)?;
     with_runtime_binding_state_under_source_authority(authority, |state| {
-        let binding = previous.unwrap_or(binding);
         state.runtime_by_tmux.insert(
             authority.session().to_owned(),
             TimedValue {
@@ -422,6 +412,9 @@ pub(crate) fn observe_verified_codex_hook(
     };
     if context.source_policy.as_deref() != Some("verified") {
         return None;
+    }
+    if !matches!(hook.event.as_str(), "session_start" | "user_prompt_submit") {
+        return Some(IngressOutcome::Proceed(ProceedReason::NoSessionSwitch));
     }
     Some(tc::with_tmux_source_authority(
         &context.tmux_session,
@@ -519,4 +512,58 @@ pub(crate) fn resolve_registered_claims() {
             let _ = resolve_under_authority(authority);
         });
     }
+}
+
+pub(crate) fn codex_verified_discovered_channel(tmux: &str) -> Option<u64> {
+    tc::with_tmux_source_authority(tmux, |authority| {
+        current_context(authority).ok().flatten()?.channel_id
+    })
+}
+
+pub(crate) fn recover_discovered_codex_binding(tmux: &str, channel: u64) -> bool {
+    tc::with_tmux_source_authority(tmux, |authority| {
+        recover_discovered_under_authority(authority, channel)
+    })
+}
+
+fn recover_discovered_under_authority(authority: &TmuxSourceAuthority<'_>, channel: u64) -> bool {
+    let context = match current_context(authority) {
+        Ok(None) => {
+            let nonce = match binding_context::observe_spawn_nonce_marker(authority.session()) {
+                SpawnNonceMarker::Known(nonce) => Some(nonce),
+                _ => None,
+            };
+            return binding_events::codex::context_for_nonce(
+                channel,
+                authority.session(),
+                nonce.as_deref(),
+            )
+            .is_ok_and(|context| context.is_none());
+        }
+        Ok(Some(context)) if context.channel_id == Some(channel) && channel != 0 => context,
+        _ => return false,
+    };
+    let registered = with_runtime_binding_state_under_source_authority(authority, |state| {
+        if state
+            .channel_by_tmux
+            .get(authority.session())
+            .is_some_and(|entry| entry.value != channel)
+        {
+            return false;
+        }
+        state.channel_by_tmux.insert(
+            authority.session().to_owned(),
+            TimedValue {
+                value: channel,
+                recorded_at: Instant::now(),
+            },
+        );
+        true
+    });
+    registered
+        && validate_context(authority, &context).is_ok()
+        && matches!(
+            resolve_under_authority(authority),
+            IngressOutcome::Durable(DurableKind::Adopted)
+        )
 }
