@@ -51,6 +51,8 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                     RuntimeHandoffKind::CodexTui,
                 )
             {
+                #[cfg(test)]
+                note_poll(&tmux_session_name, PollNote::Visit);
                 if active_tails.contains(&tmux_session_name) {
                     continue;
                 }
@@ -101,6 +103,19 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                 line_end_offset,
                                 ..
                             })) => {
+                                let same_path = inflight.output_path.as_deref().map(Path::new)
+                                    == Some(rollout_path.as_path());
+                                // A same-rollout match before the claim's start is an earlier turn's
+                                // prompt; wait for this turn's prompt and leave the row untouched.
+                                if same_path
+                                    && inflight
+                                        .turn_start_offset
+                                        .is_some_and(|start| line_end_offset < start)
+                                {
+                                    #[cfg(test)]
+                                    note_poll(&tmux_session_name, PollNote::EarlierPrompt);
+                                    continue;
+                                }
                                 if let Some(anchor_id) = inflight.injected_prompt_message_id {
                                     crate::services::tui_prompt_dedupe::record_prompt_anchor(
                                         ProviderKind::Codex.as_str(),
@@ -123,8 +138,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                 let mut repaired = inflight;
                                 // A claim on this rollout keeps its start: the bridge witness pins it,
                                 // and the tail below resumes from the prompt end on its own cursor.
-                                let same_source = repaired.output_path.as_deref().map(Path::new)
-                                    == Some(rollout_path.as_path())
+                                let same_source = same_path
                                     && repaired
                                         .turn_start_offset
                                         .is_some_and(|start| start <= line_end_offset);
@@ -406,6 +420,24 @@ pub(super) static TAIL_STARTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 type TestPause = Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>;
 #[cfg(test)]
 pub(super) static CAPTURE_PAUSE: Mutex<TestPause> = Mutex::new(None);
+/// Test hook: per tmux session, how often a poll reached each checkpoint.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum PollNote {
+    Visit,
+    EarlierPrompt,
+}
+#[cfg(test)]
+pub(super) static POLL_NOTES: Mutex<std::collections::BTreeMap<(String, PollNote), usize>> =
+    Mutex::new(std::collections::BTreeMap::new());
+#[cfg(test)]
+fn note_poll(tmux_session_name: &str, note: PollNote) {
+    *POLL_NOTES
+        .lock()
+        .unwrap()
+        .entry((tmux_session_name.to_string(), note))
+        .or_default() += 1;
+}
 
 #[cfg(unix)]
 async fn run_codex_idle_response_tail(

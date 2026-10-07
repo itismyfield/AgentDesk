@@ -1,5 +1,6 @@
 //! TUI-direct claims while the live tmux watcher tails a file other than the row's output.
 //! A Codex TUI watcher reads the relay jsonl, never the rollout the synthetic row names.
+use super::super::codex_idle_rollout::PollNote;
 use super::*;
 use crate::services::cluster::stream_relay::{
     RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame,
@@ -13,6 +14,7 @@ use tokio::sync::Notify;
 
 const PROMPT: &str = "codex direct prompt 5704";
 const RESPONSE: &str = "DIRECT_5704_OK";
+const OLD_RESPONSE: &str = "OLD_5704";
 
 fn enable_session_bound_delivery() {
     let health = Arc::new(crate::services::discord::health::HealthRegistry::new());
@@ -270,10 +272,14 @@ fn user_line() -> String {
 }
 
 fn answer_lines() -> String {
+    answer_lines_with(RESPONSE)
+}
+
+fn answer_lines_with(text: &str) -> String {
     rollout_line(serde_json::json!({"type": "response_item", "payload": {
-        "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": RESPONSE}]}}))
+        "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}}))
         + &rollout_line(serde_json::json!({"type": "event_msg", "payload": {
-            "type": "task_complete", "last_agent_message": RESPONSE}}))
+            "type": "task_complete", "last_agent_message": text}}))
 }
 
 fn append(path: &Path, text: &str) {
@@ -295,9 +301,21 @@ struct CodexChannel {
 
 impl CodexChannel {
     fn new(shared: &Arc<SharedData>, root: &Path, channel: u64, tmux: &str) -> Self {
+        Self::with_history(shared, root, channel, tmux, "")
+    }
+
+    /// `history` is rollout content the binding cursor has already passed.
+    fn with_history(
+        shared: &Arc<SharedData>,
+        root: &Path,
+        channel: u64,
+        tmux: &str,
+        history: &str,
+    ) -> Self {
         let rollout = root.join(format!("{tmux}-rollout.jsonl"));
         let header =
-            rollout_line(serde_json::json!({"type": "session_meta", "payload": {"id": "s-5704"}}));
+            rollout_line(serde_json::json!({"type": "session_meta", "payload": {"id": "s-5704"}}))
+                + history;
         std::fs::write(&rollout, &header).expect("rollout");
         let relay = crate::services::tmux_common::session_temp_path(tmux, "jsonl");
         let generation = crate::services::tmux_common::session_temp_path(tmux, "generation");
@@ -365,16 +383,28 @@ impl CodexChannel {
     }
 }
 
-/// Discord requests on `channel` whose body carries the answer.
-fn deliveries(requests: &Requests, channel: ChannelId) -> Vec<(String, String)> {
+/// `(method, path, body)` of the Discord requests on `channel` whose body carries the answer.
+fn deliveries(requests: &Requests, channel: ChannelId) -> Vec<(String, String, String)> {
     let needle = format!("/channels/{}/", channel.get());
     requests
         .lock()
         .unwrap()
         .iter()
         .filter(|(_, path, body)| path.contains(&needle) && body.contains(RESPONSE))
-        .map(|(method, path, _)| (method.clone(), path.clone()))
+        .cloned()
         .collect()
+}
+
+fn tail_starts(channel: ChannelId) -> usize {
+    let starts = super::super::codex_idle_rollout::TAIL_STARTS
+        .lock()
+        .unwrap();
+    starts.iter().filter(|id| **id == channel.get()).count()
+}
+
+fn poll_notes(tmux: &str, note: PollNote) -> usize {
+    let notes = super::super::codex_idle_rollout::POLL_NOTES.lock().unwrap();
+    notes.get(&(tmux.to_string(), note)).copied().unwrap_or(0)
 }
 
 async fn wait_for(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
@@ -420,12 +450,21 @@ async fn codex_direct_answer_scenario(root: &Path) {
     let rebinding = CodexChannel::new(&shared, root, 5_704_300, "AgentDesk-codex-5704-rebind");
     let claim_first = CodexChannel::new(&shared, root, 5_704_400, "AgentDesk-codex-5704-claim");
     let parked = CodexChannel::new(&shared, root, 5_704_500, "AgentDesk-codex-5704-parked");
+    let earlier_turn = user_line() + &answer_lines_with(OLD_RESPONSE);
+    let repeat = CodexChannel::with_history(
+        &shared,
+        root,
+        5_704_600,
+        "AgentDesk-codex-5704-repeat",
+        &earlier_turn,
+    );
     let channels = [
         &hook_first,
         &rollout_first,
         &rebinding,
         &claim_first,
         &parked,
+        &repeat,
     ];
     let frames = Arc::new(AtomicUsize::new(0));
     let mut relays = Vec::new();
@@ -529,15 +568,17 @@ async fn codex_direct_answer_scenario(root: &Path) {
         .await
         .expect("the repair tail reaches bridge capture");
     assert_eq!(parked.row().expect("parked row").current_msg_id, 0);
-    tokio::time::sleep(Duration::from_millis(1_600)).await;
-    let starts = |channel: ChannelId| {
-        let starts = super::super::codex_idle_rollout::TAIL_STARTS
-            .lock()
-            .unwrap();
-        starts.iter().filter(|id| **id == channel.get()).count()
-    };
+    let visits = poll_notes(&parked.tmux, PollNote::Visit);
+    assert!(
+        wait_for(Duration::from_secs(10), || poll_notes(
+            &parked.tmux,
+            PollNote::Visit
+        ) >= visits + 2)
+        .await,
+        "polls stopped visiting the parked session"
+    );
     assert_eq!(
-        starts(parked.channel),
+        tail_starts(parked.channel),
         1,
         "polls during the parked tail start no other"
     );
@@ -550,6 +591,68 @@ async fn codex_direct_answer_scenario(root: &Path) {
         .is_empty())
         .await,
         "parked answer never reached Discord"
+    );
+
+    // Same prompt after a completed turn, claimed before it lands: the repair poll meets only
+    // the earlier prompt and must leave the claim, its lease and the cursor as they stand.
+    crate::services::tui_prompt_dedupe::observe_hook_prompt_by_tmux_with_prompt_id_at(
+        "codex",
+        &repeat.tmux,
+        PROMPT,
+        None,
+        chrono::Utc::now(),
+    );
+    let lease = repeat.lease(&shared);
+    let claim = repeat.claim(&shared, 5_704_601, &lease).await;
+    assert!(claim.claimed);
+    let cursor = std::fs::metadata(&repeat.rollout).unwrap().len();
+    assert_eq!(claim.turn_start_offset, cursor);
+    let row_before = serde_json::to_value(repeat.row().expect("repeat row")).unwrap();
+    let live_lease = || {
+        crate::services::tui_prompt_dedupe::external_input_relay_lease(
+            "codex",
+            &repeat.tmux,
+            repeat.channel.get(),
+        )
+    };
+    let lease_before = live_lease();
+    assert!(
+        wait_for(Duration::from_secs(10), || poll_notes(
+            &repeat.tmux,
+            PollNote::EarlierPrompt
+        ) > 0)
+        .await,
+        "the repair poll never met the earlier prompt"
+    );
+    let visits = poll_notes(&repeat.tmux, PollNote::Visit);
+    assert!(
+        wait_for(Duration::from_secs(10), || poll_notes(
+            &repeat.tmux,
+            PollNote::Visit
+        ) > visits)
+        .await,
+        "polls stopped visiting the repeat session"
+    );
+    assert_eq!(
+        serde_json::to_value(repeat.row().expect("repeat row")).unwrap(),
+        row_before,
+        "the claim stands as it was"
+    );
+    assert_eq!(live_lease(), lease_before);
+    let binding =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&repeat.tmux);
+    assert_eq!(binding.expect("repeat binding").last_offset, cursor);
+    assert_eq!(tail_starts(repeat.channel), 0);
+    append(&repeat.rollout, &(user_line() + &answer_lines()));
+    assert!(
+        wait_for(Duration::from_secs(15), || !deliveries(
+            &requests,
+            repeat.channel
+        )
+        .is_empty())
+        .await,
+        "repeated prompt's answer never reached Discord: {:?}",
+        requests.lock().unwrap()
     );
 
     // Rollout first: the loop publishes the prompt and waits for the observer's claim.
@@ -634,14 +737,15 @@ async fn codex_direct_answer_scenario(root: &Path) {
         (&rollout_first, 5_704_201),
         (&claim_first, 5_704_401),
         (&parked, 5_704_501),
+        (&repeat, 5_704_601),
     ] {
         let sent = deliveries(&requests, codex.channel);
         let anchor = format!("/channels/{}/messages/{anchor}", codex.channel.get());
-        assert!(
-            sent.iter()
-                .all(|(method, path)| method == "PATCH" && path.ends_with(&anchor)),
-            "the answer edits the claimed anchor only: {sent:?}"
-        );
+        assert_eq!(sent.len(), 1, "one answer edit: {sent:?}");
+        let (method, path, body) = &sent[0];
+        assert!(method == "PATCH" && path.ends_with(&anchor), "{sent:?}");
+        let content = serde_json::from_str::<serde_json::Value>(body).unwrap()["content"].clone();
+        assert_eq!(content, RESPONSE, "the answer edits the claimed anchor");
         let turns = finalized_turns
             .iter()
             .filter(|id| **id == codex.channel.get());
@@ -653,9 +757,17 @@ async fn codex_direct_answer_scenario(root: &Path) {
             "{} released",
             codex.tmux
         );
-        assert_eq!(starts(codex.channel), 1, "one tail for {}", codex.tmux);
+        assert_eq!(tail_starts(codex.channel), 1, "one tail for {}", codex.tmux);
     }
     assert!(deliveries(&requests, rebinding.channel).is_empty());
+    assert!(
+        !requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, _, body)| body.contains(OLD_RESPONSE)),
+        "an earlier turn's answer is never sent"
+    );
     assert_eq!(
         frames.load(Ordering::SeqCst),
         0,
