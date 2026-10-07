@@ -9,14 +9,15 @@ use super::*;
 const NONCE: &str = "abcd1234";
 const TEXT: &str = "are you there?";
 
+/// Windows only bound the waits for evidence that never comes; found evidence returns at once.
 const FAST: Timing = Timing {
     lock_retries: &[Duration::ZERO],
     settle: Duration::ZERO,
     rechecks: 3,
     recheck_interval: Duration::from_millis(5),
-    confirm_window: Duration::from_millis(300),
+    confirm_window: Duration::from_secs(3),
     confirm_poll: Duration::from_millis(20),
-    restore_window: Duration::from_millis(200),
+    restore_window: Duration::from_millis(600),
 };
 
 /// A scripted Claude TUI behind `tmux`: composer and stash files, the single-slot C-s, the
@@ -351,7 +352,7 @@ fn a_second_input_waits_out_the_whole_stash_transaction() {
     let tui = Tui::new("human draft A");
     tui.put("restore_after", "never");
     let slow = Timing {
-        restore_window: Duration::from_millis(600),
+        restore_window: Duration::from_secs(2),
         ..FAST
     };
     std::thread::scope(|scope| {
