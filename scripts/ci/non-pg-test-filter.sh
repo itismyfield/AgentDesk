@@ -168,6 +168,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
   --skip services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
   --skip services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
+  --skip services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
   --skip services::discord::router::message_handler::provider_dispatch::tests
@@ -910,6 +911,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
   services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
   services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
+  services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup
   services::discord::router::message_handler::provider_dispatch::herdr_tests
   services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
   services::discord::router::message_handler::provider_dispatch::tests

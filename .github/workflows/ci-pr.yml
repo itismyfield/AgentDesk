@@ -349,6 +349,7 @@ jobs:
               - 'src/services/discord/router/message_handler/intake_turn/native_fresh_prompt_tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/runtime_transition/native_hold_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch.rs'
+              - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_followup_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs'

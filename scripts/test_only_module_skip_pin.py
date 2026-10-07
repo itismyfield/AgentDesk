@@ -211,6 +211,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/host_home_tests.rs",
         "src/services/codex/herdr_guard_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.rs",
+        "src/services/discord/router/message_handler/provider_dispatch_codex_herdr_followup_tests.rs",
         "src/services/tui_o/writer/codex_herdr_drive_tests.rs",
         "src/services/cluster/channel_home_claim_tests.rs",
         "src/services/discord/router/intake_dispatch/home_order_tests.rs",

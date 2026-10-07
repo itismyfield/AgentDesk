@@ -265,6 +265,7 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
     // Herdr panes are not tmux sessions; their rows name them. No local endpoint reads nothing.
     super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_panes(
         shared.pg_pool.as_ref(),
+        &ProviderKind::Claude,
     );
 }
 
@@ -436,6 +437,11 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
 #[cfg(unix)]
 pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
     evict_dead_orphaned_codex_tui_mirrors(shared);
+    // Codex Herdr rows, read whether or not tmux answers; off Herdr this reads nothing.
+    super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_panes(
+        shared.pg_pool.as_ref(),
+        &ProviderKind::Codex,
+    );
 
     let mut sessions = match codex_pass_tmux_session_names() {
         Ok(sessions) => sessions,

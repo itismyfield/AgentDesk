@@ -1,5 +1,6 @@
 //! A Codex turn on a Herdr pane behind the default-off `runtime.herdr_codex_turn_enabled` switch:
-//! one prompt to a launch's ready composer, its hold ending only once the hook Source is bound.
+//! one prompt to a launch's ready composer, its hold ending only once the hook Source is bound;
+//! a Bound pane takes each later prompt once, never over a draft or changed launch options.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -16,14 +17,19 @@ use super::{CodexLaunchOptions, codex_reasoning_effort_from_env};
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLookup, HostedOwner, HostedRecord, HostedState,
 };
-use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage};
+use crate::services::agent_protocol::{RuntimeHandoff, RuntimeHandoffKind, StreamMessage};
 use crate::services::claude::herdr_turn::{
     HoldRelease, gate, hold, launched, load, not_held, release_hold,
 };
 use crate::services::codex_tui::host_input::{InputRun, PlanRun, legacy_result, run_herdr};
 use crate::services::codex_tui::input::{
-    PROMPT_READY_CANCELLED_ERROR, pane_looks_ready_for_codex_prompt, plan_prompt_submit,
+    ComposerContent, PROMPT_READY_CANCELLED_ERROR, active_composer_content_in_pane,
+    pane_looks_ready_for_codex_prompt, pane_shows_codex_interactive_modal, plan_prompt_submit,
 };
+use crate::services::codex_tui::session::{
+    read_codex_tui_launch_options_fingerprint, write_codex_tui_launch_options_fingerprint,
+};
+use crate::services::codex_tui::warm_followup::codex_tui_launch_options_fingerprint;
 use crate::services::herdr_launch::{
     HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint, HerdrLaunchHost, launch_herdr_session,
 };
@@ -36,7 +42,10 @@ use crate::services::tui_prompt_dedupe::binding_events::{
     BindingCause, BindingTarget, SourceId, binding_events_since, subscribe_binding_events,
 };
 
+#[cfg(not(test))]
 const COMPOSER_READY_WAIT: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const COMPOSER_READY_WAIT: Duration = Duration::from_secs(2);
 #[cfg(not(test))]
 const SOURCE_WAIT: Duration = Duration::from_secs(60);
 #[cfg(test)]
@@ -71,6 +80,30 @@ pub(crate) trait CodexHerdrPorts {
         source: &SourceId,
         target: &HerdrTarget,
     ) -> Result<bool, String>;
+    /// `Ok` only while the reconcile reads the Bound execution as a match.
+    fn confirm_bound(
+        &self,
+        owner: &HostedOwner,
+        record: &HostedExecution,
+        target: &HerdrTarget,
+    ) -> Result<(), String>;
+}
+
+/// Why a pane took no prompt; nothing was written to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptRefused {
+    /// No attached source names a session and a rollout for the pane.
+    NoSource,
+    /// The turn's launch options are not the ones the pane was launched with, or none were kept.
+    LaunchOptionsChanged,
+    /// The composer shows text that is not this turn's; it is left as it is.
+    ComposerDraft,
+    /// The composer is in no layout the reader knows, so nothing shows it empty.
+    ComposerUnread,
+}
+
+fn refused(why: PromptRefused) -> String {
+    format!("herdr turn: codex prompt refused: {why:?}")
 }
 
 /// Runs one turn on a blocking thread inside the runtime; every error leaves the pane as it is.
@@ -83,10 +116,11 @@ pub(crate) fn execute(
     let nonce = match turn.row {
         Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {
             not_held(&record.execution_nonce)?;
-            return Err("herdr turn: a bound codex pane takes no follow-up yet".into());
+            return followup(&turn, ports, record, sender);
         }
         Some(HostedRecord::Known(record)) if record.state == HostedState::Pending => {
             not_held(&record.execution_nonce)?;
+            options_kept(&turn, &record.execution_nonce)?;
             pending_launch(&turn, &runtime, ports, record)?
         }
         Some(HostedRecord::Unknown(_)) => return Err("herdr turn: unreadable hosted record".into()),
@@ -137,7 +171,11 @@ fn fresh_launch(
     let home = codex_herdr_home(&overlay).ok_or("codex herdr launch: no Codex home")?;
     let options = launch_options(turn);
     let prepare = |prepared: &PreparedIncarnation| {
-        prepare_codex_herdr_launch(prepared, &launchable, &options, &overlay, &home)
+        let command = prepare_codex_herdr_launch(prepared, &launchable, &options, &overlay, &home)?;
+        // Kept for this execution before its Pending row, so each later prompt compares with it.
+        let nonce = &prepared.context.execution_nonce;
+        write_codex_tui_launch_options_fingerprint(logical, &kept_options(nonce, &options))?;
+        Ok(command)
     };
     let launch = launch_of(turn, Some(&home));
     launched(runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host)))
@@ -216,22 +254,52 @@ fn current_record(
     }
 }
 
-/// Polls the pane until Codex's composer is ready; a modal keeps it unready. A cancel or the
-/// deadline stops the turn with nothing written.
-fn composer_ready(target: &HerdrTarget, cancel: Option<&CancelToken>) -> Result<(), String> {
+/// Polls the pane until Codex's composer is ready and returns that screen. A modal waits on a
+/// person, so it stops the turn at once; a cancel or the deadline stops it too, nothing written.
+fn composer_ready(target: &HerdrTarget, cancel: Option<&CancelToken>) -> Result<String, String> {
     let deadline = Instant::now() + COMPOSER_READY_WAIT;
     loop {
         if cancel_requested(cancel) {
             return Err(PROMPT_READY_CANCELLED_ERROR.to_string());
         }
         let screen = target.capture(-80);
-        if screen.is_some_and(|screen| pane_looks_ready_for_codex_prompt(&screen)) {
-            return Ok(());
+        match screen {
+            Some(screen) if pane_looks_ready_for_codex_prompt(&screen) => return Ok(screen),
+            Some(screen) if pane_shows_codex_interactive_modal(&screen) => {
+                return Err("herdr turn: a codex modal holds the composer".into());
+            }
+            _ => {}
         }
         if Instant::now() >= deadline {
             return Err("herdr turn: the codex composer did not become ready".into());
         }
         std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// A ready composer shown empty; a draft, or a composer the reader cannot read, is left as it is
+/// and refuses the prompt.
+fn empty_composer(target: &HerdrTarget, cancel: Option<&CancelToken>) -> Result<(), String> {
+    let screen = composer_ready(target, cancel)?;
+    match active_composer_content_in_pane(&screen) {
+        ComposerContent::Empty => Ok(()),
+        ComposerContent::Draft => Err(refused(PromptRefused::ComposerDraft)),
+        ComposerContent::Unread => Err(refused(PromptRefused::ComposerUnread)),
+    }
+}
+
+/// What execution `nonce` keeps of the options it was launched with.
+fn kept_options(nonce: &str, options: &CodexLaunchOptions) -> String {
+    format!("{nonce} {}", codex_tui_launch_options_fingerprint(options))
+}
+
+/// Refuses a prompt whose launch options are not the ones execution `nonce` was launched with.
+fn options_kept(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<(), String> {
+    let logical = turn.owner.logical_key.as_str();
+    let expected = kept_options(nonce, &launch_options(turn));
+    match read_codex_tui_launch_options_fingerprint(logical) {
+        Some(kept) if kept == expected => Ok(()),
+        _ => Err(refused(PromptRefused::LaunchOptionsChanged)),
     }
 }
 
@@ -270,7 +338,7 @@ fn first_prompt(
     let mut logged = subscribe_binding_events(turn.channel_id)
         .map_err(|error| format!("herdr turn: binding log unavailable: {error}"))?;
     let target = gate(&current_record(turn, runtime, nonce)?)?;
-    composer_ready(&target, turn.cancel.as_deref())?;
+    empty_composer(&target, turn.cancel.as_deref())?;
     crate::services::tui_prompt_dedupe::register_provider_session("codex", logical, logical);
     crate::services::tui_prompt_dedupe::register_codex_herdr_placeholder(logical, turn.channel_id);
     hold(nonce)?;
@@ -316,14 +384,67 @@ fn first_prompt(
         return Err(format!("herdr turn: codex execution {nonce} is not bound"));
     }
     warn_release(logical, release_hold(nonce));
-    let session_id = source.session_id.clone();
+    read_reply(
+        turn,
+        &target,
+        &source.path,
+        0,
+        source.session_id.clone(),
+        sender,
+    )
+}
+
+/// A later prompt to a Bound execution: its match, source, launch options and an empty ready
+/// composer are confirmed before one gated write. Only a submitted write ends its hold at once.
+fn followup(
+    turn: &CodexHerdrTurn<'_>,
+    ports: &dyn CodexHerdrPorts,
+    record: &HostedExecution,
+    sender: Sender<StreamMessage>,
+) -> Result<(), String> {
+    let logical = turn.owner.logical_key.as_str();
+    let nonce = record.execution_nonce.as_str();
+    let plan = plan_prompt_submit(turn.prompt)?;
+    let target = gate(record)?;
+    ports.confirm_bound(&turn.owner, record, &target)?;
+    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(logical)
+        .filter(|binding| binding.runtime_kind == RuntimeHandoffKind::CodexTui)
+        .filter(|binding| !binding.output_path.is_empty());
+    let (path, session_id) = match binding.and_then(|b| Some((b.output_path, b.session_id?))) {
+        Some((path, session_id)) => (std::path::PathBuf::from(path), session_id),
+        None => return Err(refused(PromptRefused::NoSource)),
+    };
+    options_kept(turn, nonce)?;
+    empty_composer(&target, turn.cancel.as_deref())?;
+    // Read before the write, so the reply is read from where this prompt's lines begin.
+    let before = std::fs::metadata(&path)
+        .map_err(|_| refused(PromptRefused::NoSource))?
+        .len();
+    hold(nonce)?;
+    let run = run_herdr(&target, &plan, turn.cancel.as_deref());
+    if run.run == InputRun::Applied || composer_untouched(&run) {
+        warn_release(logical, release_hold(nonce));
+    }
+    legacy_result(run.run)?;
+    read_reply(turn, &target, &path, before, session_id, sender)
+}
+
+/// The rollout from `offset` until its turn ends, then the watcher handoff.
+fn read_reply(
+    turn: &CodexHerdrTurn<'_>,
+    target: &HerdrTarget,
+    path: &Path,
+    offset: u64,
+    session_id: String,
+    sender: Sender<StreamMessage>,
+) -> Result<(), String> {
     let _ = sender.send(StreamMessage::Init {
         session_id: session_id.clone(),
         raw_session_id: Some(session_id.clone()),
     });
     let read = crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset(
-        &source.path,
-        0,
+        path,
+        offset,
         Some(&session_id),
         sender.clone(),
         turn.cancel.clone(),
@@ -334,9 +455,9 @@ fn first_prompt(
     };
     let _ = sender.send(StreamMessage::RuntimeReady {
         handoff: RuntimeHandoff::CodexTui {
-            rollout_path: source.path.display().to_string(),
+            rollout_path: path.display().to_string(),
             thread_id: Some(session_id),
-            tmux_session_name: logical.to_owned(),
+            tmux_session_name: turn.owner.logical_key.clone(),
             last_offset: offset,
         },
     });

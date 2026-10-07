@@ -418,6 +418,15 @@ mod herdr {
                 other => Err(format!("herdr turn: codex source not attached: {other:?}")),
             }
         }
+
+        fn confirm_bound(
+            &self,
+            owner: &HostedOwner,
+            record: &HostedExecution,
+            target: &HerdrTarget,
+        ) -> Result<(), String> {
+            self.confirmed(owner, record, target)
+        }
     }
 
     impl HerdrTurnPorts for BootPorts<'_> {
@@ -447,6 +456,18 @@ mod herdr {
         }
 
         fn confirm_bound(
+            &self,
+            owner: &HostedOwner,
+            record: &HostedExecution,
+            target: &HerdrTarget,
+        ) -> Result<(), String> {
+            self.confirmed(owner, record, target)
+        }
+    }
+
+    impl BootPorts<'_> {
+        /// `Ok` only while the reconcile reads the Bound execution as a match.
+        fn confirmed(
             &self,
             owner: &HostedOwner,
             record: &HostedExecution,
