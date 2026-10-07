@@ -80,6 +80,7 @@ async fn state_case(site: &'static str, channel: u64, retire: bool) {
     let channel_id = ChannelId::new(channel);
     let state = row(channel, site == "dispatch_lookup", false);
     discord::inflight::save_inflight_state(&state).unwrap();
+    let state = discord::inflight::load_inflight_state(&ProviderKind::Codex, channel).unwrap();
     let root = discord::runtime_store::discord_inflight_root().unwrap();
     let path = discord::inflight::inflight_state_path(&root, &ProviderKind::Codex, channel);
     let before = fingerprint(&path);
@@ -276,6 +277,8 @@ async fn retirement_during_handoff_notice_preserves_later_effects() {
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let state = row(channel, true, true);
             discord::inflight::save_inflight_state(&state).unwrap();
+            let state =
+                discord::inflight::load_inflight_state(&ProviderKind::Codex, channel).unwrap();
             let root = discord::runtime_store::discord_inflight_root().unwrap();
             let path = discord::inflight::inflight_state_path(&root, &ProviderKind::Codex, channel);
             let before = fingerprint(&path);
