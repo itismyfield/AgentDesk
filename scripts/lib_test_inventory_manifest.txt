@@ -1588,6 +1588,7 @@ services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_runs_o
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_stops_only_the_turn_its_verdict_approved_pg
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_reset_keeps_a_configured_thread_with_or_without_a_runtime_verdict_pg
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_reset_skips_threads_with_any_unconfirmed_row_pg
+services::auto_queue::runtime::verified_reset_pg_tests::autoqueue_actual_reset_rechecks_pin_after_legacy_verdict_pg
 services::auto_queue::tests::auto_queue_status_entry_normalizes_github_repo_url
 services::auto_queue::tests::auto_queue_status_omits_diagnostics_without_slot_invariant_violation
 services::auto_queue::tests::auto_queue_status_query_uses_latest_review_clock_pg
@@ -2821,6 +2822,10 @@ services::discord::admin_host_guard::tests::headless_refuses_a_configured_turn_b
 services::discord::admin_host_guard::tests::intake_refuses_a_configured_turn_before_its_runtime_recreate_pg
 services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
 services::discord::admin_host_guard::tests::the_clear_target_keeps_mains_verdict_unless_a_configured_channel_is_switched_on_pg
+services::discord::admin_host_guard::verified_reset_tests::verified_health_clear_rechecks_late_pin_after_host_validation
+services::discord::admin_host_guard::verified_reset_tests::verified_reset_verdict_rechecks_late_pin_before_first_mailbox_clear
+services::discord::admin_host_guard::verified_reset_tests::verified_reset_verdict_refuses_before_host_validation_and_preserves_queue
+services::discord::admin_host_guard::verified_reset_tests::verified_startup_reset_hold_is_limited_to_the_exact_trial_target
 services::discord::agent_handoff::tests::channel_kind_defaults_to_cc
 services::discord::agent_handoff::tests::channel_kind_rejects_unknown_value
 services::discord::agent_handoff::tests::channel_kind_unset_reports_available_kinds
@@ -9896,6 +9901,7 @@ services::routines::session_control::tests::fresh_teardown_rejects_persistent_ro
 services::routines::session_control::tests::provider_clear_behavior_documents_supported_reset_paths
 services::routines::session_control::tests::queue_truth_routine_remote_teardown_reports_unknown_pg
 services::routines::session_control::tests::queue_truth_routine_reset_reports_unknown_pg
+services::routines::session_control::tests::routine_actual_reset_rechecks_pin_after_legacy_verdict_pg
 services::routines::session_control::tests::session_key_remote_owned_gates_local_tmux_kill
 services::routines::session_control::tests::target_channel_prefers_session_thread_then_routine_thread_then_primary
 services::routines::session_control::tests::tmux_name_from_session_key_uses_suffix_after_host

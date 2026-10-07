@@ -957,6 +957,39 @@ mod tests {
         routine_truth_result(false).await;
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn routine_actual_reset_rechecks_pin_after_legacy_verdict_pg() {
+        let fixture =
+            crate::services::auto_queue::runtime::verified_reset_pg_tests::Fixture::new(6_845_123);
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_cdx) VALUES ('agent-1', 'verified routine reset', 'codex', $1)")
+            .bind(fixture.channel.get().to_string()).execute(&pool).await.unwrap();
+        let (shared, registry, _key) = fixture.shared(&pool).await;
+        let queue = fixture.queue_bytes(&shared);
+        let pin = fixture.pin_after_legacy_verdict();
+        let controller = RoutineSessionController::new(Arc::new(pool.clone()), Some(registry));
+        let routine = routine_with_thread("persistent", Some(&fixture.channel.get().to_string()));
+        let actual = controller
+            .control_persistent_session(&routine, RoutineSessionCommand::Reset, "verified pin race")
+            .await
+            .unwrap();
+        assert_eq!(actual.lifecycle_path, "runtime-clear-refused");
+        assert!(!actual.runtime_cleared);
+        assert!(!actual.tmux_killed);
+        assert!(!actual.inflight_cleared);
+        assert_eq!(actual.disconnected_sessions, 0);
+        assert_eq!(
+            pin.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "host approval precedes pin and apply"
+        );
+        fixture.assert_unchanged(&shared, &queue).await;
+        pool.close().await;
+        db.drop().await;
+    }
+
     #[tokio::test]
     async fn queue_truth_routine_remote_teardown_reports_unknown_pg() {
         routine_truth_result(true).await;

@@ -18,7 +18,9 @@ mod managed_reset;
 #[cfg(all(test, unix))]
 use managed_reset::VERIFIED_CODEX_RESET_REFUSAL;
 pub(in crate::services::discord) use managed_reset::reset_managed_process_session;
-use managed_reset::verified_codex_reset_refusal;
+pub(in crate::services::discord) use managed_reset::{
+    verified_codex_reset_refusal, verified_codex_reset_refusal_for_target,
+};
 #[allow(dead_code)]
 pub(in crate::services::discord) mod input_clear;
 pub(in crate::services::discord) mod native;
@@ -368,7 +370,8 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<()> {
-    if let Some(reason) = verified_codex_reset_refusal(shared, provider, channel_id).await {
+    let refusal = managed_reset::refusal_for_session_key;
+    if let Some(reason) = refusal(shared, provider, channel_id, explicit_session_key).await {
         anyhow::bail!(reason);
     }
     if shared.pg_pool.is_none() {
@@ -409,7 +412,8 @@ async fn clear_channel_session_state_fenced(
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<()> {
-    if let Some(reason) = verified_codex_reset_refusal(shared, provider, channel_id).await {
+    let refusal = managed_reset::refusal_for_session_key;
+    if let Some(reason) = refusal(shared, provider, channel_id, explicit_session_key).await {
         anyhow::bail!(reason);
     }
     home_fence::check(channel_id)?;
@@ -425,7 +429,7 @@ async fn clear_channel_session_state_fenced(
         .acquire_session_transition(channel_id)
         .await
         .map_err(|_| anyhow::anyhow!("세션 전환 중이라 초기화하지 못했어요"))?;
-    if let Some(reason) = verified_codex_reset_refusal(shared, provider, channel_id).await {
+    if let Some(reason) = refusal(shared, provider, channel_id, explicit_session_key).await {
         anyhow::bail!(reason);
     }
     let hosted = native::replan(shared, provider, channel_id, explicit_session_key, hosted).await?;

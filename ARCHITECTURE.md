@@ -520,7 +520,8 @@ src/
 │   ├── auto_queue/
 │   │   ├── runtime/
 │   │   │   ├── clear_slot_sessions_pg_tests.rs
-│   │   │   └── slot_reset_host_pg_tests.rs
+│   │   │   ├── slot_reset_host_pg_tests.rs
+│   │   │   └── verified_reset_pg_tests.rs
 │   │   ├── activate_command.rs
 │   │   ├── activate_preflight.rs
 │   │   ├── activate_route.rs
@@ -1810,6 +1811,7 @@ src/
 │   │   ├── adk_session_selector_checked_tests.rs
 │   │   ├── admin_host_guard.rs
 │   │   ├── admin_host_guard_tests.rs
+│   │   ├── admin_host_guard_verified_reset_tests.rs
 │   │   ├── agent_handoff.rs
 │   │   ├── agentdesk_config.rs
 │   │   ├── answer_flush_barrier.rs

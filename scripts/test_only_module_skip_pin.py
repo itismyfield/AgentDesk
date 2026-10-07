@@ -54,6 +54,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/router/message_handler/intake_turn/runtime_transition/native_hold_tests.rs",
         "src/services/discord/commands/control/input_clear_tests.rs",
         "src/services/discord/commands/control/codex_verified_clear_tests.rs",
+        "src/services/discord/admin_host_guard_verified_reset_tests.rs",
+        "src/services/auto_queue/runtime/verified_reset_pg_tests.rs",
         "src/services/discord/input_runtime/clear_tests.rs",
         "src/services/cluster/intake_worker/input_effect_tests.rs",
         "src/services/discord/input_runtime/effect_tests.rs",
