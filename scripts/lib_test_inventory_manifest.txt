@@ -8519,6 +8519,7 @@ services::discord::turn_bridge::thinking::thinking_redaction_tests::redacted_thi
 services::discord::turn_bridge::thinking::thinking_redaction_tests::redacted_thinking_event_with_none_summary_still_blank
 services::discord::turn_bridge::thinking::thinking_redaction_tests::thinking_status_line_is_neutral_single_marker
 services::discord::turn_bridge::thinking::thinking_redaction_tests::thinking_status_line_is_stable_across_repeated_calls
+services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::pane_tests::claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::a_new_turn_generation_gets_a_fresh_delivery_fence
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::active_generation_escape_is_delivered_once_across_stop_race
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::ambiguous_or_unconfirmed_streaming_state_fails_safe_and_allows_retry
