@@ -39,6 +39,7 @@ fn open_admission() -> ForcedAdmission {
 struct Fake {
     calls: Mutex<Vec<String>>,
     save_fails: AtomicBool,
+    composer_panics: AtomicBool,
 }
 
 impl Fake {
@@ -65,6 +66,10 @@ impl NativeClearEffects for Fake {
         NativeClearSubmission::NotSent
     }
     fn composer_empty(&self, _: &str, _: Instant) -> bool {
+        assert!(
+            !self.composer_panics.load(Ordering::SeqCst),
+            "Herdr recovery must capture its pane through the production host boundary"
+        );
         true
     }
     fn reset_process(&self, tmux: &str) {
@@ -90,7 +95,7 @@ struct Fixture {
     fake: Arc<Fake>,
     alive: Arc<AtomicBool>,
     _thread: Vec<Box<dyn std::any::Any>>,
-    _env: (Guard, TestRuntimeRootGuard),
+    _env: (Guard, Guard, TestRuntimeRootGuard),
 }
 
 impl Fixture {
@@ -103,7 +108,13 @@ impl Fixture {
         let runtime_root = crate::config::runtime_root().unwrap();
         let config = crate::runtime_layout::config_file_path(&runtime_root);
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        std::fs::write(&config, format!("cluster:\n  instance_id: {HOST}\n")).unwrap();
+        std::fs::write(
+            &config,
+            format!("cluster:\n  instance_id: {HOST}\nruntime:\n  native_clear_enabled: false\n"),
+        )
+        .unwrap();
+        let explicit_config =
+            Guard::set_path_after_shared_test_env_lock("AGENTDESK_CONFIG", &config);
         let log = tempfile::tempdir().unwrap();
         let rig = Arc::new(HerdrRig::start());
         let rt = {
@@ -223,7 +234,7 @@ impl Fixture {
             fake,
             alive,
             _thread: thread,
-            _env: (instance, root),
+            _env: (instance, explicit_config, root),
         };
         fixture.record("old", BindingCause::Startup, false);
         fixture
@@ -294,6 +305,7 @@ impl Fixture {
             &ProviderKind::Claude,
             self.channel_id,
             &mut state,
+            &mut false,
         )
         .await;
         (admitted, state.0)
@@ -435,6 +447,202 @@ fn screen(text: &str) -> Value {
 
 fn clear_line() -> Vec<Value> {
     vec![json!({"pane_id": PANE, "text": "/clear", "keys": ["enter"]})]
+}
+
+struct RejectTmux {
+    _env: Guard,
+    dir: tempfile::TempDir,
+}
+
+impl RejectTmux {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("tmux");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nlog=${0%/*}/calls\nprintf '%s\\n' \"$*\" >> \"$log\"\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env = Guard::prepend_path_after_shared_test_env_lock(dir.path());
+        Self { _env: env, dir }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        std::fs::read_to_string(self.dir.path().join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+fn pane_reads(fixture: &Fixture) -> usize {
+    fixture
+        .rig
+        .requests()
+        .iter()
+        .filter(|request| request["method"] == "pane.read")
+        .count()
+}
+
+#[test]
+fn held_herdr_recovery_reads_the_composer_with_native_switch_off_pg() {
+    for (n, capture) in [
+        screen(EMPTY_COMPOSER),
+        screen("Claude Code v2.1.141\n\n\u{276f} unsent draft\nstatus"),
+        json!({"type": "ok"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let fixture = Fixture::new(20 + n as u64);
+        let _off = switch_off_for_tests();
+        let tmux = RejectTmux::new();
+        fixture.fake.composer_panics.store(true, Ordering::SeqCst);
+        assert!(switched_on(fixture.channel_id).1.is_none());
+        fixture.rt.block_on(async {
+            fixture.fake.save_fails.store(true, Ordering::SeqCst);
+            let clear = fixture
+                .clear_with(|| fixture.record("new", BindingCause::Clear, true))
+                .await;
+            assert!(clear.is_err(), "the selector failure holds the clear");
+            assert!(matches!(
+                fixture.state().await,
+                NativeClearBoundary::Unresolved { .. }
+            ));
+            fixture.fake.save_fails.store(false, Ordering::SeqCst);
+            fixture.rig.answer("pane.read", capture);
+            let before = pane_reads(&fixture);
+
+            let (admitted, session) = fixture.admits().await;
+
+            if n == 0 {
+                assert!(
+                    admitted,
+                    "empty Herdr composer must admit; admitted={admitted}, pane.read={before}->{}, tmux calls={:?}",
+                    pane_reads(&fixture),
+                    tmux.calls()
+                );
+                assert_eq!(session.as_deref(), Some("new"));
+                assert_eq!(fixture.state().await, NativeClearBoundary::Resolved);
+            } else {
+                assert!(!admitted, "case {n}: unreadable or nonempty stays held");
+                assert_eq!(session.as_deref(), Some("stale"));
+                assert!(matches!(
+                    fixture.state().await,
+                    NativeClearBoundary::Unresolved { .. }
+                ));
+            }
+            assert!(
+                pane_reads(&fixture) > before,
+                "case {n}: production recovery reads Herdr; admitted={admitted}, tmux calls={:?}",
+                tmux.calls()
+            );
+            assert_eq!(fixture.rig.sends(), clear_line(), "one clear line total");
+            assert_eq!(
+                fixture.fake.calls(),
+                [
+                    format!("clear:{}", fixture.session_key),
+                    "save:new".into(),
+                    "save:new".into()
+                ],
+                "only selector save is retried, with no reset"
+            );
+            assert!(tmux.calls().is_empty(), "Herdr never touches tmux: {:?}", tmux.calls());
+            assert!(fixture.alive.load(Ordering::SeqCst), "the process stays");
+        });
+    }
+}
+
+#[test]
+fn held_herdr_recovery_requires_the_ticket_durable_execution_pg() {
+    for (n, mismatch) in ["nonce", "logical", "channel"].into_iter().enumerate() {
+        let fixture = Fixture::new(30 + n as u64);
+        let _off = switch_off_for_tests();
+        let tmux = RejectTmux::new();
+        fixture.fake.composer_panics.store(true, Ordering::SeqCst);
+        fixture.rt.block_on(async {
+            fixture.fake.save_fails.store(true, Ordering::SeqCst);
+            assert!(
+                fixture
+                    .clear_with(|| fixture.record("new", BindingCause::Clear, true))
+                    .await
+                    .is_err()
+            );
+            fixture.fake.save_fails.store(false, Ordering::SeqCst);
+            let mut record = bound(
+                &fixture.logical,
+                &fixture.nonce,
+                &fixture.rig,
+                &fixture.shared.token_hash,
+                fixture.channel_id,
+            );
+            match mismatch {
+                "nonce" => {
+                    record.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+                    record.expected.as_mut().unwrap().binding_nonce =
+                        record.execution_nonce.clone();
+                    record.source_ref.execution_nonce = record.execution_nonce.clone();
+                }
+                "logical" => {
+                    record.owner.logical_key.push_str("-other");
+                    record.source_ref.logical_key = record.owner.logical_key.clone();
+                }
+                "channel" => {
+                    record.owner.channel_id = (fixture.channel_id.get() + 100).to_string();
+                    record.source_ref.channel = record.owner.channel_id.clone();
+                }
+                _ => unreachable!(),
+            }
+            let row_channel = record.owner.channel_id.clone();
+            assert!(
+                matches!(
+                    HostedRecord::decode(Some(&serde_json::to_value(&record).unwrap())),
+                    HostedRecord::Known(_)
+                ),
+                "{mismatch}: a well-formed Bound execution must reach the ticket comparison"
+            );
+            sqlx::query(
+                "UPDATE sessions SET hosted_execution = $1, channel_id = $3 WHERE session_key = $2",
+            )
+            .bind(serde_json::to_value(record).unwrap())
+            .bind(&fixture.session_key)
+            .bind(row_channel)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+            let before = pane_reads(&fixture);
+
+            assert!(
+                !fixture.admits().await.0,
+                "{mismatch}: the ticket owns another execution"
+            );
+
+            assert!(matches!(
+                fixture.state().await,
+                NativeClearBoundary::Unresolved { .. }
+            ));
+            assert_eq!(
+                pane_reads(&fixture),
+                before,
+                "{mismatch}: no mismatched pane read"
+            );
+            assert_eq!(fixture.rig.sends(), clear_line(), "one clear line total");
+            assert_eq!(
+                fixture.fake.calls(),
+                [
+                    format!("clear:{}", fixture.session_key),
+                    "save:new".into(),
+                    "save:new".into()
+                ],
+                "{mismatch}: checked Y save precedes host verification, never reset"
+            );
+            assert!(tmux.calls().is_empty(), "{mismatch}: no tmux calls");
+            assert!(fixture.alive.load(Ordering::SeqCst));
+        });
+    }
 }
 
 // T-C1/T-C2: a Bound execution clears through one gated `/clear` line, its own Pending commits

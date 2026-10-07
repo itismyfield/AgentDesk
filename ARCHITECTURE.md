@@ -763,6 +763,7 @@ src/
 │   │   │   │   ├── native.rs
 │   │   │   │   ├── native_herdr_e2e_tests.rs
 │   │   │   │   ├── native_herdr_tests.rs
+│   │   │   │   ├── native_policy_tests.rs
 │   │   │   │   └── native_tests.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
@@ -1221,6 +1222,8 @@ src/
 │   │   │   │   │   │   ├── mailbox_reaction_tests.rs
 │   │   │   │   │   │   ├── queued_intake_cause.rs
 │   │   │   │   │   │   └── requeue_tests.rs
+│   │   │   │   │   ├── runtime_transition/
+│   │   │   │   │   │   └── native_hold_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
@@ -1229,6 +1232,7 @@ src/
 │   │   │   │   │   ├── host_refusal.rs
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── intake_dispatch.rs
+│   │   │   │   │   ├── native_fresh_prompt_tests.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── runtime_transition.rs

@@ -26691,6 +26691,15 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/services/discord/commands/control/native_herdr_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f1065b1a75fd170c942501b885374b09aa96730e55d4c376a9f7f7fd6459feba"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/commands/control/native_herdr_tests.rs",
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",

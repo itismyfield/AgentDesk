@@ -133,6 +133,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::native::herdr_tests::e2e
   --skip services::discord::commands::control::native::herdr_tests::e2e::o_actor
   --skip services::discord::commands::control::native::tests
+  --skip services::discord::commands::control::native::tests::policy_tests
   --skip services::discord::commands::restart::host_guard_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
@@ -164,6 +165,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::intake_gate::stale_turn::host_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+  --skip services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
+  --skip services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
   --skip services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
@@ -867,6 +870,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::commands::control::native::herdr_tests::e2e
   services::discord::commands::control::native::herdr_tests::e2e::o_actor
   services::discord::commands::control::native::tests
+  services::discord::commands::control::native::tests::policy_tests
   services::discord::commands::restart::host_guard_tests
   services::discord::commands::tui_passthrough::host_guard_tests
   services::discord::health::recovery::live_agent_recovery::host_guard_tests
@@ -898,6 +902,8 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::router::intake_gate::stale_turn::host_tests
   services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+  services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
+  services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
   services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
   services::discord::router::message_handler::provider_dispatch::herdr_tests
   services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
