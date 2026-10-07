@@ -637,3 +637,42 @@ fn generic_same_uuid_with_a_different_open_file_is_not_neutral() {
         "UUID equality cannot replace opened identity"
     );
 }
+
+#[test]
+fn typed_proof_does_not_activate_or_replace_legacy_mtime_selection() {
+    use crate::services::codex_tui::{
+        rollout_index::lock_cache_for_tests, rollout_tail::latest_rollout_for_cwd_since,
+        session::source_observation::CodexSourceMode,
+    };
+    let _cache = lock_cache_for_tests();
+    let fixture = Fixture::new();
+    let older = fixture.source(PARENT);
+    let newer = fixture.source(OTHER);
+    let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+    for (source, seconds) in [(&older, 10), (&newer, 20)] {
+        let record = serde_json::json!({"type": "session_meta", "payload": {
+            "id": source.session_id, "source": "cli", "cwd": fixture.root.path()
+        }});
+        fs::write(&source.path, format!("{record}\n")).unwrap();
+        filetime::set_file_mtime(
+            &source.path,
+            filetime::FileTime::from_system_time(base + std::time::Duration::from_secs(seconds)),
+        )
+        .unwrap();
+    }
+    let proof = fixture.commit(&fixture.claim(&older), Decision::Verified(older.clone()));
+    assert_eq!(proof.verified.unwrap().source, older);
+    assert_eq!(
+        latest_rollout_for_cwd_since(
+            fixture.root.path(),
+            base,
+            fixture.context.provider_root.as_ref().unwrap(),
+        ),
+        Some(newer.path),
+        "a durable typed proof must not change the production selector in P3a"
+    );
+    assert_eq!(
+        CodexSourceMode::Verified.launch_policy(),
+        Err("SourceModeVerifiedNotLanded")
+    );
+}
