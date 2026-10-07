@@ -60,9 +60,8 @@ fn binding(fx: &Fixture) -> Option<crate::services::tui_prompt_dedupe::TuiRuntim
     crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical())
 }
 
-// T2-2: text anywhere in the Bound pane's composer, before or after its cursor, or a composer the
-// reader cannot read, refuses the follow-up before its hold: nothing is written, cleared or held,
-// and the pane stays Bound. An empty composer then takes the prompt.
+// T2-2: composer text on either side of the cursor, or an unread composer, refuses the follow-up
+// with nothing written, cleared or held and the pane Bound; an empty one then takes it.
 #[test]
 fn a_draft_in_the_bound_composer_refuses_the_follow_up_and_is_left_as_it_is_pg() {
     let fx = Fixture::admitted("draft");
