@@ -7,6 +7,9 @@ use tokio::sync::Notify;
 
 use super::host_input;
 
+mod draft_hold;
+use draft_hold::{admit_automatic_write, dismiss_startup_dialog};
+
 pub(crate) fn submit_native_clear(
     target: &host_input::InputTarget,
     gate: &dyn host_input::MutationGate,
@@ -389,18 +392,6 @@ pub fn is_prompt_ready_cancelled_error(error: &str) -> bool {
 pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot {
     let (pane, alive) = host_input::observe_legacy(session_name, PROMPT_READY_CAPTURE_SCROLLBACK);
     prompt_readiness_snapshot_from_capture(pane.as_deref(), alive)
-}
-
-/// A pane held for draft recovery refuses the write before any key, with an error in the
-/// follow-up readiness family that the turn bridge requeues while keeping the session.
-fn admit_automatic_write(session_name: &str, readiness: PromptReadinessKind) -> Result<(), String> {
-    let capture = || host_input::observe_legacy(session_name, PROMPT_READY_CAPTURE_SCROLLBACK).0;
-    super::composer_lock::admit_composer_write(session_name, capture).map_err(|_| {
-        format!(
-            "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness held; reason=draft_recovery_hold; previous_tui_turn_still_running=false; prompt_marker_detected=true",
-            readiness.label()
-        )
-    })
 }
 
 pub(super) fn prompt_readiness_snapshot_from_capture(
@@ -1625,7 +1616,7 @@ fn wait_for_prompt_ready_polling(
                         dialog.label(),
                         dialog_dismiss_attempts,
                     );
-                    run_actions(session_name, &[TuiInputAction::Enter], cancel_token)?;
+                    dismiss_startup_dialog(session_name, readiness, &dialog, cancel_token)?;
                     std::thread::sleep(STARTUP_DIALOG_DISMISS_SETTLE);
                     check_prompt_cancel(cancel_token)?;
                     continue;

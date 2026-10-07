@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
+use super::composer_lock::{ComposerAdmission, DraftSighting};
 use crate::services::tui_input::actor::gate::own_draft;
 use crate::services::tui_input::bounded_tmux::{BoundedTmuxError, run_bounded_tmux};
 use crate::services::tui_o::shadow::ShadowProvider;
@@ -411,11 +412,41 @@ fn judge_before_paste(
     Ok(plan)
 }
 
-/// A pane held for draft recovery is released by this capture: no stash, a readable composer.
-pub(crate) fn draft_recovered(capture: &str) -> bool {
+/// How a protected pane's draft reads in one capture.
+pub(crate) fn draft_sighting(capture: &str) -> DraftSighting {
     let screen = screen::read(capture);
-    screen.stash == screen::Stash::AbsentInRecognizedLayout
-        && screen.composer != screen::Composer::Unknown
+    match (screen.stash, screen.composer) {
+        (screen::Stash::AbsentInRecognizedLayout, screen::Composer::Empty) => {
+            DraftSighting::Settled
+        }
+        (screen::Stash::AbsentInRecognizedLayout, screen::Composer::Text(_)) => {
+            DraftSighting::PersonDraft
+        }
+        _ => DraftSighting::Unsettled,
+    }
+}
+
+/// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.
+pub(crate) const STASH_CHANNELS_ENV: &str = "ADK_BUSY_INJECT_STASH_CHANNELS";
+
+fn stash_allowed(session: &str) -> bool {
+    static CHANNELS: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
+    let raw = || std::env::var(STASH_CHANNELS_ENV).ok();
+    stash_channel_listed(
+        session,
+        CHANNELS.get_or_init(|| stash_channels(raw().as_deref())),
+    )
+}
+
+fn stash_channels(raw: Option<&str>) -> Vec<u64> {
+    let ids = raw.unwrap_or_default().split(',');
+    ids.filter_map(|id| id.trim().parse().ok()).collect()
+}
+
+/// A pane whose channel is unknown or unlisted never takes the stash path.
+fn stash_channel_listed(session: &str, channels: &[u64]) -> bool {
+    let channel = crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(session);
+    channel.is_some_and(|channel| channels.contains(&channel))
 }
 
 /// Tries the composer lock a bounded number of times, then injects under it.
@@ -425,6 +456,11 @@ pub(crate) fn inject(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Out
 
 /// `inject` with the draft axis kept apart from the delivery.
 pub(crate) fn inject_report(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Report {
+    inject_gated(pane, request, timing, stash_allowed(request.session))
+}
+
+/// `inject_report` with the stash path allowed or not.
+fn inject_gated(pane: &Pane, request: &Request<'_>, timing: &Timing, stash: bool) -> Report {
     let text = frame(request.source, request.author, request.nonce, request.text);
     // Both names reach tmux command strings, so only plain characters are accepted.
     let plain = |value: &str, extra: &[char]| {
@@ -449,7 +485,7 @@ pub(crate) fn inject_report(pane: &Pane, request: &Request<'_>, timing: &Timing)
         std::thread::sleep,
         || {
             super::composer_lock::try_with_composer_mutation_lock(request.session, || {
-                inject_locked(pane, request, &text, timing)
+                inject_locked(pane, request, &text, timing, stash)
             })
         },
     );
@@ -478,7 +514,13 @@ fn unix_seconds() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
-fn inject_locked(pane: &Pane, request: &Request<'_>, text: &str, timing: &Timing) -> Report {
+fn inject_locked(
+    pane: &Pane,
+    request: &Request<'_>,
+    text: &str,
+    timing: &Timing,
+    stash: bool,
+) -> Report {
     // The composer lock fences other AgentDesk writers only; a person reaches the pane by attaching.
     // The second is read first, so an attach after the state read lands in a later second.
     let floor = unix_seconds();
@@ -503,13 +545,22 @@ fn inject_locked(pane: &Pane, request: &Request<'_>, text: &str, timing: &Timing
         return Report::not_sent(Veto::PaneUnavailable);
     };
     let capture = || Some(before.clone());
-    if super::composer_lock::admit_composer_write(request.session, capture).is_err() {
+    let admission = super::composer_lock::composer_admission(request.session, capture);
+    if admission == ComposerAdmission::Held {
         return Report::not_sent(Veto::Draft);
     }
     let plan = match judge_before_paste(&before, request.transcript, text, state.size) {
         Ok(plan) => plan,
         Err(veto) => return Report::not_sent(veto),
     };
+    // A person's draft moves only through a stash on an allowlisted channel.
+    let permitted = match plan {
+        Plan::Direct => admission == ComposerAdmission::Any,
+        Plan::Stash(_) => stash,
+    };
+    if !permitted {
+        return Report::not_sent(Veto::Draft);
+    }
     let Ok(offset) = std::fs::metadata(request.transcript).map(|meta| meta.len()) else {
         return Report::not_sent(Veto::TranscriptUnavailable);
     };

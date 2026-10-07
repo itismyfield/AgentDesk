@@ -3,6 +3,7 @@
 
 use std::time::Instant;
 
+use super::super::composer_lock::DraftGuard;
 use super::screen::{self, Composer, Stash};
 use super::{Attempt, Delivery, DraftState, Guard, Outcome, Report, Unconfirmed, Veto, modal};
 
@@ -10,12 +11,15 @@ use super::{Attempt, Delivery, DraftState, Guard, Outcome, Report, Unconfirmed, 
 pub(super) fn run(attempt: &Attempt<'_>, draft: &[String]) -> Report {
     let mut last = None;
     let report = transact(attempt, draft, &mut last);
-    if !matches!(
-        report.draft,
-        DraftState::Unchanged | DraftState::RestoredObserved
-    ) {
-        super::super::composer_lock::hold_for_draft_recovery(attempt.request.session);
-        alert(attempt, &report, last.as_deref());
+    let guard = |state| super::super::composer_lock::guard_draft(attempt.request.session, state);
+    match report.draft {
+        DraftState::Unchanged => {}
+        // Handed back is not yet sent or cleared by the person: automatic writes stay off it.
+        DraftState::RestoredObserved => guard(DraftGuard::DraftRestored),
+        DraftState::StashedVerified | DraftState::Unknown => {
+            guard(DraftGuard::RecoveryRequired);
+            alert(attempt, &report, last.as_deref());
+        }
     }
     report
 }

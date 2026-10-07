@@ -570,6 +570,8 @@ src/
 │   │   └── spawn_queue.rs
 │   ├── claude_tui/
 │   │   ├── busy_inject/
+│   │   │   ├── stash_tests/
+│   │   │   │   └── hold_tests.rs
 │   │   │   ├── screen.rs
 │   │   │   ├── stash.rs
 │   │   │   └── stash_tests.rs
@@ -596,6 +598,8 @@ src/
 │   │   │   ├── host_draft_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   └── warm_followup.rs
+│   │   ├── input/
+│   │   │   └── draft_hold.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
 │   │   ├── busy_inject.rs

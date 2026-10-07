@@ -6,6 +6,8 @@ use std::time::Duration;
 use super::screen::{self, Composer, Stash};
 use super::*;
 
+mod hold_tests;
+
 const NONCE: &str = "abcd1234";
 const TEXT: &str = "are you there?";
 
@@ -36,7 +38,9 @@ cs() {
 }
 enter() {
   [ -s "$d/composer" ] || return 0
-  cat "$d/accept" >> '@T@'
+  # The acceptance record carries what the composer held at Enter.
+  awk 'BEGIN { printf "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"content\":\"" }
+    { gsub(/"/, "\\\""); printf "%s%s", (NR > 1 ? "\\n" : ""), $0 } END { print "\"}" }' "$d/composer" >> '@T@'
   : > "$d/composer"
   [ -f "$d/stash" ] || return 0
   if [ -f "$d/restore_after" ]; then cp "$d/restore_after" "$d/restore_in"; else mv "$d/stash" "$d/composer"; fi
@@ -44,6 +48,12 @@ enter() {
 paste() {
   if [ -f "$d/fold" ]; then printf '[Pasted text #1 +%s lines]' "$(wc -l < "$d/buffer" | tr -d ' ')" >> "$d/composer"
   else cat "$d/buffer" >> "$d/composer"; fi
+}
+apply() {
+  echo "$1" >> "$d/applied"
+  case "$1" in C-s) cs ;; Enter) enter ;; paste) paste ;; esac
+  # The key took effect but the reply never came back.
+  [ ! -f "$d/lost.$1" ] || exit 1
 }
 attach() { echo 1 > "$d/attached"; echo "$1" > "$d/last"; }
 detach() { echo 0 > "$d/attached"; }
@@ -84,11 +94,9 @@ if-shell)
   esac
   [ "$ok" = 1 ] || { echo "agentdesk-busy-inject-vetoed $a $l"; exit 0; }
   set -- $7; eval "key=\${$#}"; [ "$1" = paste-buffer ] && key=paste
-  echo "$key" >> "$d/applied"
-  case "$key" in C-s) cs ;; Enter) enter ;; paste) paste ;; esac
-  # The key took effect but the reply never came back.
-  [ -f "$d/lost.$key" ] && exit 1
-  ;;
+  apply "$key" ;;
+paste-buffer) apply paste ;;
+send-keys) for last do :; done; apply "$last" ;;
 esac
 exit 0
 "#;
@@ -115,7 +123,6 @@ impl Tui {
         fs::write(&program, script).unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
         let tui = Self { dir, transcript };
-        let accept = serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": frame("iMessage", "ann", NONCE, TEXT)});
         for (name, value) in [
             ("attached", "0".to_string()),
             ("last", "100".to_string()),
@@ -133,7 +140,6 @@ impl Tui {
             ),
             ("stashrow", format!("{:>58}\n", "› stashed")),
             ("composer", draft.to_string()),
-            ("accept", format!("{accept}\n")),
         ] {
             tui.put(name, &value);
         }
@@ -173,7 +179,7 @@ impl Tui {
             nonce: NONCE,
             text,
         };
-        inject_report(&pane, &request, timing)
+        inject_gated(&pane, &request, timing, true)
     }
 
     fn run(&self) -> Report {
@@ -199,6 +205,16 @@ impl Tui {
 
     fn taken(&self) -> bool {
         transcript_carries(&self.transcript, 0, NONCE)
+    }
+
+    /// Every submission the fake recorded, as the composer held it at Enter.
+    fn records(&self) -> Vec<String> {
+        let transcript = fs::read_to_string(&self.transcript).unwrap();
+        let records = transcript.lines().skip(2).map(|line| {
+            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+            record["content"].as_str().unwrap().to_string()
+        });
+        records.collect()
     }
 
     fn alerts(&self) -> Vec<serde_json::Value> {
@@ -393,124 +409,6 @@ fn a_second_input_waits_out_the_whole_stash_transaction() {
         report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged)
     );
     assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
-}
-
-/// The hold covers every automatic writer: the follow-up submit and a native `/clear` send no key
-/// until a capture shows the stash gone and the composer readable.
-#[test]
-fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
-    use crate::services::claude_tui::composer_lock::{DraftRecoveryHold, admit_composer_write};
-    use crate::services::claude_tui::host_input::{
-        LegacyTmuxGate, NativeClearSubmission, SpyGuard, SpyState, native_clear_composer_empty,
-        native_clear_once,
-    };
-    use crate::services::claude_tui::input::{
-        is_prompt_ready_timeout_error, send_followup_prompt_or_idle_transcript as follow_up,
-        with_composer_cleanup_lock,
-    };
-    const BUSY: &str = "\u{2733} Architecting\u{2026}";
-    let tui = Tui::new("human draft A");
-    tui.put("restore_after", "never");
-    let got = tui.run();
-    assert_eq!(
-        (got, got.delivery()),
-        (
-            report(Outcome::Injected, DraftState::Unknown),
-            Delivery::Observed
-        )
-    );
-    // The turn ends; the draft stays stashed under an empty composer that /clear would accept.
-    tui.put("head", "\u{23fa} Done.\n\n");
-    let held = tui.capture();
-    assert!(native_clear_composer_empty(&held));
-    let (session, idle) = (tui.session(), tui.dir.path().join("idle.jsonl"));
-    fs::write(
-        &idle,
-        r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
-    )
-    .unwrap();
-    let spy = |pane: &str| {
-        let captures = [pane, pane, pane, BUSY].map(|c| Some(c.to_string()));
-        SpyGuard::install(SpyState {
-            captures: captures.into(),
-            ..SpyState::default()
-        })
-    };
-    let keys = |calls: Vec<String>| -> Vec<String> {
-        let key = |c: &String| {
-            ["keys:", "literal:", "load:", "paste:"]
-                .iter()
-                .any(|k| c.starts_with(k))
-        };
-        calls.into_iter().filter(key).collect()
-    };
-    let deadline = || tokio::time::Instant::now() + Duration::from_secs(20);
-
-    let guard = spy(&held);
-    let error = follow_up(&session, "follow-up", None, &idle).unwrap_err();
-    let requeued = is_prompt_ready_timeout_error(&error)
-        && error.contains("follow-up prompt input readiness")
-        && error.contains("prompt_marker_detected=true");
-    assert!(requeued, "{error}");
-    let cleanup = with_composer_cleanup_lock(&session, || -> bool { panic!("held pane cleaned") });
-    assert_eq!(cleanup, None);
-    assert_eq!(keys(guard.calls()), Vec::<String>::new());
-    drop(guard);
-    let refuse = |_: &[&str], _: Duration| -> bool { panic!("a held pane took /clear") };
-    let clear = native_clear_once(
-        &session,
-        &LegacyTmuxGate,
-        deadline(),
-        |_| Some(held.clone()),
-        refuse,
-    );
-    assert_eq!(clear, NativeClearSubmission::NotSent);
-
-    // No stash, but an attachment chip or a footer this reader has not measured: still held.
-    fs::remove_file(tui.dir.path().join("stash")).unwrap();
-    let footer = "  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)\n";
-    let unreadable = [
-        ("[Image #1]", footer),
-        ("look at [Image #2]", footer),
-        ("[...Truncated text #1 +40 lines...]", footer),
-        ("human draft A", "  ? for shortcuts\n"),
-        (
-            "human draft A",
-            "  \u{23f5}\u{23f5} bypass permissions on (shift+tab \n",
-        ),
-    ];
-    for (composer, row) in unreadable {
-        tui.put("composer", composer);
-        tui.put("footer", row);
-        let admitted = admit_composer_write(&session, || Some(tui.capture()));
-        assert_eq!(admitted, Err(DraftRecoveryHold), "{composer:?} {row:?}");
-    }
-
-    // The person took the draft back and sent it: that capture releases the hold.
-    tui.put("composer", "");
-    tui.put("footer", footer);
-    let recovered = tui.capture();
-    let guard = spy(&recovered);
-    assert_eq!(follow_up(&session, "follow-up", None, &idle), Ok(()));
-    assert!(keys(guard.calls()).contains(&"keys:Enter".to_string()));
-    drop(guard);
-    let mut sent = 0;
-    let clear = native_clear_once(
-        &session,
-        &LegacyTmuxGate,
-        deadline(),
-        |_| Some(recovered.clone()),
-        |_, _| {
-            sent += 1;
-            true
-        },
-    );
-    assert_eq!((clear, sent), (NativeClearSubmission::Confirmed, 1));
-    for prompt in ["follow-up", "/clear"] {
-        crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-            "claude", &session, prompt,
-        );
-    }
 }
 
 /// Only a frame Claude shows unfolded and unwrapped may displace a draft.

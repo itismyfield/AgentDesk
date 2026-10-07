@@ -90,6 +90,10 @@ pub(crate) trait SendBackend: Send + Sync {
         delete: bool,
     ) -> Result<(), String>;
     fn send_enter(&self, session_name: &str) -> Result<(), String>;
+    /// The pane for the draft-protection check; a backend that cannot read it keeps it protected.
+    fn capture(&self, _session_name: &str) -> Option<String> {
+        None
+    }
 }
 
 struct TmuxSendBackend;
@@ -120,6 +124,10 @@ impl SendBackend for TmuxSendBackend {
             transport.send_keys(session_name, &[HostKey::Enter])
         })
         .map(|_| ())
+    }
+
+    fn capture(&self, session_name: &str) -> Option<String> {
+        host_input::observe_legacy(session_name, -80).0
     }
 }
 
@@ -270,6 +278,13 @@ fn handle_send_with_backend(
     let mutation = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
         &session_name,
         || -> Result<(bool, Option<DateTime<Utc>>), (StatusCode, Json<Value>)> {
+            let protected = crate::services::claude_tui::composer_lock::admit_composer_write(
+                &session_name,
+                || backend.capture(&session_name),
+            );
+            if protected.is_err() {
+                return Err(draft_recovery_hold_json());
+            }
             if !req.text.is_empty() {
                 let buffer_name = allocate_buffer_name();
                 backend
@@ -589,6 +604,14 @@ fn ok_error_json(message: &str) -> (StatusCode, Json<Value>) {
 
 fn bad_request_json(message: &str) -> (StatusCode, Json<Value>) {
     (StatusCode::BAD_REQUEST, Json(error_json(message)))
+}
+
+/// Nothing was sent: the pane protects a person's draft, so the caller keeps the input.
+fn draft_recovery_hold_json() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(error_json("draft_recovery_hold")),
+    )
 }
 
 /// Test-only `SendBackend` exposed to the crate so the server-layer
