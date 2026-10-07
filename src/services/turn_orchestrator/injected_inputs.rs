@@ -40,7 +40,7 @@ pub(crate) enum InjectionSettlement {
     /// The pane took the input or may have; nothing is queued.
     Delivered,
     /// Nothing reached the pane: the input takes the queue front, the place it reserved.
-    HandBack(Intervention),
+    HandBack(Box<Intervention>),
 }
 
 pub(crate) enum SettleOutcome {
@@ -137,7 +137,7 @@ pub(super) fn settle(
     let pending = state.pending_user_dispatch;
     let active = state.active_user_message_id;
     let queue = &mut state.intervention_queue;
-    let front = requeue_intervention_front(queue, intervention, pending, active, None);
+    let front = requeue_intervention_front(queue, *intervention, pending, active, None);
     if !front.enqueued {
         state.intervention_queue = previous_queue;
         let error = format!("front handback refused: {:?}", front.refusal_reason);
@@ -228,7 +228,7 @@ impl ChannelMailboxHandle {
     ) -> Result<Vec<QueueExitEvent>, &'static str> {
         for delay in HANDBACK_DELAYS {
             tokio::time::sleep(delay).await;
-            let settlement = InjectionSettlement::HandBack(intervention.clone());
+            let settlement = InjectionSettlement::HandBack(Box::new(intervention.clone()));
             let permit = input_permit.clone();
             match self
                 .settle_injected_input(ticket, settlement, persistence.clone(), permit)

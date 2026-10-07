@@ -67,7 +67,7 @@ async fn hand_back(
     ticket: InjectionTicket,
     id: u64,
 ) -> SettleOutcome {
-    let settlement = InjectionSettlement::HandBack(item(id));
+    let settlement = InjectionSettlement::HandBack(Box::new(item(id)));
     handle
         .settle_injected_input(ticket, settlement, context(), None)
         .await
@@ -339,7 +339,7 @@ async fn a_handback_lands_under_its_owner_permit_while_the_gate_closes() {
     };
     fail_queue_saves(channel, 1);
     let settle = |ticket| {
-        let settlement = InjectionSettlement::HandBack(item(2));
+        let settlement = InjectionSettlement::HandBack(Box::new(item(2)));
         handle.settle_injected_input(ticket, settlement, context(), Some(permit.clone()))
     };
     let SettleOutcome::NotCommitted { ticket, .. } = settle(ticket).await else {
