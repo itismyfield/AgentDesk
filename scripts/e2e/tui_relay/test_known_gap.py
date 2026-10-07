@@ -154,9 +154,9 @@ class E22KnownGapContract(unittest.TestCase):
                 self.assertEqual(trace["refetches"], attempt)
                 self.assertEqual(trace["outcome"], "KNOWN_GAP")
                 self.assertEqual([d["classification"] for d in trace["decisions"]], ["PENDING"] * attempt + ["KNOWN_GAP"])
-                self.assertEqual(len(requests), 5 + attempt)
+                self.assertEqual(len(requests), 6 + attempt)
                 self.assertEqual(sleeps, [1.0] * attempt)
-                self.assertEqual([round(t - (BASE + 4.1), 2) for t in requests[5:]], list(range(1, attempt + 1)))
+                self.assertEqual([round(t - (BASE + 4.1), 2) for t in requests[5:-1]], list(range(1, attempt + 1)))
                 result = {"assertions": []}
                 driver._merge_record_into_result(result, record)
                 self.assertEqual(result["known_gap_rechecks"], record["known_gap_rechecks"])
@@ -203,7 +203,7 @@ class E22KnownGapContract(unittest.TestCase):
             with self.subTest(attempt=attempt):
                 record, error, requests, _ = self._pending_pipeline(resolve_on=attempt)
                 self.assertIsNone(error, str(error))
-                self.assertEqual(len(requests), 5 + attempt)
+                self.assertEqual(len(requests), 6 + attempt)
                 self.assertEqual(record.get("revalidated_after_recheck"),
                                  [{"assertions": prefix, "passed": True}] * attempt)
                 result = {"assertions": []}
@@ -389,7 +389,7 @@ class E22KnownGapContract(unittest.TestCase):
              patch.object(assertions.Window, "mark_prompt_sent", mark):
             record = driver.run_one_cell(scenario=scenario, cell="claude-tui", channel_id=gap.CHANNEL_ID,
                 client=client, run_id=RUN, dry_run=False, args=Namespace(queue_runtime_root="/offline-denied"))
-        self.assertEqual(len(requests), 5)  # setup echo + two existing wait polls + two final refetches
+        self.assertEqual(len(requests), 6)  # setup echo + two existing wait polls + two final refetches + post-idle
         self.assertTrue(all("after=99" in url for url in requests))
         self.assertEqual(record["known_gaps"][0]["message_ids"], ["101", "103"])
         self.assertEqual(record["message_updates"], 1)

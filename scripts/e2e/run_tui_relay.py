@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import copy
 import datetime as dt
 import errno
 import http.client
@@ -42,7 +43,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -50,7 +51,7 @@ import yaml  # type: ignore[import-untyped]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tui_relay import assertions, discord, durable_delivery, fixtures, herdr, known_gap, lease, normal_intake_evidence, tmux  # noqa: E402
+from tui_relay import assertions, discord, durable_delivery, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -136,6 +137,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "known_gap_rechecks",
     "completion_rechecks",
     "revalidated_after_recheck",
+    "revalidated_after_idle",
     "relay_count",
     "raw_count",
     "message_updates",
@@ -172,6 +174,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "real_provider_contacted",
     "controlled_harness_evidence",
     "failure_attribution",
+    "autonomous_background_turn",
     "durable_record_probe",
     "dirty_active_residue",
 )
@@ -183,6 +186,16 @@ class PhaseDeadlineExpired(BaseException):
 
 class HarnessEvidenceError(assertions.AssertionError):
     """Required evidence could not be read; not a product root-cause verdict."""
+
+
+@dataclass(frozen=True)
+class ObservationContext:
+    """Bind native evidence to the API/channel actually exercised by the cell."""
+
+    api_base: str
+    channel_id: str
+    provider: str
+    transcript_root: Path | None = None
 
 
 def _arm_phase_deadline(seconds: float):
@@ -262,6 +275,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Comma-separated scenario ids (exact match, e.g. E-1,E-5).",
     )
+    parser.add_argument("--transcript-root", type=Path, help="Local provider transcript root for native evidence.")
     parser.add_argument("--output", default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -899,6 +913,9 @@ def _update_record_window_snapshot(
     record: dict[str, Any],
     window: assertions.Window,
 ) -> None:
+    window = replace(window,
+        messages=[m for m in window.messages if str(m.get("id")) not in window.deleted_ids],
+        raw_messages=[m for m in window.raw_messages if str(m.get("id")) not in window.deleted_ids])
     record["relay_count"] = len(window.messages)
     record["raw_count"] = len(window.raw_messages)
     record["message_updates"] = len(window.message_updates)
@@ -987,7 +1004,7 @@ STEP_OPTIONS = {
     "cancel_turn": {"force", "timeout_s"}, "delete_status_panel": {"panel_regex"},
     "inject_discord_failure": {"operation", "count"}, "clear_discord_failure": {"operation"},
     "send_keys_sequence": {"keys", "key_interval_s", "interval_s", "mark_prompt_sent", "diagnostic_prompt", "sleep_s"},
-    "assert_health": {"timeout_s", "poll_interval_s", "global_active_max", "global_finalizing_max", "forbid_degraded_reasons"},
+    "assert_health": {"timeout_s", "poll_interval_s", "global_active_max", "global_finalizing_max", "forbid_degraded_reasons", "require_status", "allowed_degraded_reasons"},
 }
 ASSERTION_OPTIONS = {
     **{k: None for k in ("text_present", "raw_text_present", "no_duplicate_marker", "ordered_text_present",
@@ -1010,6 +1027,7 @@ ASSERTION_OPTIONS = {
     "fixture_state": {"followup_probe_accepted"},
     "no_duplicate_marker_with_known_gap": {"marker", "known_gap"},
     "deliver_result": {"delivery", "inject_veto"}, "completion_per_turn": {"exact", "marker"},
+    "autonomous_background_turn": {"armed_marker", "auto_marker"},
 }
 
 
@@ -3554,6 +3572,12 @@ def run_one_cell(
             dry_run=dry_run,
         )
 
+    observation_context = None
+    if any("autonomous_background_turn" in spec for spec in scenario.get("assertions") or []):
+        observation_context = ObservationContext(
+            api_base=client.base_url, channel_id=channel_id, provider=cell_provider(cell),
+            transcript_root=getattr(args, "transcript_root", None),
+        )
     setup_marker = f"### E2E SETUP {scenario_id} cell={cell} run={run_id}"
     marker_targets = [
         str(marker).replace("{run_id}", run_id)
@@ -3637,31 +3661,61 @@ def run_one_cell(
             window.add(message)
 
     def _ingest_snapshot() -> list[dict[str, Any]]:
-        rows = client.fetch_messages(channel_id, after_id=after_id, limit=100)
-        _ingest_observed(rows)
-        window.reconcile_snapshot(rows, after_id=after_id)
-        return rows
+        rows, cursor = [], after_id
+        for _ in range(100):
+            page = client.fetch_messages(channel_id, after_id=cursor, limit=100)
+            try:
+                ids = [assertions._numeric_id(row) for row in page]
+            except ValueError as exc:
+                raise HarnessEvidenceError("Discord snapshot contains an invalid numeric ID") from exc
+            if any(mid is None or mid <= int(cursor) for mid in ids):
+                raise HarnessEvidenceError("Discord snapshot pagination did not advance")
+            _ingest_observed(page)
+            rows.extend(page)
+            captures = getattr(client, "captures", None)
+            page_size = len(page)
+            if isinstance(captures, list) and captures:
+                page_size = len(captures[-1]["pages"][0]["messages"])
+                if page_size >= 100:
+                    raise HarnessEvidenceError("Discord captured snapshot incomplete: fixed capture cursor cannot paginate")
+            if page_size < 100:
+                window.reconcile_snapshot(rows, after_id=after_id, complete=True)
+                return rows
+            cursor = str(max(ids))
+        raise HarnessEvidenceError("Discord snapshot incomplete after 100 pages")
 
-    def _pending_refetch() -> None:
-        _ingest_snapshot()
+    def _pending_refetch(*, post_idle: bool = False) -> list[dict[str, Any]]:
+        rows = _ingest_snapshot()
         _update_record_window_snapshot(record, window)
+        _record_marker_counts(record, window, marker_targets)
         revalidation = {"assertions": [], "passed": False}
-        record.setdefault("revalidated_after_recheck", []).append(revalidation)
+        trace_key = "revalidated_after_idle" if post_idle else "revalidated_after_recheck"
+        record.setdefault(trace_key, []).append(revalidation)
+        final_view = replace(window,
+            raw_messages=[m for m in window.raw_messages if str(m.get("id")) not in window.deleted_ids],
+            messages=[m for m in window.messages if str(m.get("id")) not in window.deleted_ids]) if post_idle else window
         for previous in record["assertions"]:
             spec = previous["spec"]
+            if post_idle and any(key in spec for key in (
+                "autonomous_background_turn", "deliver_result", "provider_hold_marker_seen",
+            )):
+                continue
             try:
+                # Rechecking a surface must not append another known-gap acceptance.
                 run_assertion(
                     spec,
-                    window=window,
-                    record=record,
+                    window=final_view,
+                    record=copy.deepcopy(record) if post_idle else record,
                     enabled_features=enabled_features,
                     run_id=run_id,
+                    observation_context=observation_context,
                 )
             except assertions.AssertionError:
                 revalidation["failed_assertion"] = next(iter(spec))
                 raise
             revalidation["assertions"].append(spec)
         revalidation["passed"] = True
+        return rows
 
     record["id"] = scenario_id
     first_send_done = False
@@ -4227,6 +4281,7 @@ def run_one_cell(
                 enabled_features=enabled_features,
                 run_id=run_id,
                 pending_refetch=_pending_refetch,
+                observation_context=observation_context,
             )
             record["assertions"].append({"spec": assertion_spec, "passed": True})
 
@@ -4237,6 +4292,7 @@ def run_one_cell(
             runtime_root=Path(args.queue_runtime_root),
         )
         record["post_scenario_idle"] = idle_check
+        settled_rows = _pending_refetch(post_idle=True)
         if e36 is not None:
             try:
                 settled = normal_intake_evidence.drained(e36.watcher())
@@ -4248,8 +4304,6 @@ def run_one_cell(
                 # The idle wait is part of the observed run, not a blind acceptance gap.
                 for request in record["discord_prompt_records"]:
                     e36.join(request)
-                settled_rows = client.fetch_messages(channel_id, after_id=after_id, limit=100)
-                _ingest_observed(settled_rows)
                 normal_intake_evidence.final_assertion(window, record, settled_rows)
             except (OSError, ValueError, KeyError, TypeError) as error:
                 raise HarnessEvidenceError(f"E36 post-idle evidence unavailable: {error}") from error
@@ -4616,6 +4670,7 @@ def run_assertion(
     enabled_features: frozenset[str] = frozenset(),
     run_id: str | None = None,
     pending_refetch: Callable[[], None] | None = None,
+    observation_context: ObservationContext | None = None,
 ) -> None:
     def expand_marker(value: str) -> str:
         return value.replace("{run_id}", run_id) if run_id is not None else value
@@ -4664,6 +4719,27 @@ def run_assertion(
         params = spec["completion_per_turn"]
         marker = params.get("marker")
         assertions.completion_per_turn(window, exact=params.get("exact", 1), marker=expand_marker(marker) if marker is not None else None)
+    elif "autonomous_background_turn" in spec:
+        params = spec["autonomous_background_turn"]
+        if (not isinstance(params, dict) or set(params) != {"armed_marker", "auto_marker"}
+                or any(not isinstance(value, str) or not value.strip() for value in params.values())):
+            raise assertions.AssertionError("autonomous_background_turn requires armed_marker/auto_marker text")
+        if observation_context is None or record is None:
+            raise HarnessEvidenceError("autonomous_background_turn requires observation context and result record")
+        try:
+            binding = source_compare.resolve_binding(
+                observation_context.api_base, channel_id=observation_context.channel_id,
+                transcript_root=observation_context.transcript_root,
+            )
+            if binding["provider"] != observation_context.provider or binding["provider"] != "claude":
+                raise ValueError("autonomous background evidence requires the exercised Claude binding")
+            evidence = source_compare.autonomous_background_turn(
+                Path(binding["transcript_path"]), armed_marker=expand_marker(params["armed_marker"]),
+                auto_marker=expand_marker(params["auto_marker"]),
+            )
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise HarnessEvidenceError(f"autonomous background native evidence failed: {error}") from error
+        record["autonomous_background_turn"] = {"binding": binding, **evidence}
     elif spec.get("no_duplicate_content"):
         assertions.no_duplicate_content(window)
     elif "text_present" in spec:

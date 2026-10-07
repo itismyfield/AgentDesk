@@ -16,7 +16,7 @@ use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_
 mod home_fence;
 #[allow(dead_code)]
 pub(in crate::services::discord) mod input_clear;
-mod native;
+pub(in crate::services::discord) mod native;
 pub(in crate::services::discord) use native::native_clear_admits;
 
 use super::config::{

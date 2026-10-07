@@ -6,17 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Struct literals whose `source` field becomes `message_outbox.source`.
-const CARRIERS: &[&str] = &["OutboxMessage", "CatchUpTooOldOutboxRequest"];
+const CARRIERS: &[&str] = &["OutboxMessage"];
 
 /// Producers whose source is chosen elsewhere; each origin is checked where it is written.
 const FORWARDED: &[(&str, &str)] = &[
     // JS policy labels (`agentdesk.message.queue`), validated when the policy enqueues.
     ("engine/ops/message_ops.rs", "&source"),
-    // Copies a `CatchUpTooOldOutboxRequest` literal, which this scan checks as a carrier.
-    (
-        "services/discord/catch_up/too_old_notice.rs",
-        "request.source",
-    ),
 ];
 
 #[test]

@@ -1,0 +1,75 @@
+id: E-53
+title: S4 Claude TUI background completion starts one autonomous relay turn
+agent_mode: real_live
+coverage_class: live
+cells: [claude-tui]
+isolation: required
+acceptance_criteria:
+  - Launch one background command and finish the initiating Discord turn.
+  - Relay AUTO exactly once when the background completion notification arrives.
+  - Drain the target channel after the autonomous response.
+notes: |
+  This is the live S4 probe. Reproduction depends on Claude honoring
+  run_in_background and handling its task-notification after the first turn.
+  The existing known_gap profile is bound to E-22 cumulative republication;
+  it cannot classify S4. A missing or duplicate AUTO therefore fails this probe.
+  Row/lease absence during the autonomous turn requires separate observation.
+  Native autonomous_background_turn evidence must prove one background Bash,
+  terminal ARMED, its identified completion notice, and terminal AUTO in a
+  separate parent-linked turn. Missing native evidence fails closed.
+  Health allows only the exact 2026-10-07 bulk inventory baseline reasons;
+  new degraded reasons and loss of target ownership still fail. HTTP health
+  responses must remain 2xx because assert_health rejects HTTP 503.
+report_marker_counts:
+  - "[E2E:S4:{run_id}:ARMED]"
+  - "[E2E:S4:{run_id}:AUTO]"
+steps:
+  - send_discord_prompt: |
+      E2E S4 autonomous background completion probe.
+      Call Bash exactly once with run_in_background=true and this command:
+      python3 -c "import time; time.sleep(30); print('S4_BACKGROUND_DONE')"
+      Do not poll or wait for that command and do not call TaskOutput.
+      Immediately finish this initiating turn with exactly [E2E:S4:{run_id}:ARMED].
+      Only when its background task completion notification arrives, begin a
+      new response and output exactly [E2E:S4:{run_id}:AUTO].
+      Do not print AUTO in the initiating turn and do not create recurring jobs.
+  - wait_for_discord_text: "[E2E:S4:{run_id}:ARMED]"
+    timeout_s: 120
+  - wait_for_discord_text: "[E2E:S4:{run_id}:AUTO]"
+    timeout_s: 240
+  - wait_idle_s: 5
+  - assert_health:
+      require_status: [healthy, degraded]
+      allowed_degraded_reasons:
+        - "tui_o:released:1474933804887179286"
+        - "tui_o:released:1475086789696946196"
+        - "tui_o:released:1478248459445469264"
+        - "tui_o:released:1478652416533463101"
+        - "tui_o:released:1478652616295583805"
+        - "tui_o:released:1478652735300829185"
+        - "tui_o:released:1478653028000338114"
+        - "tui_o:released:1478653071214252103"
+        - "tui_o:released:1480531508820185241"
+        - "tui_o:released:1481478222439907560"
+        - "tui_o:released:1490141479707086938"
+        - "tui_o:released:1500628371829428350"
+        - "tui_o:released:1509350778043895902"
+        - "tui_o:released:1527859708180828350"
+        - "tui_o:released:1536866287983132752"
+        - "tui_o:released:1536887557290197062"
+        - "tui_o:too_many_readers:1509350490461180105"
+        - "relay_verdict_unknown_codex_1509350778043895902"
+      timeout_s: 45
+      poll_interval_s: 2
+      global_active_max: 0
+      global_finalizing_max: 0
+assertions:
+  - autonomous_background_turn:
+      armed_marker: "[E2E:S4:{run_id}:ARMED]"
+      auto_marker: "[E2E:S4:{run_id}:AUTO]"
+  - text_present: "[E2E:S4:{run_id}:ARMED]"
+  - text_present: "[E2E:S4:{run_id}:AUTO]"
+  - no_duplicate_marker: "[E2E:S4:{run_id}:ARMED]"
+  - no_duplicate_marker: "[E2E:S4:{run_id}:AUTO]"
+  - no_duplicate_content: true
+  - no_resume_prompt_chrome: true

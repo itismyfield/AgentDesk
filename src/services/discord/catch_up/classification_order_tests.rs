@@ -16,11 +16,10 @@ use super::api::{CatchUpFetchCursor, CatchUpFetchRequest};
 use super::settled_frontier::SettledFrontier;
 use super::{
     CATCH_UP_RETRY_DEFERRED_REARM_LIMIT, CatchUpClassification, CatchUpClassificationDecision,
-    CatchUpDeps, CatchUpDiscordApi, CatchUpMessageView, CatchUpTooOldOutboxRequest, ChannelId,
-    MessageId, ProviderKind, RuntimeChannelBindingStatus, catch_up_intervention_text,
-    catch_up_source_generation, catch_up_too_old_drop, catch_up_too_old_notice,
+    CatchUpDeps, CatchUpDiscordApi, CatchUpMessageView, ChannelId, MessageId, ProviderKind,
+    RuntimeChannelBindingStatus, catch_up_intervention_text, catch_up_source_generation,
     classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
-    run_catch_up_sweep,
+    run_catch_up_sweep, too_old_is_actionable,
 };
 use crate::services::discord::health::UtilityBotUserIdResolution;
 use crate::services::turn_orchestrator::{
@@ -152,7 +151,7 @@ fn unavailable_utility_id_defers_only_when_sender_semantics_can_change() {
             UtilityBotUserIdResolution::Unconfigured,
         ),
         CatchUpClassificationDecision::UtilityIdentityUnavailable,
-        "same TooOld enum still defers when announce identity changes the user-facing resend surface"
+        "same TooOld enum still defers when announce identity changes the human warning count"
     );
 
     let legacy_card = view(
@@ -266,17 +265,15 @@ fn notify_identity_is_terminal_before_age_even_when_discord_bot_flag_is_false() 
             "{label} notify output must never become a recoverable turn or TooOld evidence"
         );
         assert!(
-            catch_up_too_old_drop(
+            !too_old_is_actionable(
                 outcome,
                 message.author_id,
                 message.author_is_bot,
                 &[NOTIFY_BOT_ID],
                 Some(NOTIFY_BOT_ID),
                 Some(NOTIFY_BOT_ID),
-                &message.trimmed_text,
-            )
-            .is_none(),
-            "{label} notify output must not enter the DLQ/notice side-effect gate"
+            ),
+            "{label} notify output must not enter the human warning gate"
         );
     }
 
@@ -403,23 +400,21 @@ fn aged_task_notify_and_system_messages_never_become_actionable_too_old() {
             "{label} classification must win before the age gate"
         );
         assert!(
-            catch_up_too_old_drop(
+            !too_old_is_actionable(
                 outcome,
                 message.author_id,
                 message.author_is_bot,
                 &[],
                 None,
                 None,
-                &message.trimmed_text,
-            )
-            .is_none(),
-            "{label} must not enter the actionable TooOld notice gate"
+            ),
+            "{label} must not enter the actionable TooOld warning gate"
         );
     }
 }
 
 #[test]
-fn aged_empty_message_is_empty_without_dlq_or_notice_drop() {
+fn aged_empty_message_is_empty_without_dlq_or_warning() {
     let message = view(HUMAN_ID, false, 3_600, "   \n\t");
     let outcome = classify(&message);
 
@@ -429,17 +424,15 @@ fn aged_empty_message_is_empty_without_dlq_or_notice_drop() {
         "empty content must be terminal before the age gate"
     );
     assert!(
-        catch_up_too_old_drop(
+        !too_old_is_actionable(
             outcome,
             message.author_id,
             message.author_is_bot,
             &[],
             None,
             None,
-            &message.trimmed_text,
-        )
-        .is_none(),
-        "Empty must not enter the shared TooOld DLQ/notice side-effect gate"
+        ),
+        "Empty must not enter the shared TooOld warning side-effect gate"
     );
 }
 
@@ -456,19 +449,14 @@ fn aged_allowed_human_is_too_old_and_advances_the_settled_frontier() {
     let outcome = classify(&message);
     assert_eq!(outcome, CatchUpClassification::TooOld);
 
-    let drop = catch_up_too_old_drop(
+    assert!(too_old_is_actionable(
         outcome,
         message.author_id,
         message.author_is_bot,
         &[],
         None,
         None,
-        &message.trimmed_text,
-    )
-    .expect("processable stale human enters the TooOld DLQ/notice gate");
-    let notice = catch_up_too_old_notice(&[drop]).expect("one TooOld drop produces a notice");
-    assert!(notice.contains("계속 진행해"));
-    assert!(notice.contains("1건"));
+    ));
     assert_eq!(
         settled_alone(message.message_id, outcome),
         Some(message.message_id),
@@ -477,7 +465,7 @@ fn aged_allowed_human_is_too_old_and_advances_the_settled_frontier() {
 }
 
 #[test]
-fn aged_announce_bot_settles_without_a_human_resend_notice() {
+fn aged_announce_bot_settles_without_a_human_warning() {
     let message = view(
         INFO_BOT_ID,
         true,
@@ -501,17 +489,15 @@ fn aged_announce_bot_settles_without_a_human_resend_notice() {
     );
 
     assert!(
-        catch_up_too_old_drop(
+        !too_old_is_actionable(
             outcome,
             message.author_id,
             message.author_is_bot,
             &[],
             Some(INFO_BOT_ID),
             None,
-            &message.trimmed_text,
-        )
-        .is_none(),
-        "a human cannot resend an announce-bot trigger, so it must not construct an actionable drop"
+        ),
+        "automation drops must not enter the human warning count"
     );
     assert_eq!(
         settled_alone(message.message_id, outcome),
@@ -537,12 +523,12 @@ fn aged_announce_bot_settles_without_a_human_resend_notice() {
             None,
         ),
         CatchUpClassification::Recover,
-        "the human-only notice gate must not suppress a fresh announce trigger"
+        "the human warning count must not suppress a fresh announce trigger"
     );
 }
 
 #[test]
-fn aged_marker_authorized_bot_settles_without_notice_but_fresh_trigger_recovers() {
+fn aged_marker_authorized_bot_settles_without_warning_but_fresh_trigger_recovers() {
     let stale = view(
         INFO_BOT_ID,
         true,
@@ -561,16 +547,14 @@ fn aged_marker_authorized_bot_settles_without_notice_but_fresh_trigger_recovers(
     );
     assert_eq!(stale_outcome, CatchUpClassification::TooOld);
     assert!(
-        catch_up_too_old_drop(
+        !too_old_is_actionable(
             stale_outcome,
             stale.author_id,
             stale.author_is_bot,
             &[INFO_BOT_ID],
             None,
             None,
-            &stale.trimmed_text,
-        )
-        .is_none(),
+        ),
         "an allowed automation trigger is internal evidence, never a human resend candidate"
     );
 
@@ -714,31 +698,23 @@ struct TestCatchUpApi {
     phase2_messages: Option<Vec<serenity::Message>>,
     scripted_fetches: Option<Mutex<VecDeque<Result<Vec<serenity::Message>, String>>>>,
     fetch_calls: AtomicUsize,
-    outbox: Arc<Mutex<Vec<CatchUpTooOldOutboxRequest>>>,
     dead_letters: Arc<Mutex<Vec<crate::db::relay_dead_letter::RelayDeadLetterRecord>>>,
     announce_resolution: UtilityBotUserIdResolution,
     notify_resolution: UtilityBotUserIdResolution,
 }
 
 impl TestCatchUpApi {
-    fn new(
-        messages: Vec<serenity::Message>,
-    ) -> (Self, Arc<Mutex<Vec<CatchUpTooOldOutboxRequest>>>) {
-        let outbox = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                current_user_id: Some(CURRENT_BOT_ID),
-                messages,
-                phase2_messages: None,
-                scripted_fetches: None,
-                fetch_calls: AtomicUsize::new(0),
-                outbox: Arc::clone(&outbox),
-                dead_letters: Arc::new(Mutex::new(Vec::new())),
-                announce_resolution: UtilityBotUserIdResolution::Unconfigured,
-                notify_resolution: UtilityBotUserIdResolution::Unconfigured,
-            },
-            outbox,
-        )
+    fn new(messages: Vec<serenity::Message>) -> Self {
+        Self {
+            current_user_id: Some(CURRENT_BOT_ID),
+            messages,
+            phase2_messages: None,
+            scripted_fetches: None,
+            fetch_calls: AtomicUsize::new(0),
+            dead_letters: Arc::new(Mutex::new(Vec::new())),
+            announce_resolution: UtilityBotUserIdResolution::Unconfigured,
+            notify_resolution: UtilityBotUserIdResolution::Unconfigured,
+        }
     }
 
     fn with_utility_bot_ids(
@@ -777,11 +753,6 @@ impl TestCatchUpApi {
         fetches: Vec<Result<Vec<serenity::Message>, String>>,
     ) -> Self {
         self.scripted_fetches = Some(Mutex::new(fetches.into()));
-        self
-    }
-
-    fn with_outbox(mut self, outbox: Arc<Mutex<Vec<CatchUpTooOldOutboxRequest>>>) -> Self {
-        self.outbox = outbox;
         self
     }
 }
@@ -830,33 +801,16 @@ impl CatchUpDiscordApi for TestCatchUpApi {
     ) {
     }
 
-    fn enqueue_too_old_notice(
-        &self,
-        _pool: Option<sqlx::PgPool>,
-        request: CatchUpTooOldOutboxRequest,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        let mut outbox = self.outbox.lock().expect("outbox capture lock");
-        if !outbox.iter().any(|existing| {
-            existing.target == request.target
-                && existing.content == request.content
-                && existing.reason_code == request.reason_code
-                && existing.session_key == request.session_key
-        }) {
-            outbox.push(request);
-        }
-        None
-    }
-
     fn record_too_old_dead_letter(
         &self,
-        _pool: Option<&sqlx::PgPool>,
+        pool: Option<&sqlx::PgPool>,
         record: crate::db::relay_dead_letter::RelayDeadLetterRecord,
     ) -> Option<tokio::task::JoinHandle<()>> {
         self.dead_letters
             .lock()
             .expect("dead-letter capture lock")
-            .push(record);
-        None
+            .push(record.clone());
+        crate::db::relay_dead_letter::record_detached(pool, record)
     }
 
     async fn utility_bot_user_ids(
@@ -882,7 +836,7 @@ async fn phase1_false_flag_allowed_dispatch_is_not_cancel_preserved() {
     );
     shared.settings.write().await.allowed_bot_ids = vec![INFO_BOT_ID];
 
-    let (api, outbox) = TestCatchUpApi::new(vec![discord_message(
+    let api = TestCatchUpApi::new(vec![discord_message(
         channel_id,
         dispatch_message_id,
         INFO_BOT_ID,
@@ -903,7 +857,6 @@ async fn phase1_false_flag_allowed_dispatch_is_not_cancel_preserved() {
         !mailbox.intervention_queue[0].preserve_on_cancel(),
         "a bot=false allowed DISPATCH must remain unmarked so cancel drops it like origin/main"
     );
-    assert!(outbox.lock().expect("outbox capture lock").is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -924,7 +877,7 @@ async fn production_two_scan_retries_unavailable_announce_then_recovers() {
         "PM triage: inspect the stalled workflow",
     );
 
-    let (first_api, first_outbox) = TestCatchUpApi::new(vec![message.clone()]);
+    let first_api = TestCatchUpApi::new(vec![message.clone()]);
     let first_api = first_api.with_utility_bot_resolutions(
         UtilityBotUserIdResolution::Unavailable,
         UtilityBotUserIdResolution::Unconfigured,
@@ -951,10 +904,9 @@ async fn production_two_scan_retries_unavailable_announce_then_recovers() {
             .is_empty(),
         "the unavailable scan must neither lose nor prematurely enqueue the message"
     );
-    assert!(first_outbox.lock().expect("outbox capture lock").is_empty());
 
     let pending_retry_channels = HashSet::from([channel_id]);
-    let (second_api, second_outbox) = TestCatchUpApi::new(vec![message]);
+    let second_api = TestCatchUpApi::new(vec![message]);
     let second_api = second_api.with_utility_bot_resolutions(
         UtilityBotUserIdResolution::Resolved(ANNOUNCE_BOT_ID),
         UtilityBotUserIdResolution::Unconfigured,
@@ -981,12 +933,6 @@ async fn production_two_scan_retries_unavailable_announce_then_recovers() {
         Some(announce_message_id.get())
     );
     assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
-    assert!(
-        second_outbox
-            .lock()
-            .expect("outbox capture lock")
-            .is_empty()
-    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1007,7 +953,7 @@ async fn production_two_scan_retries_unavailable_notify_then_settles_silently() 
         "DISPATCH:false-flag-notify-overlap",
     );
 
-    let (first_api, _) = TestCatchUpApi::new(vec![message.clone()]);
+    let first_api = TestCatchUpApi::new(vec![message.clone()]);
     let first_api = first_api.with_utility_bot_resolutions(
         UtilityBotUserIdResolution::Unconfigured,
         UtilityBotUserIdResolution::Unavailable,
@@ -1022,7 +968,7 @@ async fn production_two_scan_retries_unavailable_notify_then_settles_silently() 
     assert!(shared.catch_up_retry_pending.contains_key(&channel_id));
 
     let pending_retry_channels = HashSet::from([channel_id]);
-    let (second_api, second_outbox) = TestCatchUpApi::new(vec![message]);
+    let second_api = TestCatchUpApi::new(vec![message]);
     let second_api = second_api.with_utility_bot_resolutions(
         UtilityBotUserIdResolution::Unconfigured,
         UtilityBotUserIdResolution::Resolved(NOTIFY_BOT_ID),
@@ -1045,12 +991,6 @@ async fn production_two_scan_retries_unavailable_notify_then_settles_silently() 
             .intervention_queue
             .is_empty(),
         "notify output must never become a turn"
-    );
-    assert!(
-        second_outbox
-            .lock()
-            .expect("outbox capture lock")
-            .is_empty()
     );
 }
 
@@ -1082,7 +1022,7 @@ async fn unavailable_identity_retry_cap_never_settles_ambiguous_trigger() {
             .contains_key(&channel_id)
             .then(|| HashSet::from([channel_id]))
             .unwrap_or_default();
-        let (api, _) = TestCatchUpApi::new(vec![message.clone()]);
+        let api = TestCatchUpApi::new(vec![message.clone()]);
         let api = api.with_utility_bot_resolutions(
             UtilityBotUserIdResolution::Unavailable,
             UtilityBotUserIdResolution::Unconfigured,
@@ -1155,7 +1095,7 @@ async fn recent_partial_page_failure_preserves_gap_then_recovers_older_human() {
         "older non-actionable boundary",
     );
 
-    let (first_api, first_outbox) = TestCatchUpApi::new(Vec::new());
+    let first_api = TestCatchUpApi::new(Vec::new());
     let first_api = first_api.with_scripted_fetches(vec![
         Ok(vec![newest_terminal.clone()]),
         Err("transient page 2 failure".to_string()),
@@ -1174,7 +1114,6 @@ async fn recent_partial_page_failure_preserves_gap_then_recovers_older_human() {
             .is_empty(),
         "an incomplete Recent batch is retried as a whole rather than partially committed"
     );
-    assert!(first_outbox.lock().expect("outbox capture lock").is_empty());
     assert!(
         first_api
             .dead_letters
@@ -1188,7 +1127,7 @@ async fn recent_partial_page_failure_preserves_gap_then_recovers_older_human() {
         "phase 2 must not bypass an incomplete Recent lower gap"
     );
 
-    let (second_api, _) = TestCatchUpApi::new(Vec::new());
+    let second_api = TestCatchUpApi::new(Vec::new());
     let second_api = second_api.with_scripted_fetches(vec![
         Ok(vec![newest_terminal]),
         Ok(vec![buried_human, age_boundary_bot]),
@@ -1259,7 +1198,7 @@ async fn recent_initial_fetch_failure_blocks_phase2_then_recovers_whole_gap() {
     // If the initial Recent failure is not marked incomplete, phase 2 consumes
     // the second response, enqueues `newer_human`, and persists its id across
     // the unknown lower gap. The correct path stops after the first fetch.
-    let (first_api, first_outbox) = TestCatchUpApi::new(Vec::new());
+    let first_api = TestCatchUpApi::new(Vec::new());
     let first_api = first_api.with_scripted_fetches(vec![
         Err("transient initial Recent fetch failure".to_string()),
         Ok(vec![newer_human.clone(), bot_response]),
@@ -1283,7 +1222,6 @@ async fn recent_initial_fetch_failure_blocks_phase2_then_recovers_whole_gap() {
         !checkpoint_path(root.path(), &provider, channel_id).exists(),
         "the failed sweep must not create a durable frontier"
     );
-    assert!(first_outbox.lock().expect("outbox capture lock").is_empty());
     assert!(
         first_api
             .dead_letters
@@ -1294,7 +1232,7 @@ async fn recent_initial_fetch_failure_blocks_phase2_then_recovers_whole_gap() {
 
     // A later complete Recent sweep starts from the still-open lower bound and
     // recovers both messages chronologically instead of only the newer one.
-    let (second_api, second_outbox) = TestCatchUpApi::new(Vec::new());
+    let second_api = TestCatchUpApi::new(Vec::new());
     let second_api = second_api.with_scripted_fetches(vec![
         Ok(vec![newer_human, older_human]),
         Ok(Vec::new()),
@@ -1312,12 +1250,7 @@ async fn recent_initial_fetch_failure_blocks_phase2_then_recovers_whole_gap() {
         shared.last_message_ids.get(&channel_id).map(|id| *id),
         Some(newer_human_id.get())
     );
-    assert!(
-        second_outbox
-            .lock()
-            .expect("outbox capture lock")
-            .is_empty()
-    );
+
     assert!(
         second_api
             .dead_letters
@@ -1354,7 +1287,7 @@ async fn production_sweep_advances_through_mixed_terminal_aged_page() {
     );
     system.kind = serenity::MessageType::PinsAdd;
 
-    let (api, outbox) = TestCatchUpApi::new(vec![
+    let api = TestCatchUpApi::new(vec![
         discord_message(
             channel_id,
             task_id,
@@ -1388,20 +1321,6 @@ async fn production_sweep_advances_through_mixed_terminal_aged_page() {
             .is_empty(),
         "none of the five terminal aged classifications may enqueue"
     );
-    assert_eq!(
-        *outbox.lock().expect("outbox capture lock"),
-        vec![CatchUpTooOldOutboxRequest {
-            target: format!("channel:{channel_id}"),
-            content: format!(
-                "⚠️ 재시작 공백으로 1건이 5분 초과로 미처리되었습니다. 필요하면 다시 보내주세요:\n• `{HUMAN_ID}`: 계속 진행해"
-            ),
-            bot: "notify",
-            source: "catch_up_too_old",
-            reason_code: "catch_up.too_old",
-            session_key: format!("catch_up_too_old:{channel_id}:{}", human_id.get()),
-        }],
-        "production sweep must construct the exact deduplicating outbox contract without a PG pool"
-    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1423,7 +1342,7 @@ async fn production_sweep_uses_semantic_utility_identity_when_bot_flag_is_false(
         settings.allowed_user_ids = vec![HUMAN_ID];
     }
 
-    let (api, outbox) = TestCatchUpApi::new(vec![
+    let api = TestCatchUpApi::new(vec![
         discord_message(
             channel_id,
             announce_id,
@@ -1468,16 +1387,6 @@ async fn production_sweep_uses_semantic_utility_identity_when_bot_flag_is_false(
             .intervention_queue
             .is_empty()
     );
-    let outbox = outbox.lock().expect("outbox capture lock");
-    assert_eq!(outbox.len(), 1, "known utility identities must stay silent");
-    assert_eq!(
-        outbox[0].session_key,
-        format!("catch_up_too_old:{channel_id}:{}", human_id.get())
-    );
-    assert!(outbox[0].content.contains("진짜 사용자 요청"));
-    assert!(!outbox[0].content.contains("PM triage"));
-    assert!(!outbox[0].content.contains("DISPATCH:"));
-    assert!(!outbox[0].content.contains("Task completed"));
     let dead_letters: Vec<_> = api
         .dead_letters
         .lock()
@@ -1543,7 +1452,7 @@ async fn production_phase2_notify_overlap_is_blocked_before_recovery() {
     );
     shared.settings.write().await.allowed_bot_ids = vec![NOTIFY_BOT_ID, INFO_BOT_ID];
 
-    let (api, outbox) = TestCatchUpApi::new(Vec::new());
+    let api = TestCatchUpApi::new(Vec::new());
     let api = api
         .with_utility_bot_ids(Some(NOTIFY_BOT_ID), Some(NOTIFY_BOT_ID))
         .with_phase2_messages(vec![
@@ -1591,7 +1500,6 @@ async fn production_phase2_notify_overlap_is_blocked_before_recovery() {
         !recovered_ids.contains(&notify_id),
         "notify semantic identity must win before phase2 recovery"
     );
-    assert!(outbox.lock().expect("outbox capture lock").is_empty());
     assert!(
         api.dead_letters
             .lock()
@@ -1611,7 +1519,7 @@ async fn phase2_aged_input_does_not_retry_when_utility_identity_is_unavailable()
     let aged_human_id = message_id_with_age(2, Duration::from_secs(700));
     write_checkpoint(root.path(), &provider, channel_id, bot_response_id.get());
 
-    let (api, _) = TestCatchUpApi::new(Vec::new());
+    let api = TestCatchUpApi::new(Vec::new());
     let api = api
         .with_utility_bot_resolutions(
             UtilityBotUserIdResolution::Unavailable,
@@ -1666,7 +1574,7 @@ async fn phase2_checkpointed_input_does_not_retry_when_utility_identity_is_unava
         .last_message_ids
         .insert(channel_id, checkpointed_human_id.get());
 
-    let (api, _) = TestCatchUpApi::new(Vec::new());
+    let api = TestCatchUpApi::new(Vec::new());
     let api = api
         .with_utility_bot_resolutions(
             UtilityBotUserIdResolution::Unavailable,
@@ -1729,7 +1637,7 @@ async fn phase2_fresh_announce_unavailable_then_resolved_recovers_eventually() {
         ),
     ];
 
-    let (first_api, _) = TestCatchUpApi::new(Vec::new());
+    let first_api = TestCatchUpApi::new(Vec::new());
     let first_api = first_api
         .with_utility_bot_resolutions(
             UtilityBotUserIdResolution::Unavailable,
@@ -1747,7 +1655,7 @@ async fn phase2_fresh_announce_unavailable_then_resolved_recovers_eventually() {
     );
 
     let pending_retry_channels = HashSet::from([channel_id]);
-    let (second_api, _) = TestCatchUpApi::new(Vec::new());
+    let second_api = TestCatchUpApi::new(Vec::new());
     let second_api = second_api
         .with_utility_bot_resolutions(
             UtilityBotUserIdResolution::Resolved(ANNOUNCE_BOT_ID),
@@ -1798,7 +1706,7 @@ async fn phase2_false_flag_announce_unavailable_preserves_then_recovers_exact_me
         ),
     ];
 
-    let (first_api, _) = TestCatchUpApi::new(Vec::new());
+    let first_api = TestCatchUpApi::new(Vec::new());
     let first_api = first_api
         .with_utility_bot_resolutions(
             UtilityBotUserIdResolution::Unavailable,
@@ -1832,7 +1740,7 @@ async fn phase2_false_flag_announce_unavailable_preserves_then_recovers_exact_me
     );
 
     let pending_retry_channels = HashSet::from([channel_id]);
-    let (second_api, _) = TestCatchUpApi::new(Vec::new());
+    let second_api = TestCatchUpApi::new(Vec::new());
     let second_api = second_api
         .with_utility_bot_resolutions(
             UtilityBotUserIdResolution::Resolved(ANNOUNCE_BOT_ID),
@@ -1864,62 +1772,8 @@ async fn phase2_false_flag_announce_unavailable_preserves_then_recovers_exact_me
     assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn production_sweep_outbox_contract_dedupes_same_batch_and_separates_new_human() {
-    let root = scoped_runtime_root();
-    let shared = super::super::make_shared_data_for_tests();
-    let provider = ProviderKind::Claude;
-    let channel_id = ChannelId::new(4_453_004);
-    let first_id = message_id_with_age(1, Duration::from_secs(410));
-    let second_id = message_id_with_age(2, Duration::from_secs(400));
-    write_checkpoint(root.path(), &provider, channel_id, first_id.get() - 1);
-    {
-        let mut settings = shared.settings.write().await;
-        settings.owner_user_id = Some(OWNER_ID);
-        settings.allowed_user_ids = vec![HUMAN_ID];
-    }
-
-    let (first_api, outbox) = TestCatchUpApi::new(vec![discord_message(
-        channel_id,
-        first_id,
-        HUMAN_ID,
-        false,
-        "첫 사용자 요청",
-    )]);
-    run_catch_up_sweep(CatchUpDeps::new(&first_api, &shared, &provider)).await;
-    run_catch_up_sweep(CatchUpDeps::new(&first_api, &shared, &provider)).await;
-
-    let (second_api, _) = TestCatchUpApi::new(vec![discord_message(
-        channel_id,
-        second_id,
-        HUMAN_ID,
-        false,
-        "새 사용자 요청",
-    )]);
-    let second_api = second_api.with_outbox(Arc::clone(&outbox));
-    run_catch_up_sweep(CatchUpDeps::new(&second_api, &shared, &provider)).await;
-
-    let outbox = outbox.lock().expect("outbox capture lock");
-    assert_eq!(
-        outbox.len(),
-        2,
-        "same batch dedupes and a new human batch separates"
-    );
-    for (request, id, snippet) in [
-        (&outbox[0], first_id, "첫 사용자 요청"),
-        (&outbox[1], second_id, "새 사용자 요청"),
-    ] {
-        assert_eq!(request.target, format!("channel:{channel_id}"));
-        assert!(request.content.contains(snippet));
-        assert_eq!(request.bot, "notify");
-        assert_eq!(request.source, "catch_up_too_old");
-        assert_eq!(request.reason_code, "catch_up.too_old");
-        assert_eq!(
-            request.session_key,
-            format!("catch_up_too_old:{channel_id}:{}", id.get())
-        );
-    }
-}
+#[path = "too_old_drop_pg_tests.rs"]
+mod too_old_drop_pg_tests;
 
 fn queued_intervention(message_id: MessageId, index: usize) -> Intervention {
     Intervention {
@@ -1994,7 +1848,7 @@ async fn queue_membership_alone_does_not_advance_the_phase2_checkpoint() {
         assert!(super::catch_up_enqueue_accepted(&outcome));
     }
 
-    let (api, outbox) = TestCatchUpApi::new(Vec::new());
+    let api = TestCatchUpApi::new(Vec::new());
     let api = api.with_phase2_messages(vec![
         discord_message(
             channel_id,
@@ -2045,7 +1899,6 @@ async fn queue_membership_alone_does_not_advance_the_phase2_checkpoint() {
         shared.last_message_ids.get(&channel_id).is_none(),
         "a scan that recovered nothing must not establish a durable frontier"
     );
-    assert!(outbox.lock().expect("outbox capture lock").is_empty());
 }
 
 /// The other half of the #5996 split: `active_user_message_id` names the
@@ -2096,7 +1949,7 @@ async fn an_active_turn_still_advances_the_phase2_checkpoint() {
         assert!(super::catch_up_enqueue_accepted(&outcome));
     }
 
-    let (api, _outbox) = TestCatchUpApi::new(Vec::new());
+    let api = TestCatchUpApi::new(Vec::new());
     let api = api.with_phase2_messages(vec![
         discord_message(
             channel_id,
@@ -2173,7 +2026,7 @@ async fn production_sweep_checkpoint_stops_before_capacity_blocked_human() {
         assert!(super::catch_up_enqueue_accepted(&outcome));
     }
 
-    let (api, outbox) = TestCatchUpApi::new(vec![
+    let api = TestCatchUpApi::new(vec![
         discord_message(
             channel_id,
             bot_id,
@@ -2203,10 +2056,6 @@ async fn production_sweep_checkpoint_stops_before_capacity_blocked_human() {
             .iter()
             .any(|queued| queued.message_id == human_id),
         "capacity-blocked human must remain beyond the settled checkpoint"
-    );
-    assert!(
-        outbox.lock().expect("outbox capture lock").is_empty(),
-        "an aged bot before a capacity-blocked human must settle without a resend notice"
     );
 }
 
@@ -2335,14 +2184,9 @@ fn delivery_frontier_without_ledger_append_is_not_settled() {
     );
 }
 
-/// Test 1 (end-to-end): after a restart, an already-answered aged human message
-/// on the completed-turn ledger must NOT raise the false restart-gap notice.
-///
-/// MUTATION: dropping the `settled_ids` consult in the sweep re-flags the
-/// message `TooOld`, and the aggregate notice lands in the outbox — the assert
-/// on an empty outbox catches it.
+// Completed-turn evidence prevents already-answered messages from entering the DLQ.
 #[tokio::test(flavor = "current_thread")]
-async fn ledger_suppresses_the_restart_gap_notice_for_an_answered_message() {
+async fn ledger_suppresses_dead_letter_for_an_answered_message() {
     let root = scoped_runtime_root();
     let shared = super::super::make_shared_data_for_tests();
     let provider = ProviderKind::Claude;
@@ -2368,12 +2212,14 @@ async fn ledger_suppresses_the_restart_gap_notice_for_an_answered_message() {
         answered.id.get(),
     );
 
-    let (api, outbox) = TestCatchUpApi::new(vec![answered]);
+    let api = TestCatchUpApi::new(vec![answered]);
     run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
 
     assert!(
-        outbox.lock().expect("outbox capture lock").is_empty(),
-        "an answered message on the ledger must not raise a restart-gap notice"
+        api.dead_letters
+            .lock()
+            .expect("dead-letter capture lock")
+            .is_empty()
     );
 }
 
@@ -2402,7 +2248,7 @@ async fn phase1_unauthorized_human_is_not_enqueued() {
 
     // Default test settings authorize nobody: `allow_all_users` is false,
     // `owner_user_id` is None, `allowed_user_ids` is empty.
-    let (api, outbox) = TestCatchUpApi::new(vec![discord_message(
+    let api = TestCatchUpApi::new(vec![discord_message(
         channel_id,
         human_message_id,
         HUMAN_ID,
@@ -2436,7 +2282,6 @@ async fn phase1_unauthorized_human_is_not_enqueued() {
         !shared.catch_up_retry_pending.contains_key(&channel_id),
         "authorization refusal is not an ambiguity and must not arm a retry"
     );
-    assert!(outbox.lock().expect("outbox capture lock").is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2460,7 +2305,7 @@ async fn phase1_authorized_human_is_enqueued() {
         settings.allow_all_users = true;
     }
 
-    let (api, outbox) = TestCatchUpApi::new(vec![discord_message(
+    let api = TestCatchUpApi::new(vec![discord_message(
         channel_id,
         human_message_id,
         HUMAN_ID,
@@ -2485,7 +2330,6 @@ async fn phase1_authorized_human_is_enqueued() {
         shared.last_message_ids.get(&channel_id).map(|id| *id),
         Some(human_message_id.get())
     );
-    assert!(outbox.lock().expect("outbox capture lock").is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2506,7 +2350,7 @@ async fn phase1_announce_bot_bypasses_authorization() {
     // thing that can carry this message past the gate is the announce identity.
     // Automation is authorized by its configured role, never by
     // `user_is_authorized`, so the gate must consult allowance FIRST.
-    let (api, outbox) = TestCatchUpApi::new(vec![discord_message(
+    let api = TestCatchUpApi::new(vec![discord_message(
         channel_id,
         announce_message_id,
         ANNOUNCE_BOT_ID,
@@ -2531,7 +2375,6 @@ async fn phase1_announce_bot_bypasses_authorization() {
         shared.last_message_ids.get(&channel_id).map(|id| *id),
         Some(announce_message_id.get())
     );
-    assert!(outbox.lock().expect("outbox capture lock").is_empty());
 }
 
 /// The sweep tests above cannot see the difference between `NotAllowed` and any
@@ -2568,7 +2411,7 @@ async fn phase2_unauthorized_human_is_not_enqueued() {
     // takes fetch call 0 (the empty list) and phase 2 takes call 1.
     write_checkpoint(root.path(), &provider, channel_id, bot_id.get());
 
-    let (api, outbox) = TestCatchUpApi::new(Vec::new());
+    let api = TestCatchUpApi::new(Vec::new());
     let api = api.with_phase2_messages(vec![
         discord_message(
             channel_id,
@@ -2597,7 +2440,6 @@ async fn phase2_unauthorized_human_is_not_enqueued() {
         mailbox.intervention_queue.is_empty(),
         "phase 2 must keep refusing an unauthorized author"
     );
-    assert!(outbox.lock().expect("outbox capture lock").is_empty());
 }
 
 // Without an owner, catch-up refuses allow-all and allow-listed humans like live
@@ -2624,7 +2466,6 @@ struct OwnerGateSweep {
     queued: Vec<MessageId>,
     last_message_id: Option<u64>,
     retry_pending: bool,
-    outbox_empty: bool,
 }
 
 async fn phase1_owner_gate_sweep(
@@ -2644,7 +2485,7 @@ async fn phase1_owner_gate_sweep(
     );
     grant_human(&shared, grant, owner).await;
 
-    let (api, outbox) = TestCatchUpApi::new(vec![discord_message(
+    let api = TestCatchUpApi::new(vec![discord_message(
         channel_id,
         human_message_id,
         HUMAN_ID,
@@ -2655,7 +2496,6 @@ async fn phase1_owner_gate_sweep(
     run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
 
     let mailbox = super::super::mailbox_snapshot(&shared, channel_id).await;
-    let outbox_empty = outbox.lock().expect("outbox capture lock").is_empty();
     OwnerGateSweep {
         human_message_id,
         queued: mailbox
@@ -2665,7 +2505,6 @@ async fn phase1_owner_gate_sweep(
             .collect(),
         last_message_id: shared.last_message_ids.get(&channel_id).map(|id| *id),
         retry_pending: shared.catch_up_retry_pending.contains_key(&channel_id),
-        outbox_empty,
     }
 }
 
@@ -2683,7 +2522,7 @@ async fn phase2_owner_gate_sweep(
     write_checkpoint(root.path(), &provider, channel_id, bot_id.get());
     grant_human(&shared, grant, owner).await;
 
-    let (api, outbox) = TestCatchUpApi::new(Vec::new());
+    let api = TestCatchUpApi::new(Vec::new());
     let api = api
         .with_utility_bot_ids(Some(ANNOUNCE_BOT_ID), Some(NOTIFY_BOT_ID))
         .with_phase2_messages(vec![
@@ -2709,7 +2548,6 @@ async fn phase2_owner_gate_sweep(
     );
 
     let mailbox = super::super::mailbox_snapshot(&shared, channel_id).await;
-    let outbox_empty = outbox.lock().expect("outbox capture lock").is_empty();
     OwnerGateSweep {
         human_message_id,
         queued: mailbox
@@ -2719,7 +2557,6 @@ async fn phase2_owner_gate_sweep(
             .collect(),
         last_message_id: shared.last_message_ids.get(&channel_id).map(|id| *id),
         retry_pending: shared.catch_up_retry_pending.contains_key(&channel_id),
-        outbox_empty,
     }
 }
 
@@ -2740,7 +2577,6 @@ async fn assert_phase1_owner_gate(grant: OwnerlessGrant, channel_id: u64) {
         !refused.retry_pending,
         "{grant:?}: authorization refusal must not arm a retry"
     );
-    assert!(refused.outbox_empty, "{grant:?}: refusal must not notify");
 
     let control =
         phase1_owner_gate_sweep(ChannelId::new(channel_id + 1), grant, Some(OWNER_ID)).await;
@@ -2749,7 +2585,6 @@ async fn assert_phase1_owner_gate(grant: OwnerlessGrant, channel_id: u64) {
         vec![control.human_message_id],
         "{grant:?} with only the owner added must recover the same message in phase 1"
     );
-    assert!(control.outbox_empty);
 }
 
 async fn assert_phase2_owner_gate(grant: OwnerlessGrant, channel_id: u64) {
@@ -2759,7 +2594,6 @@ async fn assert_phase2_owner_gate(grant: OwnerlessGrant, channel_id: u64) {
         "{grant:?} without an owner must not become phase-2 recovery work, got {:?}",
         refused.queued
     );
-    assert!(refused.outbox_empty, "{grant:?}: refusal must not notify");
 
     let control =
         phase2_owner_gate_sweep(ChannelId::new(channel_id + 1), grant, Some(OWNER_ID)).await;
@@ -2768,7 +2602,6 @@ async fn assert_phase2_owner_gate(grant: OwnerlessGrant, channel_id: u64) {
         vec![control.human_message_id],
         "{grant:?} with only the owner added must recover the same message in phase 2"
     );
-    assert!(control.outbox_empty);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2791,11 +2624,10 @@ async fn phase2_ownerless_listed_human_is_not_enqueued() {
     assert_phase2_owner_gate(OwnerlessGrant::Listed, 4_605_907).await;
 }
 
-// Unauthorized aged humans get neither the TooOld resend notice (which echoes
-// author id + snippet) nor a DLQ record.
+// Unauthorized aged humans must not leave a DLQ record.
 
 #[tokio::test(flavor = "current_thread")]
-async fn phase1_unauthorized_human_too_old_is_neither_noticed_nor_dead_lettered() {
+async fn phase1_unauthorized_human_too_old_is_not_dead_lettered() {
     let root = scoped_runtime_root();
     let shared = super::super::make_shared_data_for_tests();
     let provider = ProviderKind::Claude;
@@ -2804,7 +2636,7 @@ async fn phase1_unauthorized_human_too_old_is_neither_noticed_nor_dead_lettered(
     write_checkpoint(root.path(), &provider, channel_id, aged_id.get() - 1);
 
     // Default settings authorize nobody.
-    let (api, outbox) = TestCatchUpApi::new(vec![discord_message(
+    let api = TestCatchUpApi::new(vec![discord_message(
         channel_id,
         aged_id,
         UNAUTHORIZED_HUMAN_ID,
@@ -2815,10 +2647,6 @@ async fn phase1_unauthorized_human_too_old_is_neither_noticed_nor_dead_lettered(
 
     run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
 
-    assert!(
-        outbox.lock().expect("outbox capture lock").is_empty(),
-        "an unauthorized author's id and content must not be echoed into the channel"
-    );
     assert!(
         api.dead_letters
             .lock()
@@ -2841,7 +2669,7 @@ async fn phase1_unauthorized_human_too_old_is_neither_noticed_nor_dead_lettered(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn phase1_authorized_human_too_old_keeps_notice_and_dead_letter_per_author() {
+async fn phase1_authorized_human_too_old_keeps_dead_letter_per_author() {
     let root = scoped_runtime_root();
     let shared = super::super::make_shared_data_for_tests();
     let provider = ProviderKind::Claude;
@@ -2855,7 +2683,7 @@ async fn phase1_authorized_human_too_old_keeps_notice_and_dead_letter_per_author
         settings.allowed_user_ids = vec![HUMAN_ID];
     }
 
-    let (api, outbox) = TestCatchUpApi::new(vec![
+    let api = TestCatchUpApi::new(vec![
         discord_message(channel_id, authorized_id, HUMAN_ID, false, "인가된 요청"),
         discord_message(
             channel_id,
@@ -2869,20 +2697,6 @@ async fn phase1_authorized_human_too_old_keeps_notice_and_dead_letter_per_author
 
     run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
 
-    assert_eq!(
-        *outbox.lock().expect("outbox capture lock"),
-        vec![CatchUpTooOldOutboxRequest {
-            target: format!("channel:{channel_id}"),
-            content: format!(
-                "⚠️ 재시작 공백으로 1건이 5분 초과로 미처리되었습니다. 필요하면 다시 보내주세요:\n• `{HUMAN_ID}`: 인가된 요청"
-            ),
-            bot: "notify",
-            source: "catch_up_too_old",
-            reason_code: "catch_up.too_old",
-            session_key: format!("catch_up_too_old:{channel_id}:{}", authorized_id.get()),
-        }],
-        "only the authorized author enters the notice, and owns the batch key"
-    );
     let dead_letters: Vec<_> = api
         .dead_letters
         .lock()
@@ -2914,7 +2728,7 @@ async fn phase1_allowed_automation_too_old_is_dead_lettered_without_authorizatio
     // No user is authorized; automation is allowed only by its configured role.
     shared.settings.write().await.allowed_bot_ids = vec![INFO_BOT_ID];
 
-    let (api, outbox) = TestCatchUpApi::new(vec![
+    let api = TestCatchUpApi::new(vec![
         discord_message(
             channel_id,
             announce_id,
@@ -2934,10 +2748,6 @@ async fn phase1_allowed_automation_too_old_is_dead_lettered_without_authorizatio
 
     run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
 
-    assert!(
-        outbox.lock().expect("outbox capture lock").is_empty(),
-        "automation TooOld stays internal evidence"
-    );
     let dead_letters: Vec<_> = api
         .dead_letters
         .lock()

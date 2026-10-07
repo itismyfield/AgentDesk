@@ -60,6 +60,7 @@ src/server/routes/message_outbox.rs
 src/server/routes/pipeline_stage_save_tests.rs
 src/server/routes/queue_api.rs
 src/server/routes/scheduled_messages/postgres_tests.rs
+src/server/routes/session_evidence_tests.rs
 src/server/routes/stats.rs
 src/server/routes/tests/auto_queue_preflight_harness_tests.rs
 src/server/task_dispatch_claims.rs
@@ -101,12 +102,13 @@ src/services/cluster/intake_worker/input_effect_tests.rs
 src/services/cluster/intake_worker/o_route_tests.rs
 src/services/cluster/machine_resources/store.rs
 src/services/discord/admin_host_guard_tests.rs
-src/services/discord/catch_up/too_old_notice.rs
+src/services/discord/catch_up/too_old_drop_pg_tests.rs
 src/services/discord/commands/control.rs
 src/services/discord/commands/control/home_fence_tests.rs
 src/services/discord/commands/control/input_clear_tests.rs
 src/services/discord/commands/control/native_herdr_e2e_tests.rs
 src/services/discord/commands/control/native_herdr_tests.rs
+src/services/discord/commands/control/native_policy_tests.rs
 src/services/discord/commands/control/native_tests.rs
 src/services/discord/commands/restart.rs
 src/services/discord/commands/tui_passthrough.rs
@@ -138,6 +140,8 @@ src/services/discord/router/intake_dispatch/tests.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs
+src/services/discord/router/message_handler/intake_turn/native_fresh_prompt_tests.rs
+src/services/discord/router/message_handler/intake_turn/runtime_transition/native_hold_tests.rs
 src/services/discord/router/message_handler/provider_dispatch.rs
 src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs
@@ -173,6 +177,7 @@ src/services/discord/turn_bridge/recovery_text.rs
 src/services/discord/turn_bridge/resume_pin_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs
+src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs
 src/services/discord/turn_bridge/voice_completion_tests.rs
@@ -275,6 +280,7 @@ server::routes::message_outbox::tests
 server::routes::pipeline::stage_save_tests
 server::routes::queue_api::cancel_queue_preserve_pg_tests
 server::routes::scheduled_messages::postgres_tests
+server::routes::session_evidence::tests
 server::routes::stats::memento_feedback_stats_pg_tests
 server::task_dispatch_claims::task_dispatch_claims_pg_tests
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests
@@ -320,7 +326,7 @@ services::cluster::intake_worker::input_effect_tests
 services::cluster::intake_worker::o_route_tests
 services::cluster::machine_resources::store::tests
 services::discord::admin_host_guard::tests
-services::discord::catch_up::too_old_notice::tests
+services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests
 services::discord::commands::control::clear_persist_failure_tests
 services::discord::commands::control::home_fence::tests
 services::discord::commands::control::input_clear::tests
@@ -328,6 +334,7 @@ services::discord::commands::control::native::herdr_tests
 services::discord::commands::control::native::herdr_tests::e2e
 services::discord::commands::control::native::herdr_tests::e2e::o_actor
 services::discord::commands::control::native::tests
+services::discord::commands::control::native::tests::policy_tests
 services::discord::commands::restart::host_guard_tests
 services::discord::commands::tui_passthrough::host_guard_tests
 services::discord::health::recovery::live_agent_recovery::host_guard_tests
@@ -359,6 +366,8 @@ services::discord::router::intake_dispatch::tests
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
+services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
+services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
@@ -397,6 +406,7 @@ services::discord::turn_bridge::recovery_text::tests
 services::discord::turn_bridge::resume_pin_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
 services::discord::turn_bridge::tmux_runtime::stop_host::tests
 services::discord::turn_bridge::voice_completion::voice_completion_tests
@@ -895,6 +905,10 @@ server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_e
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_rejects_invalid_agent_primary_channel
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_push_patch_distinguishes_values_from_null_clears
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_push_rejects_agent_id_before_foreign_key_insert
+server::routes::session_evidence::tests::session_evidence_ambiguous_owner_and_sessions_fail_closed_pg
+server::routes::session_evidence::tests::session_evidence_missing_raw_identity_is_null_pg
+server::routes::session_evidence::tests::session_evidence_provider_channels_ignore_unbound_history_pg
+server::routes::session_evidence::tests::session_evidence_stale_working_pending_is_observation_only_pg
 server::routes::stats::memento_feedback_stats_pg_tests::load_memento_feedback_counts_returns_persisted_writer_values_pg
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_acquires_first_per_node_semaphore_on_preferred_node
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_does_not_reclaim_active_null_expiry_semaphore_holder
@@ -1119,8 +1133,7 @@ services::discord::admin_host_guard::tests::headless_refuses_a_configured_turn_b
 services::discord::admin_host_guard::tests::intake_refuses_a_configured_turn_before_its_runtime_recreate_pg
 services::discord::admin_host_guard::tests::reports_name_a_kept_host_without_probing_tmux_pg
 services::discord::admin_host_guard::tests::the_clear_target_keeps_mains_verdict_unless_a_configured_channel_is_switched_on_pg
-services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_outbox_contract_and_pg_dedupe_pg
-services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
+services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests::production_sweep_too_old_drops_leave_no_outbox_notice_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg
 services::discord::commands::control::home_fence::tests::a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open_pg
@@ -1140,11 +1153,16 @@ services::discord::commands::control::native::herdr_tests::e2e::a_crash_after_th
 services::discord::commands::control::native::herdr_tests::e2e::a_crash_before_the_clears_pending_is_logged_completes_at_boot_without_a_second_line_pg
 services::discord::commands::control::native::herdr_tests::e2e::o_actor::the_clear_entry_follows_a_hosted_actors_projection_until_its_rotation_settles_pg
 services::discord::commands::control::native::herdr_tests::e2e::two_clears_from_the_entry_take_the_next_turn_to_the_latest_cleared_session_pg
+services::discord::commands::control::native::herdr_tests::held_herdr_recovery_reads_the_composer_with_native_switch_off_pg
+services::discord::commands::control::native::herdr_tests::held_herdr_recovery_requires_the_ticket_durable_execution_pg
 services::discord::commands::control::native::herdr_tests::the_herdr_clear_holds_the_channel_until_its_commit_is_settled_pg
 services::discord::commands::control::native::tests::held_native_clear_holds_input_until_admission_completes_it_pg
 services::discord::commands::control::native::tests::native_clear_keeps_the_pane_and_completes_inside_the_worker_pg
 services::discord::commands::control::native::tests::native_clear_marks_completion_before_the_worker_releases_admission_pg
 services::discord::commands::control::native::tests::native_clear_without_a_clear_hook_falls_back_to_the_managed_reset_pg
+services::discord::commands::control::native::tests::policy_tests::composer_failure_keeps_native_boundary_unresolved_and_next_input_held_pg
+services::discord::commands::control::native::tests::policy_tests::native_fixture_overrides_and_restores_an_inherited_explicit_config_pg
+services::discord::commands::control::native::tests::policy_tests::scoped_native_clear_selects_only_listed_channels_and_skips_outside_state_pg
 services::discord::commands::control::native::tests::restart_admission_holds_undecidable_rows_until_a_new_clear_pg
 services::discord::commands::control::native::tests::restart_admission_settles_each_unresolved_native_clear_row_pg
 services::discord::commands::control::native::tests::switched_off_or_unowned_clear_keeps_the_managed_reset_pg
@@ -1220,6 +1238,9 @@ services::discord::router::message_handler::intake_turn::dispatch_stamp::postgre
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::race_loss_requeue_leaves_row_in_spawned_and_worker_closes_it_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_skipped_when_capability_not_ready_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_written_when_ready_capability_is_injected_pg
+services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests::restart_native_clear_first_intake_submits_fresh_anchor_prompt_pg
+services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests::held_native_boundary_accepts_clear_through_the_text_command_router_pg
+services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests::native_hold_requeues_the_real_router_input_and_uploads_durably_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_after_the_first_write_still_binds_its_own_start_and_ends_the_hold_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_first_write_refused_before_any_key_releases_the_hold_for_the_next_prompt_pg
@@ -1421,6 +1442,17 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_cancellation_settles_work_before_postlude_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_unknown_foreign_anchor_preserves_retry_5521
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_generation_only_stale_sends_no_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_generation_only_stale_sends_no_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_identity_only_changed_sends_no_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_delivery_sends_once_for_both_providers
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_draining_holder_still_cancels_and_generation_adds_no_cleanup_authority_pg
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_http_preserve_keeps_conflict_and_cannot_cancel_token_pg
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_prepare_preserves_consumed_claim_and_intent
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_production_stop_unwired_switch_on_matches_off
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_typed_refusals_have_no_escape_effects
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_uncertain_escape_spends_claim_and_gate_mismatch_writes_nothing
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_runtime_clear_refuses_another_hosts_session_before_any_change_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_claims_pre_publish_reservation_by_correlation_pg

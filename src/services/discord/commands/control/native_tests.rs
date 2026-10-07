@@ -16,17 +16,18 @@ use crate::services::tui_prompt_dedupe::binding_events::{
 
 /// Records every native effect in order; a submit may run a hook and may wait to be released.
 #[derive(Default)]
-struct Fake {
+pub(in crate::services::discord) struct Fake {
     calls: Mutex<Vec<String>>,
-    save_fails: AtomicBool,
+    pub(in crate::services::discord) save_fails: AtomicBool,
+    composer: Mutex<Option<Option<String>>>,
     on_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     submit_entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     submit_release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
-    submitted: Mutex<Option<NativeClearSubmission>>,
+    pub(in crate::services::discord) submitted: Mutex<Option<NativeClearSubmission>>,
 }
 
 impl Fake {
-    fn calls(&self) -> Vec<String> {
+    pub(in crate::services::discord) fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
     fn note(&self, call: String) {
@@ -68,30 +69,48 @@ impl NativeClearEffects for Fake {
             .unwrap_or(NativeClearSubmission::Confirmed)
     }
     fn composer_empty(&self, _: &str, _: Instant) -> bool {
-        true
+        self.composer
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(true, |capture| {
+                capture.as_ref().is_some_and(|capture| {
+                    crate::services::claude_tui::host_input::native_clear_composer_empty(capture)
+                })
+            })
     }
     fn reset_process(&self, tmux: &str) {
         self.note(format!("reset:{tmux}"));
     }
 }
 
-struct Fixture {
+pub(in crate::services::discord) struct Fixture {
     db: Option<crate::dispatch::test_support::DispatchPostgresTestDb>,
-    pool: sqlx::PgPool,
-    shared: Arc<SharedData>,
-    http: Arc<serenity::Http>,
-    channel_id: ChannelId,
-    tmux: String,
+    pub(in crate::services::discord) pool: sqlx::PgPool,
+    pub(in crate::services::discord) shared: Arc<SharedData>,
+    pub(in crate::services::discord) http: Arc<serenity::Http>,
+    pub(in crate::services::discord) channel_id: ChannelId,
+    pub(in crate::services::discord) tmux: String,
     session_key: String,
     binding_root: tempfile::TempDir,
     _o: crate::services::tui_o::cutover::test_override::ChannelsGuard,
+    _config: crate::config::TestEnvVarGuard,
     _host: crate::config::TestEnvVarGuard,
     _root: crate::config::TestEnvVarGuard,
     _root_dir: tempfile::TempDir,
+    _env_lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>,
 }
 
 impl Fixture {
-    async fn new(n: u64) -> Self {
+    pub(in crate::services::discord) async fn new(n: u64) -> Self {
+        let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        Self::new_locked(n, Some(lock)).await
+    }
+
+    pub(in crate::services::discord) async fn new_locked(
+        n: u64,
+        env_lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>,
+    ) -> Self {
         let root_dir = tempfile::tempdir().unwrap();
         // A config in the scratch root keeps node identity off any machine-wide config.
         let config = root_dir.path().join("config");
@@ -100,10 +119,17 @@ impl Fixture {
         let yaml =
             format!("server: {{}}\ndata:\n  dir: {data}\ncluster: {{instance_id: test-node}}\n");
         std::fs::write(config.join("agentdesk.yaml"), yaml).unwrap();
-        let root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root_dir.path());
+        let root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root_dir.path(),
+        );
         let host = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
             "AGENTDESK_INSTANCE_ID",
             "test-node".as_ref(),
+        );
+        let explicit_config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CONFIG",
+            &config.join("agentdesk.yaml"),
         );
         let binding_root = tempfile::tempdir().unwrap();
         binding_events::set_test_root(Some(binding_root.path()));
@@ -175,15 +201,22 @@ impl Fixture {
             session_key,
             binding_root,
             _o: force(&[(channel_id.get(), RuntimeHandoffKind::ClaudeTui)]),
+            _config: explicit_config,
             _host: host,
             _root: root,
             _root_dir: root_dir,
+            _env_lock: env_lock,
         };
         fixture.record("old", BindingCause::Startup, false);
         fixture
     }
 
-    fn record(&self, session: &str, cause: BindingCause, pending: bool) {
+    pub(in crate::services::discord) fn record(
+        &self,
+        session: &str,
+        cause: BindingCause,
+        pending: bool,
+    ) {
         record_on(
             self.binding_root.path(),
             self.channel_id,
@@ -218,19 +251,20 @@ impl Fixture {
             &ProviderKind::Claude,
             self.channel_id,
             &mut state,
+            &mut false,
         )
         .await;
         (admitted, state.0)
     }
 
-    async fn state(&self) -> NativeClearBoundary {
+    pub(in crate::services::discord) async fn state(&self) -> NativeClearBoundary {
         native_channel_clear_state(&self.pool, &self.channel_id.get().to_string())
             .await
             .unwrap()
     }
 
     /// An unresolved native boundary as a clear leaves it when the process dies after commit.
-    async fn unresolved(&self) -> ClearTicket {
+    pub(in crate::services::discord) async fn unresolved(&self) -> ClearTicket {
         let capture = crate::services::tui_prompt_dedupe::native_clear::capture_live_clear;
         let ticket = capture(self.channel_id.get(), &self.tmux).unwrap().ticket;
         let tx = session_transcripts::begin_channel_clear_boundary_tx(&self.pool)
@@ -250,7 +284,7 @@ impl Fixture {
         (session.session_id.clone(), session.cleared)
     }
 
-    async fn drop_db(mut self) {
+    pub(in crate::services::discord) async fn drop_db(mut self) {
         binding_events::forget_channel_for_tests(self.channel_id.get());
         binding_events::set_test_root(None);
         self.pool.close().await;
@@ -293,7 +327,7 @@ fn record_on(
     });
 }
 
-fn runtime() -> tokio::runtime::Runtime {
+pub(in crate::services::discord) fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -698,3 +732,6 @@ fn restart_admission_holds_undecidable_rows_until_a_new_clear_pg() {
         }
     });
 }
+
+#[path = "native_policy_tests.rs"]
+mod policy_tests;

@@ -1,10 +1,6 @@
 use super::health::UtilityBotUserIdResolution;
 
-/// #4443: true when a message is our own restart-gap notice reposted through
-/// an allowed sender bot. Both catch-up phases must classify these out:
-/// re-collecting one nests it inside the next notice (one level per restart,
-/// every channel) and phase2 would hand a young one to the agent as input.
-/// Prefix + bot-author scoped so a human quoting the marker still recovers.
+// Both phases ignore historical bot notices; humans quoting the marker can recover.
 pub(super) fn is_restart_gap_notice(author_is_bot: bool, text: &str) -> bool {
     author_is_bot && text.starts_with(super::CATCH_UP_TOO_OLD_NOTICE_PREFIX)
 }
@@ -23,12 +19,7 @@ pub(in crate::services::discord) enum CatchUpClassification {
     Duplicate,
     /// Older than the catch-up max-age window - too late to safely replay.
     TooOld,
-    /// #4564: this inbound message already has a CONFIRMED terminal delivery on
-    /// the durable completed-turn ledger. Suppresses the false restart-gap
-    /// TooOld notice without touching the DLQ path. Positioned strictly between
-    /// the sender-eligibility gates and the age gate so it never overrides
-    /// NotAllowed/SelfAuthored (#4443/#4453) and only pre-empts TooOld.
-    /// Phase 1 also settles a fresh text command this bot already replied to.
+    /// Confirmed terminal delivery or an answered text command; prevents replay and DLQ.
     Settled,
     /// Empty content (whitespace only).
     Empty,
@@ -189,8 +180,7 @@ fn disposition_for_utility_ids(
     );
     let is_allowed_automation = allowed_bot_ids.contains(&msg.author_id)
         || announce_bot_id.is_some_and(|id| id == msg.author_id);
-    // TooOld is gated too: it echoes the author and snippet into the channel
-    // and persists the content to the DLQ, so an unauthorized human gets neither.
+    // TooOld also persists content to the DLQ, so unauthorized humans are excluded.
     if matches!(
         outcome,
         CatchUpClassification::Recover | CatchUpClassification::TooOld
@@ -237,25 +227,8 @@ fn decision_for_utility_resolution(
     }
 }
 
-/// Classify one message without turning a transient utility-bot lookup failure
-/// into an irreversible checkpoint advance.
-///
-/// For each unavailable identity, compare the observed disposition with the
-/// disposition if that identity belonged to the current author. This includes
-/// the user-facing TooOld notice bit, not just the enum outcome: an aged
-/// false-flag announce message remains `TooOld` either way, but must not be
-/// surfaced as something a human can resend. Only a semantic difference is
-/// deferred, so a stable legacy card or known non-actionable bot does not enter
-/// an identity retry loop merely because an unrelated utility lookup is down.
-///
-/// `author_is_authorized` carries the announce identity's authorization-bypass
-/// semantics into that comparison, which is why `is_allowed_automation` is
-/// checked before authorization: without that disposition bit a false-flag
-/// announce message looks like an ordinary unauthorized human while the utility
-/// lookup is down and would be irreversibly skipped. #6042 routes both catch-up
-/// phases through this one function so the live-intake gate
-/// (`router/intake_gate.rs`, which rejects before enqueue) and catch-up cannot
-/// diverge again.
+/// Defer unavailable utility identities only when they change classification or human warnings.
+/// This avoids settling unknown automation while letting stable rejections retire.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn classify_catch_up_message_with_utility_resolution(
     msg: &CatchUpMessageView,

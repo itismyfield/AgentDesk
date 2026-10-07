@@ -50,9 +50,16 @@ pub(super) async fn acquire_after_redirect_or_requeue(
     )
     .await
     {
-        Ok(mut t) => admits(http, shared, provider, channel_id, &mut t.state)
-            .await
-            .then_some(t),
+        Ok(mut t) => admits(
+            http,
+            shared,
+            provider,
+            channel_id,
+            &mut t.state,
+            &mut t.recovered_fresh,
+        )
+        .await
+        .then_some(t),
         Err(_) => None,
     };
     match admitted {
@@ -91,6 +98,9 @@ pub(super) async fn acquire_after_redirect_or_requeue(
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod native_hold_tests;
 
 #[cfg(test)]
 mod tests {
