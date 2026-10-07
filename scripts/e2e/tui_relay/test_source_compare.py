@@ -219,7 +219,11 @@ class SourceCompareTests(unittest.TestCase):
         self.assertEqual(self.compare()["verdict"], "ok")
         self.assertEqual(self.main_rc(self.messages), 0)
         for row in [{**copies[0], "message": {"content": MARKER}}, {**copies[0], "lastPrompt": [MARKER]},
-                    {"type": "last-prompt", "sessionId": MARKER}, {"type": "last-prompt", "lastPrompt": MARKER}]:
+                    {"type": "last-prompt", "sessionId": MARKER}, {"type": "last-prompt", "lastPrompt": MARKER},
+                    # Only lastPrompt is a prompt copy; exact-shape metadata must not hide a marker.
+                    {"type": "last-prompt", "leafUuid": MARKER, "sessionId": "s"},
+                    {"type": "last-prompt", "leafUuid": "leaf", "sessionId": MARKER},
+                    {**copies[0], "leafUuid": MARKER}, {**copies[0], "lastPrompt": "x", "sessionId": MARKER}]:
             self.write([self.user(), row])
             with self.subTest(row=row), self.assertRaisesRegex(ValueError, "unsupported marker-bearing"):
                 self.compare()

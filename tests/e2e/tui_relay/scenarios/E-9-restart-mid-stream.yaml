@@ -16,6 +16,27 @@ steps:
     timeout_s: 180
   - restart_dcserver:
       target: dev
+      # Same bulk inventory baseline as E-54; any other degraded reason still fails.
+      require_status: [healthy, degraded]
+      allowed_degraded_reasons:
+        - "tui_o:released:1474933804887179286"
+        - "tui_o:released:1475086789696946196"
+        - "tui_o:released:1478248459445469264"
+        - "tui_o:released:1478652416533463101"
+        - "tui_o:released:1478652616295583805"
+        - "tui_o:released:1478652735300829185"
+        - "tui_o:released:1478653028000338114"
+        - "tui_o:released:1478653071214252103"
+        - "tui_o:released:1480531508820185241"
+        - "tui_o:released:1481478222439907560"
+        - "tui_o:released:1490141479707086938"
+        - "tui_o:released:1500628371829428350"
+        - "tui_o:released:1509350778043895902"
+        - "tui_o:released:1527859708180828350"
+        - "tui_o:released:1536866287983132752"
+        - "tui_o:released:1536887557290197062"
+        - "tui_o:too_many_readers:1509350490461180105"
+        - "relay_verdict_unknown_codex_1509350778043895902"
   - wait_for_discord_text: "[E2E:E9:END]"
     timeout_s: 300
   - wait_idle_s: 5

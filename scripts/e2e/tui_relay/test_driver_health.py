@@ -3535,6 +3535,33 @@ class HarnessOutcomeContract(_OutcomeFixture, unittest.TestCase):
                     self.assertIn("live mailbox state outside cell", report["scenarios"][0]["reason"])
                     self.assertTrue(any("TEARDOWN" in call.args[1] for call in self.client.send_control.call_args_list))
 
+    def test_restart_health_wait_takes_assert_health_allowlist(self):
+        # A fully recovered restart can keep only the bulk baseline degraded reasons.
+        baseline = ["tui_o:released:1474933804887179286", "tui_o:too_many_readers:99"]
+        allow = {"require_status": ["healthy", "degraded"], "allowed_degraded_reasons": baseline}
+        healthy = {"cluster_standby": False, "status": "healthy", "ok": True, "fully_recovered": True}
+        clock = [0.0]
+        self.stub(driver.time, "monotonic", side_effect=lambda: clock[0])
+        driver.time.sleep.side_effect = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        for options, reasons, verdict in (({**allow}, baseline, "pass"),
+                                          ({**allow}, baseline + ["tui_o:unexpected:7"], "fail"),
+                                          ({}, baseline, "fail"), ({}, None, "pass")):
+            with self.subTest(options=options, reasons=reasons):
+                restarted = []
+                after = healthy if reasons is None else {**healthy, "status": "degraded", "ok": False,
+                                                         "degraded": True, "degraded_reasons": reasons}
+                self.api.side_effect = lambda base, path, **k: ((200, after if restarted else healthy)
+                                                                if path == "/api/health" else (200, {"sessions": []}))
+                with patch.object(driver.subprocess, "run", side_effect=lambda cmd, **k: restarted.append(cmd)):
+                    _, report, _ = self.main_result(self.scenario(steps=[{"restart_dcserver": {"target": "release", **options}},
+                                                                     {"send_prompt": "after restart"}]))
+                row = report["scenarios"][0]
+                self.assertEqual([cmd[:3] for cmd in restarted], [["launchctl", "kickstart", "-k"]])
+                self.assertEqual(row["status"], verdict, row.get("reason"))
+                if verdict == "fail":
+                    self.assertIn("did not become healthy", row["reason"])
+                    self.assertIn("tui_o:unexpected:7" if options else "status=degraded", row["reason"])
+
     def test_safety_recheck_precedes_mode_gates_without_teardown(self):
         for source in ("harness", "safety"):
             for required in (None, "real_live"):
