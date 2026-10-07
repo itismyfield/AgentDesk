@@ -178,6 +178,8 @@ pub(in crate::services::discord::tui_prompt_relay) fn tui_direct_watcher_covers_
     if watchers.tmux_session_live_for_relay(tmux_session_name) != Some(true) {
         return false;
     }
+    // No output path, or the same uncanonicalizable string, counts as covered, as in
+    // `tui_direct_watcher_can_own_output`.
     let Some(output_path) = output_path else {
         return true;
     };

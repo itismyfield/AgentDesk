@@ -9,6 +9,7 @@ use crate::services::discord::session_relay_sink::tests::idle_relay_harness::{
     IdleRelayHarness, PAYLOAD, live_watcher,
 };
 use std::sync::atomic::{AtomicU64, AtomicUsize};
+use tokio::sync::Notify;
 
 const PROMPT: &str = "codex direct prompt 5704";
 const RESPONSE: &str = "DIRECT_5704_OK";
@@ -46,12 +47,32 @@ fn watcher_covers_only_the_output_file_it_reads() {
             watched.display()
         );
     }
+    // Uncanonicalizable paths fall back to the raw path, and no output path is covered.
+    let missing = dir.path().join("missing.jsonl");
+    let dangling = dir.path().join("dangling.jsonl");
+    std::os::unix::fs::symlink(&missing, &dangling).expect("dangling alias");
+    let other_missing = dir.path().join("other-missing.jsonl");
+    for (watched, output, expected) in [
+        (&missing, Some(&missing), true),
+        (&missing, Some(&other_missing), false),
+        (&dangling, Some(&missing), false),
+        (&relay, None, true),
+    ] {
+        watchers.insert(channel, live_watcher(tmux, watched.to_str().unwrap()));
+        let output = output.map(PathBuf::as_path);
+        assert_eq!(
+            tui_direct_watcher_covers_output(&watchers, tmux, output),
+            expected,
+            "watcher on {} for {output:?}",
+            watched.display()
+        );
+    }
 }
 
-/// Claude transcript rotation: the watcher still tails the previous transcript, so the
-/// bridge tail is the one deliverer and the session-bound sink stays silent.
+/// Claude transcript rotation, watcher still on the previous transcript: the claim picks
+/// `BridgeAdapter`, the bridge tail is due to spawn, and the session-bound sink sends nothing.
 #[tokio::test(flavor = "current_thread")]
-async fn claude_claim_beside_a_watcher_on_the_previous_transcript_keeps_the_bridge_tail() {
+async fn claude_claim_beside_a_watcher_on_the_previous_transcript_picks_the_bridge_owner() {
     let root = tempfile::tempdir().expect("isolated inflight root");
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
     enable_session_bound_delivery();
@@ -103,7 +124,7 @@ async fn claude_claim_beside_a_watcher_on_the_previous_transcript_keeps_the_brid
     tokio::time::sleep(std::time::Duration::from_millis(11_000)).await;
     assert!(
         harness.sent().is_empty(),
-        "the bridge tail is the only deliverer"
+        "the session-bound sink stays silent"
     );
     harness.stop().await;
 }
@@ -367,8 +388,8 @@ async fn wait_for(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
     done()
 }
 
-/// Real idle rollout loop, watcher on the relay jsonl: hook-first and rollout-first answers
-/// reach Discord once each, and a rebinding channel gets no rollout-side delivery.
+/// Real idle rollout loop, watcher on the relay jsonl: every claim/scan order delivers the
+/// answer once, and a rebinding channel gets no rollout-side delivery.
 #[test]
 fn codex_direct_answer_reaches_discord_once_beside_a_relay_jsonl_watcher() {
     let _env_lock = crate::config::shared_test_env_lock()
@@ -397,9 +418,18 @@ async fn codex_direct_answer_scenario(root: &Path) {
     let hook_first = CodexChannel::new(&shared, root, 5_704_100, "AgentDesk-codex-5704-hook");
     let rollout_first = CodexChannel::new(&shared, root, 5_704_200, "AgentDesk-codex-5704-rollout");
     let rebinding = CodexChannel::new(&shared, root, 5_704_300, "AgentDesk-codex-5704-rebind");
+    let claim_first = CodexChannel::new(&shared, root, 5_704_400, "AgentDesk-codex-5704-claim");
+    let parked = CodexChannel::new(&shared, root, 5_704_500, "AgentDesk-codex-5704-parked");
+    let channels = [
+        &hook_first,
+        &rollout_first,
+        &rebinding,
+        &claim_first,
+        &parked,
+    ];
     let frames = Arc::new(AtomicUsize::new(0));
     let mut relays = Vec::new();
-    for codex in [&hook_first, &rollout_first, &rebinding] {
+    for codex in channels {
         let relay = crate::services::cluster::stream_relay::spawn_stream_relay(
             crate::services::cluster::session_matcher::MatchedChannel {
                 channel_id: codex.channel.get().to_string(),
@@ -451,6 +481,75 @@ async fn codex_direct_answer_scenario(root: &Path) {
         .await,
         "hook-first answer never reached Discord: {:?}",
         requests.lock().unwrap()
+    );
+
+    // Claim before the scan: the claim's start sits before the prompt, and the repair tail
+    // must deliver under that boundary rather than restamp it.
+    crate::services::tui_prompt_dedupe::observe_hook_prompt_by_tmux_with_prompt_id_at(
+        "codex",
+        &claim_first.tmux,
+        PROMPT,
+        None,
+        chrono::Utc::now(),
+    );
+    let lease = claim_first.lease(&shared);
+    let claim = claim_first.claim(&shared, 5_704_401, &lease).await;
+    assert!(claim.claimed);
+    append(&claim_first.rollout, &user_line());
+    let prompt_end = std::fs::metadata(&claim_first.rollout).unwrap().len();
+    assert!(claim.turn_start_offset < prompt_end);
+    append(&claim_first.rollout, &answer_lines());
+    assert!(
+        wait_for(Duration::from_secs(15), || !deliveries(
+            &requests,
+            claim_first.channel
+        )
+        .is_empty())
+        .await,
+        "claim-first answer never reached Discord: {:?}",
+        requests.lock().unwrap()
+    );
+
+    // A repair tail parked just before bridge capture: the polls meanwhile start no second tail.
+    let (entered, resume) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    *super::super::codex_idle_rollout::CAPTURE_PAUSE
+        .lock()
+        .unwrap() = Some((parked.channel.get(), entered.clone(), resume.clone()));
+    crate::services::tui_prompt_dedupe::observe_hook_prompt_by_tmux_with_prompt_id_at(
+        "codex",
+        &parked.tmux,
+        PROMPT,
+        None,
+        chrono::Utc::now(),
+    );
+    let lease = parked.lease(&shared);
+    assert!(parked.claim(&shared, 5_704_501, &lease).await.claimed);
+    append(&parked.rollout, &(user_line() + &answer_lines()));
+    tokio::time::timeout(Duration::from_secs(10), entered.notified())
+        .await
+        .expect("the repair tail reaches bridge capture");
+    assert_eq!(parked.row().expect("parked row").current_msg_id, 0);
+    tokio::time::sleep(Duration::from_millis(1_600)).await;
+    let starts = |channel: ChannelId| {
+        let starts = super::super::codex_idle_rollout::TAIL_STARTS
+            .lock()
+            .unwrap();
+        starts.iter().filter(|id| **id == channel.get()).count()
+    };
+    assert_eq!(
+        starts(parked.channel),
+        1,
+        "polls during the parked tail start no other"
+    );
+    resume.notify_one();
+    assert!(
+        wait_for(Duration::from_secs(15), || !deliveries(
+            &requests,
+            parked.channel
+        )
+        .is_empty())
+        .await,
+        "parked answer never reached Discord"
     );
 
     // Rollout first: the loop publishes the prompt and waits for the observer's claim.
@@ -530,7 +629,12 @@ async fn codex_direct_answer_scenario(root: &Path) {
     while let Ok(inflight::InflightSignal::Completed { channel_id, .. }) = finalized.try_recv() {
         finalized_turns.push(channel_id);
     }
-    for (codex, anchor) in [(&hook_first, 5_704_101), (&rollout_first, 5_704_201)] {
+    for (codex, anchor) in [
+        (&hook_first, 5_704_101),
+        (&rollout_first, 5_704_201),
+        (&claim_first, 5_704_401),
+        (&parked, 5_704_501),
+    ] {
         let sent = deliveries(&requests, codex.channel);
         let anchor = format!("/channels/{}/messages/{anchor}", codex.channel.get());
         assert!(
@@ -542,6 +646,14 @@ async fn codex_direct_answer_scenario(root: &Path) {
             .iter()
             .filter(|id| **id == codex.channel.get());
         assert_eq!(turns.count(), 1, "one bridge turn delivers {}", codex.tmux);
+        assert!(codex.row().is_none(), "{} row cleared", codex.tmux);
+        let mailbox = crate::services::discord::mailbox_snapshot(&shared, codex.channel).await;
+        assert_eq!(
+            mailbox.active_user_message_id, None,
+            "{} released",
+            codex.tmux
+        );
+        assert_eq!(starts(codex.channel), 1, "one tail for {}", codex.tmux);
     }
     assert!(deliveries(&requests, rebinding.channel).is_empty());
     assert_eq!(
@@ -552,7 +664,7 @@ async fn codex_direct_answer_scenario(root: &Path) {
     let rebind_after = rebinding.row().expect("rebind row stays");
     assert!(rebind_after.rebind_origin);
     assert_eq!(rebind_after.user_msg_id, 5_704_301);
-    for codex in [&hook_first, &rollout_first, &rebinding] {
+    for codex in channels {
         crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
             .deregister(&codex.tmux);
         crate::services::tmux_diagnostics::set_pane_liveness_override_for_tests(&codex.tmux, None);

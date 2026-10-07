@@ -121,10 +121,19 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                 );
                                 let expected = inflight::InflightTurnIdentity::from_state(&inflight);
                                 let mut repaired = inflight;
-                                repaired.output_path =
-                                    rollout_path.to_str().map(ToString::to_string);
+                                // A claim on this rollout keeps its start: the bridge witness pins it,
+                                // and the tail below resumes from the prompt end on its own cursor.
+                                let same_source = repaired.output_path.as_deref().map(Path::new)
+                                    == Some(rollout_path.as_path())
+                                    && repaired
+                                        .turn_start_offset
+                                        .is_some_and(|start| start <= line_end_offset);
+                                if !same_source {
+                                    repaired.output_path =
+                                        rollout_path.to_str().map(ToString::to_string);
+                                    repaired.turn_start_offset = Some(line_end_offset);
+                                }
                                 repaired.last_offset = line_end_offset;
-                                repaired.turn_start_offset = Some(line_end_offset);
                                 repaired.restamp_external_turn_lease(&lease);
                                 repaired.set_relay_owner_kind(RelayOwnerKind::None);
                                 let outcome = inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
@@ -390,6 +399,14 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
     )));
 }
 
+/// Test hooks: channels whose response tail started, and a one-shot pause before bridge capture.
+#[cfg(test)]
+pub(super) static TAIL_STARTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+#[cfg(test)]
+type TestPause = Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>;
+#[cfg(test)]
+pub(super) static CAPTURE_PAUSE: Mutex<TestPause> = Mutex::new(None);
+
 #[cfg(unix)]
 async fn run_codex_idle_response_tail(
     shared: Arc<SharedData>,
@@ -400,6 +417,8 @@ async fn run_codex_idle_response_tail(
     prompt_text: String,
     lease: ExternalInputRelayLease,
 ) {
+    #[cfg(test)]
+    TAIL_STARTS.lock().unwrap().push(channel_id.get());
     let _lease_guard = TuiDirectExternalInputLeaseGuard::new(
         ProviderKind::Codex,
         &tmux_session_name,
@@ -488,6 +507,8 @@ async fn run_codex_idle_response_tail(
         .await;
         return;
     }
+    #[cfg(test)]
+    super::synthetic_start::bridge_handoff::pause_for_test(&CAPTURE_PAUSE, channel_id).await;
     let delivery_result = stream_tui_idle_response_through_bridge(
         &shared,
         ProviderKind::Codex,
