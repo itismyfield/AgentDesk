@@ -2593,10 +2593,8 @@ thread_local! {
     pub(in crate::services::discord) static RESTORE_CLAIM_FOR_TEST: std::cell::RefCell<Option<super::super::tui_direct_pending_start::ClaimFn>> = const { std::cell::RefCell::new(None) };
 }
 
-/// #3154 restart durability: restore durable pending-start records during
-/// provider relay startup. Rehydrates the in-memory presence index (so the
-/// watcher / idle-queue gates hold immediately) and respawns the worker for each
-/// matching unprotected record; protected records wait for move or handback.
+/// Restore matching pending starts only for channels without an input-fence gate.
+/// Protected records stay durable instead of spawning a second boot consumer.
 pub(in crate::services::discord) fn restore_pending_starts(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
