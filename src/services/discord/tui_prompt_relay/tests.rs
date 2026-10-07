@@ -4451,33 +4451,33 @@ fn synthetic_watcher_claim_requires_live_watcher_covering_output() {
 }
 
 /// Birth-site owner table. `SessionBoundRelay` needs session-bound delivery, a live
-/// producer AND a live tmux watcher: the supervisor keeps its producer alive with no
-/// watcher, so the producer alone (#6210, formerly pinned as `SessionBoundRelay`
-/// here) left the row with no deliverer.
+/// producer AND a live tmux watcher reading this output: the sink only hears that watcher,
+/// so a producer alone or a watcher on another file leaves the row with no deliverer.
 #[test]
 fn synthetic_relay_owner_gates_session_bound_on_live_producer() {
     use super::synthetic_start::tui_direct_synthetic_relay_owner;
     use ExternalInputRelayOwner::{BridgeAdapter, SessionBoundRelay, TmuxWatcher};
 
-    // (watcher_can_own, session_bound, live_producer, tmux_watcher_live) -> owner
+    // (watcher_can_own, session_bound, live_producer, watcher_covers_output) -> owner
     let table = [
         ((true, true, true, true), TmuxWatcher),
         ((true, true, false, true), TmuxWatcher),
         ((true, false, false, true), TmuxWatcher),
-        // Watcher alive on another output path: it still forwards to the sink.
+        // Watcher reads this output under another spelling: it forwards it to the sink.
         ((false, true, true, true), SessionBoundRelay),
-        // #6210: supervisor producer alive, watcher gone -> the bridge tail delivers.
+        // Producer alive but the watcher is gone or tails another file (a Codex TUI
+        // watcher on the relay jsonl) -> the bridge tail delivers.
         ((false, true, true, false), BridgeAdapter),
         ((false, true, false, true), BridgeAdapter),
         ((false, true, false, false), BridgeAdapter),
         ((false, false, true, true), BridgeAdapter),
         ((false, false, false, false), BridgeAdapter),
     ];
-    for ((own, bound, producer, watcher), expected) in table {
+    for ((own, bound, producer, covers), expected) in table {
         assert_eq!(
-            tui_direct_synthetic_relay_owner(own, bound, producer, watcher),
+            tui_direct_synthetic_relay_owner(own, bound, producer, covers),
             expected,
-            "owner for can_own={own} session_bound={bound} producer={producer} watcher={watcher}",
+            "owner for can_own={own} session_bound={bound} producer={producer} covers={covers}",
         );
     }
 }
@@ -6484,9 +6484,8 @@ mod relayerless_claim_tests {
         inflight::load_inflight_state(&ProviderKind::Claude, channel.get()).expect("claimed row")
     }
 
-    /// Race (a) and P2 1: the watcher dies between the owner decision and the durable save.
-    /// The `SessionBoundRelay` row is recovered by the pinned reclaim, the idle relay waits the
-    /// 300 s ownerless age (nothing sent while the row is fresh), then sends exactly once.
+    /// The watcher, on an alias of the transcript, dies between the owner decision and the save.
+    /// The pinned reclaim recovers the row; the idle relay waits the 300 s age, then sends once.
     #[tokio::test(flavor = "current_thread")]
     async fn watcher_lost_between_owner_decision_and_save_is_sent_once_after_the_age() {
         let root = tempfile::tempdir().expect("isolated inflight root");
@@ -6497,7 +6496,9 @@ mod relayerless_claim_tests {
         let mut harness = IdleRelayHarness::start(root.path(), channel.get(), tmux).await;
         let shared = harness.shared.clone();
         bind_transcript(tmux, &harness.transcript);
-        let watcher = live_watcher(tmux, "/tmp/adk-6210-race-a-other.jsonl");
+        let alias = root.path().join("race-a-alias.jsonl");
+        std::os::unix::fs::symlink(&harness.transcript, &alias).expect("transcript alias");
+        let watcher = live_watcher(tmux, alias.to_str().expect("utf8 path"));
         let cancel = watcher.cancel.clone();
         shared.tmux_watchers.insert(channel, watcher);
 
@@ -6608,3 +6609,6 @@ mod relayerless_claim_tests {
 
 #[cfg(unix)]
 mod fenced_admission_tests;
+
+#[cfg(unix)]
+mod codex_direct_owner_tests;

@@ -118,7 +118,8 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
             "#3358 synthetic inflight offset-authority handover: carried committed relay frontier forward"
         );
     }
-    // The supervisor keeps its producer alive without a watcher; the sink needs both.
+    // The supervisor keeps its producer alive without a watcher; the sink also needs a
+    // watcher reading this output (a Codex TUI watcher on the relay jsonl never sees the rollout).
     let live_producer_present =
         crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
             .get_live_producer(tmux_session_name)
@@ -131,10 +132,11 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
         ),
         session_bound_discord_delivery_enabled(),
         live_producer_present,
-        shared
-            .tmux_watchers
-            .tmux_session_live_for_relay(tmux_session_name)
-            == Some(true),
+        tui_direct_watcher_covers_output(
+            &shared.tmux_watchers,
+            tmux_session_name,
+            output_path.as_deref(),
+        ),
     );
     let relay_owner_kind = match relay_owner {
         ExternalInputRelayOwner::TmuxWatcher => RelayOwnerKind::Watcher,
@@ -164,6 +166,26 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
     })
     .await;
     (claim, source)
+}
+
+/// Whether the live tmux watcher reads `output_path` itself, path aliases included. The
+/// session-bound sink only hears what that watcher reads, so another file starves it.
+pub(in crate::services::discord::tui_prompt_relay) fn tui_direct_watcher_covers_output(
+    watchers: &super::super::super::TmuxWatcherRegistry,
+    tmux_session_name: &str,
+    output_path: Option<&Path>,
+) -> bool {
+    if watchers.tmux_session_live_for_relay(tmux_session_name) != Some(true) {
+        return false;
+    }
+    let Some(output_path) = output_path else {
+        return true;
+    };
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    watchers
+        .watcher_output_path(tmux_session_name)
+        .is_some_and(|watcher_path| canonical(Path::new(&watcher_path)) == canonical(output_path))
 }
 
 impl TuiDirectSyntheticTurnClaim {
