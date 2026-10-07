@@ -1236,8 +1236,9 @@ pub(in crate::services::discord) async fn handle_event(
             let more = !upload_records.is_empty()
                 || admitted_attachment_submission.is_some()
                 || resolved_voice_announcement.is_some();
-            let live =
-                busy_inject::LiveText::new(new_message, text, reply_context.as_deref(), more);
+            let reply = reply_context.as_deref();
+            let human = preserve_on_cancel;
+            let live = busy_inject::LiveText::new(new_message, text, reply, more, human);
             if busy_inject::offered(&ctx.http, &data.shared, &data.provider, &live).await {
                 return Ok(());
             }

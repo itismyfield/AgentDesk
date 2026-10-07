@@ -408,6 +408,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::stall_watchdog_cleanup_keeps_orphan_pending_token_without_measured_death
   services::discord::health::turn_deliver::inject_tests::a_channel_closed_to_legacy_input_takes_no_paste
   services::discord::health::turn_deliver::inject_tests::any_holder_takes_input_unless_a_claimed_input_has_not_reached_its_row
+  services::discord::health::turn_deliver::inject_tests::the_row_stamp_or_the_first_bound_pane_decides_whether_a_session_is_tui
   services::discord::health::turn_deliver::inject_tests::the_switch_opens_only_on_external_or_all
   services::discord::idle_recap_interaction::tests::claim_database_error_fails_closed_without_injection
   services::discord::idle_recap_interaction::tests::compact_uses_claimed_recap_target_and_native_prompt

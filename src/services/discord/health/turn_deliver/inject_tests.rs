@@ -498,17 +498,34 @@ async fn a_channel_closed_to_legacy_input_takes_no_paste() {
     assert_eq!((outcome, pane.tmux_calls()), (refused, 0));
 }
 
-/// Waits until a query on `sessions` queues behind the test's table lock.
-async fn lookup_parked(pool: &sqlx::PgPool) {
-    let parked = async {
-        while !sqlx::query_scalar::<_, bool>(
+/// Holds `sessions` so a host lookup parks until the returned transaction ends.
+async fn lock_sessions(pool: &sqlx::PgPool) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    lock
+}
+
+/// Whether a query on `sessions` waits behind the test's table lock.
+async fn lookup_waiting(pool: &sqlx::PgPool) -> bool {
+    let waiting = async {
+        sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() \
              AND wait_event_type = 'Lock' AND query ILIKE '%sessions%')",
         )
         .fetch_one(pool)
         .await
         .unwrap()
-        {
+    };
+    waiting.await
+}
+
+/// Waits until a query on `sessions` queues behind the test's table lock.
+async fn lookup_parked(pool: &sqlx::PgPool) {
+    let parked = async {
+        while !lookup_waiting(pool).await {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     };
@@ -530,11 +547,7 @@ async fn input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg
     let mut observed = Vec::new();
     for (index, ch) in channels.into_iter().enumerate() {
         let pane = InjectPane::new(ch, "all");
-        let mut lock = pool.begin().await.unwrap();
-        sqlx::query("LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE")
-            .execute(&mut *lock)
-            .await
-            .unwrap();
+        let lock = lock_sessions(&pool).await;
         let input = deliver(&registry, ch);
         tokio::pin!(input);
         tokio::select! {
@@ -571,6 +584,156 @@ async fn input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg
             "queued external_turn_active veto=queue_nonempty fenced=true parked_tmux=0 keys=0 [earlier input,status?]",
             "queued turn_active veto=input_in_flight fenced=true parked_tmux=0 keys=0 [status?]",
             "queued background_turn veto=holder_changed fenced=true parked_tmux=0 keys=0 [status?]",
+        ]
+    );
+}
+
+/// After the host lookup, a pane rebound to another transcript vetoes the paste, and input queued
+/// while the last name lookup waits still goes first: no await is left after the final reads.
+#[tokio::test(flavor = "current_thread")]
+async fn a_rebound_transcript_or_input_queued_during_the_last_lookups_vetoes_the_paste_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let channels = [6_245_511, 6_245_512];
+    let registry = HealthRegistry::new();
+    let shared = register_inject_runtime(&registry, &channels, Some(pool.clone())).await;
+    let mut observed = Vec::new();
+    for (index, ch) in channels.into_iter().enumerate() {
+        let pane = InjectPane::new(ch, "all");
+        let lock = lock_sessions(&pool).await;
+        let input = deliver(&registry, ch);
+        tokio::pin!(input);
+        tokio::select! {
+            outcome = &mut input => panic!("deliver finished before its host lookup: {outcome}"),
+            () = lookup_parked(&pool) => {}
+        }
+        let core = if index == 0 {
+            let mut binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+                &pane.session(),
+            )
+            .expect("pane binding");
+            binding.output_path = pane.path("replaced.jsonl").display().to_string();
+            let register = crate::services::tui_prompt_dedupe::register_tmux_runtime_binding;
+            register(&pane.session(), binding);
+            lock.rollback().await.unwrap();
+            None
+        } else {
+            let core = shared.core.lock().await;
+            lock.rollback().await.unwrap();
+            let past_lookup = async {
+                while lookup_waiting(&pool).await {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            };
+            tokio::select! {
+                outcome = &mut input => panic!("deliver finished past a held name lookup: {outcome}"),
+                () = past_lookup => {}
+            }
+            let enqueue = crate::services::discord::mailbox_enqueue_intervention;
+            let channel = ChannelId::new(ch);
+            let earlier = enqueue(&shared, &ProviderKind::Claude, channel, queued(ch + 10));
+            let earlier = tokio::time::timeout(std::time::Duration::from_secs(10), earlier);
+            assert!(earlier.await.expect("enqueue needs no core lock").enqueued);
+            Some(core)
+        };
+        drop(core);
+        let outcome = input.await;
+        let queue = queue_texts(&shared, ch).await.join(",");
+        observed.push(format!("{outcome} keys={} [{queue}]", pane.keys().len()));
+    }
+    assert_eq!(
+        observed,
+        [
+            "queued external_turn_active veto=session_unresolved keys=0 [status?]",
+            "queued external_turn_active veto=queue_nonempty keys=0 [earlier input,status?]",
+        ]
+    );
+}
+
+/// A row stamped with another runtime, or a first bound candidate of another runtime, keeps the
+/// session out of injection even when a later candidate names a Claude TUI pane.
+#[test]
+fn the_row_stamp_or_the_first_bound_pane_decides_whether_a_session_is_tui() {
+    let register = crate::services::tui_prompt_dedupe::register_tmux_runtime_binding;
+    let bind = |name: &str, kind: RuntimeHandoffKind| {
+        let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: kind,
+            output_path: format!("/tmp/{name}.jsonl"),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        };
+        register(name, binding);
+    };
+    let provider = ProviderKind::Claude;
+    let (headless, tui_name) = ("agentdesk-6245-p25-headless", "agentdesk-6245-p25");
+    let tui = provider.build_tmux_session_name(tui_name);
+    bind(headless, RuntimeHandoffKind::LegacyTmuxWrapper);
+    bind(&tui, RuntimeHandoffKind::ClaudeTui);
+    let row = |kind: Option<RuntimeHandoffKind>, session: Option<&str>| {
+        let mut row = InflightTurnState::new(
+            provider.clone(),
+            6_245_521,
+            None,
+            0,
+            0,
+            0,
+            "typed".to_string(),
+            None,
+            session.map(str::to_string),
+            None,
+            None,
+            0,
+        );
+        row.runtime_kind = kind;
+        row
+    };
+    let legacy = Some(RuntimeHandoffKind::LegacyTmuxWrapper);
+    let cases = [
+        (
+            "headless row, own binding",
+            Some(row(legacy, Some(headless))),
+            None,
+        ),
+        (
+            "unstamped row, headless binding first",
+            Some(row(None, Some(headless))),
+            Some(tui_name),
+        ),
+        (
+            "headless row, tui by name",
+            Some(row(legacy, None)),
+            Some(tui_name),
+        ),
+        ("no row, tui by name", None, Some(tui_name)),
+        (
+            "tui row",
+            Some(row(Some(RuntimeHandoffKind::ClaudeTui), Some(&tui))),
+            None,
+        ),
+    ];
+    let observed: Vec<String> = cases
+        .iter()
+        .map(|(case, row, named)| {
+            let named = named.map(str::to_string);
+            let pane = inject::tui_session(&provider, row.as_ref(), None, named);
+            format!("{case}: {:?}", pane.map(|(session, _)| session == tui))
+        })
+        .collect();
+    let clear = crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding;
+    let _ = (clear(headless), clear(&tui));
+    assert_eq!(
+        observed,
+        [
+            "headless row, own binding: None",
+            "unstamped row, headless binding first: None",
+            "headless row, tui by name: None",
+            "no row, tui by name: Some(true)",
+            "tui row: Some(true)",
         ]
     );
 }

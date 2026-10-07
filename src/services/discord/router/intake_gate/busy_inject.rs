@@ -23,7 +23,9 @@ pub(super) struct LiveText<'a> {
     pub(super) channel_id: ChannelId,
     pub(super) message_id: MessageId,
     pub(super) author_id: UserId,
-    pub(super) author_is_bot: bool,
+    /// Intake's own reading of the sender as a person: not a bot, an allowed bot or a utility bot,
+    /// and a utility identity that could not be read counts as not a person.
+    pub(super) human: bool,
     pub(super) text: &'a str,
     pub(super) reply_context: Option<&'a str>,
     /// Attachments, uploads or a voice transcript ride with the text.
@@ -37,12 +39,13 @@ impl<'a> LiveText<'a> {
         text: &'a str,
         reply_context: Option<&'a str>,
         more: bool,
+        human: bool,
     ) -> Self {
         Self {
             channel_id: message.channel_id,
             message_id: message.id,
             author_id: message.author.id,
-            author_is_bot: message.author.bot,
+            human,
             text,
             reply_context,
             carries_more_than_text: more || !message.attachments.is_empty(),
@@ -53,7 +56,7 @@ impl<'a> LiveText<'a> {
 /// Only plain text a person typed, outside startup recovery and restart drain, is offered.
 fn offerable(live: &LiveText<'_>, shared: &SharedData) -> bool {
     let restart = &shared.restart;
-    !live.author_is_bot
+    live.human
         && !live.carries_more_than_text
         && !live.text.trim().is_empty()
         && !NOT_TYPED.iter().any(|prefix| live.text.starts_with(prefix))
@@ -101,7 +104,8 @@ pub(super) async fn offered(
             return false;
         }
     };
-    // A restart's catch-up must not replay a message the pane already holds.
+    // The live checkpoint moves past the message as for any handled one; a catch-up scan already
+    // reading from an older cursor is not stopped by it.
     let advance = crate::services::discord::advance_last_message_checkpoint;
     advance(shared, provider, live.channel_id, live.message_id);
     let target = TurnViewTarget::intake_user_message(live.channel_id, live.message_id);
@@ -140,7 +144,8 @@ thread_local! {
 mod tests {
     use super::*;
     use crate::services::discord::health::{
-        HealthRegistry, InjectPane, queue_texts, register_inject_runtime,
+        HealthRegistry, InjectPane, UtilityBotUserIdResolution, queue_texts,
+        register_inject_runtime,
     };
     use crate::services::provider::CancelToken;
     use crate::services::turn_orchestrator::ActiveTurnKind;
@@ -150,22 +155,30 @@ mod tests {
             channel_id: ChannelId::new(channel),
             message_id: MessageId::new(channel + 50),
             author_id: UserId::new(200),
-            author_is_bot: false,
+            human: true,
             text,
             reply_context: None,
             carries_more_than_text: false,
         }
     }
 
-    /// Typed text goes into a busy pane whoever holds it and stops intake, with the reply context
-    /// in front; bot, upload and command text, the switch off and a vetoed pane keep intake.
+    /// Intake's reading of a sender as a person, as it computes `preserve_on_cancel`.
+    fn person(author: u64, bot: bool, announce: UtilityBotUserIdResolution) -> bool {
+        let notify = UtilityBotUserIdResolution::Unconfigured;
+        let excluded = super::super::gate::live_sender_excluded_from_human_preservation;
+        !bot && !excluded(&[], author, announce, notify)
+    }
+
+    /// Typed text goes into a busy pane whoever holds it, reply context first; non-person senders,
+    /// uploads, commands, switch off and a vetoed pane keep intake and leave pane and checkpoint.
     #[tokio::test(flavor = "current_thread")]
     async fn typed_text_goes_into_a_busy_pane_and_anything_else_keeps_intake_pg() {
         let _root = crate::config::TestRuntimeRootGuard::new();
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let channels = [
-            6_245_901, 6_245_902, 6_245_903, 6_245_904, 6_245_905, 6_245_906, 6_245_907,
+            6_245_901, 6_245_902, 6_245_903, 6_245_904, 6_245_905, 6_245_906, 6_245_907, 6_245_908,
+            6_245_909,
         ];
         let registry = HealthRegistry::new();
         let shared = register_inject_runtime(&registry, &channels, Some(pool)).await;
@@ -192,7 +205,10 @@ mod tests {
         panes[5].set("fail_paste", "");
         let mut inputs = channels.map(|ch| typed(ch, "status?"));
         inputs[0].reply_context = Some("> earlier answer");
-        inputs[1].author_is_bot = true;
+        let resolved = UtilityBotUserIdResolution::Resolved;
+        inputs[1].human = person(200, true, UtilityBotUserIdResolution::Unconfigured);
+        inputs[7].human = person(200, false, resolved(200));
+        inputs[8].human = person(200, false, UtilityBotUserIdResolution::Unavailable);
         inputs[2].carries_more_than_text = true;
         inputs[3].text = "!stop";
         let http = Arc::new(serenity::Http::new(""));
@@ -225,15 +241,18 @@ mod tests {
                 "5 taken=false advanced=false queue=0 notice=false tmux=true keys=",
                 "6 taken=true advanced=true queue=0 notice=true tmux=true keys=",
                 "7 taken=false advanced=false queue=0 notice=false tmux=false keys=",
+                "8 taken=false advanced=false queue=0 notice=false tmux=false keys=",
+                "9 taken=false advanced=false queue=0 notice=false tmux=false keys=",
             ]
         );
     }
 
-    /// Intake offers typed text before it queues behind a held channel; no runtime harness reaches
-    /// the gateway handler, so the order is read from its source.
+    /// Intake offers typed text, with its own reading of the sender, before it queues behind a held
+    /// channel; no runtime harness reaches the gateway handler, so this is read from its source.
     #[test]
     fn intake_offers_typed_text_before_its_busy_queue() {
         let source = include_str!("../intake_gate.rs");
+        assert!(source.contains("let human = preserve_on_cancel;"));
         let offer = source
             .find("busy_inject::offered(")
             .expect("intake offers typed text");

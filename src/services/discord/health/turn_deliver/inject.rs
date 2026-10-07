@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use poise::serenity_prelude::MessageId;
+use poise::serenity_prelude::{ChannelId, MessageId};
 
 use super::HumanInputRequest;
 use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -156,37 +156,48 @@ async fn observe(
     (snapshot, row)
 }
 
-/// The channel's Claude TUI pane and its transcript: its watcher's session, then the durable row's,
-/// then the one its channel name builds. Any other session is not a TUI one.
-async fn tui_session(
+/// The channel's name, the one input to its pane that needs a lock.
+async fn channel_name(shared: &SharedData, channel: ChannelId) -> Option<String> {
+    let data = shared.core.lock().await;
+    let session = data.sessions.get(&channel);
+    session.and_then(|session| session.channel_name.clone())
+}
+
+/// The channel's Claude TUI pane and transcript. A row stamped with another runtime, or a first
+/// bound candidate (watcher, row, channel name) of another runtime, means the session is not TUI.
+pub(super) fn tui_session(
+    provider: &ProviderKind,
+    row: Option<&InflightTurnState>,
+    watcher: Option<String>,
+    named: Option<String>,
+) -> Option<(String, PathBuf)> {
+    let kind = row.and_then(|row| row.runtime_kind);
+    if kind.is_some_and(|kind| kind != RuntimeHandoffKind::ClaudeTui) {
+        return None;
+    }
+    let candidates = [
+        watcher,
+        row.and_then(|row| row.tmux_session_name.clone()),
+        named.map(|name| provider.build_tmux_session_name(&name)),
+    ];
+    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session;
+    let (session, binding) = candidates
+        .into_iter()
+        .flatten()
+        .find_map(|session| binding(&session).map(|binding| (session, binding)))?;
+    (binding.runtime_kind == RuntimeHandoffKind::ClaudeTui)
+        .then(|| (session, PathBuf::from(binding.relay_output_path())))
+}
+
+fn live_tui_session(
     shared: &SharedData,
     request: &HumanInputRequest,
     row: Option<&InflightTurnState>,
+    named: Option<String>,
 ) -> Option<(String, PathBuf)> {
-    let channel = request.channel_id;
-    let named = {
-        let data = shared.core.lock().await;
-        let session = data.sessions.get(&channel);
-        session.and_then(|session| session.channel_name.clone())
-    };
-    let candidates = [
-        shared
-            .tmux_watchers
-            .channel_binding(&channel)
-            .map(|binding| binding.tmux_session_name),
-        row.and_then(|row| row.tmux_session_name.clone()),
-        named.map(|name| request.provider.build_tmux_session_name(&name)),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .filter(|name| !name.trim().is_empty())
-        .find_map(|session| {
-            let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session;
-            let binding = binding(&session)
-                .filter(|binding| binding.runtime_kind == RuntimeHandoffKind::ClaudeTui)?;
-            Some((session, PathBuf::from(binding.relay_output_path())))
-        })
+    let watcher = shared.tmux_watchers.channel_binding(&request.channel_id);
+    let watcher = watcher.map(|binding| binding.tmux_session_name);
+    tui_session(&request.provider, row, watcher, named)
 }
 
 /// Every veto that needs no pane call, in the documented order.
@@ -198,12 +209,11 @@ async fn resolve(
     if request.provider != ProviderKind::Claude {
         return Err("provider_unsupported");
     }
-    // Headless sessions stop here, before any lock.
+    // A session that resolves to no Claude TUI pane stops here, before any lock.
     let read = crate::services::discord::inflight::load_inflight_state_read_only;
     let row = read(&request.provider, channel);
-    let (session, transcript) = tui_session(shared, request, row.as_ref())
-        .await
-        .ok_or(SESSION_UNRESOLVED)?;
+    let named = channel_name(shared, request.channel_id).await;
+    let pane = live_tui_session(shared, request, row.as_ref(), named).ok_or(SESSION_UNRESOLVED)?;
     let input = match fence::lookup(&request.provider, channel) {
         Some(gate) => Some(gate.admit().map_err(|_| INPUT_RUNTIME_OWNED)?),
         None => None,
@@ -218,19 +228,21 @@ async fn resolve(
     let first = holder(&snapshot, row.as_ref(), channel)?;
     backlog(&snapshot)?;
     let deferred = crate::services::discord::host_defer_gate::channel_session_deferred;
-    if deferred(shared, &request.provider, channel, &session).await {
+    if deferred(shared, &request.provider, channel, &pane.0).await {
         return Err(SESSION_UNRESOLVED);
     }
-    // Paths that skip the transition may have queued or claimed while the lookup awaited.
+    // Paths that skip the transition may have queued or claimed while the lookups awaited; the
+    // mailbox read below is the last await before the paste.
+    let named = channel_name(shared, request.channel_id).await;
     let (snapshot, row) = observe(shared, request).await;
     if holder(&snapshot, row.as_ref(), channel)? != first {
         return Err(HOLDER_CHANGED);
     }
     backlog(&snapshot)?;
-    let now = tui_session(shared, request, row.as_ref()).await;
-    if now.map(|(name, _)| name).as_deref() != Some(session.as_str()) {
+    if live_tui_session(shared, request, row.as_ref(), named).as_ref() != Some(&pane) {
         return Err(SESSION_UNRESOLVED);
     }
+    let (session, transcript) = pane;
     Ok(Target {
         session,
         transcript,
