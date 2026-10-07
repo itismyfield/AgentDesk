@@ -233,7 +233,7 @@ mod tests;
 
 pub(in crate::services::discord) const INPUT_PENDING_NOTICE: &str =
     "보류됨 — 입력 전환이 끝나면 자동 접수됩니다(5분 이내 원본). 다시 보내지 않아도 됩니다.";
-async fn input_refusal_notice(
+pub(in crate::services::discord) async fn input_refusal_notice(
     shared: &SharedData,
     channel: ChannelId,
     sources: &[u64],

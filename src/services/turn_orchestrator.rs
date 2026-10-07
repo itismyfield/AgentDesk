@@ -21,6 +21,7 @@ mod episode_identity;
 mod front_requeue;
 mod inbound_order;
 mod incarnation;
+mod injected_inputs;
 #[allow(dead_code)]
 pub(crate) mod input_fence;
 #[allow(dead_code)]
@@ -69,6 +70,9 @@ use front_requeue::requeue_intervention_front;
 use inbound_order::INBOUND_ORDER_FAIL_OPEN_AFTER;
 pub(crate) use inbound_order::TurnAdmissionOrder;
 use inbound_order::{claim_yields, pause_inbound_stall_for_turn};
+pub(crate) use injected_inputs::{
+    ExpectedClaim, HANDBACK_NOT_WRITTEN, InjectionSettlement, ReserveOutcome,
+};
 pub(crate) use intervention::{Intervention, InterventionMode, SourceMessageTextSegment};
 use lease_release::release_active_turn_anchor;
 pub(crate) use overflow::SoftInterventionProbe;
@@ -1209,6 +1213,10 @@ impl ChannelMailboxRegistry {
         let mut queued_total = 0usize;
         let mut persistence_errors = Vec::new();
         for (channel_id, handle) in handles {
+            // A held input channel's queue is already durable and owned by its transition.
+            if input_fence::held(provider, channel_id.get()) {
+                continue;
+            }
             let persistence = QueuePersistenceContext::new(
                 provider,
                 token_hash,
@@ -1480,6 +1488,8 @@ enum ChannelMailboxMsg {
     CloseIfIdle {
         reply: oneshot::Sender<Result<(), &'static str>>,
     },
+    /// Busy-turn injection order; see `injected_inputs.rs`.
+    Injection(injected_inputs::InjectionMsg),
 }
 
 /// #3167 — priority class of the mailbox active-turn slot. Lets the external-input
@@ -1573,6 +1583,8 @@ struct ChannelMailboxState {
     recovery_started_at: Option<Instant>,
     /// #3297 r2 — purge tombstone set by `CloseIfIdle`; see `registry_purge.rs`.
     closed: bool,
+    /// A busy-turn injection's order reservation and its owner's lease; see `injected_inputs.rs`.
+    injection_reserved: Option<(Option<MessageId>, Arc<injected_inputs::InjectionLease>)>,
     /// #1031: see `ChannelMailboxSnapshot::turn_started_at`. Mirrors the
     /// `cancel_token.is_some()` lifetime so the idle-detector freshness
     /// anchor is always source-of-truth from the mailbox actor itself.
@@ -2151,6 +2163,10 @@ fn input_mailbox_step(
             reply,
         } => {
             state.last_persistence = Some(persistence.clone());
+            if injected_inputs::holds_order(&mut state) {
+                let _ = reply.send(injected_inputs::head_withheld(&state));
+                return state;
+            }
             let _ = clear_stale_pending_dispatch_reservation(&mut state, channel_id);
             if let Some(result) = reconcile_pending_dispatch_marker_before_take_next(
                 &mut state,
@@ -2740,6 +2756,7 @@ fn input_mailbox_step(
         ChannelMailboxMsg::CloseIfIdle { reply } => {
             let _ = reply.send(registry_purge::close_if_idle_verdict(&mut state));
         }
+        ChannelMailboxMsg::Injection(msg) => injected_inputs::step(&mut state, channel_id, msg),
     }
     state
 }
@@ -2784,6 +2801,35 @@ pub(crate) mod test_support {
         TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Fails the channel's next `count` queue saves.
+    pub(crate) fn fail_queue_saves(channel: super::ChannelId, count: usize) {
+        for _ in 0..count {
+            super::pending_queue_persistence::save_fault::fail_next(channel);
+        }
+    }
+
+    /// Queue-save faults not yet consumed; disarms them when `clear`.
+    pub(crate) fn queue_save_faults(channel: super::ChannelId, clear: bool) -> usize {
+        super::pending_queue_persistence::save_fault::armed(channel, clear)
+    }
+
+    static INJECTION_ABANDONS: std::sync::Mutex<Vec<super::ChannelId>> =
+        std::sync::Mutex::new(Vec::new());
+
+    pub(crate) fn note_injection_abandon(channel: super::ChannelId) {
+        let mut abandons = INJECTION_ABANDONS.lock().unwrap_or_else(|e| e.into_inner());
+        abandons.push(channel);
+    }
+
+    /// Injection reservations the channel abandoned after its handback attempts ran out.
+    pub(crate) fn injection_abandons(channel: super::ChannelId) -> usize {
+        let abandons = INJECTION_ABANDONS.lock().unwrap_or_else(|e| e.into_inner());
+        abandons
+            .iter()
+            .filter(|abandoned| **abandoned == channel)
+            .count()
     }
 }
 

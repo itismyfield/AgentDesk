@@ -44,7 +44,7 @@ impl Drop for PollFixture {
     }
 }
 
-async fn wake_fixture(channel: u64, during_poll: bool, abort: bool) {
+async fn wake_fixture(channel: u64, during_poll: bool, abort: bool, run_transport: bool) {
     let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
     let _health = super::super::test_health::Clear::new(&gate);
     let ready = Arc::new(AtomicBool::new(false));
@@ -53,17 +53,22 @@ async fn wake_fixture(channel: u64, during_poll: bool, abort: bool) {
     let release = during_poll.then(|| Arc::new(std::sync::Barrier::new(2)));
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (cleanup_tx, cleanup_rx) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(detached(
-        Some(gate.admit().unwrap()),
-        PollFixture {
-            ready: ready.clone(),
-            active: active.clone(),
-            waker: waker.clone(),
-            entered: Some(entered_tx),
-            release: release.clone(),
-            cleanup: Some(cleanup_tx),
-        },
-    ));
+    let fixture = PollFixture {
+        ready: ready.clone(),
+        active: active.clone(),
+        waker: waker.clone(),
+        entered: Some(entered_tx),
+        release: release.clone(),
+        cleanup: Some(cleanup_tx),
+    };
+    let permit = Some(gate.admit().unwrap());
+    let task = tokio::spawn(async move {
+        if run_transport {
+            run(permit, fixture).await;
+        } else {
+            detached(permit, fixture).await;
+        }
+    });
     entered_rx.await.unwrap();
     let closing = gate.close().unwrap();
     let drain = closing.drain();
@@ -117,7 +122,7 @@ async fn c1_outer_abort_before_first_poll_disposes_capture_on_worker() {
 
 #[tokio::test]
 async fn c1_worker_wake_before_pending_is_not_lost() {
-    wake_fixture(6_325_408, true, false).await;
+    wake_fixture(6_325_408, true, false, false).await;
 }
 
 #[test]
@@ -127,12 +132,50 @@ fn c1_worker_wake_after_pending_returns_pool_thread() {
         .max_blocking_threads(1)
         .build()
         .unwrap()
-        .block_on(wake_fixture(6_325_409, false, false));
+        .block_on(wake_fixture(6_325_409, false, false, false));
 }
 
 #[tokio::test]
 async fn c1_worker_wake_and_outer_abort_cleanup_after_inflight_poll() {
-    wake_fixture(6_325_410, true, true).await;
+    wake_fixture(6_325_410, true, true, false).await;
+}
+
+#[tokio::test]
+async fn c1b_run_cancel_before_first_poll_disposes_capture_on_worker() {
+    let gate = Gate::protect(ProviderKind::Claude, 6_325_516).unwrap();
+    let _health = super::super::test_health::Clear::new(&gate);
+    let (cleanup_tx, cleanup_rx) = tokio::sync::oneshot::channel();
+    let fixture = PollFixture {
+        ready: Arc::new(AtomicBool::new(false)),
+        active: Arc::new(AtomicUsize::new(0)),
+        waker: Arc::new(std::sync::Mutex::new(None)),
+        entered: None,
+        release: None,
+        cleanup: Some(cleanup_tx),
+    };
+    let future = run(Some(gate.admit().unwrap()), fixture);
+    let closing = gate.close().unwrap();
+    let drain = closing.drain();
+    tokio::pin!(drain);
+    assert!(futures::poll!(drain.as_mut()).is_pending());
+    drop(future);
+    cleanup_rx.await.unwrap();
+    drain.await;
+}
+
+#[tokio::test]
+async fn c1b_run_cancel_during_poll_holds_effect_until_worker_cleanup() {
+    wake_fixture(6_325_517, true, true, true).await;
+}
+
+#[test]
+fn c1b_run_cancel_pending_returns_pool_thread_and_cleans_on_worker() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap()
+        .block_on(wake_fixture(6_325_518, false, true, true));
 }
 
 #[tokio::test]
@@ -171,25 +214,36 @@ async fn c1_detached_worker_holds_effect_until_cleanup_after_caller_returns() {
 }
 
 #[tokio::test]
-async fn c1_scope_rejects_cross_channel_and_cross_provider_without_new_admission() {
-    let gate = Gate::protect(ProviderKind::Codex, 6_325_453).unwrap();
-    let _health = super::super::test_health::Clear::new(&gate);
-    scope(Some(gate.admit().unwrap()), async {
-        let closing = gate.close().unwrap();
-        assert!(admit(&ProviderKind::Codex, 6_325_453).unwrap().is_some());
+async fn c1b_detached_cross_channel_uses_root_admission_without_lending_capability() {
+    let source = Gate::protect(ProviderKind::Codex, 6_325_453).unwrap();
+    let destination = Gate::protect(ProviderKind::Codex, 6_325_454).unwrap();
+    let _source_health = super::super::test_health::Clear::new(&source);
+    let _destination_health = super::super::test_health::Clear::new(&destination);
+    let permit = source.admit().unwrap();
+    let source_closing = source.close().unwrap();
+    let destination_closing = destination.close().unwrap();
+    tokio::spawn(detached(Some(permit), async move {
+        assert_eq!(super::super::require_worker(), Ok(()));
+        let inherited = admit(&ProviderKind::Codex, 6_325_453).unwrap().unwrap();
+        inherited.validate(&ProviderKind::Codex, 6_325_453).unwrap();
         assert!(matches!(
-            admit(&ProviderKind::Claude, 6_325_453),
+            inherited.validate(&ProviderKind::Codex, 6_325_403),
             Err(Failure::StalePermit)
         ));
+        assert!(admit(&ProviderKind::Codex, 6_325_403).unwrap().is_none());
+        assert!(admit(&ProviderKind::Claude, 6_325_453).unwrap().is_none());
         assert!(matches!(
-            admit(&ProviderKind::Codex, 6_325_403),
-            Err(Failure::StalePermit)
+            admit(&ProviderKind::Codex, 6_325_454),
+            Err(Failure::Mode(Mode::Closing))
         ));
-        let drain = closing.drain();
+        let drain = source_closing.drain();
         tokio::pin!(drain);
         assert!(futures::poll!(drain.as_mut()).is_pending());
-    })
-    .await;
+        drop(inherited);
+    }))
+    .await
+    .unwrap();
+    destination_closing.drain().await;
 }
 
 #[test]
@@ -413,4 +467,118 @@ async fn c1_io_worker_preserves_original_panic_payload() {
         .await
         .unwrap_err();
     assert_eq!(panic.downcast_ref::<u64>(), Some(&6325464));
+}
+
+struct IdentityDrop {
+    channel: Option<u64>,
+    dropped: Arc<AtomicBool>,
+}
+impl Future for IdentityDrop {
+    type Output = ();
+    fn poll(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        match self.channel {
+            Some(channel) => assert!(current().unwrap().names(&ProviderKind::Codex, channel)),
+            None => assert!(current().is_none()),
+        }
+        std::task::Poll::Pending
+    }
+}
+impl Drop for IdentityDrop {
+    fn drop(&mut self) {
+        match self.channel {
+            Some(channel) => assert!(current().unwrap().names(&ProviderKind::Codex, channel)),
+            None => assert!(current().is_none()),
+        }
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn c1b_nested_identity_scope_restores_worker_on_poll_and_cancel() {
+    let source = Gate::protect(ProviderKind::Codex, 6_325_455).unwrap();
+    let destination = Gate::protect(ProviderKind::Codex, 6_325_456).unwrap();
+    let _source_health = super::super::test_health::Clear::new(&source);
+    let _destination_health = super::super::test_health::Clear::new(&destination);
+    let permit = source.admit().unwrap();
+    let source_closing = source.close().unwrap();
+    detached(Some(permit), async move {
+        for channel in [None, Some(6_325_456)] {
+            let permit =
+                channel.map(|channel| admit(&ProviderKind::Codex, channel).unwrap().unwrap());
+            let dropped = Arc::new(AtomicBool::new(false));
+            let mut future = Box::pin(scope(
+                permit,
+                IdentityDrop {
+                    channel,
+                    dropped: dropped.clone(),
+                },
+            ));
+            assert!(futures::poll!(future.as_mut()).is_pending());
+            assert!(current().unwrap().names(&ProviderKind::Codex, 6_325_455));
+            drop(future);
+            assert!(dropped.load(Ordering::SeqCst));
+            assert!(current().unwrap().names(&ProviderKind::Codex, 6_325_455));
+        }
+        scope(None, async {
+            assert!(current().is_none());
+            run(None, async {
+                assert!(current().is_none());
+                17
+            })
+            .await
+        })
+        .await;
+        assert!(current().unwrap().names(&ProviderKind::Codex, 6_325_455));
+    })
+    .await;
+    source_closing.drain().await;
+    destination.close().unwrap().drain().await;
+}
+
+#[tokio::test]
+async fn c1b_same_identity_stale_epoch_is_not_replaced_by_root_admission() {
+    let gate = Gate::protect(ProviderKind::Codex, 6_325_536).unwrap();
+    let _health = super::super::test_health::Clear::new(&gate);
+    let permit = gate.admit().unwrap();
+    gate.state.lock().unwrap().epoch += 1;
+    scope(Some(permit), async {
+        assert!(matches!(
+            admit(&ProviderKind::Codex, 6_325_536),
+            Err(Failure::StalePermit)
+        ));
+        assert_eq!(gate.state.lock().unwrap().effects, 1);
+    })
+    .await;
+    gate.close().unwrap().drain().await;
+}
+
+#[tokio::test]
+async fn c1b_off_root_run_does_not_create_registration_or_worker_transport() {
+    assert!(current().is_none());
+    assert!(super::super::lookup(&ProviderKind::Codex, 6_325_537).is_none());
+    let permit = admit(&ProviderKind::Codex, 6_325_537).unwrap();
+    assert!(permit.is_none());
+    assert_eq!(
+        run(permit, async {
+            assert!(current().is_none());
+            assert!(super::super::require_worker().is_err());
+            17
+        })
+        .await,
+        17
+    );
+    assert!(super::super::lookup(&ProviderKind::Codex, 6_325_537).is_none());
+}
+
+#[tokio::test]
+async fn c1b_explicit_empty_worker_scope_masks_task_capability() {
+    let gate = Gate::protect(ProviderKind::Codex, 6_325_457).unwrap();
+    let _health = super::super::test_health::Clear::new(&gate);
+    TASK.scope(Some(gate.admit().unwrap()), async {
+        synchronous(None, || assert!(current().is_none()));
+        assert!(current().unwrap().names(&ProviderKind::Codex, 6_325_457));
+    })
+    .await;
+    assert!(current().is_none());
+    gate.close().unwrap().drain().await;
 }

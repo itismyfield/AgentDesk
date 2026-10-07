@@ -38,6 +38,7 @@ pub(crate) use herdr::contract::ServerWitness;
 #[cfg(unix)]
 pub(crate) use herdr_clear_adapter::{
     ClearSession, HerdrClear, HerdrClearPlan, HerdrClearRefusal, plan_clear,
+    recovery_composer_empty,
 };
 // The unix Herdr turn executor, behind its off-by-default switch, builds targets here.
 #[cfg_attr(not(test), allow(unused_imports))]

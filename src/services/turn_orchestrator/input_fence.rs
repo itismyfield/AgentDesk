@@ -114,6 +114,10 @@ pub(super) fn freeze(
         closing: closing.clone(),
     })
 }
+/// Protected and not LegacyOpen: restart drains and markers leave the channel as it is.
+pub(crate) fn held(provider: &ProviderKind, channel: u64) -> bool {
+    fence::lookup(provider, channel).is_some_and(|gate| gate.mode() != fence::Mode::LegacyOpen)
+}
 pub(super) struct StepGuard {
     _population: Option<fence::PopulationScope>,
     _effect: Option<fence::effect::WorkerScope>,
@@ -138,6 +142,7 @@ fn persistence(msg: &ChannelMailboxMsg) -> Option<&QueuePersistenceContext> {
         | M::MergeRestoredQueueItems { persistence, .. }
         | M::MergeRestoredDispatchMarker { persistence, .. }
         | M::RestartDrain { persistence, .. } => Some(persistence),
+        M::Injection(injection) => injection.persistence(),
         #[cfg(test)]
         M::ReplaceQueue { persistence, .. } => Some(persistence),
         _ => None,
@@ -183,6 +188,7 @@ pub(super) fn enter(
         M::Enqueue { input_permit, .. } | M::RequeueFront { input_permit, .. } => {
             input_permit.take()
         }
+        M::Injection(injection) => injection.take_permit(),
         _ => None,
     }
     .or_else(fence::effect::current);
@@ -312,6 +318,9 @@ pub(super) fn refuse(state: &ChannelMailboxState, msg: ChannelMailboxMsg, failur
         }
         M::CloseIfIdle { reply } => {
             let _ = reply.send(Err("input-mode-fenced"));
+        }
+        M::Injection(injection) => {
+            injection.refuse(format!("input fence: {failure:?}"));
         }
         M::PurgeQueue { reply, .. } => {
             let _ = reply.send(PurgeQueueResult {

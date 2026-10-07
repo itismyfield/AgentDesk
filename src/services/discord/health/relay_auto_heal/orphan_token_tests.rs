@@ -232,3 +232,77 @@ async fn retired_channel_orphan_token_is_not_cleaned_or_graded() {
         "the Legacy orphan is still graded"
     );
 }
+
+static SNAPSHOT_BARRIERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<ChannelId, Arc<tokio::sync::Barrier>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+pub(super) async fn snapshot_barrier(channel: ChannelId) {
+    let barrier = SNAPSHOT_BARRIERS.lock().unwrap().get(&channel).cloned();
+    if let Some(barrier) = barrier {
+        barrier.wait().await;
+        barrier.wait().await;
+    }
+}
+
+struct SnapshotBarrier(ChannelId, Arc<tokio::sync::Barrier>);
+
+impl SnapshotBarrier {
+    fn new(channel: ChannelId) -> Self {
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        SNAPSHOT_BARRIERS
+            .lock()
+            .unwrap()
+            .insert(channel, barrier.clone());
+        Self(channel, barrier)
+    }
+}
+
+impl Drop for SnapshotBarrier {
+    fn drop(&mut self) {
+        SNAPSHOT_BARRIERS.lock().unwrap().remove(&self.0);
+    }
+}
+
+#[tokio::test]
+async fn retirement_during_orphan_snapshot_prevents_auto_apply_and_grading() {
+    use crate::services::discord::health::legacy_supervision::RetiredForTest;
+    use crate::services::discord::relay_recovery::RelayRecoveryApplySource;
+
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (offset, retire) in [false, true].into_iter().enumerate() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(6_325_420_100 + offset as u64);
+        let anchor = MessageId::new(channel.get() + 10);
+        let (registry, shared, token) =
+            seed_orphan_with_queue(&provider, channel, anchor, None).await;
+        let barrier = SnapshotBarrier::new(channel);
+        let mut retired = None;
+        let apply = super::apply_orphan_pending_token_cleanup(
+            &registry,
+            &provider,
+            shared.clone(),
+            channel,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        );
+        let during_snapshot = async {
+            barrier.1.wait().await;
+            if retire {
+                retired = Some(RetiredForTest::new(provider.as_str(), channel.get()));
+            }
+            barrier.1.wait().await;
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(apply, during_snapshot)
+        })
+        .await
+        .expect("snapshot barrier must complete");
+        assert!(!result.expect("cleanup result"));
+        assert_anchor_and_queue_kept(&shared, channel, anchor, &token).await;
+        assert_eq!(
+            i20_refusals(channel).len(),
+            usize::from(!retire),
+            "the auto-apply consumer grades an unwitnessed orphan only while Legacy"
+        );
+    }
+}

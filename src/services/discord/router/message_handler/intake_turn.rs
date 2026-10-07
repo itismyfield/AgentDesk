@@ -19,10 +19,100 @@ mod stale_dispatch_guard;
 mod voice_intake;
 mod worker_entry;
 
+#[cfg(all(test, unix))]
+mod native_fresh_prompt_tests;
+
 pub(crate) use worker_entry::{IntakeRequest, execute_intake_turn_core};
 
 mod context;
 pub(in crate::services::discord) use context::IntakeDeps;
+
+#[cfg(test)]
+mod input_effect_tests {
+    use super::*;
+    use crate::services::discord::input_runtime::fence::{self, Gate};
+    use futures::FutureExt;
+
+    #[test]
+    fn c1b_off_role_override_keeps_runtime_transition_on_original_provider() {
+        let source = include_str!("intake_turn.rs");
+        let handler_marker = ["\npub(super) async fn handle_", "text_message("].concat();
+        let body = source.split_once(handler_marker.as_str()).unwrap().1;
+        let start = body
+            .find(
+                "    let Some((channel_id, bootstrapped_fresh_thread_session, redirected_permit))",
+            )
+            .unwrap();
+        let end = body[start..]
+            .find("    let (mut session_id, mut memento_context_loaded")
+            .unwrap()
+            + start;
+        let transition = &body[start..end];
+        assert!(
+            !transition.contains("let provider ="),
+            "role override must not shadow the original native-clear provider"
+        );
+        assert!(
+            transition.contains("final_admission(&final_provider, channel_id, redirected_permit)")
+        );
+        assert!(
+            transition.contains("(http, shared, token, &provider)"),
+            "runtime transition and native-clear admission retain settings.provider"
+        );
+        let runtime = include_str!("intake_turn/runtime_transition.rs");
+        assert!(runtime.contains("&mut t.recovered_fresh"));
+    }
+
+    #[tokio::test]
+    async fn c1b_worker_core_refuses_closing_before_settings_or_voice_consumption() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(6_325_601);
+        let gate = Gate::protect(shared.provider.clone(), channel.get()).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        let closing = gate.close().unwrap();
+        let message = MessageId::new(6_325_502);
+        let announcement: crate::voice::prompt::VoiceTranscriptAnnouncement =
+            serde_json::from_value(serde_json::json!({
+                "transcript": "retained input", "user_id": "7", "utterance_id": "c1b-retained",
+                "language": "ko", "verbose_progress": false, "started_at": null,
+                "completed_at": null, "samples_written": null
+            }))
+            .unwrap();
+        crate::voice::announce_meta::global_store().insert(message, announcement.clone());
+        let settings = shared.settings.write().await;
+        let http = Arc::new(serenity::http::Http::new("Bot input-test-no-network"));
+        let request = IntakeRequest {
+            intake_outbox_id: None,
+            channel_id: channel,
+            user_msg_id: MessageId::new(6_325_502),
+            source_message_ids: Vec::new(),
+            busy_followup_retry_user_msg_id: MessageId::new(6_325_502),
+            request_owner: UserId::new(7),
+            request_owner_name: "test".into(),
+            user_text: "input".into(),
+            reply_to_user_message: false,
+            defer_watcher_resume: false,
+            wait_for_completion: false,
+            merge_consecutive: false,
+            reply_context: None,
+            has_reply_boundary: false,
+            dm_hint: Some(false),
+            turn_kind: TurnKind::Foreground,
+            preserve_on_cancel: false,
+        };
+        let result = execute_intake_turn_core(&http, &shared, "test", request, Vec::new())
+            .now_or_never()
+            .expect("refusal cannot wait on settings or network");
+        assert!(result.unwrap_err().to_string().contains("Closing"));
+        assert!(shared.core.lock().await.sessions.get(&channel).is_none());
+        assert_eq!(
+            crate::voice::announce_meta::global_store().take(message),
+            Some(announcement)
+        );
+        drop(settings);
+        closing.drain().await;
+    }
+}
 
 #[cfg(test)]
 mod intake_outbox_state_builder_tests {
@@ -158,8 +248,57 @@ mod intake_outbox_state_builder_tests {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_text_message(
+    deps: &IntakeDeps<'_>,
+    preserve_on_cancel: bool,
+    request: IntakeRequest,
+    _queued_drain: bool,
+    preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+    gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+) -> Result<(), Error> {
+    use crate::services::discord::input_runtime::fence::effect;
+    let permit = effect::admit(&deps.shared.provider, request.channel_id.get())
+        .map_err(|failure| format!("input admission refused: {failure:?}"))?;
+    if permit.is_none() && effect::current().is_none() {
+        return Box::pin(handle_text_message_admitted(
+            deps,
+            preserve_on_cancel,
+            request,
+            _queued_drain,
+            preloaded_uploads,
+            gate_resolved_voice_announcement,
+        ))
+        .await;
+    }
+    let (http, cache, ctx, shared, token) = (
+        deps.http.clone(),
+        deps.cache.cloned(),
+        deps.ctx_for_chained_dispatch.cloned(),
+        deps.shared.clone(),
+        deps.token.to_owned(),
+    );
+    effect::run(permit, async move {
+        Box::pin(handle_text_message_admitted(
+            &IntakeDeps {
+                http: &http,
+                cache: cache.as_ref(),
+                ctx_for_chained_dispatch: ctx.as_ref(),
+                shared: &shared,
+                token: &token,
+            },
+            preserve_on_cancel,
+            request,
+            _queued_drain,
+            preloaded_uploads,
+            gate_resolved_voice_announcement,
+        ))
+        .await
+    })
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_text_message_admitted(
     deps: &IntakeDeps<'_>,
     preserve_on_cancel: bool,
     request: IntakeRequest,
@@ -742,183 +881,52 @@ pub(super) async fn handle_text_message(
     }
     let dispatch_uses_thread_routing =
         crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type_str.as_deref());
-    let mut bootstrapped_fresh_thread_session = false;
-    let channel_id = if let Some(ref did) = dispatch_id_for_thread {
-        if !dispatch_uses_thread_routing {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 📢 Dispatch {did} uses primary-channel routing, skipping thread creation"
-            );
-            channel_id
-        } else {
-            // Use cached dispatch metadata for thread reuse and cross-channel role override
-            let dispatch_info = &dispatch_info_cached;
-            let is_counter_model_dispatch =
-                crate::services::dispatches::outbox_route::use_counter_model_channel(
-                    dispatch_type_str.as_deref(),
-                );
-            let alt_channel_id = dispatch_info
-                .as_ref()
-                .and_then(|i| i.discord_channel_alt.as_deref())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(ChannelId::new);
-
-            if is_already_thread {
-                // Ensure thread is accessible (unarchive if needed) before proceeding
-                if !super::super::verify_thread_accessible(http, channel_id).await {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] ⚠ Dispatch {did} thread {channel_id} is not accessible (archived/locked), skipping"
-                    );
-                    return Ok(());
-                }
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 🧵 Dispatch {did} arrived in existing thread, skipping thread creation"
-                );
-                // For review dispatches in reused threads, set role override
-                // so this turn uses the counter-model channel's role/model.
-                if is_counter_model_dispatch {
-                    if let Some(alt_ch) = alt_channel_id {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] 🔄 Review dispatch in reused thread: overriding role to alt channel {}",
-                            alt_ch
-                        );
-                        shared.dispatch.role_overrides.insert(channel_id, alt_ch);
-                    }
-                }
-                channel_id
-            } else {
-                // Check if card already has an active thread via internal API
-                let existing_thread = dispatch_info
-                    .as_ref()
-                    .and_then(|i| i.active_thread_id.clone());
-                let reuse_tid = existing_thread.as_ref().and_then(|t| {
-                    let id = t.parse::<u64>().unwrap_or(0);
-                    if id != 0 {
-                        Some(ChannelId::new(id))
-                    } else {
-                        None
-                    }
-                });
-
-                // A reused thread is judged before it is unarchived, bootstrapped or mapped.
-                if let Some(tid) = reuse_tid {
-                    let input = (std::mem::take(&mut pending_uploads), session_was_cleared);
-                    let target = (tid, original_channel_id);
-                    let admitted =
-                        host_refusal::admitted_uploads(http, shared, &provider, target, input);
-                    let Some(uploads) = admitted.await? else {
-                        return Ok(());
-                    };
-                    pending_uploads = uploads;
-                }
-                let reused = if let Some(tid) = reuse_tid {
-                    if super::super::verify_thread_accessible(http, tid).await {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] 🧵 Reusing existing thread {} for dispatch {}",
-                            tid,
-                            did
-                        );
-                        bootstrapped_fresh_thread_session =
-                            super::super::super::bootstrap_thread_session(
-                                shared,
-                                tid,
-                                &dispatch_effective_path,
-                                http,
-                                cache,
-                            )
-                            .await;
-                        shared.dispatch.thread_parents.insert(channel_id, tid);
-                        // For review dispatches reusing an implementation thread,
-                        // override role/model to use the counter-model channel.
-                        if is_counter_model_dispatch {
-                            if let Some(alt_ch) = alt_channel_id {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::info!(
-                                    "  [{ts}] 🔄 Review dispatch reusing thread: overriding role to alt channel {}",
-                                    alt_ch
-                                );
-                                shared.dispatch.role_overrides.insert(tid, alt_ch);
-                            }
-                        }
-                        Some(tid)
-                    } else {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] 🧵 Thread {} is locked/inaccessible, creating new for {}",
-                            tid,
-                            did
-                        );
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                if let Some(tid) = reused {
-                    tid
-                } else {
-                    // No existing usable thread — create new
-                    let thread_title = user_text
-                        .find(" - ")
-                        .map(|idx| &user_text[idx + 3..])
-                        .unwrap_or("dispatch")
-                        .chars()
-                        .take(90)
-                        .collect::<String>();
-
-                    match channel_id
-                        .create_thread(
-                            http,
-                            poise::serenity_prelude::builder::CreateThread::new(thread_title)
-                                .kind(poise::serenity_prelude::ChannelType::PublicThread)
-                                .auto_archive_duration(
-                                    poise::serenity_prelude::AutoArchiveDuration::OneDay,
-                                ),
-                        )
-                        .await
-                    {
-                        Ok(thread) => {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!(
-                                "  [{ts}] 🧵 Created dispatch thread {} for dispatch {}",
-                                thread.id,
-                                did
-                            );
-                            bootstrapped_fresh_thread_session =
-                                super::super::super::bootstrap_thread_session(
-                                    shared,
-                                    thread.id,
-                                    &dispatch_effective_path,
-                                    http,
-                                    cache,
-                                )
-                                .await;
-                            shared.dispatch.thread_parents.insert(channel_id, thread.id);
-                            super::super::link_dispatch_thread(
-                                shared.api_port,
-                                did,
-                                thread.id.get(),
-                                channel_id.get(),
-                            )
-                            .await;
-                            thread.id
-                        }
-                        Err(e) => {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::warn!("  [{ts}] ⚠ Failed to create dispatch thread: {e}");
-                            channel_id // fallback to main channel
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        channel_id
+    let Some((channel_id, bootstrapped_fresh_thread_session, redirected_permit)) =
+        adk_thread::redirect_dispatch(adk_thread::RedirectDispatch {
+            http,
+            cache,
+            shared,
+            provider: &provider,
+            channel_id,
+            original_channel_id,
+            dispatch_id_for_thread: &dispatch_id_for_thread,
+            dispatch_info_cached: &dispatch_info_cached,
+            dispatch_type_str: dispatch_type_str.as_deref(),
+            dispatch_uses_thread_routing,
+            is_already_thread,
+            user_text,
+            dispatch_effective_path: &dispatch_effective_path,
+            pending_uploads: &mut pending_uploads,
+            session_was_cleared,
+        })
+        .await?
+    else {
+        return Ok(());
     };
+    let final_provider =
+        if let Some(override_channel) = shared.dispatch.role_overrides.get(&channel_id) {
+            resolve_role_binding(*override_channel, None)
+                .and_then(|binding| binding.provider)
+                .unwrap_or_else(|| provider.clone())
+        } else {
+            provider.clone()
+        };
+    let final_permit = adk_thread::final_admission(&final_provider, channel_id, redirected_permit)?;
+    let (http_owned, cache_owned, ctx_owned, shared_owned, token_owned) = (
+        http.clone(),
+        cache.cloned(),
+        ctx_for_chained_dispatch.cloned(),
+        shared.clone(),
+        token.to_owned(),
+    );
+    let user_text_owned = user_text.to_owned();
+    let request_owner_name_owned = request_owner_name.to_owned();
+    crate::services::discord::input_runtime::fence::effect::run(final_permit, async move {
+    let (http, cache, ctx_for_chained_dispatch, shared, token) = (
+        &http_owned, cache_owned.as_ref(), ctx_owned.as_ref(), &shared_owned, token_owned.as_str(),
+    );
+    let user_text = user_text_owned.as_str();
+    let request_owner_name = request_owner_name_owned.as_str();
     let (final_thread_parent, authoritative, active_dispatch_info, active_dispatch_id_for_prompt) =
         dispatch_runtime::prepare_post_redirect_dispatch_runtime(
             http,
@@ -1069,6 +1077,10 @@ pub(super) async fn handle_text_message(
         provider
     };
 
+    let execution_permit = crate::services::discord::input_runtime::fence::effect::admit(
+        &provider, channel_id.get(),
+    ).map_err(|failure| format!("execution input admission refused: {failure:?}"))?;
+    crate::services::discord::input_runtime::fence::effect::scope(execution_permit, async {
     {
         let channel_name_for_isolation = {
             let data = shared.core.lock().await;
@@ -1212,7 +1224,7 @@ pub(super) async fn handle_text_message(
         return Ok(());
     };
     // #5660 [R2]: classification passed; the mailbox claim still follows below.
-    let session_was_cleared = if let Some(cleared) = session_was_cleared {
+    let taken_cleared = if let Some(cleared) = session_was_cleared {
         cleared
     } else {
         let (taken_uploads, cleared) =
@@ -1220,6 +1232,7 @@ pub(super) async fn handle_text_message(
         pending_uploads.splice(0..0, taken_uploads);
         cleared
     };
+    let session_was_cleared = intake_runtime_transition.session_was_cleared(taken_cleared);
     let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);
     if force_fresh_provider_session {
         record_fresh_session_context_boundary(shared, channel_id).await?;
@@ -2434,7 +2447,9 @@ pub(super) async fn handle_text_message(
         tmux_session_name.as_deref(),
     )
     .await;
-    tokio::task::spawn_blocking(move || {
+    let provider_permit = crate::services::discord::input_runtime::fence::effect::current();
+    tokio::task::spawn_blocking(move || crate::services::discord::input_runtime::fence::blocking(|| {
+        let _input_scope = crate::services::discord::input_runtime::fence::effect::worker_scope(provider_permit);
         let _original_registration = producer_registration;
         let _upload_lifetime = materialized_uploads;
         let result = crate::services::platform::with_provider_execution_context(
@@ -2500,7 +2515,7 @@ pub(super) async fn handle_text_message(
                 });
             }
         }
-    });
+    }));
 
     // #3813 Phase 1a: provider input is about to be handed to the turn bridge.
     intake_latency.mark_input_written();
@@ -2569,6 +2584,8 @@ pub(super) async fn handle_text_message(
     }
 
     Ok(())
+    }).await
+    }).await
 }
 
 #[cfg(test)]

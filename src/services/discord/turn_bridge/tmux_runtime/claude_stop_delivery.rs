@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ClaudeStopTurnIdentity {
+pub(super) struct ClaudeStopTurnIdentity {
     output_path: String,
     file_identity: (u64, u64),
     user_line_start: u64,
@@ -24,11 +24,11 @@ struct ClaudeStopTurnIdentity {
 }
 
 impl ClaudeStopTurnIdentity {
-    fn capture(output_path: &str) -> Option<Self> {
+    pub(super) fn capture(output_path: &str) -> Option<Self> {
         latest_claude_user_turn_identity(Path::new(output_path))
     }
 
-    fn still_current(&self) -> bool {
+    pub(super) fn still_current(&self) -> bool {
         latest_claude_user_turn_identity(Path::new(&self.output_path)).as_ref() == Some(self)
     }
 }
@@ -202,12 +202,12 @@ fn deliver_claimed_claude_stop_under_lock_order<R>(
     }
 }
 
-struct ClaudeStopDeliveryReservation<'a> {
+pub(super) struct ClaudeStopDeliveryReservation<'a> {
     token: &'a CancelToken,
 }
 
 impl<'a> ClaudeStopDeliveryReservation<'a> {
-    fn claim(token: &'a CancelToken) -> Option<Self> {
+    pub(super) fn claim(token: &'a CancelToken) -> Option<Self> {
         if token.claim_claude_interrupt() {
             Some(Self { token })
         } else {

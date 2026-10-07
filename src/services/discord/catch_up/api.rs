@@ -13,7 +13,6 @@ use super::super::{
     MailboxEnqueueOutcome, RuntimeChannelBindingStatus, SharedData, bot_role, health, queue_io,
     reaction_cleanup, resolve_runtime_channel_binding_status,
 };
-use super::too_old_notice::{self, CatchUpTooOldOutboxRequest};
 
 /// Page request as the sweep builds it; the adapter turns it into the REST
 /// builder, which has no public accessors for tests to read back.
@@ -101,14 +100,6 @@ pub(super) trait CatchUpDiscordApi: Sync {
             observed,
         )
         .await
-    }
-
-    fn enqueue_too_old_notice(
-        &self,
-        pool: Option<sqlx::PgPool>,
-        request: CatchUpTooOldOutboxRequest,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        pool.map(|pool| too_old_notice::spawn_outbox(pool, request))
     }
 
     fn record_too_old_dead_letter(

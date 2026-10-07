@@ -1,6 +1,7 @@
 //! Dispositions for inputs crossing between the Legacy queue and the input ledger.
 
-use super::rows::{AbandonReason, DoneReason, HeldReason, RowState};
+use super::attempt::WitnessKind;
+use super::rows::{AbandonReason, DoneReason, HeldReason, Row, RowState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoveSource {
@@ -46,31 +47,79 @@ pub enum Handback {
     Enqueue,
     Close(RowState),
     NoticeThenClose(RowState),
+    /// Keep the row as it is and hold the handback with a notice.
+    Hold,
     Settled,
 }
 
-// `accepted`: a transcript user record or an acceptance witness exists for any generation of the row.
-pub fn handback_plan(state: RowState, accepted: bool, composer: Composer) -> Handback {
-    let reconcile = || match (accepted, composer) {
-        (true, _) => Handback::Close(RowState::Done(DoneReason::HandbackRunning)),
-        (false, Composer::Empty) => Handback::Enqueue,
-        (false, Composer::Draft) => {
-            Handback::NoticeThenClose(RowState::Held(HeldReason::Ambiguous))
+/// What a row's attempts are known to have caused, strongest evidence first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Reconciliation {
+    /// A model input record of some generation carries the row.
+    ModelConfirmed,
+    /// A tool or modal consumed the frame; it must not be delivered again.
+    Consumed,
+    /// A provider queue holds the frame without a model record yet.
+    QueueOnly,
+    Ambiguous,
+    /// Positive evidence that nothing reached the provider.
+    NeverSent,
+}
+
+impl Reconciliation {
+    /// The ledger's own witnesses and per-generation effects.
+    pub fn from_row(row: &Row) -> Self {
+        let kinds = || row.witnesses.iter().map(|seen| seen.witness.kind);
+        if kinds().any(WitnessKind::confirms_input) {
+            Self::ModelConfirmed
+        } else if kinds().any(|kind| kind == WitnessKind::Tool) {
+            Self::Consumed
+        } else if kinds().any(WitnessKind::queue_only) {
+            Self::QueueOnly
+        } else if before_effect(row.state) && row.attempts.iter().all(|a| a.effect.none()) {
+            Self::NeverSent
+        } else {
+            Self::Ambiguous
         }
-    };
-    match state {
-        RowState::Done(_) | RowState::Abandoned(_) => Handback::Settled,
+    }
+
+    /// A host's model-record flag; an empty composer never proves a pasted row did nothing.
+    pub fn from_legacy(state: RowState, accepted: bool) -> Self {
+        if accepted {
+            Self::ModelConfirmed
+        } else if before_effect(state) {
+            Self::NeverSent
+        } else {
+            Self::Ambiguous
+        }
+    }
+}
+
+// The actor enters these only before a paste or after a positive pre-effect refusal.
+fn before_effect(state: RowState) -> bool {
+    matches!(
+        state,
         RowState::Received
-        | RowState::Ready
-        | RowState::Held(HeldReason::Modal | HeldReason::NotReady) => Handback::Enqueue,
-        RowState::Held(HeldReason::Ambiguous)
-        | RowState::Unaccepted
-        | RowState::Injecting
-        | RowState::AwaitTurn => reconcile(),
-        RowState::Running if accepted => {
+            | RowState::Ready
+            | RowState::Held(HeldReason::Modal | HeldReason::NotReady)
+    )
+}
+
+/// Only positive no-effect evidence returns a row to Legacy; a queued copy may still be delivered.
+pub fn handback_plan(state: RowState, evidence: Reconciliation) -> Handback {
+    if state.is_terminal() {
+        return Handback::Settled;
+    }
+    match (evidence, state) {
+        (Reconciliation::ModelConfirmed, _) => {
             Handback::Close(RowState::Done(DoneReason::HandbackRunning))
         }
-        RowState::Running => Handback::NoticeThenClose(RowState::Held(HeldReason::Ambiguous)),
+        (Reconciliation::Consumed, _) => {
+            Handback::NoticeThenClose(RowState::Done(DoneReason::HandbackRunning))
+        }
+        (Reconciliation::QueueOnly, _) | (_, RowState::Queued) => Handback::Hold,
+        (Reconciliation::NeverSent, state) if state != RowState::Running => Handback::Enqueue,
+        _ => Handback::NoticeThenClose(RowState::Held(HeldReason::Ambiguous)),
     }
 }
 

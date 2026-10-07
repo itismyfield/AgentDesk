@@ -61,7 +61,7 @@ class SourceContractTests(unittest.TestCase):
             self.actual["identity_fence_bind"],
             {
                 "src/services/discord/relay_recovery/apply.rs": 1,
-                "src/services/discord/tui_direct_pending_start.rs": 1,
+                "src/services/discord/tui_direct_pending_start/foreign_recovery.rs": 1,
             },
         )
         # The owner file both defines and re-spells the binder; counting it would
@@ -81,7 +81,7 @@ class SourceContractTests(unittest.TestCase):
             self.actual["delivery_fence_bind"],
             {
                 "src/services/discord/relay_recovery/apply.rs": 1,
-                "src/services/discord/tui_direct_pending_start.rs": 1,
+                "src/services/discord/tui_direct_pending_start/foreign_recovery.rs": 1,
             },
         )
         self.assertEqual(self.actual["delivery_fence_bind"], self.actual["identity_fence_bind"])

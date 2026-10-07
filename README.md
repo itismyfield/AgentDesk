@@ -446,6 +446,17 @@ AgentDesk keeps settings in multiple surfaces on purpose. The contract is per-su
 | Onboarding/secrets | Dedicated onboarding wizard | Dedicated onboarding keys and flows | Tokens and setup secrets stay outside the general settings form. | `/api/onboarding/*` |
 | Channel provider rules | `onboarding.provider_suffix_map` / `default_provider` | Registry defaults, then YAML entries: add a key, replace its provider, or set its value to `null` to remove that suffix. An empty section preserves registry behavior. | Applied from the server config snapshot (including successful hot reload); offline `show session-name` reads the same YAML. Explicit provider selections win. | Channel dispatch and onboarding |
 
+Claude native `/clear` on O-owned tmux channels is controlled by the live YAML keys
+`runtime.native_clear_enabled` and `runtime.native_clear_channels`. Both clear commands
+and prompt admission read the current configuration. With `native_clear_enabled: true`,
+an optional list of numeric Discord channel IDs limits native clear and its unresolved
+boundary recovery to those channels. Omitting the list keeps all O-owned channels
+eligible; `native_clear_channels: []` selects none. An unset or false enabled switch
+keeps managed restart behavior regardless of the list. These keys have no environment
+variable override and require no process restart. Channels outside the list keep the
+existing managed-host refusal rules and do not read or write native clear boundaries.
+Shrinking the list does not complete an unresolved clear for a removed channel. Complete any unresolved clear with `!clear` before removing that channel from the list.
+
 For example, `onboarding.provider_suffix_map: {"-gem": gemini, "-cc": codex, "-gm": null}` adds `-gem`, changes `-cc` to Codex, and removes `-gm`; other registry suffixes remain available. Keys are normalized to lowercase with a leading `-`; channel names still match exactly, and the longest matching suffix wins. Unknown providers and overlapping suffixes produce warnings; invalid provider entries are ignored, preserving any registry entry at that key. Unknown keys under `onboarding` are rejected. `onboarding.default_provider` sets the provider fallback when there is no explicit provider or matching suffix; an invalid value warns and uses the registry default. The offline session-name command still requires a suffix or explicit `--provider`.
 
 Onboarding completion uses `onboarding.guild_id`, then `discord.guild_id`, when the request omits its guild. This preserves an existing runtime `discord.guild_id`; initial setup with no runtime guild saves the selected guild. An explicit request guild wins and updates the runtime guild. Each completion channel can set `category` to a label from `onboarding.default_categories` or a raw Discord category ID; newly created channels receive that `parent_id`, and name-based reuse requires the same category. Existing channels supplied by ID are not moved. Unknown labels or invalid category IDs are rejected before creation. Changing the selected category also changes completion retry identity.

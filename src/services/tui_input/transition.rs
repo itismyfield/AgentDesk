@@ -8,8 +8,8 @@ use serde_json::Value;
 
 use super::blob::BlobPin;
 use super::handover::{
-    Composer, EnqueueOutcome, Handback, MoveEvidence, MoveSource, handback_after_enqueue,
-    handback_plan, move_disposition,
+    Composer, EnqueueOutcome, Handback, MoveEvidence, MoveSource, Reconciliation,
+    handback_after_enqueue, handback_plan, move_disposition,
 };
 use super::ledger::{Ledger, LedgerLease};
 use super::rows::{Entry, Owner, Row, Rows};
@@ -45,7 +45,15 @@ pub trait Host {
     }
     fn delete(&mut self, phase: DeletePhase) -> io::Result<()>;
     fn start_actor(&mut self) -> io::Result<()>;
-    fn reconcile(&mut self, key: u64, row: &Row) -> io::Result<(bool, Composer)>;
+    /// Whether a model record carries the row; `reconciliation` supersedes this pair.
+    fn reconcile(&mut self, _key: u64, _row: &Row) -> io::Result<(bool, Composer)> {
+        Ok((false, Composer::Draft))
+    }
+    /// Handback evidence from the ledger's witnesses and the host's model-record flag.
+    fn reconciliation(&mut self, key: u64, row: &Row) -> io::Result<Reconciliation> {
+        let (accepted, _) = self.reconcile(key, row)?;
+        Ok(Reconciliation::from_row(row).min(Reconciliation::from_legacy(row.state, accepted)))
+    }
     fn enqueue(&mut self, key: u64, row: &Row) -> io::Result<EnqueueOutcome>;
     fn notice(&mut self, key: Option<u64>, reason: &'static str) -> io::Result<()>;
 }
@@ -224,6 +232,14 @@ impl Move {
             self.phase = Phase::Finished(Outcome::Legacy);
             return Ok(Outcome::Legacy);
         }
+        // A key handed back after a tracked attempt keeps its tombstone, so the channel stays Legacy.
+        if matches!(self.phase, Phase::Stage)
+            && (self.inputs.iter()).any(|input| rows.keeps_tracked_history(input.key))
+        {
+            host.notice(None, "tui_o:turn_mode_refused")?;
+            self.phase = Phase::Finished(Outcome::Legacy);
+            return Ok(Outcome::Legacy);
+        }
         if matches!(self.phase, Phase::Stage) {
             let staged = rows.staged_since(self.first);
             for input in &mut self.inputs {
@@ -362,8 +378,8 @@ fn return_rows(lease: &mut LedgerLease, host: &mut impl Host) -> io::Result<Outc
     }
     let mut held = false;
     for (key, row) in open {
-        let (accepted, composer) = host.reconcile(key, row)?;
-        let closed = match handback_plan(row.state, accepted, composer) {
+        let evidence = host.reconciliation(key, row)?;
+        let closed = match handback_plan(row.state, evidence) {
             Handback::Enqueue => {
                 let outcome = host.enqueue(key, row).unwrap_or(EnqueueOutcome::Rejected);
                 let closed = handback_after_enqueue(outcome);
@@ -376,8 +392,18 @@ fn return_rows(lease: &mut LedgerLease, host: &mut impl Host) -> io::Result<Outc
             Handback::Close(state) => Some(state),
             Handback::NoticeThenClose(state) => {
                 held = !state.is_terminal();
-                host.notice(Some(key), "handback_ambiguous")?;
+                let reason = if held {
+                    "handback_ambiguous"
+                } else {
+                    "handback_consumed"
+                };
+                host.notice(Some(key), reason)?;
                 Some(state)
+            }
+            Handback::Hold => {
+                held = true;
+                host.notice(Some(key), "handback_queued")?;
+                None
             }
             Handback::Settled => None,
         };

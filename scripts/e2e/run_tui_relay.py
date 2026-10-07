@@ -7,7 +7,7 @@ against a single (provider, runtime) cell — e.g. ``claude-pipe`` against the
 ``adk-e2e-orchestrator`` agent, which invokes this script once per cell.
 
 Cell format: ``<provider>-<runtime>`` (e.g. ``claude-pipe``, ``claude-tui``,
-``codex-pipe``, ``codex-tui``). A scenario is executed only when
+``codex-pipe``, ``codex-tui``, ``claude-herdr``, ``codex-herdr``). A scenario is executed only when
 its ``cells:`` list includes the requested cell.
 
 Safety guards:
@@ -28,10 +28,12 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import copy
 import datetime as dt
 import errno
 import http.client
 import json
+import uuid
 import math
 import os
 import signal
@@ -41,7 +43,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -49,7 +51,7 @@ import yaml  # type: ignore[import-untyped]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tui_relay import assertions, discord, durable_delivery, fixtures, known_gap, lease, normal_intake_evidence, tmux  # noqa: E402
+from tui_relay import assertions, discord, durable_delivery, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -57,6 +59,8 @@ SUPPORTED_CELLS: tuple[str, ...] = (
     "claude-tui",
     "codex-pipe",
     "codex-tui",
+    "claude-herdr",
+    "codex-herdr",
 )
 AGENT_MODES: tuple[str, ...] = ("none", "controlled", "real_live")
 AGENT_MODE_RANK = {mode: rank for rank, mode in enumerate(AGENT_MODES)}
@@ -69,6 +73,7 @@ COVERAGE_CLASS_RANK = {
 REAL_PROVIDER_STEP_KEYS: tuple[str, ...] = (
     "send_prompt",
     "send_discord_prompt",
+    "deliver_prompt",
     "send_provider_hold_prompt",
     "send_timed_response_prompt",
     "send_prompts_concurrent",
@@ -125,12 +130,14 @@ TUI_IDLE_DRAFT_GUARD_POLL_S = float(
 )
 DIRECT_INPUT_NOTIFICATION_MARKER = "터미널에 직접 주입된 입력"
 REPORT_RECORD_KEYS: tuple[str, ...] = (
+    "deliver_results",
     "discord_prompt_records",
     "e36_acceptance",
     "known_gaps",
     "known_gap_rechecks",
     "completion_rechecks",
     "revalidated_after_recheck",
+    "revalidated_after_idle",
     "relay_count",
     "raw_count",
     "message_updates",
@@ -167,6 +174,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "real_provider_contacted",
     "controlled_harness_evidence",
     "failure_attribution",
+    "autonomous_background_turn",
     "durable_record_probe",
     "dirty_active_residue",
 )
@@ -178,6 +186,16 @@ class PhaseDeadlineExpired(BaseException):
 
 class HarnessEvidenceError(assertions.AssertionError):
     """Required evidence could not be read; not a product root-cause verdict."""
+
+
+@dataclass(frozen=True)
+class ObservationContext:
+    """Bind native evidence to the API/channel actually exercised by the cell."""
+
+    api_base: str
+    channel_id: str
+    provider: str
+    transcript_root: Path | None = None
 
 
 def _arm_phase_deadline(seconds: float):
@@ -225,7 +243,11 @@ def parse_args() -> argparse.Namespace:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--run-id", default=uuid.uuid4().hex, help="Explicit run identity shared with source comparison")
     parser.add_argument("--base-url", default="http://127.0.0.1:8791")
+    parser.add_argument("--herdr-isolated-server", action="store_true", help="Operator attests restart target is a dedicated E2E server with no other channels.")
+    parser.add_argument("--herdr-endpoint", help="Boot endpoint key for this channel; required for live Herdr observations.")
+    parser.add_argument("--herdr-status-bin", default="agentdesk", help="AgentDesk CLI on the target node (read-only herdr status).")
     parser.add_argument("--e36-intake-log", help="Explicit readable adk-tracing-text-v1 dcserver log for E36")
     parser.add_argument(
         "--cell",
@@ -253,6 +275,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Comma-separated scenario ids (exact match, e.g. E-1,E-5).",
     )
+    parser.add_argument("--transcript-root", type=Path, help="Local provider transcript root for native evidence.")
     parser.add_argument("--output", default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -414,12 +437,14 @@ def cell_runtime(cell: str) -> str:
 
 def cell_session_name(cell: str, *, thread_channel_id: str | None = None) -> str:
     """tmux session name owned by the cell's worker agent."""
+    if cell_runtime(cell) == "herdr":
+        raise ValueError("Herdr cells have no tmux session")
     suffix = f"-t{thread_channel_id}" if thread_channel_id else ""
     return f"AgentDesk-{cell_provider(cell)}-adk-{cell}-e2e{suffix}"
 
 
 def cell_default_agent(cell: str) -> str:
-    return f"adk-{cell}-e2e"
+    return f"adk-{cell.replace('-herdr', '-tui')}-e2e"
 
 
 def cell_channel_kind(cell: str) -> str:
@@ -888,6 +913,9 @@ def _update_record_window_snapshot(
     record: dict[str, Any],
     window: assertions.Window,
 ) -> None:
+    window = replace(window,
+        messages=[m for m in window.messages if str(m.get("id")) not in window.deleted_ids],
+        raw_messages=[m for m in window.raw_messages if str(m.get("id")) not in window.deleted_ids])
     record["relay_count"] = len(window.messages)
     record["raw_count"] = len(window.raw_messages)
     record["message_updates"] = len(window.message_updates)
@@ -961,6 +989,101 @@ def validate_scenario_filter(raw: str | None, scenarios_dir: Path) -> set[str]:
     return wanted
 
 
+STEP_OPTIONS = {
+    "send_prompt": None, "send_discord_prompt": None, "send_keys": None, "send_keys_no_enter": None,
+    "wait_for_discord_text": None, "wait_for_raw_discord_text": None, "wait_idle_s": None,
+    "deliver_prompt": {"text", "source"}, "restart_dcserver": {"target"},
+    "kill_pane": {"reverify_session_name_substring"}, "poison_claude_tui_relay_offset": set(),
+    "capture_session_identity": {"label"}, "assert_session_preserved": {"label"},
+    "send_prompts_concurrent": {"prompts"}, "fixture_followup_probe": {"prompt"},
+    "replay_fixture": {"kind", "provider", "frames"},
+    "local_control_then_prompt": {"control", "notice", "prompt", "notice_timeout_s", "admission_timeout_s", "quiet_s", "poll_interval_s"},
+    "send_timed_response_prompt": {"before_marker", "after_marker", "hold_seconds"},
+    "send_provider_hold_prompt": {"ok_marker", "marker", "late_marker", "hold_seconds"},
+    "wait_for_provider_hold_state": {"ok_marker", "marker", "late_marker", "timeout_s", "poll_interval_s"},
+    "cancel_turn": {"force", "timeout_s"}, "delete_status_panel": {"panel_regex"},
+    "inject_discord_failure": {"operation", "count"}, "clear_discord_failure": {"operation"},
+    "send_keys_sequence": {"keys", "key_interval_s", "interval_s", "mark_prompt_sent", "diagnostic_prompt", "sleep_s"},
+    "assert_health": {"timeout_s", "poll_interval_s", "global_active_max", "global_finalizing_max", "forbid_degraded_reasons", "require_status", "allowed_degraded_reasons"},
+}
+ASSERTION_OPTIONS = {
+    **{k: None for k in ("text_present", "provider_text_present", "raw_text_present", "no_duplicate_marker", "ordered_text_present",
+                         "no_duplicate_content", "no_resume_prompt_chrome", "no_suppressed_label_chrome",
+                         "no_control_chars", "body_not_overwritten", "fixture_followup_ready",
+                         "fixture_no_health_degradation", "no_placeholder_left")},
+    "message_count_between_markers": {"min", "max"},
+    "raw_message_count_between_markers": {"min", "max", "include_our_send"},
+    "relay_latency_within": {"max_seconds"}, "body_complete": {"head", "tail"},
+    "chrome_count": {"text", "regex", "min", "max", "exact", "include_our_send"},
+    "raw_text_absent": {"needle", "text", "include_our_send"},
+    "marker_absent": {"marker", "surface", "include_our_send"},
+    "provider_hold_marker_seen": {"marker", "ok_marker"},
+    "status_panel_after_body": {"body_marker", "panel_regex"}, "single_status_panel": {"panel_regex"},
+    "completion_chrome_after_body": {"body_marker", "required"},
+    "relay_bodies_after_local_control": {"containing", "exact"},
+    "fixture_task_notification": {"source", "kind", "status"},
+    "fixture_finalized": {"finalized", "result_text_source", "active_turn"},
+    "fixture_task_complete_finalized": {"result_text_source", "turn_id"},
+    "fixture_state": {"followup_probe_accepted"},
+    "no_duplicate_marker_with_known_gap": {"marker", "known_gap"},
+    "deliver_result": {"delivery", "inject_veto"}, "completion_per_turn": {"exact", "marker"},
+    "autonomous_background_turn": {"armed_marker", "auto_marker"},
+}
+
+
+def validate_scenario_schema(scenario):
+    """Reject unexecuted actions/options before the driver can contact a server."""
+    for kind, schema in (("steps", STEP_OPTIONS), ("assertions", ASSERTION_OPTIONS)):
+        entries = scenario.get(kind, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"{kind} must be a list")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"{kind} entry must be a mapping: {entry!r}")
+            actions = set(entry) & schema.keys()
+            if len(actions) != 1:
+                raise ValueError(f"{kind} needs exactly one supported action: {entry!r}")
+            action = next(iter(actions))
+            metadata = {"requires_feature"} if kind == "assertions" else set()
+            if action in {"wait_for_discord_text", "wait_for_raw_discord_text"}:
+                metadata.add("timeout_s")
+            if action == "wait_for_discord_text":
+                metadata.add("relay_author")
+                if entry.get("relay_author", "provider") != "provider":
+                    raise ValueError("relay_author supports only provider")
+            if action in {"send_prompt", "send_discord_prompt", "deliver_prompt", "send_provider_hold_prompt", "send_timed_response_prompt"}:
+                metadata.add("post_send_sleep_s")
+            if action == "send_discord_prompt" and scenario.get("e36_normal_intake"):
+                metadata.update({"request_key", "body_marker", "hold_marker"})
+            if set(entry) - {action} - metadata:
+                raise ValueError(f"unsupported {kind} sibling options: {entry!r}")
+            value, allowed = entry[action], schema[action]
+            if isinstance(value, dict) and (allowed is None or set(value) - allowed):
+                raise ValueError(f"unsupported {action} options: {value!r}")
+            scalar_or_mapping = {"deliver_prompt", "assert_session_preserved", "provider_hold_marker_seen", "raw_text_absent", "marker_absent", "relay_latency_within", "completion_chrome_after_body", "single_status_panel"}
+            if allowed is not None and action not in scalar_or_mapping and not isinstance(value, dict):
+                raise ValueError(f"{action} requires mapping options")
+            if action in {"send_prompt", "send_discord_prompt", "send_keys", "send_keys_no_enter", "wait_for_discord_text", "wait_for_raw_discord_text", "provider_text_present"} and not isinstance(value, str):
+                raise ValueError(f"{action} requires text")
+            if action in {"no_placeholder_left", "no_duplicate_content", "no_control_chars", "no_resume_prompt_chrome", "no_suppressed_label_chrome"} and value is not True:
+                raise ValueError(f"{action} must be true")
+            if "post_send_sleep_s" in entry:
+                delay = entry["post_send_sleep_s"]
+                if type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0:
+                    raise ValueError("post_send_sleep_s must be a finite nonnegative number")
+            if action == "deliver_prompt":
+                text = value.get("text") if isinstance(value, dict) else value
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("deliver_prompt requires nonempty text")
+            if action == "deliver_result":
+                if "requires_feature" in entry:
+                    raise ValueError("deliver_result cannot be feature-gated")
+                if not isinstance(value, dict) or not value.get("delivery") or any(not isinstance(v, list) or not v for v in value.values()):
+                    raise ValueError("deliver_result requires nonempty delivery allowed values")
+    if any("deliver_prompt" in step for step in scenario.get("steps", [])) and not any("deliver_result" in spec for spec in scenario.get("assertions", [])):
+        raise ValueError("deliver_prompt requires deliver_result before any POST")
+
+
 def load_scenarios(scenarios_dir: Path, *, cell: str) -> list[dict[str, Any]]:
     scenarios: list[dict[str, Any]] = []
     for yaml_path in sorted(scenarios_dir.glob("*.yaml")):
@@ -968,6 +1091,7 @@ def load_scenarios(scenarios_dir: Path, *, cell: str) -> list[dict[str, Any]]:
             data = yaml.safe_load(fp)
         if not isinstance(data, dict):
             raise ValueError(f"{yaml_path} did not parse to a mapping")
+        validate_scenario_schema(data)
         cells = data.get("cells") or []
         if not isinstance(cells, list):
             raise ValueError(f"{yaml_path} has non-list cells field")
@@ -2689,6 +2813,7 @@ def _expected_markers_for_wait(scenario: dict[str, Any], needle: str) -> list[st
         if not isinstance(spec, dict):
             continue
         add_marker(spec.get("text_present"))
+        add_marker(spec.get("provider_text_present"))
         add_marker(spec.get("no_duplicate_marker"))
         ordered = spec.get("ordered_text_present")
         if isinstance(ordered, list):
@@ -2934,6 +3059,7 @@ def wait_for_discord_text_with_tui_idle_draft_guard(
     thread_channel_id: str | None,
     timeout_s: float,
     debug_label: str,
+    author_id: str | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     deadline = time.monotonic() + timeout_s
     guard_after_s = min(TUI_IDLE_DRAFT_GUARD_AFTER_S, max(timeout_s, 0.0))
@@ -2941,7 +3067,8 @@ def wait_for_discord_text_with_tui_idle_draft_guard(
     observed: list[dict[str, Any]] = []
     observed_by_id: dict[str, dict[str, Any]] = {}
     predicate = lambda message: (  # noqa: E731
-        (body := assertions.relay_body(message)) is not None and needle in body
+        (body := assertions.relay_body(message) if author_id is None
+         else assertions.author_relay_body(message, author_id)) is not None and needle in body
     )
     while time.monotonic() < deadline:
         messages = client.fetch_messages(channel_id, after_id=after_id, limit=100)
@@ -3041,6 +3168,9 @@ def run_scenario(
     partial_record_holder: dict[str, Any] = {}
     if partial_result_sink is not None:
         partial_result_sink["result"] = result
+
+    if cell_runtime(cell) == "herdr":
+        return herdr.run(sys.modules[__name__], scenario, args, client, run_id, result)
 
     target_channel_id = scenario_channel_id(scenario, args)
     if target_channel_id is None:
@@ -3393,6 +3523,39 @@ def run_scenario(
     return result
 
 
+def post_send_sleep(step):
+    delay = step.get("post_send_sleep_s", 3)
+    if type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0:
+        raise ValueError("post_send_sleep_s must be a finite nonnegative number")
+    time.sleep(delay)
+
+
+def deliver_step(client, step, *, cell, run_id, channel_id, record):
+    author = os.environ.get("AGENTDESK_E2E_DELIVER_AUTHOR_ID", "").strip()
+    if not author:
+        raise assertions.AssertionError("deliver_prompt requires AGENTDESK_E2E_DELIVER_AUTHOR_ID")
+    params = step["deliver_prompt"]
+    if isinstance(params, str):
+        params = {"text": params}
+    if not isinstance(params, dict) or not isinstance(params.get("text"), str) or not params["text"].strip():
+        raise assertions.AssertionError("deliver_prompt requires nonempty text")
+    if set(params) - {"text", "source"}:
+        raise assertions.AssertionError(f"unsupported deliver options: {sorted(set(params) - {'text', 'source'})}")
+    index = len(record.get("deliver_results", []))
+    origin_id = f"{run_id}-{record.get('id', 'scenario')}-deliver-{index}"
+    marker = f"[E2E:DELIVER:{origin_id}]"
+    text = marker + "\n" + params["text"].replace("{run_id}", run_id)
+    response = client.deliver(cell_default_agent(cell), text, author,
+                              params.get("source", "adk-e2e-orchestrator"), origin_id)
+    observed = {k: response.get(k) for k in ("delivery", "reason", "inject_veto", "channel_id")}
+    observed.update(origin_id=origin_id, run_marker=marker)
+    record["real_provider_contacted"] = True
+    record.setdefault("deliver_results", []).append(observed)
+    if str(response.get("channel_id")) != str(channel_id):
+        raise assertions.AssertionError(f"deliver response channel mismatch: expected {channel_id}, observed {response.get('channel_id')}")
+    return response
+
+
 def run_one_cell(
     *,
     scenario: dict[str, Any],
@@ -3416,6 +3579,12 @@ def run_one_cell(
             dry_run=dry_run,
         )
 
+    observation_context = None
+    if any("autonomous_background_turn" in spec for spec in scenario.get("assertions") or []):
+        observation_context = ObservationContext(
+            api_base=client.base_url, channel_id=channel_id, provider=cell_provider(cell),
+            transcript_root=getattr(args, "transcript_root", None),
+        )
     setup_marker = f"### E2E SETUP {scenario_id} cell={cell} run={run_id}"
     marker_targets = [
         str(marker).replace("{run_id}", run_id)
@@ -3499,32 +3668,64 @@ def run_one_cell(
             window.add(message)
 
     def _ingest_snapshot() -> list[dict[str, Any]]:
-        rows = client.fetch_messages(channel_id, after_id=after_id, limit=100)
-        _ingest_observed(rows)
-        window.reconcile_snapshot(rows, after_id=after_id)
-        return rows
+        rows, cursor = [], after_id
+        for _ in range(100):
+            page = client.fetch_messages(channel_id, after_id=cursor, limit=100)
+            try:
+                ids = [assertions._numeric_id(row) for row in page]
+            except ValueError as exc:
+                raise HarnessEvidenceError("Discord snapshot contains an invalid numeric ID") from exc
+            if any(mid is None or mid <= int(cursor) for mid in ids):
+                raise HarnessEvidenceError("Discord snapshot pagination did not advance")
+            _ingest_observed(page)
+            rows.extend(page)
+            captures = getattr(client, "captures", None)
+            page_size = len(page)
+            if isinstance(captures, list) and captures:
+                page_size = len(captures[-1]["pages"][0]["messages"])
+                if page_size >= 100:
+                    raise HarnessEvidenceError("Discord captured snapshot incomplete: fixed capture cursor cannot paginate")
+            if page_size < 100:
+                window.reconcile_snapshot(rows, after_id=after_id, complete=True)
+                return rows
+            cursor = str(max(ids))
+        raise HarnessEvidenceError("Discord snapshot incomplete after 100 pages")
 
-    def _pending_refetch() -> None:
-        _ingest_snapshot()
+    def _pending_refetch(*, post_idle: bool = False) -> list[dict[str, Any]]:
+        rows = _ingest_snapshot()
         _update_record_window_snapshot(record, window)
+        _record_marker_counts(record, window, marker_targets)
         revalidation = {"assertions": [], "passed": False}
-        record.setdefault("revalidated_after_recheck", []).append(revalidation)
+        trace_key = "revalidated_after_idle" if post_idle else "revalidated_after_recheck"
+        record.setdefault(trace_key, []).append(revalidation)
+        final_view = replace(window,
+            raw_messages=[m for m in window.raw_messages if str(m.get("id")) not in window.deleted_ids],
+            messages=[m for m in window.messages if str(m.get("id")) not in window.deleted_ids]) if post_idle else window
         for previous in record["assertions"]:
             spec = previous["spec"]
+            if post_idle and any(key in spec for key in (
+                "autonomous_background_turn", "deliver_result", "provider_hold_marker_seen",
+            )):
+                continue
             try:
+                # Rechecking a surface must not append another known-gap acceptance.
                 run_assertion(
                     spec,
-                    window=window,
-                    record=record,
+                    window=final_view,
+                    record=copy.deepcopy(record) if post_idle else record,
                     enabled_features=enabled_features,
                     run_id=run_id,
+                    observation_context=observation_context,
+                    provider=cell_provider(cell),
                 )
             except assertions.AssertionError:
                 revalidation["failed_assertion"] = next(iter(spec))
                 raise
             revalidation["assertions"].append(spec)
         revalidation["passed"] = True
+        return rows
 
+    record["id"] = scenario_id
     first_send_done = False
 
     def _advance_window_past_setup_echo() -> None:
@@ -3563,7 +3764,13 @@ def run_one_cell(
             record.setdefault("controlled_harness_evidence", []).append(
                 controlled_evidence
             )
-        if "send_discord_prompt" in step:
+        if "deliver_prompt" in step:
+            _prepare_first_prompt_window()
+            window.mark_prompt_sent()
+            deliver_step(client, step, cell=cell, run_id=run_id, channel_id=channel_id, record=record)
+            _mark_real_provider_contacted(record, declared_agent_mode=declared_agent_mode, dry_run=dry_run)
+            post_send_sleep(step)
+        elif "send_discord_prompt" in step:
             _prepare_first_prompt_window()
             if scenario.get("durable_delivery_probe"):
                 safety = durable_probe_safety_gate(
@@ -3585,7 +3792,7 @@ def run_one_cell(
                     response.get("message_id") or response.get("id") or ""
                 )
             _mark_real_provider_contacted(record, declared_agent_mode=declared_agent_mode, dry_run=dry_run)
-            time.sleep(3)
+            post_send_sleep(step)
         elif "send_prompt" in step:
             _prepare_first_prompt_window()
             window.mark_prompt_sent()
@@ -3604,7 +3811,7 @@ def run_one_cell(
                 response,
                 channel_id=channel_id,
             )
-            time.sleep(3)
+            post_send_sleep(step)
         elif "send_provider_hold_prompt" in step or "send_timed_response_prompt" in step:
             _prepare_first_prompt_window()
             timed_response = "send_timed_response_prompt" in step
@@ -3644,7 +3851,7 @@ def run_one_cell(
                     "turn_identity": dict(last_turn_identity),
                 }
             )
-            time.sleep(3)
+            post_send_sleep(step)
         elif "send_prompts_concurrent" in step:
             _prepare_first_prompt_window()
             params = step["send_prompts_concurrent"]
@@ -3691,7 +3898,10 @@ def run_one_cell(
             time.sleep(float(step["wait_idle_s"]))
         elif "wait_for_discord_text" in step:
             needle = str(step["wait_for_discord_text"]).replace("{run_id}", run_id)
+            author_id = (assertions.provider_bot_id(cell_provider(cell))
+                         if step.get("relay_author") == "provider" else None)
             found, observed = wait_for_discord_text_with_tui_idle_draft_guard(
+                author_id=author_id,
                 client=client,
                 channel_id=channel_id,
                 cell=cell,
@@ -4082,6 +4292,8 @@ def run_one_cell(
                 enabled_features=enabled_features,
                 run_id=run_id,
                 pending_refetch=_pending_refetch,
+                observation_context=observation_context,
+                provider=cell_provider(cell),
             )
             record["assertions"].append({"spec": assertion_spec, "passed": True})
 
@@ -4092,6 +4304,7 @@ def run_one_cell(
             runtime_root=Path(args.queue_runtime_root),
         )
         record["post_scenario_idle"] = idle_check
+        settled_rows = _pending_refetch(post_idle=True)
         if e36 is not None:
             try:
                 settled = normal_intake_evidence.drained(e36.watcher())
@@ -4103,8 +4316,6 @@ def run_one_cell(
                 # The idle wait is part of the observed run, not a blind acceptance gap.
                 for request in record["discord_prompt_records"]:
                     e36.join(request)
-                settled_rows = client.fetch_messages(channel_id, after_id=after_id, limit=100)
-                _ingest_observed(settled_rows)
                 normal_intake_evidence.final_assertion(window, record, settled_rows)
             except (OSError, ValueError, KeyError, TypeError) as error:
                 raise HarnessEvidenceError(f"E36 post-idle evidence unavailable: {error}") from error
@@ -4471,6 +4682,8 @@ def run_assertion(
     enabled_features: frozenset[str] = frozenset(),
     run_id: str | None = None,
     pending_refetch: Callable[[], None] | None = None,
+    observation_context: ObservationContext | None = None,
+    provider: str | None = None,
 ) -> None:
     def expand_marker(value: str) -> str:
         return value.replace("{run_id}", run_id) if run_id is not None else value
@@ -4499,10 +4712,56 @@ def run_assertion(
             high=int(params.get("max", 999)),
             include_our_send=bool(params.get("include_our_send", False)),
         )
+    elif "deliver_result" in spec:
+        params = spec["deliver_result"]
+        rows = (record or {}).get("deliver_results")
+        if not isinstance(params, dict) or not params or set(params) - {"delivery", "inject_veto"}:
+            raise assertions.AssertionError("deliver_result requires delivery/inject_veto allowed-value lists")
+        if not rows:
+            raise assertions.AssertionError("deliver_result requires an observed deliver response")
+        for key, allowed in params.items():
+            if not isinstance(allowed, list) or not allowed or any(row.get(key) not in allowed for row in rows):
+                raise assertions.AssertionError(f"deliver_result {key} not in {allowed!r}: {rows!r}")
+    elif spec.get("no_placeholder_left"):
+        if not hasattr(assertions, "no_placeholder_left"):
+            raise assertions.AssertionError("assertion not available yet: no_placeholder_left")
+        assertions.no_placeholder_left(window)
+    elif "completion_per_turn" in spec:
+        if not hasattr(assertions, "completion_per_turn"):
+            raise assertions.AssertionError("assertion not available yet: completion_per_turn")
+        params = spec["completion_per_turn"]
+        marker = params.get("marker")
+        assertions.completion_per_turn(window, exact=params.get("exact", 1), marker=expand_marker(marker) if marker is not None else None)
+    elif "autonomous_background_turn" in spec:
+        params = spec["autonomous_background_turn"]
+        if (not isinstance(params, dict) or set(params) != {"armed_marker", "auto_marker"}
+                or any(not isinstance(value, str) or not value.strip() for value in params.values())):
+            raise assertions.AssertionError("autonomous_background_turn requires armed_marker/auto_marker text")
+        if observation_context is None or record is None:
+            raise HarnessEvidenceError("autonomous_background_turn requires observation context and result record")
+        try:
+            binding = source_compare.resolve_binding(
+                observation_context.api_base, channel_id=observation_context.channel_id,
+                transcript_root=observation_context.transcript_root,
+            )
+            if binding["provider"] != observation_context.provider or binding["provider"] != "claude":
+                raise ValueError("autonomous background evidence requires the exercised Claude binding")
+            evidence = source_compare.autonomous_background_turn(
+                Path(binding["transcript_path"]), armed_marker=expand_marker(params["armed_marker"]),
+                auto_marker=expand_marker(params["auto_marker"]),
+            )
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise HarnessEvidenceError(f"autonomous background native evidence failed: {error}") from error
+        record["autonomous_background_turn"] = {"binding": binding, **evidence}
     elif spec.get("no_duplicate_content"):
         assertions.no_duplicate_content(window)
     elif "text_present" in spec:
         assertions.text_present(window, needle=expand_marker(spec["text_present"]))
+    elif "provider_text_present" in spec:
+        if provider is None:
+            raise assertions.AssertionError("provider_text_present needs the exercised cell provider")
+        assertions.provider_text_present(window, needle=expand_marker(spec["provider_text_present"]),
+                                         author_id=assertions.provider_bot_id(provider))
     elif "provider_hold_marker_seen" in spec:
         marker = spec["provider_hold_marker_seen"]
         if isinstance(marker, dict):
@@ -4563,7 +4822,7 @@ def run_assertion(
             raise assertions.AssertionError(
                 f"ordered_text_present must be a list of needles: {spec!r}"
             )
-        assertions.ordered_text_present(window, needles=needles)
+        assertions.ordered_text_present(window, needles=[expand_marker(str(n)) for n in needles])
     elif gap_key in spec:
         params = spec[gap_key]
         if not isinstance(params, dict) or params != {"marker": known_gap.PRE, "known_gap": known_gap.PROFILE}:
@@ -4806,7 +5065,7 @@ def main() -> int:
         return 2
     handoff_to = args.handoff_to_agent or cell_default_agent(cell)
     output_dir = resolve_output_dir(args.output, cell)
-    run_id = output_dir.name
+    run_id = getattr(args, "run_id", output_dir.name)
     print(f"[e2e] cell={cell} run_id={run_id} output={output_dir}")
 
     scenarios = load_scenarios(scenarios_dir, cell=cell)
@@ -4833,14 +5092,15 @@ def main() -> int:
         args._e36_phase_started = time.monotonic()
         if len(scenarios) != 1:
             raise ValueError("E36 requires an exclusive single-scenario phase")
-        normal_intake_evidence.validate(scenarios[0], args)
+        if cell_runtime(cell) != "herdr":
+            normal_intake_evidence.validate(scenarios[0], args)
     results: list[dict[str, Any]] = []
     partial_result_sink: dict[str, Any] = {}
     active_scenario: dict[str, Any] | None = None
     deferred_failure: dict[str, Any] | None = None
     previous_alarm = _arm_phase_deadline(args.phase_deadline_s) if args.phase_deadline_s else None
     try:
-        with lease.acquire(lease_token, cell=cell) if not args.dry_run else _null_lease(run_id):
+        with lease.acquire(lease_token, cell=cell.replace("-herdr", "-tui")) if not args.dry_run else _null_lease(run_id):
             for scenario in scenarios:
                 active_scenario, partial_result_sink = scenario, {}
                 print(f"[e2e] running {scenario.get('id')} cell={cell}")
@@ -4904,6 +5164,8 @@ def main() -> int:
             "pass": sum(1 for r in results if r["status"] == "pass"),
             "fail": sum(1 for r in results if r["status"] == "fail"),
             "skipped": sum(1 for r in results if r["status"] == "skipped"),
+            **{status: sum(r["status"] == status for r in results)
+               for status in ("not_applicable", "known_gap", "unexpected_pass", "dry_run")},
         },
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")

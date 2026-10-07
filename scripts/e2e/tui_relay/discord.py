@@ -108,6 +108,18 @@ class DiscordClient:
             return {}
         return json.loads(payload)
 
+    def deliver(self, agent, text, author, source, origin_id):
+        """Deliver external human input; never retry an unconfirmed mutation."""
+        request = urllib.request.Request(
+            f"{self.base_url.rstrip('/')}/api/agents/{urllib.parse.quote(str(agent), safe='')}/turn/deliver",
+            data=json.dumps({"text": text, "author_discord_user_id": author,
+                             "source": source, "origin_id": origin_id}).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        payload = self._read_json(request, operation="deliver")
+        if payload.get("ok") is not True or payload.get("delivery") not in {"started", "queued", "injected", "unconfirmed"}:
+            raise RuntimeError(f"deliver returned invalid/refused response: {payload!r}")
+        return payload
+
     def send_control(self, channel_id: int | str, content: str) -> dict[str, Any]:
         """Send harness bookkeeping with notify-bot so workers do not wake.
 

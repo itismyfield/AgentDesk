@@ -114,10 +114,21 @@ pub struct RuntimeSettingsConfig {
     /// the managed process reset and skips the native recovery check at admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_clear_enabled: Option<bool>,
+    /// Live native-clear channel allowlist; unset keeps all O-owned channels eligible.
+    /// An empty list selects no channels; the enabled switch still gates every channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_clear_channels: Option<Vec<u64>>,
     /// Live switch for Claude turns on a Herdr-configured channel; unset or false keeps refusing
     /// them before any pane I/O.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub herdr_turn_enabled: Option<bool>,
+    /// The same switch for Codex turns on a Herdr-configured channel; unset or false refuses them
+    /// as an unsupported provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub herdr_codex_turn_enabled: Option<bool>,
+    /// Requested Herdr Escape switch; delivery stays disabled until terminal settlement is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub herdr_cancel_enabled: Option<bool>,
     /// Switch for the `channel-home` delegate, reclaim and force commands and the boot start of
     /// delegated homes; unset or false refuses or skips them before any database access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,6 +138,14 @@ pub struct RuntimeSettingsConfig {
 }
 
 impl RuntimeSettingsConfig {
+    pub(crate) fn native_clear_enabled_for_channel(&self, channel_id: u64) -> bool {
+        self.native_clear_enabled == Some(true)
+            && self
+                .native_clear_channels
+                .as_ref()
+                .is_none_or(|channels| channels.contains(&channel_id))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.delivery_journal_mode == DeliveryJournalMode::Legacy
             && self.delivery_journal_cohort_percent == 0
@@ -167,7 +186,10 @@ impl RuntimeSettingsConfig {
             && self.dispatch_rate_limit_gate_enabled.is_none()
             && self.dispatch_rate_limit_gate_danger_pct.is_none()
             && self.native_clear_enabled.is_none()
+            && self.native_clear_channels.is_none()
             && self.herdr_turn_enabled.is_none()
+            && self.herdr_codex_turn_enabled.is_none()
+            && self.herdr_cancel_enabled.is_none()
             && self.channel_home_delegation_enabled.is_none()
             && !self.reset_overrides_on_restart
     }
@@ -184,5 +206,61 @@ impl RuntimeSettingsConfig {
                 .unwrap_or(200)
                 .clamp(1, 500) as i64,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_clear_channel_policy_requires_enabled_and_matches_optional_allowlist() {
+        for (enabled, channels, member, outsider) in [
+            (None, None, false, false),
+            (None, Some(vec![]), false, false),
+            (None, Some(vec![42]), false, false),
+            (Some(false), None, false, false),
+            (Some(false), Some(vec![]), false, false),
+            (Some(false), Some(vec![42]), false, false),
+            (Some(true), None, true, true),
+            (Some(true), Some(vec![]), false, false),
+            (Some(true), Some(vec![42]), true, false),
+        ] {
+            let runtime = RuntimeSettingsConfig {
+                native_clear_enabled: enabled,
+                native_clear_channels: channels,
+                ..RuntimeSettingsConfig::default()
+            };
+            assert_eq!(runtime.native_clear_enabled_for_channel(42), member);
+            assert_eq!(runtime.native_clear_enabled_for_channel(43), outsider);
+        }
+    }
+
+    #[test]
+    fn native_clear_channel_allowlist_preserves_absent_empty_and_selected_values() {
+        let absent: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(absent.native_clear_enabled, None);
+        assert_eq!(absent.native_clear_channels, None);
+        assert!(absent.is_empty());
+
+        for (yaml, expected) in [
+            ("native_clear_channels: []", vec![]),
+            (
+                "native_clear_channels: [1509350490461180105, 42]",
+                vec![1509350490461180105, 42],
+            ),
+        ] {
+            let runtime: RuntimeSettingsConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(runtime.native_clear_channels, Some(expected));
+            assert!(!runtime.is_empty());
+            let config = Config {
+                runtime,
+                ..Config::default()
+            };
+            let serialized = serde_yaml::to_string(&config).unwrap();
+            assert!(serialized.contains("native_clear_channels:"));
+            let reparsed: Config = serde_yaml::from_str(&serialized).unwrap();
+            assert_eq!(reparsed.runtime, config.runtime);
+        }
     }
 }

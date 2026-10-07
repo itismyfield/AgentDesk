@@ -52,6 +52,7 @@ pub mod routines;
 mod runtime_profile_tests;
 pub mod scheduled_messages;
 pub(crate) mod session_activity;
+mod session_evidence;
 pub mod settings;
 mod skill_usage_analytics;
 pub mod skills_api;

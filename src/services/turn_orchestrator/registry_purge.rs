@@ -70,6 +70,9 @@ pub(super) fn close_if_idle_verdict(state: &mut ChannelMailboxState) -> Result<(
     if state.pending_user_dispatch.is_some() {
         return Err("pending_user_dispatch");
     }
+    if super::injected_inputs::holds_order(state) {
+        return Err("injection_reserved");
+    }
     state.closed = true;
     Ok(())
 }
@@ -93,7 +96,9 @@ pub(super) fn gate_closed_arm(
         | M::ActiveTurnKind { .. }
         | M::CancelToken { .. }
         | M::CloseIfIdle { .. }
-        | M::CommitCapturedReadyDelivery { .. } => return Some(msg),
+        | M::CommitCapturedReadyDelivery { .. }
+        // Clears only its own reservation, which a closed actor cannot hold.
+        | M::Injection(super::injected_inputs::InjectionMsg::Abandon { .. }) => return Some(msg),
         #[cfg(test)]
         M::AgeActiveTurnForTest { .. }
         | M::AgeInboundWaitsForTest { .. }
@@ -117,6 +122,7 @@ pub(super) fn gate_closed_arm(
             let _ = reply.send(EnqueueInterventionResult::refused(refusal, Vec::new()));
             "Enqueue"
         }
+        M::Injection(injection) => injection.refuse("actor_closed".to_string()),
         // Restitution callers read `MailboxClosed` and replay on the fresh actor.
         M::RequeueFront { reply, .. } => {
             let _ = reply.send(RequeueInterventionResult {

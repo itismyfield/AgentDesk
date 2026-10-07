@@ -10,7 +10,9 @@ use serde_json::{Value, json};
 use super::inflight::{self, InflightEpisodePin, InflightTurnState};
 use super::runtime_store;
 use crate::services::provider::ProviderKind;
-use crate::services::tui_input::handover::{Composer, EnqueueOutcome, MoveEvidence, MoveSource};
+use crate::services::tui_input::handover::{
+    Composer, EnqueueOutcome, MoveEvidence, MoveSource, Reconciliation,
+};
 use crate::services::tui_input::ledger::Ledger;
 use crate::services::tui_input::rows::Row;
 use crate::services::tui_input::transition::{DeletePhase, Host, Input};
@@ -21,8 +23,10 @@ pub(in crate::services::discord) trait Effects {
     fn intake_outbox_open(&mut self) -> io::Result<bool>;
     fn evidence(&mut self, key: u64, payload: &Value) -> io::Result<MoveEvidence>;
     /// Handback evidence for a ledger row; an adapter may judge the row's own attempt witness.
-    fn reconcile(&mut self, key: u64, row: &Row) -> io::Result<MoveEvidence> {
-        self.evidence(key, &row.input)
+    fn reconcile(&mut self, key: u64, row: &Row) -> io::Result<Reconciliation> {
+        let evidence = self.evidence(key, &row.input)?;
+        Ok(Reconciliation::from_row(row)
+            .min(Reconciliation::from_legacy(row.state, evidence.user_record)))
     }
     fn provider_alive(&mut self) -> io::Result<bool>;
     fn materialize_bundle(&mut self, upload: &Value) -> io::Result<Vec<(String, Vec<u8>)>>;
@@ -523,9 +527,8 @@ impl<E: Effects> Host for Files<E> {
     fn start_actor(&mut self) -> io::Result<()> {
         self.effects.start_actor()
     }
-    fn reconcile(&mut self, key: u64, row: &Row) -> io::Result<(bool, Composer)> {
-        let evidence = self.effects.reconcile(key, row)?;
-        Ok((evidence.user_record, evidence.composer))
+    fn reconciliation(&mut self, key: u64, row: &Row) -> io::Result<Reconciliation> {
+        self.effects.reconcile(key, row)
     }
     fn enqueue(&mut self, key: u64, row: &Row) -> io::Result<EnqueueOutcome> {
         self.effects.enqueue(key, &row.input)

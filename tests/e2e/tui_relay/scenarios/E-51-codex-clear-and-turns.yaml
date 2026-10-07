@@ -2,7 +2,7 @@ id: E-51
 title: Codex 연속 턴 → !clear → 새 세션 턴, 턴마다 본문 정확히 1회
 agent_mode: real_live
 coverage_class: live
-cells: [codex-tui, codex-pipe]
+cells: [codex-tui, codex-pipe, codex-herdr]
 isolation: required
 acceptance_criteria:
   - T1·T2 are consecutive turns; T2 is a warm follow-up on the live pane and each marker arrives exactly once

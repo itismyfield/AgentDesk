@@ -31,6 +31,7 @@ pub(crate) fn submit_native_clear_tmux(
             gate,
             deadline,
             |remaining| tmux::capture_pane_timeout(&session, -80, remaining),
+            |remaining| capture_draft_with("tmux", &session, remaining),
             |keys, remaining| {
                 tmux::send_keys_timeout(&session, keys, remaining).is_ok_and(|o| o.status.success())
             },
@@ -39,11 +40,12 @@ pub(crate) fn submit_native_clear_tmux(
     .unwrap_or(NativeClearSubmission::NotSent)
 }
 
-fn native_clear_once(
+pub(super) fn native_clear_once(
     session: &str,
     gate: &dyn MutationGate,
     deadline: tokio::time::Instant,
     mut capture: impl FnMut(std::time::Duration) -> Option<String>,
+    draft: impl FnOnce(std::time::Duration) -> Option<String>,
     mut send: impl FnMut(&[&str], std::time::Duration) -> bool,
 ) -> NativeClearSubmission {
     // The shared subprocess owner may spend 200ms killing and 2s reaping a timed-out child.
@@ -61,6 +63,7 @@ fn native_clear_once(
     };
     if !native_clear_composer_empty(&before)
         || remaining().is_zero()
+        || super::composer_lock::admit_composer_write(session, || draft(remaining())).is_err()
         || gate.admit(session).is_err()
     {
         return NativeClearSubmission::NotSent;
@@ -244,6 +247,11 @@ pub(crate) trait InputTransport {
     -> Result<Output, String>;
     fn send_keys(&mut self, session: &str, keys: &[HostKey]) -> Result<Output, String>;
     fn capture(&mut self, session: &str, scroll_back: i32) -> Option<String>;
+    /// The pane for the draft-protection reader; a transport that cannot keep its attributes
+    /// returns nothing, which keeps a protected pane held.
+    fn capture_draft(&mut self, _session: &str) -> Option<String> {
+        None
+    }
     fn pane_alive(&mut self, session: &str) -> bool;
     fn present(&mut self, session: &str) -> bool;
     /// Records the termination and exit reason, then kills the session.
@@ -276,6 +284,14 @@ impl InputTransport for TmuxInput {
 
     fn capture(&mut self, session: &str, scroll_back: i32) -> Option<String> {
         tmux::capture_pane(session, scroll_back)
+    }
+
+    fn capture_draft(&mut self, session: &str) -> Option<String> {
+        #[cfg(test)]
+        if let Some(program) = spy::draft_route(session) {
+            return capture_draft_with(program, session, DRAFT_CAPTURE_TIMEOUT);
+        }
+        capture_draft_with("tmux", session, DRAFT_CAPTURE_TIMEOUT)
     }
 
     fn pane_alive(&mut self, session: &str) -> bool {
@@ -646,6 +662,35 @@ pub(crate) fn run_legacy(
     with_transport(|transport| run_plan(&target, &LegacyTmuxGate, transport, actions, cancel_token))
 }
 
+/// Bounds the draft-protection capture of a pane.
+const DRAFT_CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The last 80 rows with `-e`, so a faint placeholder stays apart from typed text; `program` is
+/// tmux outside tests.
+pub(crate) fn capture_draft_with(
+    program: impl AsRef<std::ffi::OsStr>,
+    session: &str,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    use crate::services::process::{configure_child_process_group, wait_with_output_timeout};
+    let mut command = crate::services::platform::binary_resolver::runtime_command(program).ok()?;
+    let args = ["-u", "capture-pane", "-p", "-e", "-t", session, "-S", "-80"];
+    command.args(args).stdin(std::process::Stdio::null());
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    configure_child_process_group(&mut command);
+    let child = command.spawn().ok()?;
+    let output = wait_with_output_timeout(child, timeout, "tmux capture-pane -e").ok()?;
+    let text = || String::from_utf8_lossy(&output.stdout).into_owned();
+    output.status.success().then(text)
+}
+
+/// The legacy tmux session as the draft-protection reader needs it.
+pub(crate) fn observe_draft(session_name: &str) -> Option<String> {
+    with_transport(|transport| transport.capture_draft(session_name))
+}
+
 /// Capture, then liveness, of the legacy tmux session: the order input reads them.
 pub(crate) fn observe_legacy(session_name: &str, scroll_back: i32) -> (Option<String>, bool) {
     with_transport(|transport| {
@@ -783,6 +828,8 @@ pub(crate) fn classify(
     }
 }
 
+#[cfg(all(test, unix))]
+pub(crate) use spy::FakeDraftPane;
 #[cfg(test)]
 pub(crate) use spy::{SpyGuard, SpyState};
 
@@ -841,6 +888,18 @@ mod spy {
         }
     }
 
+    fn without_escapes(capture: &str) -> String {
+        let (mut out, mut chars) = (String::new(), capture.chars());
+        while let Some(c) = chars.next() {
+            if c != '\x1b' {
+                out.push(c);
+            } else if chars.next() == Some('[') {
+                chars.by_ref().find(|c| ('\x40'..='\x7e').contains(c));
+            }
+        }
+        out
+    }
+
     pub(crate) fn exit(code: i32, stderr: &str) -> Output {
         #[cfg(unix)]
         let status = std::os::unix::process::ExitStatusExt::from_raw(code << 8);
@@ -871,9 +930,20 @@ mod spy {
             self.send(format!("keys:{}", names.join("+")))
         }
 
+        /// Like tmux without `-e`: attributes are dropped.
         fn capture(&mut self, _session: &str, _scroll_back: i32) -> Option<String> {
             let mut state = self.0.borrow_mut();
             state.record("capture".to_string());
+            state
+                .captures
+                .pop_front()
+                .flatten()
+                .map(|c| without_escapes(&c))
+        }
+
+        fn capture_draft(&mut self, _session: &str) -> Option<String> {
+            let mut state = self.0.borrow_mut();
+            state.record("capture:draft".to_string());
             state.captures.pop_front().flatten()
         }
 
@@ -893,6 +963,66 @@ mod spy {
             self.0
                 .borrow_mut()
                 .record(format!("retire:{reason_code}:{reason}"));
+        }
+    }
+
+    static DRAFT_ROUTES: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
+    > = std::sync::LazyLock::new(Default::default);
+
+    fn draft_routes()
+    -> std::sync::MutexGuard<'static, std::collections::HashMap<String, std::path::PathBuf>> {
+        DRAFT_ROUTES.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub(super) fn draft_route(session: &str) -> Option<std::path::PathBuf> {
+        draft_routes().get(session).cloned()
+    }
+
+    /// A tmux stand-in for one session's draft capture on any thread: `-e` prints the `pane` file
+    /// as written, a capture without it drops attributes, and every call is logged.
+    #[cfg(unix)]
+    pub(crate) struct FakeDraftPane {
+        dir: tempfile::TempDir,
+        session: String,
+    }
+
+    #[cfg(unix)]
+    impl FakeDraftPane {
+        pub(crate) fn new(session: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let d = dir.path().display();
+            let script = format!(
+                "#!/bin/sh\necho \"$*\" >> '{d}/log'\ncase \" $* \" in *\" -e \"*) cat '{d}/pane' ;; \
+                 *) sed \"s/$(printf '\\033')\\[[0-9;]*m//g\" '{d}/pane' ;; esac\n"
+            );
+            let program = dir.path().join("tmux");
+            std::fs::write(&program, script).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(dir.path().join("pane"), "").unwrap();
+            draft_routes().insert(session.to_string(), program);
+            Self {
+                dir,
+                session: session.to_string(),
+            }
+        }
+
+        pub(crate) fn show(&self, pane: &str) {
+            std::fs::write(self.dir.path().join("pane"), pane).unwrap();
+        }
+
+        /// How many `-e` captures read this pane.
+        pub(crate) fn draft_reads(&self) -> usize {
+            let log = std::fs::read_to_string(self.dir.path().join("log")).unwrap_or_default();
+            log.lines().filter(|line| line.contains(" -e ")).count()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FakeDraftPane {
+        fn drop(&mut self) {
+            draft_routes().remove(&self.session);
         }
     }
 
@@ -948,6 +1078,7 @@ mod tests {
             &LegacyTmuxGate,
             tokio::time::Instant::now() + std::time::Duration::from_secs(20),
             |_| Some(EMPTY_COMPOSER.into()),
+            |_| None,
             |keys, _| {
                 assert_eq!(keys, &["/clear", "Enter"]);
                 sends += 1;
@@ -977,6 +1108,7 @@ mod tests {
                     &LegacyTmuxGate,
                     tokio::time::Instant::now() + std::time::Duration::from_secs(20),
                     |_| capture.map(str::to_owned),
+                    |_| None,
                     |_, _| panic!("unready pane sent keys")
                 ),
                 NativeClearSubmission::NotSent
@@ -988,6 +1120,7 @@ mod tests {
                 &LegacyTmuxGate,
                 tokio::time::Instant::now(),
                 |_| panic!("expired deadline captured pane"),
+                |_| None,
                 |_, _| panic!("expired deadline sent")
             ),
             NativeClearSubmission::NotSent
@@ -999,6 +1132,7 @@ mod tests {
                 &refused,
                 tokio::time::Instant::now() + std::time::Duration::from_secs(20),
                 |_| Some(EMPTY_COMPOSER.into()),
+                |_| None,
                 |_, _| panic!("changed execution sent")
             ),
             NativeClearSubmission::NotSent
@@ -1010,6 +1144,7 @@ mod tests {
                 &LegacyTmuxGate,
                 tokio::time::Instant::now() + std::time::Duration::from_secs(20),
                 |_| captures.next().map(str::to_owned),
+                |_| None,
                 |_, _| true,
             );
             assert_eq!(

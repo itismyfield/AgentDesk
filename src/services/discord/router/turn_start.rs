@@ -4,6 +4,7 @@ use crate::services::observability::turn_lifecycle::{
     SessionStrategyDetails, TurnEvent, TurnLifecycleEmit, emit_turn_lifecycle,
     provider_session_fingerprint,
 };
+use crate::services::turn_orchestrator::TurnAdmissionOrder;
 use poise::serenity_prelude::{ChannelId, MessageId};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,9 +35,17 @@ impl HeadlessTurnStartStatus {
 pub(crate) struct HeadlessTurnReservation {
     pub(super) user_msg_id: MessageId,
     pub(super) placeholder_msg_id: MessageId,
+    /// How the start claims the mailbox: at once, or behind input queued or reserved before it.
+    admission: TurnAdmissionOrder,
 }
 
 impl HeadlessTurnReservation {
+    /// The start waits behind queued input, a dequeued head and an injection reservation.
+    pub(in crate::services::discord) fn behind_queue(self) -> Self {
+        let admission = TurnAdmissionOrder::BehindQueue;
+        Self { admission, ..self }
+    }
+
     pub(in crate::services::discord) fn turn_id(&self, channel_id: ChannelId) -> String {
         discord_turn_id(channel_id, self.user_msg_id)
     }
@@ -144,7 +153,47 @@ pub(in crate::services::discord) fn reserve_headless_turn() -> HeadlessTurnReser
     HeadlessTurnReservation {
         user_msg_id: next_headless_turn_message_id(),
         placeholder_msg_id: next_headless_turn_message_id(),
+        admission: TurnAdmissionOrder::Immediate,
     }
+}
+
+/// Waits out the channel's session transition, then claims the mailbox slot for a reserved
+/// headless turn in the reservation's admission order; the guard is held until the start ends.
+pub(in crate::services::discord) async fn claim_reserved_headless_turn(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    request_owner: UserId,
+    reservation: &HeadlessTurnReservation,
+    (provider, role_id): (ProviderKind, Option<String>),
+) -> Result<(tokio::sync::OwnedMutexGuard<()>, Arc<CancelToken>), HeadlessTurnStartError> {
+    let channel = channel_id.get();
+    let transition = shared.acquire_session_transition(channel_id).await;
+    let transition = transition.map_err(|_| {
+        let wait = super::super::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT.as_secs();
+        let error =
+            format!("session transition stayed busy for {wait} seconds on channel {channel}");
+        HeadlessTurnStartError::Conflict(error)
+    })?;
+    let cancel_token = Arc::new(CancelToken::new());
+    let (token, message) = (cancel_token.clone(), reservation.user_msg_id);
+    let claim = async move {
+        match reservation.admission {
+            TurnAdmissionOrder::Immediate => {
+                let start = super::super::mailbox_try_start_turn;
+                start(shared, channel_id, token, request_owner, message).await
+            }
+            TurnAdmissionOrder::BehindQueue => {
+                let start = super::super::queue_io::mailbox_try_start_turn_behind_queue;
+                start(shared, channel_id, token, request_owner, message).await
+            }
+        }
+    };
+    let with_identity = crate::services::agent_recovery::admission::with_turn_identity;
+    if !with_identity(provider, role_id, claim).await {
+        let error = format!("agent mailbox is busy for channel {channel}");
+        return Err(HeadlessTurnStartError::Conflict(error));
+    }
+    Ok((transition, cancel_token))
 }
 
 // NOTE(#3588, #3591): idle 기반 + 턴수 기반(100턴) 세션 리셋이 모두 제거됨.
@@ -561,10 +610,15 @@ pub(crate) fn load_session_runtime_state(
 
 pub(crate) struct IntakeRuntimeTransition {
     pub(crate) state: (Option<String>, bool, String),
+    pub(crate) recovered_fresh: bool,
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl IntakeRuntimeTransition {
+    pub(in crate::services::discord) fn session_was_cleared(&self, taken_cleared: bool) -> bool {
+        taken_cleared || self.recovered_fresh
+    }
+
     pub(crate) async fn complete_mailbox_claim<T>(self, claim: impl Future<Output = T>) -> T {
         let output = claim.await;
         drop(self);
@@ -583,6 +637,7 @@ async fn intake_runtime_transition_with_guard(
         .unwrap_or(fallback_state);
     IntakeRuntimeTransition {
         state,
+        recovered_fresh: false,
         _guard: guard,
     }
 }

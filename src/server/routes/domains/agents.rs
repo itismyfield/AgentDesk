@@ -31,6 +31,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             )
             .route("/agents/{id}/quality", get(agents::agent_quality))
             .route(
+                "/agents/{id}/session-evidence",
+                get(super::super::session_evidence::get),
+            )
+            .route(
                 "/agents/{id}/execution-requirements",
                 get(execution_requirements::get).put(execution_requirements::put),
             )

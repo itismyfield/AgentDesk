@@ -26,6 +26,8 @@ pub(super) use message_handler::{
 };
 pub(crate) use message_handler::{IntakeRequest, execute_intake_turn_core};
 pub(in crate::services::discord) use queue_status_presentation::queue_status_card_enabled;
+#[cfg(test)]
+pub(super) use turn_start::claim_reserved_headless_turn;
 pub(super) use turn_start::reserve_headless_turn;
 pub(crate) use turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,

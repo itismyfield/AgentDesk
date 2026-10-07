@@ -501,6 +501,8 @@ pub enum RebindError {
     /// `tmux_session` not provided and no in-memory session supplies a
     /// channel_name — cannot derive the canonical tmux session name. 400.
     ChannelNameMissing,
+    /// The channel's input gate is not open to new Legacy effects; nothing was written. 409.
+    InputFenced(String),
     /// Unrecoverable internal error (inflight write, lock poisoning, etc.). 500.
     Internal(String),
 }
@@ -554,6 +556,7 @@ impl std::fmt::Display for RebindError {
                 f,
                 "channel name missing — pass tmux_session or pre-register the channel"
             ),
+            Self::InputFenced(reason) => write!(f, "input fence refused rebind: {reason}"),
             Self::Internal(msg) => write!(f, "internal: {msg}"),
         }
     }
