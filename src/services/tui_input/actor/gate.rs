@@ -129,10 +129,16 @@ pub(crate) fn own_draft(
         .strip_prefix(' ')
         .or_else(|| first.strip_prefix('\u{00a0}'))
         .unwrap_or(first);
-    let body = std::iter::once(first)
-        .chain(lines[start + 1..end].iter().copied())
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Claude draws each continuation row two columns in, keeping the line's own leading spaces;
+    // a row indented any other way is not our paste.
+    let mut rows = vec![first];
+    for line in &lines[start + 1..end] {
+        let Some(row) = line.strip_prefix("  ").or(line.is_empty().then_some("")) else {
+            return false;
+        };
+        rows.push(row);
+    }
+    let body = rows.join("\n");
     if body == frame {
         return true;
     }
