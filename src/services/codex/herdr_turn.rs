@@ -23,7 +23,7 @@ use crate::services::claude::herdr_turn::{
 };
 use crate::services::codex_tui::host_input::{InputRun, PlanRun, legacy_result, run_herdr};
 use crate::services::codex_tui::input::{
-    PROMPT_READY_CANCELLED_ERROR, active_composer_visible_prompt_draft_in_pane,
+    ComposerContent, PROMPT_READY_CANCELLED_ERROR, active_composer_content_in_pane,
     pane_looks_ready_for_codex_prompt, pane_shows_codex_interactive_modal, plan_prompt_submit,
 };
 use crate::services::codex_tui::session::{
@@ -98,6 +98,8 @@ pub(crate) enum PromptRefused {
     LaunchOptionsChanged,
     /// The composer shows text that is not this turn's; it is left as it is.
     ComposerDraft,
+    /// The composer is in no layout the reader knows, so nothing shows it empty.
+    ComposerUnread,
 }
 
 fn refused(why: PromptRefused) -> String {
@@ -275,12 +277,14 @@ fn composer_ready(target: &HerdrTarget, cancel: Option<&CancelToken>) -> Result<
     }
 }
 
-/// A ready composer holding no text; a draft is left as it is and refuses the prompt.
+/// A ready composer shown empty; a draft, or a composer the reader cannot read, is left as it is
+/// and refuses the prompt.
 fn empty_composer(target: &HerdrTarget, cancel: Option<&CancelToken>) -> Result<(), String> {
     let screen = composer_ready(target, cancel)?;
-    match active_composer_visible_prompt_draft_in_pane(&screen) {
-        Some(_) => Err(refused(PromptRefused::ComposerDraft)),
-        None => Ok(()),
+    match active_composer_content_in_pane(&screen) {
+        ComposerContent::Empty => Ok(()),
+        ComposerContent::Draft => Err(refused(PromptRefused::ComposerDraft)),
+        ComposerContent::Unread => Err(refused(PromptRefused::ComposerUnread)),
     }
 }
 

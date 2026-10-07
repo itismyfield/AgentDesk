@@ -6,11 +6,14 @@ use crate::services::discord::recovery_engine::herdr_reader::{
     ReconnectCounts, reconnect_counts, reconnect_restarted_herdr_panes,
 };
 
-const DRAFT: &str = "earlier output\n\
-╭──────────────────────────────────────────────────────────────╮\n\
-│ 남은 초안▌                                                   │\n\
-╰──────────────────────────────────────────────────────────────╯\n\
-  Esc to interrupt   Ctrl+J newline   ⏎ send";
+/// A ready screen whose boxed composer holds the `body` lines.
+fn composer(body: &str) -> String {
+    let edge = "─".repeat(30);
+    format!(
+        "earlier output\n╭{edge}╮\n{body}\n╰{edge}╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send"
+    )
+}
+
 const SIGN_IN: &str = "Welcome to Codex\n\n  Sign in with ChatGPT to use Codex as part of your plan\n\n\
 > 1. Sign in with ChatGPT\n  2. Provide your own API key\n\n  Press Enter to continue";
 
@@ -57,30 +60,63 @@ fn binding(fx: &Fixture) -> Option<crate::services::tui_prompt_dedupe::TuiRuntim
     crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical())
 }
 
-// T2-2: a draft in the Bound pane's composer refuses the follow-up before its hold: nothing is
-// written, cleared or held, and the pane stays Bound.
+// T2-2: text anywhere in the Bound pane's composer, before or after its cursor, or a composer the
+// reader cannot read, refuses the follow-up before its hold: nothing is written, cleared or held,
+// and the pane stays Bound. An empty composer then takes the prompt.
 #[test]
 fn a_draft_in_the_bound_composer_refuses_the_follow_up_and_is_left_as_it_is_pg() {
     let fx = Fixture::admitted("draft");
     let launcher = Arc::new(Launcher::default());
-    let (nonce, _) = launch(&fx, &fx.ports(&launcher));
-    fx.rig.answer("pane.read", screen(DRAFT));
-    let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
-    assert!(second.unwrap_err().contains("ComposerDraft"));
-    assert_eq!(fx.rig.sends(), prompt_sends(), "no write and no key");
-    assert!(!hold_of(&nonce).exists());
-    assert_eq!(fx.row(), Some(HostedState::Bound));
+    let (nonce, path) = launch(&fx, &fx.ports(&launcher));
+    for (body, why) in [
+        ("│ 남은 초안▌                   │", "ComposerDraft"),
+        ("│ ▌남은 초안                   │", "ComposerDraft"),
+        (
+            "│ 남은 초안                    │\n│ ▌                            │",
+            "ComposerDraft",
+        ),
+        ("│                              │", "ComposerUnread"),
+    ] {
+        fx.rig.answer("pane.read", screen(&composer(body)));
+        let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
+        assert_eq!(
+            fx.rig.sends(),
+            prompt_sends(),
+            "no write and no key: {body}"
+        );
+        assert!(!hold_of(&nonce).exists(), "{body}");
+        assert_eq!(fx.row(), Some(HostedState::Bound), "{body}");
+        let second = second.unwrap_err();
+        assert!(second.contains(why), "{body}: {second}");
+    }
+    fx.rig.answer(
+        "pane.read",
+        screen(&composer("│ ▌                            │")),
+    );
+    let (third, messages) = fx.turn(&fx.record(), &fx.ports(&launcher), || {
+        reply(&fx, &path, 4, "t2", "둘째")
+    });
+    assert_eq!(third, Ok(()));
+    assert_eq!(texts(&messages), ["둘째"]);
 }
 
-// T2-3: a follow-up whose launch options are not the pane's, or whose pane kept none, writes
-// nothing.
+// T2-3: a follow-up whose launch options are not the pane's, whose kept options name another
+// execution or none, or whose pane kept none, writes nothing.
 #[test]
 fn changed_or_unkept_launch_options_refuse_the_follow_up_pg() {
     let fx = Fixture::admitted("options");
     let launcher = Arc::new(Launcher::default());
     let (nonce, _) = launch(&fx, &fx.ports(&launcher));
     let kept = options_of(&fx);
-    for options in [Some("launched with another model"), None] {
+    let launched = std::fs::read_to_string(&kept).unwrap();
+    let (_, fingerprint) = launched.trim().split_once(' ').unwrap();
+    let other = format!("{} {fingerprint}", uuid::Uuid::new_v4());
+    for options in [
+        Some(other.as_str()),
+        Some(fingerprint),
+        Some("launched with another model"),
+        None,
+    ] {
         match options {
             Some(options) => std::fs::write(&kept, options).unwrap(),
             None => std::fs::remove_file(&kept).unwrap(),
@@ -106,14 +142,60 @@ fn an_unclear_follow_up_keeps_its_hold_and_the_next_prompt_writes_nothing_pg() {
     fx.rig.leave_sends_unanswered(true);
     let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
     assert!(second.is_err());
-    let sent = fx.rig.sends();
-    assert_eq!(
-        sent,
-        [prompt_sends(), prompt_sends()[..1].to_vec()].concat()
+    let text_only = [prompt_sends(), prompt_sends()[..1].to_vec()].concat();
+    held_after(&fx, &launcher, &nonce, text_only);
+}
+
+// A cancel after the follow-up's text landed and before its Enter keeps the hold, since that text
+// may sit in the composer; no Enter follows and the next prompt is held.
+#[test]
+fn a_cancel_between_the_follow_up_text_and_its_enter_keeps_the_hold_pg() {
+    let fx = Fixture::admitted("cancel-before-enter");
+    let launcher = Arc::new(Launcher::default());
+    let (nonce, _) = launch(&fx, &fx.ports(&launcher));
+    let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {
+        if wait_for(&fx.finished, "the follow-up text", || {
+            fx.rig.sends().len() == 3
+        }) {
+            fx.cancel_now();
+        }
+    });
+    assert!(second.unwrap_err().contains("cancel"));
+    let text_only = [prompt_sends(), prompt_sends()[..1].to_vec()].concat();
+    held_after(&fx, &launcher, &nonce, text_only);
+}
+
+// An Enter whose reply never came may have submitted the follow-up: its hold stays and nothing is
+// sent again.
+#[test]
+fn an_unanswered_follow_up_enter_keeps_the_hold_and_sends_nothing_again_pg() {
+    let fx = Fixture::admitted("unclear-enter");
+    let launcher = Arc::new(Launcher::default());
+    let (nonce, _) = launch(&fx, &fx.ports(&launcher));
+    let (second, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {
+        if wait_for(&fx.finished, "the follow-up text", || {
+            fx.rig.sends().len() == 3
+        }) {
+            // The text is answered at once; its Enter waits out a 200ms settle first.
+            std::thread::sleep(Duration::from_millis(60));
+            fx.rig.leave_sends_unanswered(true);
+        }
+    });
+    assert!(second.is_err());
+    held_after(
+        &fx,
+        &launcher,
+        &nonce,
+        [prompt_sends(), prompt_sends()].concat(),
     );
-    assert!(hold_of(&nonce).exists());
+}
+
+/// A follow-up that left exactly `sent` keeps its hold, and the next prompt writes nothing.
+fn held_after(fx: &Fixture, launcher: &Arc<Launcher>, nonce: &str, sent: Vec<Value>) {
+    assert_eq!(fx.rig.sends(), sent);
+    assert!(hold_of(nonce).exists());
     fx.rig.leave_sends_unanswered(false);
-    let (third, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
+    let (third, _) = fx.turn(&fx.record(), &fx.ports(launcher), || {});
     assert!(third.unwrap_err().contains("input held"));
     assert_eq!(fx.rig.sends(), sent);
 }
