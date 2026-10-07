@@ -2596,7 +2596,7 @@ thread_local! {
 /// #3154 restart durability: restore durable pending-start records during
 /// provider relay startup. Rehydrates the in-memory presence index (so the
 /// watcher / idle-queue gates hold immediately) and respawns the worker for each
-/// record whose provider matches.
+/// matching unprotected record; protected records wait for move or handback.
 pub(in crate::services::discord) fn restore_pending_starts(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

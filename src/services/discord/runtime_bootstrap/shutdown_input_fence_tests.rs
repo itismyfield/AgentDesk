@@ -4,7 +4,7 @@ use crate::services::turn_orchestrator::{Intervention, InterventionMode, QueuePe
 
 #[cfg(unix)]
 #[tokio::test]
-async fn c2_sigterm_handler_dispatch_persists_before_consuming_shutdown_slot() {
+async fn c2_sigterm_handler_dispatch_persists_and_consumes_shutdown_slot() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
