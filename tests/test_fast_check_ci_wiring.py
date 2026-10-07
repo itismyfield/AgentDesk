@@ -1568,25 +1568,27 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 result = self.run_hardening_fixture(mutated)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
 
-    def test_change_surfaces_doc_states_the_actual_publisher_wiring(self) -> None:
+    def test_change_surfaces_wiring_table_is_the_exact_publisher_closure(self) -> None:
         jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        doc_path = REPO_ROOT / "docs/agent-maintenance/change-surfaces.md"
-        doc = " ".join(doc_path.read_text(encoding="utf-8").split())
-        publishers = ("scripts_required_context", "relay-authority-contract")
-        closure, frontier = set(), list(publishers)
+        doc = (REPO_ROOT / "docs/agent-maintenance/change-surfaces.md").read_text(encoding="utf-8")
+        blocks = re.findall(r"<!-- required-publisher-wiring -->\n(.*?)\n *<!-- /required-publisher-wiring -->", doc, re.S)
+        self.assertEqual(len(blocks), 1, "change-surfaces.md must hold exactly one publisher wiring table")
+        rows, frontier = {}, ["scripts_required_context", "relay-authority-contract"]
         while frontier:
             job_id = frontier.pop()
-            if job_id not in closure:
-                closure.add(job_id)
+            if job_id not in rows:
                 needs = jobs[job_id].get("needs", [])
-                frontier.extend([needs] if isinstance(needs, str) else needs)
-        stated = re.search(r"closure is the finite set `\{([^}]*)\}`", doc)
-        self.assertIsNotNone(stated, "change-surfaces.md must state the publisher needs closure")
-        self.assertEqual({name.strip() for name in stated.group(1).split(",")}, closure)
-        relay_needs = ", ".join(jobs["relay-authority-contract"]["needs"])
-        self.assertIn(f"`needs: [{relay_needs}]`", doc)
-        self.assertEqual({jobs[job_id]["if"] for job_id in publishers}, {MIRROR_IF})
-        self.assertIn(f"both publishers must carry exactly `if: {MIRROR_IF}`", doc)
+                rows[job_id] = [needs] if isinstance(needs, str) else needs
+                frontier.extend(rows[job_id])
+
+        def cell(values: list[str]) -> str:
+            return ", ".join(f"`{value}`" for value in values) or "none"
+
+        expected = ["| job | needs | job-level `if` |", "|---|---|---|"] + [
+            f"| `{job_id}` | {cell(needs)} | {cell([jobs[job_id]['if']] if 'if' in jobs[job_id] else [])} |"
+            for job_id, needs in sorted(rows.items())
+        ]
+        self.assertEqual([line.strip() for line in blocks[0].splitlines()], expected)
 
     def test_duplicate_required_job_id_is_rejected_before_last_wins_resolution(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

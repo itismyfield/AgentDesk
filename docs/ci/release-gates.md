@@ -201,8 +201,9 @@ write 사이에 끼어드는 것이라 바이트를 **추가**할 수 있을 뿐
    그 이름의 check가 아예 발행되지 않은 경우다. job skip과 구분한다.)
    mirror job은 `if: ${{ !cancelled() }}`로 돌면서 의도된 skip만 명시적 green으로
    바꾸고, upstream 실패와 timeout(`cancelled`로 보고됨)에는 fail-closed다.
-   run 자체가 취소되면 mirror는 실행되지 않는다. 그때 check conclusion이
-   `cancelled`로 남는지는 PR run 취소로 실측해 확인한다.
+   run이 취소되면 아직 시작하지 않은 mirror는 시작하지 않고, 이미 실행 중인
+   mirror는 run과 함께 취소 대상이 된다. 그때의 check conclusion은 PR run
+   취소로 실측해 확인한다.
 
 `scripts/check-ci-runner-hardening.sh`의 `targets`에 등재된 `test_fast`,
 `high-risk-recovery`, `check_fast_cross_os`, `check_fast_cross_os_targets`,

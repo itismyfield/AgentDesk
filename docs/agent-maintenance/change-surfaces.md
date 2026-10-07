@@ -279,18 +279,15 @@ time for diagnostics; neither is a stored approval value.
 - fixed surfaces: the `Script checks` publisher has exactly checkout,
   contract, and one result-mirror step per shard job (`scripts` runs the
   `cargo` shard, `scripts_guards` and `scripts_contracts` the others); its
-  `name`, `needs: [changes, scripts, scripts_guards, scripts_contracts]`,
-  required job-level `if: ${{ !cancelled() }}`, `runs-on`, checkout provenance, and
+  `name`, `needs`, job-level `if`, `runs-on`, checkout provenance, and
   absence of `continue-on-error`,
   `defaults`/`env`/`environment`/`strategy`/`container` are pinned. The
-  publisher's `if: ${{ !cancelled() }}` is what runs the fail-closed
-  mirror after an upstream failure, skip, or timeout cancellation; a cancelled
-  run does not run the publisher, so it publishes no failure. The independent
-  `relay-authority-contract` publisher has
-  `needs: [relay_authority_targets, relay_authority_mutations]` and the same
-  exact `if: ${{ !cancelled() }}`; `changes`, every shard job, and both relay
-  execution jobs must omit job-level `if` (and the relay execution jobs omit
-  `needs`) so their own work cannot be condition-skipped. Each extra
+  publishers' job-level `if` (wiring table below) is what runs the fail-closed
+  mirror after an upstream failure, skip, or timeout cancellation. When the
+  run is cancelled, a publisher that has not started never starts and a
+  running one is cancelled with the run; its final check conclusion is
+  measured on a PR run, not assumed here. Execution jobs omit job-level `if`
+  so their own work cannot be condition-skipped. Each extra
   shard job runs `./scripts/ci-script-checks.sh` exactly once with the
   `scripts` aggregate's effective execution and its own `SCRIPT_CHECK_SHARD`.
   Its source-byte range is also hashed, so YAML scalar tags and styles remain in
@@ -299,14 +296,26 @@ time for diagnostics; neither is a stored approval value.
   Actions scalars. Plain YAML-boolean-like job IDs fail closed, while quoted
   `"yes"` remains a valid string job ID. The relay publisher's semantic hash
   and explicit step registry pin its `needs`, `if`, non-matrix shape, and
-  content-hash backstop. Starting at the two required publishers, the complete
-  recursive `needs` closure is the finite set
-  `{scripts_required_context, relay-authority-contract, scripts,
-  scripts_guards, scripts_contracts, changes, relay_authority_targets,
-  relay_authority_mutations}`; every member must exist and omit
-  `continue-on-error`, both publishers must carry exactly
-  `if: ${{ !cancelled() }}`, and the other six jobs must omit job-level `if`.
-  Any edge that expands that set is a review-triggering gate failure.
+  content-hash backstop. The wiring table below is the single statement of
+  the recursive `needs` closure of the two required publishers and of each
+  member's `needs` and job-level `if`; `tests/test_fast_check_ci_wiring.py`
+  requires it to equal `ci-pr.yml` exactly. Every member must exist and omit
+  `continue-on-error`, and any edge that expands the closure is a
+  review-triggering gate failure.
+
+  <!-- required-publisher-wiring -->
+  | job | needs | job-level `if` |
+  |---|---|---|
+  | `changes` | none | none |
+  | `relay-authority-contract` | `relay_authority_targets`, `relay_authority_mutations` | `${{ !cancelled() }}` |
+  | `relay_authority_mutations` | none | none |
+  | `relay_authority_targets` | none | none |
+  | `scripts` | `changes` | none |
+  | `scripts_contracts` | `changes` | none |
+  | `scripts_guards` | `changes` | none |
+  | `scripts_required_context` | `changes`, `scripts`, `scripts_guards`, `scripts_contracts` | `${{ !cancelled() }}` |
+  <!-- /required-publisher-wiring -->
+
 - aggregate execution: the calculator records shell/working-directory
   candidates, environment scopes, `runs-on`, prior recognized file writes, and
   the selected
