@@ -1,15 +1,8 @@
 name: CI PR
 
 on:
-  # PR-only triggers. The previous `push: branches-ignore: [main]` trigger ran
-  # this whole workflow a SECOND time for every push that also had an open PR
-  # (pull_request: synchronize already covers PR-branch pushes), doubling CI
-  # compute. Deduping via the concurrency group instead would cancel the older
-  # run, but the `*_required_context` mirrors run `if: always()` and FAIL CLOSED
-  # on a `cancelled` upstream — so cancellation surfaces spurious required-check
-  # failures. Dropping both the redundant push trigger and manual dispatch
-  # prevents any non-candidate run from publishing the required `Script checks`
-  # context. Branch CI is obtained by opening a PR; main is covered by ci-main.yml.
+  # PR-only: no push/dispatch run may publish `Script checks`. Mirrors use !cancelled(): on run cancel
+  # pending mirrors never start and running ones are cancelled; a timed-out upstream still mirrors red.
   pull_request:
 
 concurrency:
@@ -1038,7 +1031,7 @@ jobs:
     needs:
       - changes
       - check_fast
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1071,7 +1064,7 @@ jobs:
     needs:
       - changes
       - test_fast
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1090,7 +1083,7 @@ jobs:
     needs:
       - changes
       - dashboard
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1422,7 +1415,7 @@ jobs:
     needs:
       - changes
       - high-risk-recovery
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1716,7 +1709,7 @@ jobs:
     needs:
       - changes
       - library_sweep
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1783,7 +1776,7 @@ jobs:
     needs:
       - changes
       - lint
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1819,7 +1812,7 @@ jobs:
       - changes
       - check_fast_cross_os
       - check_fast_cross_os_targets
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1855,7 +1848,7 @@ jobs:
   win32_build_token_required_context:
     name: Win32 build-token required context
     needs: [changes, win32_build_token]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -2093,7 +2086,7 @@ jobs:
       - scripts
       - scripts_guards
       - scripts_contracts
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -2115,7 +2108,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=8588e8a9c2727083a47394f4ab6ad59781bc69e9f4378638b140ed7310ef516f
+          expected=ffcf623fe982af0ce2818d6d8e2615c2c9988186da852eb66e8bc81b6f0f7a6f
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2323,7 +2316,7 @@ jobs:
     needs:
       - relay_authority_targets
       - relay_authority_mutations
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -2348,7 +2341,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=8588e8a9c2727083a47394f4ab6ad59781bc69e9f4378638b140ed7310ef516f
+          expected=ffcf623fe982af0ce2818d6d8e2615c2c9988186da852eb66e8bc81b6f0f7a6f
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
