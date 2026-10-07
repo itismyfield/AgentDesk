@@ -1568,6 +1568,26 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 result = self.run_hardening_fixture(mutated)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
 
+    def test_change_surfaces_doc_states_the_actual_publisher_wiring(self) -> None:
+        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        doc_path = REPO_ROOT / "docs/agent-maintenance/change-surfaces.md"
+        doc = " ".join(doc_path.read_text(encoding="utf-8").split())
+        publishers = ("scripts_required_context", "relay-authority-contract")
+        closure, frontier = set(), list(publishers)
+        while frontier:
+            job_id = frontier.pop()
+            if job_id not in closure:
+                closure.add(job_id)
+                needs = jobs[job_id].get("needs", [])
+                frontier.extend([needs] if isinstance(needs, str) else needs)
+        stated = re.search(r"closure is the finite set `\{([^}]*)\}`", doc)
+        self.assertIsNotNone(stated, "change-surfaces.md must state the publisher needs closure")
+        self.assertEqual({name.strip() for name in stated.group(1).split(",")}, closure)
+        relay_needs = ", ".join(jobs["relay-authority-contract"]["needs"])
+        self.assertIn(f"`needs: [{relay_needs}]`", doc)
+        self.assertEqual({jobs[job_id]["if"] for job_id in publishers}, {MIRROR_IF})
+        self.assertIn(f"both publishers must carry exactly `if: {MIRROR_IF}`", doc)
+
     def test_duplicate_required_job_id_is_rejected_before_last_wins_resolution(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         mirror = job_block(workflow, "scripts_required_context")

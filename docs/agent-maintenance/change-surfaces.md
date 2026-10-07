@@ -268,10 +268,9 @@ time for diagnostics; neither is a stored approval value.
   `scripts/required-check-mirror.sh`. The required `Script checks` publisher
   compares both the helper digest and the digest of
   `scripts/check-ci-runner-hardening.sh` immediately after checkout; the
-  unconditional required `relay-authority-contract` job repeats the same two
-  comparisons before its own gate run (they sit after its toolchain and
-  relay-contract steps, and any earlier step failure already turns that
-  required job red), and each job then runs only its verified gate copy. The publisher-side copy is intentional and
+  required `relay-authority-contract` publisher repeats the same two
+  comparisons in its first step after checkout, before its own gate run and
+  its two result mirrors, and each job then runs only its verified gate copy. The publisher-side copy is intentional and
   symmetric: it catches a skipped/altered relay job, while the relay copy
   catches a skipped/altered publisher. The helper's
   behavior tests remain useful regressions, but byte identity is primary:
@@ -286,26 +285,28 @@ time for diagnostics; neither is a stored approval value.
   `defaults`/`env`/`environment`/`strategy`/`container` are pinned. The
   publisher's `if: ${{ !cancelled() }}` is what runs the fail-closed
   mirror after an upstream failure, skip, or timeout cancellation; a cancelled
-  run cancels the publisher instead of publishing a failure. The independent
-  `relay-authority-contract` publisher has no `needs` and must omit job-level
-  `if`; the internal `changes` job and every shard job must also omit
-  job-level `if` so their own work cannot be condition-skipped. Each extra
+  run does not run the publisher, so it publishes no failure. The independent
+  `relay-authority-contract` publisher has
+  `needs: [relay_authority_targets, relay_authority_mutations]` and the same
+  exact `if: ${{ !cancelled() }}`; `changes`, every shard job, and both relay
+  execution jobs must omit job-level `if` (and the relay execution jobs omit
+  `needs`) so their own work cannot be condition-skipped. Each extra
   shard job runs `./scripts/ci-script-checks.sh` exactly once with the
   `scripts` aggregate's effective execution and its own `SCRIPT_CHECK_SHARD`.
   Its source-byte range is also hashed, so YAML scalar tags and styles remain in
   the comparison; Psych cannot erase an explicit tag such as `!!binary` or
   equate YAML 1.1 spellings such as `yes` and `012` with the intended
   Actions scalars. Plain YAML-boolean-like job IDs fail closed, while quoted
-  `"yes"` remains a valid string job ID. The relay job's semantic hash and
-  explicit step registry pin its absent `needs`/`if`, non-matrix shape, and
+  `"yes"` remains a valid string job ID. The relay publisher's semantic hash
+  and explicit step registry pin its `needs`, `if`, non-matrix shape, and
   content-hash backstop. Starting at the two required publishers, the complete
   recursive `needs` closure is the finite set
   `{scripts_required_context, relay-authority-contract, scripts,
-  scripts_guards, scripts_contracts, changes}`; every member must exist and
-  omit `continue-on-error`, the Script checks publisher must carry exactly
-  `if: ${{ !cancelled() }}`, and the other jobs must
-  omit job-level `if`. Any edge that expands that set is a review-triggering
-  gate failure.
+  scripts_guards, scripts_contracts, changes, relay_authority_targets,
+  relay_authority_mutations}`; every member must exist and omit
+  `continue-on-error`, both publishers must carry exactly
+  `if: ${{ !cancelled() }}`, and the other six jobs must omit job-level `if`.
+  Any edge that expands that set is a review-triggering gate failure.
 - aggregate execution: the calculator records shell/working-directory
   candidates, environment scopes, `runs-on`, prior recognized file writes, and
   the selected

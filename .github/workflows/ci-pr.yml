@@ -2,7 +2,7 @@ name: CI PR
 
 on:
   # PR-only: no push/dispatch run may publish `Script checks`. Mirrors use !cancelled(): a cancelled
-  # run leaves blocking cancelled contexts; a timed-out upstream (also `cancelled`) still mirrors red.
+  # run does not run them, while a timed-out upstream (reported `cancelled`) still mirrors red.
   pull_request:
 
 concurrency:

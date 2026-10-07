@@ -194,10 +194,15 @@ write 사이에 끼어드는 것이라 바이트를 **추가**할 수 있을 뿐
    오염은 확률적이고, 실제로 5회 스윕 중 1회 오탐이 관측된 적이 있다.
 4. 등록할 컨텍스트 이름은 **`Library test sweep (ubuntu-latest)`**
    (= `library_sweep_required_context` job)이다. sweep 잡 본체인
-   `Library test sweep`을 등록하면 `rust_tests` 출력이 false인 PR에서
-   잡이 skip되어 **pending으로 영구 블록**된다. mirror job은 `if: ${{ !cancelled() }}`로
-   돌면서 skip을 명시적 green으로 변환하고 upstream 실패/timeout 취소에는 fail-closed다.
-   run 자체가 취소되면 mirror도 `cancelled`로 끝나 실패를 발행하지 않고 머지는 계속 막힌다.
+   `Library test sweep`을 등록하면 `rust_tests` 출력이 false인 PR에서 잡이
+   `if:`로 skip되는데, GitHub은 job 조건으로 skip된 required check를 **통과로
+   친다**. `changes`가 실패해 sweep이 skip돼도 통과하므로 fail-open이다.
+   (**pending으로 남아 머지를 막는 것**은 workflow 자체가 트리거되지 않거나
+   그 이름의 check가 아예 발행되지 않은 경우다. job skip과 구분한다.)
+   mirror job은 `if: ${{ !cancelled() }}`로 돌면서 의도된 skip만 명시적 green으로
+   바꾸고, upstream 실패와 timeout(`cancelled`로 보고됨)에는 fail-closed다.
+   run 자체가 취소되면 mirror는 실행되지 않는다. 그때 check conclusion이
+   `cancelled`로 남는지는 PR run 취소로 실측해 확인한다.
 
 `scripts/check-ci-runner-hardening.sh`의 `targets`에 등재된 `test_fast`,
 `high-risk-recovery`, `check_fast_cross_os`, `check_fast_cross_os_targets`,
