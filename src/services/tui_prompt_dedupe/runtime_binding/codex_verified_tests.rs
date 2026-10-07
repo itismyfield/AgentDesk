@@ -688,3 +688,38 @@ fn production_rollout_selector_still_picks_newest_mtime_even_with_an_owned_sourc
     assert_eq!(selected, Some(h.path(CHILD)));
     assert_eq!(h.consumer().unwrap().session_id.as_deref(), Some(ID));
 }
+
+#[test]
+fn same_native_hook_retries_with_optional_path_hints_do_not_append() {
+    for missing_first in [true, false] {
+        let h = Fixture::new("fresh", None);
+        h.header(ID, false);
+        let without_path = |event| {
+            let envelope = HookBindingEnvelope {
+                context: CapturedContext::Captured(h.context.clone()),
+                observed: ObservedHookProcess::default(),
+            };
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
+            let payload = json!({"session_id":ID, "source":"startup", "prompt":PROMPT});
+            observe_binding_hook("codex", event, Some(ID), Some(ID), &payload, &headers)
+        };
+        if missing_first {
+            without_path("session-start");
+        } else {
+            h.send("session-start", ID, Value::Null, None);
+        }
+        h.assert_proof();
+        let before = h.fold();
+        if missing_first {
+            h.send("user-prompt-submit", ID, json!(PROMPT), None);
+        } else {
+            without_path("user-prompt-submit");
+        }
+        h.assert_proof();
+        assert_eq!(h.fold(), before);
+        without_path("session-start");
+        h.assert_proof();
+        assert_eq!(h.fold(), before);
+    }
+}

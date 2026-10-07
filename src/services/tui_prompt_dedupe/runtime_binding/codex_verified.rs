@@ -197,9 +197,10 @@ fn commit(
     context: &BindingContext,
     claim: &Claim,
 ) -> io::Result<Fold> {
+    let previous = binding_events::codex::read_ownership(context)?.verified;
     let retry = matches!(&claim.evidence, ClaimEvidence::NativeHook { event, .. } if event == "user_prompt_submit")
-        && binding_events::codex::read_ownership(context)?
-            .verified
+        && previous
+            .as_ref()
             .is_some_and(|proof| proof.source.session_id == claim.session_id);
     let mut verified = None;
     let decision = if !retry && !claim_eligible(context, claim) {
@@ -227,7 +228,14 @@ fn commit(
             action();
         }
     });
-    binding_events::codex::commit_claim(context, claim, decision, || {
+    // A path hint cannot split a retry of the same opened native descriptor.
+    let persisted_claim = match (&previous, &decision) {
+        (Some(proof), Decision::Verified(source)) if &proof.source == source => {
+            &proof.ownership.claim
+        }
+        _ => claim,
+    };
+    binding_events::codex::commit_claim(context, persisted_claim, decision, || {
         validate_context(authority, context)?;
         if let Some(before) = &verified {
             let after = native(context, claim)
