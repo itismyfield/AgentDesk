@@ -61,7 +61,7 @@ sys.exit(0 if mode in ('normal', 'quiet', 'delayed_normal') else 7)
 "#)).unwrap();
         // A fork on another thread holds any writable fd on the script until its exec, failing
         // our exec with ETXTBSY; `cp` writes it in its own process so no such fd exists here.
-        let copied = std::process::Command::new("cp")
+        let copied = std::process::Command::new("/bin/cp")
             .arg(&source)
             .arg(&cli)
             .status()
