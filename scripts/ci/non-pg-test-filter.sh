@@ -150,6 +150,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::inflight::host_recovery_guard::keyed_tests
   --skip services::discord::inflight::rebind_reap::tests
   --skip services::discord::inflight::removal::custody_notice_tests
+  --skip services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
   --skip services::discord::placeholder_sweeper::retirement_tests
   --skip services::discord::recovery_engine::host_reconcile::tests
@@ -197,6 +198,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tmux_reaper::host_guard_tests
   --skip services::discord::tui_prompt_relay::herdr_source::tests
   --skip services::discord::tui_prompt_relay::rehydration::tests::host_defer
+  --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
   --skip services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
@@ -541,6 +544,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_live_local_pending_open_route_runs_locally_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_local_accepted_route_stays_fenced_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040
+  services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::only_the_live_reader_runs_a_late_stop_at_the_turns_own_start
   services::discord::router::message_handler::provider_dispatch::herdr_tests::a_judgment_left_by_an_early_exit_admits_no_later_send
   services::discord::router::message_handler::provider_dispatch::herdr_tests::an_unconfigured_channel_passes_both_entries_without_a_read
   services::discord::router::message_handler::provider_dispatch::herdr_tests::the_switch_alone_decides_whether_a_configured_turn_reaches_the_herdr_executor
@@ -895,6 +899,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::inflight::host_recovery_guard::keyed_tests
   services::discord::inflight::rebind_reap::tests
   services::discord::inflight::removal::custody_notice_tests
+  services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
   services::discord::placeholder_sweeper::abandon_guard::tests
   services::discord::placeholder_sweeper::retirement_tests
   services::discord::recovery_engine::host_reconcile::tests
@@ -942,6 +947,8 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tmux_reaper::host_guard_tests
   services::discord::tui_prompt_relay::herdr_source::tests
   services::discord::tui_prompt_relay::rehydration::tests::host_defer
+  services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
+  services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
   services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests

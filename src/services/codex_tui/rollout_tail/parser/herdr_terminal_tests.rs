@@ -128,7 +128,7 @@ fn terminal_frames(frames: &[StreamMessage]) -> Vec<String> {
 }
 
 /// A Herdr Codex read ends only on its own turn's record: never at the drain, an abort typed at its
-/// end, a completion after a stop plain; unnamed aborts and dead panes end nothing. Off: drain.
+/// end, a completion after a stop typed too; unnamed aborts and dead panes end nothing. Off: drain.
 #[test]
 fn a_herdr_codex_turn_ends_only_on_its_own_rollout_terminal() {
     let dir = tempfile::tempdir().unwrap();
@@ -169,7 +169,7 @@ fn a_herdr_codex_turn_ends_only_on_its_own_rollout_terminal() {
     append(&completed.path, &event("task_complete", Some("t1")));
     let (result, frames) = completed.finish();
     assert!(matches!(result, ReadOutputResult::Completed { .. }));
-    assert_eq!(terminal_frames(&frames), ["done:partial"]);
+    assert_eq!(terminal_frames(&frames), ["native:Completed:partial"]);
 
     let unnamed = Tail::start(dir.path(), "unnamed.jsonl", &token, true);
     append(&unnamed.path, &event("turn_aborted", None));
@@ -227,12 +227,12 @@ fn a_herdr_turn_accepts_nothing_past_its_terminal_record() {
     let counted = (outcome.final_offset, outcome.bytes_read, outcome.lines_read);
     assert_eq!(counted, (end, end, 6));
     let frames: Vec<_> = rx.try_iter().collect();
-    assert_eq!(terminal_frames(&frames), ["done:partial"]);
+    assert_eq!(terminal_frames(&frames), ["native:Completed:partial"]);
     assert!(!format!("{frames:?}").contains("next t"), "{frames:?}");
 }
 
 /// An abort or completion ends a Herdr read only when it and the started turn both name the same
-/// turn; missing, null or empty ids, or another turn's completion, keep the read tailing.
+/// turn; missing, null, empty or blank ids, or another turn's completion, keep the read tailing.
 #[test]
 fn a_herdr_turn_ends_only_on_a_record_naming_its_started_turn() {
     let dir = tempfile::tempdir().unwrap();
@@ -250,6 +250,11 @@ fn a_herdr_turn_ends_only_on_a_record_naming_its_started_turn() {
             "empty",
             event("task_started", Some("")),
             event("turn_aborted", Some("")),
+        ),
+        (
+            "blank",
+            event("task_started", Some(" \t ")),
+            event("turn_aborted", Some(" \t ")),
         ),
         (
             "foreign",
@@ -270,4 +275,21 @@ fn a_herdr_turn_ends_only_on_a_record_naming_its_started_turn() {
         );
         assert!(terminal_frames(&frames).is_empty(), "{name}: {frames:?}");
     }
+}
+
+/// A Herdr reply takes a fallback body only from its own turn's completion, never another turn's.
+#[test]
+fn a_herdr_reply_never_takes_another_turns_fallback_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = herdr_token(false);
+    let complete = |turn: &str, text: &str| {
+        record(
+            json!({"type": "event_msg", "payload": {"type": "task_complete", "turn_id": turn,
+            "last_agent_message": text}}),
+        )
+    };
+    let body = running_turn() + &complete("t0", "foreign answer") + &complete("t1", "own partial");
+    let (result, frames) = Tail::start_with(dir.path(), "fallback", &token, true, body).finish();
+    assert!(matches!(result, ReadOutputResult::Completed { .. }));
+    assert_eq!(terminal_frames(&frames), ["native:Completed:own partial"]);
 }

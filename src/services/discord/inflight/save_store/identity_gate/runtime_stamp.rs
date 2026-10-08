@@ -275,7 +275,8 @@ impl TuiTerminalRange {
         }
         let captured = Self {
             retained_codex_terminal: row.provider_kind() == Some(ProviderKind::Codex),
-            kind: NativeTerminalKind::Completed,
+            // Pinned evidence was required above; an older pinned row reads as a completion.
+            kind: row.tui_terminal_kind.unwrap_or_default(),
             identity: InflightTurnIdentity::from_state(row),
             result: row.full_response.clone(),
             rollout_path: row.output_path.clone()?,
@@ -1287,7 +1288,15 @@ impl InflightTurnState {
         ),
         observed_response: &str,
         message: StreamMessage,
-    ) -> Result<(StreamMessage, Option<TuiTerminalRange>, bool), GuardedSaveOutcome> {
+    ) -> Result<
+        (
+            StreamMessage,
+            Option<TuiTerminalRange>,
+            bool,
+            Option<NativeTerminalKind>,
+        ),
+        GuardedSaveOutcome,
+    > {
         let provider = if matches!(
             &message,
             StreamMessage::CodexTuiTerminalDone {
@@ -1336,14 +1345,16 @@ impl InflightTurnState {
             kind,
         }) = message
         else {
-            return captured_terminal_admission::admit_uncaptured_terminal(
+            let admitted = captured_terminal_admission::admit_uncaptured_terminal(
                 self,
                 baseline,
                 expected,
                 can_deliver_directly,
                 message,
-            )
-            .await;
+            );
+            return admitted
+                .await
+                .map(|(msg, range, terminal)| (msg, range, terminal, None));
         };
         let (shared, bridge_actor) = actor_authority;
         let result = if result.trim().is_empty() {
@@ -1369,6 +1380,25 @@ impl InflightTurnState {
             .is_some_and(|current| std::sync::Arc::ptr_eq(current, &captured))
         {
             return Err(mismatch);
+        }
+        if generation_mtime_ns == 0
+            && crate::services::provider::herdr_provider_terminal_only(Some(bridge_actor)).is_some()
+        {
+            let frame = herdr_terminal_admission::HerdrFrame {
+                provider,
+                result,
+                session_id,
+                path: transcript_path,
+                logical: tmux_session_name,
+                turn_nonce,
+                source_start,
+                end: complete_record_end,
+                file: (source_file_dev, source_file_ino),
+                kind,
+            };
+            return self
+                .admit_herdr_terminal(baseline, expected, can_deliver_directly, captured, frame)
+                .await;
         }
         let admission = captured_terminal_admission::CapturedTerminalAdmission {
             provider,
@@ -1399,7 +1429,50 @@ impl InflightTurnState {
         .map_err(|_| GuardedSaveOutcome::IoError)?;
         *self = local;
         *baseline = persisted;
-        outcome
+        outcome.map(|(msg, range, terminal)| (msg, range, terminal, None))
+    }
+
+    /// A Herdr typed terminal: admitted, it becomes the turn's Done carrying its kind; refused, it
+    /// stays an error, so no Herdr terminal degrades to a terminal-capable plain Done.
+    async fn admit_herdr_terminal(
+        &mut self,
+        baseline: &mut InflightTurnState,
+        expected: &InflightTurnIdentity,
+        can_deliver_directly: bool,
+        actor: std::sync::Arc<crate::services::provider::CancelToken>,
+        frame: herdr_terminal_admission::HerdrFrame,
+    ) -> Result<
+        (
+            StreamMessage,
+            Option<TuiTerminalRange>,
+            bool,
+            Option<NativeTerminalKind>,
+        ),
+        GuardedSaveOutcome,
+    > {
+        let (mut local, mut persisted, expected) =
+            (self.clone(), baseline.clone(), expected.clone());
+        let done = StreamMessage::Done {
+            result: frame.result.clone(),
+            session_id: frame.session_id.clone(),
+        };
+        #[cfg(test)]
+        let binding_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
+        // The marker, binding log and transcript reads and the lock-held commit stay off the scheduler.
+        let (admitted, local, persisted) = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            crate::services::tui_prompt_dedupe::binding_events::set_test_root(
+                binding_root.as_deref(),
+            );
+            let states = (&mut local, &mut persisted);
+            let admitted = frame.admit(states, &expected, can_deliver_directly, &actor);
+            (admitted, local, persisted)
+        })
+        .await
+        .map_err(|_| GuardedSaveOutcome::IoError)?;
+        *self = local;
+        *baseline = persisted;
+        admitted.map(|kind| (done, None, true, Some(kind)))
     }
 }
 
@@ -1409,3 +1482,6 @@ mod claude_terminal_tests;
 
 #[path = "runtime_stamp/captured_terminal_admission.rs"]
 mod captured_terminal_admission;
+
+#[path = "runtime_stamp/herdr_terminal_admission.rs"]
+pub(in crate::services::discord) mod herdr_terminal_admission;

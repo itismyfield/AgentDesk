@@ -63,6 +63,13 @@ pub(in crate::services::discord) use watcher_respawn::reclaim_watcherless_sessio
 // `HeadlessAgentTurnReservation` has no external referent today (callers
 // destructure the reserve/start tuple); kept re-exported for the reserve→start
 // API surface, same convention as the recovery/snapshot blocks below.
+#[cfg(all(test, unix))]
+pub(crate) use super::turn_presence::activity::tests::{
+    BindingRoot, ReadyPane, bind_turn_mode_transcript, settled_reason,
+};
+pub(crate) use super::turn_presence::supervisor::status as turn_presence_status;
+#[cfg(test)]
+pub(crate) use super::turn_presence::supervisor::tests::seed_presence_for_tests;
 pub(crate) use crate::services::discord::outbound::manual_delivery::ManualOutboundDeliveryId;
 pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
 use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
@@ -85,14 +92,18 @@ pub use headless_turn::{
 pub use mailbox::purge_idle_channel_mailbox_registry_entry;
 #[cfg(all(test, unix))]
 pub(crate) use turn_deliver::inject_tests::{
-    InjectPane, end_turn, queue_texts, register_inject_runtime, start_without_gateway,
+    InjectPane, claim_kinded, end_turn, inject_hook, queue_texts, register_inject_runtime,
+    send_meanwhile, start_without_gateway,
 };
 pub use turn_deliver::{
-    EXTERNAL_TURN_ACTIVE, HumanInputDelivery, HumanInputError, HumanInputRequest,
-    deliver_human_input, external_turn_holds_channel,
+    ExternalHold, HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
+    external_turn_hold_for_start,
 };
+pub(crate) use turn_deliver::{InjectAttempt, InjectOrigin, SOURCE_OWNED, inject_human_input};
 #[cfg(test)]
-pub(crate) use turn_deliver::{register_bot_auth_for_tests, seed_external_turn_row_for_tests};
+pub(crate) use turn_deliver::{
+    inflight_rows_for_tests, register_bot_auth_for_tests, seed_external_turn_row_for_tests,
+};
 // #5147: re-exported as a module (not as loose constants) so a consumer reads
 // `self_watchdog::TCP_TIMEOUT` — a name that says which timeout — rather than a
 // bare `TCP_TIMEOUT` at the health root.

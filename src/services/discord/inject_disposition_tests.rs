@@ -140,8 +140,8 @@ fn a_full_ring_drops_its_oldest_entry_and_a_rerecorded_message_keeps_one() {
     assert_eq!(observed, expected);
 }
 
-/// A writer held between its read and its write keeps a second writer out until it lands, so
-/// neither entry is lost.
+/// A writer held between its read and its write keeps a second writer, seen reaching the flock,
+/// from finishing until it lands, so neither entry is lost.
 #[test]
 fn a_writer_between_read_and_write_holds_the_second_writer_off() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -149,7 +149,8 @@ fn a_writer_between_read_and_write_holds_the_second_writer_off() {
     let channel = ChannelId::new(5_845_441);
     let (first, second) = (MessageId::new(5_845_442), MessageId::new(5_845_443));
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let (reached, go) = test_support::park_before_write(&ring_path(&provider).unwrap());
+    let path = ring_path(&provider).unwrap();
+    let (reached, go) = test_support::park_before_write(&path);
     let write = |message: MessageId| {
         let provider = provider.clone();
         std::thread::spawn(move || {
@@ -166,15 +167,26 @@ fn a_writer_between_read_and_write_holds_the_second_writer_off() {
     reached
         .recv_timeout(Duration::from_secs(10))
         .expect("first writer parked");
+    let at_lock = test_support::watch_lock(&path);
     let b = write(second);
-    std::thread::sleep(Duration::from_millis(300));
-    let b_waited = !b.is_finished();
+    at_lock
+        .recv_timeout(Duration::from_secs(10))
+        .expect("second writer at the flock");
+    // Unlocked, the second writer would land on its own well within this bound.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while !b.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let b_finished_first = b.is_finished();
     go.send(()).unwrap();
     a.join().unwrap().unwrap();
     b.join().unwrap().unwrap();
     let mut ids = ring_ids(&provider);
     ids.sort_unstable();
-    assert_eq!((b_waited, ids), (true, vec![first.get(), second.get()]));
+    assert_eq!(
+        (b_finished_first, ids),
+        (false, vec![first.get(), second.get()])
+    );
 }
 
 /// An unreadable ring is replaced by one holding only the new entry.
@@ -196,4 +208,111 @@ fn an_unreadable_ring_is_replaced_by_the_new_entry() {
     )
     .unwrap();
     assert_eq!(ring_ids(&provider), [message.get()]);
+}
+
+/// A parent's claim keeps a second claim and a thread's promotion off the message and reads as in
+/// progress until its guard drops; the drop itself removes the claim.
+#[test]
+fn a_claim_holds_its_message_until_its_guard_drops_and_the_drop_removes_it() {
+    let provider = isolated("claim");
+    let (message, now) = (MessageId::new(5_845_461), Instant::now());
+    let guard = claim_source(&provider, message, now).expect("the first claim");
+    let held = (
+        claim_source(&provider, message, now).is_none(),
+        promote_thread(&provider, message, now),
+        in_progress(Some(&provider), message, now),
+    );
+    drop(guard);
+    let raw = test_support::source_entry(&provider, message.get());
+    let after = (in_progress(Some(&provider), message, now), raw);
+    let again = claim_source(&provider, message, now).is_some();
+    assert_eq!(
+        (held, after, again),
+        ((true, false, true), (false, None), true)
+    );
+}
+
+/// A claim whose owner vanished without its guard's cleanup blocks nothing: its lease is dead.
+#[test]
+fn a_claim_left_with_a_dead_lease_blocks_nothing() {
+    let provider = isolated("dead-lease");
+    let (message, now) = (MessageId::new(5_845_471), Instant::now());
+    test_support::plant_dead_lease(&provider, message.get());
+    let progress = in_progress(Some(&provider), message, now);
+    let promoted = promote_thread(&provider, message, now);
+    let other = MessageId::new(5_845_472);
+    test_support::plant_dead_lease(&provider, other.get());
+    let claimed = claim_source(&provider, other, now).is_some();
+    assert_eq!((progress, promoted, claimed), (false, true, true));
+}
+
+/// A guard's drop removes only its own claim: a terminal noted while it held the message stays,
+/// and a claim made after that terminal aged out is not removed by the older guard.
+#[test]
+fn a_dropped_guard_keeps_a_terminal_and_a_later_claim() {
+    let provider = isolated("identity");
+    let channel = ChannelId::new(5_845_480);
+    let (ended, now) = (MessageId::new(5_845_481), Instant::now());
+    let guard = claim_source(&provider, ended, now).expect("claim");
+    note_terminal(
+        &provider,
+        channel,
+        Some(ended),
+        InjectionOutcome::Observed,
+        now,
+    );
+    drop(guard);
+    let kept = terminal(Some(&provider), ended, now);
+    let replaced = MessageId::new(5_845_482);
+    let older = claim_source(&provider, replaced, now).expect("claim");
+    note_terminal(
+        &provider,
+        channel,
+        Some(replaced),
+        InjectionOutcome::Observed,
+        now,
+    );
+    let later = now + MEMORY_TTL;
+    let newer = claim_source(&provider, replaced, later).expect("a claim after the terminal aged");
+    drop(older);
+    let still = in_progress(Some(&provider), replaced, later);
+    drop(newer);
+    assert_eq!((kept, still), (Some(InjectionOutcome::Observed), true));
+}
+
+/// A thread's intake keeps a parent's claim off the message for the dedup window only, and never
+/// reads as an injection in progress, so the thread's own mailbox takes it.
+#[test]
+fn a_thread_intake_blocks_a_parent_claim_until_it_expires() {
+    let provider = isolated("thread-intake");
+    let (message, now) = (MessageId::new(5_845_491), Instant::now());
+    let promoted = promote_thread(&provider, message, now);
+    let blocked = claim_source(&provider, message, now).is_none();
+    let progress = in_progress(Some(&provider), message, now);
+    let later = now + THREAD_INTAKE_TTL;
+    let claimed = claim_source(&provider, message, later).is_some();
+    assert_eq!(
+        (promoted, blocked, progress, claimed),
+        (true, true, false, true)
+    );
+}
+
+/// A message noted again keeps one order slot, so repeats cannot grow the table's order.
+#[test]
+fn a_renoted_terminal_keeps_one_order_slot() {
+    let provider = isolated("renote");
+    let (channel, now) = (ChannelId::new(5_845_500), Instant::now());
+    let message = MessageId::new(5_845_501);
+    for outcome in [
+        InjectionOutcome::Observed,
+        InjectionOutcome::Unconfirmed,
+        InjectionOutcome::Observed,
+    ] {
+        note_terminal(&provider, channel, Some(message), outcome, now);
+    }
+    let slots = test_support::order_slots(&provider, message.get());
+    assert_eq!(
+        (slots, terminal(Some(&provider), message, now)),
+        (1, Some(InjectionOutcome::Observed))
+    );
 }

@@ -91,7 +91,7 @@ if-shell)
   a=$(cat "$d/attached"); l=$(cat "$d/last"); ok=0
   [ "$a" = 0 ] && ok=1
   case "$6" in *session_last_attached*)
-    g0=$(printf '%s' "$6" | sed 's/.*session_last_attached},\([0-9]*\)}}$/\1/')
+    g0=$(printf '%s' "$6" | sed 's/.*session_last_attached},\([0-9]*\)}.*/\1/')
     [ "$l" = "$g0" ] || ok=0 ;;
   esac
   [ "$ok" = 1 ] || { echo "agentdesk-busy-inject-vetoed $a $l"; exit 0; }

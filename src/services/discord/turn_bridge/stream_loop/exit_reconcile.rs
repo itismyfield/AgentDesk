@@ -9,20 +9,24 @@ pub(in crate::services::discord::turn_bridge) enum StreamLoopOutcome {
     AuthorityLost,
 }
 
-/// A Herdr turn that took a user stop ends only on its provider's admitted terminal; any other
-/// exit leaves the turn, its row and its mailbox slot held. Settlement is checked first.
+/// A Herdr turn whose input may have been submitted, or that took a user stop, ends only on its
+/// provider's admitted terminal; EOF, a dead pane or a disconnect leave the turn, row and slot held.
 pub(in crate::services::discord::turn_bridge) fn herdr_stop_unconfirmed(
     token: &crate::services::provider::CancelToken,
     cancelled: bool,
     terminal_admitted: bool,
 ) -> bool {
-    use crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available;
+    use crate::services::provider::cancel_token_claude_interrupt::{
+        HerdrSubmission, herdr_stop_settlement_available,
+    };
     herdr_stop_settlement_available()
         && !cancelled
         && !terminal_admitted
-        && token
-            .herdr_interrupt_state()
-            .is_some_and(|intent| intent.user_stop.load(std::sync::atomic::Ordering::Acquire))
+        && token.herdr_interrupt_state().is_some_and(|intent| {
+            let submission = *intent.submission.lock().unwrap_or_else(|e| e.into_inner());
+            intent.user_stop.load(std::sync::atomic::Ordering::Acquire)
+                || submission != HerdrSubmission::Unsubmitted
+        })
 }
 
 pub(super) fn stream_loop_should_continue(

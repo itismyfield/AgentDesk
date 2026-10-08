@@ -45,7 +45,7 @@ pub(super) fn text_command_evidence(
 }
 
 /// The live intake's command test: `!` after an optional leading `<@id>` / `<@!id>`.
-pub(super) fn is_text_command(text: &str) -> bool {
+pub(in crate::services::discord) fn is_text_command(text: &str) -> bool {
     without_leading_mention(text).starts_with('!')
 }
 

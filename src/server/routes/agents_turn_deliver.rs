@@ -262,6 +262,17 @@ mod tests {
         post(app, &format!("/agents/{agent}/turn/deliver"), body).await
     }
 
+    pub(super) async fn get(app: &Router, uri: &str) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request");
+        let response = app.clone().oneshot(request).await.expect("response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1 << 20).await.expect("body");
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
     pub(super) async fn post(app: &Router, uri: &str, body: &str) -> (StatusCode, Value) {
         let request = Request::builder()
             .method(Method::POST)
@@ -321,7 +332,7 @@ mod pg_tests {
     use axum::http::StatusCode;
     use serde_json::{Value, json};
 
-    use super::tests::{deliver, post, router};
+    use super::tests::{deliver, get, post, router};
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::services::discord::health::{
         HealthRegistry, register_bot_auth_for_tests, seed_external_turn_row_for_tests,
@@ -501,6 +512,104 @@ mod pg_tests {
                 r#"503 {"detail":"provider runtime is not ready","error":"runtime_unavailable","ok":false}"#,
             ]
         );
+    }
+
+    /// A turn-mode direct turn holds no row: its transcript alone must queue a deliver and refuse a
+    /// start, naming whether it read busy or unknown, and the hold writes no row of its own.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_turn_mode_direct_turn_queues_deliver_and_refuses_start_pg() {
+        use crate::services::discord::health::{
+            BindingRoot, ReadyPane, bind_turn_mode_transcript, inflight_rows_for_tests,
+            queue_texts, register_inject_runtime, seed_presence_for_tests, settled_reason,
+            start_without_gateway,
+        };
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let bindings = tempfile::tempdir().unwrap();
+        let _binding = BindingRoot::enter(bindings.path());
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let user = r#"{"type":"user","uuid":"a","message":{"content":"direct"}}"#;
+        // Every pane passes the final send check, so only the transcript holds the channel.
+        let agents = [
+            ("tm-busy", 6_845_301_u64, format!("{user}\n"), "open"),
+            (
+                "tm-unknown",
+                6_845_302,
+                format!("{user}\n{{\"type\":\"user\"\n"),
+                "facts_halted",
+            ),
+            ("tm-missing", 6_845_303, String::new(), "binding_unreadable"),
+        ];
+        for (agent, channel, _, _) in &agents {
+            let seed = crate::db::agents::insert_agent_channels_for_tests;
+            seed(&pool, agent, Some(&channel.to_string()), None).await;
+        }
+        let registry = Arc::new(HealthRegistry::new());
+        let channels = agents.each_ref().map(|(_, channel, _, _)| *channel);
+        let shared = register_inject_runtime(&registry, &channels, Some(pool.clone())).await;
+        let (mut starts, mut confirmed, mut ready) = (Vec::new(), Vec::new(), Vec::new());
+        for (_, channel, transcript, reason) in &agents {
+            starts.push(start_without_gateway(*channel));
+            let path = bindings.path().join(format!("{channel}.jsonl"));
+            std::fs::write(&path, transcript).unwrap();
+            let session = format!("route-{channel}");
+            ready.push(ReadyPane::mark(&session));
+            let provider = ProviderKind::Claude;
+            confirmed.push(bind_turn_mode_transcript(
+                &shared, &provider, *channel, &session, &path,
+            ));
+            if transcript.is_empty() {
+                std::fs::rename(&path, path.with_extension("moved")).unwrap();
+            }
+            assert_eq!(settled_reason(&shared, &provider, *channel).await, *reason);
+        }
+        let rows = || inflight_rows_for_tests(&ProviderKind::Claude, &channels);
+        assert_eq!(rows(), 0);
+        let app = router(Some(pool), Some(registry));
+        let input = json!({"text": "status?", "author_discord_user_id": "200"}).to_string();
+        let start = json!({"prompt": "status?"}).to_string();
+        let mut observed = Vec::new();
+        for (agent, channel, _, _) in &agents {
+            let (status, body) = deliver(&app, agent, &input).await;
+            let field = |body: &Value, name: &str| body[name].as_str().unwrap_or("-").to_string();
+            let queued = queue_texts(&shared, *channel).await.len();
+            let (start_status, started) =
+                post(&app, &format!("/agents/{agent}/turn/start"), &start).await;
+            observed.push(format!(
+                "{agent}: deliver {} {} {} queued={queued} start {} {}",
+                status.as_u16(),
+                field(&body, "delivery"),
+                field(&body, "reason"),
+                start_status.as_u16(),
+                field(&started, "reason"),
+            ));
+        }
+        assert_eq!(
+            observed,
+            [
+                "tm-busy: deliver 200 queued external_turn_active queued=1 start 409 external_turn_active",
+                "tm-unknown: deliver 200 queued turn_activity_unknown queued=1 start 409 turn_activity_unknown",
+                "tm-missing: deliver 200 queued turn_activity_unknown queued=1 start 409 turn_activity_unknown",
+            ]
+        );
+        assert_eq!(rows(), 0, "a held deliver or start writes no row");
+        // The turn endpoint shows a supervised presence only while the channel is in turn mode.
+        for (index, (_, channel, _, _)) in agents.iter().enumerate() {
+            seed_presence_for_tests(*channel, index == 0);
+        }
+        drop(confirmed.pop());
+        let mut presence = Vec::new();
+        for (agent, _, _, _) in &agents {
+            let (status, body) = get(&app, &format!("/agents/{agent}/turn")).await;
+            presence.push((status.as_u16(), body["turn_presence"]["activity"].clone()));
+        }
+        let expected = [
+            (200, json!("busy")),
+            (200, json!("unknown")),
+            (200, Value::Null),
+        ];
+        assert_eq!(presence, expected);
     }
 
     #[tokio::test(flavor = "current_thread")]

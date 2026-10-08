@@ -181,7 +181,7 @@ pub(super) async fn run_stream_loop(
 
     let mut state_dirty = false;
     #[rustfmt::skip]
-    let (mut pending_long_running_open_after_state_save, mut pending_long_running_retarget_after_state_save, mut loop_outcome, mut runtime_handoff_retry_retained, mut admitted_codex_terminal_range, mut guarded_tool_frame_retry_retained) = (None, None, StreamLoopOutcome::Completed, false, None, false);
+    let (mut pending_long_running_open_after_state_save, mut pending_long_running_retarget_after_state_save, mut loop_outcome, mut runtime_handoff_retry_retained, mut admitted_codex_terminal_range, mut guarded_tool_frame_retry_retained, mut admitted_herdr_terminal) = (None, None, StreamLoopOutcome::Completed, false, None, false, None);
 
     'outer: while stream_loop_should_continue(
         done,
@@ -285,11 +285,14 @@ pub(super) async fn run_stream_loop(
                         break 'outer;
                     }
                     #[rustfmt::skip]
-                    let (msg, admission, was_codex_terminal) = match inflight_state.admit_tui_terminal_frame(&mut persisted_inflight_baseline, &stream_tick_expected_identity, gateway.can_deliver_directly(), (shared_owned.as_ref(), &cancel_token), &full_response, msg).await {
+                    let (msg, admission, was_codex_terminal, herdr_terminal) = match inflight_state.admit_tui_terminal_frame(&mut persisted_inflight_baseline, &stream_tick_expected_identity, gateway.can_deliver_directly(), (shared_owned.as_ref(), &cancel_token), &full_response, msg).await {
                         Ok(admitted) => admitted,
                         Err(_) => { loop_outcome = StreamLoopOutcome::AuthorityLost; break 'outer; }
                     };
                     admitted_codex_terminal_range = admission.or(admitted_codex_terminal_range);
+                    admitted_herdr_terminal = herdr_terminal.or(admitted_herdr_terminal);
+                    #[rustfmt::skip]
+                    let herdr_aborted = herdr_terminal == Some(crate::services::agent_protocol::NativeTerminalKind::Aborted);
                     terminal_control_ready_observed |= was_codex_terminal;
                     match msg {
                         content_message @ (StreamMessage::RetryBoundary
@@ -317,6 +320,7 @@ pub(super) async fn run_stream_loop(
                                     watcher_relay_available_for_turn,
                                     standby_relay_owns_output,
                                     terminal_control_ready_observed,
+                                    herdr_aborted,
                                     streaming_rollover_frozen_msg_ids:
                                         &streaming_rollover_frozen_msg_ids,
                                     context_compact_lower_bound_tokens,
@@ -372,6 +376,7 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
+                            cancelled |= herdr_aborted;
                             if was_codex_terminal {
                                 break;
                             }
@@ -966,6 +971,7 @@ pub(super) async fn run_stream_loop(
         outcome: loop_outcome,
         tui_error_classification,
         codex_tui_terminal_range: admitted_codex_terminal_range,
+        herdr_terminal: admitted_herdr_terminal,
         pending_long_running_open_after_state_save,
         pending_long_running_retarget_after_state_save,
     }

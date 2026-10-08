@@ -19,7 +19,10 @@ use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
     Intervention, InterventionMode, SourceMessageQueuedGeneration,
 };
-use inject::{InjectAttempt, InjectMode};
+use inject::InjectMode;
+pub(crate) use inject::{
+    InjectAttempt, Origin as InjectOrigin, SOURCE_OWNED, attempt as inject_human_input,
+};
 
 pub struct HumanInputRequest {
     pub channel_id: ChannelId,
@@ -92,6 +95,9 @@ enum MailboxHolder {
 /// Queue reason when a turn that never claimed the mailbox holds the channel.
 pub const EXTERNAL_TURN_ACTIVE: &str = "external_turn_active";
 
+/// Queue reason when a confirmed turn-mode channel's transcript reads neither idle nor busy.
+pub const TURN_ACTIVITY_UNKNOWN: &str = "turn_activity_unknown";
+
 /// A TUI-direct, adopted or monitor turn owns the channel through its durable row alone; a
 /// headless start there could not create its own row and would lose the input.
 pub fn external_turn_holds_channel(provider: &ProviderKind, channel_id: u64) -> bool {
@@ -101,9 +107,66 @@ pub fn external_turn_holds_channel(provider: &ProviderKind, channel_id: u64) -> 
         })
 }
 
+/// What keeps a start off a channel whose mailbox may be free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalHold {
+    Row,
+    Busy,
+    Unknown,
+}
+
+impl ExternalHold {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Row | Self::Busy => EXTERNAL_TURN_ACTIVE,
+            Self::Unknown => TURN_ACTIVITY_UNKNOWN,
+        }
+    }
+}
+
+/// A turn-mode direct turn leaves no row, so a confirmed channel also reads its transcript fresh.
+pub(in crate::services::discord) async fn external_turn_hold(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<ExternalHold> {
+    use crate::services::discord::turn_presence::activity::{Activity, activity_now};
+    if external_turn_holds_channel(provider, channel_id.get()) {
+        return Some(ExternalHold::Row);
+    }
+    if !crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
+        return None;
+    }
+    match activity_now(shared, provider, channel_id).await.activity {
+        Activity::Idle => None,
+        Activity::Busy => Some(ExternalHold::Busy),
+        Activity::Unknown => Some(ExternalHold::Unknown),
+    }
+}
+
+/// The `/turn/start` hold: the row, then the transcript once a runtime owns the channel; without
+/// one the start itself fails.
+pub async fn external_turn_hold_for_start(
+    registry: Option<&HealthRegistry>,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<ExternalHold> {
+    if external_turn_holds_channel(provider, channel_id) {
+        return Some(ExternalHold::Row);
+    }
+    if !crate::services::tui_o::turn_mode::transcript_turns(channel_id) {
+        return None;
+    }
+    let channel = ChannelId::new(channel_id);
+    let shared = resolve_direct_meeting_shared(registry?, channel, provider)
+        .await
+        .ok()?;
+    external_turn_hold(&shared, provider, channel).await
+}
+
 #[async_trait]
 trait DeliveryPorts: Send + Sync {
-    async fn external_turn_active(&self) -> bool;
+    async fn external_hold(&self) -> Option<ExternalHold>;
     async fn try_start(&self) -> StartAttempt;
     async fn mailbox_holder(&self) -> MailboxHolder;
     async fn enqueue(&self) -> Result<String, String>;
@@ -126,6 +189,10 @@ async fn deliver_with_ports<P: DeliveryPorts>(
                 let detail = detail.to_string();
                 return Ok(HumanInputDelivery::Unconfirmed { turn_id, detail });
             }
+            InjectAttempt::OwnerFailed { turn_id } => {
+                let detail = "executor_failed".to_string();
+                return Ok(HumanInputDelivery::Unconfirmed { turn_id, detail });
+            }
             // Ahead of anything sent after the reservation; only a written queue front is Queued.
             InjectAttempt::HandedBack { turn_id, veto } => {
                 let (reason, inject_veto) = ("handed_back".to_string(), Some(veto.to_string()));
@@ -140,7 +207,7 @@ async fn deliver_with_ports<P: DeliveryPorts>(
             }
         }
     }
-    if !ports.external_turn_active().await {
+    if ports.external_hold().await.is_none() {
         match ports.try_start().await {
             StartAttempt::Started(turn_id) => return Ok(HumanInputDelivery::Started { turn_id }),
             StartAttempt::Unavailable(error) => {
@@ -152,13 +219,18 @@ async fn deliver_with_ports<P: DeliveryPorts>(
             StartAttempt::Busy => {}
         }
     }
-    let reason = match ports.mailbox_holder().await {
-        MailboxHolder::Turn => "turn_active",
-        MailboxHolder::BackgroundTurn => "background_turn",
-        MailboxHolder::Nothing if ports.external_turn_active().await => EXTERNAL_TURN_ACTIVE,
+    let holder = ports.mailbox_holder().await;
+    let hold = match holder {
+        MailboxHolder::Nothing => ports.external_hold().await,
+        _ => None,
+    };
+    let reason = match (holder, hold) {
+        (MailboxHolder::Turn, _) => "turn_active",
+        (MailboxHolder::BackgroundTurn, _) => "background_turn",
+        (MailboxHolder::Nothing, Some(hold)) => hold.reason(),
         // A refused start with an empty slot is a session transition or a turn
         // that just ended; one more start attempt avoids queueing behind nothing.
-        MailboxHolder::Nothing => match ports.try_start().await {
+        (MailboxHolder::Nothing, None) => match ports.try_start().await {
             StartAttempt::Started(turn_id) => return Ok(HumanInputDelivery::Started { turn_id }),
             StartAttempt::Unavailable(error) => {
                 return Err(HumanInputError::RuntimeUnavailable(error));
@@ -188,8 +260,9 @@ struct LivePorts {
 
 #[async_trait]
 impl DeliveryPorts for LivePorts {
-    async fn external_turn_active(&self) -> bool {
-        external_turn_holds_channel(&self.request.provider, self.request.channel_id.get())
+    async fn external_hold(&self) -> Option<ExternalHold> {
+        let request = &self.request;
+        external_turn_hold(&self.shared, &request.provider, request.channel_id).await
     }
 
     async fn try_start(&self) -> StartAttempt {
@@ -270,7 +343,7 @@ impl DeliveryPorts for LivePorts {
     }
 
     async fn try_inject(&self) -> InjectAttempt {
-        inject::attempt(&self.shared, &self.request).await
+        inject::attempt(&self.shared, &self.request, inject::Origin::External).await
     }
 }
 
@@ -384,6 +457,15 @@ pub(crate) fn seed_external_turn_row_for_tests(provider: &ProviderKind, channel_
         .expect("external turn row");
 }
 
+/// How many of `channels` hold an inflight row file on disk.
+#[cfg(test)]
+pub(crate) fn inflight_rows_for_tests(provider: &ProviderKind, channels: &[u64]) -> usize {
+    use crate::services::discord::inflight::{inflight_runtime_root, inflight_state_path};
+    let root = inflight_runtime_root().expect("test runtime root");
+    let row = |channel: &&u64| inflight_state_path(&root, provider, **channel).exists();
+    channels.iter().filter(row).count()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -393,7 +475,7 @@ mod tests {
     use super::*;
 
     struct FakePorts {
-        externals: Mutex<VecDeque<bool>>,
+        externals: Mutex<VecDeque<Option<ExternalHold>>>,
         starts: Mutex<VecDeque<StartAttempt>>,
         start_calls: AtomicUsize,
         holder: MailboxHolder,
@@ -420,8 +502,8 @@ mod tests {
 
     #[async_trait]
     impl DeliveryPorts for FakePorts {
-        async fn external_turn_active(&self) -> bool {
-            self.externals.lock().unwrap().pop_front().unwrap_or(false)
+        async fn external_hold(&self) -> Option<ExternalHold> {
+            self.externals.lock().unwrap().pop_front().flatten()
         }
         async fn try_start(&self) -> StartAttempt {
             self.start_calls.fetch_add(1, Ordering::SeqCst);
@@ -487,11 +569,12 @@ mod tests {
         cases
     }
 
-    /// PR1's external-row table, with the start count.
+    /// PR1's external-row table and the turn-mode holds, with the start count.
     fn external_cases() -> Vec<(FakePorts, &'static str)> {
+        use ExternalHold::{Busy, Row, Unknown};
         use MailboxHolder::{BackgroundTurn, Nothing, Turn};
         let started = || StartAttempt::Started("discord:7:1".into());
-        let external = |answers: Vec<bool>, starts: Vec<StartAttempt>, holder| {
+        let external = |answers: Vec<Option<ExternalHold>>, starts: Vec<StartAttempt>, holder| {
             let fake = ports(starts, holder);
             *fake.externals.lock().unwrap() = answers.into();
             fake
@@ -499,11 +582,15 @@ mod tests {
         #[rustfmt::skip]
         let cases = vec![
             // The start a free mailbox would grant is never attempted.
-            (external(vec![true, true], vec![started()], Nothing), "queued discord:7:900 external_turn_active enqueue=1 starts=0"),
-            (external(vec![true], vec![started()], Turn), "queued discord:7:900 turn_active enqueue=1 starts=0"),
-            (external(vec![true], vec![started()], BackgroundTurn), "queued discord:7:900 background_turn enqueue=1 starts=0"),
+            (external(vec![Some(Row), Some(Row)], vec![started()], Nothing), "queued discord:7:900 external_turn_active enqueue=1 starts=0"),
+            (external(vec![Some(Row)], vec![started()], Turn), "queued discord:7:900 turn_active enqueue=1 starts=0"),
+            (external(vec![Some(Row)], vec![started()], BackgroundTurn), "queued discord:7:900 background_turn enqueue=1 starts=0"),
             // A row that appears after a refused start labels the queue and stops the retry.
-            (external(vec![false, true], vec![StartAttempt::Busy, started()], Nothing), "queued discord:7:900 external_turn_active enqueue=1 starts=1"),
+            (external(vec![None, Some(Row)], vec![StartAttempt::Busy, started()], Nothing), "queued discord:7:900 external_turn_active enqueue=1 starts=1"),
+            // A busy direct turn shares the row's reason; an unreadable one names itself.
+            (external(vec![Some(Busy), Some(Busy)], vec![started()], Nothing), "queued discord:7:900 external_turn_active enqueue=1 starts=0"),
+            (external(vec![Some(Unknown), Some(Unknown)], vec![started()], Nothing), "queued discord:7:900 turn_activity_unknown enqueue=1 starts=0"),
+            (external(vec![Some(Unknown)], vec![started()], Turn), "queued discord:7:900 turn_active enqueue=1 starts=0"),
         ];
         cases
     }
@@ -571,6 +658,9 @@ mod tests {
             },
             InjectAttempt::HandbackFailed("handback_persistence"),
             InjectAttempt::HandbackFailed("handback_unknown"),
+            InjectAttempt::OwnerFailed {
+                turn_id: Some("discord:7:6".into()),
+            },
         ];
         let mut observed = Vec::new();
         for mode in [InjectMode::External, InjectMode::All] {
@@ -602,9 +692,11 @@ mod tests {
             "queued discord:7:900 session_transition veto=not_busy enqueue=1 starts=2 asked=1",
             "queued discord:7:900 turn_active veto=not_busy enqueue=1 starts=0 asked=1",
             "queued discord:7:900 turn_active veto=not_busy enqueue=1 starts=1 asked=1",
+            "queued discord:7:900 turn_activity_unknown veto=not_busy enqueue=1 starts=0 asked=1",
             "started discord:7:1 enqueue=0 starts=1 asked=1",
             "started discord:7:1 enqueue=0 starts=2 asked=1",
             "unconfirmed Some(\"discord:7:5\") not_observed enqueue=0 starts=0 asked=1",
+            "unconfirmed Some(\"discord:7:6\") executor_failed enqueue=0 starts=0 asked=1",
         ];
         assert_eq!(observed, expected);
     }

@@ -39,6 +39,14 @@ fn recovery_output_path_with_tmux_fallback(
         .or_else(|| (!fallback_output.is_empty()).then_some(fallback_output))
 }
 
+#[cfg(unix)]
+fn herdr_turn_held(provider: &ProviderKind, state: &inflight::InflightTurnState) -> bool {
+    crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
+        && state.tui_terminal_kind.is_none()
+        && recovery_tmux_session_name(provider, state)
+            .is_some_and(|name| crate::services::discord::turn_bridge::herdr_marked(&name))
+}
+
 #[path = "restore_inflight/kickoff_identity.rs"]
 mod kickoff_identity;
 pub(in crate::services::discord) use kickoff_identity::finish_recovered_turn_mailbox;
@@ -134,6 +142,15 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             );
             continue;
         };
+        // A held Herdr turn ends only on its admitted terminal, never on a transcript read here.
+        #[cfg(unix)]
+        if herdr_turn_held(provider, &state) {
+            tracing::info!(
+                channel_id = state.channel_id,
+                "recovery kept a held Herdr turn"
+            );
+            continue;
+        }
 
         // #2235: silent-skip rows whose on-disk `runtime_kind` was a
         // present-but-unknown variant string. `load_inflight_states_from_root`

@@ -71,6 +71,8 @@ pub(in crate::services::discord) struct DiscordMockState {
     pub(super) messages: Arc<Mutex<MintedMessages>>,
     pub(super) channel_posts: Arc<Mutex<Vec<(u64, String)>>>,
     extra_channels: Arc<Mutex<std::collections::HashSet<u64>>>,
+    /// Guild threads the mock answers for, by thread id, with their parent channel.
+    threads: Arc<Mutex<std::collections::HashMap<u64, u64>>>,
     next_response_id: Arc<AtomicU64>,
 }
 
@@ -95,6 +97,7 @@ impl DiscordMockState {
             messages: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             channel_posts: Arc::new(Mutex::new(Vec::new())),
             extra_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            threads: Arc::new(Mutex::new(std::collections::HashMap::new())),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
         }
     }
@@ -104,6 +107,12 @@ impl DiscordMockState {
             .lock()
             .expect("allowed channels")
             .insert(channel_id);
+    }
+
+    /// Answers `thread` as a guild thread under `parent`.
+    pub(super) fn add_thread(&self, thread: u64, parent: u64) {
+        self.threads.lock().expect("threads").insert(thread, parent);
+        self.allow_channel(thread);
     }
 
     fn accepts_channel(&self, channel_id: u64) -> bool {
@@ -158,6 +167,16 @@ fn private_channel_json() -> Value {
         "last_pin_timestamp": null,
         "type": 1,
         "recipients": [discord_user_json(USER_ID, "queue-user", false)]
+    })
+}
+
+fn thread_channel_json(id: u64, parent: u64) -> Value {
+    json!({
+        "id": id.to_string(),
+        "type": 11,
+        "guild_id": "940487400000009",
+        "parent_id": parent.to_string(),
+        "name": "busy-thread"
     })
 }
 
@@ -327,8 +346,12 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
         && channel_allowed
         && route_channel.is_some_and(|id| path == format!("/api/v10/channels/{id}"))
     {
+        let id = route_channel.unwrap();
+        if let Some(parent) = state.threads.lock().expect("threads").get(&id).copied() {
+            return Json(thread_channel_json(id, parent)).into_response();
+        }
         let mut channel = private_channel_json();
-        channel["id"] = json!(route_channel.unwrap().to_string());
+        channel["id"] = json!(id.to_string());
         return Json(channel).into_response();
     }
     let message_channel = path

@@ -580,6 +580,7 @@ src/
 │   │   │   ├── stash_tests/
 │   │   │   │   └── hold_tests.rs
 │   │   │   ├── screen.rs
+│   │   │   ├── screen_tests.rs
 │   │   │   ├── stash.rs
 │   │   │   └── stash_tests.rs
 │   │   ├── hook_relay/
@@ -606,7 +607,8 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── warm_followup.rs
 │   │   ├── input/
-│   │   │   └── draft_hold.rs
+│   │   │   ├── draft_hold.rs
+│   │   │   └── final_ready_tests.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
 │   │   ├── busy_inject.rs
@@ -736,6 +738,7 @@ src/
 │   │   │   └── inline_banner.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── parser/
+│   │   │   │   ├── herdr_replay.rs
 │   │   │   │   └── herdr_terminal_tests.rs
 │   │   │   ├── child_binding_tests.rs
 │   │   │   ├── legacy_selection.rs
@@ -954,7 +957,10 @@ src/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── runtime_stamp/
 │   │   │   │   │   │   ├── captured_terminal_admission.rs
-│   │   │   │   │   │   └── claude_terminal_tests.rs
+│   │   │   │   │   │   ├── claude_terminal_tests.rs
+│   │   │   │   │   │   ├── herdr_terminal_admission.rs
+│   │   │   │   │   │   ├── herdr_terminal_admission_tests.rs
+│   │   │   │   │   │   └── herdr_terminal_restart_tests.rs
 │   │   │   │   │   ├── bridge_entry.rs
 │   │   │   │   │   ├── claude_e_stamp.rs
 │   │   │   │   │   ├── completion_preserve.rs
@@ -1231,6 +1237,8 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── intake_gate/
 │   │   │   │   ├── busy_duplicate_notice.rs
+│   │   │   │   ├── busy_inject.rs
+│   │   │   │   ├── busy_inject_test_support.rs
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── queue_effects.rs
@@ -1553,6 +1561,8 @@ src/
 │   │   │   │   ├── codex_marker.rs
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── relay_e2e/
+│   │   │   │   ├── busy_inject_e2e_tests.rs
+│   │   │   │   ├── busy_inject_thread_e2e_tests.rs
 │   │   │   │   ├── catch_up_pagination_e2e.rs
 │   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
@@ -1777,6 +1787,12 @@ src/
 │   │   │   └── watcher_backstop.rs
 │   │   ├── turn_lease/
 │   │   │   └── registry.rs
+│   │   ├── turn_presence/
+│   │   │   ├── activity.rs
+│   │   │   ├── activity_tests.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── supervisor.rs
+│   │   │   └── supervisor_tests.rs
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── api.rs
 │   │   │   ├── apply.rs
@@ -2313,6 +2329,7 @@ src/
 │   │   ├── writer/
 │   │   │   ├── input_facts/
 │   │   │   │   ├── reactions.rs
+│   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
