@@ -12,7 +12,7 @@ use super::claude_stop_delivery::{
 
 use crate::db::dispatched_sessions::hosted_execution::{HostedLookup, HostedRecord, HostedState};
 use crate::services::provider::cancel_token_claude_interrupt::{
-    ClaudeInterruptDeliveryGuard, HerdrSubmission, herdr_cancel_enabled,
+    ClaudeInterruptDeliveryGuard, HerdrSubmission, HerdrTurnStart, LateStop, herdr_cancel_enabled,
     herdr_stop_settlement_available,
 };
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -102,6 +102,55 @@ impl CodexStopTurnIdentity {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// Whether this active turn is the one `start` began: the first start at or after its offset,
+    /// with no other turn's record before it. An unreadable record is `Unobserved`.
+    fn is_own(&self, start: &HerdrTurnStart) -> Result<(), HerdrNotSent> {
+        if self.path != start.source
+            || start.file.is_some_and(|file| file != self.file)
+            || self.started_at < start.offset
+        {
+            return Err(HerdrNotSent::Identity);
+        }
+        let mut file = std::fs::File::open(&self.path).map_err(|_| unobserved())?;
+        file.seek(std::io::SeekFrom::Start(start.offset))
+            .map_err(|_| unobserved())?;
+        let mut reader = std::io::BufReader::new(file);
+        let (mut line, mut offset) = (String::new(), start.offset);
+        loop {
+            line.clear();
+            let position = offset;
+            match reader.read_line(&mut line) {
+                Ok(read) if read > 0 && line.ends_with('\n') => offset += read as u64,
+                _ => return Err(unobserved()),
+            }
+            let record: serde_json::Value =
+                serde_json::from_str(&line).map_err(|_| unobserved())?;
+            let payload = &record["payload"];
+            let kind = payload["type"].as_str().unwrap_or("");
+            let foreign = match record["type"].as_str() {
+                Some("event_msg") if kind == "task_started" => {
+                    return match position == self.started_at {
+                        true => Ok(()),
+                        false => Err(HerdrNotSent::Identity),
+                    };
+                }
+                Some("event_msg") => matches!(kind, "task_complete" | "turn_aborted"),
+                Some("response_item") => match kind {
+                    "message" => payload["role"].as_str() == Some("assistant"),
+                    "function_call" | "custom_tool_call" | "tool_search_call" | "reasoning" => true,
+                    "function_call_output" | "custom_tool_call_output" | "tool_search_output" => {
+                        true
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            if foreign {
+                return Err(HerdrNotSent::Identity);
             }
         }
     }
@@ -374,10 +423,10 @@ pub(super) async fn herdr_command_stop(
         Some(_) if admitted.already_stopping => HerdrStop::AlreadyRequested,
         Some(token) => HerdrStop::Requested(match shared.pg_pool.as_ref() {
             Some(pool) => match interrupt_herdr(pool, &token, provider).await {
-                HerdrDelivery::NotSent(HerdrNotSent::Pending)
-                    if arm_late_stop(shared, pool, &token, provider, channel) =>
-                {
-                    interrupt_herdr(pool, &token, provider).await
+                HerdrDelivery::NotSent(HerdrNotSent::Pending) => {
+                    #[cfg(all(test, unix))]
+                    tests::before_late_stop().await;
+                    late_stop(shared, pool, &token, provider, channel).await
                 }
                 delivery => delivery,
             },
@@ -388,50 +437,110 @@ pub(super) async fn herdr_command_stop(
     stop
 }
 
-/// Arms a stop that met its turn unbound to run this executor once from the turn's reader, at its
-/// own start, while `token` is still the channel's turn; `true` when that start was already seen.
-fn arm_late_stop(
+/// A stop that met its turn unbound runs from the turn's reader at its own start, or now when that
+/// start was already read; either way only while `token` is still the channel's turn.
+async fn late_stop(
     shared: &Arc<crate::services::discord::SharedData>,
     pool: &sqlx::PgPool,
     token: &Arc<CancelToken>,
     provider: &ProviderKind,
     channel: poise::serenity_prelude::ChannelId,
-) -> bool {
+) -> HerdrDelivery {
     let Some(state) = token.herdr_interrupt_state() else {
-        return false;
+        return HerdrDelivery::NotSent(HerdrNotSent::Pending);
     };
-    let (data, actor) = (Arc::downgrade(shared), Arc::downgrade(token));
-    let (pool, provider) = (pool.clone(), provider.clone());
-    let handle = tokio::runtime::Handle::current();
+    let run = LateRun {
+        data: Arc::downgrade(shared),
+        actor: Arc::downgrade(token),
+        pool: pool.clone(),
+        provider: provider.clone(),
+        channel,
+        handle: tokio::runtime::Handle::current(),
+        #[cfg(test)]
+        enabled: crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
+            .with(std::cell::Cell::get),
+    };
+    if state.arm_late_stop(run.clone().into_stop()) {
+        return HerdrDelivery::NotSent(HerdrNotSent::Pending);
+    }
+    let after = state.seen_progress().unwrap_or(0);
+    let delivery = match mutant("immediate_branch_skips_token_check") {
+        true => Some(interrupt_herdr(pool, token, provider).await),
+        false => late_attempt(shared, pool, token, provider, channel).await,
+    };
+    if retries(delivery) {
+        state.retry_late_stop(run.into_stop(), after);
+    }
+    delivery.unwrap_or(HerdrDelivery::NotSent(HerdrNotSent::Generation))
+}
+
+/// The executor for a late stop, run only while `token` is still the channel's turn.
+async fn late_attempt(
+    shared: &crate::services::discord::SharedData,
+    pool: &sqlx::PgPool,
+    token: &Arc<CancelToken>,
+    provider: &ProviderKind,
+    channel: poise::serenity_prelude::ChannelId,
+) -> Option<HerdrDelivery> {
+    let current = shared.mailbox_peek(channel)?.cancel_token().await.ok()??;
+    match Arc::ptr_eq(&current, token) {
+        true => Some(interrupt_herdr(pool, token, provider).await),
+        false => None,
+    }
+}
+
+/// Only a refusal before any send keeps a late stop for the reader's next record.
+fn retries(delivery: Option<HerdrDelivery>) -> bool {
+    matches!(
+        delivery,
+        Some(HerdrDelivery::NotSent(
+            HerdrNotSent::Pending | HerdrNotSent::Unobserved
+        ))
+    ) && !mutant("late_intent_dropped_on_notsent")
+}
+
+/// What a late stop needs on the turn's reader; it holds the channel state and token only weakly.
+#[derive(Clone)]
+struct LateRun {
+    data: std::sync::Weak<crate::services::discord::SharedData>,
+    actor: std::sync::Weak<CancelToken>,
+    pool: sqlx::PgPool,
+    provider: ProviderKind,
+    channel: poise::serenity_prelude::ChannelId,
+    handle: tokio::runtime::Handle,
     #[cfg(test)]
-    let enabled = crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
-        .with(std::cell::Cell::get);
-    let stop = move || {
-        let (Some(shared), Some(token)) = (data.upgrade(), actor.upgrade()) else {
-            return;
-        };
-        #[cfg(test)]
-        let previous =
+    enabled: Option<bool>,
+}
+
+impl LateRun {
+    fn into_stop(self) -> LateStop {
+        Box::new(move || {
+            let (Some(shared), Some(token)) = (self.data.upgrade(), self.actor.upgrade()) else {
+                return;
+            };
+            #[cfg(test)]
+            let previous =
+                crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
+                    .replace(self.enabled);
+            // The reader is a blocking thread, as the tail's own waits are.
+            let attempt = late_attempt(&shared, &self.pool, &token, &self.provider, self.channel);
+            let delivery = self.handle.block_on(attempt);
+            #[cfg(test)]
             crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
-                .replace(enabled);
-        // The reader is a blocking thread, as the tail's own waits are.
-        let delivery = handle.block_on(async {
-            let current = shared.mailbox_peek(channel)?.cancel_token().await.ok()??;
-            match Arc::ptr_eq(&current, &token) {
-                true => Some(interrupt_herdr(&pool, &token, &provider).await),
-                false => None,
+                .set(previous);
+            tracing::info!(
+                channel_id = self.channel.get(),
+                ?delivery,
+                "herdr late user stop"
+            );
+            if retries(delivery)
+                && let Some(state) = token.herdr_interrupt_state()
+            {
+                let after = state.seen_progress().unwrap_or(0);
+                state.retry_late_stop(self.clone().into_stop(), after);
             }
-        });
-        #[cfg(test)]
-        crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
-            .set(previous);
-        tracing::info!(
-            channel_id = channel.get(),
-            ?delivery,
-            "herdr late user stop"
-        );
-    };
-    !state.arm_late_stop(Box::new(stop))
+        })
+    }
 }
 
 /// Dormant until settlement lands; only the Herdr user stop calls this executor.
@@ -568,6 +677,12 @@ fn deliver(
         let identity = TurnIdentity::capture(provider, &binding.output_path)
             .map_err(|()| unobserved())?
             .ok_or(Idle)?;
+        // A Codex stop targets the turn its token began, never a later native turn of the pane.
+        if let TurnIdentity::Codex(turn) = &identity
+            && !mutant("late_escape_retargets_native_turn")
+        {
+            turn.is_own(state.turn_start.get().ok_or(Pending)?)?;
+        }
         #[cfg(all(test, unix))]
         if let Some(action) = tests::AFTER_IDENTITY.lock().unwrap().take() {
             action();

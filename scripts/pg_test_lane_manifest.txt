@@ -1272,6 +1272,7 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_first_write_refused_before_any_key_releases_the_hold_for_the_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_late_stop_refused_before_any_send_runs_at_the_next_complete_record_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_late_stop_sends_nothing_after_a_terminal_or_for_a_replaced_token_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_launch_without_daemon_isolation_or_hooks_writes_no_pending_row_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_pending_pane_whose_own_start_was_logged_takes_no_second_first_prompt_pg
@@ -1504,6 +1505,8 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_cancellation_settles_work_before_postlude_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_unknown_foreign_anchor_preserves_retry_5521
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_codex_stop_never_takes_a_later_native_turn_for_its_own
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_generation_only_stale_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_generation_only_stale_sends_no_escape
