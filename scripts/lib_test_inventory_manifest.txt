@@ -3708,6 +3708,7 @@ services::discord::health::turn_deliver::inject_tests::a_handback_onto_a_full_qu
 services::discord::health::turn_deliver::inject_tests::a_handback_that_never_lands_refuses_the_delivery_and_keeps_no_place_pg
 services::discord::health::turn_deliver::inject_tests::a_headless_claim_returns_the_token_it_registered
 services::discord::health::turn_deliver::inject_tests::a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox
+services::discord::health::turn_deliver::inject_tests::a_paste_its_rows_cannot_prove_is_handed_back_unpasted_pg
 services::discord::health::turn_deliver::inject_tests::a_rebound_transcript_or_input_queued_during_the_last_lookups_vetoes_the_paste_pg
 services::discord::health::turn_deliver::inject_tests::a_row_replaced_after_its_last_read_does_not_stop_the_reservation_allowed_range_pg
 services::discord::health::turn_deliver::inject_tests::a_session_of_another_runtime_stops_before_the_transition_and_the_pane
