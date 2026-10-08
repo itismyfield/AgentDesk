@@ -44,6 +44,9 @@ use tokio::sync::Notify;
 pub(in crate::services::discord) struct JsonlWatcher {
     notify: Arc<Notify>,
     _stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Set once the parent directory is under watch, so a test can create a file after it.
+    #[cfg(test)]
+    watching: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl JsonlWatcher {
@@ -56,9 +59,12 @@ impl JsonlWatcher {
     pub(in crate::services::discord) fn spawn(path: PathBuf) -> Arc<Self> {
         let notify = Arc::new(Notify::new());
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watching = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let handle = Arc::new(Self {
             notify: notify.clone(),
             _stop: stop.clone(),
+            #[cfg(test)]
+            watching: watching.clone(),
         });
 
         let watch_target_path = path.clone();
@@ -97,6 +103,7 @@ impl JsonlWatcher {
                     watch_target_path,
                     notify_for_thread,
                     stop_for_thread,
+                    watching,
                 );
             });
         if let Err(err) = result {
@@ -121,6 +128,7 @@ fn run_watcher_thread(
     full_path: PathBuf,
     notify: Arc<Notify>,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    watching: Arc<std::sync::atomic::AtomicBool>,
 ) {
     use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -168,7 +176,10 @@ fn run_watcher_thread(
         }
         if parent.exists() {
             match watcher.watch(&parent, RecursiveMode::NonRecursive) {
-                Ok(()) => break,
+                Ok(()) => {
+                    watching.store(true, std::sync::atomic::Ordering::Release);
+                    break;
+                }
                 Err(err) => {
                     tracing::warn!("jsonl_watcher: cannot watch {}: {err}", parent.display());
                     // No retry policy will recover from a hard error
@@ -265,17 +276,23 @@ mod tests {
         let watcher = JsonlWatcher::spawn(marker.clone());
         let notify = watcher.notify();
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The marker must be created after the watch is attached, or its event is never seen.
+        let attached = tokio::time::timeout(Duration::from_secs(30), async {
+            while !watcher.watching.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(attached.is_ok(), "JsonlWatcher never attached its watch");
 
-        let waiter = tokio::spawn(async move {
-            tokio::time::timeout(Duration::from_secs(3), notify.notified())
-                .await
-                .map(|_| ())
-        });
+        // Register the waiter before the create: notify_waiters keeps no permit for later.
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
 
         std::fs::write(&marker, "pane-exited").unwrap();
 
-        let result = waiter.await.expect("waiter task panicked");
+        let result = tokio::time::timeout(Duration::from_secs(30), notified).await;
         assert!(
             result.is_ok(),
             "JsonlWatcher Notify should fire on dead marker create"
