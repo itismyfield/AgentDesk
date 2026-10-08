@@ -11,7 +11,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::busy_inject::{self, Outcome, Unconfirmed, Veto};
 use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{InflightTurnState, TurnSource};
-use crate::services::discord::inject_disposition::{self, InjectionOutcome};
+use crate::services::discord::inject_disposition::{self, InjectionOutcome, SourceGuard};
 use crate::services::discord::input_runtime::fence;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
@@ -29,7 +29,8 @@ pub(super) const INPUT_IN_FLIGHT: &str = "input_in_flight";
 const INPUT_RUNTIME_OWNED: &str = "input_runtime_owned";
 const MAILBOX_UNAVAILABLE: &str = "mailbox_unavailable";
 const NOT_BUSY: &str = "not_busy";
-const SOURCE_OWNED: &str = "source_owned";
+/// The message is already queued, held, injected or claimed by another path.
+pub(crate) const SOURCE_OWNED: &str = "source_owned";
 pub(super) const QUEUE_NONEMPTY: &str = "queue_nonempty";
 const SESSION_UNRESOLVED: &str = "session_unresolved";
 pub(super) const TRANSITION_BUSY: &str = "transition_busy";
@@ -52,7 +53,7 @@ impl InjectMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum InjectAttempt {
+pub(crate) enum InjectAttempt {
     /// Nothing was reserved or sent; the caller's own start or queue follows.
     NotSent(&'static str),
     Injected {
@@ -69,6 +70,21 @@ pub(super) enum InjectAttempt {
     },
     /// The pane vetoed and the queue front was not written, or its result is unknown.
     HandbackFailed(&'static str),
+    /// The owner died outside the pane effect: nothing was recorded and the paste is unknown.
+    OwnerFailed {
+        turn_id: Option<String>,
+    },
+}
+
+/// Where the input came from. A Discord message carries its id, the queue entry a vetoed paste
+/// becomes, and the claim the owner holds on it until the injection ends.
+pub(crate) enum Origin {
+    External,
+    Discord {
+        message: MessageId,
+        handback: Box<(Intervention, String)>,
+        guard: SourceGuard,
+    },
 }
 
 /// Tests never read the process env; a channel injects only when a test forces it.
@@ -267,9 +283,10 @@ async fn resolve(
     })
 }
 
-pub(super) async fn attempt(
+pub(crate) async fn attempt(
     shared: &Arc<SharedData>,
     request: &HumanInputRequest,
+    origin: Origin,
 ) -> InjectAttempt {
     let target = match resolve(shared, request).await {
         Ok(target) => target,
@@ -285,19 +302,30 @@ pub(super) async fn attempt(
         nonce: busy_inject::fresh_nonce(),
     });
     let (session, turn_id) = (target.session.clone(), target.turn_id.clone());
+    let (message, handback, guard) = match origin {
+        Origin::External => (None, request.queue_entry(), None),
+        Origin::Discord {
+            message,
+            handback,
+            guard,
+        } => (Some(message), *handback, Some(guard)),
+    };
     let owner = Owner {
         shared: shared.clone(),
         provider: request.provider.clone(),
         channel_id: request.channel_id,
-        // External input has no Discord message to settle a disposition for.
-        message: None,
-        handback: request.queue_entry(),
+        message,
+        handback,
+        guard,
     };
     // The owner outlives a cancelled request: it settles the reservation and any handback itself.
     match tokio::spawn(owner.run(target, input.clone())).await {
         Ok(attempt) => attempt,
         // The owner panicked; its reservation is an orphan and its paste is unknown.
-        Err(_) => unconfirmed(&input, &session, turn_id, "executor_failed"),
+        Err(_) => {
+            let _ = unconfirmed(&input, &session, turn_id.clone(), "executor_failed");
+            InjectAttempt::OwnerFailed { turn_id }
+        }
     }
 }
 
@@ -309,6 +337,9 @@ struct Owner {
     message: Option<MessageId>,
     /// The queue entry a vetoed paste becomes, and the turn id that names it.
     handback: (Intervention, String),
+    /// Dropped before the result returns, so a caller that falls back to its own intake is not
+    /// refused by this claim.
+    guard: Option<SourceGuard>,
 }
 
 impl Owner {
@@ -319,6 +350,7 @@ impl Owner {
             channel_id,
             message,
             handback: (handback, queued_turn),
+            guard,
         } = self;
         let Target {
             session,
@@ -344,6 +376,8 @@ impl Owner {
             ReserveOutcome::Backlog => return InjectAttempt::NotSent(QUEUE_NONEMPTY),
             ReserveOutcome::Unavailable => return InjectAttempt::NotSent(MAILBOX_UNAVAILABLE),
         };
+        #[cfg(test)]
+        test_hook::owner_crash(input.channel);
         let pane = pane(input.channel, &session);
         let effect = tokio::task::spawn_blocking({
             let (input, session, turn_id) = (input.clone(), session.clone(), turn_id.clone());
@@ -359,6 +393,8 @@ impl Owner {
                 let source = [handback.message_id.get()];
                 let handed =
                     mailbox.hand_back_injected_input(ticket, handback, persistence, permit.clone());
+                #[cfg(test)]
+                let handed = test_hook::hand_back(input.channel, handed);
                 match handed.await {
                     Ok(events) => {
                         let apply = crate::services::discord::apply_queue_exit_feedback;
@@ -397,7 +433,8 @@ impl Owner {
                 delivered
             }
         };
-        drop((transition, permit));
+        // A handed-back message now waits in the queue, so the drain must not see it claimed.
+        drop((guard, transition, permit));
         // Ending the reservation may release a drain it withheld.
         let kick = crate::services::discord::queue_io::schedule_post_enqueue_idle_queue_kick;
         kick(shared, provider, channel_id);
@@ -556,6 +593,58 @@ pub(crate) mod test_hook {
     type Park = (Arc<Notify>, Arc<Notify>);
     static BEFORE_RESERVE: Mutex<Option<HashMap<u64, Park>>> = Mutex::new(None);
     static GATEWAYLESS: Mutex<Option<HashMap<u64, Arc<Notify>>>> = Mutex::new(None);
+    static OWNER_CRASHING: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    static HANDBACK_FAULTS: Mutex<Vec<(u64, HandbackFault)>> = Mutex::new(Vec::new());
+
+    /// How the channel's next handback answer is lost.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum HandbackFault {
+        /// The actor wrote the queue front but its answer never came back.
+        AnswerLost,
+        /// The settle never reached the actor; the ticket is gone with it.
+        Dropped,
+    }
+
+    pub(crate) fn fault_handback(channel_id: u64, fault: HandbackFault) {
+        let mut faults = HANDBACK_FAULTS.lock().unwrap_or_else(|e| e.into_inner());
+        faults.push((channel_id, fault));
+    }
+
+    /// The handback as the channel's scripted fault leaves it.
+    pub(super) async fn hand_back<T>(
+        channel_id: u64,
+        handed: impl std::future::Future<Output = Result<T, &'static str>>,
+    ) -> Result<T, &'static str> {
+        let fault = {
+            let mut faults = HANDBACK_FAULTS.lock().unwrap_or_else(|e| e.into_inner());
+            let at = faults
+                .iter()
+                .position(|(channel, _)| *channel == channel_id);
+            at.map(|at| faults.remove(at).1)
+        };
+        match fault {
+            None => handed.await,
+            Some(HandbackFault::AnswerLost) => {
+                assert!(handed.await.is_ok(), "the scripted handback lands");
+                Err("handback_unknown")
+            }
+            // Never polled, so the settle and its ticket go nowhere.
+            Some(HandbackFault::Dropped) => Err("handback_unknown"),
+        }
+    }
+
+    /// Makes the channel's owner panic after its reservation, outside the pane effect.
+    pub(crate) fn crash_owner(channel_id: u64) {
+        let mut crashing = OWNER_CRASHING.lock().unwrap_or_else(|e| e.into_inner());
+        crashing.push(channel_id);
+    }
+
+    pub(super) fn owner_crash(channel_id: u64) {
+        let crashing = OWNER_CRASHING.lock().unwrap_or_else(|e| e.into_inner());
+        let crash = crashing.contains(&channel_id);
+        drop(crashing);
+        assert!(!crash, "scripted owner crash");
+    }
 
     /// Lets the channel's deliver start run without a gateway context: the headless start's own
     /// transition wait and mailbox claim, nothing after. The signal fires as each start begins.
@@ -640,6 +729,10 @@ pub(crate) mod test_hook {
         }
         let mut crashing = CRASHING.lock().unwrap_or_else(|e| e.into_inner());
         crashing.retain(|channel| *channel != channel_id);
+        let mut crashing = OWNER_CRASHING.lock().unwrap_or_else(|e| e.into_inner());
+        crashing.retain(|channel| *channel != channel_id);
+        let mut faults = HANDBACK_FAULTS.lock().unwrap_or_else(|e| e.into_inner());
+        faults.retain(|(channel, _)| *channel != channel_id);
         let mut starts = GATEWAYLESS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(starts) = starts.as_mut() {
             starts.remove(&channel_id);

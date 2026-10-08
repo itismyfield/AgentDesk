@@ -12,6 +12,9 @@
 //! CI pins these to `env -u AGENTDESK_ROOT_DIR ... -- --test-threads=1`; a new
 //! scenario module inherits that only once it is named in the same invocation.
 
+#[cfg(unix)]
+#[path = "busy_inject_e2e_tests.rs"]
+mod busy_inject_e2e;
 mod catch_up_pagination_e2e;
 mod consumed_command_guard_e2e;
 pub(in crate::services::discord) mod discord_mock;
@@ -183,7 +186,7 @@ impl RelayE2eHarness {
     }
 
     pub(super) async fn start_with_provider(stub: ProviderStub) -> Self {
-        Self::start_inner(stub, false, std::future::ready(None)).await
+        Self::start_inner(stub, false, std::future::ready(None), false).await
     }
 
     /// A runtime on the pool `storage` opens once the env lock is held; no session is bound.
@@ -191,19 +194,28 @@ impl RelayE2eHarness {
         storage: impl std::future::Future<Output = sqlx::PgPool>,
     ) -> Self {
         let storage = async { Some(storage.await) };
-        Self::start_inner(ProviderStub::Success, false, storage).await
+        Self::start_inner(ProviderStub::Success, false, storage, false).await
+    }
+
+    /// [`Self::start_unbound_on`] with the channel bound to its session.
+    pub(super) async fn start_bound_on(
+        storage: impl std::future::Future<Output = sqlx::PgPool>,
+    ) -> Self {
+        let storage = async { Some(storage.await) };
+        Self::start_inner(ProviderStub::Success, false, storage, true).await
     }
 
     /// Adds a health registry, the source of the utility bots SSH-direct
     /// announcements post through.
     pub(super) async fn start_with_health_registry() -> Self {
-        Self::start_inner(ProviderStub::Success, true, std::future::ready(None)).await
+        Self::start_inner(ProviderStub::Success, true, std::future::ready(None), false).await
     }
 
     async fn start_inner(
         stub: ProviderStub,
         with_health_registry: bool,
         storage: impl std::future::Future<Output = Option<sqlx::PgPool>>,
+        bind_with_pool: bool,
     ) -> Self {
         let env_lock = crate::config::shared_test_env_lock()
             .lock()
@@ -236,7 +248,7 @@ impl RelayE2eHarness {
         let ctx = discord_mock::serenity_context(proxy.clone(), gateway_url).await;
         // Storage opens after the shared test-env lock, the canonical lock order.
         let pool = storage.await;
-        let unbound = pool.is_some();
+        let unbound = pool.is_some() && !bind_with_pool;
         let mut shared = crate::services::discord::make_shared_data_for_tests_with_storage(pool);
         let health_registry = with_health_registry.then(|| {
             let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
@@ -308,6 +320,21 @@ impl RelayE2eHarness {
             new_message: user_message(id, text),
         };
         router::handle_event(&self.ctx, &event, &self.data).await
+    }
+
+    /// Production intake of any inbound message, run on its own task.
+    pub(super) fn spawn_message(
+        &self,
+        new_message: serenity::Message,
+    ) -> tokio::task::JoinHandle<Result<(), Error>> {
+        let event = serenity::FullEvent::Message { new_message };
+        let (ctx, data) = (self.ctx.clone(), self.clone_data());
+        tokio::spawn(async move { router::handle_event(&ctx, &event, &data).await })
+    }
+
+    /// Answers `thread` as a guild thread of the fixture channel.
+    pub(super) fn add_thread(&self, thread: u64) {
+        self.mock.add_thread(thread, CHANNEL_ID);
     }
 
     /// [`Self::deliver_user_message`] on its own task, for scenarios that act while it runs.

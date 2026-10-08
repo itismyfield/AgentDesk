@@ -675,22 +675,47 @@ fn an_injected_claim_yields_before_the_yield_helpers_count_or_clear_anything() {
     );
 }
 
-/// An actor that knows its provider reads only that provider's terminals; one that has not
-/// persisted yet reads any provider's, which can only refuse more.
+/// A claim yields to a terminal of the provider its actor last persisted for, or of any provider
+/// before it has persisted; `owns` judges the provider it is given, not the actor's.
 #[test]
 fn a_fresh_actor_reads_any_provider_terminal_and_a_known_one_only_its_own() {
     let message = MessageId::new(6_845_271);
     let (channel, now) = (ChannelId::new(6_845_270), std::time::Instant::now());
     let outcome = InjectionOutcome::Observed;
     disposition::note_terminal(&ProviderKind::Codex, channel, Some(message), outcome, now);
-    let claude = ChannelMailboxState {
+    let mut claude = ChannelMailboxState {
         last_persistence: Some(context()),
         ..ChannelMailboxState::default()
     };
-    let fresh = ChannelMailboxState::default();
+    let mut fresh = ChannelMailboxState::default();
+    let (kind, order) = (ActiveTurnKind::UserOrAgent, TurnAdmissionOrder::Immediate);
+    let yields = [&mut fresh, &mut claude].map(|state| claim_yields(state, kind, message, order));
+    let (codex, own) = (Some(&ProviderKind::Codex), Some(&ProviderKind::Claude));
+    let judged = [codex, own, None].map(|provider| owns(&claude, provider, message));
+    assert_eq!((yields, judged), ([true, false], [true, false, true]));
+}
+
+/// A message another channel claimed for injection is refused by a fresh actor's direct claim
+/// and its enqueue until the claim's guard drops.
+#[tokio::test]
+async fn a_fresh_actor_refuses_a_message_claimed_for_injection_elsewhere() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let message = MessageId::new(6_845_291);
+    let now = std::time::Instant::now();
+    let guard = disposition::claim_source(&ProviderKind::Claude, message, now).expect("claim");
+    let handle = ChannelMailboxRegistry::default().handle(ChannelId::new(6_845_290));
+    let token = Arc::new(CancelToken::new());
+    let started = handle.try_start_turn(token, UserId::new(7), message).await;
+    let refused = handle.enqueue(item(message.get()), context()).await;
+    drop(guard);
+    let accepted = handle
+        .enqueue(item(message.get()), context())
+        .await
+        .enqueued;
+    let claimed = Some(EnqueueRefusalReason::ClaimedSinceObservation);
     assert_eq!(
-        (owns(&fresh, message), owns(&claude, message)),
-        (true, false)
+        (started, refused.refusal_reason, accepted),
+        (false, claimed, true)
     );
 }
 

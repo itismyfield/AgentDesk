@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
+pub(crate) use super::inject::test_hook as inject_hook;
 use super::inject::{self, InjectMode, test_hook};
 use super::{HumanInputDelivery, HumanInputRequest, deliver_human_input};
 use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -131,7 +132,7 @@ impl InjectPane {
     }
 
     /// Rewrites the channel's row with another source and user message id.
-    fn reseat_row(&self, source: TurnSource, message: u64) {
+    pub(in crate::services::discord) fn reseat_row(&self, source: TurnSource, message: u64) {
         let provider = ProviderKind::Claude;
         let load = crate::services::discord::inflight::load_inflight_state_read_only;
         let mut row = load(&provider, self.channel).expect("seeded row");
@@ -150,7 +151,7 @@ impl InjectPane {
         map(shared, ChannelId::new(self.channel), &name).await;
     }
 
-    fn path(&self, name: &str) -> PathBuf {
+    pub(crate) fn path(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
     }
 
@@ -299,7 +300,11 @@ async fn claim(shared: &SharedData, channel: u64) -> Arc<CancelToken> {
 }
 
 /// A claim of `kind` on message `channel + 10`, as intake, a TUI-direct relay or a monitor takes it.
-async fn claim_kinded(shared: &SharedData, channel: u64, kind: ActiveTurnKind) -> Arc<CancelToken> {
+pub(crate) async fn claim_kinded(
+    shared: &SharedData,
+    channel: u64,
+    kind: ActiveTurnKind,
+) -> Arc<CancelToken> {
     let token = Arc::new(CancelToken::new());
     let (user, message) = (UserId::new(7), MessageId::new(channel + 10));
     let start = crate::services::discord::mailbox_try_start_turn_kinded;
@@ -643,7 +648,7 @@ async fn a_channel_closed_to_legacy_input_takes_no_paste() {
         metadata: None,
         channel_name_hint: None,
     };
-    let outcome = inject::attempt(&shared, &request).await;
+    let outcome = inject::attempt(&shared, &request, inject::Origin::External).await;
     let refused = inject::InjectAttempt::NotSent("input_runtime_owned");
     assert_eq!((outcome, pane.tmux_calls()), (refused, 0));
 }
@@ -671,7 +676,7 @@ async fn a_session_of_another_runtime_stops_before_the_transition_and_the_pane()
         metadata: None,
         channel_name_hint: None,
     };
-    let outcome = inject::attempt(&shared, &request).await;
+    let outcome = inject::attempt(&shared, &request, inject::Origin::External).await;
     let refused = inject::InjectAttempt::NotSent("session_unresolved");
     assert_eq!((outcome, pane.tmux_calls()), (refused, 0));
 }
@@ -1019,14 +1024,14 @@ async fn an_effect_that_dies_outside_its_guard_is_still_reported_once_pg() {
 
 impl InjectPane {
     /// A composer holding a half-typed draft, so the pane vetoes the paste as `draft`.
-    fn draft(&self) {
+    pub(crate) fn draft(&self) {
         let pane =
             format!("⏺ Working on it.\n\n{SPINNER}\n\n{BORDER}\n❯ half typed\n{BORDER}\n{FOOTER}");
         self.set("cap.before", &pane);
     }
 
     /// A pane whose turn has ended, so the paste is vetoed as `not_busy`.
-    fn idle(&self) {
+    pub(crate) fn idle(&self) {
         let pane = format!("⏺ Done.\n\n{BORDER}\n❯\u{00a0}\n{BORDER}\n{FOOTER}");
         self.set("cap.before", &pane);
     }
@@ -1052,7 +1057,12 @@ async fn deliver_parked(
 }
 
 /// Input sent while a delivery holds its reservation, as Discord intake would queue it.
-async fn send_meanwhile(shared: &Arc<SharedData>, channel: u64, message: u64, text: &str) {
+pub(crate) async fn send_meanwhile(
+    shared: &Arc<SharedData>,
+    channel: u64,
+    message: u64,
+    text: &str,
+) {
     let mut item = queued(message);
     item.text = text.to_string();
     let enqueue = crate::services::discord::mailbox_enqueue_intervention;
@@ -1308,7 +1318,7 @@ async fn an_idle_transcript_stops_before_the_reservation_and_the_pane() {
         metadata: None,
         channel_name_hint: None,
     };
-    let outcome = inject::attempt(&shared, &request).await;
+    let outcome = inject::attempt(&shared, &request, inject::Origin::External).await;
     let refused = inject::InjectAttempt::NotSent("not_busy");
     assert_eq!((outcome, pane.tmux_calls()), (refused, 0));
 }
