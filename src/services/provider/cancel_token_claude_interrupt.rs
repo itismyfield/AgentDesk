@@ -17,6 +17,73 @@ pub(crate) struct HerdrInterruptState {
     pub(crate) owner: crate::db::dispatched_sessions::hosted_execution::HostedOwner,
     pub(crate) submission: Mutex<HerdrSubmission>,
     pub(crate) user_stop: AtomicBool,
+    /// Where this token's own input began; terminal admission reads its turn from here only.
+    pub(crate) turn_start: std::sync::OnceLock<HerdrTurnStart>,
+}
+
+/// The source and offset an executor observed at this token's input, never taken from a frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HerdrTurnStart {
+    pub(crate) execution_nonce: String,
+    pub(crate) source: std::path::PathBuf,
+    /// The source's (dev, ino) at the input; a cold start's transcript does not exist yet.
+    pub(crate) file: Option<(u64, u64)>,
+    pub(crate) offset: u64,
+    /// Claude's input instant: its turn begins at the first record stamped at or after it.
+    pub(crate) submitted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl HerdrInterruptState {
+    /// Records the turn start once; a different second start is refused, never overwritten.
+    pub(crate) fn record_turn_start(&self, start: HerdrTurnStart) -> bool {
+        match self.turn_start.set(start) {
+            Ok(()) => true,
+            Err(start) => self.turn_start.get() == Some(&start),
+        }
+    }
+}
+
+impl HerdrTurnStart {
+    /// The start of input to `source` at its current end, read before the input is written.
+    pub(crate) fn at_end_of(
+        execution_nonce: &str,
+        source: &std::path::Path,
+        submitted_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Self {
+        let meta = std::fs::metadata(source).ok();
+        Self {
+            execution_nonce: execution_nonce.to_owned(),
+            source: source.to_owned(),
+            file: meta.as_ref().and_then(file_identity),
+            offset: meta.map_or(0, |meta| meta.len()),
+            submitted_at,
+        }
+    }
+}
+
+/// The (dev, ino) of the descriptor a reader opened; `(0, 0)` names none.
+pub(crate) fn opened_file_identity(
+    source: Option<&crate::services::cluster::stream_relay::SourceFileIdentity>,
+) -> (u64, u64) {
+    #[cfg(unix)]
+    if let Some(crate::services::cluster::stream_relay::SourceFileIdentity::Unix { dev, ino }) =
+        source
+    {
+        return (*dev, *ino);
+    }
+    let _ = source;
+    (0, 0)
+}
+
+#[cfg(unix)]
+fn file_identity(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_identity(_: &std::fs::Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 impl CancelToken {
@@ -41,6 +108,7 @@ impl CancelToken {
             owner: owner.clone(),
             submission: Mutex::new(HerdrSubmission::Unsubmitted),
             user_stop: AtomicBool::new(false),
+            turn_start: std::sync::OnceLock::new(),
         });
         self.bind_interrupt_session(provider, &owner.logical_key);
         *slot = Some(state.clone());

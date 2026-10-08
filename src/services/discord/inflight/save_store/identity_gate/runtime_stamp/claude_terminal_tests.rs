@@ -146,6 +146,7 @@ impl Fixture {
                 frame,
             )
             .await
+            .map(|(message, range, terminal, _)| (message, range, terminal))
     }
 
     fn durable(&self) -> Vec<u8> {

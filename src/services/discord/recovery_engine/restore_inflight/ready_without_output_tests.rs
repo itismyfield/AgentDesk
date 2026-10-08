@@ -411,7 +411,7 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
                 };
                 let mut baseline = fixture.state.clone();
                 let identity = inflight::InflightTurnIdentity::from_state(&fixture.state);
-                let (_, admitted, _) = fixture
+                let (_, admitted, _, _) = fixture
                     .state
                     .admit_tui_terminal_frame(
                         &mut baseline,

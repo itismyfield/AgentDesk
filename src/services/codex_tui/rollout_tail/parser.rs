@@ -489,9 +489,15 @@ pub(super) fn herdr_eof(
     accept: &RecordAcceptance<'_>,
     is_alive: &mut dyn FnMut() -> bool,
 ) -> Option<Option<ReadOutputResult>> {
-    let logical = crate::services::provider::herdr_provider_terminal_only(accept.token)?;
+    let actor = accept.token?;
+    let logical = crate::services::provider::herdr_provider_terminal_only(Some(actor))?;
     if let Some(kind) = herdr_terminal_kind(state) {
-        let offset = emit_herdr_terminal(sender, state, kind, rollout_path, turn, logical);
+        let terminal = HerdrTerminal {
+            kind,
+            actor,
+            logical,
+        };
+        let offset = emit_herdr_terminal(sender, state, terminal, rollout_path, turn);
         return Some(Some(ReadOutputResult::Completed { offset }));
     }
     if super::try_process_complete_partial_line(partial_line, sender, state, accept) {
@@ -515,17 +521,20 @@ pub(super) enum NextRecord {
 /// The one judgement every complete record passes before the tail accepts it; each stop rule is
 /// one predicate in `accept_next_record`, so neither the record loop nor the EOF flush changes.
 pub(super) struct RecordAcceptance<'a> {
-    token: Option<&'a crate::services::provider::CancelToken>,
+    token: Option<&'a std::sync::Arc<crate::services::provider::CancelToken>>,
 }
 
 impl<'a> RecordAcceptance<'a> {
-    pub(super) fn new(token: Option<&'a crate::services::provider::CancelToken>) -> Self {
+    pub(super) fn new(
+        token: Option<&'a std::sync::Arc<crate::services::provider::CancelToken>>,
+    ) -> Self {
         Self { token }
     }
 
     pub(super) fn accept_next_record(&self, state: &RolloutParseState) -> NextRecord {
         // A Herdr turn's reply stops at its terminal record; later lines are another turn's.
-        if crate::services::provider::herdr_provider_terminal_only(self.token).is_some()
+        let token = self.token.map(std::sync::Arc::as_ref);
+        if crate::services::provider::herdr_provider_terminal_only(token).is_some()
             && herdr_terminal_kind(state).is_some()
         {
             return NextRecord::StopBefore;
@@ -534,41 +543,45 @@ impl<'a> RecordAcceptance<'a> {
     }
 }
 
-/// Sends a Herdr turn's provider terminal ending at its record: a completion as today's Done, an
-/// abort only as a typed native frame, which bridge admission never turns into a plain Done.
+/// The provider terminal a Herdr read ended on and the token that read it.
+struct HerdrTerminal<'a> {
+    kind: NativeTerminalKind,
+    actor: &'a std::sync::Arc<crate::services::provider::CancelToken>,
+    logical: String,
+}
+
+/// Sends a Herdr turn's provider terminal ending at its record, completion and abort alike, as a
+/// typed frame naming the reader's own descriptor; only bridge admission turns it into a Done.
 fn emit_herdr_terminal(
     sender: &RelaySuppressionSender<'_>,
     state: &mut RolloutParseState,
-    kind: NativeTerminalKind,
+    terminal: HerdrTerminal<'_>,
     rollout_path: &Path,
     (source_start, turn_nonce): (u64, Option<&str>),
-    tmux_session_name: String,
 ) -> u64 {
     let complete_record_end = source_start.saturating_add(state.bytes_read);
-    if kind == NativeTerminalKind::Completed {
+    if terminal.kind == NativeTerminalKind::Completed {
         super::promote_task_complete_fallback_text(state);
-        let terminal = (source_start, turn_nonce, false);
-        let path = RolloutFinalizePath::Envelope;
-        emit_done(
-            sender,
-            state,
-            path,
-            rollout_path,
-            complete_record_end,
-            terminal,
-        );
-        return complete_record_end;
     }
+    let (source_file_dev, source_file_ino) =
+        crate::services::provider::cancel_token_claude_interrupt::opened_file_identity(
+            state.harvest.source_file.as_ref(),
+        );
     sender.send(StreamMessage::CodexTuiTerminalDone {
         result: state.final_text.clone(),
         session_id: state.session_id.clone(),
         rollout_path: rollout_path.display().to_string(),
-        tmux_session_name,
+        tmux_session_name: terminal.logical,
         turn_nonce: turn_nonce.unwrap_or_default().to_owned(),
         source_start,
         complete_record_end,
-        captured_source: None,
-        kind,
+        captured_source: Some(crate::services::agent_protocol::CapturedTuiTerminalSource {
+            generation_mtime_ns: 0,
+            source_file_dev,
+            source_file_ino,
+            actor: std::sync::Arc::downgrade(terminal.actor),
+        }),
+        kind: terminal.kind,
     });
     complete_record_end
 }
@@ -720,6 +733,8 @@ pub(super) fn emit_done(
         });
     }
 }
+
+mod herdr_replay;
 
 #[cfg(all(test, unix))]
 mod herdr_terminal_tests;

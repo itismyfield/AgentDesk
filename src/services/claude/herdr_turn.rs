@@ -591,8 +591,15 @@ fn prompt_and_read(
     let run = if herdr_stop_settlement_available()
         && let Some(state) = cancel.and_then(CancelToken::herdr_interrupt_state)
     {
-        use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
+        use crate::services::provider::cancel_token_claude_interrupt::{
+            HerdrSubmission, HerdrTurnStart,
+        };
         let mut submitted = state.submission.lock().unwrap_or_else(|e| e.into_inner());
+        let mut start = HerdrTurnStart::at_end_of(&attached.nonce, path, Some(started_at));
+        start.offset = before;
+        if !state.record_turn_start(start) {
+            return Err("herdr turn: the token already began another turn".into());
+        }
         let run = run_herdr(&attached.target, &plan, cancel);
         *submitted = match &run {
             InputRun::Applied => HerdrSubmission::Submitted,
@@ -631,6 +638,7 @@ fn prompt_and_read(
         || true,
         unread,
     )?;
+    let mut terminal = None;
     if early.is_none() {
         let kind = Some(RuntimeHandoffKind::ClaudeTui);
         let probe =
@@ -639,7 +647,9 @@ fn prompt_and_read(
         if let Some(token) = cancel.as_ref()
             && herdr_provider_terminal_only(Some(token)).is_some()
         {
-            read_to_provider_terminal(&transcript, start, &sender, token, probe.is_alive)?;
+            let read =
+                read_to_provider_terminal(&transcript, start, &sender, token, probe.is_alive);
+            terminal = read?.map(|terminal| (terminal, token.clone(), start));
         } else {
             read_output_file_until_result_with_harvest(
                 &transcript,
@@ -651,93 +661,274 @@ fn prompt_and_read(
             .map_err(|failure| failure.error)?;
         }
     }
+    // A Herdr turn hands off exactly where its terminal record ends, never past it.
+    let terminal_end = terminal.as_ref().map(|(read, ..)| read.end);
+    let handoff_end = || terminal_end.unwrap_or_else(length);
     // The tmux handoff's launch registration; with the transcript now written it resolves a cold
-    // start's Pending source.
+    // start's Pending source, before any terminal of this turn reaches admission.
     let binding = TuiRuntimeBinding {
         runtime_kind: RuntimeHandoffKind::ClaudeTui,
         output_path: transcript.clone(),
         relay_output_path: None,
         input_fifo_path: None,
         session_id: Some(attached.session_id.clone()),
-        last_offset: length(),
+        last_offset: handoff_end(),
         relay_last_offset: None,
     };
     crate::services::tui_prompt_dedupe::register_launched_tmux_runtime_binding(logical, binding);
     if !attached.bound {
         runtime.block_on(bind_once_logged(turn, &attached.nonce));
     }
+    if let Some((read, token, start)) = terminal.take() {
+        let _ = sender.send(read.frame(&transcript, logical, start, &token));
+    }
     let _ = sender.send(StreamMessage::RuntimeReady {
         handoff: RuntimeHandoff::ClaudeTui {
             transcript_path: transcript,
             tmux_session_name: logical.to_owned(),
-            last_offset: length(),
+            last_offset: handoff_end(),
         },
     });
     Ok(())
 }
 
-/// Under settlement the transcript is read to its provider's own turn-end record, its interrupt
-/// marker sent as a typed abort. Neither idleness, EOF nor a dead pane ends the turn.
+/// A Herdr Claude turn's provider terminal and the record end the read stopped at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClaudeTurnTerminal {
+    pub(crate) kind: NativeTerminalKind,
+    pub(crate) end: u64,
+    pub(crate) result: String,
+    pub(crate) session_id: Option<String>,
+    /// The (dev, ino) of the descriptor the read used.
+    pub(crate) file: (u64, u64),
+}
+
+impl ClaudeTurnTerminal {
+    /// The typed frame only bridge admission turns into a terminal; no tmux generation names it.
+    fn frame(
+        self,
+        transcript: &str,
+        logical: &str,
+        start: u64,
+        token: &Arc<CancelToken>,
+    ) -> StreamMessage {
+        StreamMessage::ClaudeTuiTerminalDone {
+            result: self.result,
+            session_id: self.session_id,
+            transcript_path: transcript.to_owned(),
+            tmux_session_name: logical.to_owned(),
+            turn_nonce: token.turn_nonce().unwrap_or_default().to_owned(),
+            source_start: start,
+            complete_record_end: self.end,
+            generation_mtime_ns: 0,
+            source_file_dev: self.file.0,
+            source_file_ino: self.file.1,
+            actor: Arc::downgrade(token),
+            kind: self.kind,
+        }
+    }
+}
+
+/// One Claude turn's records as the Herdr reader and bridge admission judge them alike: a
+/// turn-end record counts only after this turn's own prompt, so an earlier turn's tail ends nothing.
+#[derive(Default)]
+pub(crate) struct HerdrTurnLines {
+    stream: StreamLineState,
+    prompt_seen: bool,
+}
+
+impl HerdrTurnLines {
+    pub(crate) fn process(&mut self, line: &str, sender: &Sender<StreamMessage>) -> bool {
+        if !self.prompt_seen && is_turn_prompt(line) {
+            self.prompt_seen = true;
+            self.stream.turn_ended = false;
+            self.stream.interrupted = false;
+            self.stream.final_result = None;
+        }
+        process_stream_line(line, sender, &mut self.stream)
+    }
+
+    /// The turn's terminal: its interrupt marker is an abort, a result or turn end a completion.
+    pub(crate) fn terminal(&self) -> Option<NativeTerminalKind> {
+        let stream = &self.stream;
+        if !self.prompt_seen || (stream.final_result.is_none() && !stream.turn_ended) {
+            return None;
+        }
+        Some(match stream.interrupted && stream.final_result.is_none() {
+            true => NativeTerminalKind::Aborted,
+            false => NativeTerminalKind::Completed,
+        })
+    }
+
+    pub(crate) fn result(&self) -> (String, Option<String>) {
+        let result = self.stream.final_result.clone().unwrap_or_default();
+        (result, self.stream.last_session_id.clone())
+    }
+}
+
+/// The typed frame the Herdr reader would send for `transcript` read from `start`, for admission tests.
+#[cfg(test)]
+pub(crate) fn herdr_terminal_frame(
+    transcript: &str,
+    start: u64,
+    logical: &str,
+    token: &Arc<CancelToken>,
+) -> Option<StreamMessage> {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let alive = move || std::time::Instant::now() < deadline;
+    let read = read_to_provider_terminal(transcript, start, &tx, token, alive).ok()??;
+    Some(read.frame(transcript, logical, start, token))
+}
+
+/// Admission's re-read of a Claude turn from its descriptor: from the first record stamped at or
+/// after the input, as the reader starts, to the first terminal `HerdrTurnLines` accepts.
+pub(crate) fn replay_herdr_turn(
+    file: &mut std::fs::File,
+    submitted_at: chrono::DateTime<chrono::Utc>,
+    len: u64,
+) -> Option<(u64, NativeTerminalKind, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut bytes = Vec::new();
+    file.seek(SeekFrom::Start(0)).ok()?;
+    file.take(len).read_to_end(&mut bytes).ok()?;
+    let records = complete_records(&bytes);
+    let stamped = |line: &str| {
+        let json = serde_json::from_str::<serde_json::Value>(line).ok()?;
+        let stamp = json.get("timestamp")?.as_str()?;
+        chrono::DateTime::parse_from_rfc3339(stamp).ok()
+    };
+    let (start, at) = records.iter().enumerate().find_map(|(at, (start, line))| {
+        stamped(line)
+            .filter(|stamp| *stamp >= submitted_at)
+            .map(|_| (*start, at))
+    })?;
+    let (local, _rx) = std::sync::mpsc::channel();
+    let mut lines = HerdrTurnLines::default();
+    for (record_start, line) in &records[at..] {
+        lines.process(line, &local);
+        if let Some(kind) = lines.terminal() {
+            let end = record_start + line.len() as u64 + 1;
+            return Some((start, kind, end));
+        }
+    }
+    None
+}
+
+/// Each newline-terminated record's start offset and trimmed text; a torn tail is not a record.
+fn complete_records(bytes: &[u8]) -> Vec<(u64, &str)> {
+    let mut records = Vec::new();
+    let mut offset = 0u64;
+    for raw in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if raw.last() != Some(&b'\n') {
+            break;
+        }
+        let line = &raw[..raw.len() - 1];
+        if let Ok(text) = std::str::from_utf8(line)
+            && !text.trim().is_empty()
+        {
+            records.push((offset, text));
+        }
+        offset += raw.len() as u64;
+    }
+    records
+}
+
+/// A user record that is a prompt: text, not a tool result, a meta note or an interrupt marker.
+fn is_turn_prompt(line: &str) -> bool {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    if json.get("type").and_then(|kind| kind.as_str()) != Some("user")
+        || json.get("isMeta").and_then(|meta| meta.as_bool()) == Some(true)
+        || crate::services::tui_turn_state::envelope_is_turn_end_terminator(
+            &ProviderKind::Claude,
+            &json,
+        )
+    {
+        return false;
+    }
+    match json.pointer("/message/content") {
+        Some(serde_json::Value::String(text)) => !text.trim().is_empty(),
+        Some(serde_json::Value::Array(blocks)) => {
+            let kind = |block: &serde_json::Value, named: &str| {
+                block.get("type").and_then(serde_json::Value::as_str) == Some(named)
+            };
+            blocks.iter().any(|block| kind(block, "text"))
+                && !blocks.iter().any(|block| kind(block, "tool_result"))
+        }
+        _ => false,
+    }
+}
+
+/// Under settlement the transcript is read to this turn's own turn-end record, returned unsent;
+/// offsets advance only over processed records. Idleness, EOF or a dead pane end no turn.
 fn read_to_provider_terminal(
     transcript: &str,
     start: u64,
     sender: &Sender<StreamMessage>,
     token: &Arc<CancelToken>,
     is_alive: impl FnMut() -> bool,
-) -> Result<(), String> {
+) -> Result<Option<ClaudeTurnTerminal>, String> {
     use crate::services::cluster::stream_relay::SourceFileIdentity;
-    let mut state = StreamLineState::new();
+    let mut lines = HerdrTurnLines::default();
     let mut opened = SourceFileIdentity::Unavailable;
-    let (offsets, lines) = (sender.clone(), sender.clone());
+    // A buffer's raw end is sent only once a later read shows all its records were processed.
+    let pending = std::cell::Cell::new(None::<u64>);
+    let (offsets, relay) = (sender.clone(), sender.clone());
+    let (local, local_rx) = std::sync::mpsc::channel();
     let read = poll_output_file_until_result(
         transcript,
         start,
         Some(token.clone()),
-        &mut state,
+        &mut lines,
         is_alive,
         || false,
-        move |offset| {
-            let _ = offsets.send(StreamMessage::OutputOffset { offset });
+        |raw_end| {
+            if let Some(processed) = pending.replace(Some(raw_end)) {
+                let _ = offsets.send(StreamMessage::OutputOffset { offset: processed });
+            }
         },
-        move |line, state| process_stream_line(line, &lines, state),
-        |state| state.final_result.is_some() || state.turn_ended,
+        move |line, lines: &mut HerdrTurnLines| {
+            let processed = lines.process(line, &local);
+            // The turn's Done is the typed frame sent after the read, never the stream's own.
+            for message in local_rx.try_iter() {
+                if !matches!(message, StreamMessage::Done { .. }) {
+                    let _ = relay.send(message);
+                }
+            }
+            processed
+        },
+        |lines| lines.terminal().is_some(),
         |_| false,
         |_| {},
         |file| opened = SourceFileIdentity::from_open_file(file),
     )
     .map_err(|failure| failure.error)?;
-    let (ReadOutputResult::Completed { offset }, None) = (read, &state.final_result) else {
-        return Ok(());
+    let end = match read {
+        ReadOutputResult::Completed { offset }
+        | ReadOutputResult::Cancelled { offset }
+        | ReadOutputResult::SessionDied { offset } => offset,
     };
-    if !state.interrupted {
-        // A turn_duration end carries no result; the streamed text is the reply, as idle Done had it.
-        let session_id = state.last_session_id.clone();
-        let _ = sender.send(StreamMessage::Done {
-            result: String::new(),
-            session_id,
+    if let Some(raw_end) = pending.get() {
+        let _ = sender.send(StreamMessage::OutputOffset {
+            offset: raw_end.min(end),
         });
-        return Ok(());
     }
-    let (source_file_dev, source_file_ino) = match opened {
-        SourceFileIdentity::Unix { dev, ino } => (dev, ino),
-        _ => (0, 0),
+    let (ReadOutputResult::Completed { .. }, Some(kind)) = (read, lines.terminal()) else {
+        return Ok(None);
     };
-    // No tmux generation names a Herdr pane, so admission keeps this abort unadmitted, never Done.
-    let _ = sender.send(StreamMessage::ClaudeTuiTerminalDone {
-        result: String::new(),
-        session_id: state.last_session_id.clone(),
-        transcript_path: transcript.to_owned(),
-        tmux_session_name: herdr_provider_terminal_only(Some(token)).unwrap_or_default(),
-        turn_nonce: token.turn_nonce().unwrap_or_default().to_owned(),
-        source_start: start,
-        complete_record_end: offset,
-        generation_mtime_ns: 0,
-        source_file_dev,
-        source_file_ino,
-        actor: Arc::downgrade(token),
-        kind: NativeTerminalKind::Aborted,
-    });
-    Ok(())
+    let (result, session_id) = lines.result();
+    let file = crate::services::provider::cancel_token_claude_interrupt::opened_file_identity(
+        Some(&opened),
+    );
+    Ok(Some(ClaudeTurnTerminal {
+        kind,
+        end,
+        result,
+        session_id,
+        file,
+    }))
 }
 
 /// The row turns Bound once the pane's latest logged source is this execution's; until then it

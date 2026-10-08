@@ -923,7 +923,7 @@ async fn exact_receipt_rowless_terminal_custody_empty_recovery_stays_inside_sour
             };
             let mut baseline = state.inflight_state.clone();
             let expected = InflightTurnIdentity::from_state(&baseline);
-            let (_, admitted, _) = state
+            let (_, admitted, _, _) = state
                 .inflight_state
                 .admit_tui_terminal_frame(
                     &mut baseline,

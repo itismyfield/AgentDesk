@@ -7,6 +7,7 @@ const ASSISTANT: &str =
     r#"{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}"#;
 const INTERRUPT: &str = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
 const RESULT: &str = r#"{"type":"result","subtype":"success","result":"answer"}"#;
+const PROMPT: &str = r#"{"type":"user","message":{"role":"user","content":"question"}}"#;
 const TURN_END: &str = r#"{"type":"system","subtype":"turn_duration","durationMs":10}"#;
 
 fn herdr_token() -> Arc<CancelToken> {
@@ -29,7 +30,7 @@ fn read(
     lines: &[&str],
     token: &Arc<CancelToken>,
     alive_for: Duration,
-) -> Vec<StreamMessage> {
+) -> (Vec<StreamMessage>, Option<ClaudeTurnTerminal>) {
     let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
     std::fs::write(path, body).unwrap();
     let alive = Arc::new(AtomicBool::new(true));
@@ -46,69 +47,65 @@ fn read(
         std::thread::sleep(Duration::from_millis(20));
     }
     alive.store(false, Ordering::SeqCst);
-    reader.join().unwrap().unwrap();
-    rx.try_iter().collect()
+    let terminal = reader.join().unwrap().unwrap();
+    (rx.try_iter().collect(), terminal)
 }
 
-fn terminals(frames: &[StreamMessage]) -> Vec<String> {
-    frames
-        .iter()
-        .filter_map(|frame| match frame {
-            StreamMessage::Done { result, .. } => Some(format!("done:{result}")),
-            StreamMessage::ClaudeTuiTerminalDone { kind, .. } => Some(format!("native:{kind:?}")),
-            StreamMessage::Error { message, .. } => Some(format!("error:{message}")),
-            _ => None,
-        })
-        .collect()
+fn record_end(lines: &[&str]) -> u64 {
+    lines.iter().map(|line| line.len() as u64 + 1).sum()
 }
 
-/// A Herdr Claude read ends only on its turn-end record: the interrupt as a typed abort at its end,
-/// a result or turn_duration as a plain Done; a dead pane without one sends no Done or error.
+/// A Herdr Claude read returns its own turn's interrupt as an abort and its result or turn_duration
+/// as a completion, offsets never past it; an earlier turn's tail or a dead pane ends nothing.
 #[test]
 fn a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal() {
     let dir = tempfile::tempdir().unwrap();
     let token = herdr_token();
     let path = dir.path().join("interrupted.jsonl");
     let next = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"next turn"}]}}"#;
-    let frames = read(
-        &path,
-        &[ASSISTANT, INTERRUPT, next],
-        &token,
-        Duration::from_secs(5),
-    );
-    assert_eq!(terminals(&frames), ["native:Aborted"]);
-    let Some(StreamMessage::ClaudeTuiTerminalDone {
-        complete_record_end,
-        actor,
-        turn_nonce,
-        ..
-    }) = frames.last()
-    else {
-        panic!("the abort ends the read: {frames:?}");
-    };
-    assert_eq!(
-        *complete_record_end,
-        (ASSISTANT.len() + INTERRUPT.len() + 2) as u64
-    );
-    assert!(Arc::ptr_eq(&actor.upgrade().unwrap(), &token));
-    assert_eq!(Some(turn_nonce.as_str()), token.turn_nonce());
+    let turn = [PROMPT, ASSISTANT, INTERRUPT];
+    let lines = [&turn[..], &[next]].concat();
+    let (frames, terminal) = read(&path, &lines, &token, Duration::from_secs(5));
+    let terminal = terminal.expect("the interrupt ends the turn");
+    assert_eq!(terminal.kind, NativeTerminalKind::Aborted);
+    assert_eq!(terminal.end, record_end(&turn));
+    let meta = std::fs::metadata(&path).unwrap();
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(terminal.file, (meta.dev(), meta.ino()));
+    for frame in &frames {
+        match frame {
+            StreamMessage::OutputOffset { offset } => assert!(*offset <= terminal.end, "{frame:?}"),
+            StreamMessage::Done { .. }
+            | StreamMessage::ClaudeTuiTerminalDone { .. }
+            | StreamMessage::Error { .. } => panic!("the read sends no terminal: {frame:?}"),
+            _ => {}
+        }
+    }
 
-    let path = dir.path().join("result.jsonl");
-    let frames = read(&path, &[ASSISTANT, RESULT], &token, Duration::from_secs(5));
-    assert_eq!(terminals(&frames), ["done:answer"]);
-    let path = dir.path().join("duration.jsonl");
-    let frames = read(
-        &path,
-        &[ASSISTANT, TURN_END],
-        &token,
-        Duration::from_secs(5),
-    );
-    assert_eq!(terminals(&frames), ["done:"]);
+    for (name, last, result) in [("result", RESULT, "answer"), ("duration", TURN_END, "")] {
+        let path = dir.path().join(format!("{name}.jsonl"));
+        let terminal = read(
+            &path,
+            &[PROMPT, ASSISTANT, last],
+            &token,
+            Duration::from_secs(5),
+        )
+        .1;
+        let terminal = terminal.expect("a completion ends the turn");
+        assert_eq!(terminal.kind, NativeTerminalKind::Completed, "{name}");
+        assert_eq!(terminal.result, result, "{name}");
+    }
 
+    let path = dir.path().join("previous.jsonl");
+    let previous = [ASSISTANT, INTERRUPT, RESULT, TURN_END, PROMPT, ASSISTANT];
+    let (_, terminal) = read(&path, &previous, &token, Duration::from_millis(400));
+    assert!(terminal.is_none(), "an earlier turn's tail ends nothing");
     let path = dir.path().join("running.jsonl");
-    let frames = read(&path, &[ASSISTANT], &token, Duration::from_millis(300));
-    assert!(
-        terminals(&frames).is_empty(),
-        "a dead pane is no terminal: {frames:?}"
+    let (frames, terminal) = read(
+        &path,
+        &[PROMPT, ASSISTANT],
+        &token,
+        Duration::from_millis(300),
     );
+    assert!(terminal.is_none(), "a dead pane is no terminal: {frames:?}");
 }

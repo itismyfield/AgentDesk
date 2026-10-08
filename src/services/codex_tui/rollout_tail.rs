@@ -883,7 +883,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
     let mut sender = RelaySuppressionSender::new(sender, cancel_token.as_deref());
     sender.source_pin = source_pin.as_ref();
     sender.source_identity = source_identity;
-    let accept = parser::RecordAcceptance::new(cancel_token.as_deref());
+    let accept = parser::RecordAcceptance::new(cancel_token.as_ref());
 
     loop {
         if sender.cancel_observed() {

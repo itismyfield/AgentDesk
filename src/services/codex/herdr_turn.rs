@@ -33,7 +33,9 @@ use crate::services::codex_tui::warm_followup::codex_tui_launch_options_fingerpr
 use crate::services::herdr_launch::{
     HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint, HerdrLaunchHost, launch_herdr_session,
 };
-use crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available;
+use crate::services::provider::cancel_token_claude_interrupt::{
+    HerdrSubmission, HerdrTurnStart, herdr_stop_settlement_available,
+};
 use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, cancel_requested, is_readonly_tool_policy,
 };
@@ -349,22 +351,9 @@ fn first_prompt(
     crate::services::tui_prompt_dedupe::register_provider_session("codex", logical, logical);
     crate::services::tui_prompt_dedupe::register_codex_herdr_placeholder(logical, turn.channel_id);
     hold(nonce)?;
-    let run = if herdr_stop_settlement_available()
-        && let Some(token) = turn.cancel.as_deref()
-        && let Some(state) = token.herdr_interrupt_state()
-    {
-        use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
-        let mut submitted = state.submission.lock().unwrap_or_else(|e| e.into_inner());
-        let run = run_herdr(&target, &plan, Some(token));
-        *submitted = match &run.run {
-            InputRun::Applied => HerdrSubmission::Submitted,
-            InputRun::Indeterminate { .. } if run.enter_attempted => HerdrSubmission::Unknown,
-            _ => HerdrSubmission::Unsubmitted,
-        };
-        run
-    } else {
+    let run = observed_input(turn.cancel.as_deref(), None, || {
         run_herdr(&target, &plan, turn.cancel.as_deref())
-    };
+    })?;
     if run.run != InputRun::Applied {
         if composer_untouched(&run) {
             warn_release(logical, release_hold(nonce));
@@ -390,6 +379,15 @@ fn first_prompt(
     if !ports.attach(&turn.owner, &record, &source, &target)? {
         return Err(format!("herdr turn: codex execution {nonce} is not bound"));
     }
+    // The launch's own new rollout begins with this prompt's turn.
+    let start = HerdrTurnStart {
+        execution_nonce: nonce.to_owned(),
+        source: source.path.clone(),
+        file: Some((source.dev, source.ino)),
+        offset: 0,
+        submitted_at: None,
+    };
+    record_turn_start(turn.cancel.as_deref(), start)?;
     warn_release(logical, release_hold(nonce));
     read_reply(
         turn,
@@ -399,6 +397,43 @@ fn first_prompt(
         source.session_id.clone(),
         sender,
     )
+}
+
+/// One gated write under the token's submission observation, as a stop delivery reads it; a
+/// follow-up's turn start is recorded under the same lock, before its input.
+fn observed_input(
+    cancel: Option<&CancelToken>,
+    start: Option<HerdrTurnStart>,
+    write: impl FnOnce() -> PlanRun,
+) -> Result<PlanRun, String> {
+    let state = cancel.filter(|_| herdr_stop_settlement_available());
+    let Some(state) = state.and_then(CancelToken::herdr_interrupt_state) else {
+        return Ok(write());
+    };
+    let mut submitted = state.submission.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(start) = start
+        && !state.record_turn_start(start)
+    {
+        return Err("herdr turn: the token already began another turn".into());
+    }
+    let run = write();
+    *submitted = match &run.run {
+        InputRun::Applied => HerdrSubmission::Submitted,
+        InputRun::Indeterminate { .. } if run.enter_attempted => HerdrSubmission::Unknown,
+        _ => HerdrSubmission::Unsubmitted,
+    };
+    Ok(run)
+}
+
+/// Records where this token's turn began, under settlement only; a second, different start refuses.
+fn record_turn_start(cancel: Option<&CancelToken>, start: HerdrTurnStart) -> Result<(), String> {
+    let state = cancel.filter(|_| herdr_stop_settlement_available());
+    match state.and_then(CancelToken::herdr_interrupt_state) {
+        Some(state) if !state.record_turn_start(start) => {
+            Err("herdr turn: the token already began another turn".into())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// A later prompt to a Bound execution: its match, source, launch options and an empty ready
@@ -428,7 +463,11 @@ fn followup(
         .map_err(|_| refused(PromptRefused::NoSource))?
         .len();
     hold(nonce)?;
-    let run = run_herdr(&target, &plan, turn.cancel.as_deref());
+    let mut start = HerdrTurnStart::at_end_of(nonce, &path, None);
+    start.offset = before;
+    let run = observed_input(turn.cancel.as_deref(), Some(start), || {
+        run_herdr(&target, &plan, turn.cancel.as_deref())
+    })?;
     if run.run == InputRun::Applied || composer_untouched(&run) {
         warn_release(logical, release_hold(nonce));
     }

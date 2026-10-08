@@ -128,7 +128,7 @@ fn terminal_frames(frames: &[StreamMessage]) -> Vec<String> {
 }
 
 /// A Herdr Codex read ends only on its own turn's record: never at the drain, an abort typed at its
-/// end, a completion after a stop plain; unnamed aborts and dead panes end nothing. Off: drain.
+/// end, a completion after a stop typed too; unnamed aborts and dead panes end nothing. Off: drain.
 #[test]
 fn a_herdr_codex_turn_ends_only_on_its_own_rollout_terminal() {
     let dir = tempfile::tempdir().unwrap();
@@ -169,7 +169,7 @@ fn a_herdr_codex_turn_ends_only_on_its_own_rollout_terminal() {
     append(&completed.path, &event("task_complete", Some("t1")));
     let (result, frames) = completed.finish();
     assert!(matches!(result, ReadOutputResult::Completed { .. }));
-    assert_eq!(terminal_frames(&frames), ["done:partial"]);
+    assert_eq!(terminal_frames(&frames), ["native:Completed:partial"]);
 
     let unnamed = Tail::start(dir.path(), "unnamed.jsonl", &token, true);
     append(&unnamed.path, &event("turn_aborted", None));
@@ -227,7 +227,7 @@ fn a_herdr_turn_accepts_nothing_past_its_terminal_record() {
     let counted = (outcome.final_offset, outcome.bytes_read, outcome.lines_read);
     assert_eq!(counted, (end, end, 6));
     let frames: Vec<_> = rx.try_iter().collect();
-    assert_eq!(terminal_frames(&frames), ["done:partial"]);
+    assert_eq!(terminal_frames(&frames), ["native:Completed:partial"]);
     assert!(!format!("{frames:?}").contains("next t"), "{frames:?}");
 }
 
