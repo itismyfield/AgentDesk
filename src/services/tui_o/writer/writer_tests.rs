@@ -179,19 +179,23 @@ impl DeliveryLease for Arc<FakeLease> {
     }
 }
 
-#[derive(Clone, Default)]
-struct Alarms(Arc<Mutex<Vec<WriterAlarm>>>);
+/// The alarms of one harness channel; an alarm for any other channel fails the test.
+#[derive(Clone)]
+struct Alarms {
+    channel: u64,
+    raised: Arc<Mutex<Vec<WriterAlarm>>>,
+}
 
 impl AlarmSink for Alarms {
     fn raise(&self, channel: u64, alarm: WriterAlarm) {
-        assert_eq!(channel, CHANNEL);
-        self.0.lock().unwrap().push(alarm);
+        assert_eq!(channel, self.channel);
+        self.raised.lock().unwrap().push(alarm);
     }
 }
 
 impl Alarms {
     fn taken(&self) -> Vec<WriterAlarm> {
-        std::mem::take(&mut self.0.lock().unwrap())
+        std::mem::take(&mut self.raised.lock().unwrap())
     }
 }
 
@@ -255,7 +259,10 @@ impl Harness {
             gate,
             port,
             lease,
-            alarms: Alarms::default(),
+            alarms: Alarms {
+                channel: channel_id,
+                raised: Arc::default(),
+            },
         }
     }
 
