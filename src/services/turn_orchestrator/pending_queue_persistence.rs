@@ -473,6 +473,10 @@ fn save_channel_queue_locked(
                 )
                 .is_some() =>
             {
+                #[cfg(test)]
+                if fsync_fault::take(channel_id) {
+                    return Err(format!("injected parent fsync failure {}", path.display()));
+                }
                 crate::services::discord::runtime_store::fsync_parent_dir(&path)
                     .map_err(|e| e.to_string())
             }
@@ -974,6 +978,28 @@ pub(crate) fn warn_legacy_pending_queue_files(provider: &ProviderKind) {
                 path.display()
             );
         }
+    }
+}
+
+/// Test-only: fail a channel's next parent fsync after its empty queue file was removed, once.
+#[cfg(test)]
+pub(super) mod fsync_fault {
+    use poise::serenity_prelude::ChannelId;
+    use std::sync::Mutex;
+
+    static ARMED: Mutex<Vec<ChannelId>> = Mutex::new(Vec::new());
+
+    pub(in crate::services::turn_orchestrator) fn fail_next(channel_id: ChannelId) {
+        ARMED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(channel_id);
+    }
+
+    pub(super) fn take(channel_id: ChannelId) -> bool {
+        let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
+        let index = armed.iter().position(|armed| *armed == channel_id);
+        index.map(|index| armed.swap_remove(index)).is_some()
     }
 }
 
