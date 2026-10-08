@@ -239,7 +239,7 @@ fn mailbox_holds(state: &ChannelMailboxState, message: MessageId) -> bool {
 }
 
 /// The provider this actor last persisted for; `None` on an actor that has not persisted yet.
-fn actor_provider(state: &ChannelMailboxState) -> Option<&ProviderKind> {
+pub(super) fn actor_provider(state: &ChannelMailboxState) -> Option<&ProviderKind> {
     state
         .last_persistence
         .as_ref()
@@ -254,11 +254,19 @@ fn reserved_live(state: &ChannelMailboxState, message: MessageId) -> bool {
     state.injection_reserved.as_ref().is_some_and(live)
 }
 
-/// Whether an injection owns `message`, live or ended; a claim of it yields. Reads, never clears.
-pub(super) fn owns(state: &ChannelMailboxState, message: MessageId) -> bool {
+/// Whether an injection owns `message` under `provider` (`None`: any provider), live or ended; a
+/// claim of it yields. Another channel's injection does not own a message this mailbox holds.
+pub(super) fn owns(
+    state: &ChannelMailboxState,
+    provider: Option<&ProviderKind>,
+    message: MessageId,
+) -> bool {
     let now = std::time::Instant::now();
+    let elsewhere =
+        || disposition::in_progress(provider, message, now) && !mailbox_holds(state, message);
     reserved_live(state, message)
-        || disposition::terminal(actor_provider(state), message, now).is_some()
+        || disposition::terminal(provider, message, now).is_some()
+        || elsewhere()
 }
 
 /// Refuses an enqueue of injected input: every source ended in a pane, or one is mid-injection.
@@ -272,7 +280,9 @@ pub(super) fn enqueue_refusal(
     let ended = |source: &MessageId| disposition::terminal(provider, *source, now).is_some();
     let (reason, label) = if !sources.is_empty() && sources.iter().all(ended) {
         (EnqueueRefusalReason::AlreadyActiveTurn, "injected_terminal")
-    } else if sources.iter().any(|source| reserved_live(state, *source)) {
+    } else if sources.iter().any(|source| {
+        reserved_live(state, *source) || disposition::in_progress(provider, *source, now)
+    }) {
         (
             EnqueueRefusalReason::ClaimedSinceObservation,
             "injection_in_progress",

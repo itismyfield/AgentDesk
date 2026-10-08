@@ -77,7 +77,7 @@ mod api;
 mod classification;
 pub(in crate::services::discord) mod consumed_commands;
 mod frontier_evidence;
-mod handled_command;
+pub(in crate::services::discord) mod handled_command;
 mod phase2;
 pub(in crate::services::discord) mod retry_state;
 mod settled_frontier;

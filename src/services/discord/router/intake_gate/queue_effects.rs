@@ -37,7 +37,7 @@ pub(in crate::services::discord::router) fn queue_pending_reaction_for(
 /// head-only check would wrongly remove it. Reconciled queue-marker removal is
 /// best-effort (no-op when already cleared), and only the calling provider bot's
 /// own @me reaction is removed.
-async fn add_queue_pending_reaction_self_healing(
+pub(super) async fn add_queue_pending_reaction_self_healing(
     ctx: &serenity::Context,
     data: &Data,
     channel_id: serenity::ChannelId,

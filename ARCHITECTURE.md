@@ -1231,6 +1231,8 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── intake_gate/
 │   │   │   │   ├── busy_duplicate_notice.rs
+│   │   │   │   ├── busy_inject.rs
+│   │   │   │   ├── busy_inject_test_support.rs
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── queue_effects.rs
@@ -1553,6 +1555,8 @@ src/
 │   │   │   │   ├── codex_marker.rs
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── relay_e2e/
+│   │   │   │   ├── busy_inject_e2e_tests.rs
+│   │   │   │   ├── busy_inject_thread_e2e_tests.rs
 │   │   │   │   ├── catch_up_pagination_e2e.rs
 │   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs

@@ -46,7 +46,9 @@ pub(super) fn claim_yields(
     admission_order: TurnAdmissionOrder,
 ) -> bool {
     // An injection owns this message; yield before the helpers below count or clear anything.
-    if super::injected_inputs::owns(state, user_message_id) {
+    // The provider is the one this actor last persisted for, or any while it has none.
+    let provider = super::injected_inputs::actor_provider(state);
+    if super::injected_inputs::owns(state, provider, user_message_id) {
         return true;
     }
     let background = background_defers_claim(state, turn_kind);
