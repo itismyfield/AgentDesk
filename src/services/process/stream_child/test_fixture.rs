@@ -34,7 +34,8 @@ impl ProviderFixture {
             "gemini" => r#"{"type":"result","status":"success","result":"done"}"#,
             _ => r#"{"type":"result","subtype":"success","result":"done"}"#,
         };
-        std::fs::write(&cli, format!(r#"#!/usr/bin/env python3
+        let source = dir.path().join("provider.src");
+        std::fs::write(&source, format!(r#"#!/usr/bin/env python3
 import json, os, pathlib, subprocess, sys, time
 root = pathlib.Path(__file__).parent
 mode = {mode:?}
@@ -58,6 +59,14 @@ if mode == 'quiet':
 if mode in ('normal', 'quiet', 'delayed_normal'): print({terminal:?}, flush=True)
 sys.exit(0 if mode in ('normal', 'quiet', 'delayed_normal') else 7)
 "#)).unwrap();
+        // A fork on another thread holds any writable fd on the script until its exec, failing
+        // our exec with ETXTBSY; `cp` writes it in its own process so no such fd exists here.
+        let copied = std::process::Command::new("/bin/cp")
+            .arg(&source)
+            .arg(&cli)
+            .status()
+            .unwrap();
+        assert!(copied.success(), "cp provider script: {copied}");
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = dir.path().to_owned();
         let (tx, cleanup) = mpsc::channel();
