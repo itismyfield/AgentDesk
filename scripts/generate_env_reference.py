@@ -26,8 +26,9 @@ Test-only code is excluded: ``tests.rs`` / ``integration_tests.rs`` modules,
 
 Output is deterministic: files are visited in sorted order, rows are sorted by
 variable name, and the description is a single sentence chosen by a fixed
-preference order. CI regenerates the document and fails on ``git diff`` drift
-(see ``scripts/ci-script-checks.sh``).
+preference order. Locations are file paths without line numbers, so edits that
+only shift lines leave the document unchanged. CI regenerates the document and
+fails on ``git diff`` drift (see ``scripts/ci-script-checks.sh``).
 """
 
 from __future__ import annotations
@@ -109,6 +110,12 @@ class Variable:
         if consts:
             return consts[0]
         return sorted(self.sites)[0]
+
+    def site_paths(self) -> list[str]:
+        """Distinct source files, primary first; line numbers stay out of the doc."""
+
+        primary = self.primary_site().path
+        return [primary, *sorted({site.path for site in self.sites} - {primary})]
 
     def description(self) -> str:
         ordered = sorted(self.sites)
@@ -365,11 +372,7 @@ def markdown_cell(text: str) -> str:
 def render_table(variables: list[Variable]) -> list[str]:
     lines = ["| Variable | Defined at | Description |", "|---|---|---|"]
     for variable in variables:
-        site = variable.primary_site()
-        extra = len(variable.sites) - 1
-        location = f"`{site.path}:{site.line}`"
-        if extra > 0:
-            location += f" (+{extra} more)"
+        location = ", ".join(f"`{path}`" for path in variable.site_paths())
         lines.append(
             f"| `{variable.name}` | {location} | {markdown_cell(variable.description())} |"
         )
@@ -387,9 +390,11 @@ def render(variables: dict[str, Variable]) -> str:
         "",
         "Environment variables read by the AgentDesk binary, derived from `src/`.",
         "Test-only modules and `#[cfg(test)]` blocks are excluded. `Defined at`",
-        "points to the name constant when one exists, otherwise to the first read",
-        "site; `(+N more)` counts additional read sites. `Description` is the",
-        "comment adjacent to that site (blank when the code has none).",
+        "lists each source file once: the file defining the name constant first when",
+        "one exists, then the other files that read the variable, in path order.",
+        "Line numbers are left out so edits that only shift lines do not change this",
+        "file. `Description` is the comment adjacent to the variable's site (blank",
+        "when the code has none).",
         "",
         f"Regenerate with `{GENERATOR_COMMAND}`; CI fails when this file drifts.",
         "",
