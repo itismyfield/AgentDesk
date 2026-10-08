@@ -1134,3 +1134,220 @@ fn a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg() {
 
 #[path = "provider_dispatch_codex_herdr_followup_tests.rs"]
 mod followup;
+
+/// Codex at work, as a stop delivery reads its pane.
+const WORKING: &str = "• Working (1s • esc to interrupt)";
+
+/// A runtime whose user stops this fixture's channel: its token hash, the pane's Herdr marker.
+fn stop_runtime(fx: &Fixture) -> Arc<crate::services::discord::SharedData> {
+    let pool = Some(fx.pool.clone());
+    let mut shared = crate::services::discord::make_shared_data_for_tests_with_storage(pool);
+    Arc::get_mut(&mut shared).unwrap().token_hash = TOKEN.into();
+    let marker = crate::services::tmux_common::session_temp_path(fx.logical(), "host_kind");
+    std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+    std::fs::write(&marker, "herdr").unwrap();
+    shared
+}
+
+fn mailbox_turn(
+    fx: &Fixture,
+    shared: &Arc<crate::services::discord::SharedData>,
+    token: Arc<CancelToken>,
+) {
+    let channel = poise::serenity_prelude::ChannelId::new(CHANNEL);
+    let (user, message) = (
+        poise::serenity_prelude::UserId::new(7),
+        poise::serenity_prelude::MessageId::new(CHANNEL + 1),
+    );
+    let start =
+        crate::services::discord::mailbox_try_start_turn(shared, channel, token, user, message);
+    assert!(fx.rt.block_on(start));
+}
+
+/// A `/stop` through the production user-stop entry with the Escape switch on, as its Herdr reply.
+fn user_stop(fx: &Fixture, shared: &Arc<crate::services::discord::SharedData>) -> String {
+    use crate::services::discord::turn_bridge::{CommandStop, begin_user_stop};
+    use crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE;
+    let channel = poise::serenity_prelude::ChannelId::new(CHANNEL);
+    HERDR_CANCEL_OVERRIDE.set(Some(true));
+    let stop = begin_user_stop(shared, &ProviderKind::Codex, channel, true, "/stop");
+    let stop = fx.rt.block_on(stop);
+    HERDR_CANCEL_OVERRIDE.set(None);
+    match stop {
+        CommandStop::Herdr(stop) => format!("{stop:?}"),
+        _ => "not a Herdr stop".into(),
+    }
+}
+
+fn escapes(fx: &Fixture) -> usize {
+    let escape = json!({"pane_id": PANE, "keys": ["esc"]});
+    fx.rig
+        .sends()
+        .iter()
+        .filter(|send| **send == escape)
+        .count()
+}
+
+/// Waits up to five seconds for `n` Escapes, then a moment more for any extra one.
+fn settle_escapes(fx: &Fixture, n: usize) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while escapes(fx) < n.max(1) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    escapes(fx)
+}
+
+#[derive(Debug, PartialEq)]
+struct LateStop {
+    /// The reply to the stop taken while the turn was submitted but not bound.
+    unbound: String,
+    /// Escapes then, and once the pane played `own_turn`.
+    escapes: (usize, usize),
+    intent_kept: bool,
+    result: Result<(), String>,
+}
+
+/// A cold Herdr Codex turn stopped by its user after its prompt is submitted and before its own
+/// Source and attach; `own_turn` then plays the pane's provider from its new rollout.
+fn stopped_before_attach(
+    tag: &str,
+    own_turn: impl FnOnce(&Fixture, &Arc<crate::services::discord::SharedData>, &Path),
+) -> LateStop {
+    let fx = Fixture::admitted(tag);
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let shared = stop_runtime(&fx);
+    let seen = Mutex::new(None);
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        let Some(nonce) = fx.start_provider(&launcher, true) else {
+            return;
+        };
+        if !wait_for(&fx.finished, "the prompt", || fx.rig.sends().len() == 2) {
+            return;
+        }
+        let token = fx.cancel.lock().unwrap().clone();
+        mailbox_turn(&fx, &shared, token.clone());
+        fx.rig.answer("pane.read", screen(WORKING));
+        let unbound = (user_stop(&fx, &shared), escapes(&fx));
+        let state = token.herdr_interrupt_state().unwrap();
+        let intent_kept = state.user_stop.load(Ordering::SeqCst);
+        let session = uuid::Uuid::new_v4().to_string();
+        let path = fx.rollout(&session);
+        assert_eq!(fx.session_start(&context_of(&nonce), &session, &path), 202);
+        own_turn(&fx, &shared, &path);
+        *seen.lock().unwrap() = Some((unbound, intent_kept, escapes(&fx)));
+    });
+    let ((unbound, before), intent_kept, after) = seen.into_inner().unwrap().unwrap();
+    LateStop {
+        unbound,
+        escapes: (before, after),
+        intent_kept,
+        result,
+    }
+}
+
+fn pending_stop() -> String {
+    "Requested(NotSent(Pending))".into()
+}
+
+// P2-2: a stop that met the turn unbound keeps its intent and sends nothing; once the turn's own
+// start is read after its attach, the existing delivery sends exactly one Escape, never a second.
+#[test]
+fn a_stop_before_the_attach_sends_one_escape_at_the_turns_own_start_pg() {
+    let again = Mutex::new(None);
+    let late = stopped_before_attach("late-stop", |fx, shared, path| {
+        append(path, &started_lines("t1", "답"));
+        let sent = settle_escapes(fx, 1);
+        // Later records and a repeated stop reach the reader and the mailbox, never the pane.
+        let usage = json!({"type": "event_msg", "payload": {"type": "token_count"}});
+        append(path, &[usage.clone(), usage]);
+        std::thread::sleep(Duration::from_millis(400));
+        *again.lock().unwrap() = Some((sent, user_stop(fx, shared)));
+        let done = json!({"type": "event_msg", "payload": {"type": "task_complete",
+            "turn_id": "t1", "last_agent_message": "답"}});
+        append(path, &[done]);
+    });
+    let expected = LateStop {
+        unbound: pending_stop(),
+        escapes: (0, 1),
+        intent_kept: true,
+        result: Ok(()),
+    };
+    assert_eq!(late, expected);
+    let (sent, repeated) = again.into_inner().unwrap().unwrap();
+    assert_eq!(sent, 1, "one Escape at the turn's own start");
+    assert_eq!(repeated, "AlreadyRequested");
+}
+
+// A turn whose own start arrives with its terminal and the next turn's head sends no late Escape,
+// nor does one whose channel already holds another token when its own start is read.
+#[test]
+fn a_late_stop_sends_nothing_after_a_terminal_or_for_a_replaced_token_pg() {
+    let ended = stopped_before_attach("late-ended", |fx, _, path| {
+        let next =
+            json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t2"}});
+        append(path, &[answer_lines(), vec![next]].concat());
+        settle_escapes(fx, 0);
+    });
+    let replaced = stopped_before_attach("late-replaced", |fx, shared, path| {
+        let channel = poise::serenity_prelude::ChannelId::new(CHANNEL);
+        let finish =
+            crate::services::discord::mailbox_finish_turn(shared, &ProviderKind::Codex, channel);
+        fx.rt.block_on(finish);
+        mailbox_turn(fx, shared, Arc::new(CancelToken::new()));
+        append(path, &started_lines("t1", "답"));
+        settle_escapes(fx, 0);
+        let done = json!({"type": "event_msg", "payload": {"type": "task_complete",
+            "turn_id": "t1", "last_agent_message": "답"}});
+        append(path, &[done]);
+    });
+    for late in [ended, replaced] {
+        let expected = LateStop {
+            unbound: pending_stop(),
+            escapes: (0, 0),
+            intent_kept: true,
+            result: Ok(()),
+        };
+        assert_eq!(late, expected);
+    }
+}
+
+// The admission replay of a turn never runs its late stop; the live reader runs it once, at the
+// turn's own start.
+#[test]
+fn only_the_live_reader_runs_a_late_stop_at_the_turns_own_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("late-stop.jsonl");
+    append(&path, &started_lines("t1", "답"));
+    let owner = HostedOwner {
+        provider: "codex".into(),
+        discord_token_hash: TOKEN.into(),
+        channel_id: CHANNEL.to_string(),
+        logical_key: "AgentDesk-codex-p10-late-replay".into(),
+        owner_node: NODE.into(),
+        runtime_root: "/adk/runtime".into(),
+    };
+    let token = Arc::new(CancelToken::new());
+    let state = token.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+    let runs = Arc::new(AtomicUsize::new(0));
+    let counted = runs.clone();
+    assert!(state.arm_late_stop(Box::new(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+    })));
+    let mut file = std::fs::File::open(&path).unwrap();
+    let len = file.metadata().unwrap().len();
+    let decoder = crate::services::codex_tui::rollout_tail::RolloutRecordDecoder::replay_herdr_turn;
+    assert_eq!(decoder(&mut file, 0, len, &token), None);
+    assert_eq!(runs.load(Ordering::SeqCst), 0, "a replay runs no stop");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let until = Instant::now() + Duration::from_millis(500);
+    let alive = move || Instant::now() < until;
+    let tail = crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset;
+    tail(&path, 0, Some("late"), tx, Some(token.clone()), alive).unwrap();
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "the live reader runs it once"
+    );
+}

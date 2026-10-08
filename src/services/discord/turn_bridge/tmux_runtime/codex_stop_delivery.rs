@@ -373,12 +373,65 @@ pub(super) async fn herdr_command_stop(
         None => HerdrStop::Refused(HerdrNotSent::Generation),
         Some(_) if admitted.already_stopping => HerdrStop::AlreadyRequested,
         Some(token) => HerdrStop::Requested(match shared.pg_pool.as_ref() {
-            Some(pool) => interrupt_herdr(pool, &token, provider).await,
+            Some(pool) => match interrupt_herdr(pool, &token, provider).await {
+                HerdrDelivery::NotSent(HerdrNotSent::Pending)
+                    if arm_late_stop(shared, pool, &token, provider, channel) =>
+                {
+                    interrupt_herdr(pool, &token, provider).await
+                }
+                delivery => delivery,
+            },
             None => HerdrDelivery::NotSent(HerdrNotSent::Pending),
         }),
     };
     tracing::info!(channel_id = channel.get(), reason, ?stop, "herdr user stop");
     stop
+}
+
+/// Arms a stop that met its turn unbound to run this executor once from the turn's reader, at its
+/// own start, while `token` is still the channel's turn; `true` when that start was already seen.
+fn arm_late_stop(
+    shared: &Arc<crate::services::discord::SharedData>,
+    pool: &sqlx::PgPool,
+    token: &Arc<CancelToken>,
+    provider: &ProviderKind,
+    channel: poise::serenity_prelude::ChannelId,
+) -> bool {
+    let Some(state) = token.herdr_interrupt_state() else {
+        return false;
+    };
+    let (data, actor) = (Arc::downgrade(shared), Arc::downgrade(token));
+    let (pool, provider) = (pool.clone(), provider.clone());
+    let handle = tokio::runtime::Handle::current();
+    #[cfg(test)]
+    let enabled = crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
+        .with(std::cell::Cell::get);
+    let stop = move || {
+        let (Some(shared), Some(token)) = (data.upgrade(), actor.upgrade()) else {
+            return;
+        };
+        #[cfg(test)]
+        let previous =
+            crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
+                .replace(enabled);
+        // The reader is a blocking thread, as the tail's own waits are.
+        let delivery = handle.block_on(async {
+            let current = shared.mailbox_peek(channel)?.cancel_token().await.ok()??;
+            match Arc::ptr_eq(&current, &token) {
+                true => Some(interrupt_herdr(&pool, &token, &provider).await),
+                false => None,
+            }
+        });
+        #[cfg(test)]
+        crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
+            .set(previous);
+        tracing::info!(
+            channel_id = channel.get(),
+            ?delivery,
+            "herdr late user stop"
+        );
+    };
+    !state.arm_late_stop(Box::new(stop))
 }
 
 /// Dormant until settlement lands; only the Herdr user stop calls this executor.

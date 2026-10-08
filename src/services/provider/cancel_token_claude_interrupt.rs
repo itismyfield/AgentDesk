@@ -19,6 +19,16 @@ pub(crate) struct HerdrInterruptState {
     pub(crate) user_stop: AtomicBool,
     /// Where this token's own input began; terminal admission reads its turn from here only.
     pub(crate) turn_start: std::sync::OnceLock<HerdrTurnStart>,
+    /// Whether this turn's reader has seen its own start, and a stop that met the turn unbound.
+    pub(crate) own_start: Mutex<OwnStart>,
+}
+
+/// A stop's one late delivery attempt; it holds the token only weakly.
+pub(crate) type LateStop = Box<dyn Fn() + Send>;
+
+pub(crate) enum OwnStart {
+    Unseen(Option<LateStop>),
+    Seen,
 }
 
 /// The source and offset an executor observed at this token's input, never taken from a frame.
@@ -39,6 +49,31 @@ impl HerdrInterruptState {
         match self.turn_start.set(start) {
             Ok(()) => true,
             Err(start) => self.turn_start.get() == Some(&start),
+        }
+    }
+
+    /// Keeps `stop` until the reader first sees this turn's own start; `false`, dropping it, when
+    /// that was already seen. Only the first armed stop is kept.
+    pub(crate) fn arm_late_stop(&self, stop: LateStop) -> bool {
+        match &mut *self.own_start.lock().unwrap_or_else(|e| e.into_inner()) {
+            OwnStart::Unseen(armed) => {
+                armed.get_or_insert(stop);
+                true
+            }
+            OwnStart::Seen => false,
+        }
+    }
+
+    /// The reader saw this turn's own start: an armed stop runs once, outside the slot.
+    pub(crate) fn own_start_observed(&self) {
+        let mut slot = self.own_start.lock().unwrap_or_else(|e| e.into_inner());
+        let armed = match std::mem::replace(&mut *slot, OwnStart::Seen) {
+            OwnStart::Unseen(armed) => armed,
+            OwnStart::Seen => None,
+        };
+        drop(slot);
+        if let Some(stop) = armed {
+            stop();
         }
     }
 }
@@ -109,6 +144,7 @@ impl CancelToken {
             submission: Mutex::new(HerdrSubmission::Unsubmitted),
             user_stop: AtomicBool::new(false),
             turn_start: std::sync::OnceLock::new(),
+            own_start: Mutex::new(OwnStart::Unseen(None)),
         });
         self.bind_interrupt_session(provider, &owner.logical_key);
         *slot = Some(state.clone());
