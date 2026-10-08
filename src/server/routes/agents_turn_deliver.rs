@@ -446,7 +446,7 @@ mod pg_tests {
     }
 
     /// With the switch off the route answers as it did before injection existed: a start claims
-    /// at once even past queued input, and no answer carries `inject_veto` or `detail`.
+    /// at once even past queued input, no success adds an injection field, and errors keep `detail`.
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn the_switch_off_keeps_every_route_answer_field_for_field_pg() {
