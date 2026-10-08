@@ -185,3 +185,38 @@ fn a_herdr_codex_turn_ends_only_on_its_own_rollout_terminal() {
         "without settlement the drain still completes the turn"
     );
 }
+
+fn tool(kind: &str) -> String {
+    record(
+        json!({"type": "response_item", "payload": {"type": kind, "name": "exec", "call_id": "c1"}}),
+    )
+}
+
+/// A Herdr completion waits for its open tool, and the next turn's records that one read already
+/// pulled in stay unaccepted: the result offset and `final_offset` both end at the tool output.
+#[test]
+fn a_herdr_turn_accepts_nothing_past_its_terminal_record() {
+    use crate::services::codex_tui::rollout_tail::{
+        RolloutTailOptions, tail_rollout_file_until_assistant_response_with_pane_busy_probe as tail,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("accepted.jsonl");
+    let open_tool = tool("function_call") + &event("task_complete", Some("t1"));
+    let accepted = running_turn() + &open_tool + &tool("function_call_output");
+    let next_turn = event("task_started", Some("t2")) + &reply("next turn");
+    let torn = &reply("next tail")[..24];
+    std::fs::write(&path, accepted.clone() + &next_turn + torn).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let token = Some(herdr_token(false));
+    let options = RolloutTailOptions::default();
+    let session = Some("herdr-session".to_owned());
+    let (result, outcome) = tail(&path, 0, session, &tx, token, || true, options).unwrap();
+
+    let end = accepted.len() as u64;
+    assert_eq!(result, ReadOutputResult::Completed { offset: end });
+    let counted = (outcome.final_offset, outcome.bytes_read, outcome.lines_read);
+    assert_eq!(counted, (end, end, 6));
+    let frames: Vec<_> = rx.try_iter().collect();
+    assert_eq!(terminal_frames(&frames), ["done:partial"]);
+    assert!(!format!("{frames:?}").contains("next t"), "{frames:?}");
+}

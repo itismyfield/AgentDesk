@@ -883,6 +883,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
     let mut sender = RelaySuppressionSender::new(sender, cancel_token.as_deref());
     sender.source_pin = source_pin.as_ref();
     sender.source_identity = source_identity;
+    let accept = parser::RecordAcceptance::new(cancel_token.as_deref());
 
     loop {
         if sender.cancel_observed() {
@@ -909,14 +910,18 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
         match file.read(&mut buf) {
             Ok(0) => {
                 let turn = (seek_offset, terminal_range.1);
-                let token = cancel_token.as_deref();
                 let tail = (&mut state, &mut partial_line);
-                match parser::herdr_eof(&sender, tail, rollout_path, turn, token, &mut is_alive) {
+                match parser::herdr_eof(&sender, tail, rollout_path, turn, &accept, &mut is_alive) {
                     Some(Some(ended)) => return Ok((ended, outcome(&state, seek_offset))),
                     Some(None) => continue,
                     None => {}
                 }
-                if try_process_complete_partial_line(&mut partial_line, &sender, &mut state) {
+                if try_process_complete_partial_line(
+                    &mut partial_line,
+                    &sender,
+                    &mut state,
+                    &accept,
+                ) {
                     last_output_at = Some(Instant::now());
                     continue;
                 }
@@ -1139,8 +1144,8 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                 // enforcement point: once the shared cancel flag flips,
                 // every `send` call drops on the floor.
                 while let Some(pos) = partial_line.iter().position(|byte| *byte == b'\n') {
-                    // A Herdr turn's reply stops at its terminal record; later lines are another turn's.
-                    if parser::herdr_reply_ended(cancel_token.as_deref(), &state) {
+                    // A stop leaves this and later bytes unaccepted in `partial_line`.
+                    if accept.accept_next_record(&state) == parser::NextRecord::StopBefore {
                         break;
                     }
                     if let Some(pin) = &source_pin
@@ -1227,7 +1232,12 @@ fn try_process_complete_partial_line(
     partial_line: &mut Vec<u8>,
     sender: &RelaySuppressionSender<'_>,
     state: &mut RolloutParseState,
+    accept: &parser::RecordAcceptance<'_>,
 ) -> bool {
+    // A flushed partial line is a record too, so it passes the same acceptance judgement.
+    if accept.accept_next_record(state) == parser::NextRecord::StopBefore {
+        return false;
+    }
     let Ok(line) = std::str::from_utf8(partial_line) else {
         return false;
     };

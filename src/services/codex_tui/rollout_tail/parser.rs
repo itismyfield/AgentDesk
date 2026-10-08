@@ -484,15 +484,15 @@ pub(super) fn herdr_eof(
     (state, partial_line): (&mut RolloutParseState, &mut Vec<u8>),
     rollout_path: &Path,
     turn: (u64, Option<&str>),
-    token: Option<&crate::services::provider::CancelToken>,
+    accept: &RecordAcceptance<'_>,
     is_alive: &mut dyn FnMut() -> bool,
 ) -> Option<Option<ReadOutputResult>> {
-    let logical = crate::services::provider::herdr_provider_terminal_only(token)?;
+    let logical = crate::services::provider::herdr_provider_terminal_only(accept.token)?;
     if let Some(kind) = herdr_terminal_kind(state) {
         let offset = emit_herdr_terminal(sender, state, kind, rollout_path, turn, logical);
         return Some(Some(ReadOutputResult::Completed { offset }));
     }
-    if super::try_process_complete_partial_line(partial_line, sender, state) {
+    if super::try_process_complete_partial_line(partial_line, sender, state, accept) {
         return Some(None);
     }
     // No drain, deadline or idle wait ends a Herdr turn.
@@ -504,12 +504,32 @@ pub(super) fn herdr_eof(
     Some(None)
 }
 
-pub(super) fn herdr_reply_ended(
-    token: Option<&crate::services::provider::CancelToken>,
-    state: &RolloutParseState,
-) -> bool {
-    crate::services::provider::herdr_provider_terminal_only(token).is_some()
-        && herdr_terminal_kind(state).is_some()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NextRecord {
+    Accept,
+    StopBefore,
+}
+
+/// The one judgement every complete record passes before the tail accepts it; each stop rule is
+/// one predicate in `accept_next_record`, so neither the record loop nor the EOF flush changes.
+pub(super) struct RecordAcceptance<'a> {
+    token: Option<&'a crate::services::provider::CancelToken>,
+}
+
+impl<'a> RecordAcceptance<'a> {
+    pub(super) fn new(token: Option<&'a crate::services::provider::CancelToken>) -> Self {
+        Self { token }
+    }
+
+    pub(super) fn accept_next_record(&self, state: &RolloutParseState) -> NextRecord {
+        // A Herdr turn's reply stops at its terminal record; later lines are another turn's.
+        if crate::services::provider::herdr_provider_terminal_only(self.token).is_some()
+            && herdr_terminal_kind(state).is_some()
+        {
+            return NextRecord::StopBefore;
+        }
+        NextRecord::Accept
+    }
 }
 
 /// Sends a Herdr turn's provider terminal ending at its record: a completion as today's Done, an

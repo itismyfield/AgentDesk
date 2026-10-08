@@ -2667,6 +2667,7 @@ services::codex_tui::rollout_tail::child_binding_tests::direct_registration_refu
 services::codex_tui::rollout_tail::child_binding_tests::fresh_launch_consumes_b_source_despite_newer_child
 services::codex_tui::rollout_tail::child_binding_tests::replacement_after_discovery_is_rejected_before_marker_and_o_publication
 services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_codex_turn_ends_only_on_its_own_rollout_terminal
+services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_turn_accepts_nothing_past_its_terminal_record
 services::codex_tui::rollout_tail::tests::always_fresh_pane_signal_reaches_hard_veto_cap_and_emits_done
 services::codex_tui::rollout_tail::tests::assistant_response_deadline_emits_timeout_done
 services::codex_tui::rollout_tail::tests::codex_stop_hook_emits_done_before_drain
