@@ -168,7 +168,9 @@ impl TurnViewReconciler {
         source: &'static str,
     ) -> TurnViewDelivery {
         debug_assert!(
-            TURN_VIEW_REACTIONS.contains(&emoji) || QUEUE_EXIT_FEEDBACK_REACTIONS.contains(&emoji)
+            TURN_VIEW_REACTIONS.contains(&emoji)
+                || QUEUE_EXIT_FEEDBACK_REACTIONS.contains(&emoji)
+                || INJECTION_REACTIONS.contains(&emoji)
         );
         #[cfg(not(test))]
         {

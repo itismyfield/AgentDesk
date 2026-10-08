@@ -85,12 +85,14 @@ pub use headless_turn::{
 pub use mailbox::purge_idle_channel_mailbox_registry_entry;
 #[cfg(all(test, unix))]
 pub(crate) use turn_deliver::inject_tests::{
-    InjectPane, end_turn, queue_texts, register_inject_runtime, start_without_gateway,
+    InjectPane, claim_kinded, end_turn, inject_hook, queue_texts, register_inject_runtime,
+    send_meanwhile, start_without_gateway,
 };
 pub use turn_deliver::{
     EXTERNAL_TURN_ACTIVE, HumanInputDelivery, HumanInputError, HumanInputRequest,
     deliver_human_input, external_turn_holds_channel,
 };
+pub(crate) use turn_deliver::{InjectAttempt, InjectOrigin, SOURCE_OWNED, inject_human_input};
 #[cfg(test)]
 pub(crate) use turn_deliver::{register_bot_auth_for_tests, seed_external_turn_row_for_tests};
 // #5147: re-exported as a module (not as loose constants) so a consumer reads

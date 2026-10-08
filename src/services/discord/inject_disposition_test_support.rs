@@ -13,6 +13,9 @@ type Pause = (
     std::sync::mpsc::Receiver<()>,
 );
 static PAUSES: Mutex<Vec<Pause>> = Mutex::new(Vec::new());
+static LOCK_WATCH: Mutex<Vec<(PathBuf, std::sync::mpsc::Sender<()>)>> = Mutex::new(Vec::new());
+/// `(call, message)` for every gate-only table call, so a test reads its own message's calls.
+static CALLS: Mutex<Vec<(&'static str, u64)>> = Mutex::new(Vec::new());
 
 pub(super) fn note_read(path: &Path) {
     READS.with(|reads| *reads.borrow_mut().entry(path.to_path_buf()).or_default() += 1);
@@ -88,4 +91,64 @@ pub(super) fn pause_before_write(path: &Path) {
         let _ = reached.send(());
         let _ = go.recv();
     }
+}
+
+/// Signals the next writer to `path` as it is about to take the flock.
+pub(crate) fn watch_lock(path: &Path) -> std::sync::mpsc::Receiver<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    LOCK_WATCH.lock().unwrap().push((path.to_path_buf(), tx));
+    rx
+}
+
+pub(super) fn before_lock(path: &Path) {
+    let watched = {
+        let mut watches = LOCK_WATCH.lock().unwrap();
+        let at = watches.iter().position(|(watched, _)| watched == path);
+        at.map(|at| watches.remove(at))
+    };
+    if let Some((_, reached)) = watched {
+        let _ = reached.send(());
+    }
+}
+
+pub(super) fn note_call(call: &'static str, message: u64) {
+    CALLS.lock().unwrap().push((call, message));
+}
+
+/// The gate-only table calls made for `message`, in order.
+pub(crate) fn calls(message: u64) -> Vec<&'static str> {
+    let calls = CALLS.lock().unwrap();
+    let mine = calls.iter().filter(|(_, id)| *id == message);
+    mine.map(|(call, _)| *call).collect()
+}
+
+/// `message`'s raw claim entry, unpruned: `in_progress`, `dead_lease` or `thread_intake`.
+pub(crate) fn source_entry(provider: &ProviderKind, message: u64) -> Option<&'static str> {
+    let tables = lock_table(TABLE.get()?);
+    let source = tables.get(provider.as_str())?.sources.get(&message)?;
+    Some(match source {
+        Source::InProgress { lease } if lease.strong_count() > 0 => "in_progress",
+        Source::InProgress { .. } => "dead_lease",
+        Source::ThreadIntake { .. } => "thread_intake",
+    })
+}
+
+/// Order slots held for `message`.
+pub(crate) fn order_slots(provider: &ProviderKind, message: u64) -> usize {
+    let Some(table) = TABLE.get() else {
+        return 0;
+    };
+    let tables = lock_table(table);
+    let Some(table) = tables.get(provider.as_str()) else {
+        return 0;
+    };
+    table.order.iter().filter(|slot| slot.0 == message).count()
+}
+
+/// A claim whose owner vanished without its guard's cleanup, as a leaked guard would leave it.
+pub(crate) fn plant_dead_lease(provider: &ProviderKind, message: u64) {
+    let lease = Arc::downgrade(&Arc::new(SourceLease));
+    let mut tables = lock_table(TABLE.get_or_init(Default::default));
+    let table = tables.entry(provider.as_str().to_string()).or_default();
+    table.sources.insert(message, Source::InProgress { lease });
 }

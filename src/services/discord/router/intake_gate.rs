@@ -7,6 +7,9 @@ use super::intake_queue_transaction::{
 };
 
 mod busy_duplicate_notice;
+mod busy_inject;
+#[cfg(test)]
+pub(in crate::services::discord) use busy_inject::test_support as busy_inject_support;
 mod component_events;
 mod gate;
 mod queue_effects;
@@ -452,7 +455,11 @@ pub(in crate::services::discord) async fn handle_event(
                                     iv.message_id == new_message.id
                                         || iv.source_message_ids.contains(&new_message.id)
                                 });
-                            if already_intake {
+                            let parent_injecting = || {
+                                let take = busy_inject::thread_may_take;
+                                !take(&data.provider, parent_channel, new_message.id)
+                            };
+                            if already_intake || parent_injecting() {
                                 thread_promotion_blocked = true;
                                 // Mark thread-processed so subsequent duplicates are no-ops.
                                 e.insert((now, true));
@@ -637,6 +644,12 @@ pub(in crate::services::discord) async fn handle_event(
                     channel_id,
                     effective_channel_id,
                 );
+                return Ok(());
+            }
+            // A redelivered message an injection already took stops before anything acts on it.
+            let parent = (effective_channel_id != channel_id).then_some(effective_channel_id);
+            let taken = busy_inject::already_taken;
+            if taken(&data.provider, channel_id, parent, new_message.id) {
                 return Ok(());
             }
             if !is_voice_transcript_announcement
@@ -1237,6 +1250,24 @@ pub(in crate::services::discord) async fn handle_event(
                     return Ok(());
                 }
                 // No active turn — fall through to normal processing below
+            }
+
+            // A busy Claude TUI pane takes a person's text before intake queues or starts it.
+            let live = busy_inject::LiveText {
+                channel_id,
+                parent,
+                message_id: new_message.id,
+                author_id: user_id,
+                human: preserve_on_cancel,
+                text,
+                reply_context: reply_context.as_deref(),
+                has_reply_boundary,
+                carries_more_than_text: !upload_records.is_empty()
+                    || !new_message.attachments.is_empty()
+                    || resolved_voice_announcement.is_some(),
+            };
+            if busy_inject::offered(ctx, data, &live).await {
+                return Ok(());
             }
 
             // Queue messages while AI is in progress (executed as next turn after current finishes)
