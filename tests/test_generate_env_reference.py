@@ -1,7 +1,11 @@
 from pathlib import Path
+import re
+import shutil
 import sys
+import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -89,6 +93,72 @@ class PatternTests(unittest.TestCase):
         self.assertNotIn("AGENTDESK_NOT_A_READ", helpers)
 
 
+class SourceTreeStabilityTests(unittest.TestCase):
+    """Render a scratch ``src/`` tree through the real file walk and renderer."""
+
+    DEFINING = textwrap.dedent(
+        """\
+        /// `AGENTDESK_ALPHA` picks the alpha mode.
+        const ALPHA_ENV: &str = "AGENTDESK_ALPHA";
+        fn alpha() { let _ = std::env::var(ALPHA_ENV); }
+        fn alpha_again() { let _ = std::env::var(ALPHA_ENV); }
+        """
+    )
+    READER = 'fn beta() { let _ = std::env::var("AGENTDESK_BETA"); let _ = std::env::var("AGENTDESK_ALPHA"); }\n'
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        self.write("src/config/alpha.rs", self.DEFINING)
+        self.write("src/reader.rs", self.READER)
+
+    def write(self, rel: str, text: str) -> None:
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def render(self) -> str:
+        with mock.patch.object(gen, "REPO_ROOT", self.root), mock.patch.object(
+            gen, "SRC_ROOT", self.root / "src"
+        ):
+            return gen.render(gen.collect_variables(gen.production_rust_files()))
+
+    def row(self, rendered: str, name: str) -> str:
+        return next(line for line in rendered.splitlines() if line.startswith(f"| `{name}` |"))
+
+    def test_line_shift_in_source_files_leaves_output_unchanged(self) -> None:
+        before = self.render()
+        self.assertEqual(
+            self.row(before, "AGENTDESK_ALPHA"),
+            "| `AGENTDESK_ALPHA` | `src/config/alpha.rs`, `src/reader.rs` "
+            "| `AGENTDESK_ALPHA` picks the alpha mode. |",
+        )
+        self.assertIsNone(re.search(r"\.rs:\d", before))
+        self.write("src/config/alpha.rs", "\n" + self.DEFINING)
+        self.write("src/reader.rs", "\n\n" + self.READER)
+        self.assertEqual(self.render(), before)
+
+    def test_variable_add_and_remove_change_output(self) -> None:
+        before = self.render()
+        self.write("src/reader.rs", self.READER + 'fn gamma() { let _ = std::env::var("AGENTDESK_GAMMA"); }\n')
+        added = self.render()
+        self.assertNotEqual(added, before)
+        self.assertIn("| `AGENTDESK_GAMMA` | `src/reader.rs` |", added)
+        self.write("src/reader.rs", 'fn beta() { let _ = std::env::var("AGENTDESK_ALPHA"); }\n')
+        removed = self.render()
+        self.assertNotEqual(removed, before)
+        self.assertNotIn("AGENTDESK_BETA", removed)
+
+    def test_defining_file_move_changes_output(self) -> None:
+        before = self.render()
+        (self.root / "src/config/alpha.rs").unlink()
+        self.write("src/settings/alpha.rs", self.DEFINING)
+        moved = self.render()
+        self.assertNotEqual(moved, before)
+        self.assertIn("`src/settings/alpha.rs`", self.row(moved, "AGENTDESK_ALPHA"))
+        self.assertNotIn("src/config/alpha.rs", moved)
+
+
 class RepositoryTests(unittest.TestCase):
     def test_generated_doc_is_deterministic_and_covers_known_variables(self) -> None:
         variables = gen.collect_variables(gen.production_rust_files())
@@ -96,6 +166,7 @@ class RepositoryTests(unittest.TestCase):
         second = gen.render(gen.collect_variables(gen.production_rust_files()))
         self.assertEqual(first, second)
         project = [name for name in variables if name.startswith(gen.PROJECT_PREFIXES)]
+        self.assertIsNone(re.search(r"\.rs:\d", first))
         self.assertGreaterEqual(len(project), 80)
         for expected in (
             "AGENTDESK_ROOT_DIR",
