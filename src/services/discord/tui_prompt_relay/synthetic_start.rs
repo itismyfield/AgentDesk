@@ -2480,12 +2480,8 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                     )
                     .unwrap_or_else(|| lease.clone());
                 tail_lease.relay_owner = claim.relay_owner;
-                // #3154 P1 (timestamp-anchor output loss): `observed_at` is NO LONGER
-                // used to anchor the tail's start offset for this deferred path — we
-                // pass the claim's post-drain EOF `turn_start_offset` explicitly below
-                // (see `explicit_start_offset`). It remains on the struct only for the
-                // tail's tracing/lease bookkeeping; a `Utc::now()` timestamp scan here
-                // would skip bytes written during the deferred-claim wait window.
+                // `observed_at` is bookkeeping only: the tail starts at the claim's post-drain EOF
+                // offset below, because a timestamp scan would skip bytes written while deferred.
                 let observed = ObservedTuiPrompt {
                     provider: record.provider.clone(),
                     tmux_session_name: record.tmux_session_name.clone(),
@@ -2498,6 +2494,7 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                         crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
                     hook_prompt_id: None,
                     native_turn_id: None,
+                    steer_echo: false,
                 };
                 let spawned = maybe_spawn_claude_idle_response_tail(
                     shared.clone(),

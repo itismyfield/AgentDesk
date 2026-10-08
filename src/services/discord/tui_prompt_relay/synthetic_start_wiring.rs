@@ -182,6 +182,45 @@ impl Drop for UnannouncedPromptIdGuard<'_> {
     }
 }
 
+/// Withdraws the native turn the prompt reserved when its relay ends with no row or pending start,
+/// so a later steer of that turn is relayed as its own input instead of joining nothing.
+pub(super) struct UnownedNativeTurnGuard<'a>(pub(super) &'a ObservedTuiPrompt);
+
+impl Drop for UnownedNativeTurnGuard<'_> {
+    fn drop(&mut self) {
+        crate::services::tui_prompt_dedupe::withdraw_unowned_native_turn(self.0);
+    }
+}
+
+/// Shows a steering input's text in the channel: the running turn's anchor keeps the answer, so
+/// this records no lease, anchor or turn.
+pub(super) async fn post_steer_echo(
+    shared: &Arc<SharedData>,
+    prompt: &ObservedTuiPrompt,
+    channel_id: ChannelId,
+) {
+    let Some(registry) = shared.health_registry() else {
+        return;
+    };
+    let notify = super::super::bot_role::UtilityBotRole::Notify;
+    let http = match super::super::health::resolve_utility_bot_http(registry.as_ref(), notify).await
+    {
+        Ok(http) => http,
+        Err((status, body)) => {
+            tracing::warn!(channel_id = channel_id.get(), %status, %body, "steer echo: notify bot unavailable");
+            return;
+        }
+    };
+    let content = format_ssh_direct_prompt_notification(
+        &prompt.provider,
+        &prompt.tmux_session_name,
+        &prompt.prompt,
+    );
+    if let Err(error) = channel_id.say(&*http, content).await {
+        tracing::warn!(channel_id = channel_id.get(), %error, "failed to send steer echo");
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct SyntheticLifecycleAnchor {
     pub(super) message_id: MessageId,
@@ -436,6 +475,7 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
     // tail below (a second observer tail would relay the SAME output twice — the
     // original bug). The worker owns the relay-owner handoff.
     let mut deferred_synthetic_start = false;
+    let mut claimed = false;
     if let Some(provider) = ProviderKind::from_str(provider_str) {
         // #3154 — TEMPORAL fix for turn-interleaving. An INLINE claim while the
         // PRIOR turn's tail still drains seeds `turn_start_offset` from the prior
@@ -488,6 +528,7 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
                     prompt.native_turn_id.as_deref(),
                 )
                 .await;
+            claimed = claim.claimed;
             if !claim.claimed
                 && source.is_some()
                 && lease.turn_id.as_deref().is_some_and(|id| !id.is_empty())
@@ -539,6 +580,9 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
                 super::super::tui_direct_pending_start::record_claim_marker_if_watcher_owned,
             );
         }
+    }
+    if claimed || deferred_synthetic_start {
+        crate::services::tui_prompt_dedupe::adopt_native_turn(prompt);
     }
     deferred_synthetic_start
 }

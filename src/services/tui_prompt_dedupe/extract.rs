@@ -279,30 +279,83 @@ pub(crate) fn resolve_tmux_session_name(
         .map(|entry| entry.value.clone())
 }
 
-/// Whether `native_turn` is the turn the latest published Codex input opened.
-pub(super) fn native_turn_is_open(
+/// Joins `prompt` to `native_turn` when the latest published input opened it; `Some(true)` the
+/// first time this text joins, so its echo is shown once however often it is read.
+pub(super) fn join_native_turn(
     provider: &str,
     tmux_session_name: &str,
     native_turn: &str,
-) -> bool {
+    prompt: &str,
+) -> Option<bool> {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
-    state
+    let slot = &mut state
         .native_turn_by_tmux
-        .get(&PromptKey::new(provider, tmux_session_name))
-        .is_some_and(|open| open.value == native_turn)
+        .get_mut(&PromptKey::new(provider, tmux_session_name))
+        .filter(|open| open.value.turn == native_turn)?
+        .value;
+    if slot.shown.iter().any(|shown| shown == prompt) {
+        return Some(false);
+    }
+    slot.shown.push(prompt.to_string());
+    Some(true)
 }
 
-/// Records `native_turn` as the turn a published Codex input opened.
-pub(super) fn open_native_turn(provider: &str, tmux_session_name: &str, native_turn: &str) {
+/// Records `native_turn` as opened by observation `observed_by` with text `prompt`; `owned` when
+/// its answer already has an owner outside this relay.
+pub(super) fn open_native_turn(
+    provider: &str,
+    tmux_session_name: &str,
+    native_turn: &str,
+    prompt: &str,
+    (observed_by, owned): (u64, bool),
+) {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.native_turn_by_tmux.insert(
         PromptKey::new(provider, tmux_session_name),
         TimedValue {
-            value: native_turn.to_string(),
+            value: NativeTurnSlot {
+                turn: native_turn.to_string(),
+                observed_by,
+                owned,
+                shown: vec![prompt.to_string()],
+            },
             recorded_at: Instant::now(),
         },
     );
+}
+
+/// A row or durable pending start now answers the native turn `prompt` opened.
+pub(crate) fn adopt_native_turn(prompt: &ObservedTuiPrompt) {
+    settle_native_turn(prompt, true);
+}
+
+/// The relay of `prompt` ended with no owner: its own unowned slot goes, a newer one stays.
+pub(crate) fn withdraw_unowned_native_turn(prompt: &ObservedTuiPrompt) {
+    settle_native_turn(prompt, false);
+}
+
+fn settle_native_turn(prompt: &ObservedTuiPrompt, owned: bool) {
+    let observed_by = prompt.ssh_direct_observation_generation;
+    let Some(turn) = prompt.native_turn_id.as_deref() else {
+        return;
+    };
+    if prompt.steer_echo || observed_by == SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED {
+        return;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let key = PromptKey::new(&prompt.provider, prompt.tmux_session_name.trim());
+    let Some(slot) = state.native_turn_by_tmux.get_mut(&key) else {
+        return;
+    };
+    if slot.value.turn != turn || slot.value.observed_by != observed_by || slot.value.owned {
+        return;
+    }
+    if owned {
+        slot.value.owned = true;
+    } else {
+        state.native_turn_by_tmux.remove(&key);
+    }
 }
 
 pub(super) fn take_matching_pending_prompt(

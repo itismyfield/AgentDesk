@@ -205,7 +205,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "tmux_watcher/two_message_panel.rs": {"send_channel_message*": 1},
     "tui_prompt_relay.rs": {".say": 2},
     "tui_prompt_relay/bridge_gateway.rs": {"edit_outbound_message": 1, "replace_long_message*": 1, "send_long_message*": 1, "send_outbound_message": 1},
-    "tui_prompt_relay/synthetic_start_wiring.rs": {".say": 2},
+    "tui_prompt_relay/synthetic_start_wiring.rs": {".say": 3},
     "turn_bridge/completion_postlude/o_panel_below.rs": {"TurnGateway::send_message": 1, "send_channel_message*": 1},
     "turn_bridge/current_message_anchor.rs": {"TurnGateway::edit_message": 1, "TurnGateway::send_message": 1},
     "turn_bridge/headless_delivery.rs": {"edit_channel_message*": 1, "send_long_message*": 1},

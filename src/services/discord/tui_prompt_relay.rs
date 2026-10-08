@@ -297,6 +297,7 @@ pub(super) fn spawn_tui_prompt_relay(shared: Arc<SharedData>, provider: Provider
 
 async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiPrompt) {
     let _unannounced_prompt_id = synthetic_start_wiring::UnannouncedPromptIdGuard(&prompt);
+    let _unowned_native_turn = synthetic_start_wiring::UnownedNativeTurnGuard(&prompt);
     // Local-only controls were classified before publication, so this relay path
     // never needs to repair pre-publish lease/SSH state. A missing or lagged
     // receiver therefore cannot strand a local `/compact` relay lease.
@@ -309,6 +310,9 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         return;
     };
+    if prompt.steer_echo {
+        return synthetic_start_wiring::post_steer_echo(shared, &prompt, channel_id).await;
+    }
     if let Some(control) = relay_prompt_decision.local_only_control.as_ref() {
         let provider = ProviderKind::from_str_or_unsupported(&prompt.provider);
         super::queue_io::schedule_deferred_idle_queue_kickoff_immediate(

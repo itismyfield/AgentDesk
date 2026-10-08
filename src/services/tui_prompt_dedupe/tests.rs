@@ -1663,6 +1663,7 @@ fn local_compact_entry_id_is_recorded_only_after_a_successful_note_delivery() {
         ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
         native_turn_id: None,
+        steer_echo: false,
     });
     assert_eq!(
         observe_prompt_by_tmux_with_entry_id_at(
@@ -1729,6 +1730,7 @@ fn local_note_delivery_ack_does_not_record_nonlocal_entries() {
         ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
         native_turn_id: None,
+        steer_echo: false,
     };
 
     record_local_only_entry_id_after_note_delivery(&nonlocal);
@@ -3128,5 +3130,39 @@ fn external_lease_fence_serializes_writer_and_rejects_stale_capture() {
     assert_eq!(
         external_input_relay_lease("claude", "fence-writer", 43),
         Some(successor)
+    );
+}
+
+/// An earlier relay's withdrawal leaves the newer turn's reservation, so its steer still joins.
+#[test]
+fn withdrawing_an_earlier_native_reservation_keeps_the_newer_one() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    reset_state();
+    let tmux = "AgentDesk-codex-native-reservation";
+    let mut rx = subscribe_observed_prompts();
+    let mut observe = |prompt: &str, turn: &str| {
+        let observation =
+            observe_codex_prompt_in_turn_at(tmux, prompt, None, Some(turn), Utc::now());
+        let event = std::iter::from_fn(|| rx.try_recv().ok())
+            .find(|event| event.tmux_session_name == tmux && event.prompt == prompt);
+        (observation, event)
+    };
+    let (_, first) = observe("first input", "turn-1");
+    let (_, second) = observe("second input", "turn-2");
+    let (first, second) = (
+        first.expect("first published"),
+        second.expect("second published"),
+    );
+    withdraw_unowned_native_turn(&first);
+    assert_eq!(
+        observe("steer of the second", "turn-2").0,
+        PromptObservation::JoinedNativeTurn
+    );
+    withdraw_unowned_native_turn(&second);
+    assert_eq!(
+        observe("input after the withdrawal", "turn-2").0,
+        PromptObservation::PublishedSshDirect
     );
 }

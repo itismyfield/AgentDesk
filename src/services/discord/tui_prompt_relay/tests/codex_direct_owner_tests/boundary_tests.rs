@@ -54,6 +54,8 @@ struct Fixture {
     shared: Arc<SharedData>,
     codex: CodexChannel,
     requests: Requests,
+    /// Message POSTs still to be rejected.
+    failing_posts: Arc<AtomicUsize>,
     frames: Arc<AtomicUsize>,
     finalized: tokio::sync::broadcast::Receiver<inflight::InflightSignal>,
     observed: tokio::sync::broadcast::Receiver<ObservedTuiPrompt>,
@@ -97,7 +99,9 @@ impl Fixture {
         crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
             .register(codex.tmux.clone(), relay.producer());
         let finalized = shared.inflight_signals.subscribe();
-        let (requests, http, server) = recording_discord(codex.channel.get()).await;
+        let failing_posts = Arc::new(AtomicUsize::new(0));
+        let (requests, http, server) =
+            recording_discord_failing(codex.channel.get(), failing_posts.clone()).await;
         registry
             .set_utility_bot_http_for_tests(
                 crate::services::discord::bot_role::UtilityBotRole::Notify,
@@ -120,6 +124,7 @@ impl Fixture {
             shared,
             codex,
             requests,
+            failing_posts,
             frames,
             finalized,
             observed,
@@ -161,17 +166,28 @@ impl Fixture {
         }
     }
 
-    /// A steer's hook joins its running turn: nothing about `prompt` was or is published.
-    async fn joined_hook(&mut self, prompt: &str, turn: &str) {
+    /// A steer's hook; returns how many echoes [`Self::relay_echoes`] relayed.
+    async fn steer_hook(&mut self, prompt: &str, turn: &str) -> usize {
         self.send_hook(prompt, turn);
-        let window = tokio::time::Instant::now() + Duration::from_secs(1);
+        self.relay_echoes(prompt).await
+    }
+
+    /// Relays each observation of `prompt` published within a second; each must be a steer echo.
+    async fn relay_echoes(&mut self, prompt: &str) -> usize {
+        let (window, mut echoes) = (tokio::time::Instant::now() + Duration::from_secs(1), 0);
         while let Ok(event) = tokio::time::timeout_at(window, self.observed.recv()).await {
             let event = event.expect("observation channel open");
+            if event.tmux_session_name != self.codex.tmux || event.prompt != prompt {
+                continue;
+            }
             assert!(
-                event.prompt != prompt,
-                "a steering input published its own observation"
+                event.steer_echo,
+                "a steering input published an owning observation"
             );
+            super::super::super::relay_observed_prompt(&self.shared, event).await;
+            echoes += 1;
         }
+        echoes
     }
 
     /// Waits for `n` more idle loop polls of this session.
@@ -187,14 +203,14 @@ impl Fixture {
         );
     }
 
-    /// The session's external-input lease id.
-    fn lease_turn(&self) -> Option<String> {
+    /// The session's external-input lease: its turn id and generation.
+    fn lease(&self) -> Option<(Option<String>, u64)> {
         crate::services::tui_prompt_dedupe::external_input_relay_lease(
             "codex",
             &self.codex.tmux,
             self.codex.channel.get(),
         )
-        .and_then(|lease| lease.turn_id)
+        .map(|lease| (lease.turn_id, lease.generation))
     }
 
     fn append(&self, text: &str) -> u64 {

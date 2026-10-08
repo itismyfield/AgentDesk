@@ -7877,6 +7877,7 @@ services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_t
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_answer_skips_another_turn_with_the_same_prompt
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_answer_waits_for_its_turn_through_a_torn_opening
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_deferred_input_keeps_its_native_turn_across_a_restart
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_steer_after_a_failed_announcement_answers_on_its_own_anchor
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_steering_input_before_the_first_body_joins_the_running_turn
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_steering_input_joins_the_running_turn
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_steering_record_read_before_its_hook_joins_the_running_turn
@@ -11251,6 +11252,7 @@ services::tui_prompt_dedupe::tests::task_notification_is_status_only_and_next_pr
 services::tui_prompt_dedupe::tests::touch_anchor_on_activity_does_not_run_global_purge_or_touch_ledger
 services::tui_prompt_dedupe::tests::touch_anchor_on_activity_evicts_expired_anchor_without_resurrecting_it
 services::tui_prompt_dedupe::tests::watcher_snapshot_generation_clear_preserves_newer_same_key_lease
+services::tui_prompt_dedupe::tests::withdrawing_an_earlier_native_reservation_keeps_the_newer_one
 services::tui_steering::tests::legacy_prompt_never_enters_native_tui_route_or_probes_pane
 services::tui_steering::tests::unsafe_snapshots_fail_closed_before_injection
 services::tui_turn_state::completion_scan::tests::a_turns_own_abort_ends_it_for_the_completion_scan

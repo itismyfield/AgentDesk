@@ -128,8 +128,8 @@ enum Steer {
     ScannedFirst,
 }
 
-/// A steering input joins the running native turn: one anchor, tail and turn, no pending start,
-/// and the running turn's lease stays.
+/// A steering input joins the running native turn: its text is echoed once, and one anchor,
+/// tail and turn answer it with no pending start while the running turn's lease stays.
 async fn steer_into_running_turn(root: PathBuf, channel: u64, tmux: &str, order: Steer) {
     let _live_pane = live_pane_tmux(&root);
     let mut fx = Fixture::start(&root, channel, tmux).await;
@@ -153,39 +153,45 @@ async fn steer_into_running_turn(root: PathBuf, channel: u64, tmux: &str, order:
         .await,
         "the running turn's tail never started"
     );
-    let lease = fx.lease_turn();
+    let lease = fx.lease();
     assert!(lease.is_some());
-    match order {
+    let mut echoes = match order {
         Steer::HookAfterBody => {
             fx.append(&progress);
-            fx.joined_hook(PROMPT2, &t1).await;
+            let echoes = fx.steer_hook(PROMPT2, &t1).await;
             fx.append(&steer);
+            echoes
         }
         Steer::HookBeforeBody => {
-            fx.joined_hook(PROMPT2, &t1).await;
+            let echoes = fx.steer_hook(PROMPT2, &t1).await;
             fx.append(&(steer + &progress));
+            echoes
         }
         Steer::RecordFirst => {
             fx.append(&(progress + &steer));
             tokio::time::sleep(Duration::from_secs(1)).await;
-            fx.joined_hook(PROMPT2, &t1).await;
+            fx.steer_hook(PROMPT2, &t1).await
         }
-        Steer::ScannedFirst => fx.joined_hook(PROMPT2, &t1).await,
-    }
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        fx.lease_turn(),
-        lease,
-        "the join replaced the running lease"
-    );
+        Steer::ScannedFirst => fx.steer_hook(PROMPT2, &t1).await,
+    };
+    echoes += fx.relay_echoes(PROMPT2).await;
+    assert_eq!(fx.lease(), lease, "the join replaced the running lease");
     fx.append(&answer_for(&t1, RESPONSE2));
     assert!(
         fx.delivered(RESPONSE2).await,
         "the turn's answer never reached Discord: {:?}",
         fx.requests.lock().unwrap()
     );
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    let target = format!("/channels/{}/messages/{anchor}", fx.codex.channel.get());
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    echoes += fx.relay_echoes(PROMPT2).await;
+    assert_eq!(echoes, 1, "the steer is echoed once");
+    let echoed = fx.sent(PROMPT2);
+    let messages = format!("/channels/{}/messages", fx.codex.channel.get());
+    assert!(
+        echoed.len() == 1 && echoed[0].0 == "POST" && echoed[0].1.ends_with(&messages),
+        "{echoed:?}"
+    );
+    let target = format!("{messages}/{anchor}");
     let sent = fx.sent(RESPONSE2);
     assert!(
         sent.iter()
@@ -247,6 +253,53 @@ fn codex_direct_steering_record_scanned_before_the_claim_joins_the_running_turn(
             "AgentDesk-codex-5704-steer-scan",
             Steer::ScannedFirst,
         ))
+    });
+}
+
+/// The running input's announcement fails, so nothing owns its turn: a later steer of that turn
+/// is its own input and gets its answer on its own anchor.
+#[test]
+fn codex_direct_steer_after_a_failed_announcement_answers_on_its_own_anchor() {
+    run(|root| {
+        Box::pin(async move {
+            let _live_pane = live_pane_tmux(&root);
+            let mut fx =
+                Fixture::start(&root, 5_705_043, "AgentDesk-codex-5704-steer-orphan").await;
+            let t1 = turn(1);
+            fx.failing_posts.store(1, Ordering::SeqCst);
+            let first = fx.hook(PROMPT, &t1).await;
+            super::super::super::super::relay_observed_prompt(&fx.shared, first).await;
+            assert_eq!(
+                fx.failing_posts.load(Ordering::SeqCst),
+                0,
+                "the announcement failed"
+            );
+            let progress = rollout_line(serde_json::json!({"type": "response_item", "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "running the command"}]}}));
+            let end =
+                fx.append(&(opening(&t1, PROMPT) + &item_completed_line_for(&t1) + &progress));
+            fx.scanned_past(end).await;
+            assert!(fx.codex.row().is_none() && fx.pending_starts().is_empty());
+            let steer = fx.hook(PROMPT2, &t1).await;
+            assert!(!steer.steer_echo, "the steer joined a turn nothing answers");
+            super::super::super::super::relay_observed_prompt(&fx.shared, steer).await;
+            let anchor = fx.codex.row().expect("the steer claims").user_msg_id;
+            fx.append(&(user_line_for(PROMPT2) + &item_completed_line_for(&t1)));
+            fx.append(&answer_for(&t1, RESPONSE2));
+            assert!(
+                fx.delivered(RESPONSE2).await,
+                "the steer's answer never reached Discord: {:?}",
+                fx.requests.lock().unwrap()
+            );
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            fx.assert_answer(RESPONSE2, anchor);
+            assert_eq!(fx.sent(PROMPT2).len(), 1, "one announcement, no echo");
+            assert_eq!(fx.completed_turns(), 1);
+            assert_eq!(tail_starts(fx.codex.channel), 1);
+            fx.assert_released().await;
+            fx.finish();
+        })
     });
 }
 

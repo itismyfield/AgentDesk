@@ -120,6 +120,8 @@ pub struct ObservedTuiPrompt {
     pub(crate) hook_prompt_id: Option<String>,
     /// Codex native turn this input opened, when its hook or record named one.
     pub(crate) native_turn_id: Option<String>,
+    /// A steering input that joined its running native turn: its text is shown, nothing is owned.
+    pub(crate) steer_echo: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,7 +267,18 @@ struct TuiPromptDedupeState {
     // fresh uuid) is suppressed as the same input once the hook was announced.
     relayed_prompt_ids_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<RelayedPromptId>>>,
     // Latest Codex native turn an observed input opened; a later input naming it steers that turn.
-    native_turn_by_tmux: HashMap<PromptKey, TimedValue<String>>,
+    native_turn_by_tmux: HashMap<PromptKey, TimedValue<NativeTurnSlot>>,
+}
+
+#[derive(Clone, Debug)]
+struct NativeTurnSlot {
+    turn: String,
+    /// The opening observation's generation: only its relay may withdraw the slot.
+    observed_by: u64,
+    /// A row or durable pending start answers the turn, so the slot outlives the relay.
+    owned: bool,
+    /// Texts already shown in Discord for this turn: the opening input and each echoed steer.
+    shown: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -310,7 +323,7 @@ pub(crate) use shadow_peek::peek_tmux_runtime_binding;
 pub use extract::*;
 use extract::{
     is_discord_relayed_user_prompt, is_user_prefixed_subagent_notification_machine_event,
-    native_turn_is_open, normalize_line_endings, normalize_provider, open_native_turn,
+    join_native_turn, normalize_line_endings, normalize_provider, open_native_turn,
     record_relayed_entry_id, relayed_entry_id_already_seen, take_matching_pending_prompt,
     take_or_record_recent_observed_prompt,
 };
