@@ -8847,9 +8847,11 @@ services::discord::turn_presence::activity::tests::every_observation_maps_to_its
 services::discord::turn_presence::activity::tests::pending_rejected_and_resolved_binds_are_read_one_seq_at_a_time
 services::discord::turn_presence::activity::tests::the_boot_kickoff_loop_arms_only_turn_mode_channels_it_could_not_start
 services::discord::turn_presence::supervisor::tests::a_mailbox_token_keeps_presence_from_typing
+services::discord::turn_presence::supervisor::tests::a_marker_left_on_disk_alone_is_woken_at_once_and_every_half_minute
 services::discord::turn_presence::supervisor::tests::a_new_supervisor_over_an_idle_channel_stays_silent
 services::discord::turn_presence::supervisor::tests::a_queue_two_wakes_did_not_move_is_held_and_noticed_with_its_cause
 services::discord::turn_presence::supervisor::tests::a_send_overtaken_by_idle_counts_nothing_and_schedules_nothing
+services::discord::turn_presence::supervisor::tests::a_slow_notice_holds_only_its_own_channel
 services::discord::turn_presence::supervisor::tests::a_slow_send_holds_only_its_own_channel
 services::discord::turn_presence::supervisor::tests::an_idle_queue_is_woken_on_the_transition_and_every_half_minute
 services::discord::turn_presence::supervisor::tests::an_overtaken_reading_is_never_published

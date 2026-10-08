@@ -29,7 +29,10 @@ struct Fake {
     typed: Mutex<Vec<(u64, Duration)>>,
     kicks: Mutex<Vec<(u64, Duration)>>,
     notices: Mutex<Vec<(u64, Duration, String)>>,
+    notice_delay: Mutex<Option<Duration>>,
     gate_blocked: AtomicBool,
+    /// When set, the mailbox answer comes from this runtime's real mailbox and disk markers.
+    live_mailbox: Mutex<Option<Arc<SharedData>>>,
 }
 
 impl Fake {
@@ -45,7 +48,9 @@ impl Fake {
             typed: Mutex::new(Vec::new()),
             kicks: Mutex::new(Vec::new()),
             notices: Mutex::new(Vec::new()),
+            notice_delay: Mutex::new(None),
             gate_blocked: AtomicBool::new(false),
+            live_mailbox: Mutex::new(None),
         })
     }
 
@@ -97,7 +102,11 @@ impl Effects for Fake {
         Reading::unwatched_for_tests(observed, Some("pane"), Some("/t.jsonl"))
     }
 
-    async fn mailbox(&self, _: u64) -> (bool, Option<u64>) {
+    async fn mailbox(&self, channel: u64) -> (bool, Option<u64>) {
+        let live = lock(&self.live_mailbox).clone();
+        if let Some(shared) = live {
+            return waiting_input(&shared, &ProviderKind::Claude, ChannelId::new(channel)).await;
+        }
         (self.token.load(Ordering::SeqCst), *lock(&self.head))
     }
 
@@ -120,6 +129,10 @@ impl Effects for Fake {
 
     async fn notice(&self, channel: u64, text: String) -> Result<(), String> {
         lock(&self.notices).push((channel, self.since(), text));
+        let delay = *lock(&self.notice_delay);
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         Ok(())
     }
 
@@ -310,6 +323,46 @@ async fn a_queue_two_wakes_did_not_move_is_held_and_noticed_with_its_cause() {
         assert_eq!(notices.len(), 1, "{reason}");
         assert!(notices[0].1.contains(words), "{}", notices[0].1);
     }
+}
+
+/// A pending marker left on disk alone, with no queue or reservation in memory, is woken from
+/// the real mailbox and store at the idle transition and every 30 seconds after.
+#[tokio::test(start_paused = true)]
+async fn a_marker_left_on_disk_alone_is_woken_at_once_and_every_half_minute() {
+    let _root = crate::services::discord::relay_recovery::tests::isolated_agentdesk_root();
+    let channel = 6_200_016;
+    let _confirmed = TestConfirmation::new(channel);
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let marker = crate::services::discord::relay_recovery::tests::orphan_token_finish::queued(31);
+    let save = crate::services::turn_orchestrator::save_channel_pending_dispatch_marker;
+    let (provider, id) = (ProviderKind::Claude, ChannelId::new(channel));
+    save(&provider, &shared.token_hash, id, &marker, None).unwrap();
+    let fake = Fake::new(&[channel], BUSY);
+    *lock(&fake.live_mailbox) = Some(shared.clone());
+    let run = supervise(&fake);
+    wait(10).await;
+    assert_eq!(fake.kick_secs(), Vec::<u64>::new(), "busy holds the marker");
+    fake.set(channel, IDLE);
+    wait(65).await;
+    run.abort();
+    assert_eq!(fake.kick_secs(), [12, 42, 72]);
+}
+
+/// A notice that takes 30 seconds to post holds neither another channel's typing nor its stop.
+#[tokio::test(start_paused = true)]
+async fn a_slow_notice_holds_only_its_own_channel() {
+    let (unknown, busy) = (6_200_014, 6_200_015);
+    let _confirmed = (TestConfirmation::new(unknown), TestConfirmation::new(busy));
+    let fake = Fake::new(&[unknown, busy], BUSY);
+    fake.set(unknown, UNKNOWN);
+    *lock(&fake.notice_delay) = Some(Duration::from_secs(30));
+    let run = supervise(&fake);
+    wait(70).await;
+    fake.set(busy, IDLE);
+    wait(30).await;
+    run.abort();
+    assert_eq!(fake.notice_secs(), [60]);
+    assert_eq!(fake.typed_secs(busy), [0, 8, 16, 24, 32, 40, 48, 56, 64]);
 }
 
 /// One channel's slow send never delays another channel's typing.

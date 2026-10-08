@@ -174,7 +174,7 @@ enum Action {
 trait Effects: Send + Sync + 'static {
     fn channels(&self) -> Vec<u64>;
     async fn read(&self, channel: u64) -> Reading;
-    /// Whether a mailbox token holds the channel, and the queue head or reserved dispatch.
+    /// Whether a mailbox token holds the channel, and its oldest waiting input.
     async fn mailbox(&self, channel: u64) -> (bool, Option<u64>);
     async fn typing(&self, channel: u64) -> Result<(), String>;
     fn kickoff(&self, channel: u64);
@@ -321,11 +321,15 @@ impl<E: Effects> Supervisor<E> {
                     presence.queue_held = Some((reason, Utc::now(), Instant::now()));
                 }
             }
+            // Posted off the tick like typing, so a slow notice holds no other channel.
             Action::Notice(text) => {
                 tracing::warn!(channel, "[turn_presence] unknown_notice channel={channel}");
-                if let Err(error) = self.effects.notice(channel, text).await {
-                    tracing::warn!(channel, %error, "[turn_presence] notice failed");
-                }
+                let effects = self.effects.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = effects.notice(channel, text).await {
+                        tracing::warn!(channel, %error, "[turn_presence] notice failed");
+                    }
+                });
             }
         }
     }
@@ -519,6 +523,22 @@ fn held_notice(reason: &str) -> String {
     }
 }
 
+/// The mailbox token and the oldest waiting input: queue head, in-memory reservation, then the
+/// on-disk pending marker a failed requeue can leave behind. Read only; kickoff decides the start.
+async fn waiting_input(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> (bool, Option<u64>) {
+    let snapshot = super::super::mailbox_snapshot(shared, channel).await;
+    let head = snapshot.intervention_queue.first().map(|i| i.message_id);
+    let waiting = head.or(snapshot.pending_user_dispatch).or_else(|| {
+        let load = crate::services::turn_orchestrator::load_channel_pending_dispatch_marker;
+        load(provider, &shared.token_hash, channel).map(|(marker, _)| marker.message_id)
+    });
+    (snapshot.cancel_token.is_some(), waiting.map(|id| id.get()))
+}
+
 struct LiveEffects {
     shared: Arc<SharedData>,
     provider: ProviderKind,
@@ -535,13 +555,7 @@ impl Effects for LiveEffects {
     }
 
     async fn mailbox(&self, channel: u64) -> (bool, Option<u64>) {
-        let snapshot = super::super::mailbox_snapshot(&self.shared, ChannelId::new(channel)).await;
-        let head = snapshot
-            .intervention_queue
-            .first()
-            .map(|i| i.message_id.get());
-        let reserved = snapshot.pending_user_dispatch.map(|id| id.get());
-        (snapshot.cancel_token.is_some(), head.or(reserved))
+        waiting_input(&self.shared, &self.provider, ChannelId::new(channel)).await
     }
 
     async fn typing(&self, channel: u64) -> Result<(), String> {
