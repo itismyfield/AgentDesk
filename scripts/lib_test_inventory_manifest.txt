@@ -1644,6 +1644,7 @@ services::claude::claude_tui_session_resolution_tests::stranded_followup_user_dr
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_quiescent_draft_can_recreate_hosted_tui
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_with_prompt_marker_and_draft_reaches_recovery
 services::claude::claude_tui_session_resolution_tests::warm_followup_continues_after_prompt_draft_clear
+services::claude::herdr_turn::provider_terminal_tests::a_compact_summary_neither_starts_nor_splits_a_herdr_claude_turn
 services::claude::herdr_turn::provider_terminal_tests::a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal
 services::claude::host_gate::tests::a_failed_pane_probe_never_reads_as_a_stale_session
 services::claude::host_gate::tests::a_failed_presence_probe_never_prepares_a_fresh_session
@@ -2484,6 +2485,7 @@ services::codex::c1_teardown_tests::an_existing_session_is_recreated_only_under_
 services::codex::codex_fifo_followup_transport_tests::reused_fifo_wrapper_buffer_keeps_protocol_line_terminated
 services::codex::codex_fifo_followup_transport_tests::send_codex_pipe_prompt_writes_sentinel_to_fifo
 services::codex::herdr_guard_tests::both_codex_tmux_entries_refuse_a_herdr_channel_before_any_tmux_call_or_cleanup
+services::codex::herdr_turn::observed_input_tests::a_followup_builds_its_turn_start_only_under_settlement
 services::codex::relay_separator_tests::codex_second_agent_message_carries_paragraph_separator_3431
 services::codex::remote_dispatch_gate_tests::remote_direct_is_refused_when_gate_off
 services::codex::remote_dispatch_gate_tests::remote_tmux_is_hard_refused_as_policy_non_goal
@@ -2669,6 +2671,7 @@ services::codex_tui::rollout_tail::child_binding_tests::direct_registration_refu
 services::codex_tui::rollout_tail::child_binding_tests::fresh_launch_consumes_b_source_despite_newer_child
 services::codex_tui::rollout_tail::child_binding_tests::replacement_after_discovery_is_rejected_before_marker_and_o_publication
 services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_codex_turn_ends_only_on_its_own_rollout_terminal
+services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_reply_never_takes_another_turns_fallback_body
 services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_turn_accepts_nothing_past_its_terminal_record
 services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_turn_ends_only_on_a_record_naming_its_started_turn
 services::codex_tui::rollout_tail::tests::always_fresh_pane_signal_reaches_hard_veto_cap_and_emits_done
@@ -4086,6 +4089,14 @@ services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_te
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_without_row_mutation
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::contended_captured_terminal_keeps_scheduler_timer_and_loopback_live
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::contended_uncaptured_codex_terminal_keeps_scheduler_timer_and_loopback_live
+services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg
+services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::a_herdr_claude_terminal_is_admitted_only_from_this_tokens_own_prompt
+services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::a_herdr_codex_terminal_is_admitted_only_from_this_tokens_own_turn
+services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::a_herdr_range_holding_another_turns_head_or_tail_is_refused
+services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::a_herdr_terminal_whose_actor_or_source_moved_is_refused
+services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::a_source_rebind_waits_for_the_herdr_admission_commit
+services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::an_admitted_kind_survives_guarded_saves_and_never_reaches_a_successor
+services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::settlement_off_keeps_the_legacy_herdr_frame_and_row_bytes
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::claude_tui_runtime_stamp_accepts_none_to_projects_output_path
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::codex_terminal_range_cold_admission_and_exit_owner_5264
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::divergent_runtime_response_is_non_retryable_and_preserves_both_snapshots
@@ -5905,9 +5916,11 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_first_write_refused_before_any_key_releases_the_hold_for_the_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_late_stop_sends_nothing_after_a_terminal_or_for_a_replaced_token_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_launch_without_daemon_isolation_or_hooks_writes_no_pending_row_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_pending_pane_whose_own_start_was_logged_takes_no_second_first_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_release_is_not_durable_only_after_its_unlink_and_kept_only_without_it_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_stop_before_the_attach_sends_one_escape_at_the_turns_own_start_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::an_unclear_first_write_keeps_the_hold_and_the_next_prompt_writes_nothing_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::cold_start_prompts_once_then_its_own_session_start_binds_it_and_ends_the_hold_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_pg
@@ -5926,6 +5939,7 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::changed_or_unkept_launch_options_refuse_the_follow_up_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::o_posts_only_the_rest_of_a_turn_across_a_restart_and_its_restore_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::o_posts_a_cold_start_once_across_its_attach_and_a_repeated_start_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::only_the_live_reader_runs_a_late_stop_at_the_turns_own_start
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::without_its_own_session_start_the_prompt_stays_held_and_is_never_resent_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_judgment_left_by_an_early_exit_admits_no_later_send
@@ -8023,7 +8037,8 @@ services::discord::tui_task_card::tests::task_card_clamps_many_short_headings_un
 services::discord::tui_task_card::tests::task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::c1_actual_spawn_bridge_retains_effect_until_future_disposal
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::headless_entry_abort_releases_mailbox_without_touching_durable_owner
-services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::herdr_codex_abort_reaches_the_bridge_typed_and_never_completes
+services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::herdr_settlement::a_herdr_turn_settles_on_its_own_admitted_terminal_after_a_stop
+services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::herdr_settlement::a_herdr_turn_without_an_admitted_terminal_stays_held
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::herdr_stopped_turn_without_provider_terminal_stays_held
 services::discord::turn_bridge::bridge_entry_persist::tests::a_reconcile_that_changes_nothing_records_nothing
 services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals

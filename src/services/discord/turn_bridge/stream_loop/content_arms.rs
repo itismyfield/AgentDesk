@@ -307,7 +307,7 @@ pub(super) async fn handle_stream_content_message(
                             if let Some((key, snapshot, close_trigger, ack_consumed)) =
                                 long_running_placeholder_active.take()
                             {
-                                let target = if session_died_retry {
+                                let target = if session_died_retry || ctx.herdr_aborted {
                                     super::super::super::placeholder_controller::PlaceholderLifecycle::Aborted
                                 } else {
                                     super::super::super::placeholder_controller::PlaceholderLifecycle::Completed
@@ -383,7 +383,7 @@ pub(super) async fn handle_stream_content_message(
                                 new_session_id = Some(s.clone());
                                 inflight_state.session_id = Some(s);
                             }
-                            if !session_died_retry {
+                            if !session_died_retry && !ctx.herdr_aborted {
                                 push_transcript_event(
                                     &mut transcript_events,
                                     SessionTranscriptEvent {
@@ -400,7 +400,7 @@ pub(super) async fn handle_stream_content_message(
                                     },
                                 );
                             }
-                            if session_died_retry {
+                            if session_died_retry || ctx.herdr_aborted {
                                 close_all_tracked_background_children(
                                     shared_owned.pg_pool.as_ref(),
                                     &mut active_background_child_session_ids,

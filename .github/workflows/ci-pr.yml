@@ -330,6 +330,7 @@ jobs:
               - 'src/services/discord/inflight/host_recovery_guard_keyed_tests.rs'
               - 'src/services/discord/inflight/rebind_reap/tests.rs'
               - 'src/services/discord/inflight/removal/custody_notice_tests.rs'
+              - 'src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_restart_tests.rs'
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/placeholder_sweeper/abandon_guard.rs'
               - 'src/services/discord/placeholder_sweeper/retirement_tests.rs'

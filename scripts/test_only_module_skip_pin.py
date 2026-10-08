@@ -255,6 +255,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord_custody/tests.rs",
         "src/services/discord/inflight/save_store/bridge_entry_guard_tests.rs",
         "src/services/discord/inflight/save_store/identity_gate/runtime_stamp/claude_terminal_tests.rs",
+        "src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_admission_tests.rs",
+        "src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_restart_tests.rs",
         "src/services/discord/inflight/save_store/outcome_decomposition_tests.rs",
         "src/services/discord/inflight/save_store/post_loop_identity_guard_tests.rs",
         "src/services/discord/outbound/manual_delivery/production_nonce_tests.rs",
