@@ -2,6 +2,8 @@
 //! A person's draft is first stashed (`stash`); after the paste only Injected or Unconfirmed follow.
 
 mod screen;
+#[cfg(test)]
+mod screen_tests;
 mod stash;
 #[cfg(all(test, unix))]
 mod stash_tests;
@@ -12,7 +14,7 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use super::composer_lock::{ComposerAdmission, DraftSighting};
-use crate::services::tui_input::actor::gate::own_draft;
+use crate::services::tui_input::actor::gate::{own_draft, own_wrapped_draft};
 use crate::services::tui_input::bounded_tmux::{BoundedTmuxError, run_bounded_tmux};
 use crate::services::tui_o::shadow::ShadowProvider;
 
@@ -34,6 +36,9 @@ pub(crate) enum Veto {
     NotBusy,
     TranscriptUnavailable,
     LoadFailed,
+    /// The pane size is unknown or Claude's rows for the input are not predictable, so a paste
+    /// could not be proven ours and would stay in the composer.
+    UnpredictableRender,
 }
 
 /// A paste was attempted, so the input may sit in the composer or be submitted.
@@ -374,7 +379,8 @@ fn modal(capture: &str) -> bool {
 }
 
 enum Plan {
-    Direct,
+    /// An empty composer, and how Claude will show the paste in it.
+    Direct(screen::Drawn),
     /// The person's draft rows as Claude shows them, to recognise it when it comes back.
     Stash(Vec<String>),
 }
@@ -398,10 +404,10 @@ fn judge_before_paste(
     let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(capture);
     let empty = !tmux_capture_indicates_claude_tui_prompt_draft(&plain)
         && tmux_capture_indicates_claude_tui_exact_empty_composer(&plain);
-    let plan = if empty {
-        Plan::Direct
+    let stash = if empty {
+        None
     } else {
-        Plan::Stash(screen::stashable(capture, text, size).ok_or(Veto::Draft)?)
+        Some(screen::stashable(capture, text, size).ok_or(Veto::Draft)?)
     };
     // Enter on an idle pane would start a new turn instead of queueing behind this one. Claude
     // hides its busy chrome while the composer holds text, so a draft rests on the transcript.
@@ -409,7 +415,12 @@ fn judge_before_paste(
     if !turn.is_busy() || (empty && !tmux_capture_indicates_claude_tui_busy(&plain)) {
         return Err(Veto::NotBusy);
     }
-    Ok(plan)
+    match stash {
+        Some(draft) => Ok(Plan::Stash(draft)),
+        None => screen::drawn(text, size)
+            .map(Plan::Direct)
+            .ok_or(Veto::UnpredictableRender),
+    }
 }
 
 /// How a protected pane's draft reads in one capture.
@@ -569,7 +580,7 @@ fn inject_locked(
     };
     // A person's draft moves only through a stash on an allowlisted channel.
     let permitted = match plan {
-        Plan::Direct => admission == ComposerAdmission::Any,
+        Plan::Direct(_) => admission == ComposerAdmission::Any,
         Plan::Stash(_) => stash,
     };
     if !permitted {
@@ -603,7 +614,7 @@ fn inject_locked(
         timing,
     };
     match plan {
-        Plan::Direct => Report::new(paste_into_empty(&attempt), DraftState::Unchanged),
+        Plan::Direct(drawn) => Report::new(paste_into_empty(&attempt, &drawn), DraftState::Unchanged),
         Plan::Stash(draft) => stash::run(&attempt, &draft),
     }
 }
@@ -702,7 +713,7 @@ impl Attempt<'_> {
 }
 
 /// The composer was empty: paste, prove the bytes are ours, then one Enter.
-fn paste_into_empty(attempt: &Attempt<'_>) -> Outcome {
+fn paste_into_empty(attempt: &Attempt<'_>, drawn: &screen::Drawn) -> Outcome {
     // From the paste on, absence of evidence never proves the input was not taken.
     match attempt.paste() {
         Guard::Applied => {}
@@ -716,9 +727,12 @@ fn paste_into_empty(attempt: &Attempt<'_>) -> Outcome {
         }
         Guard::Failed => return Outcome::Unconfirmed(Unconfirmed::PasteFailed),
     }
-    // Exact body, or a folded placeholder matching only in shape and line count;
-    // anything else may hold a person's keys.
-    let owns = |after: &str| own_draft(ShadowProvider::Claude, after, attempt.text, true);
+    // Exact body, the exact rows Claude wraps it into, or a folded placeholder matching only in
+    // shape and line count; anything else may hold a person's keys.
+    let owns = |after: &str| {
+        own_draft(ShadowProvider::Claude, after, attempt.text, true)
+            || matches!(drawn, screen::Drawn::Rows(rows) if own_wrapped_draft(after, rows))
+    };
     if let Err(detail) = attempt.await_own(owns, &mut None) {
         return Outcome::Unconfirmed(detail);
     }
