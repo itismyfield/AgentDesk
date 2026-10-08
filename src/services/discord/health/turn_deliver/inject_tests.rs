@@ -25,13 +25,13 @@ const SPINNER: &str = "✻ Thinking… (12s · esc to interrupt)";
 const BUSY_TURN: &str = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n\
     {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n";
 
-/// A scripted `tmux`: the paste shows folded (flat with `draw`) and the Enter queues its header in
-/// the transcript as Claude does mid-turn. `gate` holds keys, `hold` the first capture, until `go`.
+/// A scripted 80x24 `tmux`: the paste shows folded (flat with `draw`, `draw.rows` below the header)
+/// and the Enter queues its header as Claude does mid-turn. `gate`/`hold` park keys/capture to `go`.
 const FAKE_TMUX: &str = r#"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
 case "$2" in
-display-message) cat "$d/attach" ;;
+display-message) echo "$(cat "$d/attach"),,80,24" ;;
 capture-pane)
   if [ -f "$d/hold" ]; then
     rm -f "$d/hold"; touch "$d/at_hold"; i=0
@@ -51,7 +51,10 @@ if-shell)
   case "$7" in
   paste-buffer*)
     touch "$d/pasted"
-    [ -f "$d/draw" ] && { cat "$d/draw"; awk 'NR == 1 { printf "\342\235\257\302\240%s\n", $0; next } { print ($0 == "" ? "" : "  " $0) }' "$d/buffer"; cat "$d/draw.tail"; } > "$d/cap.pasted" ;;
+    [ -f "$d/draw" ] && {
+      cat "$d/draw"; printf '\342\235\257\302\240%s\n' "$(head -n 1 "$d/buffer")"
+      if [ -f "$d/draw.rows" ]; then cat "$d/draw.rows"; else awk 'NR > 1 { print ($0 == "" ? "" : "  " $0) }' "$d/buffer"; fi
+      cat "$d/draw.tail"; } > "$d/cap.pasted" ;;
   send-keys*) printf '{"type":"queue-operation","operation":"enqueue","content":"%s\\nstatus?","sessionId":"6245","timestamp":"2026-10-06T00:00:00.000Z"}\n' "$(head -n 1 "$d/buffer")" >> "$d/transcript.jsonl" ;;
   esac ;;
 esac
@@ -164,8 +167,11 @@ impl InjectPane {
         self.set("cap.pasted", &pane);
     }
 
-    /// The composer after the paste shows it flat: continuation rows two columns in.
-    fn draw_paste(&self) {
+    /// The composer after the paste shows it flat: continuation rows two columns in, or `rows`.
+    fn draw_paste(&self, rows: Option<&[String]>) {
+        if let Some(rows) = rows {
+            self.set("draw.rows", &format!("{}\n", rows.join("\n")));
+        }
         self.set(
             "draw",
             &format!("⏺ Working on it.\n\n{SPINNER}\n\n{BORDER}\n"),
@@ -521,7 +527,7 @@ async fn a_flat_paste_drawn_with_its_indent_is_injected_pg() {
     let mut observed = Vec::new();
     for (ch, text) in inputs {
         let pane = InjectPane::new(ch, "all");
-        pane.draw_paste();
+        pane.draw_paste(None);
         let outcome = deliver_text(&registry, ch, text).await;
         let queue = queue_texts(&shared, ch).await.join(",");
         let (keys, seen) = (pane.keys().join("+"), pane.transcript_recorded_the_paste());
@@ -529,6 +535,44 @@ async fn a_flat_paste_drawn_with_its_indent_is_injected_pg() {
     }
     let injected = "Ok(Injected { turn_id: None }) keys=paste-buffer+send-keys seen=true []";
     assert_eq!(observed, [injected; 2]);
+}
+
+/// At 80x24 a long line wraps as measured on Claude Code 2.1.293: predicted rows prove the paste
+/// ours, and a line whose rows are not predictable is handed back unpasted.
+#[tokio::test(flavor = "current_thread")]
+async fn a_wrapped_paste_is_injected_only_when_its_rows_are_predicted_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let (wrapped, unpredictable) = (6_687_011, 6_687_012);
+    let registry = HealthRegistry::new();
+    let shared = register_inject_runtime(&registry, &[wrapped, unpredictable], Some(pool)).await;
+    let words = |n: usize| ["가나다"; 25][..n].join(" ");
+    let measured = [
+        format!("  {}", words(11)),
+        format!("  {}", words(10)),
+        format!("  {} 끝", words(4)),
+    ];
+    let emoji = [format!("  {}", "😀a".repeat(25)), "  😀a".to_string()];
+    let mut observed = Vec::new();
+    for (ch, text, rows) in [
+        (wrapped, format!("{} 끝", words(25)), measured.as_slice()),
+        (unpredictable, "😀a".repeat(26), emoji.as_slice()),
+    ] {
+        let pane = InjectPane::new(ch, "all");
+        pane.draw_paste(Some(rows));
+        let outcome = deliver_text(&registry, ch, &text).await;
+        let queue = queue_texts(&shared, ch).await.len();
+        let (keys, seen) = (pane.keys().join("+"), pane.transcript_recorded_the_paste());
+        observed.push(format!("{outcome} keys={keys} seen={seen} queued={queue}"));
+    }
+    assert_eq!(
+        observed,
+        [
+            "Ok(Injected { turn_id: None }) keys=paste-buffer+send-keys seen=true queued=0",
+            "queued handed_back veto=unpredictable_render keys= seen=false queued=1",
+        ]
+    );
 }
 
 /// A channel whose input moved to the input runtime keeps its pane untouched.
