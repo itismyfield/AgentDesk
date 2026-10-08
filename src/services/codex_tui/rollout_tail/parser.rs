@@ -1,7 +1,10 @@
 use serde_json::Value;
 use std::collections::HashSet;
 
-use crate::services::agent_protocol::StreamMessage;
+use crate::services::agent_protocol::{
+    NativeTerminalKind, StreamMessage, codex_payload_turn_id, same_codex_turn,
+};
+use crate::services::provider::ReadOutputResult;
 
 use super::{RelaySuppressionSender, RolloutFinalizePath};
 use std::path::Path;
@@ -110,6 +113,12 @@ pub(super) struct RolloutParseState {
     pub(super) last_emitted_text_ended_with_newline: Option<bool>,
     /// Byte offset in `final_text` where the most recent message text begins.
     pub(super) last_message_start: usize,
+    /// The first `task_started` read and its turn id: the turn this reader follows.
+    pub(super) started_turn: Option<Option<String>>,
+    /// That turn's own `turn_aborted` record was read.
+    pub(super) turn_aborted_seen: bool,
+    /// That turn's own `task_complete` was read; `turn_complete_seen` also counts any other turn's.
+    pub(super) own_turn_complete_seen: bool,
 }
 
 impl RolloutParseState {
@@ -424,8 +433,22 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
             }
             None
         }
+        "task_started" => {
+            if state.started_turn.is_none() {
+                state.started_turn = Some(codex_payload_turn_id(payload).map(str::to_owned));
+            }
+            state.lifecycle_activity = true;
+            None
+        }
+        "turn_aborted" => {
+            // An abort ends this reader's turn only when it and the started turn name the same turn.
+            state.turn_aborted_seen |= started_turn_named_by(state, payload);
+            state.lifecycle_activity = true;
+            None
+        }
         "task_complete" => {
             state.turn_complete_seen = true;
+            state.own_turn_complete_seen |= started_turn_named_by(state, payload);
             if state.task_complete_fallback_text.is_none() {
                 state.task_complete_fallback_text = payload
                     .get("last_agent_message")
@@ -440,6 +463,114 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
             None
         }
     }
+}
+
+fn started_turn_named_by(state: &RolloutParseState, payload: &Value) -> bool {
+    let started = state.started_turn.as_ref().and_then(Option::as_deref);
+    same_codex_turn(started, codex_payload_turn_id(payload))
+}
+
+/// A Herdr turn's provider terminal: its own abort, else its own completion with no tool left open.
+pub(super) fn herdr_terminal_kind(state: &RolloutParseState) -> Option<NativeTerminalKind> {
+    if state.turn_aborted_seen {
+        return Some(NativeTerminalKind::Aborted);
+    }
+    (state.own_turn_complete_seen && !state.has_pending_tool_call())
+        .then_some(NativeTerminalKind::Completed)
+}
+
+/// One EOF of a Herdr turn's tail under settlement: `None` keeps the legacy judgement, `Some(None)`
+/// reads on, `Some(Some(_))` ends on the provider's record or, for a dead pane, unconfirmed.
+pub(super) fn herdr_eof(
+    sender: &RelaySuppressionSender<'_>,
+    (state, partial_line): (&mut RolloutParseState, &mut Vec<u8>),
+    rollout_path: &Path,
+    turn: (u64, Option<&str>),
+    accept: &RecordAcceptance<'_>,
+    is_alive: &mut dyn FnMut() -> bool,
+) -> Option<Option<ReadOutputResult>> {
+    let logical = crate::services::provider::herdr_provider_terminal_only(accept.token)?;
+    if let Some(kind) = herdr_terminal_kind(state) {
+        let offset = emit_herdr_terminal(sender, state, kind, rollout_path, turn, logical);
+        return Some(Some(ReadOutputResult::Completed { offset }));
+    }
+    if super::try_process_complete_partial_line(partial_line, sender, state, accept) {
+        return Some(None);
+    }
+    // No drain, deadline or idle wait ends a Herdr turn.
+    if !is_alive() {
+        let offset = turn.0.saturating_add(state.bytes_read);
+        return Some(Some(ReadOutputResult::SessionDied { offset }));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    Some(None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NextRecord {
+    Accept,
+    StopBefore,
+}
+
+/// The one judgement every complete record passes before the tail accepts it; each stop rule is
+/// one predicate in `accept_next_record`, so neither the record loop nor the EOF flush changes.
+pub(super) struct RecordAcceptance<'a> {
+    token: Option<&'a crate::services::provider::CancelToken>,
+}
+
+impl<'a> RecordAcceptance<'a> {
+    pub(super) fn new(token: Option<&'a crate::services::provider::CancelToken>) -> Self {
+        Self { token }
+    }
+
+    pub(super) fn accept_next_record(&self, state: &RolloutParseState) -> NextRecord {
+        // A Herdr turn's reply stops at its terminal record; later lines are another turn's.
+        if crate::services::provider::herdr_provider_terminal_only(self.token).is_some()
+            && herdr_terminal_kind(state).is_some()
+        {
+            return NextRecord::StopBefore;
+        }
+        NextRecord::Accept
+    }
+}
+
+/// Sends a Herdr turn's provider terminal ending at its record: a completion as today's Done, an
+/// abort only as a typed native frame, which bridge admission never turns into a plain Done.
+fn emit_herdr_terminal(
+    sender: &RelaySuppressionSender<'_>,
+    state: &mut RolloutParseState,
+    kind: NativeTerminalKind,
+    rollout_path: &Path,
+    (source_start, turn_nonce): (u64, Option<&str>),
+    tmux_session_name: String,
+) -> u64 {
+    let complete_record_end = source_start.saturating_add(state.bytes_read);
+    if kind == NativeTerminalKind::Completed {
+        super::promote_task_complete_fallback_text(state);
+        let terminal = (source_start, turn_nonce, false);
+        let path = RolloutFinalizePath::Envelope;
+        emit_done(
+            sender,
+            state,
+            path,
+            rollout_path,
+            complete_record_end,
+            terminal,
+        );
+        return complete_record_end;
+    }
+    sender.send(StreamMessage::CodexTuiTerminalDone {
+        result: state.final_text.clone(),
+        session_id: state.session_id.clone(),
+        rollout_path: rollout_path.display().to_string(),
+        tmux_session_name,
+        turn_nonce: turn_nonce.unwrap_or_default().to_owned(),
+        source_start,
+        complete_record_end,
+        captured_source: None,
+        kind,
+    });
+    complete_record_end
 }
 
 fn maybe_observe_synthetic_composer_ready(state: &mut RolloutParseState) {
@@ -580,6 +711,7 @@ pub(super) fn emit_done(
             source_start,
             complete_record_end,
             captured_source: None,
+            kind: NativeTerminalKind::Completed,
         });
     } else {
         sender.send(StreamMessage::Done {
@@ -588,3 +720,6 @@ pub(super) fn emit_done(
         });
     }
 }
+
+#[cfg(all(test, unix))]
+mod herdr_terminal_tests;

@@ -558,6 +558,8 @@ src/
 │   │   ├── recovery.rs
 │   │   └── worker.rs
 │   ├── claude/
+│   │   ├── herdr_turn/
+│   │   │   └── provider_terminal_tests.rs
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
 │   │   ├── c1_teardown_tests.rs
@@ -733,6 +735,8 @@ src/
 │   │   │   ├── composer_status.rs
 │   │   │   └── inline_banner.rs
 │   │   ├── rollout_tail/
+│   │   │   ├── parser/
+│   │   │   │   └── herdr_terminal_tests.rs
 │   │   │   ├── child_binding_tests.rs
 │   │   │   ├── legacy_selection.rs
 │   │   │   └── parser.rs
