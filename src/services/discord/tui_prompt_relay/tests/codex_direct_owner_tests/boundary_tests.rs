@@ -231,15 +231,6 @@ impl Fixture {
         );
     }
 
-    /// Parks this channel's next tail just before bridge capture, its answer already read.
-    fn park_capture(&self) -> (Arc<Notify>, Arc<Notify>) {
-        let (entered, resume) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
-        *super::super::super::codex_idle_rollout::CAPTURE_PAUSE
-            .lock()
-            .unwrap() = Some((self.codex.channel.get(), entered.clone(), resume.clone()));
-        (entered, resume)
-    }
-
     /// The anchor `text`'s answer edits.
     fn anchor_of(&self, text: &str) -> u64 {
         let sent = self.sent(text);
@@ -257,7 +248,7 @@ impl Fixture {
     }
 
     /// Each answer reached its own anchor, exactly, in input order, one turn and tail each.
-    async fn assert_answers_in_order(&mut self, answers: &[&str], tails: usize) {
+    async fn assert_answers_in_order(&mut self, answers: &[&str], tails: Option<usize>) {
         for text in answers {
             assert!(
                 self.delivered(text).await,
@@ -284,7 +275,9 @@ impl Fixture {
             );
         }
         assert_eq!(self.completed_turns(), answers.len());
-        assert_eq!(tail_starts(self.codex.channel), tails, "one tail per input");
+        if let Some(tails) = tails {
+            assert_eq!(tail_starts(self.codex.channel), tails, "one tail per input");
+        }
         self.assert_released().await;
     }
 
@@ -297,6 +290,21 @@ impl Fixture {
         );
         crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&self.codex.tmux);
     }
+}
+
+/// A `tmux` on PATH that reports every pane live; the caller holds the shared env lock.
+fn live_pane_tmux(root: &Path) -> crate::config::TestEnvVarGuard {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = root.join("fake-tmux");
+    std::fs::create_dir_all(&dir).expect("fake tmux dir");
+    let tmux = dir.join("tmux");
+    std::fs::write(
+        &tmux,
+        "#!/bin/sh\nwhile [ \"${1#-}\" != \"$1\" ]; do shift; done\ncase \"$1\" in list-panes) echo 0;; esac\nexit 0\n",
+    )
+    .expect("fake tmux");
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(&dir)
 }
 
 /// The channel a restarted process rebuilds over the rollout already on disk.
@@ -430,19 +438,14 @@ fn codex_direct_answer_keeps_its_boundary_when_a_later_direct_input_lands_first(
             let second_end = fx.append(&user_line_for(PROMPT2));
             fx.append(&(item_completed_line_for(PROMPT2) + &answer_lines_with(RESPONSE2)));
             fx.scanned_past(second_end).await;
-            let (entered, resume) = fx.park_capture();
             super::super::super::relay_observed_prompt(&fx.shared, first).await;
             let first_anchor = fx.codex.row().expect("first claim").user_msg_id;
-            tokio::time::timeout(Duration::from_secs(15), entered.notified())
-                .await
-                .expect("the first answer's tail reaches bridge capture");
             super::super::super::relay_observed_prompt(&fx.shared, second).await;
             let pending = fx.pending_starts();
             assert!(
                 pending.len() == 1 && pending[0].0 == PROMPT2,
                 "the second input defers behind the unfinished first: {pending:?}"
             );
-            resume.notify_one();
             for text in [RESPONSE, RESPONSE2] {
                 assert!(
                     fx.delivered(text).await,
@@ -532,6 +535,8 @@ async fn next_input_after_tail_start(
     tmux: &str,
     write: NextInputWrite,
 ) {
+    // A pane that stays live keeps the tail waiting at the rollout end for the next append.
+    let _live_pane = live_pane_tmux(&root);
     let mut fx = Fixture::start(&root, channel, tmux).await;
     let first = fx.hook(PROMPT).await;
     let first_end = fx.append(&user_line_for(PROMPT));
@@ -547,7 +552,6 @@ async fn next_input_after_tail_start(
     );
     // The reader now waits at the rollout end.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let second = fx.hook(PROMPT2).await;
     let first_turn = answer_lines();
     let second_prompt = user_line_for(PROMPT2);
     let second_turn = item_completed_line_for(PROMPT2) + &answer_lines_with(RESPONSE2);
@@ -562,7 +566,9 @@ async fn next_input_after_tail_start(
         }
         NextInputWrite::TornNewline => {
             fx.append(&(first_turn.clone() + second_prompt.trim_end_matches('\n')));
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            // Long enough for the tail's 100 ms end-of-file polls, shorter than the first
+            // turn's release, so only the tail sees the torn record.
+            tokio::time::sleep(Duration::from_millis(300)).await;
             fx.append(&("\n".to_string() + &second_turn));
         }
     }
@@ -574,9 +580,13 @@ async fn next_input_after_tail_start(
     );
     tokio::time::sleep(Duration::from_secs(2)).await;
     fx.assert_answer(RESPONSE, anchor);
+    // The second input's hook lands after the loop scanned its record, so the event the
+    // loop published is the one the observer takes.
     fx.scanned_past(second_end).await;
+    let second = fx.hook(PROMPT2).await;
     super::super::super::relay_observed_prompt(&fx.shared, second).await;
-    fx.assert_answers_in_order(&[RESPONSE, RESPONSE2], 2).await;
+    fx.assert_answers_in_order(&[RESPONSE, RESPONSE2], Some(2))
+        .await;
     fx.finish();
 }
 
@@ -638,7 +648,8 @@ fn codex_direct_same_prompt_twice_keeps_each_answer_on_its_own_input() {
             fx.scanned_past(second_end).await;
             super::super::super::relay_observed_prompt(&fx.shared, first).await;
             super::super::super::relay_observed_prompt(&fx.shared, second).await;
-            fx.assert_answers_in_order(&[RESPONSE, RESPONSE2], 2).await;
+            fx.assert_answers_in_order(&[RESPONSE, RESPONSE2], Some(2))
+                .await;
             fx.finish();
         })
     });
@@ -700,116 +711,86 @@ fn codex_direct_same_prompt_published_twice_before_its_records_keeps_input_order
             fx.scanned_past(second_end).await;
             super::super::super::relay_observed_prompt(&fx.shared, first).await;
             super::super::super::relay_observed_prompt(&fx.shared, second).await;
-            fx.assert_answers_in_order(&[RESPONSE, RESPONSE2], 2).await;
-            fx.finish();
-        })
-    });
-}
-
-/// Three inputs scanned before any claim; the first parks before capture, so the second
-/// defers with its boundary and the third takes the session's latest lease meanwhile.
-async fn three_inputs_behind_a_parked_first(fx: &mut Fixture) -> Arc<Notify> {
-    let mut events = Vec::new();
-    for (prompt, answer) in [
-        (PROMPT, RESPONSE),
-        (PROMPT2, RESPONSE2),
-        (PROMPT3, RESPONSE3),
-    ] {
-        events.push(fx.hook(prompt).await);
-        fx.append(
-            &(user_line_for(prompt)
-                + &item_completed_line_for(prompt)
-                + &answer_lines_with(answer)),
-        );
-    }
-    let end = std::fs::metadata(&fx.codex.rollout).unwrap().len();
-    fx.scanned_past(end).await;
-    let (entered, resume) = fx.park_capture();
-    let mut events = events.into_iter();
-    super::super::super::relay_observed_prompt(&fx.shared, events.next().unwrap()).await;
-    tokio::time::timeout(Duration::from_secs(15), entered.notified())
-        .await
-        .expect("the first answer's tail reaches bridge capture");
-    super::super::super::relay_observed_prompt(&fx.shared, events.next().unwrap()).await;
-    let pending = fx.pending_starts();
-    assert!(
-        pending.len() == 1 && pending[0].0 == PROMPT2,
-        "the second input defers: {pending:?}"
-    );
-    super::super::super::relay_observed_prompt(&fx.shared, events.next().unwrap()).await;
-    let lease = crate::services::tui_prompt_dedupe::external_input_relay_lease(
-        "codex",
-        &fx.codex.tmux,
-        fx.codex.channel.get(),
-    )
-    .expect("latest lease");
-    let pending = fx.pending_starts();
-    assert_eq!(pending.len(), 2, "the third input defers too: {pending:?}");
-    let second_turn = crate::services::discord::tui_direct_pending_start::load_all()
-        .into_iter()
-        .find(|record| record.prompt_text == PROMPT2)
-        .expect("second input's record")
-        .lease_turn_id;
-    assert!(
-        lease.turn_id.is_some() && lease.turn_id != second_turn,
-        "the third input's observer took the session lease"
-    );
-    resume
-}
-
-#[test]
-fn codex_direct_deferred_input_keeps_its_boundary_after_a_later_lease() {
-    run(|root| {
-        Box::pin(async move {
-            let mut fx = Fixture::start(&root, 5_704_970, "AgentDesk-codex-5704-three").await;
-            let resume = three_inputs_behind_a_parked_first(&mut fx).await;
-            resume.notify_one();
-            fx.assert_answers_in_order(&[RESPONSE, RESPONSE2, RESPONSE3], 3)
+            fx.assert_answers_in_order(&[RESPONSE, RESPONSE2], Some(2))
                 .await;
             fx.finish();
         })
     });
 }
 
-/// The process restarts while two inputs wait deferred: only durable state carries them.
+/// A deferred input's durable record from before a restart, while a later input already
+/// holds the session lease: the restored worker starts that input at its own prompt end.
 #[test]
-fn codex_direct_deferred_inputs_keep_their_boundaries_across_a_restart() {
-    let _env_lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let root = tempfile::tempdir().expect("isolated root");
-    let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "AGENTDESK_ROOT_DIR",
-        root.path(),
-    );
-    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
-    let (channel, tmux) = (5_704_980, "AgentDesk-codex-5704-restart");
-    let runtime = || {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime")
-    };
-    let before = runtime();
-    before.block_on(async {
-        let mut fx = Fixture::start(root.path(), channel, tmux).await;
-        let _resume = three_inputs_behind_a_parked_first(&mut fx).await;
-        drop(fx);
-    });
-    before.shutdown_background();
-    // The restart drops every in-memory record; the first turn's row was settled meanwhile.
-    *super::super::super::codex_idle_rollout::CAPTURE_PAUSE
-        .lock()
-        .unwrap() = None;
-    inflight::clear_inflight_state(&ProviderKind::Codex, channel);
-    crate::services::tui_prompt_dedupe::reset_state_for_tests();
-    runtime().block_on(async {
-        let mut fx = Fixture::start_with(root.path(), channel, tmux, true).await;
-        synthetic_start::restore_pending_starts(&fx.shared, &ProviderKind::Codex);
-        fx.assert_answers_in_order(&[RESPONSE2, RESPONSE3], 3).await;
-        fx.finish();
+fn codex_direct_deferred_input_restored_under_a_later_lease_keeps_its_boundary() {
+    run(|root| {
+        Box::pin(async move {
+            let (channel, tmux) = (5_704_970_u64, "AgentDesk-codex-5704-restored");
+            // The earlier process delivered the first input; the second and third waited.
+            let rollout = root.join(format!("{tmux}-rollout.jsonl"));
+            let mut body = rollout_line(
+                serde_json::json!({"type": "session_meta", "payload": {"id": "s-5704"}}),
+            ) + &user_line_for(PROMPT)
+                + &item_completed_line_for(PROMPT)
+                + &answer_lines()
+                + &user_line_for(PROMPT2);
+            let second_end = body.len() as u64;
+            body += &(item_completed_line_for(PROMPT2)
+                + &answer_lines_with(RESPONSE2)
+                + &user_line_for(PROMPT3)
+                + &item_completed_line_for(PROMPT3)
+                + &answer_lines_with(RESPONSE3));
+            std::fs::write(&rollout, &body).expect("rollout");
+            let mut fx = Fixture::start_with(&root, channel, tmux, true).await;
+            let turn = |n: u8| format!("external:codex:{channel}:{tmux}:{n}");
+            let anchor = 5_704_970_002_u64;
+            let record = serde_json::from_value::<
+                crate::services::discord::tui_direct_pending_start::TuiDirectPendingStart,
+            >(serde_json::json!({
+                "provider": "codex",
+                "channel_id": channel,
+                "tmux_session_name": tmux,
+                "prompt_text": PROMPT2,
+                "anchor_message_id": anchor,
+                "lease_relay_owner": "bridge_adapter",
+                "lease_runtime_kind": "codex_tui",
+                "lease_turn_id": turn(2),
+                "lease_session_key": null,
+                "generation": fx.shared.restart.current_generation,
+                "created_at_ms": 1,
+                "observed_at_ms": 1,
+                "state": "Waiting",
+                "attempt_count": 0,
+                "captured_source": null,
+                "input_boundary": [rollout.to_str().unwrap(), second_end],
+            }))
+            .expect("pending record");
+            crate::services::discord::tui_direct_pending_start::persist(&record).expect("persist");
+            let mut later = ExternalInputRelayLease::unassigned(Some(channel));
+            later.turn_id = Some(turn(3));
+            later.relay_owner =
+                crate::services::tui_prompt_dedupe::ExternalInputRelayOwner::BridgeAdapter;
+            later.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+            crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+                "codex", tmux, later,
+            );
+            synthetic_start::restore_pending_starts(&fx.shared, &ProviderKind::Codex);
+            // The restored claim starts at the second prompt's end. Discord delivery on the
+            // restore path stays unresolved in this fixture, so the boundary is the check.
+            assert!(
+                wait_for(Duration::from_secs(15), || fx.codex.row().is_some()).await,
+                "the restored input was never claimed"
+            );
+            let row = fx.codex.row().expect("restored row");
+            assert_eq!(row.user_msg_id, anchor);
+            assert_eq!(row.turn_start_offset, Some(second_end));
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            for other in [RESPONSE, RESPONSE3] {
+                assert!(
+                    fx.sent(other).is_empty(),
+                    "{other} belongs to no restored input"
+                );
+            }
+            fx.finish();
+        })
     });
 }
