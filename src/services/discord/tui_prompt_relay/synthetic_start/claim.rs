@@ -10,6 +10,7 @@ pub(super) struct SyntheticClaimIdentity<'a> {
     pub(super) anchor_message_id: MessageId,
     pub(super) lease: &'a ExternalInputRelayLease,
     pub(super) register_deferred_start: bool,
+    pub(super) native_turn: Option<&'a str>,
 }
 
 pub(super) struct SyntheticClaimPreparation<'a> {
@@ -38,6 +39,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
         anchor_message_id,
         lease,
         None,
+        None,
     )
     .await
     .0
@@ -54,6 +56,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
     anchor_message_id: MessageId,
     lease: &ExternalInputRelayLease,
     captured_source: Option<&(String, u64)>,
+    native_turn: Option<&str>,
 ) -> (TuiDirectSyntheticTurnClaim, Option<(String, u64)>) {
     if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
         return (
@@ -87,6 +90,23 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
         );
     #[cfg(not(unix))]
     let committed_relay_offset: Option<u64> = None;
+    // A Codex input whose native turn the rollout already holds starts at that turn's record.
+    let native_source = native_turn
+        .filter(|_| provider == &ProviderKind::Codex)
+        .zip(output_path.as_deref())
+        .and_then(|(turn, path)| {
+            match super::super::idle_transcript_scan::resolve_codex_turn_prompt_end(
+                path,
+                turn,
+                prompt_text,
+            ) {
+                Ok(super::super::idle_transcript_scan::CodexTurnPrompt::Found(end)) => {
+                    Some((path.to_str()?.to_string(), end))
+                }
+                _ => None,
+            }
+        });
+    let captured_source = native_source.as_ref().or(captured_source);
     let start_offset = match captured_source {
         Some((path, offset)) => {
             if output_path.as_deref() != Some(Path::new(path))
@@ -158,6 +178,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
             anchor_message_id,
             lease,
             register_deferred_start: DEFERRED,
+            native_turn,
         },
         output_path,
         start_offset,
@@ -329,6 +350,7 @@ mod n1a_tests {
                         MessageId::new(7),
                         &lease,
                         None,
+                        None,
                     )
                     .await;
                     assert!(
@@ -355,6 +377,7 @@ mod n1a_tests {
                         "human prompt",
                         MessageId::new(7),
                         &lease,
+                        None,
                         None,
                     )
                     .await;

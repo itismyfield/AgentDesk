@@ -205,10 +205,19 @@ impl RelaySink for CountingSink {
     }
 }
 
-/// `(method, path, body)` of every Discord REST request.
+/// `(method, path, body)` of every Discord REST request the mock accepted; a rejected one is not
+/// recorded, so it never counts as delivered.
 type Requests = Arc<std::sync::Mutex<Vec<(String, String, String)>>>;
 
 async fn recording_discord(channel: u64) -> (Requests, Arc<serenity::Http>, AbortOnDrop) {
+    recording_discord_failing(channel, Arc::default()).await
+}
+
+/// [`recording_discord`] that rejects the next `failing` message POSTs with a Discord error.
+async fn recording_discord_failing(
+    channel: u64,
+    failing: Arc<AtomicUsize>,
+) -> (Requests, Arc<serenity::Http>, AbortOnDrop) {
     use axum::body::Bytes;
     use axum::http::{Method, StatusCode, Uri};
     use axum::response::IntoResponse;
@@ -217,10 +226,19 @@ async fn recording_discord(channel: u64) -> (Requests, Arc<serenity::Http>, Abor
     let recorded = requests.clone();
     let app = axum::Router::new().fallback(axum::routing::any(
         move |method: Method, uri: Uri, body: Bytes| {
-            let (recorded, next) = (recorded.clone(), next.clone());
+            let (recorded, next, failing) = (recorded.clone(), next.clone(), failing.clone());
             async move {
                 let path = uri.path().to_string();
                 let body = String::from_utf8_lossy(&body).into_owned();
+                if method == Method::POST
+                    && path.ends_with("/messages")
+                    && failing
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                        .is_ok()
+                {
+                    let error = serde_json::json!({"code": 50035, "message": "Invalid Form Body"});
+                    return (StatusCode::BAD_REQUEST, axum::Json(error)).into_response();
+                }
                 recorded
                     .lock()
                     .unwrap()
@@ -327,7 +345,7 @@ impl CodexChannel {
                 output_path: rollout.to_str().unwrap().to_string(),
                 relay_output_path: Some(relay.clone()),
                 input_fifo_path: None,
-                session_id: None,
+                session_id: Some("s-5704".to_string()),
                 last_offset: header.len() as u64,
                 relay_last_offset: Some(0),
             },
@@ -804,3 +822,6 @@ async fn codex_direct_answer_scenario(root: &Path) {
     }
     drop(relays);
 }
+
+/// Codex direct input whose claim lands after the idle loop's cursor moved on.
+mod boundary_tests;

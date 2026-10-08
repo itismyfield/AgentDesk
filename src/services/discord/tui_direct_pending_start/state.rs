@@ -92,6 +92,9 @@ pub(in crate::services::discord) struct TuiDirectPendingStart {
     /// Older deferred records still resolve the post-drain cursor at claim time.
     #[serde(default)]
     pub captured_source: Option<(String, u64)>,
+    /// Codex native turn the deferred input opened, so the worker's claim starts at its record.
+    #[serde(default)]
+    pub native_turn_id: Option<String>,
 }
 
 impl TuiDirectPendingStart {

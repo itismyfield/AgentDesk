@@ -41,6 +41,7 @@ async fn retire_during_admission_refuses_row_save_and_releases_mailbox() {
         state: tui_direct_pending_start::PendingStartState::Waiting,
         attempt_count: 0,
         captured_source: None,
+        native_turn_id: None,
     };
     tui_direct_pending_start::persist(&record).expect("persist record");
 

@@ -60,6 +60,7 @@ pub(super) fn spawn_handoff_reader(
                 Some(reader_cancel),
                 || true,
                 &tmux,
+                None,
             ));
             return;
         }
@@ -181,7 +182,7 @@ fn synthetic_bridge_handoff_fixture(
                 *synthetic_start::bridge_handoff::ADMISSION_PAUSE.lock().unwrap() =
                     Some((channel.get(), entered.clone(), resume.clone()));
                 let attempt = synthetic_start::claim_tui_direct_synthetic_turn_inner::<false>(
-                    &shared, &provider, channel, tmux, "handoff prompt", anchor, &lease, None,
+                    &shared, &provider, channel, tmux, "handoff prompt", anchor, &lease, None, None,
                 );
                 let replace = async {
                     entered.notified().await;
@@ -213,6 +214,8 @@ fn synthetic_bridge_handoff_fixture(
                         source_event_id: None, external_input_lease_generation: lease.generation,
                         ssh_direct_observation_generation: crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
                         hook_prompt_id: None,
+                        native_turn_id: None,
+                        steer_echo: false,
                     };
                     let mut inline_lease = lease.clone();
                     assert!(synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(

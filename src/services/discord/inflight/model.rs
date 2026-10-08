@@ -358,6 +358,10 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// and take the conservative path; only matching nonempty `Some` keys prove identity.
     #[serde(default)]
     pub external_turn_id: Option<String>,
+    /// Codex native turn a TUI-direct input opened; its answer is read from that turn alone.
+    /// Additive `#[serde(default)]`: legacy rows read as `None` and keep the text search.
+    #[serde(default)]
+    pub native_turn_id: Option<String>,
     /// Preferred Discord bot key for terminal headless delivery.
     #[serde(default)]
     pub delivery_bot: Option<String>,
@@ -1114,6 +1118,7 @@ impl InflightTurnState {
             has_post_tool_text: false,
             session_key: None,
             external_turn_id: None,
+            native_turn_id: None,
             delivery_bot: None,
             silent_turn: false,
             dispatch_id: None,

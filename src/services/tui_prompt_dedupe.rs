@@ -118,6 +118,10 @@ pub struct ObservedTuiPrompt {
     /// Hook-submitted Claude `prompt_id`, held unannounced until the relay's
     /// announcement POST result settles it.
     pub(crate) hook_prompt_id: Option<String>,
+    /// Codex native turn this input opened, when its hook or record named one.
+    pub(crate) native_turn_id: Option<String>,
+    /// A steering input that joined its running native turn: its text is shown, nothing is owned.
+    pub(crate) steer_echo: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,6 +266,27 @@ struct TuiPromptDedupeState {
     // Hook `prompt_id` -> its text, so the idle scanner's later row (`promptId`,
     // fresh uuid) is suppressed as the same input once the hook was announced.
     relayed_prompt_ids_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<RelayedPromptId>>>,
+    // Latest Codex native turn an observed input opened; a later input naming it steers that turn.
+    native_turn_by_tmux: HashMap<PromptKey, TimedValue<NativeTurnSlot>>,
+}
+
+#[derive(Clone, Debug)]
+struct NativeTurnSlot {
+    turn: String,
+    /// The opening observation's generation: only its relay may withdraw the slot.
+    observed_by: u64,
+    owner: NativeTurnOwner,
+}
+
+/// Who answers an open native turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeTurnOwner {
+    /// The observing relay, until it adopts, hands over or withdraws the turn.
+    Relay,
+    /// The deferred start worker of this anchor message: its claim keeps the turn, its exit drops it.
+    Worker(u64),
+    /// A row or a Discord turn.
+    Answer,
 }
 
 #[derive(Clone, Debug)]
@@ -306,8 +331,8 @@ pub(crate) use shadow_peek::peek_tmux_runtime_binding;
 pub use extract::*;
 use extract::{
     is_discord_relayed_user_prompt, is_user_prefixed_subagent_notification_machine_event,
-    normalize_line_endings, normalize_provider, record_relayed_entry_id,
-    relayed_entry_id_already_seen, take_matching_pending_prompt,
+    native_turn_is_open, normalize_line_endings, normalize_provider, open_native_turn,
+    record_relayed_entry_id, relayed_entry_id_already_seen, take_matching_pending_prompt,
     take_or_record_recent_observed_prompt,
 };
 use observation::clear_ssh_direct_observation_pending;

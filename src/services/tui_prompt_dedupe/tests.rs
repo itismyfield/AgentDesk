@@ -1662,6 +1662,8 @@ fn local_compact_entry_id_is_recorded_only_after_a_successful_note_delivery() {
         external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        native_turn_id: None,
+        steer_echo: false,
     });
     assert_eq!(
         observe_prompt_by_tmux_with_entry_id_at(
@@ -1727,6 +1729,8 @@ fn local_note_delivery_ack_does_not_record_nonlocal_entries() {
         external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        native_turn_id: None,
+        steer_echo: false,
     };
 
     record_local_only_entry_id_after_note_delivery(&nonlocal);
@@ -3126,5 +3130,47 @@ fn external_lease_fence_serializes_writer_and_rejects_stale_capture() {
     assert_eq!(
         external_input_relay_lease("claude", "fence-writer", 43),
         Some(successor)
+    );
+}
+
+/// A late withdrawal by an earlier observation keeps a newer reservation of another turn or of the
+/// same turn, and a deferred worker settles only the turn handed to it.
+#[test]
+fn withdrawing_an_earlier_native_reservation_keeps_the_newer_one() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    reset_state();
+    let tmux = "AgentDesk-codex-native-reservation";
+    let mut rx = subscribe_observed_prompts();
+    let mut observe = |prompt: &str, turn: &str| {
+        let observation =
+            observe_codex_prompt_in_turn_at(tmux, prompt, None, Some(turn), Utc::now());
+        let event = std::iter::from_fn(|| rx.try_recv().ok())
+            .find(|event| event.tmux_session_name == tmux && event.prompt == prompt);
+        (observation, event.expect("observation published"))
+    };
+    let joined = PromptObservation::JoinedNativeTurn;
+    let (_, first) = observe("first input", "turn-1");
+    let (_, second) = observe("second input", "turn-2");
+    withdraw_unowned_native_turn(&first);
+    assert_eq!(observe("steer of the second", "turn-2").0, joined);
+    withdraw_unowned_native_turn(&second);
+    let (reopened, third) = observe("input after the withdrawal", "turn-2");
+    assert_eq!(reopened, PromptObservation::PublishedSshDirect);
+    withdraw_unowned_native_turn(&second);
+    assert_eq!(
+        observe("steer after a stale withdrawal", "turn-2").0,
+        joined
+    );
+    hand_native_turn_to_worker(&third, 7);
+    withdraw_unowned_native_turn(&third);
+    assert_eq!(observe("steer of the handed turn", "turn-2").0, joined);
+    settle_worker_native_turn("codex", tmux, 8, false);
+    assert_eq!(observe("steer after another worker", "turn-2").0, joined);
+    settle_worker_native_turn("codex", tmux, 7, false);
+    assert_eq!(
+        observe("input after its worker", "turn-2").0,
+        PromptObservation::PublishedSshDirect
     );
 }

@@ -259,6 +259,8 @@ pub enum PromptObservation {
     PublishedTaskNotification,
     SuppressedDiscordDuplicate,
     SuppressedRecentDuplicate,
+    /// A Codex input named the native turn an earlier input already opened: it steers that turn.
+    JoinedNativeTurn,
     /// Identity match with an already-relayed prompt: its row uuid (30min) or a
     /// hook-recorded `prompt_id` with the same text (4h). Never tails a response.
     SuppressedReplayedEntry,
@@ -275,6 +277,104 @@ pub(crate) fn resolve_tmux_session_name(
         .tmux_by_provider_session
         .get(&PromptKey::new(provider, provider_session_id))
         .map(|entry| entry.value.clone())
+}
+
+/// Whether `native_turn` is the turn the latest published Codex input opened.
+pub(super) fn native_turn_is_open(
+    provider: &str,
+    tmux_session_name: &str,
+    native_turn: &str,
+) -> bool {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    state
+        .native_turn_by_tmux
+        .get(&PromptKey::new(provider, tmux_session_name))
+        .is_some_and(|open| open.value.turn == native_turn)
+}
+
+/// Records `native_turn` as opened by observation `observed_by` and answered by `owner`.
+pub(super) fn open_native_turn(
+    provider: &str,
+    tmux_session_name: &str,
+    native_turn: &str,
+    (observed_by, owner): (u64, NativeTurnOwner),
+) {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.native_turn_by_tmux.insert(
+        PromptKey::new(provider, tmux_session_name),
+        TimedValue {
+            value: NativeTurnSlot {
+                turn: native_turn.to_string(),
+                observed_by,
+                owner,
+            },
+            recorded_at: Instant::now(),
+        },
+    );
+}
+
+/// A row now answers the native turn `prompt` opened.
+pub(crate) fn adopt_native_turn(prompt: &ObservedTuiPrompt) {
+    settle_native_turn(prompt, Some(NativeTurnOwner::Answer));
+}
+
+/// The deferred start worker of `anchor` takes over the native turn `prompt` opened.
+pub(crate) fn hand_native_turn_to_worker(prompt: &ObservedTuiPrompt, anchor: u64) {
+    settle_native_turn(prompt, Some(NativeTurnOwner::Worker(anchor)));
+}
+
+/// The relay of `prompt` ended with no owner: its own unowned slot goes, a newer one stays.
+pub(crate) fn withdraw_unowned_native_turn(prompt: &ObservedTuiPrompt) {
+    settle_native_turn(prompt, None);
+}
+
+fn settle_native_turn(prompt: &ObservedTuiPrompt, owner: Option<NativeTurnOwner>) {
+    let observed_by = prompt.ssh_direct_observation_generation;
+    let Some(turn) = prompt.native_turn_id.as_deref() else {
+        return;
+    };
+    if prompt.steer_echo || observed_by == SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED {
+        return;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let key = PromptKey::new(&prompt.provider, prompt.tmux_session_name.trim());
+    let Some(slot) = state.native_turn_by_tmux.get_mut(&key) else {
+        return;
+    };
+    if slot.value.turn != turn
+        || slot.value.observed_by != observed_by
+        || slot.value.owner != NativeTurnOwner::Relay
+    {
+        return;
+    }
+    match owner {
+        Some(owner) => slot.value.owner = owner,
+        None => drop(state.native_turn_by_tmux.remove(&key)),
+    }
+}
+
+/// The deferred start worker of `anchor` ended: a claimed row keeps its turn, any other exit drops
+/// it so a later steer of that turn is relayed as its own input.
+pub(crate) fn settle_worker_native_turn(
+    provider: &str,
+    tmux_session_name: &str,
+    anchor: u64,
+    claimed: bool,
+) {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let key = PromptKey::new(provider, tmux_session_name.trim());
+    let Some(slot) = state.native_turn_by_tmux.get_mut(&key) else {
+        return;
+    };
+    if slot.value.owner != NativeTurnOwner::Worker(anchor) {
+        return;
+    }
+    if claimed {
+        slot.value.owner = NativeTurnOwner::Answer;
+    } else {
+        state.native_turn_by_tmux.remove(&key);
+    }
 }
 
 pub(super) fn take_matching_pending_prompt(

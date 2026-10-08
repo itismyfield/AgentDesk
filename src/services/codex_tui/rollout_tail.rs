@@ -145,6 +145,8 @@ pub struct RolloutTailOptions {
     /// pending-tool deadline. Once reached, recovery fails open to `Done`.
     pub pane_busy_veto_cap: Duration,
     terminal_range_eligible: bool,
+    /// The Codex native turn a direct input's tail answers; its reply ends with that turn.
+    own_turn: Option<String>,
 }
 
 impl Default for RolloutTailOptions {
@@ -166,6 +168,7 @@ impl Default for RolloutTailOptions {
             pane_busy_probe: None,
             pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
             terminal_range_eligible: false,
+            own_turn: None,
         }
     }
 }
@@ -391,10 +394,12 @@ pub(crate) fn tail_idle_rollout_for_tmux(
     cancel_token: Option<Arc<CancelToken>>,
     is_alive: impl FnMut() -> bool,
     tmux_session_name: &str,
+    own_turn: Option<String>,
 ) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
     let options = RolloutTailOptions {
         pane_busy_probe: Some(pane_busy_probe_for_tmux(tmux_session_name)),
         tmux_session_name: Some(tmux_session_name.to_owned()),
+        own_turn,
         ..Default::default()
     };
     tail_rollout_file_until_assistant_response_with_pane_busy_probe(
@@ -813,6 +818,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
         mut pane_busy_probe,
         pane_busy_veto_cap,
         terminal_range_eligible,
+        own_turn,
         ..
     } = options;
     let source_pin = super::verified_tail::SourcePin::new(
@@ -884,6 +890,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
     sender.source_pin = source_pin.as_ref();
     sender.source_identity = source_identity;
     let accept = parser::RecordAcceptance::new(cancel_token.as_ref());
+    let accept = accept.with_own_turn(own_turn.as_deref(), &mut state);
 
     loop {
         if sender.cancel_observed() {
@@ -915,6 +922,15 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                     Some(Some(ended)) => return Ok((ended, outcome(&state, seek_offset))),
                     Some(None) => continue,
                     None => {}
+                }
+                if let Some(ended) = parser::native_turn_eof(
+                    &sender,
+                    &mut state,
+                    rollout_path,
+                    terminal_range,
+                    &accept,
+                ) {
+                    return Ok((ended, outcome(&state, seek_offset)));
                 }
                 if try_process_complete_partial_line(
                     &mut partial_line,
@@ -2151,6 +2167,7 @@ mod tests {
                 pane_busy_probe: None,
                 pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
                 terminal_range_eligible: false,
+                own_turn: None,
             },
         )
         .unwrap();
@@ -2215,6 +2232,7 @@ mod tests {
                 pane_busy_probe: None,
                 pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
                 terminal_range_eligible: false,
+                own_turn: None,
             },
         )
         .unwrap();
