@@ -382,6 +382,7 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
                     source_file_dev: metadata.dev(),
                     source_file_ino: metadata.ino(),
                     actor: Arc::downgrade(&original_actor),
+                    kind: crate::services::agent_protocol::NativeTerminalKind::Completed,
                 };
                 let frame = if native {
                     crate::services::discord::StreamMessage::CodexTuiTerminalDone {
@@ -403,6 +404,7 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
                                 actor: Arc::downgrade(&original_actor),
                             },
                         ),
+                        kind: crate::services::agent_protocol::NativeTerminalKind::Completed,
                     }
                 } else {
                     frame

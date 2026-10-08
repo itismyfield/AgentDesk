@@ -919,6 +919,7 @@ async fn exact_receipt_rowless_terminal_custody_empty_recovery_stays_inside_sour
                 source_file_dev: dev,
                 source_file_ino: ino,
                 actor: Arc::downgrade(&state.cancel_token),
+                kind: crate::services::agent_protocol::NativeTerminalKind::Completed,
             };
             let mut baseline = state.inflight_state.clone();
             let expected = InflightTurnIdentity::from_state(&baseline);

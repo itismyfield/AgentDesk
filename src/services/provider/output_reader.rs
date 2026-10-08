@@ -8,6 +8,16 @@ use super::{
 };
 use crate::services::session_backend::ReadOutputFailure;
 
+/// Under settlement a Herdr turn's reader ends only on its provider's own terminal record; the
+/// pane's logical name identifies its frames. Settlement is read first, so production reads nothing.
+pub(crate) fn herdr_provider_terminal_only(token: Option<&CancelToken>) -> Option<String> {
+    use super::cancel_token_claude_interrupt::herdr_stop_settlement_available;
+    if !herdr_stop_settlement_available() {
+        return None;
+    }
+    Some(token?.herdr_interrupt_state()?.owner.logical_key.clone())
+}
+
 pub fn fold_read_output_result<T>(
     read_result: ReadOutputResult,
     on_ready: impl FnOnce(u64) -> T,
