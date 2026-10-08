@@ -705,7 +705,10 @@ pub async fn agent_turn(
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let pool = state.pg_pool_ref().ok_or_else(pg_required_error)?;
     match load_agent_turn_status_pg(pool, &id).await {
-        Ok(body) => Ok((StatusCode::OK, Json(body))),
+        Ok(mut body) => {
+            body["turn_presence"] = super::agents_turn_target::turn_presence(pool, &id).await;
+            Ok((StatusCode::OK, Json(body)))
+        }
         Err(AgentTurnLookupError::AgentNotFound) => Err(AppError::not_found("agent not found")),
         Err(AgentTurnLookupError::Query(error)) => {
             Err(AppError::internal(format!("query: {error}")).with_code(ErrorCode::Database))
@@ -820,8 +823,12 @@ pub async fn start_agent_turn(
         Err(response) => return response,
     };
     if dm_user_id_num.is_none()
-        && let Some(conflict) =
-            super::agents_turn_target::external_turn_conflict(&provider, channel_id_num)
+        && let Some(conflict) = super::agents_turn_target::external_turn_conflict(
+            state.health_registry.as_deref(),
+            &provider,
+            channel_id_num,
+        )
+        .await
     {
         return conflict;
     }

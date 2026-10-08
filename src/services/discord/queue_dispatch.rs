@@ -169,6 +169,26 @@ async fn mailbox_take_admitted_automatic_intervention(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
+    // A turn-mode direct turn holds no token; a busy or unreadable transcript keeps the queue whole.
+    if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
+        use super::turn_presence::activity::{Activity, activity_now};
+        let observed = activity_now(shared, provider, channel_id).await;
+        if observed.activity != Activity::Idle {
+            tracing::info!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                activity = ?observed.activity,
+                reason = observed.reason,
+                "[turn_presence] dequeue_held"
+            );
+            let reason = "turn presence hold";
+            super::arm_slow_idle_queue_backstop_if_queue_nonempty(
+                shared, provider, channel_id, reason,
+            )
+            .await;
+            return MailboxTakeNextSoftOutcome::default();
+        }
+    }
     let mut excluded_stale_primary_message_ids = std::collections::HashSet::new();
     loop {
         let mut snapshot = super::mailbox_snapshot(shared, channel_id).await;

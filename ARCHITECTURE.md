@@ -606,7 +606,8 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── warm_followup.rs
 │   │   ├── input/
-│   │   │   └── draft_hold.rs
+│   │   │   ├── draft_hold.rs
+│   │   │   └── final_ready_tests.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
 │   │   ├── busy_inject.rs
@@ -1781,6 +1782,12 @@ src/
 │   │   │   └── watcher_backstop.rs
 │   │   ├── turn_lease/
 │   │   │   └── registry.rs
+│   │   ├── turn_presence/
+│   │   │   ├── activity.rs
+│   │   │   ├── activity_tests.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── supervisor.rs
+│   │   │   └── supervisor_tests.rs
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── api.rs
 │   │   │   ├── apply.rs
@@ -2317,6 +2324,7 @@ src/
 │   │   ├── writer/
 │   │   │   ├── input_facts/
 │   │   │   │   ├── reactions.rs
+│   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
