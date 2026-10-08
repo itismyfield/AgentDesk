@@ -39,6 +39,7 @@ fn recovery_output_path_with_tmux_fallback(
         .or_else(|| (!fallback_output.is_empty()).then_some(fallback_output))
 }
 
+#[cfg(unix)]
 fn herdr_turn_held(provider: &ProviderKind, state: &inflight::InflightTurnState) -> bool {
     crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
         && state.tui_terminal_kind.is_none()
@@ -142,6 +143,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             continue;
         };
         // A held Herdr turn ends only on its admitted terminal, never on a transcript read here.
+        #[cfg(unix)]
         if herdr_turn_held(provider, &state) {
             tracing::info!(
                 channel_id = state.channel_id,

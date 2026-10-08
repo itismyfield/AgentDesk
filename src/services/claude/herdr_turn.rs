@@ -855,13 +855,15 @@ fn is_turn_output(line: &str) -> bool {
     matches!(kind, Some("assistant" | "result"))
 }
 
-/// A user record that is a prompt: text, not a tool result, a meta note or an interrupt marker.
+/// A user record that is a prompt: text, not a tool result, a meta note, a compact summary or an
+/// interrupt marker.
 fn is_turn_prompt(line: &str) -> bool {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
         return false;
     };
     if json.get("type").and_then(|kind| kind.as_str()) != Some("user")
         || json.get("isMeta").and_then(|meta| meta.as_bool()) == Some(true)
+        || crate::services::tui_prompt_dedupe::is_claude_compact_summary(&json)
         || crate::services::tui_turn_state::envelope_is_turn_end_terminator(
             &ProviderKind::Claude,
             &json,

@@ -109,3 +109,99 @@ fn a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal() {
     );
     assert!(terminal.is_none(), "a dead pane is no terminal: {frames:?}");
 }
+
+/// The reader's terminal and admission's replay of `lines`, each stamped after the input.
+fn read_and_replay(
+    path: &Path,
+    lines: &[serde_json::Value],
+    alive_for: Duration,
+) -> (
+    Option<(NativeTerminalKind, u64)>,
+    Option<(u64, NativeTerminalKind, u64)>,
+) {
+    let input = chrono::Utc::now();
+    let stamp = (input + chrono::Duration::seconds(1)).to_rfc3339();
+    let stamped: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            let mut line = line.clone();
+            line["timestamp"] = stamp.clone().into();
+            line.to_string()
+        })
+        .collect();
+    let stamped: Vec<&str> = stamped.iter().map(String::as_str).collect();
+    let (_, terminal) = read(path, &stamped, &herdr_token(), alive_for);
+    let mut file = std::fs::File::open(path).unwrap();
+    let len = file.metadata().unwrap().len();
+    let replayed = replay_herdr_turn(&mut file, input, len);
+    (terminal.map(|t| (t.kind, t.end)), replayed)
+}
+
+/// A compact summary is neither a turn's own prompt nor the next turn's head; a second ordinary
+/// prompt, however its summary flag is spelt, and a summary with no own prompt still end nothing.
+#[test]
+fn a_compact_summary_neither_starts_nor_splits_a_herdr_claude_turn() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let prompt = json!({"type": "user", "message": {"role": "user", "content": "실제 입력"}});
+    let reply = |text: &str| json!({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}});
+    let boundary = json!({"type": "system", "subtype": "compact_boundary"});
+    let summary = |flag: serde_json::Value| {
+        json!({"type": "user", "isCompactSummary": flag, "isVisibleInTranscriptOnly": true,
+            "message": {"role": "user", "content": "요약 본문"}})
+    };
+    let parse = |line: &str| serde_json::from_str::<serde_json::Value>(line).unwrap();
+    let compacted = |last: &str| {
+        let head = [prompt.clone(), reply("BEFORE"), boundary.clone()];
+        let tail = [summary(json!(true)), reply("AFTER"), parse(last)];
+        [&head[..], &tail[..]].concat()
+    };
+    let alive = Duration::from_secs(5);
+    for (name, last, kind) in [
+        ("completed", TURN_END, NativeTerminalKind::Completed),
+        ("aborted", INTERRUPT, NativeTerminalKind::Aborted),
+    ] {
+        let lines = [compacted(last), vec![reply("NEXT")]].concat();
+        let path = dir.path().join(format!("{name}.jsonl"));
+        let (read, replayed) = read_and_replay(&path, &lines, alive);
+        // The terminal is the record before the next turn's, so it ends where that one begins.
+        let body = std::fs::read_to_string(&path).unwrap();
+        let end = body.trim_end().rfind('\n').unwrap() as u64 + 1;
+        assert_eq!(read, Some((kind, end)), "{name}");
+        assert_eq!(replayed, Some((0, kind, end)), "{name}");
+    }
+
+    let short = Duration::from_millis(400);
+    let mut refused = Vec::new();
+    for flag in [None, Some(json!(false)), Some(json!("true"))] {
+        let mut second = prompt.clone();
+        if let Some(flag) = flag.clone() {
+            second["isCompactSummary"] = flag;
+        }
+        refused.push((
+            format!("{flag:?}"),
+            vec![
+                prompt.clone(),
+                reply("BEFORE"),
+                second,
+                reply("AFTER"),
+                parse(TURN_END),
+            ],
+        ));
+    }
+    let orphan = vec![
+        boundary,
+        summary(json!(true)),
+        reply("AFTER"),
+        parse(TURN_END),
+    ];
+    refused.push(("summary without its own prompt".into(), orphan));
+    for (n, (name, lines)) in refused.into_iter().enumerate() {
+        let path = dir.path().join(format!("refused-{n}.jsonl"));
+        assert_eq!(
+            read_and_replay(&path, &lines, short),
+            (None, None),
+            "{name}"
+        );
+    }
+}
