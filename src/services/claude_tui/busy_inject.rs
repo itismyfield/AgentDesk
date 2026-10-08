@@ -323,19 +323,21 @@ impl Pane {
         let Some(out) = self.ok(&args) else {
             return Guard::Failed;
         };
-        // The else branch ran, so the command did not; a count means a person attached since g0.
+        // The else branch ran, so the command did not; a count means a person attached since g0,
+        // unless no client was attached then and none since, which leaves only the size.
         match out.trim().strip_prefix(VETOED).map(str::trim) {
             None if out.trim().is_empty() => Guard::Applied,
             None => Guard::Failed,
-            Some(rest)
-                if rest
-                    .split_whitespace()
-                    .next()
-                    .is_some_and(|count| count.parse::<u32>().is_ok()) =>
-            {
-                Guard::Vetoed
+            Some(rest) => {
+                let mut fields = rest.split_whitespace();
+                match fields.next().map(str::parse::<u32>) {
+                    Some(Ok(0)) if size.is_some() && fields.next().unwrap_or("") == g0.last => {
+                        Guard::Resized
+                    }
+                    Some(Ok(_)) => Guard::Vetoed,
+                    _ => Guard::Gone,
+                }
             }
-            Some(_) => Guard::Gone,
         }
     }
 
@@ -355,6 +357,8 @@ impl Pane {
 enum Guard {
     Applied,
     Vetoed,
+    /// Only a sized guard: the pane is no longer the size the command was planned for.
+    Resized,
     Gone,
     Failed,
 }
@@ -704,7 +708,9 @@ impl Attempt<'_> {
         // A person may still type after the last capture; an attach by then withholds the Enter.
         match self.key("Enter") {
             Guard::Applied => {}
-            Guard::Vetoed => return Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste),
+            Guard::Vetoed | Guard::Resized => {
+                return Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste);
+            }
             Guard::Gone | Guard::Failed => return Outcome::Unconfirmed(Unconfirmed::EnterFailed),
         }
         // Only a scan that ends inside the window confirms; later evidence stays NotObserved.
@@ -729,11 +735,10 @@ fn paste_into_empty(attempt: &Attempt<'_>, drawn: &screen::Drawn) -> Outcome {
     // From the paste on, absence of evidence never proves the input was not taken.
     match attempt.paste(attempt.size) {
         Guard::Applied => {}
-        guard @ (Guard::Vetoed | Guard::Gone) => {
+        guard @ (Guard::Vetoed | Guard::Resized | Guard::Gone) => {
             attempt.drop_buffer();
-            // With no attach since g0, only a resize can have refused the paste.
             return Outcome::NotSent(match guard {
-                Guard::Vetoed if attempt.unattended() => Veto::UnpredictableRender,
+                Guard::Resized => Veto::UnpredictableRender,
                 Guard::Vetoed => Veto::HumanAttached,
                 _ => Veto::PaneUnavailable,
             });
