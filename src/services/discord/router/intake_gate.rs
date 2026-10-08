@@ -7,9 +7,7 @@ use super::intake_queue_transaction::{
 };
 
 mod busy_duplicate_notice;
-mod busy_inject;
-#[cfg(test)]
-pub(in crate::services::discord) use busy_inject::test_support as busy_inject_support;
+pub(super) mod busy_inject;
 mod component_events;
 mod gate;
 mod queue_effects;
@@ -455,11 +453,8 @@ pub(in crate::services::discord) async fn handle_event(
                                     iv.message_id == new_message.id
                                         || iv.source_message_ids.contains(&new_message.id)
                                 });
-                            let parent_injecting = || {
-                                let take = busy_inject::thread_may_take;
-                                !take(&data.provider, parent_channel, new_message.id)
-                            };
-                            if already_intake || parent_injecting() {
+                            let (take, id) = (busy_inject::thread_may_take, new_message.id);
+                            if already_intake || !take(&data.provider, parent_channel, id) {
                                 thread_promotion_blocked = true;
                                 // Mark thread-processed so subsequent duplicates are no-ops.
                                 e.insert((now, true));

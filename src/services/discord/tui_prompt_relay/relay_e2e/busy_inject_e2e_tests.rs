@@ -206,12 +206,10 @@ async fn a_taken_message_ends_before_a_pending_dm_reply_consumes_it_pg() {
     let reply = register(Some(&pool), "agent", &user, None, "{}", 600)
         .await
         .unwrap();
-    let status = || async {
-        sqlx::query_scalar::<_, String>("SELECT status FROM pending_dm_replies WHERE id = $1")
-            .bind(reply)
-            .fetch_one(&pool)
-            .await
-            .unwrap()
+    // The reply still waiting for this user, if it was not consumed.
+    let pending = || async {
+        let load = crate::services::discord_dm_reply_store::load_oldest_pending_dm_reply_db;
+        load(Some(&pool), &user).await.unwrap().map(|row| row.id)
     };
     let (channel, now_ms) = (
         ChannelId::new(CHANNEL_ID),
@@ -228,13 +226,10 @@ async fn a_taken_message_ends_before_a_pending_dm_reply_consumes_it_pg() {
     )
     .unwrap();
     rt.h.deliver_user_message(taken.get(), "yes").await.unwrap();
-    let after_taken = status().await;
+    let after_taken = pending().await;
     rt.h.deliver_user_message(fresh_id(), "yes").await.unwrap();
-    let after_new = status().await;
-    assert_eq!(
-        (after_taken.as_str(), after_new.as_str()),
-        ("pending", "consumed")
-    );
+    let after_new = pending().await;
+    assert_eq!((after_taken, after_new), (Some(reply), None));
 }
 
 /// A message the mailbox already runs is the mailbox's: the reservation answers owned, and the
