@@ -407,6 +407,14 @@ impl HealthRegistry {
         *self.utility_bot(role).http.lock().await = Some(http);
     }
 
+    /// Test-only: resolves a utility bot to `id` for its current token without a Discord lookup.
+    #[cfg(test)]
+    pub(crate) async fn set_utility_bot_user_id_for_tests(&self, role: UtilityBotRole, id: u64) {
+        let runtime = self.utility_bot(role);
+        let generation = runtime.token_generation.load(Ordering::SeqCst);
+        *runtime.user_id.lock().await = Some((id, generation));
+    }
+
     /// Snapshot the announce-role HTTP client. This role is where `Manage
     /// Messages` permissions are concentrated, so pin/unpin lifecycle code
     /// prefers it over per-provider HTTP clients.
