@@ -82,6 +82,16 @@ async fn busy() -> Busy {
 }
 
 impl Runtime {
+    /// Empties the channel's mailbox and disarms leftover save faults, so no task this scenario
+    /// left writes its queue into the next harness's root, which reuses the channel.
+    async fn finish(&self) {
+        let channel = ChannelId::new(CHANNEL_ID);
+        crate::services::turn_orchestrator::test_support::queue_save_faults(channel, true);
+        let context = crate::services::discord::queue_persistence_context;
+        let persistence = context(&self.h.shared, &ProviderKind::Claude, channel);
+        self.h.shared.mailbox(channel).clear(persistence).await;
+    }
+
     /// A background turn holds the mailbox, so input the pane does not take is queued.
     async fn hold_mailbox(&self) {
         claim_kinded(&self.h.shared, CHANNEL_ID, ActiveTurnKind::Background).await;
@@ -143,6 +153,7 @@ async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
     let keys = vec!["paste-buffer".to_string(), "send-keys".to_string()];
     let disk = Some("\"observed\"".to_string());
     let taken = (keys, vec!["📥".to_string()], Some(message), vec![], 0, disk);
+    rt.finish().await;
     assert_eq!(observed, taken);
 }
 
@@ -187,6 +198,7 @@ async fn a_redelivered_injected_message_ends_at_the_lookup_pg() {
     }
     let left = (pane.keys(), rt.queue().await, rt.h.checkpoint());
     let none = [("restarted", 0, 0), ("idle", 0, 0), ("held", 0, 0)];
+    rt.finish().await;
     assert_eq!((observed, left), (none.to_vec(), (vec![], vec![], None)));
 }
 
@@ -229,6 +241,7 @@ async fn a_taken_message_ends_before_a_pending_dm_reply_consumes_it_pg() {
     let after_taken = pending().await;
     rt.h.deliver_user_message(fresh_id(), "yes").await.unwrap();
     let after_new = pending().await;
+    rt.finish().await;
     assert_eq!((after_taken, after_new), (Some(reply), None));
 }
 
@@ -264,6 +277,7 @@ async fn a_message_the_mailbox_already_runs_is_not_pasted_pg() {
         rt.queue().await,
     );
     let owned = vec!["NotSent(\"source_owned\")".to_string()];
+    rt.finish().await;
     assert_eq!(observed, (owned, vec![], vec![], vec![]));
 }
 
@@ -295,6 +309,7 @@ async fn an_owner_refused_before_its_reservation_leaves_the_message_to_intake_pg
     let refused = vec!["NotSent(\"queue_nonempty\")".to_string()];
     // Intake merges the message into the input queued just before it.
     let queue = vec!["meanwhile\nstatus?".to_string()];
+    rt.finish().await;
     assert_eq!(observed, (refused, queue, vec![], vec!["➕".to_string()]));
 }
 
@@ -336,6 +351,7 @@ async fn a_vetoed_paste_hands_the_message_back_ahead_of_input_sent_meanwhile_pg(
         in_memory(message),
     );
     let queue = vec!["status?".to_string(), "meanwhile".to_string()];
+    rt.finish().await;
     assert_eq!(
         observed,
         (queue, vec!["📬".to_string()], None, vec![], None)
@@ -373,6 +389,7 @@ async fn a_handback_that_never_lands_ends_the_message_with_a_notice_pg() {
     );
     let failed = vec!["HandbackFailed(\"handback_persistence\")".to_string()];
     let left = vec!["meanwhile".to_string()];
+    rt.finish().await;
     assert_eq!(observed, (failed, left, vec![], None, 1, 1));
 }
 
@@ -400,6 +417,7 @@ async fn a_handback_with_an_unknown_answer_is_neither_resent_nor_queued_again_pg
             rt.notices(),
             busy.pane.keys(),
         ));
+        rt.finish().await;
     }
     let unknown = vec!["HandbackFailed(\"handback_unknown\")".to_string()];
     let notice = vec![QUEUE_UNKNOWN.to_string()];
@@ -439,6 +457,7 @@ async fn an_aborted_intake_leaves_the_owner_to_record_the_injection_pg() {
     let recorded = recorded.await;
     let source = disposition::test_support::source_entry(&ProviderKind::Claude, message);
     let observed = (recorded, in_memory(message), source, busy.pane.keys().len());
+    rt.finish().await;
     assert_eq!(observed, (true, Some(InjectionOutcome::Observed), None, 2));
 }
 
@@ -462,6 +481,7 @@ async fn an_owner_that_dies_outside_the_effect_reports_the_input_unknown_pg() {
     );
     let failed = vec!["OwnerFailed { turn_id: None }".to_string()];
     let notice = vec![UNCONFIRMED.to_string()];
+    rt.finish().await;
     assert_eq!(observed, (failed, notice, vec![], None, None, None));
 }
 
@@ -481,6 +501,7 @@ async fn a_text_command_on_a_gated_channel_is_never_offered_pg() {
         on_disk(message),
         busy.pane.keys(),
     );
+    rt.finish().await;
     assert_eq!(observed, (true, 0, vec!["taken"], None, vec![]));
 }
 
@@ -511,6 +532,7 @@ async fn startup_recovery_and_a_restart_drain_keep_text_from_the_pane_pg() {
         observed.push((case, hook::seen(message).offers, calls, busy.pane.keys()));
     }
     let passed = |case| (case, 1, vec!["taken"], vec![]);
+    rt.finish().await;
     assert_eq!(observed, [passed("recovery"), passed("drain")]);
 }
 
@@ -566,5 +588,6 @@ async fn a_channel_outside_the_gate_reaches_no_injection_step_pg() {
         none,
         false,
     );
+    rt.finish().await;
     assert_eq!(observed, base);
 }

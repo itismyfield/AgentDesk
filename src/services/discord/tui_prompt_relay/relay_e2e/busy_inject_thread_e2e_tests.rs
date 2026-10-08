@@ -60,6 +60,7 @@ async fn a_thread_arrival_is_refused_while_the_parent_pastes_the_message_pg() {
         busy.pane.set("go", "");
         parent.await.unwrap().unwrap();
         let observed = (promotions, took, busy.pane.keys().len());
+        rt.finish().await;
         assert_eq!(
             observed,
             (vec![false], (0, false), 2),
@@ -94,6 +95,7 @@ async fn a_parent_arrival_after_the_thread_took_the_message_does_not_paste_pg() 
         rt.queue().await,
     );
     let parent_queue = vec!["status?".to_string()];
+    rt.finish().await;
     assert_eq!(
         observed,
         (vec![true], (1, true), vec![], vec![], parent_queue)
@@ -138,6 +140,7 @@ async fn a_thread_arrival_of_an_injected_message_never_runs_pg() {
     }
     let refused = ("dedup", vec![false], (0, false));
     let stopped = |case| (case, vec![], (0, false));
+    rt.finish().await;
     assert_eq!(observed, [refused, stopped("memory"), stopped("disk")]);
 }
 
@@ -160,5 +163,6 @@ async fn a_thread_takes_a_message_whose_parent_owner_died_pg() {
         thread_took(rt, thread, message).await,
     );
     let died = vec!["OwnerFailed { turn_id: None }".to_string()];
+    rt.finish().await;
     assert_eq!(observed, (died, None, vec![true], (1, true)));
 }
