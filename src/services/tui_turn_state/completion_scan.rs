@@ -36,8 +36,8 @@ pub(crate) fn jsonl_completion_scan_idle(provider: &ProviderKind, path: &Path) -
     )
 }
 
-/// The finalizer entry for a turn its caller holds as Herdr's: under settlement its own Codex
-/// abort ends it too.
+/// The tail scan with the Herdr abort flag, kept only as the backstop's start-offset mutant.
+#[cfg(test)]
 pub(crate) fn jsonl_herdr_completion_scan_idle(provider: &ProviderKind, path: &Path) -> bool {
     scan_strict_terminator_idle_with_strictness(
         provider,

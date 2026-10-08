@@ -106,53 +106,26 @@ impl CodexStopTurnIdentity {
         }
     }
 
-    /// Whether this active turn is the one `start` began: the first start at or after its offset,
-    /// with no other turn's record before it. An unreadable record is `Unobserved`.
-    fn is_own(&self, start: &HerdrTurnStart) -> Result<(), HerdrNotSent> {
+    /// Whether this active turn is the one `start` began, and, once the reader saw that start as
+    /// `seen`, still that native turn. An unreadable record is `Unobserved`.
+    fn is_own(&self, start: &HerdrTurnStart, seen: Option<&str>) -> Result<(), HerdrNotSent> {
+        use crate::services::provider::cancel_token_claude_interrupt::OwnTurnRead;
         if self.path != start.source
             || start.file.is_some_and(|file| file != self.file)
             || self.started_at < start.offset
         {
             return Err(HerdrNotSent::Identity);
         }
-        let mut file = std::fs::File::open(&self.path).map_err(|_| unobserved())?;
-        file.seek(std::io::SeekFrom::Start(start.offset))
-            .map_err(|_| unobserved())?;
-        let mut reader = std::io::BufReader::new(file);
-        let (mut line, mut offset) = (String::new(), start.offset);
-        loop {
-            line.clear();
-            let position = offset;
-            match reader.read_line(&mut line) {
-                Ok(read) if read > 0 && line.ends_with('\n') => offset += read as u64,
-                _ => return Err(unobserved()),
-            }
-            let record: serde_json::Value =
-                serde_json::from_str(&line).map_err(|_| unobserved())?;
-            let payload = &record["payload"];
-            let kind = payload["type"].as_str().unwrap_or("");
-            let foreign = match record["type"].as_str() {
-                Some("event_msg") if kind == "task_started" => {
-                    return match position == self.started_at {
-                        true => Ok(()),
-                        false => Err(HerdrNotSent::Identity),
-                    };
-                }
-                Some("event_msg") => matches!(kind, "task_complete" | "turn_aborted"),
-                Some("response_item") => match kind {
-                    "message" => payload["role"].as_str() == Some("assistant"),
-                    "function_call" | "custom_tool_call" | "tool_search_call" | "reasoning" => true,
-                    "function_call_output" | "custom_tool_call_output" | "tool_search_output" => {
-                        true
-                    }
-                    _ => false,
-                },
-                _ => false,
-            };
-            if foreign {
-                return Err(HerdrNotSent::Identity);
-            }
+        let own = start.codex_own_turn(false).map_err(|read| match read {
+            OwnTurnRead::Foreign => HerdrNotSent::Identity,
+            OwnTurnRead::Unreadable | OwnTurnRead::NotYet => unobserved(),
+        })?;
+        let rewritten = seen.is_some_and(|seen| seen != own.turn_id)
+            && !mutant("late_identity_ignores_native_id");
+        if own.started_at != self.started_at || rewritten {
+            return Err(HerdrNotSent::Identity);
         }
+        Ok(())
     }
 }
 
@@ -681,7 +654,8 @@ fn deliver(
         if let TurnIdentity::Codex(turn) = &identity
             && !mutant("late_escape_retargets_native_turn")
         {
-            turn.is_own(state.turn_start.get().ok_or(Pending)?)?;
+            let seen = state.seen_turn_id();
+            turn.is_own(state.turn_start.get().ok_or(Pending)?, seen.as_deref())?;
         }
         #[cfg(all(test, unix))]
         if let Some(action) = tests::AFTER_IDENTITY.lock().unwrap().take() {

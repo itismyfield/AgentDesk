@@ -100,11 +100,21 @@ pub(super) fn watcher_backstop_turn_is_terminal(
     let herdr = herdr_hold.is_some();
     #[cfg(test)]
     let herdr = policy_mutant(herdr);
+    let transcript = std::path::Path::new(&output_path);
     let signal = match herdr {
-        true => super::completion_signal::herdr_completion_signal_from_transcript,
-        false => completion_signal_from_transcript,
+        true => {
+            // Only the held turn's own start, in the hold's transcript, can prove its abort.
+            let held = held_turn_start(inflight_state.as_ref(), herdr_hold.as_ref(), &output_path);
+            let held = held.as_ref();
+            super::completion_signal::herdr_completion_signal_from_transcript(
+                provider,
+                runtime_kind,
+                transcript,
+                held,
+            )
+        }
+        false => completion_signal_from_transcript(provider, runtime_kind, transcript),
     };
-    let signal = signal(provider, runtime_kind, std::path::Path::new(&output_path));
     let confirmed_end_publication = Some(
         shared
             .tmux_relay_coord(channel_id)
@@ -192,13 +202,56 @@ fn herdr_hold_source(
     Some((name, path, false))
 }
 
-/// Test-only effect mutations of the backstop's Herdr policy choice.
+/// The own input start of the turn a Herdr hold names, from that turn's live token, only while the
+/// watcher reads the transcript the hold names.
+fn held_turn_start(
+    inflight_state: Option<&crate::services::discord::inflight::InflightTurnState>,
+    hold: Option<&(String, String, bool)>,
+    output_path: &str,
+) -> Option<crate::services::provider::cancel_token_claude_interrupt::HerdrTurnStart> {
+    let state = inflight_state?;
+    #[cfg(test)]
+    let unheld;
+    #[cfg(test)]
+    let hold = match hold {
+        None if backstop_mutant("backstop_off_changed") => {
+            unheld = (
+                state.tmux_session_name.clone()?,
+                output_path.to_owned(),
+                false,
+            );
+            Some(&unheld)
+        }
+        hold => hold,
+    };
+    let (logical, hold_path, _) = hold?;
+    let mut start = crate::services::provider::cancel_token_claude_interrupt::herdr_turn_start(
+        logical,
+        state.turn_nonce.as_deref()?,
+    );
+    #[cfg(test)]
+    if backstop_mutant("backstop_identity_skipped") {
+        // Any turn in the watcher's transcript, from its first record.
+        return start.map(|mut start| {
+            (start.source, start.file, start.offset) = (output_path.into(), None, 0);
+            start
+        });
+    }
+    start = start.filter(|_| hold_path == output_path);
+    start
+}
+
+/// Test-only effect mutations of the backstop's Herdr policy.
+#[cfg(test)]
+pub(super) fn backstop_mutant(name: &str) -> bool {
+    crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(name)
+}
+
 #[cfg(test)]
 fn policy_mutant(herdr: bool) -> bool {
-    use crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant as mutant;
     match herdr {
-        true => !mutant("backstop_policy_ignored"),
-        false => mutant("backstop_off_changed"),
+        true => !backstop_mutant("backstop_policy_ignored"),
+        false => backstop_mutant("backstop_off_changed"),
     }
 }
 
@@ -423,50 +476,62 @@ mod tests {
         .await;
     }
 
-    /// A held Herdr Codex turn ends on its own abort under settlement only; outside Herdr or without
-    /// settlement the backstop reads that abort as the existing signal does, never as terminal.
+    fn codex(kind: &str, turn: &str) -> String {
+        let record =
+            serde_json::json!({"type": "event_msg", "payload": {"type": kind, "turn_id": turn}});
+        format!("{record}\n")
+    }
+
+    /// `n` KiB of a running Codex turn's reasoning records.
+    fn reasoning(n: usize) -> String {
+        let text = "x".repeat(1000);
+        let payload = serde_json::json!({"type": "agent_reasoning", "text": text});
+        let record = serde_json::json!({"type": "event_msg", "payload": payload});
+        format!("{record}\n").repeat(n)
+    }
+
+    /// A held Herdr Codex turn: its row names `held`, a live watcher reads `watched`, and its
+    /// token's own input began at `offset` of `held`.
     #[cfg(unix)]
-    #[tokio::test(flavor = "current_thread")]
-    async fn only_a_held_herdr_turn_ends_on_its_own_codex_abort() {
-        use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
-        super::super::tests::with_isolated_runtime_root(|| async move {
-            let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
-            let entropy = chrono::Utc::now()
-                .timestamp_nanos_opt()
-                .unwrap_or_default()
-                .unsigned_abs();
-            let channel = ChannelId::new(50_340_026u64.saturating_add(entropy % 1_000_000));
-            let session = format!("AgentDesk-codex-backstop-abort-{}", entropy % 1_000_000);
-            let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
-            let path = transcript.to_str().unwrap().to_string();
-            let rollout = |aborted: &str| {
-                let event = |kind: &str, turn: &str| {
-                    serde_json::json!({"type": "event_msg", "payload": {"type": kind, "turn_id": turn}})
-                };
-                let lines = [event("task_started", "t1"), event("turn_aborted", aborted)];
-                let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
-                std::fs::write(&transcript, body).unwrap();
-            };
-            let state = crate::services::discord::inflight::InflightTurnState::new(
+    struct HeldTurn {
+        shared: Arc<SharedData>,
+        channel: ChannelId,
+        marker: String,
+        _token: Arc<crate::services::provider::CancelToken>,
+    }
+
+    #[cfg(unix)]
+    impl HeldTurn {
+        fn new(held: &std::path::Path, offset: u64, watched: &std::path::Path) -> Self {
+            use crate::services::provider::cancel_token_claude_interrupt::HerdrTurnStart;
+            use std::os::unix::fs::MetadataExt;
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let channel = ChannelId::new(50_340_027_000 + u64::from(std::process::id()) * 100 + n);
+            let session = format!("AgentDesk-codex-backstop-held-{}-{n}", std::process::id());
+            let token = Arc::new(crate::services::provider::CancelToken::new());
+            let mut state = crate::services::discord::inflight::InflightTurnState::new(
                 ProviderKind::Codex,
                 channel.get(),
                 None,
                 7,
                 310,
                 311,
-                "herdr abort".to_string(),
+                "herdr hold".to_string(),
                 None,
                 Some(session.clone()),
-                Some(path.clone()),
+                Some(held.display().to_string()),
                 None,
                 0,
             );
+            state.turn_nonce = token.turn_nonce().map(str::to_owned);
             crate::services::discord::inflight::save_inflight_state(&state).unwrap();
             shared.tmux_watchers.insert(
                 channel,
                 crate::services::discord::TmuxWatcherHandle {
                     tmux_session_name: session.clone(),
-                    output_path: path,
+                    output_path: watched.display().to_string(),
                     paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     resume_offset: Arc::new(std::sync::Mutex::new(None)),
                     cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -479,25 +544,118 @@ mod tests {
             );
             let marker = crate::services::tmux_common::session_temp_path(&session, "host_kind");
             std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
-            let terminal =
-                || watcher_backstop_turn_is_terminal(&shared, channel, &ProviderKind::Codex, true);
-
-            rollout("t1");
-            let existing = completion_signal_from_transcript(&ProviderKind::Codex, None, &transcript);
-            assert_eq!(existing, CompletionSignal::PausedLive);
-            assert!(!terminal(), "a non-Herdr turn reads the abort as the existing signal does");
             std::fs::write(&marker, "herdr").unwrap();
-            HERDR_SETTLEMENT_OVERRIDE.set(false);
-            let unsettled = terminal();
-            HERDR_SETTLEMENT_OVERRIDE.set(true);
-            assert!(!unsettled, "without settlement a Herdr turn keeps the existing signal");
-            assert!(terminal(), "a held Herdr turn ends on its own abort");
-            rollout("t0");
-            assert!(!terminal(), "another turn's abort ends nothing");
+            let owner = crate::db::dispatched_sessions::hosted_execution::HostedOwner {
+                provider: "codex".into(),
+                discord_token_hash: shared.token_hash.clone(),
+                channel_id: channel.to_string(),
+                logical_key: session,
+                owner_node: "node".into(),
+                runtime_root: "/tmp".into(),
+            };
+            let herdr = token.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+            let meta = std::fs::metadata(held).unwrap();
+            assert!(herdr.record_turn_start(HerdrTurnStart {
+                execution_nonce: "backstop".into(),
+                source: held.to_owned(),
+                file: Some((meta.dev(), meta.ino())),
+                offset,
+                submitted_at: None,
+            }));
+            Self {
+                shared,
+                channel,
+                marker,
+                _token: token,
+            }
+        }
 
-            shared.tmux_watchers.remove(&channel);
-            let _ = std::fs::remove_file(&marker);
-            let _ = std::fs::remove_file(&transcript);
+        fn terminal(&self) -> bool {
+            watcher_backstop_turn_is_terminal(
+                &self.shared,
+                self.channel,
+                &ProviderKind::Codex,
+                true,
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for HeldTurn {
+        fn drop(&mut self) {
+            self.shared.tmux_watchers.remove(&self.channel);
+            let _ = std::fs::remove_file(&self.marker);
+        }
+    }
+
+    /// Under settlement a held Herdr Codex turn ends only on its own abort read from its own start
+    /// in the hold's transcript; outside Herdr the abort keeps the existing signal.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_held_herdr_turn_ends_only_on_its_own_abort() {
+        use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
+        super::super::tests::with_isolated_runtime_root(|| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let file = |name: &str, body: String| {
+                let path = dir.path().join(name);
+                std::fs::write(&path, body).unwrap();
+                path
+            };
+            let earlier = codex("task_started", "a") + &codex("turn_aborted", "a");
+            let own = codex("task_started", "b") + &codex("turn_aborted", "b");
+
+            let mine = file("own.jsonl", own.clone());
+            let held = HeldTurn::new(&mine, 0, &mine);
+            let existing = completion_signal_from_transcript(&ProviderKind::Codex, None, &mine);
+            assert_eq!(existing, CompletionSignal::PausedLive);
+            assert!(held.terminal(), "its own abort from its own start ends it");
+            HERDR_SETTLEMENT_OVERRIDE.set(false);
+            let unsettled = held.terminal();
+            HERDR_SETTLEMENT_OVERRIDE.set(true);
+            assert!(!unsettled, "without settlement the existing signal holds");
+            std::fs::remove_file(&held.marker).unwrap();
+            assert!(!held.terminal(), "outside Herdr the abort is no terminal");
+
+            let after = file("after.jsonl", earlier.clone());
+            let end = std::fs::metadata(&after).unwrap().len();
+            let next = HeldTurn::new(&after, end, &after);
+            assert!(
+                !next.terminal(),
+                "an earlier turn's abort ends no later held turn"
+            );
+
+            let other = file("other.jsonl", earlier);
+            let held_b = file("held.jsonl", codex("task_started", "b"));
+            let elsewhere = HeldTurn::new(&held_b, 0, &other);
+            assert!(
+                !elsewhere.terminal(),
+                "another transcript's abort ends nothing"
+            );
+
+            let unstarted = file("unstarted.jsonl", codex("turn_aborted", "b"));
+            assert!(!HeldTurn::new(&unstarted, 0, &unstarted).terminal());
+            let foreign = file(
+                "foreign.jsonl",
+                codex("task_started", "b") + &codex("turn_aborted", "z"),
+            );
+            assert!(!HeldTurn::new(&foreign, 0, &foreign).terminal());
+        })
+        .await;
+    }
+
+    /// A held Herdr turn longer than the transcript tails still ends on its own abort.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_long_held_herdr_turn_ends_on_its_own_abort() {
+        super::super::tests::with_isolated_runtime_root(|| async move {
+            let dir = tempfile::tempdir().unwrap();
+            for kib in [70, 1100] {
+                let path = dir.path().join(format!("long-{kib}.jsonl"));
+                let body =
+                    codex("task_started", "b") + &reasoning(kib) + &codex("turn_aborted", "b");
+                std::fs::write(&path, body).unwrap();
+                assert!(HeldTurn::new(&path, 0, &path).terminal(), "{kib} KiB");
+            }
         })
         .await;
     }

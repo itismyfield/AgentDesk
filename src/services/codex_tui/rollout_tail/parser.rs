@@ -534,11 +534,12 @@ pub(super) fn herdr_eof(
         return Some(Some(ReadOutputResult::Completed { offset }));
     }
     // The turn's own start is read and nothing ended it: a stop that met it unbound runs now.
-    if matches!(state.started_turn, Some(Some(_)))
+    let progress = turn.0.saturating_add(state.bytes_read);
+    if let Some(Some(turn_id)) = state.started_turn.as_ref()
         && !state.mixed_turn
         && let Some(herdr) = actor.herdr_interrupt_state()
     {
-        herdr.own_start_observed(turn.0.saturating_add(state.bytes_read));
+        herdr.own_start_observed(progress, turn_id);
     }
     if super::try_process_complete_partial_line(partial_line, sender, state, accept) {
         return Some(None);
