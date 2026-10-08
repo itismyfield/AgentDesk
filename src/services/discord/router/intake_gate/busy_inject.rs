@@ -1,5 +1,5 @@
-//! A person's Discord text offered to a busy Claude TUI pane before intake queues or starts it,
-//! behind its own channel gate, with the message claimed until the injection ends.
+//! Admitted Discord text, from a person or a bot, offered to a busy Claude TUI pane before intake
+//! queues or starts it, behind its own channel gate, the message claimed until the injection ends.
 
 use std::collections::HashSet;
 use std::sync::atomic::Ordering::Relaxed;
@@ -18,7 +18,7 @@ use crate::services::discord::{Data, SharedData};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::HANDBACK_NOT_WRITTEN;
 
-/// `ADK_BUSY_INJECT_DISCORD_CHANNELS` opens busy-turn injection of a person's Discord text, read
+/// `ADK_BUSY_INJECT_DISCORD_CHANNELS` opens busy-turn injection of admitted Discord text, read
 /// once per process: `*` or channel ids split by commas or spaces, threads of a listed channel too.
 #[cfg(not(test))]
 const DISCORD_INJECT_ENV: &str = "ADK_BUSY_INJECT_DISCORD_CHANNELS";
@@ -118,8 +118,9 @@ pub(super) struct LiveText<'a> {
     pub(super) parent: Option<ChannelId>,
     pub(super) message_id: MessageId,
     pub(super) author_id: UserId,
-    /// Intake's own reading of the sender as a person (`preserve_on_cancel`).
-    pub(super) human: bool,
+    /// The author marks intake's own queue entry would carry, which a handback carries too.
+    pub(super) author_is_bot: bool,
+    pub(super) author_is_allowed_automation: bool,
     pub(super) text: &'a str,
     pub(super) reply_context: Option<&'a str>,
     pub(super) has_reply_boundary: bool,
@@ -127,11 +128,10 @@ pub(super) struct LiveText<'a> {
     pub(super) carries_more_than_text: bool,
 }
 
-/// Only plain text a person typed, outside startup recovery and restart drain, is offered.
+/// Only plain text, whoever sent it, outside startup recovery and restart drain, is offered.
 fn offerable(live: &LiveText<'_>, shared: &SharedData) -> bool {
     let restart = &shared.restart;
-    live.human
-        && !live.carries_more_than_text
+    !live.carries_more_than_text
         && !live.text.trim().is_empty()
         && !crate::services::discord::catch_up::handled_command::is_text_command(live.text)
         && !NOT_TYPED.iter().any(|prefix| live.text.starts_with(prefix))
@@ -153,8 +153,8 @@ fn handback(live: &LiveText<'_>) -> (crate::services::turn_orchestrator::Interve
     let spec = SoftInterventionSpec {
         channel_id: live.channel_id,
         author_id: live.author_id,
-        author_is_bot: false,
-        author_is_allowed_automation: false,
+        author_is_bot: live.author_is_bot,
+        author_is_allowed_automation: live.author_is_allowed_automation,
         message_id: live.message_id,
         text: live.text.to_string(),
         reply_context: live.reply_context.map(str::to_string),
