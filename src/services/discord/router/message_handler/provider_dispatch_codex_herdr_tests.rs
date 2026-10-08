@@ -1351,3 +1351,49 @@ fn only_the_live_reader_runs_a_late_stop_at_the_turns_own_start() {
         "the live reader runs it once"
     );
 }
+
+fn write_raw(path: &Path, bytes: &str) {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(bytes.as_bytes()).unwrap();
+}
+
+// A late attempt that met an unfinished record sent nothing, so it runs once more when the reader
+// passes the next complete record: one Escape then, never another.
+#[test]
+fn a_late_stop_refused_before_any_send_runs_at_the_next_complete_record_pg() {
+    let seen = Mutex::new(None);
+    let late = stopped_before_attach("late-retry", |fx, shared, path| {
+        let usage = json!({"type": "event_msg", "payload": {"type": "token_count"}});
+        let record = usage.to_string();
+        let (head, rest) = record.split_at(record.len() / 2);
+        let lines: String = started_lines("t1", "답")
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect();
+        write_raw(path, &(lines + head));
+        let unfinished = settle_escapes(fx, 0);
+        write_raw(path, &format!("{rest}\n"));
+        let sent = settle_escapes(fx, 1);
+        append(path, &[usage.clone(), usage]);
+        std::thread::sleep(Duration::from_millis(400));
+        *seen.lock().unwrap() = Some((unfinished, sent, user_stop(fx, shared)));
+        let done = json!({"type": "event_msg", "payload": {"type": "task_complete",
+            "turn_id": "t1", "last_agent_message": "답"}});
+        append(path, &[done]);
+    });
+    let expected = LateStop {
+        unbound: pending_stop(),
+        escapes: (0, 1),
+        intent_kept: true,
+        result: Ok(()),
+    };
+    assert_eq!(late, expected);
+    let (unfinished, sent, repeated) = seen.into_inner().unwrap().unwrap();
+    assert_eq!(
+        (unfinished, sent),
+        (0, 1),
+        "none over the unfinished record, one after it"
+    );
+    assert_eq!(repeated, "AlreadyRequested");
+}
