@@ -62,7 +62,12 @@ impl HerdrFrame {
         // The Source is judged and the kind committed under one source authority, so no clear or
         // rebind lands between them.
         crate::services::tmux_common::with_tmux_source_authority(&self.logical, |_| {
-            if !crate::services::discord::turn_bridge::herdr_marked(&self.logical) {
+            // Herdr exists only on unix; elsewhere no pane is Herdr's.
+            #[cfg(unix)]
+            let herdr = crate::services::discord::turn_bridge::herdr_marked(&self.logical);
+            #[cfg(not(unix))]
+            let herdr = false;
+            if !herdr {
                 return Err(refused);
             }
             let source =
