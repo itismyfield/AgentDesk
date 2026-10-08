@@ -207,6 +207,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/claude_tui/hook_payload_fixture_tests.rs",
         "src/services/claude_tui/hook_server_memento_tests.rs",
         "src/services/claude_tui/session/auto_compact_launch_tests.rs",
+        "src/services/codex_tui/busy_inject/inject_tests.rs",
         "src/services/codex_tui/session/source_observation_tests.rs",
         "src/services/kakao/transport_tests.rs",
         "src/services/cluster/attachment_transfer/tests.rs",

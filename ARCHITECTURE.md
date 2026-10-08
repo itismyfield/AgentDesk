@@ -729,6 +729,10 @@ src/
 │   ├── codex_tmux_wrapper/
 │   │   └── input.rs
 │   ├── codex_tui/
+│   │   ├── busy_inject/
+│   │   │   ├── inject_tests.rs
+│   │   │   ├── rollout.rs
+│   │   │   └── screen.rs
 │   │   ├── input/
 │   │   │   ├── tests/
 │   │   │   │   └── startup_update_tests.rs
@@ -748,6 +752,7 @@ src/
 │   │   │   └── source_observation_tests.rs
 │   │   ├── verified_tail/
 │   │   │   └── diagnostic_tests.rs
+│   │   ├── busy_inject.rs
 │   │   ├── canary.rs
 │   │   ├── host_input.rs
 │   │   ├── input.rs
