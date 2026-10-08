@@ -3,7 +3,10 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
-use super::{NextRecord, RecordAcceptance, RolloutParseState, herdr_terminal_kind};
+use super::{
+    NextRecord, RecordAcceptance, RolloutParseState, herdr_terminal_kind,
+    promote_own_task_complete_fallback_text,
+};
 use crate::services::agent_protocol::NativeTerminalKind;
 use crate::services::provider::CancelToken;
 
@@ -48,7 +51,7 @@ impl super::RolloutRecordDecoder {
         super::super::try_process_complete_partial_line(&mut partial, &sender, &mut state, &accept);
         let kind = herdr_terminal_kind(&state)?;
         if kind == NativeTerminalKind::Completed {
-            super::super::promote_task_complete_fallback_text(&mut state);
+            promote_own_task_complete_fallback_text(&mut state);
         }
         Some(ReplayedTerminal {
             kind,

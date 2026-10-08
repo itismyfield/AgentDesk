@@ -351,9 +351,11 @@ fn first_prompt(
     crate::services::tui_prompt_dedupe::register_provider_session("codex", logical, logical);
     crate::services::tui_prompt_dedupe::register_codex_herdr_placeholder(logical, turn.channel_id);
     hold(nonce)?;
-    let run = observed_input(turn.cancel.as_deref(), None, || {
-        run_herdr(&target, &plan, turn.cancel.as_deref())
-    })?;
+    let run = observed_input(
+        turn.cancel.as_deref(),
+        || None,
+        || run_herdr(&target, &plan, turn.cancel.as_deref()),
+    )?;
     if run.run != InputRun::Applied {
         if composer_untouched(&run) {
             warn_release(logical, release_hold(nonce));
@@ -400,10 +402,10 @@ fn first_prompt(
 }
 
 /// One gated write under the token's submission observation, as a stop delivery reads it; a
-/// follow-up's turn start is recorded under the same lock, before its input.
+/// follow-up's turn start is built and recorded under the same lock, before its input, only then.
 fn observed_input(
     cancel: Option<&CancelToken>,
-    start: Option<HerdrTurnStart>,
+    start: impl FnOnce() -> Option<HerdrTurnStart>,
     write: impl FnOnce() -> PlanRun,
 ) -> Result<PlanRun, String> {
     let state = cancel.filter(|_| herdr_stop_settlement_available());
@@ -411,7 +413,7 @@ fn observed_input(
         return Ok(write());
     };
     let mut submitted = state.submission.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(start) = start
+    if let Some(start) = start()
         && !state.record_turn_start(start)
     {
         return Err("herdr turn: the token already began another turn".into());
@@ -463,9 +465,14 @@ fn followup(
         .map_err(|_| refused(PromptRefused::NoSource))?
         .len();
     hold(nonce)?;
-    let mut start = HerdrTurnStart::at_end_of(nonce, &path, None);
-    start.offset = before;
-    let run = observed_input(turn.cancel.as_deref(), Some(start), || {
+    let start = || {
+        let start = HerdrTurnStart::at_end_of(nonce, &path, None);
+        Some(HerdrTurnStart {
+            offset: before,
+            ..start
+        })
+    };
+    let run = observed_input(turn.cancel.as_deref(), start, || {
         run_herdr(&target, &plan, turn.cancel.as_deref())
     })?;
     if run.run == InputRun::Applied || composer_untouched(&run) {
@@ -508,4 +515,47 @@ fn read_reply(
         },
     });
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod observed_input_tests {
+    use super::*;
+    use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
+
+    /// A follow-up's turn start, a stat of its rollout, is built only under settlement and then
+    /// before its write; without settlement the write is all that runs.
+    #[test]
+    fn a_followup_builds_its_turn_start_only_under_settlement() {
+        let owner = HostedOwner {
+            provider: "codex".into(),
+            discord_token_hash: "hash".into(),
+            channel_id: "1".into(),
+            logical_key: "AgentDesk-codex-observed".into(),
+            owner_node: "node".into(),
+            runtime_root: "/tmp".into(),
+        };
+        let mut seen = Vec::new();
+        for settled in [false, true] {
+            HERDR_SETTLEMENT_OVERRIDE.set(settled);
+            let token = CancelToken::new();
+            token.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+            let calls = std::cell::RefCell::new(Vec::new());
+            let start = || {
+                calls.borrow_mut().push("start");
+                None
+            };
+            let write = || {
+                calls.borrow_mut().push("write");
+                PlanRun {
+                    run: InputRun::Applied,
+                    composer_mutated: true,
+                    enter_attempted: true,
+                }
+            };
+            assert!(observed_input(Some(&token), start, write).is_ok());
+            seen.push(calls.into_inner());
+        }
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        assert_eq!(seen, [vec!["write"], vec!["start", "write"]]);
+    }
 }

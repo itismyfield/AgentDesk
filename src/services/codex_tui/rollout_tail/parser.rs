@@ -119,6 +119,10 @@ pub(super) struct RolloutParseState {
     pub(super) turn_aborted_seen: bool,
     /// That turn's own `task_complete` was read; `turn_complete_seen` also counts any other turn's.
     pub(super) own_turn_complete_seen: bool,
+    /// The fallback body of that turn's own `task_complete`; a Herdr turn ends only on this one.
+    pub(super) own_task_complete_fallback_text: Option<String>,
+    /// Another turn's terminal before the start or another start before a terminal: no Herdr kind.
+    pub(super) mixed_turn: bool,
 }
 
 impl RolloutParseState {
@@ -272,7 +276,16 @@ fn response_item_messages(json: &Value, state: &mut RolloutParseState) -> Vec<St
     let Some(payload) = json.get("payload") else {
         return Vec::new();
     };
-    match payload.get("type").and_then(Value::as_str).unwrap_or("") {
+    let kind = payload.get("type").and_then(Value::as_str).unwrap_or("");
+    // Assistant text, a tool record or reasoning before this turn's start is a previous turn's tail.
+    let content = match kind {
+        "message" => payload.get("role").and_then(Value::as_str) == Some("assistant"),
+        "function_call" | "custom_tool_call" | "tool_search_call" | "reasoning" => true,
+        "function_call_output" | "custom_tool_call_output" | "tool_search_output" => true,
+        _ => false,
+    };
+    state.mixed_turn |= content && state.started_turn.is_none();
+    match kind {
         "message" => response_message_items(payload, state),
         "function_call" | "custom_tool_call" | "tool_search_call" => {
             match payload.get("call_id").and_then(Value::as_str) {
@@ -436,6 +449,9 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
         "task_started" => {
             if state.started_turn.is_none() {
                 state.started_turn = Some(codex_payload_turn_id(payload).map(str::to_owned));
+            } else if herdr_terminal_kind(state).is_none() {
+                // The next turn's head before this turn's terminal.
+                state.mixed_turn |= !started_turn_named_by(state, payload);
             }
             state.lifecycle_activity = true;
             None
@@ -443,18 +459,26 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
         "turn_aborted" => {
             // An abort ends this reader's turn only when it and the started turn name the same turn.
             state.turn_aborted_seen |= started_turn_named_by(state, payload);
+            state.mixed_turn |= state.started_turn.is_none();
             state.lifecycle_activity = true;
             None
         }
         "task_complete" => {
             state.turn_complete_seen = true;
-            state.own_turn_complete_seen |= started_turn_named_by(state, payload);
+            // A previous turn's tail after this turn's input boundary but before its start.
+            state.mixed_turn |= state.started_turn.is_none();
+            let own = started_turn_named_by(state, payload);
+            state.own_turn_complete_seen |= own;
+            let text = payload
+                .get("last_agent_message")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned);
+            if own && state.own_task_complete_fallback_text.is_none() {
+                state.own_task_complete_fallback_text = text.clone();
+            }
             if state.task_complete_fallback_text.is_none() {
-                state.task_complete_fallback_text = payload
-                    .get("last_agent_message")
-                    .and_then(Value::as_str)
-                    .filter(|text| !text.is_empty())
-                    .map(str::to_owned);
+                state.task_complete_fallback_text = text;
             }
             None
         }
@@ -470,8 +494,17 @@ fn started_turn_named_by(state: &RolloutParseState, payload: &Value) -> bool {
     same_codex_turn(started, codex_payload_turn_id(payload))
 }
 
+/// A Herdr turn's reply takes the fallback body only from its own `task_complete`.
+pub(super) fn promote_own_task_complete_fallback_text(state: &mut RolloutParseState) {
+    state.task_complete_fallback_text = state.own_task_complete_fallback_text.take();
+    super::promote_task_complete_fallback_text(state);
+}
+
 /// A Herdr turn's provider terminal: its own abort, else its own completion with no tool left open.
 pub(super) fn herdr_terminal_kind(state: &RolloutParseState) -> Option<NativeTerminalKind> {
+    if state.mixed_turn {
+        return None;
+    }
     if state.turn_aborted_seen {
         return Some(NativeTerminalKind::Aborted);
     }
@@ -561,7 +594,7 @@ fn emit_herdr_terminal(
 ) -> u64 {
     let complete_record_end = source_start.saturating_add(state.bytes_read);
     if terminal.kind == NativeTerminalKind::Completed {
-        super::promote_task_complete_fallback_text(state);
+        promote_own_task_complete_fallback_text(state);
     }
     let (source_file_dev, source_file_ino) =
         crate::services::provider::cancel_token_claude_interrupt::opened_file_identity(

@@ -479,8 +479,12 @@ mod herdr_settlement {
     }
 
     fn codex(kind: &str) -> String {
+        turn(kind, "t1")
+    }
+
+    fn turn(kind: &str, id: &str) -> String {
         let record =
-            serde_json::json!({"type": "event_msg", "payload": {"type": kind, "turn_id": "t1"}});
+            serde_json::json!({"type": "event_msg", "payload": {"type": kind, "turn_id": id}});
         format!("{record}\n")
     }
 
@@ -727,7 +731,7 @@ mod herdr_settlement {
     }
 
     /// A submitted Herdr turn whose reader ends without an admitted terminal keeps its slot, row and
-    /// token, stopped or not: a dead pane, or a terminal admission refuses, which shows no success.
+    /// token, stopped or not: a dead pane, a range mixing another turn, or a refused admission.
     #[tokio::test(flavor = "current_thread")]
     async fn a_herdr_turn_without_an_admitted_terminal_stays_held() {
         let root = tempfile::tempdir().unwrap();
@@ -736,9 +740,16 @@ mod herdr_settlement {
         let running = codex("task_started") + &reply("partial");
         let completed = codex("task_started") + &reply("answer") + &codex("task_complete");
         let aborted = codex("task_started") + &reply("partial") + &codex("turn_aborted");
+        let next_head = codex("task_started")
+            + &turn("task_started", "t2")
+            + &reply("answer")
+            + &codex("task_complete");
+        let prior_tail = turn("task_complete", "t0") + &completed;
         for (n, body, stopped, dead, evidence) in [
             (11, running.clone(), true, true, Evidence::Logged),
             (15, running, false, true, Evidence::Logged),
+            (16, next_head, false, true, Evidence::Logged),
+            (17, prior_tail, false, true, Evidence::Logged),
             (12, completed.clone(), false, false, Evidence::Unmarked),
             (13, completed, true, false, Evidence::Unmarked),
             (14, aborted, true, false, Evidence::Unmarked),

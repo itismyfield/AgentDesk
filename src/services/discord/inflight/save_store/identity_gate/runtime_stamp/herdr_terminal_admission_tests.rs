@@ -169,10 +169,14 @@ impl Case {
 
     /// The typed frame the provider's real Herdr reader sends, reading from `from`.
     fn read(&self, from: u64) -> StreamMessage {
+        self.try_read(from).expect("a provider terminal")
+    }
+
+    fn try_read(&self, from: u64) -> Option<StreamMessage> {
         if self.provider == ProviderKind::Claude {
             let path = self.path.display().to_string();
             let read = crate::services::claude::herdr_turn::herdr_terminal_frame;
-            return read(&path, from, &self.logical, &self.actor).expect("a Claude terminal");
+            return read(&path, from, &self.logical, &self.actor);
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let (path, actor) = (self.path.clone(), self.actor.clone());
@@ -192,7 +196,6 @@ impl Case {
         .unwrap();
         rx.try_iter()
             .find(|frame| matches!(frame, StreamMessage::CodexTuiTerminalDone { .. }))
-            .expect("a Codex terminal")
     }
 
     async fn admit(&mut self, frame: StreamMessage) -> Option<NativeTerminalKind> {
@@ -378,6 +381,83 @@ async fn a_herdr_claude_terminal_is_admitted_only_from_this_tokens_own_prompt() 
         "an earlier turn's terminal"
     );
     assert_eq!(case.durable_kind(), None);
+    assert_eq!(case.admit(frame).await, Some(NativeTerminalKind::Completed));
+}
+
+/// A range holding the next turn's head before its terminal, or a previous turn's terminal or output
+/// before its start, ends nothing for reader or admission; metadata and input before it still pass.
+#[tokio::test(flavor = "current_thread")]
+async fn a_herdr_range_holding_another_turns_head_or_tail_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let _env = env(temp.path());
+    let at = chrono::Utc::now() + chrono::Duration::seconds(1);
+    let prompt = |text: &str| {
+        claude(
+            serde_json::json!({"type": "user", "message": {"role": "user", "content": text}}),
+            at,
+        )
+    };
+    let result = claude(
+        serde_json::json!({"type": "result", "subtype": "success", "result": "answer"}),
+        at,
+    );
+    let earlier = serde_json::json!({"type": "assistant", "message": {"role": "assistant",
+        "content": [{"type": "text", "text": "earlier"}]}});
+    let own =
+        codex("task_started", Some("t1")) + &reply("answer") + &codex("task_complete", Some("t1"));
+    let shapes = [
+        (
+            21,
+            ProviderKind::Codex,
+            own.clone(),
+            codex("task_started", Some("t1"))
+                + &codex("task_started", Some("t2"))
+                + &reply("answer")
+                + &codex("task_complete", Some("t1")),
+        ),
+        (
+            22,
+            ProviderKind::Codex,
+            own.clone(),
+            codex("task_complete", Some("t0")) + &own,
+        ),
+        (
+            25,
+            ProviderKind::Codex,
+            own.clone(),
+            reply("earlier") + &own,
+        ),
+        (
+            23,
+            ProviderKind::Claude,
+            prompt("q1") + &result,
+            prompt("q1") + &prompt("q2") + &result,
+        ),
+        (
+            26,
+            ProviderKind::Claude,
+            prompt("q1") + &result,
+            claude(earlier, at) + &prompt("q1") + &result,
+        ),
+    ];
+    for (n, provider, valid, mixed) in shapes {
+        let input = (provider == ProviderKind::Claude).then(|| at - chrono::Duration::seconds(2));
+        let mut case = Case::new(temp.path(), n, provider, &valid, 0, input).await;
+        let template = case.read(0);
+        std::fs::write(&case.path, &mixed).unwrap();
+        assert!(case.try_read(0).is_none(), "{n}: the reader ends nothing");
+        let forged = claim(template, Some(0), Some(mixed.len() as u64), None);
+        assert_eq!(case.admit(forged).await, None, "{n}: {mixed}");
+        assert_eq!(case.durable_kind(), None, "{n}");
+    }
+
+    let meta = serde_json::json!({"type": "session_meta", "payload": {"id": SESSION}});
+    let usage = serde_json::json!({"type": "event_msg", "payload": {"type": "token_count"}});
+    let input = serde_json::json!({"type": "response_item", "payload": {"type": "message",
+        "role": "user", "content": [{"type": "input_text", "text": "question"}]}});
+    let body = format!("{meta}\n{usage}\n{input}\n") + &own;
+    let mut case = Case::new(temp.path(), 24, ProviderKind::Codex, &body, 0, None).await;
+    let frame = case.read(0);
     assert_eq!(case.admit(frame).await, Some(NativeTerminalKind::Completed));
 }
 

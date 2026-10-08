@@ -273,7 +273,7 @@ mod tests {
     }
 
     /// Under settlement a Herdr caller's scan ends a Codex turn on its own abort, as Claude's interrupt
-    /// does; a foreign abort, an unnamed record, settlement off or a non-Herdr caller ends nothing.
+    /// does; a foreign, unnamed or blank abort, settlement off or a non-Herdr caller ends nothing.
     #[test]
     fn a_turns_own_abort_ends_it_for_the_completion_scan() {
         let started = codex("task_started", Some("t1"));
@@ -288,7 +288,7 @@ mod tests {
         assert!(ends(ProviderKind::Codex, &aborted(Some("t1"))));
         assert!(!ends(ProviderKind::Codex, &aborted(Some("t0"))));
         assert!(!ends(ProviderKind::Codex, &aborted(None)));
-        for unnamed in [None, Some("")] {
+        for unnamed in [None, Some(""), Some(" \t ")] {
             let pair = [
                 codex("task_started", unnamed),
                 codex("turn_aborted", unnamed),

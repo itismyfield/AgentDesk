@@ -2482,6 +2482,7 @@ services::codex::c1_teardown_tests::an_existing_session_is_recreated_only_under_
 services::codex::codex_fifo_followup_transport_tests::reused_fifo_wrapper_buffer_keeps_protocol_line_terminated
 services::codex::codex_fifo_followup_transport_tests::send_codex_pipe_prompt_writes_sentinel_to_fifo
 services::codex::herdr_guard_tests::both_codex_tmux_entries_refuse_a_herdr_channel_before_any_tmux_call_or_cleanup
+services::codex::herdr_turn::observed_input_tests::a_followup_builds_its_turn_start_only_under_settlement
 services::codex::relay_separator_tests::codex_second_agent_message_carries_paragraph_separator_3431
 services::codex::remote_dispatch_gate_tests::remote_direct_is_refused_when_gate_off
 services::codex::remote_dispatch_gate_tests::remote_tmux_is_hard_refused_as_policy_non_goal
@@ -2667,6 +2668,7 @@ services::codex_tui::rollout_tail::child_binding_tests::direct_registration_refu
 services::codex_tui::rollout_tail::child_binding_tests::fresh_launch_consumes_b_source_despite_newer_child
 services::codex_tui::rollout_tail::child_binding_tests::replacement_after_discovery_is_rejected_before_marker_and_o_publication
 services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_codex_turn_ends_only_on_its_own_rollout_terminal
+services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_reply_never_takes_another_turns_fallback_body
 services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_turn_accepts_nothing_past_its_terminal_record
 services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_turn_ends_only_on_a_record_naming_its_started_turn
 services::codex_tui::rollout_tail::tests::always_fresh_pane_signal_reaches_hard_veto_cap_and_emits_done
@@ -4087,6 +4089,7 @@ services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_te
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::a_herdr_claude_terminal_is_admitted_only_from_this_tokens_own_prompt
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::a_herdr_codex_terminal_is_admitted_only_from_this_tokens_own_turn
+services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::a_herdr_range_holding_another_turns_head_or_tail_is_refused
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::a_herdr_terminal_whose_actor_or_source_moved_is_refused
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::a_source_rebind_waits_for_the_herdr_admission_commit
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::an_admitted_kind_survives_guarded_saves_and_never_reaches_a_successor

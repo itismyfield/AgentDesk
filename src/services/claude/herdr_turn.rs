@@ -740,15 +740,23 @@ impl ClaudeTurnTerminal {
 pub(crate) struct HerdrTurnLines {
     stream: StreamLineState,
     prompt_seen: bool,
+    /// Output before the prompt or a second prompt before the terminal: another turn's records.
+    mixed: bool,
 }
 
 impl HerdrTurnLines {
     pub(crate) fn process(&mut self, line: &str, sender: &Sender<StreamMessage>) -> bool {
-        if !self.prompt_seen && is_turn_prompt(line) {
-            self.prompt_seen = true;
-            self.stream.turn_ended = false;
-            self.stream.interrupted = false;
-            self.stream.final_result = None;
+        if is_turn_prompt(line) {
+            if self.prompt_seen {
+                self.mixed |= self.terminal().is_none();
+            } else {
+                self.prompt_seen = true;
+                self.stream.turn_ended = false;
+                self.stream.interrupted = false;
+                self.stream.final_result = None;
+            }
+        } else if !self.prompt_seen {
+            self.mixed |= is_turn_output(line);
         }
         process_stream_line(line, sender, &mut self.stream)
     }
@@ -756,7 +764,8 @@ impl HerdrTurnLines {
     /// The turn's terminal: its interrupt marker is an abort, a result or turn end a completion.
     pub(crate) fn terminal(&self) -> Option<NativeTerminalKind> {
         let stream = &self.stream;
-        if !self.prompt_seen || (stream.final_result.is_none() && !stream.turn_ended) {
+        if !self.prompt_seen || self.mixed || (stream.final_result.is_none() && !stream.turn_ended)
+        {
             return None;
         }
         Some(match stream.interrupted && stream.final_result.is_none() {
@@ -837,6 +846,13 @@ fn complete_records(bytes: &[u8]) -> Vec<(u64, &str)> {
         offset += raw.len() as u64;
     }
     records
+}
+
+/// An assistant or result record: a turn's own output, never metadata.
+fn is_turn_output(line: &str) -> bool {
+    let json = serde_json::from_str::<serde_json::Value>(line).ok();
+    let kind = json.as_ref().and_then(|json| json.get("type")?.as_str());
+    matches!(kind, Some("assistant" | "result"))
 }
 
 /// A user record that is a prompt: text, not a tool result, a meta note or an interrupt marker.

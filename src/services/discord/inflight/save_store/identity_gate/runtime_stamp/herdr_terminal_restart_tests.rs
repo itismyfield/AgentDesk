@@ -8,7 +8,7 @@ use crate::services::session_host::{HostLiveness, HostPresence, HostSessionRef};
 use serenity::all::ChannelId;
 
 /// A restart keeps a held Herdr turn's row byte for byte and its kind as admitted: `None` never
-/// turns into a terminal, though the pane's transcript already holds one, and nothing reattaches it.
+/// turns into a terminal, though the wrapper or transcript it names holds one; nothing reattaches.
 #[tokio::test]
 async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -20,11 +20,12 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
     let transcripts = tempfile::tempdir().unwrap();
     let (mut cases, mut guards) = (Vec::new(), Vec::new());
     let kinds = [
-        None,
-        Some(NativeTerminalKind::Aborted),
-        Some(NativeTerminalKind::Completed),
+        (None, false),
+        (None, true),
+        (Some(NativeTerminalKind::Aborted), false),
+        (Some(NativeTerminalKind::Completed), false),
     ];
-    for (n, kind) in kinds.into_iter().enumerate() {
+    for (n, (kind, own_output)) in kinds.into_iter().enumerate() {
         let channel = ChannelId::new(1_479_671_301_387_160_000 + n as u64);
         let name = provider.build_tmux_session_name(&format!("p10-held-{n}"));
         seed(
@@ -40,8 +41,11 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
             InjectedLivenessGuard::set(session, HostLiveness::DeadOrAbsent),
             InjectedPresenceGuard::set(session, HostPresence::Present),
         ));
+        let marker = crate::services::tmux_common::session_temp_path(&name, "host_kind");
+        std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(&marker, "herdr").unwrap();
         busy_turn(&shared, channel, &name).await;
-        // The row keeps the tmux wrapper seed; the provider transcript lives beside it.
+        // The row names the tmux wrapper seed or the provider transcript, which holds a result.
         let wrapper = transcripts.path().join(format!("{n}.wrapper.jsonl"));
         std::fs::write(&wrapper, "").unwrap();
         let transcript = transcripts.path().join(format!("{n}.jsonl"));
@@ -53,7 +57,8 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
             crate::services::discord::inflight::load_inflight_state(&provider, channel.get())
                 .unwrap();
         row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
-        row.output_path = Some(wrapper.display().to_string());
+        let output = if own_output { &transcript } else { &wrapper };
+        row.output_path = Some(output.display().to_string());
         row.tui_terminal_kind = kind;
         crate::services::discord::inflight::save_inflight_state(&row).unwrap();
         let path = inflight_state_path(&inflight_runtime_root().unwrap(), &provider, channel.get());
