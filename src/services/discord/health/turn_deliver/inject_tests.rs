@@ -25,10 +25,8 @@ const SPINNER: &str = "✻ Thinking… (12s · esc to interrupt)";
 const BUSY_TURN: &str = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n\
     {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n";
 
-/// A scripted `tmux`: the composer folds the paste, or with `draw` shows it flat as Claude does,
-/// and the Enter makes the transcript record the pasted header the way Claude queues input typed
-/// during a turn. `gate` holds keys until `go`; `hold` holds the first pane capture, after the
-/// reservation, until `go`.
+/// A scripted `tmux`: the paste shows folded (flat with `draw`) and the Enter queues its header in
+/// the transcript as Claude does mid-turn. `gate` holds keys, `hold` the first capture, until `go`.
 const FAKE_TMUX: &str = r#"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
