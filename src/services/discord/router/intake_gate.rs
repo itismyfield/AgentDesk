@@ -1247,13 +1247,14 @@ pub(in crate::services::discord) async fn handle_event(
                 // No active turn — fall through to normal processing below
             }
 
-            // A busy Claude TUI pane takes a person's text before intake queues or starts it.
+            // A busy Claude TUI pane takes any admitted text before intake queues or starts it.
             let live = busy_inject::LiveText {
                 channel_id,
                 parent,
                 message_id: new_message.id,
                 author_id: user_id,
-                human: preserve_on_cancel,
+                author_is_bot: new_message.author.bot,
+                author_is_allowed_automation: author_excluded_from_cancel_preservation,
                 text,
                 reply_context: reply_context.as_deref(),
                 has_reply_boundary,

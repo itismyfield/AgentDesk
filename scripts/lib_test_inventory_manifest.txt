@@ -7719,6 +7719,8 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_vetoed_paste_
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_aborted_intake_leaves_the_owner_to_record_the_injection_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_owner_refused_before_its_reservation_leaves_the_message_to_intake_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_owner_that_dies_outside_the_effect_reports_the_input_unknown_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::bot::a_busy_pane_takes_the_announce_bot_s_text_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::bot::a_vetoed_paste_queues_with_the_sender_s_own_marks_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::startup_recovery_and_a_restart_drain_keep_text_from_the_pane_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_parent_arrival_after_the_thread_took_the_message_does_not_paste_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_arrival_is_refused_while_the_parent_pastes_the_message_pg

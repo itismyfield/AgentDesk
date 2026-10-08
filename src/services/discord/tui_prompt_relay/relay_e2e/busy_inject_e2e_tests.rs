@@ -1,4 +1,4 @@
-//! A person's Discord text offered to a busy Claude TUI pane through production intake: what each
+//! Admitted Discord text offered to a busy Claude TUI pane through production intake: what each
 //! injection result leaves, and what a taken message, the gate and commands keep from the pane.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +18,8 @@ use crate::services::discord::router::busy_inject_support as hook;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::ActiveTurnKind;
 
+#[path = "busy_inject_bot_e2e_tests.rs"]
+mod bot;
 #[path = "busy_inject_thread_e2e_tests.rs"]
 mod thread;
 
