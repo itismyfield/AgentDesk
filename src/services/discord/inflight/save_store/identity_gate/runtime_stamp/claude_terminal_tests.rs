@@ -599,3 +599,56 @@ fn an_admitted_terminal_keeps_its_kind_and_an_unverified_abort_is_never_done() {
             }
         });
 }
+
+/// The fields a terminal range persisted before it carried a kind, in their serialized order.
+#[derive(serde::Serialize)]
+struct PreKindRange<'a> {
+    identity: &'a InflightTurnIdentity,
+    result: &'a str,
+    rollout_path: &'a str,
+    session_id: &'a str,
+    source: &'a ExactJsonlSourceIdentity,
+    source_file_identity: Option<(u64, u64)>,
+}
+
+/// A completed range persists exactly the bytes it had before ranges carried a kind and reads
+/// back completed; an aborted range persists and reads back its kind.
+#[test]
+fn a_completed_range_persists_its_pre_kind_bytes_and_an_aborted_one_its_kind() {
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let _dedupe = dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for (index, kind) in [
+        (45, NativeTerminalKind::Completed),
+        (46, NativeTerminalKind::Aborted),
+    ] {
+        let range = runtime.block_on(async {
+            let mut fixture = Fixture::new(temp.path(), index, ProviderKind::Claude).await;
+            let frame = with_kind(fixture.frame(), kind);
+            fixture.admit(frame).await.unwrap().1.unwrap()
+        });
+        let bytes = serde_json::to_string(&range).unwrap();
+        let read: TuiTerminalRange = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(read.kind, kind);
+        assert_eq!(serde_json::to_string(&read).unwrap(), bytes);
+        let pre_kind = serde_json::to_string(&PreKindRange {
+            identity: &range.identity,
+            result: &range.result,
+            rollout_path: &range.rollout_path,
+            session_id: &range.session_id,
+            source: &range.source,
+            source_file_identity: range.source_file_identity,
+        })
+        .unwrap();
+        match kind {
+            NativeTerminalKind::Completed => assert_eq!(bytes, pre_kind),
+            NativeTerminalKind::Aborted => assert!(bytes.ends_with(r#","kind":"Aborted"}"#)),
+        }
+    }
+}

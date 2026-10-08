@@ -2668,6 +2668,7 @@ services::codex_tui::rollout_tail::child_binding_tests::fresh_launch_consumes_b_
 services::codex_tui::rollout_tail::child_binding_tests::replacement_after_discovery_is_rejected_before_marker_and_o_publication
 services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_codex_turn_ends_only_on_its_own_rollout_terminal
 services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_turn_accepts_nothing_past_its_terminal_record
+services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_turn_ends_only_on_a_record_naming_its_started_turn
 services::codex_tui::rollout_tail::tests::always_fresh_pane_signal_reaches_hard_veto_cap_and_emits_done
 services::codex_tui::rollout_tail::tests::assistant_response_deadline_emits_timeout_done
 services::codex_tui::rollout_tail::tests::codex_stop_hook_emits_done_before_drain
@@ -4070,6 +4071,7 @@ services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::s
 services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::transient_claude_e_stamp_read_error_is_retryable_and_preserves_process_frame
 services::discord::inflight::save_store::identity_gate::host_locator::tests::hosted_binding_is_installed_once_and_only_its_own_nonce_and_locator_may_write
 services::discord::inflight::save_store::identity_gate::host_locator::tests::legacy_rows_without_a_binding_stamp_and_reload_unchanged
+services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::a_completed_range_persists_its_pre_kind_bytes_and_an_aborted_one_its_kind
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::an_admitted_terminal_keeps_its_kind_and_an_unverified_abort_is_never_done
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_progress
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_without_row_mutation

@@ -154,6 +154,23 @@ pub enum NativeTerminalKind {
     Aborted,
 }
 
+impl NativeTerminalKind {
+    pub fn is_completed(&self) -> bool {
+        *self == Self::Completed
+    }
+}
+
+/// The turn a Codex rollout payload names; a missing, null or empty `turn_id` names none.
+pub fn codex_payload_turn_id(payload: &Value) -> Option<&str> {
+    let turn_id = payload.get("turn_id").and_then(Value::as_str)?;
+    (!turn_id.trim().is_empty()).then_some(turn_id)
+}
+
+/// Two Codex records belong to one turn only when both name it; unnamed records never match.
+pub fn same_codex_turn(started: Option<&str>, ended: Option<&str>) -> bool {
+    matches!((started, ended), (Some(started), Some(ended)) if started == ended)
+}
+
 /// Source captured by a native reader before an idle bridge claims its actor.
 #[derive(Debug, Clone)]
 pub struct CapturedTuiTerminalSource {

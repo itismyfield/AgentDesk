@@ -12,8 +12,9 @@ pub(in crate::services::discord) struct TuiTerminalRange {
     pub(in crate::services::discord) source: ExactJsonlSourceIdentity,
     #[serde(default)]
     pub(in crate::services::discord) source_file_identity: Option<(u64, u64)>,
-    /// How the admitted frame's provider record ended the turn; older ranges read as `Completed`.
-    #[serde(default)]
+    /// How the admitted frame's provider record ended the turn; `Completed` is not written, so a
+    /// completed range keeps its earlier bytes and older ranges read as `Completed`.
+    #[serde(default, skip_serializing_if = "NativeTerminalKind::is_completed")]
     pub(in crate::services::discord) kind: NativeTerminalKind,
     // Only reconstruction from the durable captured Codex row grants this;
     // serialized frames and live admissions cannot widen cursor authority.

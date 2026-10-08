@@ -79,8 +79,18 @@ struct Tail {
 
 impl Tail {
     fn start(dir: &Path, name: &str, token: &Arc<CancelToken>, settlement: bool) -> Self {
+        Self::start_with(dir, name, token, settlement, running_turn())
+    }
+
+    fn start_with(
+        dir: &Path,
+        name: &str,
+        token: &Arc<CancelToken>,
+        settlement: bool,
+        body: String,
+    ) -> Self {
         let path = dir.join(name);
-        std::fs::write(&path, running_turn()).unwrap();
+        std::fs::write(&path, body).unwrap();
         let alive = Arc::new(AtomicBool::new(true));
         let (tx, frames) = mpsc::channel();
         let reader = spawn_tail(path.clone(), token.clone(), settlement, alive.clone(), tx);
@@ -219,4 +229,45 @@ fn a_herdr_turn_accepts_nothing_past_its_terminal_record() {
     let frames: Vec<_> = rx.try_iter().collect();
     assert_eq!(terminal_frames(&frames), ["done:partial"]);
     assert!(!format!("{frames:?}").contains("next t"), "{frames:?}");
+}
+
+/// An abort or completion ends a Herdr read only when it and the started turn both name the same
+/// turn; missing, null or empty ids, or another turn's completion, keep the read tailing.
+#[test]
+fn a_herdr_turn_ends_only_on_a_record_naming_its_started_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = herdr_token(false);
+    let meta = record(json!({"type": "session_meta", "payload": {"id": "herdr-session"}}));
+    let missing = |kind: &str| record(json!({"type": "event_msg", "payload": {"type": kind}}));
+    let cases = [
+        ("missing", missing("task_started"), missing("turn_aborted")),
+        (
+            "null",
+            event("task_started", None),
+            event("turn_aborted", None),
+        ),
+        (
+            "empty",
+            event("task_started", Some("")),
+            event("turn_aborted", Some("")),
+        ),
+        (
+            "foreign",
+            event("task_started", Some("t1")),
+            event("task_complete", Some("t0")),
+        ),
+    ];
+    for (name, started, ended) in cases {
+        let body = meta.clone() + &started + &reply("partial") + &ended;
+        let tail = Tail::start_with(dir.path(), name, &token, true, body);
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!tail.reader.is_finished(), "{name}: the read keeps tailing");
+        tail.alive.store(false, Ordering::SeqCst);
+        let (result, frames) = tail.finish();
+        assert!(
+            matches!(result, ReadOutputResult::SessionDied { .. }),
+            "{name}"
+        );
+        assert!(terminal_frames(&frames).is_empty(), "{name}: {frames:?}");
+    }
 }

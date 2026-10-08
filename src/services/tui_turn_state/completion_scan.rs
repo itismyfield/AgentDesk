@@ -145,8 +145,8 @@ fn scan_strict_terminator(
     StrictTerminatorScan::Inconclusive
 }
 
-/// Under settlement a Codex `turn_aborted` ends the turn it names, the latest `task_started`
-/// before it; an unnamed abort, or one naming another turn, ends nothing.
+/// Under settlement a Codex `turn_aborted` ends the latest `task_started` before it only when both
+/// name the same turn; an unnamed record on either side ends nothing.
 fn codex_abort_ends_turn(provider: &ProviderKind, json: &Value, earlier: &[String]) -> bool {
     use crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available;
     let event = |json: &Value, kind: &str| {
@@ -154,9 +154,8 @@ fn codex_abort_ends_turn(provider: &ProviderKind, json: &Value, earlier: &[Strin
             && json.pointer("/payload/type").and_then(Value::as_str) == Some(kind)
     };
     let turn_id = |json: &Value| {
-        json.pointer("/payload/turn_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
+        let payload = json.get("payload")?;
+        crate::services::agent_protocol::codex_payload_turn_id(payload).map(str::to_owned)
     };
     if *provider != ProviderKind::Codex
         || !herdr_stop_settlement_available()
@@ -168,7 +167,11 @@ fn codex_abort_ends_turn(provider: &ProviderKind, json: &Value, earlier: &[Strin
         let json = serde_json::from_str::<Value>(line.trim()).ok()?;
         event(&json, "task_started").then(|| turn_id(&json))
     });
-    turn_id(json).is_some_and(|aborted| started.flatten() == Some(aborted))
+    let aborted = turn_id(json);
+    crate::services::agent_protocol::same_codex_turn(
+        started.flatten().as_deref(),
+        aborted.as_deref(),
+    )
 }
 
 fn provider_envelope_turn_state(provider: &ProviderKind, json: &Value) -> Option<TuiTurnState> {
@@ -254,8 +257,8 @@ mod tests {
         serde_json::json!({"type": "event_msg", "payload": {"type": kind, "turn_id": turn_id}})
     }
 
-    /// Under settlement the completion scan ends a Codex turn on its own abort (as Claude's on its
-    /// interrupt); an unnamed or foreign abort does not, nor any abort without settlement.
+    /// Under settlement a Codex turn's own abort ends it for the scan, as Claude's interrupt does;
+    /// a foreign abort, an unnamed record on either side, or settlement off ends nothing.
     #[test]
     fn a_turns_own_abort_ends_it_for_the_completion_scan() {
         let started = codex("task_started", Some("t1"));
@@ -270,6 +273,13 @@ mod tests {
         assert!(ends(ProviderKind::Codex, &aborted(Some("t1"))));
         assert!(!ends(ProviderKind::Codex, &aborted(Some("t0"))));
         assert!(!ends(ProviderKind::Codex, &aborted(None)));
+        for unnamed in [None, Some("")] {
+            let pair = [
+                codex("task_started", unnamed),
+                codex("turn_aborted", unnamed),
+            ];
+            assert!(!ends(ProviderKind::Codex, &pair), "{unnamed:?}");
+        }
         let interrupt = serde_json::json!({"type": "user", "message": {"role": "user",
             "content": [{"type": "text", "text": "[Request interrupted by user]"}]}});
         assert!(ends(ProviderKind::Claude, &[interrupt]));

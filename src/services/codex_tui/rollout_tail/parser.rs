@@ -1,7 +1,9 @@
 use serde_json::Value;
 use std::collections::HashSet;
 
-use crate::services::agent_protocol::{NativeTerminalKind, StreamMessage};
+use crate::services::agent_protocol::{
+    NativeTerminalKind, StreamMessage, codex_payload_turn_id, same_codex_turn,
+};
 use crate::services::provider::ReadOutputResult;
 
 use super::{RelaySuppressionSender, RolloutFinalizePath};
@@ -115,6 +117,8 @@ pub(super) struct RolloutParseState {
     pub(super) started_turn: Option<Option<String>>,
     /// That turn's own `turn_aborted` record was read.
     pub(super) turn_aborted_seen: bool,
+    /// That turn's own `task_complete` was read; `turn_complete_seen` also counts any other turn's.
+    pub(super) own_turn_complete_seen: bool,
 }
 
 impl RolloutParseState {
@@ -431,19 +435,20 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
         }
         "task_started" => {
             if state.started_turn.is_none() {
-                state.started_turn = Some(record_turn_id(payload));
+                state.started_turn = Some(codex_payload_turn_id(payload).map(str::to_owned));
             }
             state.lifecycle_activity = true;
             None
         }
         "turn_aborted" => {
-            // An abort names the turn it ends; one that does not name this reader's turn ends nothing.
-            state.turn_aborted_seen |= state.started_turn == Some(record_turn_id(payload));
+            // An abort ends this reader's turn only when it and the started turn name the same turn.
+            state.turn_aborted_seen |= started_turn_named_by(state, payload);
             state.lifecycle_activity = true;
             None
         }
         "task_complete" => {
             state.turn_complete_seen = true;
+            state.own_turn_complete_seen |= started_turn_named_by(state, payload);
             if state.task_complete_fallback_text.is_none() {
                 state.task_complete_fallback_text = payload
                     .get("last_agent_message")
@@ -460,20 +465,17 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
     }
 }
 
-fn record_turn_id(payload: &Value) -> Option<String> {
-    payload
-        .get("turn_id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map(str::to_owned)
+fn started_turn_named_by(state: &RolloutParseState, payload: &Value) -> bool {
+    let started = state.started_turn.as_ref().and_then(Option::as_deref);
+    same_codex_turn(started, codex_payload_turn_id(payload))
 }
 
-/// A Herdr turn's provider terminal: its own abort, else a completion with no tool left open.
+/// A Herdr turn's provider terminal: its own abort, else its own completion with no tool left open.
 pub(super) fn herdr_terminal_kind(state: &RolloutParseState) -> Option<NativeTerminalKind> {
     if state.turn_aborted_seen {
         return Some(NativeTerminalKind::Aborted);
     }
-    (state.turn_complete_seen && !state.has_pending_tool_call())
+    (state.own_turn_complete_seen && !state.has_pending_tool_call())
         .then_some(NativeTerminalKind::Completed)
 }
 
