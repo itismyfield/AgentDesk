@@ -45,6 +45,10 @@ pub(super) fn claim_yields(
     user_message_id: MessageId,
     admission_order: TurnAdmissionOrder,
 ) -> bool {
+    // An injection owns this message; yield before the helpers below count or clear anything.
+    if super::injected_inputs::owns(state, user_message_id) {
+        return true;
+    }
     let background = background_defers_claim(state, turn_kind);
     let order = inbound_order_defers_claim(state, user_message_id, admission_order);
     // An injection reservation is held outside the fail-open and dequeued-head exceptions above.

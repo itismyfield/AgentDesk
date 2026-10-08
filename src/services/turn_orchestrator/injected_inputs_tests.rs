@@ -432,8 +432,9 @@ async fn a_closed_actor_refuses_reserve_and_settle_and_passes_abandon() {
     let reserve = handle.reserve_injection(None, None, context(), None).await;
     let ticket = InjectionTicket {
         lease: Arc::new(InjectionLease),
+        message: None,
     };
-    let settle = InjectionSettlement::Delivered;
+    let settle = InjectionSettlement::Delivered(InjectionOutcome::Observed);
     let settled = match handle
         .settle_injected_input(ticket, settle, context(), None)
         .await
@@ -443,6 +444,7 @@ async fn a_closed_actor_refuses_reserve_and_settle_and_passes_abandon() {
     };
     let ticket = InjectionTicket {
         lease: Arc::new(InjectionLease),
+        message: None,
     };
     let abandoned = handle
         .request(|reply| {
@@ -455,4 +457,293 @@ async fn a_closed_actor_refuses_reserve_and_settle_and_passes_abandon() {
         .await;
     let observed = format!("{removed:?} {reserve:?} {settled} {abandoned:?}");
     assert_eq!(observed, "Removed Unavailable actor_closed Ok(())");
+}
+
+/// A Discord message's injection, reserved and settled as delivered with `outcome`.
+async fn injected(handle: &ChannelMailboxHandle, message: u64, outcome: InjectionOutcome) {
+    let ticket = reserved(handle, Some(MessageId::new(message)), None).await;
+    let settle = InjectionSettlement::Delivered(outcome);
+    let settled = handle.settle_injected_input(ticket, settle, context(), None);
+    assert!(matches!(settled.await, SettleOutcome::Committed { .. }));
+}
+
+/// The actor never takes a delivered message back, by enqueue or by start, yet still takes
+/// input that merges it with a message not yet delivered.
+#[tokio::test]
+async fn an_injected_message_is_neither_enqueued_nor_started_again() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let handle = ChannelMailboxRegistry::default().handle(ChannelId::new(6_845_201));
+    injected(&handle, 6_845_202, InjectionOutcome::Observed).await;
+    let refused = handle.enqueue(item(6_845_202), context()).await;
+    let token = Arc::new(CancelToken::new());
+    let start = handle.try_start_turn_kinded_with_persistence(
+        token,
+        UserId::new(7),
+        MessageId::new(6_845_202),
+        ActiveTurnKind::UserOrAgent,
+        TurnAdmissionOrder::Immediate,
+        context(),
+    );
+    let started = start.await.started;
+    let snapshot = handle.snapshot().await;
+    let mut merged = item(6_845_203);
+    merged
+        .source_message_ids
+        .insert(0, MessageId::new(6_845_202));
+    let merged = handle.enqueue(merged, context()).await;
+    let observed = (
+        refused.enqueued,
+        refused.refusal_reason,
+        started,
+        snapshot.cancel_token.is_some(),
+        snapshot.intervention_queue.len(),
+        merged.enqueued,
+    );
+    let refusal = Some(EnqueueRefusalReason::AlreadyActiveTurn);
+    assert_eq!(observed, (false, refusal, false, false, 0, true));
+}
+
+/// A catch-up enqueue classified before the reservation is refused by its claim CAS even once
+/// the in-process record has aged out and no longer answers for the message.
+#[tokio::test]
+async fn a_scan_from_before_the_reservation_is_refused_after_the_terminal_ages_out() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (channel, message) = (ChannelId::new(6_845_211), MessageId::new(6_845_212));
+    let handle = ChannelMailboxRegistry::default().handle(channel);
+    let before = handle.snapshot().await.claim_observation;
+    injected(&handle, message.get(), InjectionOutcome::Observed).await;
+    let age = crate::services::discord::inject_disposition::test_support::age;
+    age(
+        &ProviderKind::Claude,
+        message.get(),
+        disposition::MEMORY_TTL,
+    );
+    let aged = disposition::terminal(None, message, std::time::Instant::now());
+    let enqueue = handle.enqueue_observed(item(message.get()), context(), Some(before));
+    let refusal = enqueue.await.refusal_reason;
+    let claimed = Some(EnqueueRefusalReason::ClaimedSinceObservation);
+    assert_eq!((aged, refusal), (None, claimed));
+}
+
+/// A message mid-injection is refused even where no claim CAS sees the reservation, until its
+/// owner drops the ticket and the same enqueue is accepted.
+#[tokio::test]
+async fn a_live_injection_refuses_its_message_until_its_lease_dies() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (channel, message) = (ChannelId::new(6_845_221), MessageId::new(6_845_222));
+    let handle = ChannelMailboxRegistry::default().handle(channel);
+    let ticket = reserved(&handle, Some(message), None).await;
+    let after = handle.snapshot().await.claim_observation;
+    let mut observed = Vec::new();
+    for observation in [Some(after), None] {
+        let enqueue = handle.enqueue_observed(item(message.get()), context(), observation);
+        let outcome = enqueue.await;
+        observed.push((outcome.enqueued, outcome.refusal_reason));
+    }
+    drop(ticket);
+    let outcome = handle.enqueue(item(message.get()), context()).await;
+    observed.push((outcome.enqueued, outcome.refusal_reason));
+    let in_progress = (false, Some(EnqueueRefusalReason::ClaimedSinceObservation));
+    assert_eq!(observed, [in_progress, in_progress, (true, None)]);
+}
+
+/// A reservation for a message the mailbox holds (queued, live dispatch, active) is `Owned` and
+/// for an injected one `Consumed`, ahead of the backlog check that a dead dispatch falls to.
+#[tokio::test]
+async fn a_reservation_for_a_held_or_injected_message_is_owned_or_consumed() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let mut observed = Vec::new();
+    for (n, case) in ["queued", "dispatched", "orphaned", "active", "injected"]
+        .iter()
+        .enumerate()
+    {
+        let channel = ChannelId::new(6_845_231 + n as u64);
+        let message = MessageId::new(6_845_241 + n as u64);
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        let (mut claim, mut _dispatch) = (None, None);
+        match *case {
+            "queued" => assert!(
+                handle
+                    .enqueue(item(message.get()), context())
+                    .await
+                    .enqueued
+            ),
+            "dispatched" | "orphaned" => {
+                assert!(
+                    handle
+                        .enqueue(item(message.get()), context())
+                        .await
+                        .enqueued
+                );
+                let taken = handle.take_next_soft(context()).await;
+                let head = taken.intervention.map(|item| item.message_id);
+                assert_eq!(head, Some(message));
+                _dispatch = taken.dispatch_lease.filter(|_| *case == "dispatched");
+                let orphan_after = super::super::PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER;
+                handle
+                    .age_inbound_waits_for_test(orphan_after + Duration::from_secs(1))
+                    .await;
+            }
+            "active" => {
+                let token = Arc::new(CancelToken::new());
+                assert!(
+                    handle
+                        .try_start_turn(token.clone(), UserId::new(7), message)
+                        .await
+                );
+                claim = Some((token, ActiveTurnKind::UserOrAgent, Some(message)));
+            }
+            _ => injected(&handle, message.get(), InjectionOutcome::Observed).await,
+        }
+        let reserve = handle.reserve_injection(Some(message), claim, context(), None);
+        observed.push(format!("{case}: {:?}", reserve.await));
+    }
+    assert_eq!(
+        observed,
+        [
+            "queued: Owned",
+            "dispatched: Owned",
+            "orphaned: Backlog",
+            "active: Owned",
+            "injected: Consumed"
+        ]
+    );
+}
+
+/// An injected outcome survives the settle as given: an unconfirmed paste stays unconfirmed.
+#[tokio::test]
+async fn a_settle_keeps_the_injection_outcome() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let handle = ChannelMailboxRegistry::default().handle(ChannelId::new(6_845_251));
+    let mut observed = Vec::new();
+    for (message, outcome) in [
+        (6_845_252, InjectionOutcome::Unconfirmed),
+        (6_845_253, InjectionOutcome::Observed),
+    ] {
+        injected(&handle, message, outcome).await;
+        let now = std::time::Instant::now();
+        let kept = disposition::terminal(Some(&ProviderKind::Claude), MessageId::new(message), now);
+        observed.push(kept);
+    }
+    let (unconfirmed, seen) = (InjectionOutcome::Unconfirmed, InjectionOutcome::Observed);
+    assert_eq!(observed, [Some(unconfirmed), Some(seen)]);
+}
+
+/// An idle slot refuses an injected message's claim before any other yield rule runs, leaving
+/// the background-yield count, pending-dispatch retirement and stall clock untouched.
+#[test]
+fn an_injected_claim_yields_before_the_yield_helpers_count_or_clear_anything() {
+    let message = MessageId::new(6_845_261);
+    let now = std::time::Instant::now();
+    let outcome = InjectionOutcome::Observed;
+    let channel = ChannelId::new(6_845_260);
+    disposition::note_terminal(&ProviderKind::Claude, channel, Some(message), outcome, now);
+    let behind = TurnAdmissionOrder::BehindQueue;
+    let mut observed = Vec::new();
+    for case in ["plain", "background_pending_only", "stall_clock"] {
+        let mut state = ChannelMailboxState {
+            last_persistence: Some(context()),
+            ..ChannelMailboxState::default()
+        };
+        let mut kind = ActiveTurnKind::UserOrAgent;
+        let lease = Arc::new(DispatchLease);
+        match case {
+            "background_pending_only" => {
+                kind = ActiveTurnKind::Background;
+                state.pending_user_dispatch = Some(MessageId::new(3));
+                state.pending_user_dispatch_since = Some(Instant::now());
+                state.pending_user_dispatch_lease = Some(lease.clone());
+            }
+            "stall_clock" => state.intervention_queue.push(item(4)),
+            _ => {}
+        }
+        let yields = claim_yields(&mut state, kind, message, behind);
+        observed.push(format!(
+            "{case}: yields={yields} count={} pending={} stall={}",
+            state.pending_user_dispatch_yield_count,
+            state.pending_user_dispatch.is_some(),
+            state.inbound_stall_since.is_some(),
+        ));
+    }
+    assert_eq!(
+        observed,
+        [
+            "plain: yields=true count=0 pending=false stall=false",
+            "background_pending_only: yields=true count=0 pending=true stall=false",
+            "stall_clock: yields=true count=0 pending=false stall=false",
+        ]
+    );
+}
+
+/// An actor that knows its provider reads only that provider's terminals; one that has not
+/// persisted yet reads any provider's, which can only refuse more.
+#[test]
+fn a_fresh_actor_reads_any_provider_terminal_and_a_known_one_only_its_own() {
+    let message = MessageId::new(6_845_271);
+    let (channel, now) = (ChannelId::new(6_845_270), std::time::Instant::now());
+    let outcome = InjectionOutcome::Observed;
+    disposition::note_terminal(&ProviderKind::Codex, channel, Some(message), outcome, now);
+    let claude = ChannelMailboxState {
+        last_persistence: Some(context()),
+        ..ChannelMailboxState::default()
+    };
+    let fresh = ChannelMailboxState::default();
+    assert_eq!(
+        (owns(&fresh, message), owns(&claude, message)),
+        (true, false)
+    );
+}
+
+/// A busy slot answers a claim of an injected message as it answers any other: no start, and
+/// the running turn keeps its token, so a stale-busy heal sees what it saw before.
+#[tokio::test]
+async fn a_busy_slot_keeps_its_turn_when_an_injected_message_is_claimed() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let handle = ChannelMailboxRegistry::default().handle(ChannelId::new(6_845_281));
+    injected(&handle, 6_845_282, InjectionOutcome::Observed).await;
+    let running = Arc::new(CancelToken::new());
+    let holder = MessageId::new(6_845_283);
+    assert!(
+        handle
+            .try_start_turn(running.clone(), UserId::new(7), holder)
+            .await
+    );
+    let other = Arc::new(CancelToken::new());
+    let message = MessageId::new(6_845_282);
+    let started = handle.try_start_turn(other, UserId::new(7), message).await;
+    let snapshot = handle.snapshot().await;
+    let kept = snapshot
+        .cancel_token
+        .as_ref()
+        .is_some_and(|token| Arc::ptr_eq(token, &running));
+    let observed = (started, kept, snapshot.active_user_message_id);
+    assert_eq!(observed, (false, true, Some(holder)));
+}
+
+/// A cancel that removed the last input's file but failed the parent fsync is not reported;
+/// memory keeps the input, so the reservation still sees backlog with disk and marker empty.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cancel_that_removed_the_file_but_failed_its_fsync_still_holds_the_reservation() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(6_845_291);
+    let gate = Gate::protect(ProviderKind::Claude, channel.get()).expect("gate");
+    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
+    let handle = ChannelMailboxRegistry::default().handle(channel);
+    assert!(handle.enqueue(item(6_845_292), context()).await.enqueued);
+    super::super::pending_queue_persistence::fsync_fault::fail_next(channel);
+    let cancel = handle.cancel_queued_primary_message(MessageId::new(6_845_292), context());
+    let cancelled = cancel.await;
+    let (provider, hash) = (ProviderKind::Claude, "inject-order-test");
+    let disk = load_channel_pending_queue(&provider, hash, channel).0.len();
+    let marker = super::super::load_channel_pending_dispatch_marker(&provider, hash, channel);
+    let reserve = handle.reserve_injection(None, None, context(), None).await;
+    let observed = format!(
+        "removed={} error={} memory={:?} disk={disk} marker={} reserve={reserve:?}",
+        cancelled.removed.is_some(),
+        cancelled.persistence_error.is_some(),
+        queued(&handle).await,
+        marker.is_some(),
+    );
+    let expected = "removed=false error=true memory=[6845292] disk=0 marker=false reserve=Backlog";
+    assert_eq!(observed, expected);
 }
