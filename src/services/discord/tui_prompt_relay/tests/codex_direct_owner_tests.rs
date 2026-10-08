@@ -741,11 +741,31 @@ async fn codex_direct_answer_scenario(root: &Path) {
     ] {
         let sent = deliveries(&requests, codex.channel);
         let anchor = format!("/channels/{}/messages/{anchor}", codex.channel.get());
-        assert_eq!(sent.len(), 1, "one answer edit: {sent:?}");
-        let (method, path, body) = &sent[0];
-        assert!(method == "PATCH" && path.ends_with(&anchor), "{sent:?}");
-        let content = serde_json::from_str::<serde_json::Value>(body).unwrap()["content"].clone();
-        assert_eq!(content, RESPONSE, "the answer edits the claimed anchor");
+        let content = |body: &str| {
+            let value = serde_json::from_str::<serde_json::Value>(body).unwrap();
+            value["content"].as_str().unwrap_or_default().to_string()
+        };
+        let finals = sent.iter().filter(|(_, _, body)| content(body) == RESPONSE);
+        assert_eq!(finals.count(), 1, "one answer edit: {sent:?}");
+        // When the answer and the turn end reach the bridge in separate passes, its first-answer
+        // fast lane edits the same anchor once with the answer above the status line.
+        assert!(sent.len() <= 2, "one answer edit: {sent:?}");
+        for (method, path, _) in &sent {
+            assert!(method == "PATCH" && path.ends_with(&anchor), "{sent:?}");
+        }
+        let (_, _, last) = sent.last().unwrap();
+        assert_eq!(
+            content(last),
+            RESPONSE,
+            "the answer edits the claimed anchor"
+        );
+        if let [(_, _, progress), _] = sent.as_slice() {
+            let status = content(progress);
+            assert!(
+                status.starts_with(&format!("{RESPONSE}\n\n")),
+                "only the answer's progress edit precedes it: {sent:?}"
+            );
+        }
         let turns = finalized_turns
             .iter()
             .filter(|id| **id == codex.channel.get());

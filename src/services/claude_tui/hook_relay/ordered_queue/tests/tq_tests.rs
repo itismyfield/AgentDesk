@@ -324,6 +324,9 @@ async fn late_stop_after_refusals(tq: &Tq, producer_delay: Duration, fault_off_a
     let producers = (!producer_delay.is_zero()).then(|| tq.delay_producers(producer_delay));
     let cli = tq.waiting_cli("Stop", tq.payload(&tq.b, json!({})));
     tokio::time::sleep(fault_off_at.saturating_sub(t0.elapsed())).await;
+    // A loaded runner may reach the first delivery attempt only after `fault_off_at`; the fault
+    // stays until that attempt is refused so the refusal below is observed, not raced.
+    tq.settled(|tq| tq.refused("Stop") > 0).await;
     APPEND_FAULT.with(|fault| fault.set(None));
     let cli = join_within(cli, Duration::from_secs(5)).await;
     if let Some(producers) = producers {

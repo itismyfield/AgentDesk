@@ -375,8 +375,8 @@ fn replay(
     let file = OpenOptions::new().read(true).write(true).open(path)?;
     // Refuse recovery while an operator is writing; replay, the withdraw check and every cut share
     // this handle.
-    file.try_lock().map_err(io::Error::from)?;
-    let mut reader = BufReader::new(file);
+    let file = super::durable::LockedFile::try_lock(file)?;
+    let mut reader = BufReader::new(&*file);
     let (mut offset, mut line) = (0u64, Vec::new());
     // The last complete line waits here until the next read shows whether it ends the file.
     let mut held: Option<(u64, LedgerLine)> = None;

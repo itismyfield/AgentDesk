@@ -1,7 +1,8 @@
 //! Crash-ordered file primitives: create-once, atomic replace, synced append and tail truncation.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -89,6 +90,38 @@ pub(super) fn truncate_synced(path: &Path, len: u64) -> io::Result<()> {
     let file = OpenOptions::new().write(true).open(path)?;
     file.set_len(len)?;
     file.sync_all()
+}
+
+/// A file under its exclusive lock, released explicitly on drop: a child forked on another thread
+/// shares the open file until its exec, and a lock left to the last close would outlive this handle.
+pub(super) struct LockedFile(File);
+
+impl LockedFile {
+    /// Locks `file` without waiting; a lock held elsewhere is `WouldBlock`.
+    pub(super) fn try_lock(file: File) -> io::Result<Self> {
+        file.try_lock().map_err(io::Error::from)?;
+        Ok(Self(file))
+    }
+}
+
+impl Deref for LockedFile {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+
+impl DerefMut for LockedFile {
+    fn deref_mut(&mut self) -> &mut File {
+        &mut self.0
+    }
+}
+
+impl Drop for LockedFile {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 /// Reads a JSON file; absent is `None`, unparsable is store damage.
