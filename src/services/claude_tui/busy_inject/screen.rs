@@ -1,6 +1,10 @@
 //! Reads the active Claude composer and the status row right above its top border from one
 //! `capture-pane -e` capture. Anything outside the recognised layout reads as Unknown.
 
+use unicode_width::UnicodeWidthChar;
+
+use crate::services::tui_input::actor::gate::{claude_border_row, claude_prompt_row};
+
 /// Draft chips whose payload is not measured to survive a stash round trip.
 const UNMEASURED_CHIPS: [&str; 3] = [
     "[Image #",
@@ -256,6 +260,130 @@ fn renders_flat(frame: &str, width: usize, height: usize) -> bool {
                 && !line.chars().any(char::is_control)
                 && columns < width.saturating_sub(4)
         })
+}
+
+/// How Claude shows a paste in an empty composer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Drawn {
+    /// A `[Pasted text #N …]` placeholder.
+    Folded,
+    /// Every row, the prompt and continuation indent removed.
+    Rows(Vec<String>),
+}
+
+/// Measured on Claude Code 2.1.293: a paste folds as in [`renders_flat`]; otherwise each line
+/// wraps at width-4 and the composer shows at most (rows-10)/2 rows. `None` when not predictable.
+pub(super) fn drawn(frame: &str, size: Option<(usize, usize)>) -> Option<Drawn> {
+    let (width, height) = size?;
+    // Claude may rewrite a tab or CR, changing even a folded paste's line count.
+    if frame
+        .split('\n')
+        .any(|line| line.chars().any(char::is_control))
+    {
+        return None;
+    }
+    let newlines = frame.matches('\n').count();
+    if frame.encode_utf16().count() > 800 || newlines > height.saturating_sub(10).min(2) {
+        return Some(Drawn::Folded);
+    }
+    let mut rows = Vec::new();
+    for line in frame.split('\n') {
+        if line.trim_end() != line {
+            return None;
+        }
+        rows.extend(wrap(line, width.checked_sub(4).filter(|&c| c >= 2)?)?);
+    }
+    // A row the composer reader would take for the prompt or a border could not prove the paste.
+    let misread = |row: &String| {
+        let shown = format!("  {row}");
+        claude_prompt_row(&shown) || claude_border_row(&shown)
+    };
+    if rows[1..].iter().any(misread) {
+        return None;
+    }
+    (rows.len() <= height.saturating_sub(10) / 2).then_some(Drawn::Rows(rows))
+}
+
+/// One line as wrap-ansi `hard` without trim lays it out; Claude drops the leading spaces of each
+/// wrapped row and the capture drops trailing ones. `None` for a wrap past measured characters.
+fn wrap(line: &str, columns: usize) -> Option<Vec<String>> {
+    // Zero-width joiners, selectors, combining marks and modifiers may merge into one glyph.
+    if line.chars().any(may_join) {
+        return None;
+    }
+    // No character is wider than two columns, so this bound proves a line stays on one row.
+    let bound: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
+    if bound <= columns {
+        return Some(vec![line.to_string()]);
+    }
+    let mut rows = vec![String::new()];
+    let mut used = 0;
+    for (index, word) in line.split(' ').enumerate() {
+        if index > 0 {
+            if used >= columns {
+                rows.push(String::new());
+                used = 0;
+            }
+            rows.last_mut()?.push(' ');
+            used += 1;
+        }
+        let length = word.chars().map(measured_width).sum::<Option<usize>>()?;
+        if length > columns {
+            // A word wider than the row breaks where it starts unless that costs a row.
+            if (length - 1) / columns < 1 + (length - (columns - used) - 1) / columns {
+                rows.push(String::new());
+                used = 0;
+            }
+            let chars: Vec<char> = word.chars().collect();
+            for (at, &c) in chars.iter().enumerate() {
+                let cells = measured_width(c)?;
+                if used + cells <= columns {
+                    rows.last_mut()?.push(c);
+                    used += cells;
+                } else {
+                    rows.push(c.to_string());
+                    used = cells;
+                }
+                if used == columns && at + 1 < chars.len() {
+                    rows.push(String::new());
+                    used = 0;
+                }
+            }
+            continue;
+        }
+        if used + length > columns && used > 0 && length > 0 {
+            rows.push(String::new());
+            used = 0;
+        }
+        rows.last_mut()?.push_str(word);
+        used += length;
+    }
+    let shown = |(index, row): (usize, String)| {
+        let row = row.trim_end_matches(' ');
+        if index == 0 {
+            row
+        } else {
+            row.trim_start_matches(' ')
+        }
+        .to_string()
+    };
+    Some(rows.into_iter().enumerate().map(shown).collect())
+}
+
+/// A character with no cell of its own, or a flag or skin-tone half that joins its neighbour.
+fn may_join(c: char) -> bool {
+    !matches!(c.width(), Some(1 | 2))
+        || ('\u{1f1e6}'..='\u{1f1ff}').contains(&c)
+        || ('\u{1f3fb}'..='\u{1f3ff}').contains(&c)
+}
+
+/// Columns measured in Claude's composer: printable ASCII one, Hangul syllables and jamo two.
+fn measured_width(c: char) -> Option<usize> {
+    match c {
+        ' '..='~' => Some(1),
+        '\u{ac00}'..='\u{d7a3}' | '\u{3131}'..='\u{318e}' => Some(2),
+        _ => None,
+    }
 }
 
 /// The composer shows exactly the frame, row for row, with the draft still stashed.

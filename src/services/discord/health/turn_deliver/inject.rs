@@ -560,6 +560,7 @@ fn veto_name(veto: Veto) -> &'static str {
         Veto::NotBusy => "not_busy",
         Veto::TranscriptUnavailable => "transcript_unavailable",
         Veto::LoadFailed => "load_failed",
+        Veto::UnpredictableRender => "unpredictable_render",
     }
 }
 

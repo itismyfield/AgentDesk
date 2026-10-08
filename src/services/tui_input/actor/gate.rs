@@ -102,37 +102,10 @@ pub(crate) fn own_draft(
             && !plain.contains("[Pasted Content ")
             && !plain.to_ascii_lowercase().contains("approval required");
     }
-    if detect_claude_startup_dialog(&plain).is_some()
-        || tmux_capture_indicates_claude_tui_interactive_modal(&plain)
-        || tmux_capture_indicates_claude_tui_mcp_auth_required(&plain)
-    {
-        return false;
-    }
-    let lines: Vec<_> = plain.lines().collect();
-    let Some(start) = lines
-        .iter()
-        .rposition(|line| line.trim_start().starts_with('❯'))
-    else {
+    let Some(rows) = claude_composer_rows(&plain) else {
         return false;
     };
-    let Some(end) = lines
-        .iter()
-        .enumerate()
-        .skip(start + 1)
-        .find(|(_, line)| line.trim().chars().all(|c| c == '─') && line.trim().len() >= 3)
-        .map(|(i, _)| i)
-    else {
-        return false;
-    };
-    let first = lines[start].trim_start().strip_prefix('❯').unwrap();
-    let first = first
-        .strip_prefix(' ')
-        .or_else(|| first.strip_prefix('\u{00a0}'))
-        .unwrap_or(first);
-    let body = std::iter::once(first)
-        .chain(lines[start + 1..end].iter().copied())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let body = rows.join("\n");
     if body == frame {
         return true;
     }
@@ -157,4 +130,51 @@ pub(crate) fn own_draft(
         return true;
     }
     suffix == format!(" +{newlines} lines]")
+}
+
+/// The composer shows exactly `rows`, as Claude wraps a paste; nothing folded or typed besides.
+pub(crate) fn own_wrapped_draft(capture: &str, rows: &[String]) -> bool {
+    let plain = strip_ansi_escape_sequences(capture);
+    claude_composer_rows(&plain)
+        .is_some_and(|shown| shown.into_iter().eq(rows.iter().map(String::as_str)))
+}
+
+// The bottom Claude composer's rows, prompt and continuation indent removed; none under a modal.
+fn claude_composer_rows(plain: &str) -> Option<Vec<&str>> {
+    if detect_claude_startup_dialog(plain).is_some()
+        || tmux_capture_indicates_claude_tui_interactive_modal(plain)
+        || tmux_capture_indicates_claude_tui_mcp_auth_required(plain)
+    {
+        return None;
+    }
+    let lines: Vec<_> = plain.lines().collect();
+    let start = lines.iter().rposition(|line| claude_prompt_row(line))?;
+    let end = (start + 1..lines.len()).find(|&i| claude_border_row(lines[i]))?;
+    // An indented border-like row is pasted text, so the real border cannot be told apart.
+    if lines[end].starts_with(char::is_whitespace) {
+        return None;
+    }
+    let first = lines[start].trim_start().strip_prefix('❯')?;
+    let first = first
+        .strip_prefix(' ')
+        .or_else(|| first.strip_prefix('\u{00a0}'))
+        .unwrap_or(first);
+    // Claude draws each continuation row two columns in, keeping the line's own leading spaces;
+    // a row indented any other way is not our paste.
+    let mut rows = vec![first];
+    for line in &lines[start + 1..end] {
+        rows.push(line.strip_prefix("  ").or(line.is_empty().then_some(""))?);
+    }
+    Some(rows)
+}
+
+/// A row the Claude composer reader takes for the prompt.
+pub(crate) fn claude_prompt_row(line: &str) -> bool {
+    line.trim_start().starts_with('❯')
+}
+
+/// A row the Claude composer reader takes for a border.
+pub(crate) fn claude_border_row(line: &str) -> bool {
+    let line = line.trim();
+    line.chars().all(|c| c == '─') && line.len() >= 3
 }

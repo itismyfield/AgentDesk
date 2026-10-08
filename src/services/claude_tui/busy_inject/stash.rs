@@ -31,7 +31,7 @@ fn transact(attempt: &Attempt<'_>, draft: &[String], last: &mut Option<String>) 
     };
     match attempt.key("C-s") {
         Guard::Applied => {}
-        Guard::Vetoed => return stop(Veto::HumanAttached, DraftState::Unchanged),
+        Guard::Vetoed | Guard::Resized => return stop(Veto::HumanAttached, DraftState::Unchanged),
         Guard::Gone => return stop(Veto::PaneUnavailable, DraftState::Unchanged),
         // The key may still have landed.
         Guard::Failed => return stop(Veto::PaneUnavailable, DraftState::Unknown),
@@ -39,9 +39,11 @@ fn transact(attempt: &Attempt<'_>, draft: &[String], last: &mut Option<String>) 
     if let Err(veto) = await_stash(attempt, last) {
         return stop(veto, DraftState::Unknown);
     }
-    match attempt.paste() {
+    match attempt.paste(None) {
         Guard::Applied => {}
-        Guard::Vetoed => return stop(Veto::HumanAttached, DraftState::StashedVerified),
+        Guard::Vetoed | Guard::Resized => {
+            return stop(Veto::HumanAttached, DraftState::StashedVerified);
+        }
         Guard::Gone => return stop(Veto::PaneUnavailable, DraftState::StashedVerified),
         Guard::Failed => {
             let outcome = Outcome::Unconfirmed(Unconfirmed::PasteFailed);

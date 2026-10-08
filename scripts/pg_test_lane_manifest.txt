@@ -1190,11 +1190,14 @@ services::discord::health::turn_deliver::inject_tests::a_busy_pane_takes_the_inp
 services::discord::health::turn_deliver::inject_tests::a_cancelled_caller_leaves_the_handback_and_its_kick_to_the_owner_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg
 services::discord::health::turn_deliver::inject_tests::a_deliver_waiting_on_a_handback_claims_behind_it_and_the_kick_runs_the_handback_pg
+services::discord::health::turn_deliver::inject_tests::a_flat_paste_drawn_with_its_indent_is_injected_pg
 services::discord::health::turn_deliver::inject_tests::a_handback_onto_a_full_queue_records_its_one_overflow_pg
 services::discord::health::turn_deliver::inject_tests::a_handback_that_never_lands_refuses_the_delivery_and_keeps_no_place_pg
+services::discord::health::turn_deliver::inject_tests::a_paste_its_rows_cannot_prove_is_handed_back_unpasted_pg
 services::discord::health::turn_deliver::inject_tests::a_rebound_transcript_or_input_queued_during_the_last_lookups_vetoes_the_paste_pg
 services::discord::health::turn_deliver::inject_tests::a_row_replaced_after_its_last_read_does_not_stop_the_reservation_allowed_range_pg
 services::discord::health::turn_deliver::inject_tests::a_vetoed_paste_hands_the_input_back_ahead_of_input_sent_after_its_reservation_pg
+services::discord::health::turn_deliver::inject_tests::a_wrapped_paste_is_injected_only_when_its_rows_are_predicted_pg
 services::discord::health::turn_deliver::inject_tests::an_effect_that_dies_outside_its_guard_is_still_reported_once_pg
 services::discord::health::turn_deliver::inject_tests::an_injection_without_a_discord_message_records_no_disposition_pg
 services::discord::health::turn_deliver::inject_tests::input_left_on_disk_for_an_unloaded_mailbox_stays_ahead_of_a_deliver_pg
