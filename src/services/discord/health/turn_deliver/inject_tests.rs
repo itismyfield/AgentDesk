@@ -1291,3 +1291,73 @@ async fn a_deliver_waiting_on_a_handback_claims_behind_it_and_the_kick_runs_the_
          | kick: [\"status? claimed=true\"] [later] keys=0"
     );
 }
+
+/// A reserved headless claim returns the very token it registered on the mailbox, in either
+/// admission order.
+#[tokio::test(flavor = "current_thread")]
+async fn a_headless_claim_returns_the_token_it_registered() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let router = crate::services::discord::router::reserve_headless_turn;
+    let mut observed = Vec::new();
+    for (n, behind) in [false, true].into_iter().enumerate() {
+        let channel = ChannelId::new(6_845_901 + n as u64);
+        let reservation = router();
+        let reservation = if behind {
+            reservation.behind_queue()
+        } else {
+            reservation
+        };
+        let claim = crate::services::discord::router::claim_reserved_headless_turn;
+        let identity = (ProviderKind::Claude, None);
+        let claimed = claim(&shared, channel, UserId::new(100), &reservation, identity).await;
+        let Ok((_transition, token)) = claimed else {
+            panic!("an idle channel claims");
+        };
+        let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel).await;
+        let registered = snapshot.cancel_token.expect("the claim registered a token");
+        observed.push((behind, Arc::ptr_eq(&token, &registered)));
+    }
+    assert_eq!(observed, [(false, true), (true, true)]);
+}
+
+const NO_MESSAGE_CHILD: &str = "ADK_INJECT_NO_MESSAGE_CHILD";
+
+/// External input has no Discord message, so its injection answers as before and builds no
+/// disposition table or ring file; it runs in its own process so the table check sees only itself.
+#[tokio::test(flavor = "current_thread")]
+async fn an_injection_without_a_discord_message_records_no_disposition_pg() {
+    if std::env::var_os(NO_MESSAGE_CHILD).is_none() {
+        let module = module_path!().split_once("::").unwrap().1;
+        let name = "an_injection_without_a_discord_message_records_no_disposition_pg";
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{module}::{name}"), "--test-threads=1"])
+            .args(["--nocapture"])
+            .env(NO_MESSAGE_CHILD, "1")
+            .output()
+            .unwrap();
+        let log = String::from_utf8_lossy(&output.stdout).to_string()
+            + &String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success() && log.contains("1 passed"), "{log}");
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let channel = 6_845_911;
+    let registry = HealthRegistry::new();
+    let shared = register_inject_runtime(&registry, &[channel], Some(pool)).await;
+    let pane = InjectPane::new(channel, "all");
+    claim_kinded(&shared, channel, ActiveTurnKind::Background).await;
+    let outcome = deliver(&registry, channel).await;
+    let support = crate::services::discord::inject_disposition::test_support::table_built;
+    let ring = crate::services::discord::inject_disposition::test_support::ring_file;
+    let observed = (
+        outcome,
+        pane.transcript_recorded_the_paste(),
+        support(),
+        ring(&ProviderKind::Claude).exists(),
+    );
+    let injected = "Ok(Injected { turn_id: None })".to_string();
+    assert_eq!(observed, (injected, true, false, false));
+}

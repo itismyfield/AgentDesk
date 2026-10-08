@@ -767,6 +767,7 @@ src/
 │   │   │   ├── frontier_sweep_tests.rs
 │   │   │   ├── handled_command.rs
 │   │   │   ├── handled_command_tests.rs
+│   │   │   ├── injected_catch_up_tests.rs
 │   │   │   ├── merged_alias_tests.rs
 │   │   │   ├── phase2.rs
 │   │   │   ├── retry_state.rs
@@ -1861,6 +1862,9 @@ src/
 │   │   ├── idle_relay_drift.rs
 │   │   ├── inflight.rs
 │   │   ├── inflight_heartbeat_sweeper.rs
+│   │   ├── inject_disposition.rs
+│   │   ├── inject_disposition_test_support.rs
+│   │   ├── inject_disposition_tests.rs
 │   │   ├── input_transition.rs
 │   │   ├── input_transition_tests.rs
 │   │   ├── internal_api.rs

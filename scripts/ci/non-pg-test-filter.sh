@@ -419,6 +419,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::reuse_no_op_reattach_tick_still_skips_the_destructive_branches_5396
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::stall_watchdog_cleanup_keeps_orphan_pending_token_without_measured_death
   services::discord::health::turn_deliver::inject_tests::a_channel_closed_to_legacy_input_takes_no_paste
+  services::discord::health::turn_deliver::inject_tests::a_headless_claim_returns_the_token_it_registered
   services::discord::health::turn_deliver::inject_tests::a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox
   services::discord::health::turn_deliver::inject_tests::a_session_of_another_runtime_stops_before_the_transition_and_the_pane
   services::discord::health::turn_deliver::inject_tests::an_idle_transcript_stops_before_the_reservation_and_the_pane
