@@ -584,7 +584,7 @@ pub(super) fn herdr_eof(
         && !state.mixed_turn
         && let Some(herdr) = actor.herdr_interrupt_state()
     {
-        herdr.own_start_observed();
+        herdr.own_start_observed(turn.0.saturating_add(state.bytes_read));
     }
     if super::try_process_complete_partial_line(partial_line, sender, state, accept) {
         return Some(None);

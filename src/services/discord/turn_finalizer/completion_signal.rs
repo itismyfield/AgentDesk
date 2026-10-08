@@ -33,6 +33,24 @@ pub(in crate::services::discord) fn completion_signal_from_transcript(
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
     transcript_path: &std::path::Path,
 ) -> CompletionSignal {
+    completion_signal_under(provider, runtime_kind, transcript_path, false)
+}
+
+/// The backstop's signal for a turn it holds as Herdr's: its own Codex abort ends it under settlement.
+pub(super) fn herdr_completion_signal_from_transcript(
+    provider: &ProviderKind,
+    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+    transcript_path: &std::path::Path,
+) -> CompletionSignal {
+    completion_signal_under(provider, runtime_kind, transcript_path, true)
+}
+
+fn completion_signal_under(
+    provider: &ProviderKind,
+    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+    transcript_path: &std::path::Path,
+    herdr: bool,
+) -> CompletionSignal {
     if !crate::services::tui_turn_state::provider_runtime_has_structured_jsonl_turn_state(
         provider,
         runtime_kind,
@@ -45,7 +63,11 @@ pub(in crate::services::discord) fn completion_signal_from_transcript(
     if !metadata.is_file() || metadata.len() == 0 {
         return CompletionSignal::PausedLive;
     }
-    if crate::services::tui_turn_state::jsonl_completion_scan_idle(provider, transcript_path) {
+    let idle = match herdr {
+        true => crate::services::tui_turn_state::jsonl_herdr_completion_scan_idle,
+        false => crate::services::tui_turn_state::jsonl_completion_scan_idle,
+    };
+    if idle(provider, transcript_path) {
         CompletionSignal::Done
     } else {
         CompletionSignal::PausedLive

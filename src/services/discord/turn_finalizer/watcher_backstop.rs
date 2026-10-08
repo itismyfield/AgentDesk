@@ -97,11 +97,14 @@ pub(super) fn watcher_backstop_turn_is_terminal(
         .or_else(|| {
             crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&tmux_session_name)
         });
-    let signal = completion_signal_from_transcript(
-        provider,
-        runtime_kind,
-        std::path::Path::new(&output_path),
-    );
+    let herdr = herdr_hold.is_some();
+    #[cfg(test)]
+    let herdr = policy_mutant(herdr);
+    let signal = match herdr {
+        true => super::completion_signal::herdr_completion_signal_from_transcript,
+        false => completion_signal_from_transcript,
+    };
+    let signal = signal(provider, runtime_kind, std::path::Path::new(&output_path));
     let confirmed_end_publication = Some(
         shared
             .tmux_relay_coord(channel_id)
@@ -187,6 +190,16 @@ fn herdr_hold_source(
     // No recorded transcript proves no end: the turn stays held.
     let path = state.output_path.clone().unwrap_or_default();
     Some((name, path, false))
+}
+
+/// Test-only effect mutations of the backstop's Herdr policy choice.
+#[cfg(test)]
+fn policy_mutant(herdr: bool) -> bool {
+    use crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant as mutant;
+    match herdr {
+        true => !mutant("backstop_policy_ignored"),
+        false => mutant("backstop_off_changed"),
+    }
 }
 
 fn delivery_confirmed_for_produced_end(
@@ -404,6 +417,85 @@ mod tests {
                 "the transcript's own terminal ends the Herdr turn"
             );
 
+            let _ = std::fs::remove_file(&marker);
+            let _ = std::fs::remove_file(&transcript);
+        })
+        .await;
+    }
+
+    /// A held Herdr Codex turn ends on its own abort under settlement only; outside Herdr or without
+    /// settlement the backstop reads that abort as the existing signal does, never as terminal.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_a_held_herdr_turn_ends_on_its_own_codex_abort() {
+        use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
+        super::super::tests::with_isolated_runtime_root(|| async move {
+            let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
+            let entropy = chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+                .unsigned_abs();
+            let channel = ChannelId::new(50_340_026u64.saturating_add(entropy % 1_000_000));
+            let session = format!("AgentDesk-codex-backstop-abort-{}", entropy % 1_000_000);
+            let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
+            let path = transcript.to_str().unwrap().to_string();
+            let rollout = |aborted: &str| {
+                let event = |kind: &str, turn: &str| {
+                    serde_json::json!({"type": "event_msg", "payload": {"type": kind, "turn_id": turn}})
+                };
+                let lines = [event("task_started", "t1"), event("turn_aborted", aborted)];
+                let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+                std::fs::write(&transcript, body).unwrap();
+            };
+            let state = crate::services::discord::inflight::InflightTurnState::new(
+                ProviderKind::Codex,
+                channel.get(),
+                None,
+                7,
+                310,
+                311,
+                "herdr abort".to_string(),
+                None,
+                Some(session.clone()),
+                Some(path.clone()),
+                None,
+                0,
+            );
+            crate::services::discord::inflight::save_inflight_state(&state).unwrap();
+            shared.tmux_watchers.insert(
+                channel,
+                crate::services::discord::TmuxWatcherHandle {
+                    tmux_session_name: session.clone(),
+                    output_path: path,
+                    paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                    cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                        crate::services::discord::tmux_watcher_now_ms(),
+                    )),
+                },
+            );
+            let marker = crate::services::tmux_common::session_temp_path(&session, "host_kind");
+            std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+            let terminal =
+                || watcher_backstop_turn_is_terminal(&shared, channel, &ProviderKind::Codex, true);
+
+            rollout("t1");
+            let existing = completion_signal_from_transcript(&ProviderKind::Codex, None, &transcript);
+            assert_eq!(existing, CompletionSignal::PausedLive);
+            assert!(!terminal(), "a non-Herdr turn reads the abort as the existing signal does");
+            std::fs::write(&marker, "herdr").unwrap();
+            HERDR_SETTLEMENT_OVERRIDE.set(false);
+            let unsettled = terminal();
+            HERDR_SETTLEMENT_OVERRIDE.set(true);
+            assert!(!unsettled, "without settlement a Herdr turn keeps the existing signal");
+            assert!(terminal(), "a held Herdr turn ends on its own abort");
+            rollout("t0");
+            assert!(!terminal(), "another turn's abort ends nothing");
+
+            shared.tmux_watchers.remove(&channel);
             let _ = std::fs::remove_file(&marker);
             let _ = std::fs::remove_file(&transcript);
         })

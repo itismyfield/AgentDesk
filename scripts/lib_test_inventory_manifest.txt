@@ -5922,6 +5922,7 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_first_write_refused_before_any_key_releases_the_hold_for_the_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_late_stop_refused_before_any_send_runs_at_the_next_complete_record_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_late_stop_sends_nothing_after_a_terminal_or_for_a_replaced_token_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_launch_without_daemon_isolation_or_hooks_writes_no_pending_row_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_pending_pane_whose_own_start_was_logged_takes_no_second_first_prompt_pg
@@ -8630,6 +8631,8 @@ services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::turn_
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::turn_identity_without_uuid_still_detects_replaced_turn
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::wrapper_interrupt_is_fenced_but_can_cancel_submitted_generation
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::wrapper_submit_pending_overrides_prior_idle_state
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_codex_stop_never_takes_a_later_native_turn_for_its_own
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_generation_only_stale_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_generation_only_stale_sends_no_escape
@@ -8894,6 +8897,7 @@ services::discord::turn_finalizer::watcher_backstop::tests::herdr_turn_without_w
 services::discord::turn_finalizer::watcher_backstop::tests::missing_delivery_proof_never_confirms_terminal_end
 services::discord::turn_finalizer::watcher_backstop::tests::non_jsonl_signal_never_terminal_on_fast_path_probe
 services::discord::turn_finalizer::watcher_backstop::tests::o_delegated_done_turn_needs_no_legacy_delivery_confirmation
+services::discord::turn_finalizer::watcher_backstop::tests::only_a_held_herdr_turn_ends_on_its_own_codex_abort
 services::discord::turn_lease::registry::tests::turn_lease_registry_inspect_returns_rowless_lease_identity
 services::discord::turn_lease::registry::tests::turn_lease_registry_selects_owner_and_refuses_ambiguity
 services::discord::turn_lease::tests::claim_refuses_unbound_message_id_without_panic
