@@ -251,6 +251,13 @@ pub(in crate::services::discord) async fn kickoff_idle_queues_with_deps(
         let outcome = kickoff_idle_queue_channel(deps, provider, channel_id).await;
         if outcome.started {
             started_count += 1;
+        } else if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
+            // Boot and full reconcile have no later no-start arm; a held direct turn needs one.
+            let reason = "boot kickoff turn-mode no-start";
+            super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
+                shared, provider, channel_id, reason,
+            )
+            .await;
         }
     }
     started_count

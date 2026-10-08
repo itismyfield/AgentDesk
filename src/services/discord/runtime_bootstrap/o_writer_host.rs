@@ -192,7 +192,8 @@ impl HostIo for GatewayHost {
         };
         let confirm =
             super::super::tui_direct_pending_start::turn_retirement::confirm_turn_channels;
-        confirm(&kind, Some(&self.turn), || vec![channel]);
+        let confirmed = confirm(&kind, Some(&self.turn), || vec![channel]);
+        super::super::turn_presence::supervisor::register(&kind, &confirmed);
     }
 }
 
