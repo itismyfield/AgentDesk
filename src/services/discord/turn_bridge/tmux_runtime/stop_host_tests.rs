@@ -89,6 +89,7 @@ impl Fixture {
              case \"$1\" in\ndisplay-message) cat \"$d/pane_pid\"; exit 0 ;;\n\
              capture-pane) r=\"$(cat \"$d/ready\" 2>/dev/null)\"\n\
              [ -n \"$r\" ] && case \"$*\" in *\"-t $r -S\"*) echo 'Ready for input (type message + Enter)'; exit 0 ;; esac\n\
+             [ -f \"$d/pane\" ] && {{ cat \"$d/pane\"; exit 0; }}\n\
              echo '· Actioning… (4m 7s · esc to interrupt)'; exit 0 ;;\nesac\nexit 0"
         )
         .expect("tmux body");
@@ -141,6 +142,11 @@ impl Fixture {
     /// Makes the pane of `session` read as a Claude prompt ready for input; every other stays busy.
     pub(in super::super) fn ready(&self, session: &str) {
         std::fs::write(self.dir.path().join("ready"), session).unwrap();
+    }
+
+    /// Makes every other pane print `text` in place of the default busy frame.
+    pub(in super::super) fn pane(&self, text: &str) {
+        std::fs::write(self.dir.path().join("pane"), text).unwrap();
     }
 
     pub(in super::super) fn pid(&self) -> u32 {

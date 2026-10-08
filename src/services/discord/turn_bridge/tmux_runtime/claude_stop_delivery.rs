@@ -276,6 +276,21 @@ pub(super) fn classify_tui_interrupt_phase(
     }
 }
 
+/// Pane evidence at a Claude TUI stop: `(prompt painted, interruptible turn, editable draft)`.
+pub(super) fn claude_tui_stop_pane_evidence(pane: &str) -> (bool, bool, bool) {
+    use crate::services::tmux_common as screen;
+    // Claude keeps its empty composer painted through generation and foreground tools, so spinner
+    // chrome counts as active only above an exactly empty composer, never over composer text.
+    let active = screen::tmux_capture_indicates_claude_tui_actively_streaming(pane)
+        || (screen::tmux_capture_indicates_claude_tui_structured_spinner(pane)
+            && screen::tmux_capture_indicates_claude_tui_exact_empty_composer(pane));
+    (
+        screen::tmux_capture_indicates_claude_tui_ready_for_input(pane),
+        active,
+        screen::tmux_capture_indicates_claude_tui_prompt_draft(pane),
+    )
+}
+
 /// Decide delivery after the caller has reserved the token-local ownership fence.
 pub(super) fn decide_claimed_claude_stop_delivery(
     delivery: ClaudeTurnInterruptDelivery,
@@ -422,15 +437,9 @@ pub(super) async fn interrupt_claude_session(
         } else {
             None
         };
-        let pane_ready = pane.as_deref().is_some_and(
-            crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input,
-        );
-        let pane_active = pane.as_deref().is_some_and(
-            crate::services::tmux_common::tmux_capture_indicates_claude_tui_actively_streaming,
-        );
-        let pane_has_draft = pane.as_deref().is_some_and(
-            crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft,
-        );
+        let (pane_ready, pane_active, pane_has_draft) = pane
+            .as_deref()
+            .map_or((false, false, false), claude_tui_stop_pane_evidence);
         let phase = match delivery {
             ClaudeTurnInterruptDelivery::TuiEscape => classify_tui_interrupt_phase(
                 structured_state,
@@ -1283,3 +1292,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "claude_stop_pane_tests.rs"]
+mod pane_tests;
