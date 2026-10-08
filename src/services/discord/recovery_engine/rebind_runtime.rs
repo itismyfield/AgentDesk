@@ -917,6 +917,7 @@ mod tests {
             source_file_dev: 1,
             source_file_ino: 2,
             actor: std::sync::Weak::new(),
+            kind: crate::services::agent_protocol::NativeTerminalKind::Completed,
         };
         assert_eq!(codex_rebind_stream_message_json(message), None);
     }

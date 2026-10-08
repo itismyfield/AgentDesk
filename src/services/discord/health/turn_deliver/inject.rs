@@ -4,13 +4,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use poise::serenity_prelude::ChannelId;
+use poise::serenity_prelude::{ChannelId, MessageId};
 
 use super::HumanInputRequest;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::busy_inject::{self, Outcome, Unconfirmed, Veto};
 use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{InflightTurnState, TurnSource};
+use crate::services::discord::inject_disposition::{self, InjectionOutcome};
 use crate::services::discord::input_runtime::fence;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
@@ -28,6 +29,7 @@ pub(super) const INPUT_IN_FLIGHT: &str = "input_in_flight";
 const INPUT_RUNTIME_OWNED: &str = "input_runtime_owned";
 const MAILBOX_UNAVAILABLE: &str = "mailbox_unavailable";
 const NOT_BUSY: &str = "not_busy";
+const SOURCE_OWNED: &str = "source_owned";
 pub(super) const QUEUE_NONEMPTY: &str = "queue_nonempty";
 const SESSION_UNRESOLVED: &str = "session_unresolved";
 pub(super) const TRANSITION_BUSY: &str = "transition_busy";
@@ -287,6 +289,8 @@ pub(super) async fn attempt(
         shared: shared.clone(),
         provider: request.provider.clone(),
         channel_id: request.channel_id,
+        // External input has no Discord message to settle a disposition for.
+        message: None,
         handback: request.queue_entry(),
     };
     // The owner outlives a cancelled request: it settles the reservation and any handback itself.
@@ -301,6 +305,8 @@ struct Owner {
     shared: Arc<SharedData>,
     provider: ProviderKind,
     channel_id: ChannelId,
+    /// The Discord message the input is, whose injection is recorded so it never replays.
+    message: Option<MessageId>,
     /// The queue entry a vetoed paste becomes, and the turn id that names it.
     handback: (Intervention, String),
 }
@@ -311,6 +317,7 @@ impl Owner {
             shared,
             provider,
             channel_id,
+            message,
             handback: (handback, queued_turn),
         } = self;
         let Target {
@@ -326,9 +333,13 @@ impl Owner {
         let persistence = discord(&shared, &provider, channel_id);
         #[cfg(test)]
         test_hook::before_reserve(input.channel).await;
-        let reserve = mailbox.reserve_injection(None, claim, persistence.clone(), permit.clone());
+        let reserve =
+            mailbox.reserve_injection(message, claim, persistence.clone(), permit.clone());
         let ticket = match reserve.await {
             ReserveOutcome::Reserved(ticket) => ticket,
+            ReserveOutcome::Owned | ReserveOutcome::Consumed => {
+                return InjectAttempt::NotSent(SOURCE_OWNED);
+            }
             ReserveOutcome::HolderChanged => return InjectAttempt::NotSent(HOLDER_CHANGED),
             ReserveOutcome::Backlog => return InjectAttempt::NotSent(QUEUE_NONEMPTY),
             ReserveOutcome::Unavailable => return InjectAttempt::NotSent(MAILBOX_UNAVAILABLE),
@@ -370,11 +381,19 @@ impl Owner {
                 }
             }
             delivered => {
-                let settle = InjectionSettlement::Delivered;
+                let outcome = match delivered {
+                    InjectAttempt::Injected { .. } => InjectionOutcome::Observed,
+                    _ => InjectionOutcome::Unconfirmed,
+                };
+                let settle = InjectionSettlement::Delivered(outcome);
                 let permit = permit.clone();
                 let _ = mailbox
                     .settle_injected_input(ticket, settle, persistence, permit)
                     .await;
+                // Recorded whatever the settle answered, so a restart still finds it.
+                if let Some(message) = message {
+                    record_terminal(&provider, channel_id, message, outcome).await;
+                }
                 delivered
             }
         };
@@ -383,6 +402,23 @@ impl Owner {
         let kick = crate::services::discord::queue_io::schedule_post_enqueue_idle_queue_kick;
         kick(shared, provider, channel_id);
         attempt
+    }
+}
+
+/// Records an injected message in the provider file; a failure only loses replay protection.
+async fn record_terminal(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    message: MessageId,
+    outcome: InjectionOutcome,
+) {
+    let (provider, now_ms) = (provider.clone(), chrono::Utc::now().timestamp_millis());
+    let record =
+        move || inject_disposition::record_terminal(&provider, channel, message, outcome, now_ms);
+    match tokio::task::spawn_blocking(record).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "injected input not recorded"),
+        Err(error) => tracing::warn!(%error, "injected input record panicked"),
     }
 }
 

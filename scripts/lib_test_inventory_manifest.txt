@@ -1643,6 +1643,7 @@ services::claude::claude_tui_session_resolution_tests::stranded_followup_user_dr
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_quiescent_draft_can_recreate_hosted_tui
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_with_prompt_marker_and_draft_reaches_recovery
 services::claude::claude_tui_session_resolution_tests::warm_followup_continues_after_prompt_draft_clear
+services::claude::herdr_turn::provider_terminal_tests::a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal
 services::claude::host_gate::tests::a_failed_pane_probe_never_reads_as_a_stale_session
 services::claude::host_gate::tests::a_failed_presence_probe_never_prepares_a_fresh_session
 services::claude::host_gate::tests::a_session_marked_for_another_host_is_never_probed_killed_or_relaunched
@@ -2665,6 +2666,9 @@ services::codex_tui::rollout_tail::child_binding_tests::child_only_launch_publis
 services::codex_tui::rollout_tail::child_binding_tests::direct_registration_refuses_both_child_indicators
 services::codex_tui::rollout_tail::child_binding_tests::fresh_launch_consumes_b_source_despite_newer_child
 services::codex_tui::rollout_tail::child_binding_tests::replacement_after_discovery_is_rejected_before_marker_and_o_publication
+services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_codex_turn_ends_only_on_its_own_rollout_terminal
+services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_turn_accepts_nothing_past_its_terminal_record
+services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_turn_ends_only_on_a_record_naming_its_started_turn
 services::codex_tui::rollout_tail::tests::always_fresh_pane_signal_reaches_hard_veto_cap_and_emits_done
 services::codex_tui::rollout_tail::tests::assistant_response_deadline_emits_timeout_done
 services::codex_tui::rollout_tail::tests::codex_stop_hook_emits_done_before_drain
@@ -2975,6 +2979,11 @@ services::discord::catch_up::classification_order_tests::frontier_sweep_tests::t
 services::discord::catch_up::classification_order_tests::frontier_sweep_tests::t9c_clear_that_fails_to_persist_keeps_the_retry_and_checkpoint
 services::discord::catch_up::classification_order_tests::handled_command_tests::sweep_defers_a_command_when_own_identity_is_unknown
 services::discord::catch_up::classification_order_tests::handled_command_tests::sweep_skips_replied_commands_and_recovers_everything_else
+services::discord::catch_up::classification_order_tests::injected_catch_up_tests::a_hit_is_counted_for_a_fetched_message_the_scan_never_reached
+services::discord::catch_up::classification_order_tests::injected_catch_up_tests::a_scan_without_injections_reads_the_absent_ring_once_per_phase_and_leaves_no_trace
+services::discord::catch_up::classification_order_tests::injected_catch_up_tests::phase1_skips_a_message_the_process_table_holds
+services::discord::catch_up::classification_order_tests::injected_catch_up_tests::phase1_skips_a_message_the_ring_records_and_passes_it
+services::discord::catch_up::classification_order_tests::injected_catch_up_tests::phase2_passes_an_injected_message_unless_the_queue_also_holds_it
 services::discord::catch_up::classification_order_tests::ledger_suppresses_dead_letter_for_an_answered_message
 services::discord::catch_up::classification_order_tests::notify_identity_is_terminal_before_age_even_when_discord_bot_flag_is_false
 services::discord::catch_up::classification_order_tests::phase1_allowed_automation_too_old_is_dead_lettered_without_authorization
@@ -3693,6 +3702,7 @@ services::discord::health::turn_deliver::inject_tests::a_channel_closed_to_legac
 services::discord::health::turn_deliver::inject_tests::a_deliver_waiting_on_a_handback_claims_behind_it_and_the_kick_runs_the_handback_pg
 services::discord::health::turn_deliver::inject_tests::a_handback_onto_a_full_queue_records_its_one_overflow_pg
 services::discord::health::turn_deliver::inject_tests::a_handback_that_never_lands_refuses_the_delivery_and_keeps_no_place_pg
+services::discord::health::turn_deliver::inject_tests::a_headless_claim_returns_the_token_it_registered
 services::discord::health::turn_deliver::inject_tests::a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox
 services::discord::health::turn_deliver::inject_tests::a_rebound_transcript_or_input_queued_during_the_last_lookups_vetoes_the_paste_pg
 services::discord::health::turn_deliver::inject_tests::a_row_replaced_after_its_last_read_does_not_stop_the_reservation_allowed_range_pg
@@ -3700,6 +3710,7 @@ services::discord::health::turn_deliver::inject_tests::a_session_of_another_runt
 services::discord::health::turn_deliver::inject_tests::a_vetoed_paste_hands_the_input_back_ahead_of_input_sent_after_its_reservation_pg
 services::discord::health::turn_deliver::inject_tests::an_effect_that_dies_outside_its_guard_is_still_reported_once_pg
 services::discord::health::turn_deliver::inject_tests::an_idle_transcript_stops_before_the_reservation_and_the_pane
+services::discord::health::turn_deliver::inject_tests::an_injection_without_a_discord_message_records_no_disposition_pg
 services::discord::health::turn_deliver::inject_tests::any_holder_takes_input_unless_a_claimed_input_has_not_reached_its_row
 services::discord::health::turn_deliver::inject_tests::input_left_on_disk_for_an_unloaded_mailbox_stays_ahead_of_a_deliver_pg
 services::discord::health::turn_deliver::inject_tests::input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg
@@ -4067,6 +4078,8 @@ services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::s
 services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::transient_claude_e_stamp_read_error_is_retryable_and_preserves_process_frame
 services::discord::inflight::save_store::identity_gate::host_locator::tests::hosted_binding_is_installed_once_and_only_its_own_nonce_and_locator_may_write
 services::discord::inflight::save_store::identity_gate::host_locator::tests::legacy_rows_without_a_binding_stamp_and_reload_unchanged
+services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::a_completed_range_persists_its_pre_kind_bytes_and_an_aborted_one_its_kind
+services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::an_admitted_terminal_keeps_its_kind_and_an_unverified_abort_is_never_done
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_progress
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_without_row_mutation
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::contended_captured_terminal_keeps_scheduler_timer_and_loopback_live
@@ -4243,6 +4256,12 @@ services::discord::inflight_heartbeat_sweeper::retired_channel_tests::retired_ch
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_initial_delay_below_placeholder_abandon
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_interval_below_placeholder_sweep_interval
 services::discord::inflight_heartbeat_sweeper::tests::heartbeat_sweep_report_default_is_zero
+services::discord::inject_disposition::tests::a_full_ring_drops_its_oldest_entry_and_a_rerecorded_message_keeps_one
+services::discord::inject_disposition::tests::a_ring_terminal_answers_a_scan_until_its_ttl
+services::discord::inject_disposition::tests::a_table_terminal_answers_until_its_ttl
+services::discord::inject_disposition::tests::a_writer_between_read_and_write_holds_the_second_writer_off
+services::discord::inject_disposition::tests::an_unreadable_ring_is_replaced_by_the_new_entry
+services::discord::inject_disposition::tests::the_table_drops_its_oldest_terminal_past_the_cap_and_the_ring_still_holds_it
 services::discord::input_runtime::clear::tests::a_blocking_resume_cuts_only_the_ticket_inputs_and_keeps_the_guard_until_done
 services::discord::input_runtime::clear::tests::a_confirmed_absent_commit_refuses_with_every_input_kept
 services::discord::input_runtime::clear::tests::a_dropped_receiver_neither_cancels_the_clear_nor_frees_its_guard_early
@@ -7979,6 +7998,7 @@ services::discord::tui_task_card::tests::task_card_clamps_many_short_headings_un
 services::discord::tui_task_card::tests::task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::c1_actual_spawn_bridge_retains_effect_until_future_disposal
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::headless_entry_abort_releases_mailbox_without_touching_durable_owner
+services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::herdr_codex_abort_reaches_the_bridge_typed_and_never_completes
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::herdr_stopped_turn_without_provider_terminal_stays_held
 services::discord::turn_bridge::bridge_entry_persist::tests::a_reconcile_that_changes_nothing_records_nothing
 services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals
@@ -8519,6 +8539,7 @@ services::discord::turn_bridge::thinking::thinking_redaction_tests::redacted_thi
 services::discord::turn_bridge::thinking::thinking_redaction_tests::redacted_thinking_event_with_none_summary_still_blank
 services::discord::turn_bridge::thinking::thinking_redaction_tests::thinking_status_line_is_neutral_single_marker
 services::discord::turn_bridge::thinking::thinking_redaction_tests::thinking_status_line_is_stable_across_repeated_calls
+services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::pane_tests::claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::a_new_turn_generation_gets_a_fresh_delivery_fence
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::active_generation_escape_is_delivered_once_across_stop_race
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::ambiguous_or_unconfirmed_streaming_state_fails_safe_and_allows_retry
@@ -11126,6 +11147,7 @@ services::tui_prompt_dedupe::tests::touch_anchor_on_activity_evicts_expired_anch
 services::tui_prompt_dedupe::tests::watcher_snapshot_generation_clear_preserves_newer_same_key_lease
 services::tui_steering::tests::legacy_prompt_never_enters_native_tui_route_or_probes_pane
 services::tui_steering::tests::unsafe_snapshots_fail_closed_before_injection
+services::tui_turn_state::completion_scan::tests::a_turns_own_abort_ends_it_for_the_completion_scan
 services::tui_turn_state::tests::claude_assistant_after_permission_mode_is_streaming
 services::tui_turn_state::tests::claude_assistant_with_only_thinking_content_stays_streaming
 services::tui_turn_state::tests::claude_assistant_without_terminal_envelope_is_streaming
@@ -11308,11 +11330,20 @@ services::turn_orchestrator::inbound_order::tests::an_aged_queue_item_does_not_r
 services::turn_orchestrator::inbound_order::tests::an_immediate_turn_cycle_never_refreshes_the_stall_clock
 services::turn_orchestrator::inbound_order::tests::nothing_ahead_of_the_claim_clears_the_stall_clock
 services::turn_orchestrator::inbound_order::tests::the_fail_open_window_spans_three_idle_queue_backstop_rounds
+services::turn_orchestrator::injected_inputs::tests::a_busy_slot_keeps_its_turn_when_an_injected_message_is_claimed
+services::turn_orchestrator::injected_inputs::tests::a_cancel_that_removed_the_file_but_failed_its_fsync_still_holds_the_reservation
 services::turn_orchestrator::injected_inputs::tests::a_closed_actor_refuses_reserve_and_settle_and_passes_abandon
+services::turn_orchestrator::injected_inputs::tests::a_fresh_actor_reads_any_provider_terminal_and_a_known_one_only_its_own
 services::turn_orchestrator::injected_inputs::tests::a_handback_lands_under_its_owner_permit_while_the_gate_closes
+services::turn_orchestrator::injected_inputs::tests::a_live_injection_refuses_its_message_until_its_lease_dies
 services::turn_orchestrator::injected_inputs::tests::a_reservation_checks_the_queue_and_dispatch_marker_a_fresh_actor_has_not_loaded
+services::turn_orchestrator::injected_inputs::tests::a_reservation_for_a_held_or_injected_message_is_owned_or_consumed
 services::turn_orchestrator::injected_inputs::tests::a_reservation_holds_past_the_fail_open_and_the_dequeued_head_exceptions
+services::turn_orchestrator::injected_inputs::tests::a_scan_from_before_the_reservation_is_refused_after_the_terminal_ages_out
 services::turn_orchestrator::injected_inputs::tests::a_sent_handback_without_an_answer_is_unknown_and_never_resent
+services::turn_orchestrator::injected_inputs::tests::a_settle_keeps_the_injection_outcome
+services::turn_orchestrator::injected_inputs::tests::an_injected_claim_yields_before_the_yield_helpers_count_or_clear_anything
+services::turn_orchestrator::injected_inputs::tests::an_injected_message_is_neither_enqueued_nor_started_again
 services::turn_orchestrator::injected_inputs::tests::an_unwritten_handback_keeps_the_reservation_until_the_same_ticket_lands
 services::turn_orchestrator::injected_inputs::tests::close_if_idle_refuses_a_live_reservation_and_admits_an_orphaned_one
 services::turn_orchestrator::injected_inputs::tests::take_next_and_behind_queue_claims_wait_on_a_reservation_after_its_turn_ended

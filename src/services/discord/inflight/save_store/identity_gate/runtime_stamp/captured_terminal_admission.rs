@@ -16,6 +16,13 @@ pub(super) async fn admit_uncaptured_terminal(
     ) {
         return Ok((message, None, false));
     }
+    let aborted = matches!(
+        &message,
+        StreamMessage::CodexTuiTerminalDone {
+            kind: crate::services::agent_protocol::NativeTerminalKind::Aborted,
+            ..
+        }
+    );
     let mut owned_local = local.clone();
     let mut owned_baseline = baseline.clone();
     let expected = expected.clone();
@@ -33,7 +40,11 @@ pub(super) async fn admit_uncaptured_terminal(
     .map_err(|_| GuardedSaveOutcome::IoError)?;
     *local = owned_local;
     *baseline = owned_baseline;
-    Ok(admitted)
+    // An abort never degrades to a plain Done: without admitted evidence it keeps the obligation.
+    match admitted {
+        (_, None, _) if aborted => Err(GuardedSaveOutcome::AuthorityPinned),
+        admitted => Ok(admitted),
+    }
 }
 
 pub(super) struct CapturedTerminalAdmission {
@@ -51,6 +62,7 @@ pub(super) struct CapturedTerminalAdmission {
     pub(super) source_file_ino: u64,
     pub(super) captured: std::sync::Arc<crate::services::provider::CancelToken>,
     pub(super) can_deliver_directly: bool,
+    pub(super) kind: crate::services::agent_protocol::NativeTerminalKind,
 }
 
 impl CapturedTerminalAdmission {
@@ -75,6 +87,7 @@ impl CapturedTerminalAdmission {
             source_file_ino,
             captured,
             can_deliver_directly,
+            kind,
         } = self;
         let mismatch = GuardedSaveOutcome::SuccessorOwned;
         let root = inflight_runtime_root().ok_or(mismatch)?;
@@ -169,7 +182,7 @@ impl CapturedTerminalAdmission {
             crate::services::tui_prompt_dedupe::register_tmux_runtime_binding_under_source_authority(authority, binding);
             Ok((
                 StreamMessage::Done { result, session_id },
-                Some(range),
+                Some(range.of_kind(kind)),
                 true,
             ))
         })

@@ -44,10 +44,13 @@ impl FrontierEvidence {
     }
 }
 
-/// I20: only a turn that took THIS id is evidence; membership and absorption are not.
+/// I20: only a turn that took THIS id is evidence; membership and absorption are not. An
+/// injected id passes too: an unconfirmed one by policy, as a suppressed resend, not as delivery.
 fn of_arm(arm: RecoveryKnownIdArm) -> FrontierEvidence {
     match arm {
-        RecoveryKnownIdArm::ActiveTurn => FrontierEvidence::Dispatched,
+        RecoveryKnownIdArm::ActiveTurn
+        | RecoveryKnownIdArm::InjectedObserved
+        | RecoveryKnownIdArm::InjectedUnconfirmed => FrontierEvidence::Dispatched,
         RecoveryKnownIdArm::Queued
         | RecoveryKnownIdArm::PendingDispatch
         | RecoveryKnownIdArm::AbsorbedActiveTurn => FrontierEvidence::Open,
@@ -58,8 +61,8 @@ fn of_arm(arm: RecoveryKnownIdArm) -> FrontierEvidence {
 mod tests {
     use super::*;
 
-    /// #5996/#6035: only the active-turn arm names a message a turn actually
-    /// took, so only it may move a checkpoint past one.
+    /// Of the mailbox arms only the active turn names a message a turn took, so only it may move
+    /// a checkpoint past one; the injected arms are checked with the catch-up phases.
     #[test]
     fn only_the_active_turn_arm_is_dispatch_evidence() {
         let duplicate = |arm| FrontierEvidence::of_known(CatchUpClassification::Duplicate, arm);
