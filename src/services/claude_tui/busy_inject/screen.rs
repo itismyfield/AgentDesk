@@ -337,7 +337,12 @@ fn wrap(line: &str, columns: usize) -> Option<Vec<String>> {
     }
     let shown = |(index, row): (usize, String)| {
         let row = row.trim_end_matches(' ');
-        if index == 0 { row } else { row.trim_start_matches(' ') }.to_string()
+        if index == 0 {
+            row
+        } else {
+            row.trim_start_matches(' ')
+        }
+        .to_string()
     };
     Some(rows.into_iter().enumerate().map(shown).collect())
 }

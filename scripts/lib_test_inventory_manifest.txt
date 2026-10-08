@@ -1710,6 +1710,9 @@ services::claude_compact_trigger::tests::stale_authority_rejection_cannot_rearm_
 services::claude_compact_trigger::tests::stale_generation_worker_neither_sends_nor_rearms_after_pane_recreated
 services::claude_compact_trigger::tests::window_switch_invalidates_old_worker_and_starts_a_fresh_cycle
 services::claude_e::process::tests::claude_e_command_receives_authoritative_launch_env
+services::claude_tui::busy_inject::screen_tests::a_flat_paste_is_drawn_in_the_rows_measured_at_each_boundary
+services::claude_tui::busy_inject::screen_tests::a_paste_whose_rows_cannot_be_predicted_or_shown_whole_has_no_rows
+services::claude_tui::busy_inject::screen_tests::a_wrapped_paste_is_owned_only_in_the_rows_claude_draws
 services::claude_tui::busy_inject::stash_tests::a_draft_beside_an_occupied_or_unreadable_stash_is_left_alone
 services::claude_tui::busy_inject::stash_tests::a_draft_is_stashed_then_the_input_entered_once_and_the_draft_handed_back
 services::claude_tui::busy_inject::stash_tests::a_frame_that_would_fold_or_wrap_leaves_the_draft_alone
@@ -3699,6 +3702,7 @@ services::discord::health::turn_deliver::inject_tests::a_rebound_transcript_or_i
 services::discord::health::turn_deliver::inject_tests::a_row_replaced_after_its_last_read_does_not_stop_the_reservation_allowed_range_pg
 services::discord::health::turn_deliver::inject_tests::a_session_of_another_runtime_stops_before_the_transition_and_the_pane
 services::discord::health::turn_deliver::inject_tests::a_vetoed_paste_hands_the_input_back_ahead_of_input_sent_after_its_reservation_pg
+services::discord::health::turn_deliver::inject_tests::a_wrapped_paste_is_injected_only_when_its_rows_are_predicted_pg
 services::discord::health::turn_deliver::inject_tests::an_effect_that_dies_outside_its_guard_is_still_reported_once_pg
 services::discord::health::turn_deliver::inject_tests::an_idle_transcript_stops_before_the_reservation_and_the_pane
 services::discord::health::turn_deliver::inject_tests::any_holder_takes_input_unless_a_claimed_input_has_not_reached_its_row

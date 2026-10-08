@@ -614,7 +614,9 @@ fn inject_locked(
         timing,
     };
     match plan {
-        Plan::Direct(drawn) => Report::new(paste_into_empty(&attempt, &drawn), DraftState::Unchanged),
+        Plan::Direct(drawn) => {
+            Report::new(paste_into_empty(&attempt, &drawn), DraftState::Unchanged)
+        }
         Plan::Stash(draft) => stash::run(&attempt, &draft),
     }
 }
