@@ -10723,6 +10723,7 @@ services::tui_o::shadow::tap::tests::tap_counts_a_full_queue_as_dropped_instead_
 services::tui_o::shadow::tap::tests::the_window_start_tail_reads_to_the_end_in_one_pass
 services::tui_o::shadow_host::tests::tap_copies_own_bot_messages_and_authorless_edits_only
 services::tui_o::store::durable::tests::a_create_once_retry_leaves_the_published_file_and_its_crash_alias_untouched
+services::tui_o::store::ledger::lock_tests::a_recovery_lock_ends_with_the_recovery_while_a_forked_child_still_holds_the_file
 services::tui_o::store::ledger::lock_tests::operator_child
 services::tui_o::store::ledger::lock_tests::recovery_excludes_an_operator_in_a_separate_process
 services::tui_o::store::ledger::lock_tests::successful_operator_append_survives_recovery_tail_truncation

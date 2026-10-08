@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -209,9 +209,9 @@ impl OStore {
         append: impl FnOnce(&mut File, DateTime<Utc>, &LedgerEntry) -> Result<(), StoreError>,
     ) -> Result<(SourceId, u64), StoreError> {
         let path = self.channel_dir(channel).join(LEDGER_FILE);
-        let mut file = OpenOptions::new().read(true).append(true).open(&path)?;
+        let file = OpenOptions::new().read(true).append(true).open(&path)?;
         // Hold the existing ledger lock across validation and the durable operator append.
-        file.try_lock().map_err(io::Error::from)?;
+        let mut file = durable::LockedFile::try_lock(file)?;
         if self.read_init(channel)?.is_none() {
             return Err(rejected(format!("channel {channel} has no O store")));
         }
