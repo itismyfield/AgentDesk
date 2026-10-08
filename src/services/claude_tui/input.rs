@@ -9,6 +9,8 @@ use super::host_input;
 
 mod draft_hold;
 use draft_hold::{admit_automatic_write, dismiss_startup_dialog};
+#[cfg(test)]
+mod final_ready_tests;
 
 pub(crate) fn submit_native_clear(
     target: &host_input::InputTarget,
@@ -1800,6 +1802,13 @@ pub(super) fn prompt_marker_confirms_prompt_ready(
     snapshot.prompt_marker_detected
         && !snapshot.prompt_draft_detected
         && snapshot_allows_prompt_readiness(readiness, snapshot)
+}
+
+/// A live, captured pane whose marker passes the follow-up send's draft, busy and auth vetoes.
+pub(crate) fn final_prompt_ready(snapshot: &PromptReadinessSnapshot) -> bool {
+    snapshot.tmux_pane_alive
+        && snapshot.capture_available
+        && prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, snapshot)
 }
 
 /// Revalidate a hosted warm follow-up after it acquires the narrow composer

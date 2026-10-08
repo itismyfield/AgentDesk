@@ -48,6 +48,13 @@ pub enum Ordered {
     },
 }
 
+/// Where a reader stopped by a typed `Blocked` record may resume, and the state it held there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resume {
+    pub after: u64,
+    pub carried: TurnState,
+}
+
 pub struct InputFacts {
     binding: SourceBinding,
     capture: SourceCapture,
@@ -55,6 +62,11 @@ pub struct InputFacts {
     state: TurnState,
     halted: Option<String>,
     events: Vec<Ordered>,
+    saw_turn_evidence: bool,
+    resume: Option<Resume>,
+    /// A resumed reader's carried state; only the carried turn's own closer may end it.
+    carried: TurnState,
+    awaiting_boundary: bool,
 }
 
 impl InputFacts {
@@ -90,7 +102,38 @@ impl InputFacts {
             state: TurnState::Unknown,
             halted: None,
             events: Vec::new(),
+            saw_turn_evidence: false,
+            resume: None,
+            carried: TurnState::Unknown,
+            awaiting_boundary: false,
         })
+    }
+
+    /// Reopens after a typed `Blocked` record; Unknown until the carried turn's closer or an opener.
+    pub fn resume(binding: SourceBinding, resume: &Resume) -> Result<Self, String> {
+        let mut facts = Self::open_at(binding, resume.after)?;
+        facts.awaiting_boundary = true;
+        facts.carried = resume.carried.clone();
+        Ok(facts)
+    }
+
+    /// Set only when a typed `Blocked` record halted this reader.
+    pub fn resume_point(&self) -> Option<&Resume> {
+        self.resume.as_ref()
+    }
+
+    /// Whether any record fact other than a row that does not itself open a turn was read.
+    pub fn saw_turn_evidence(&self) -> bool {
+        self.saw_turn_evidence
+    }
+
+    /// A resumed reader that has not yet seen the carried turn's closer or a new opener.
+    pub fn awaiting_boundary(&self) -> bool {
+        self.awaiting_boundary
+    }
+
+    pub fn binding(&self) -> &SourceBinding {
+        &self.binding
     }
 
     /// The last poll's ordered facts.
@@ -140,13 +183,16 @@ impl InputFacts {
             let row = row_key(&value);
             let range = (record.start, record.end);
             for fact in classify(self.binding.provider, &value) {
+                self.saw_turn_evidence |= !matches!(fact, RecordFact::Prompt(false, _));
                 // A foreign closer cannot release this channel's running parent turn.
-                if let (
-                    RecordFact::Idle(Some(close)),
-                    TurnState::Open {
-                        native_turn_id: Some(open),
-                    },
-                ) = (&fact, &self.state)
+                let open = match (&self.state, &self.carried) {
+                    (TurnState::Open { native_turn_id }, _) => native_turn_id.as_ref(),
+                    (_, TurnState::Open { native_turn_id }) if self.awaiting_boundary => {
+                        native_turn_id.as_ref()
+                    }
+                    _ => None,
+                };
+                if let (RecordFact::Idle(Some(close)), Some(open)) = (&fact, open)
                     && open != close
                 {
                     continue;
@@ -163,6 +209,13 @@ impl InputFacts {
                     TurnEvent::StrayIdle | TurnEvent::EdgeTurn => (Some(TurnState::Idle), None),
                     TurnEvent::None => {
                         if let RecordFact::Blocked(reason) = &fact {
+                            // Before a boundary the carried turn is still the one to protect.
+                            let carried = match self.awaiting_boundary {
+                                true => self.carried.clone(),
+                                false => self.state.clone(),
+                            };
+                            let after = record.end;
+                            self.resume = Some(Resume { after, carried });
                             return Err(reason.clone());
                         }
                         let anonymous_open = matches!(fact, RecordFact::TurnStart(_))
@@ -219,6 +272,8 @@ impl InputFacts {
             _ => {}
         }
         self.state = next;
+        self.awaiting_boundary = false;
+        self.carried = TurnState::Unknown;
     }
 }
 
@@ -232,5 +287,7 @@ fn aborted(provider: ShadowProvider, value: &Value) -> bool {
     }
 }
 
+#[cfg(test)]
+mod resume_tests;
 #[cfg(test)]
 mod tests;

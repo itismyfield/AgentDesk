@@ -744,4 +744,121 @@ mod tests {
                 );
             });
     }
+
+    /// A turn-mode channel whose transcript reads busy or unknown keeps its queue, dispatch marker
+    /// and lease through the finalizer's dequeue and arms the backstop; idle dispatches once.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_held_turn_mode_transcript_keeps_the_finalizer_from_dequeuing() {
+        use crate::services::discord::turn_presence::activity::tests::{
+            BindingRoot, ReadyPane, bind_turn_mode_transcript, settled_reason,
+        };
+        let _runtime = crate::config::TestRuntimeRootGuard::new();
+        let root = tempfile::tempdir().unwrap();
+        let _binding = BindingRoot::enter(root.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let user = r#"{"type":"user","uuid":"a","message":{"content":"direct"}}"#;
+        let end = r#"{"type":"system","subtype":"turn_duration"}"#;
+        let cases = [
+            (6_100_031_u64, format!("{user}\n"), "open"),
+            (
+                6_100_032,
+                format!("{user}\n{{\"type\":\"user\"\n"),
+                "facts_halted",
+            ),
+            (6_100_033, format!("{user}\n{end}\n"), "closed"),
+            (6_100_034, String::new(), "binding_unreadable"),
+        ];
+        // The queue as the mailbox and the disk hold it: items, dispatch marker and lease.
+        let held = |channel_id: ChannelId| {
+            let shared = shared.clone();
+            async move {
+                let snapshot = super::super::mailbox_snapshot(&shared, channel_id).await;
+                let dir = crate::services::discord::runtime_store::discord_pending_queue_root()
+                    .unwrap()
+                    .join(ProviderKind::Claude.as_str())
+                    .join(&shared.token_hash);
+                let disk = ["json", "dispatch"].map(|ext| {
+                    std::fs::read_to_string(dir.join(format!("{}.{ext}", channel_id.get()))).ok()
+                });
+                let ids: Vec<_> = snapshot
+                    .intervention_queue
+                    .iter()
+                    .map(|i| i.message_id)
+                    .collect();
+                let marker = (
+                    snapshot.pending_user_dispatch,
+                    snapshot.pending_user_dispatch_source_ids,
+                    snapshot.pending_user_dispatch_lease_held_by_caller,
+                );
+                (ids, marker, disk)
+            }
+        };
+        let mut observed = Vec::new();
+        let (mut confirmations, mut ready) = (Vec::new(), Vec::new());
+        for (channel, transcript, reason) in &cases {
+            let path = root.path().join(format!("{channel}.jsonl"));
+            std::fs::write(&path, transcript).unwrap();
+            let session = format!("finalize-{channel}");
+            ready.push(ReadyPane::mark(&session));
+            confirmations.push(bind_turn_mode_transcript(
+                &shared, &provider, *channel, &session, &path,
+            ));
+            if transcript.is_empty() {
+                std::fs::rename(&path, path.with_extension("moved")).unwrap();
+            }
+            assert_eq!(settled_reason(&shared, &provider, *channel).await, *reason);
+            let channel_id = ChannelId::new(*channel);
+            let queued = queued_intervention(channel + 100);
+            let context = super::super::queue_persistence_context(&shared, &provider, channel_id);
+            shared
+                .mailbox(channel_id)
+                .replace_queue(vec![queued], context)
+                .await;
+            shared.restart.finalizing_turns.store(1, Ordering::Relaxed);
+            shared.restart.global_finalizing.store(1, Ordering::Relaxed);
+            let before = held(channel_id).await;
+            let dispatched = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let gateway = RecordingFailingQueuedDispatchGateway {
+                dispatched_message_ids: dispatched.clone(),
+            };
+            finalize_and_drain_queued_turns(
+                shared.clone(),
+                true,
+                false,
+                Arc::new(gateway),
+                channel_id,
+                provider.clone(),
+                "requester".to_string(),
+                None,
+                None,
+                true,
+            )
+            .await;
+            let queue = super::super::mailbox_snapshot(&shared, channel_id)
+                .await
+                .intervention_queue
+                .len();
+            let armed = shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id);
+            let dispatches = dispatched.lock().unwrap().len();
+            if dispatches == 0 {
+                assert_eq!(held(channel_id).await, before, "{reason}");
+            }
+            observed.push((*reason, dispatches, queue, armed));
+        }
+        // The idle case's forced dispatch failure restores the head and re-arms as before.
+        assert_eq!(
+            observed,
+            [
+                ("open", 0, 1, true),
+                ("facts_halted", 0, 1, true),
+                ("closed", 1, 1, true),
+                ("binding_unreadable", 0, 1, true),
+            ]
+        );
+    }
 }

@@ -285,10 +285,11 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // doctor handles only health-registered runtimes, which register after their reaper.
     super::inflight::reap_inflight_rows_at_boot_blocking(&provider, shared.pg_pool.clone()).await;
     // Turn mode is fixed before the relay restores pending starts for the channels it confirms.
-    super::tui_direct_pending_start::turn_retirement::confirm_at_boot(
+    let confirmed = super::tui_direct_pending_start::turn_retirement::confirm_at_boot(
         &provider,
         boot_config.tui_o.as_ref(),
     );
+    super::turn_presence::supervisor::register(&provider, &confirmed);
     super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());
 
     // Phase 5.2 of intake-node-routing (issue #2009): populate
@@ -303,6 +304,11 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // returns Err on already-set), preserving the leader's existing
     // semantics.
     let _ = shared.http.cached_bot_token.set(token.to_string());
+    // Presence sends only after the token is set, and only where turn mode is configured.
+    let turn = boot_config.tui_o.as_ref().map(|config| &config.turn);
+    if turn.is_some_and(|turn| turn.all_owned || !turn.channels.is_empty()) {
+        super::turn_presence::supervisor::spawn(shared.clone(), provider.clone());
+    }
 
     if !modules.gateway {
         health_registry
@@ -1100,6 +1106,12 @@ agents:
                 "reaper must precede {later}"
             );
         }
+        let token = body.find("cached_bot_token.set(").unwrap();
+        let presence = body.find("turn_presence::supervisor::spawn(").unwrap();
+        assert!(
+            token < presence,
+            "presence never sends before the bot token is set"
+        );
         let confirm = body.find("turn_retirement::confirm_at_boot(").unwrap();
         assert!(
             at < confirm && confirm < body.find("spawn_tui_prompt_relay(").unwrap(),
