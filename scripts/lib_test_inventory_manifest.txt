@@ -1643,6 +1643,7 @@ services::claude::claude_tui_session_resolution_tests::stranded_followup_user_dr
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_quiescent_draft_can_recreate_hosted_tui
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_with_prompt_marker_and_draft_reaches_recovery
 services::claude::claude_tui_session_resolution_tests::warm_followup_continues_after_prompt_draft_clear
+services::claude::herdr_turn::provider_terminal_tests::a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal
 services::claude::host_gate::tests::a_failed_pane_probe_never_reads_as_a_stale_session
 services::claude::host_gate::tests::a_failed_presence_probe_never_prepares_a_fresh_session
 services::claude::host_gate::tests::a_session_marked_for_another_host_is_never_probed_killed_or_relaunched
@@ -2668,6 +2669,9 @@ services::codex_tui::rollout_tail::child_binding_tests::child_only_launch_publis
 services::codex_tui::rollout_tail::child_binding_tests::direct_registration_refuses_both_child_indicators
 services::codex_tui::rollout_tail::child_binding_tests::fresh_launch_consumes_b_source_despite_newer_child
 services::codex_tui::rollout_tail::child_binding_tests::replacement_after_discovery_is_rejected_before_marker_and_o_publication
+services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_codex_turn_ends_only_on_its_own_rollout_terminal
+services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_turn_accepts_nothing_past_its_terminal_record
+services::codex_tui::rollout_tail::parser::herdr_terminal_tests::a_herdr_turn_ends_only_on_a_record_naming_its_started_turn
 services::codex_tui::rollout_tail::tests::always_fresh_pane_signal_reaches_hard_veto_cap_and_emits_done
 services::codex_tui::rollout_tail::tests::assistant_response_deadline_emits_timeout_done
 services::codex_tui::rollout_tail::tests::codex_stop_hook_emits_done_before_drain
@@ -4079,6 +4083,8 @@ services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::s
 services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::transient_claude_e_stamp_read_error_is_retryable_and_preserves_process_frame
 services::discord::inflight::save_store::identity_gate::host_locator::tests::hosted_binding_is_installed_once_and_only_its_own_nonce_and_locator_may_write
 services::discord::inflight::save_store::identity_gate::host_locator::tests::legacy_rows_without_a_binding_stamp_and_reload_unchanged
+services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::a_completed_range_persists_its_pre_kind_bytes_and_an_aborted_one_its_kind
+services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::an_admitted_terminal_keeps_its_kind_and_an_unverified_abort_is_never_done
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_progress
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_without_row_mutation
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::contended_captured_terminal_keeps_scheduler_timer_and_loopback_live
@@ -7997,6 +8003,7 @@ services::discord::tui_task_card::tests::task_card_clamps_many_short_headings_un
 services::discord::tui_task_card::tests::task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::c1_actual_spawn_bridge_retains_effect_until_future_disposal
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::headless_entry_abort_releases_mailbox_without_touching_durable_owner
+services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::herdr_codex_abort_reaches_the_bridge_typed_and_never_completes
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::herdr_stopped_turn_without_provider_terminal_stays_held
 services::discord::turn_bridge::bridge_entry_persist::tests::a_reconcile_that_changes_nothing_records_nothing
 services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals
@@ -8537,6 +8544,7 @@ services::discord::turn_bridge::thinking::thinking_redaction_tests::redacted_thi
 services::discord::turn_bridge::thinking::thinking_redaction_tests::redacted_thinking_event_with_none_summary_still_blank
 services::discord::turn_bridge::thinking::thinking_redaction_tests::thinking_status_line_is_neutral_single_marker
 services::discord::turn_bridge::thinking::thinking_redaction_tests::thinking_status_line_is_stable_across_repeated_calls
+services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::pane_tests::claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::a_new_turn_generation_gets_a_fresh_delivery_fence
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::active_generation_escape_is_delivered_once_across_stop_race
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::ambiguous_or_unconfirmed_streaming_state_fails_safe_and_allows_retry
@@ -11145,6 +11153,7 @@ services::tui_prompt_dedupe::tests::touch_anchor_on_activity_evicts_expired_anch
 services::tui_prompt_dedupe::tests::watcher_snapshot_generation_clear_preserves_newer_same_key_lease
 services::tui_steering::tests::legacy_prompt_never_enters_native_tui_route_or_probes_pane
 services::tui_steering::tests::unsafe_snapshots_fail_closed_before_injection
+services::tui_turn_state::completion_scan::tests::a_turns_own_abort_ends_it_for_the_completion_scan
 services::tui_turn_state::tests::claude_assistant_after_permission_mode_is_streaming
 services::tui_turn_state::tests::claude_assistant_with_only_thinking_content_stays_streaming
 services::tui_turn_state::tests::claude_assistant_without_terminal_envelope_is_streaming

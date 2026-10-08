@@ -387,3 +387,117 @@ async fn herdr_stop_case(channel_id: u64, stopped: bool) -> (BridgeCompletionSig
     let row = discord::inflight::load_inflight_state(&ProviderKind::Codex, channel_id);
     (signal, holds, row.is_some())
 }
+
+/// A Herdr rollout abort from the real reader reaches the real bridge typed; unadmitted, it keeps
+/// the slot and row, while the same reader's task_complete frees the slot.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn herdr_codex_abort_reaches_the_bridge_typed_and_never_completes() {
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let aborted = herdr_tail_case(root.path(), 5_340_331_001, "turn_aborted").await;
+    assert_eq!(aborted, (BridgeCompletionSignal::Unresolved, true, true));
+    let completed = herdr_tail_case(root.path(), 5_340_331_002, "task_complete").await;
+    assert!(!completed.1, "a completion frees the slot: {completed:?}");
+}
+
+/// (completion signal, mailbox still holds the token, inflight row present)
+#[cfg(unix)]
+async fn herdr_tail_case(
+    dir: &std::path::Path,
+    channel_id: u64,
+    terminal: &str,
+) -> (BridgeCompletionSignal, bool, bool) {
+    use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
+    let record = |value: serde_json::Value| format!("{value}\n");
+    let event = |kind: &str| {
+        record(serde_json::json!({"type": "event_msg", "payload": {"type": kind, "turn_id": "t1"}}))
+    };
+    let rollout = dir.join(format!("{channel_id}.jsonl"));
+    let reply = serde_json::json!({"type": "response_item", "payload": {"type": "message",
+        "role": "assistant", "content": [{"type": "output_text", "text": "partial"}]}});
+    let body = event("task_started") + &record(reply) + &event(terminal);
+    std::fs::write(&rollout, body).unwrap();
+    let shared = discord::make_shared_data_for_tests();
+    let row = InflightTurnState::new(
+        ProviderKind::Codex,
+        channel_id,
+        None,
+        1,
+        77_100,
+        18,
+        String::new(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    let channel = ChannelId::new(channel_id);
+    let message = MessageId::new(row.user_msg_id);
+    let cancel = Arc::new(CancelToken::new());
+    let mut row = row;
+    row.turn_nonce = cancel.turn_nonce().map(str::to_owned);
+    let owner = HostedOwner {
+        provider: "codex".into(),
+        discord_token_hash: shared.token_hash.clone(),
+        channel_id: channel_id.to_string(),
+        logical_key: format!("AgentDesk-codex-tail-{channel_id}"),
+        owner_node: "node".into(),
+        runtime_root: "/tmp".into(),
+    };
+    cancel.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+    assert!(
+        discord::mailbox_try_start_turn(&shared, channel, cancel.clone(), UserId::new(1), message)
+            .await
+    );
+    discord::increment_global_active(&shared, "test_bridge_admission");
+    discord::inflight::save_inflight_state(&row).unwrap();
+    let mut bridge = seed_context("", row);
+    bridge.user_msg_id = Some(message);
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    bridge.completion_tx = Some(completion_tx);
+    let (tx, rx) = mpsc::channel();
+    let reader = {
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset(
+                &rollout,
+                0,
+                Some("herdr-session"),
+                tx,
+                Some(cancel),
+                || true,
+            )
+        })
+    };
+    spawn_turn_bridge(shared.clone(), cancel.clone(), rx, bridge);
+    let signal = tokio::time::timeout(std::time::Duration::from_secs(20), completion_rx)
+        .await
+        .expect("the bridge reports")
+        .unwrap();
+    assert!(matches!(
+        reader.join().unwrap(),
+        Ok(crate::services::provider::ReadOutputResult::Completed { .. })
+    ));
+    let settle = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut holds = true;
+    while std::time::Instant::now() < settle {
+        let snapshot = discord::mailbox_snapshot(&shared, channel).await;
+        holds = snapshot
+            .cancel_token
+            .as_ref()
+            .is_some_and(|token| Arc::ptr_eq(token, &cancel));
+        if !holds {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let cancelled = cancel.cancelled.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        !cancelled || terminal != "turn_aborted",
+        "the abort flips no token"
+    );
+    let row = discord::inflight::load_inflight_state(&ProviderKind::Codex, channel_id);
+    (signal, holds, row.is_some())
+}

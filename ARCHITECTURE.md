@@ -558,6 +558,8 @@ src/
 │   │   ├── recovery.rs
 │   │   └── worker.rs
 │   ├── claude/
+│   │   ├── herdr_turn/
+│   │   │   └── provider_terminal_tests.rs
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
 │   │   ├── c1_teardown_tests.rs
@@ -734,6 +736,8 @@ src/
 │   │   │   ├── composer_status.rs
 │   │   │   └── inline_banner.rs
 │   │   ├── rollout_tail/
+│   │   │   ├── parser/
+│   │   │   │   └── herdr_terminal_tests.rs
 │   │   │   ├── child_binding_tests.rs
 │   │   │   ├── legacy_selection.rs
 │   │   │   └── parser.rs
@@ -1685,6 +1689,7 @@ src/
 │   │   │   │   └── rowless_receipt.rs
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── claude_stop_delivery.rs
+│   │   │   │   ├── claude_stop_pane_tests.rs
 │   │   │   │   ├── codex_stop_delivery.rs
 │   │   │   │   ├── codex_stop_delivery_tests.rs
 │   │   │   │   ├── interrupt_policy.rs

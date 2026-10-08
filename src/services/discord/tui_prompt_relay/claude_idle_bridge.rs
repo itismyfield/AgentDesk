@@ -696,6 +696,7 @@ fn forward_idle_stream_into_bridge_with_logging(
                                 actor: source.actor,
                             },
                         ),
+                        kind: crate::services::agent_protocol::NativeTerminalKind::Completed,
                     }
                 } else {
                     StreamMessage::ClaudeTuiTerminalDone {
@@ -710,6 +711,7 @@ fn forward_idle_stream_into_bridge_with_logging(
                         source_file_dev: dev,
                         source_file_ino: ino,
                         actor: source.actor,
+                        kind: crate::services::agent_protocol::NativeTerminalKind::Completed,
                     }
                 }
             }

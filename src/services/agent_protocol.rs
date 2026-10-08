@@ -146,6 +146,31 @@ pub enum RuntimeHandoff {
     },
 }
 
+/// How a provider's own terminal record ended its turn; every pre-existing producer is `Completed`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NativeTerminalKind {
+    #[default]
+    Completed,
+    Aborted,
+}
+
+impl NativeTerminalKind {
+    pub fn is_completed(&self) -> bool {
+        *self == Self::Completed
+    }
+}
+
+/// The turn a Codex rollout payload names; a missing, null or empty `turn_id` names none.
+pub fn codex_payload_turn_id(payload: &Value) -> Option<&str> {
+    let turn_id = payload.get("turn_id").and_then(Value::as_str)?;
+    (!turn_id.trim().is_empty()).then_some(turn_id)
+}
+
+/// Two Codex records belong to one turn only when both name it; unnamed records never match.
+pub fn same_codex_turn(started: Option<&str>, ended: Option<&str>) -> bool {
+    matches!((started, ended), (Some(started), Some(ended)) if started == ended)
+}
+
 /// Source captured by a native reader before an idle bridge claims its actor.
 #[derive(Debug, Clone)]
 pub struct CapturedTuiTerminalSource {
@@ -220,6 +245,7 @@ pub enum StreamMessage {
         source_start: u64,
         complete_record_end: u64,
         captured_source: Option<CapturedTuiTerminalSource>,
+        kind: NativeTerminalKind,
     },
     /// Claude terminal read from the captured file descriptor and actor.
     ClaudeTuiTerminalDone {
@@ -234,6 +260,7 @@ pub enum StreamMessage {
         source_file_dev: u64,
         source_file_ino: u64,
         actor: std::sync::Weak<crate::services::provider::CancelToken>,
+        kind: NativeTerminalKind,
     },
     /// Error
     Error {
