@@ -8868,6 +8868,7 @@ services::discord::turn_finalizer::watcher_backstop::tests::herdr_turn_without_w
 services::discord::turn_finalizer::watcher_backstop::tests::missing_delivery_proof_never_confirms_terminal_end
 services::discord::turn_finalizer::watcher_backstop::tests::non_jsonl_signal_never_terminal_on_fast_path_probe
 services::discord::turn_finalizer::watcher_backstop::tests::o_delegated_done_turn_needs_no_legacy_delivery_confirmation
+services::discord::turn_finalizer::watcher_backstop::tests::only_a_held_herdr_turn_ends_on_its_own_codex_abort
 services::discord::turn_lease::registry::tests::turn_lease_registry_inspect_returns_rowless_lease_identity
 services::discord::turn_lease::registry::tests::turn_lease_registry_selects_owner_and_refuses_ambiguity
 services::discord::turn_lease::tests::claim_refuses_unbound_message_id_without_panic
