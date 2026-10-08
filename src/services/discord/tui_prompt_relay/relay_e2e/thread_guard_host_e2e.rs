@@ -83,11 +83,12 @@ fn bot_message(id: u64) -> serenity::Message {
 async fn intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg() {
     for stored in [Stored::Hosted, Stored::LegacyHerdrMarker, Stored::Legacy] {
         let mut db = None;
-        let start = RelayE2eHarness::start_inner(ProviderStub::Success, true, async {
+        let storage = async {
             let (fixture, pool) = postgres().await;
             db = Some(fixture);
             Some(pool)
-        });
+        };
+        let start = RelayE2eHarness::start_inner(ProviderStub::Success, true, storage, false);
         let harness = start.await;
         let db = db.expect("a database under the harness lock");
         let tmux = ModeTmux::install();

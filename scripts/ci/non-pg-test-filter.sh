@@ -198,6 +198,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tmux_reaper::host_guard_tests
   --skip services::discord::tui_prompt_relay::herdr_source::tests
   --skip services::discord::tui_prompt_relay::rehydration::tests::host_defer
+  --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
   --skip services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
@@ -945,6 +947,8 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tmux_reaper::host_guard_tests
   services::discord::tui_prompt_relay::herdr_source::tests
   services::discord::tui_prompt_relay::rehydration::tests::host_defer
+  services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
+  services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
   services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests

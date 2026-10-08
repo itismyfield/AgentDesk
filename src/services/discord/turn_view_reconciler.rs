@@ -33,6 +33,8 @@ pub(in crate::services::discord) use orphan_sweep::{
 
 const TURN_VIEW_REACTIONS: [char; 7] = ['📬', '➕', '🔄', '⏳', '✅', '⚠', '🛑'];
 const QUEUE_EXIT_FEEDBACK_REACTIONS: [char; 3] = ['🚫', '⌛', '⏏'];
+/// Marks on a message a busy turn's pane took or may have taken; never tracked as turn view state.
+const INJECTION_REACTIONS: [char; 2] = ['📥', '❓'];
 const PERSISTED_STATE_VERSION: u32 = 1;
 const LEGACY_QUEUED_HOURGLASS_STATE_VERSION: u32 = 2;
 const QUEUED_MARKER_ONLY_STATE_VERSION: u32 = 3;

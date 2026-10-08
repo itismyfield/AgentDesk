@@ -19,7 +19,10 @@ use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
     Intervention, InterventionMode, SourceMessageQueuedGeneration,
 };
-use inject::{InjectAttempt, InjectMode};
+use inject::InjectMode;
+pub(crate) use inject::{
+    InjectAttempt, Origin as InjectOrigin, SOURCE_OWNED, attempt as inject_human_input,
+};
 
 pub struct HumanInputRequest {
     pub channel_id: ChannelId,
@@ -124,6 +127,10 @@ async fn deliver_with_ports<P: DeliveryPorts>(
             }
             InjectAttempt::Unconfirmed { turn_id, detail } => {
                 let detail = detail.to_string();
+                return Ok(HumanInputDelivery::Unconfirmed { turn_id, detail });
+            }
+            InjectAttempt::OwnerFailed { turn_id } => {
+                let detail = "executor_failed".to_string();
                 return Ok(HumanInputDelivery::Unconfirmed { turn_id, detail });
             }
             // Ahead of anything sent after the reservation; only a written queue front is Queued.
@@ -270,7 +277,7 @@ impl DeliveryPorts for LivePorts {
     }
 
     async fn try_inject(&self) -> InjectAttempt {
-        inject::attempt(&self.shared, &self.request).await
+        inject::attempt(&self.shared, &self.request, inject::Origin::External).await
     }
 }
 
@@ -571,6 +578,9 @@ mod tests {
             },
             InjectAttempt::HandbackFailed("handback_persistence"),
             InjectAttempt::HandbackFailed("handback_unknown"),
+            InjectAttempt::OwnerFailed {
+                turn_id: Some("discord:7:6".into()),
+            },
         ];
         let mut observed = Vec::new();
         for mode in [InjectMode::External, InjectMode::All] {
@@ -605,6 +615,7 @@ mod tests {
             "started discord:7:1 enqueue=0 starts=1 asked=1",
             "started discord:7:1 enqueue=0 starts=2 asked=1",
             "unconfirmed Some(\"discord:7:5\") not_observed enqueue=0 starts=0 asked=1",
+            "unconfirmed Some(\"discord:7:6\") executor_failed enqueue=0 starts=0 asked=1",
         ];
         assert_eq!(observed, expected);
     }
