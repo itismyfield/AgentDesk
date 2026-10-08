@@ -488,6 +488,9 @@ pub(in crate::services::discord::turn_bridge) struct StreamLoopOutput {
     pub(in crate::services::discord::turn_bridge) outcome: StreamLoopOutcome,
     pub(in crate::services::discord::turn_bridge) tui_error_classification: TuiErrorClassification,
     pub(in crate::services::discord::turn_bridge) codex_tui_terminal_range: Option<CodexRange>,
+    /// The Herdr provider terminal admission committed for this turn, if any.
+    pub(in crate::services::discord::turn_bridge) herdr_terminal:
+        Option<crate::services::agent_protocol::NativeTerminalKind>,
     pub(in crate::services::discord::turn_bridge) pending_long_running_open_after_state_save:
         PendingLongRunningOpenAfterStateSave,
     pub(in crate::services::discord::turn_bridge) pending_long_running_retarget_after_state_save:

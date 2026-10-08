@@ -638,7 +638,7 @@ fn prompt_and_read(
         || true,
         unread,
     )?;
-    let mut terminal = None;
+    let (mut terminal, mut unconfirmed) = (None, false);
     if early.is_none() {
         let kind = Some(RuntimeHandoffKind::ClaudeTui);
         let probe =
@@ -650,6 +650,7 @@ fn prompt_and_read(
             let read =
                 read_to_provider_terminal(&transcript, start, &sender, token, probe.is_alive);
             terminal = read?.map(|terminal| (terminal, token.clone(), start));
+            unconfirmed = terminal.is_none();
         } else {
             read_output_file_until_result_with_harvest(
                 &transcript,
@@ -681,6 +682,10 @@ fn prompt_and_read(
     }
     if let Some((read, token, start)) = terminal.take() {
         let _ = sender.send(read.frame(&transcript, logical, start, &token));
+    }
+    // A read that ended without this turn's terminal hands no runtime to a watcher to finish.
+    if unconfirmed {
+        return Ok(());
     }
     let _ = sender.send(StreamMessage::RuntimeReady {
         handoff: RuntimeHandoff::ClaudeTui {

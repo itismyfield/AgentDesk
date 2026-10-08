@@ -736,6 +736,7 @@ src/
 │   │   │   └── inline_banner.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── parser/
+│   │   │   │   ├── herdr_replay.rs
 │   │   │   │   └── herdr_terminal_tests.rs
 │   │   │   ├── child_binding_tests.rs
 │   │   │   ├── legacy_selection.rs
@@ -954,7 +955,10 @@ src/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── runtime_stamp/
 │   │   │   │   │   │   ├── captured_terminal_admission.rs
-│   │   │   │   │   │   └── claude_terminal_tests.rs
+│   │   │   │   │   │   ├── claude_terminal_tests.rs
+│   │   │   │   │   │   ├── herdr_terminal_admission.rs
+│   │   │   │   │   │   ├── herdr_terminal_admission_tests.rs
+│   │   │   │   │   │   └── herdr_terminal_restart_tests.rs
 │   │   │   │   │   ├── bridge_entry.rs
 │   │   │   │   │   ├── claude_e_stamp.rs
 │   │   │   │   │   ├── completion_preserve.rs

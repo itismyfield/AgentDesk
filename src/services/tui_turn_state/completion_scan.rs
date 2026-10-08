@@ -13,6 +13,7 @@ pub(crate) fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path)
         provider,
         path,
         TerminatorStrictness::DrainReadiness,
+        false,
     )
 }
 
@@ -31,21 +32,23 @@ pub(crate) fn jsonl_completion_scan_idle(provider: &ProviderKind, path: &Path) -
         provider,
         path,
         TerminatorStrictness::FinalizeAuthority,
+        false,
     )
 }
 
 /// Shared windowed reverse-scan driver for the lenient and turn-END-only
-/// probes; only the `strictness` argument differs.
+/// probes; `herdr_abort` is the caller's Herdr policy for a Codex abort.
 fn scan_strict_terminator_idle_with_strictness(
     provider: &ProviderKind,
     path: &Path,
     strictness: TerminatorStrictness,
+    herdr_abort: bool,
 ) -> bool {
     let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
         // A read error cannot prove the turn has ended → conservative Busy.
         return false;
     };
-    match scan_strict_terminator(provider, &window.lines, strictness) {
+    match scan_strict_terminator(provider, &window.lines, strictness, herdr_abort) {
         StrictTerminatorScan::Idle => return true,
         StrictTerminatorScan::Busy => return false,
         // Inconclusive over the whole file stays Busy; otherwise widen once (#3030).
@@ -59,7 +62,7 @@ fn scan_strict_terminator_idle_with_strictness(
     let Ok(wide) = read_recent_jsonl_window(path, TURN_STATE_MAX_TAIL_BYTES) else {
         return false;
     };
-    match scan_strict_terminator(provider, &wide.lines, strictness) {
+    match scan_strict_terminator(provider, &wide.lines, strictness, herdr_abort) {
         StrictTerminatorScan::Idle => true,
         // Still no terminator at the 1MB ceiling: stay Busy, not idle-by-default.
         StrictTerminatorScan::Busy | StrictTerminatorScan::Inconclusive => false,
@@ -91,6 +94,7 @@ fn scan_strict_terminator(
     provider: &ProviderKind,
     lines: &[String],
     strictness: TerminatorStrictness,
+    herdr_abort: bool,
 ) -> StrictTerminatorScan {
     let mut allow_torn_trailing_skip = true;
     for (rev_index, line) in lines.iter().rev().enumerate() {
@@ -119,7 +123,9 @@ fn scan_strict_terminator(
         };
         // A complete line consumes the budget: a later unparseable line is genuine corruption.
         allow_torn_trailing_skip = false;
-        if codex_abort_ends_turn(provider, &json, &lines[..lines.len() - rev_index - 1]) {
+        if herdr_abort
+            && codex_abort_ends_turn(provider, &json, &lines[..lines.len() - rev_index - 1])
+        {
             return StrictTerminatorScan::Idle;
         }
         let classified = provider_envelope_turn_state(provider, &json);
@@ -145,8 +151,8 @@ fn scan_strict_terminator(
     StrictTerminatorScan::Inconclusive
 }
 
-/// Under settlement a Codex `turn_aborted` ends the latest `task_started` before it only when both
-/// name the same turn; an unnamed record on either side ends nothing.
+/// Under settlement and a caller's Herdr policy, a Codex `turn_aborted` ends the latest
+/// `task_started` only when both name the same turn; an unnamed record ends nothing.
 fn codex_abort_ends_turn(provider: &ProviderKind, json: &Value, earlier: &[String]) -> bool {
     use crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available;
     let event = |json: &Value, kind: &str| {
@@ -247,18 +253,27 @@ mod tests {
     use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
 
     fn ends(provider: ProviderKind, lines: &[serde_json::Value]) -> bool {
+        scan(provider, lines, true)
+    }
+
+    /// The scan under a caller's abort policy; `false` is the public finalizer entry's.
+    fn scan(provider: ProviderKind, lines: &[serde_json::Value], herdr: bool) -> bool {
         let file = tempfile::NamedTempFile::new().unwrap();
         let body: Vec<String> = lines.iter().map(ToString::to_string).collect();
         std::fs::write(file.path(), body.join("\n")).unwrap();
-        jsonl_completion_scan_idle(&provider, file.path())
+        if !herdr {
+            return jsonl_completion_scan_idle(&provider, file.path());
+        }
+        let strictness = TerminatorStrictness::FinalizeAuthority;
+        scan_strict_terminator_idle_with_strictness(&provider, file.path(), strictness, true)
     }
 
     fn codex(kind: &str, turn_id: Option<&str>) -> serde_json::Value {
         serde_json::json!({"type": "event_msg", "payload": {"type": kind, "turn_id": turn_id}})
     }
 
-    /// Under settlement a Codex turn's own abort ends it for the scan, as Claude's interrupt does;
-    /// a foreign abort, an unnamed record on either side, or settlement off ends nothing.
+    /// Under settlement a Herdr caller's scan ends a Codex turn on its own abort, as Claude's interrupt
+    /// does; a foreign abort, an unnamed record, settlement off or a non-Herdr caller ends nothing.
     #[test]
     fn a_turns_own_abort_ends_it_for_the_completion_scan() {
         let started = codex("task_started", Some("t1"));
@@ -283,6 +298,7 @@ mod tests {
         let interrupt = serde_json::json!({"type": "user", "message": {"role": "user",
             "content": [{"type": "text", "text": "[Request interrupted by user]"}]}});
         assert!(ends(ProviderKind::Claude, &[interrupt]));
+        assert!(!scan(ProviderKind::Codex, &aborted(Some("t1")), false));
         HERDR_SETTLEMENT_OVERRIDE.set(false);
         let without_settlement = ends(ProviderKind::Codex, &aborted(Some("t1")));
         HERDR_SETTLEMENT_OVERRIDE.set(true);
