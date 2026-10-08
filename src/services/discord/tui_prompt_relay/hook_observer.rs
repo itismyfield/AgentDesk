@@ -98,13 +98,27 @@ pub(super) fn spawn_tui_prompt_relay_observer_inner(
                                 let prompt_id = (event.provider == "claude")
                                     .then(|| extract_prompt_id_from_hook_payload(&event.payload))
                                     .flatten();
-                                let observation = observe_hook_prompt_by_tmux_with_prompt_id_at(
-                                    &event.provider,
-                                    &target,
-                                    &prompt,
-                                    prompt_id.as_deref(),
-                                    event.received_at,
-                                );
+                                // Codex hooks name the native turn the input opens or steers.
+                                let native_turn = (event.provider == "codex")
+                                    .then(|| event.payload.get("turn_id").and_then(|turn| turn.as_str()))
+                                    .flatten();
+                                let observation = if native_turn.is_some() {
+                                    crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at(
+                                        &target,
+                                        &prompt,
+                                        None,
+                                        native_turn,
+                                        event.received_at,
+                                    )
+                                } else {
+                                    observe_hook_prompt_by_tmux_with_prompt_id_at(
+                                        &event.provider,
+                                        &target,
+                                        &prompt,
+                                        prompt_id.as_deref(),
+                                        event.received_at,
+                                    )
+                                };
                                 tracing::debug!(
                                     provider = %event.provider,
                                     session_id = %event.session_id,

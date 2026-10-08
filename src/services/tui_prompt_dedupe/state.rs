@@ -50,6 +50,8 @@ impl TuiPromptDedupeState {
         // `PROMPT_ANCHOR_TTL`.
         self.prompt_anchor_by_tmux
             .retain(|_, entry| now.duration_since(entry.recorded_at) <= PROMPT_ANCHOR_SUBMIT_TTL);
+        self.native_turn_by_tmux
+            .retain(|_, entry| now.duration_since(entry.recorded_at) <= PROMPT_ANCHOR_SUBMIT_TTL);
         self.ssh_direct_observation_by_tmux
             .retain(|_, entry| now.duration_since(entry.recorded_at) <= SSH_DIRECT_OBSERVATION_TTL);
         self.external_input_relay_lease_by_tmux.retain(|_, entry| {

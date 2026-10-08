@@ -63,7 +63,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         prompt_text,
         anchor_message_id,
         lease,
-        register_deferred_start: _,
+        ..
     } = identity;
 
     let (cancel_token, pg_pin, class) = match bridge_handoff::prepare_admission(
@@ -292,6 +292,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         relay_owner_kind,
     );
     inflight_state.turn_nonce = active_turn_nonce;
+    inflight_state.native_turn_id = identity.native_turn.map(str::to_string);
     // #4002/#4082: lower-level safety. Normal wiring gates neutral continuation
     // records before this point; if a suppressing class reaches the raw claim API,
     // keep it relay-ownership-only so watcher completion Path B skips it.
@@ -748,6 +749,7 @@ mod tests {
             state: crate::services::discord::tui_direct_pending_start::PendingStartState::Waiting,
             attempt_count: 0,
             captured_source: None,
+            native_turn_id: None,
         };
         assert!(pending_start_claim_fn()(shared, &record).await);
         let stale_token = crate::services::discord::mailbox_snapshot(shared, channel_id)
@@ -2321,6 +2323,7 @@ pub(super) fn defer_synthetic_turn_start(
         state: super::super::tui_direct_pending_start::PendingStartState::Waiting,
         attempt_count: 0,
         captured_source,
+        native_turn_id: prompt.native_turn_id.clone(),
     };
     if let Err(error) = super::super::tui_direct_pending_start::persist(&record) {
         tracing::warn!(
@@ -2418,6 +2421,7 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                 anchor_message_id,
                 &lease,
                 record.captured_source.as_ref(),
+                record.native_turn_id.as_deref(),
             )
             .await
             .0;
@@ -2493,6 +2497,7 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                     ssh_direct_observation_generation:
                         crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
                     hook_prompt_id: None,
+                    native_turn_id: None,
                 };
                 let spawned = maybe_spawn_claude_idle_response_tail(
                     shared.clone(),

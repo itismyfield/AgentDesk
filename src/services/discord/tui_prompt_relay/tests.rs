@@ -253,6 +253,7 @@ fn abort_cleanup_records_marker_and_keeps_hourglass() {
         state: super::super::tui_direct_pending_start::PendingStartState::Waiting,
         attempt_count: 0,
         captured_source: None,
+        native_turn_id: None,
     };
     let cleanup = pending_start_abort_cleanup_fn();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -857,6 +858,7 @@ async fn task_notification_status_only_preserves_existing_turn_request_anchor() 
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        native_turn_id: None,
     };
 
     relay_observed_prompt(&shared, prompt).await;
@@ -1820,6 +1822,7 @@ fn local_control_prompt(tmux: &str, body: &str, entry_id: &str) -> ObservedTuiPr
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        native_turn_id: None,
     }
 }
 
@@ -2612,6 +2615,7 @@ async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        native_turn_id: None,
     };
     let lease = ExternalInputRelayLease {
         channel_id: Some(channel_id.get()),
@@ -2685,6 +2689,7 @@ fn task_notification_repeat_clears_its_recorded_external_lease() {
             ssh_direct_observation_generation:
                 crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
             hook_prompt_id: None,
+            native_turn_id: None,
         };
     let lease = ExternalInputRelayLease {
         channel_id: Some(channel_id.get()),
@@ -2747,6 +2752,7 @@ fn task_notification_repeat_lease_clear_preserves_newer_turn() {
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        native_turn_id: None,
     };
     let repeat_lease = ExternalInputRelayLease {
         channel_id: Some(channel_id.get()),
@@ -3953,6 +3959,7 @@ async fn s5833_r2_synthetic_refresh_preserves_existing_episode_key() {
         anchor,
         &original_lease,
         None,
+        None,
     )
     .await;
     assert!(initial.claimed);
@@ -4747,6 +4754,7 @@ async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free(
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        native_turn_id: None,
     };
     let decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
     assert_eq!(
@@ -4825,6 +4833,7 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        native_turn_id: None,
     };
     let decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
     assert_eq!(decision.injected_class, InjectedPromptClass::HumanTuiDirect);

@@ -259,6 +259,8 @@ pub enum PromptObservation {
     PublishedTaskNotification,
     SuppressedDiscordDuplicate,
     SuppressedRecentDuplicate,
+    /// A Codex input named the native turn an earlier input already opened: it steers that turn.
+    JoinedNativeTurn,
     /// Identity match with an already-relayed prompt: its row uuid (30min) or a
     /// hook-recorded `prompt_id` with the same text (4h). Never tails a response.
     SuppressedReplayedEntry,
@@ -275,6 +277,32 @@ pub(crate) fn resolve_tmux_session_name(
         .tmux_by_provider_session
         .get(&PromptKey::new(provider, provider_session_id))
         .map(|entry| entry.value.clone())
+}
+
+/// Whether `native_turn` is the turn the latest published Codex input opened.
+pub(super) fn native_turn_is_open(
+    provider: &str,
+    tmux_session_name: &str,
+    native_turn: &str,
+) -> bool {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    state
+        .native_turn_by_tmux
+        .get(&PromptKey::new(provider, tmux_session_name))
+        .is_some_and(|open| open.value == native_turn)
+}
+
+/// Records `native_turn` as the turn a published Codex input opened.
+pub(super) fn open_native_turn(provider: &str, tmux_session_name: &str, native_turn: &str) {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.native_turn_by_tmux.insert(
+        PromptKey::new(provider, tmux_session_name),
+        TimedValue {
+            value: native_turn.to_string(),
+            recorded_at: Instant::now(),
+        },
+    );
 }
 
 pub(super) fn take_matching_pending_prompt(

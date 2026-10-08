@@ -39,6 +39,7 @@ fn n1a_confirmed_direct_prompt_posts_only_its_notice() {
                 dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
             ssh_direct_observation_generation: dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
             hook_prompt_id: None,
+            native_turn_id: None,
         };
         super::super::relay_observed_prompt(&h.shared, prompt).await;
 
@@ -280,6 +281,7 @@ fn n1a_confirmed_slash_raw_and_wrapper_post_one_notice() {
                     ssh_direct_observation_generation:
                         dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
                     hook_prompt_id: None,
+                    native_turn_id: None,
                 },
             )
             .await;

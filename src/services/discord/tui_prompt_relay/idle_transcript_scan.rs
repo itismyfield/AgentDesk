@@ -427,6 +427,107 @@ pub(super) fn scan_codex_idle_rollout_for_latest_prompt_matching(
     }
 }
 
+/// Where a Codex native turn's prompt record ends, read from the rollout itself.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CodexTurnPrompt {
+    /// End offset of the turn's first user record carrying the prompt.
+    Found(u64),
+    /// The turn or its prompt record is not written yet.
+    NotYet,
+    /// The rollout names no turns (an older Codex), so callers keep the text search.
+    Unsupported,
+}
+
+/// The turn a `task_started` or `turn_context` record opens: `Some(None)` when it names none.
+fn codex_record_opened_turn(json: &serde_json::Value) -> Option<Option<String>> {
+    let opens = json
+        .pointer("/payload/type")
+        .and_then(serde_json::Value::as_str)
+        == Some("task_started")
+        || json.get("type").and_then(serde_json::Value::as_str) == Some("turn_context");
+    opens.then(|| {
+        json.pointer("/payload/turn_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+/// Visits each complete rollout record with its end offset until `visit` returns true.
+fn visit_complete_codex_records(
+    rollout_path: &Path,
+    mut visit: impl FnMut(u64, &serde_json::Value) -> bool,
+) -> Result<(), String> {
+    let file = std::fs::File::open(rollout_path)
+        .map_err(|error| format!("open Codex rollout {}: {error}", rollout_path.display()))?;
+    let mut reader = std::io::BufReader::new(file);
+    let (mut offset, mut line) = (0_u64, String::new());
+    loop {
+        line.clear();
+        let bytes_read = reader
+            .read_line(&mut line)
+            .map_err(|error| format!("read Codex rollout {}: {error}", rollout_path.display()))?;
+        if bytes_read == 0 || !line.ends_with('\n') {
+            return Ok(());
+        }
+        offset += bytes_read as u64;
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim())
+            && visit(offset, &json)
+        {
+            return Ok(());
+        }
+    }
+}
+
+/// Resolves native turn `native_turn`'s first `prompt_text` record from the rollout start.
+pub(super) fn resolve_codex_turn_prompt_end(
+    rollout_path: &Path,
+    native_turn: &str,
+    prompt_text: &str,
+) -> Result<CodexTurnPrompt, String> {
+    let target = prompt_text.trim();
+    let (mut current, mut named_turn, mut user_record, mut found) = (None, false, false, None);
+    visit_complete_codex_records(rollout_path, |end, json| {
+        if let Some(opened) = codex_record_opened_turn(json) {
+            named_turn |= opened.is_some();
+            current = opened;
+            return false;
+        }
+        let Some((prompt, _)) =
+            crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_entry_id(
+                json,
+            )
+        else {
+            return false;
+        };
+        user_record = true;
+        if current.as_deref() == Some(native_turn) && prompt.trim() == target {
+            found = Some(end);
+        }
+        found.is_some()
+    })?;
+    Ok(match found {
+        Some(end) => CodexTurnPrompt::Found(end),
+        None if user_record && !named_turn => CodexTurnPrompt::Unsupported,
+        None => CodexTurnPrompt::NotYet,
+    })
+}
+
+/// The native turn open at `offset`: the last turn a record ending at or before it named.
+pub(super) fn codex_native_turn_at(rollout_path: &Path, offset: u64) -> Option<String> {
+    let mut current = None;
+    visit_complete_codex_records(rollout_path, |end, json| {
+        if end > offset {
+            return true;
+        }
+        if let Some(opened) = codex_record_opened_turn(json) {
+            current = opened;
+        }
+        false
+    })
+    .ok()?;
+    current
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

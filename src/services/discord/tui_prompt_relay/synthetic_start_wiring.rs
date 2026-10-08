@@ -485,6 +485,7 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
                     anchor_message_id,
                     &*lease,
                     None,
+                    prompt.native_turn_id.as_deref(),
                 )
                 .await;
             if !claim.claimed

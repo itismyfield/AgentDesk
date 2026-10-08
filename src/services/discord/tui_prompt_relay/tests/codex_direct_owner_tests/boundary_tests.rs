@@ -1,6 +1,5 @@
-//! Each Codex direct input's claim starts at its own prompt's end in the rollout, however
-//! far the idle loop's scan cursor moved before the observer claimed. Records and hooks carry
-//! Codex's native turn id as `probe-codex-steer` measured on codex-cli 0.160.1.
+//! Each Codex direct input's answer starts at its own prompt's end, however far the scan cursor
+//! moved first. Records and hooks carry native turn ids as measured on codex-cli 0.160.1.
 use super::*;
 use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind};
 use crate::services::tui_prompt_dedupe::ObservedTuiPrompt;
@@ -132,9 +131,9 @@ impl Fixture {
         }
     }
 
-    /// The Codex UserPromptSubmit hook for `prompt` in native turn `turn`, and the event it
-    /// publishes. A steering input names the running turn.
-    async fn hook(&mut self, prompt: &str, turn: &str) -> ObservedTuiPrompt {
+    /// The Codex UserPromptSubmit hook for `prompt` in native turn `turn`; a steer names the
+    /// running turn.
+    fn send_hook(&self, prompt: &str, turn: &str) {
         self.hooks
             .send(HookEvent {
                 provider: "codex".to_string(),
@@ -146,6 +145,11 @@ impl Fixture {
                 fanout: None,
             })
             .expect("hook observer listening");
+    }
+
+    /// The hook and the event it publishes.
+    async fn hook(&mut self, prompt: &str, turn: &str) -> ObservedTuiPrompt {
+        self.send_hook(prompt, turn);
         loop {
             let event = tokio::time::timeout(Duration::from_secs(5), self.observed.recv())
                 .await
@@ -155,6 +159,42 @@ impl Fixture {
                 return event;
             }
         }
+    }
+
+    /// A steer's hook joins its running turn: nothing about `prompt` was or is published.
+    async fn joined_hook(&mut self, prompt: &str, turn: &str) {
+        self.send_hook(prompt, turn);
+        let window = tokio::time::Instant::now() + Duration::from_secs(1);
+        while let Ok(event) = tokio::time::timeout_at(window, self.observed.recv()).await {
+            let event = event.expect("observation channel open");
+            assert!(
+                event.prompt != prompt,
+                "a steering input published its own observation"
+            );
+        }
+    }
+
+    /// Waits for `n` more idle loop polls of this session.
+    async fn polls(&self, n: usize) {
+        let start = poll_notes(&self.codex.tmux, PollNote::Visit);
+        assert!(
+            wait_for(Duration::from_secs(10), || poll_notes(
+                &self.codex.tmux,
+                PollNote::Visit
+            ) >= start + n)
+            .await,
+            "the idle loop stopped polling"
+        );
+    }
+
+    /// The session's external-input lease id.
+    fn lease_turn(&self) -> Option<String> {
+        crate::services::tui_prompt_dedupe::external_input_relay_lease(
+            "codex",
+            &self.codex.tmux,
+            self.codex.channel.get(),
+        )
+        .and_then(|lease| lease.turn_id)
     }
 
     fn append(&self, text: &str) -> u64 {
@@ -412,9 +452,8 @@ fn turn(n: u32) -> String {
     format!("019a5704-{n:04}-7000-8000-000000005704")
 }
 
-/// Production's order: the hook fires, Codex writes the prompt and its `item_completed`
-/// record, the loop polls past both, then the observer claims; the answer may land on
-/// either side of the claim.
+/// Production's order: hook, prompt and `item_completed` records, the loop polls past both, then
+/// the observer claims; the answer may land on either side of the claim.
 async fn cursor_past_prompt(root: PathBuf, channel: u64, tmux: &str, answer_first: bool) {
     let mut fx = Fixture::start(&root, channel, tmux).await;
     let t1 = turn(1);
@@ -568,6 +607,8 @@ enum NextInputWrite {
     Interrupted,
     /// The first turn writes no terminal at all before the next turn opens.
     Unclosed,
+    /// As `Interrupted`, then a late completion of the aborted turn inside the next one.
+    LateForeignComplete,
 }
 
 /// The tail stops before the next turn's records, however its bytes arrive.
@@ -597,7 +638,7 @@ async fn next_input_after_tail_start(
     tokio::time::sleep(Duration::from_secs(1)).await;
     let first_turn = match write {
         // Measured interrupt: a developer notice and `turn_aborted` close the first turn.
-        NextInputWrite::Interrupted => {
+        NextInputWrite::Interrupted | NextInputWrite::LateForeignComplete => {
             rollout_line(serde_json::json!({"type": "response_item", "payload": {
                 "type": "message", "role": "assistant",
                 "content": [{"type": "output_text", "text": RESPONSE}]}}))
@@ -607,6 +648,8 @@ async fn next_input_after_tail_start(
                     "content": [{"type": "input_text", "text": "<turn_aborted>\ninterrupted\n</turn_aborted>"}]}}))
                 + &rollout_line(serde_json::json!({"type": "event_msg", "payload": {
                     "type": "turn_aborted", "turn_id": t1, "reason": "interrupted"}}))
+                + &rollout_line(serde_json::json!({"type": "event_msg", "payload": {
+                    "type": "thread_settings_applied"}}))
         }
         NextInputWrite::Unclosed => rollout_line(serde_json::json!({"type": "response_item",
             "payload": {"type": "message", "role": "assistant",
@@ -614,9 +657,22 @@ async fn next_input_after_tail_start(
         _ => answer_for(&t1, RESPONSE),
     };
     let second_prompt = opening(&t2, PROMPT2);
-    let second_turn = item_completed_line_for(&t2) + &answer_for(&t2, RESPONSE2);
+    let mut second_turn = item_completed_line_for(&t2);
+    if matches!(write, NextInputWrite::LateForeignComplete) {
+        second_turn += &rollout_line(serde_json::json!({"type": "event_msg", "payload": {
+            "type": "task_complete", "turn_id": t1, "last_agent_message": OLD_RESPONSE}}));
+    }
+    second_turn += &answer_for(&t2, RESPONSE2);
+    if matches!(write, NextInputWrite::Interrupted) {
+        // Measured: the aborted turn's command completes after the next turn's completion.
+        second_turn += &rollout_line(serde_json::json!({"type": "event_msg", "payload": {
+            "type": "item_completed", "turn_id": t1, "item": {"type": "CommandExecution"}}}));
+    }
     match write {
-        NextInputWrite::Whole | NextInputWrite::Interrupted | NextInputWrite::Unclosed => {
+        NextInputWrite::Whole
+        | NextInputWrite::Interrupted
+        | NextInputWrite::Unclosed
+        | NextInputWrite::LateForeignComplete => {
             fx.append(&(first_turn.clone() + &second_prompt + &second_turn));
         }
         NextInputWrite::ReadBoundary => {
@@ -649,6 +705,10 @@ async fn next_input_after_tail_start(
     super::super::super::relay_observed_prompt(&fx.shared, second).await;
     fx.assert_answers_in_order(&[RESPONSE, RESPONSE2], Some(2))
         .await;
+    assert!(
+        fx.sent(OLD_RESPONSE).is_empty(),
+        "a foreign completion's text leaked"
+    );
     fx.finish();
 }
 
@@ -708,6 +768,18 @@ fn codex_direct_answer_ends_at_its_own_interrupted_turn() {
             5_704_933,
             "AgentDesk-codex-5704-interrupted",
             NextInputWrite::Interrupted,
+        ))
+    });
+}
+
+#[test]
+fn codex_direct_answer_ignores_a_late_completion_of_an_aborted_turn() {
+    run(|root| {
+        Box::pin(next_input_after_tail_start(
+            root,
+            5_704_935,
+            "AgentDesk-codex-5704-late-complete",
+            NextInputWrite::LateForeignComplete,
         ))
     });
 }
@@ -823,23 +895,33 @@ fn codex_direct_same_prompt_published_twice_before_its_records_keeps_input_order
     });
 }
 
-/// An input claimed before the loop saw its record and delivered, then the same prompt
-/// again past the dedupe window and scanned first: the second answer reaches the second
-/// anchor.
+/// An input claimed before its record keeps its claim start; the same prompt again past the
+/// dedupe window and scanned first still answers on the second anchor.
 #[test]
 fn codex_direct_same_prompt_after_a_claim_first_input_keeps_its_own_boundary() {
     run(|root| {
         Box::pin(async move {
+            let _live_pane = live_pane_tmux(&root);
             let mut fx = Fixture::start(&root, 5_704_980, "AgentDesk-codex-5704-claimfirst").await;
             let (t1, t2) = (turn(1), turn(2));
             let first = fx.hook(PROMPT, &t1).await;
             super::super::super::relay_observed_prompt(&fx.shared, first).await;
-            let first_anchor = fx.codex.row().expect("first claim").user_msg_id;
-            fx.append(
-                &(opening(&t1, PROMPT)
-                    + &item_completed_line_for(&t1)
-                    + &answer_for(&t1, RESPONSE)),
+            let claimed = fx.codex.row().expect("first claim");
+            let (first_anchor, claim_start) = (claimed.user_msg_id, claimed.turn_start_offset);
+            let prompt_end = fx.append(&opening(&t1, PROMPT));
+            fx.append(&item_completed_line_for(&t1));
+            assert!(
+                wait_for(Duration::from_secs(10), || tail_starts(fx.codex.channel)
+                    == 1)
+                .await,
+                "the claimed input's tail never started"
             );
+            // The bridge witness pins the claim start, so the tail reads from the prompt end
+            // while the row keeps that start.
+            let repaired = fx.codex.row().expect("repaired row");
+            assert!(claim_start.is_some_and(|start| start < prompt_end));
+            assert_eq!(repaired.turn_start_offset, claim_start);
+            fx.append(&answer_for(&t1, RESPONSE));
             assert!(
                 fx.delivered(RESPONSE).await,
                 "first answer never reached Discord"
@@ -871,9 +953,8 @@ fn codex_direct_same_prompt_after_a_claim_first_input_keeps_its_own_boundary() {
     });
 }
 
-/// The first turn ends with no answer while the same prompt waits deferred, and the
-/// deferred input is claimed before Codex writes its record: the second answer still
-/// reaches the second anchor.
+/// The first turn ends empty while the same prompt waits deferred and is claimed before its
+/// record: the second answer still reaches the second anchor.
 #[test]
 fn codex_direct_same_prompt_deferred_behind_an_empty_turn_keeps_its_own_boundary() {
     run(|root| {
@@ -934,59 +1015,6 @@ fn codex_direct_same_prompt_deferred_behind_an_empty_turn_keeps_its_own_boundary
     });
 }
 
-/// A steering input joins the running native turn: the turn's final answer reaches the
-/// turn's anchor once, and the steering input opens no second turn.
-#[test]
-fn codex_direct_steering_input_joins_the_running_turn() {
-    run(|root| {
-        Box::pin(async move {
-            let _live_pane = live_pane_tmux(&root);
-            let mut fx = Fixture::start(&root, 5_704_995, "AgentDesk-codex-5704-steer").await;
-            let t1 = turn(1);
-            let first = fx.hook(PROMPT, &t1).await;
-            let first_end = fx.append(&(opening(&t1, PROMPT) + &item_completed_line_for(&t1)));
-            fx.scanned_past(first_end).await;
-            super::super::super::relay_observed_prompt(&fx.shared, first).await;
-            let anchor = fx.codex.row().expect("first claim").user_msg_id;
-            // Measured order: progress and a tool step, then the steer's hook and record.
-            fx.append(
-                &(rollout_line(serde_json::json!({"type": "response_item", "payload": {
-                    "type": "message", "role": "assistant",
-                    "content": [{"type": "output_text", "text": "running the command"}]}}))
-                    + &token_count_line()),
-            );
-            let steer = fx.hook(PROMPT2, &t1).await;
-            fx.append(&(user_line_for(PROMPT2) + &item_completed_line_for(&t1)));
-            // The loop does not scan a channel while its row is live; the tail reads on.
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            super::super::super::relay_observed_prompt(&fx.shared, steer).await;
-            fx.append(&answer_for(&t1, RESPONSE2));
-            assert!(
-                fx.delivered(RESPONSE2).await,
-                "the turn's answer never reached Discord: {:?}",
-                fx.requests.lock().unwrap()
-            );
-            tokio::time::sleep(Duration::from_secs(4)).await;
-            // The turn's progress text and final answer share the turn's anchor.
-            let target = format!("/channels/{}/messages/{anchor}", fx.codex.channel.get());
-            let sent = fx.sent(RESPONSE2);
-            assert!(
-                sent.iter()
-                    .all(|(method, path, _)| method == "PATCH" && path.ends_with(&target)),
-                "{sent:?}"
-            );
-            assert_eq!(fx.completed_turns(), 1, "one native turn, one bridge turn");
-            assert_eq!(tail_starts(fx.codex.channel), 1, "one tail");
-            assert!(
-                fx.pending_starts().is_empty(),
-                "nothing waits for a second turn"
-            );
-            fx.assert_released().await;
-            fx.finish();
-        })
-    });
-}
-
 /// A deferred input's durable record from before a restart, while a later input already
 /// holds the session lease: the restored worker starts that input at its own prompt end.
 #[test]
@@ -1010,7 +1038,7 @@ fn codex_direct_deferred_input_restored_under_a_later_lease_keeps_its_boundary()
                 + &item_completed_line_for(&t3)
                 + &answer_for(&t3, RESPONSE3));
             std::fs::write(&rollout, &body).expect("rollout");
-            let mut fx = Fixture::start_with(&root, channel, tmux, true).await;
+            let fx = Fixture::start_with(&root, channel, tmux, true).await;
             let lease_turn = |n: u8| format!("external:codex:{channel}:{tmux}:{n}");
             let anchor = 5_704_970_002_u64;
             let record = serde_json::from_value::<
@@ -1064,3 +1092,6 @@ fn codex_direct_deferred_input_restored_under_a_later_lease_keeps_its_boundary()
         })
     });
 }
+
+/// Native turn identity: fallback, steering joins, durable deferral.
+mod native_turn_tests;

@@ -120,6 +120,7 @@ async fn check_reclaim(site: &'static str, channel_id: u64, retire: bool, pendin
         state: PendingStartState::Waiting,
         attempt_count: 0,
         captured_source: None,
+        native_turn_id: None,
     };
     let barrier = Arc::new(Barrier::default());
     BARRIERS

@@ -67,6 +67,7 @@ fn pending(channel: u64) -> TuiDirectPendingStart {
         state: PendingStartState::Waiting,
         attempt_count: 0,
         captured_source: None,
+        native_turn_id: None,
     }
 }
 

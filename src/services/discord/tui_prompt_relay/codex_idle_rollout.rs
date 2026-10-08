@@ -1,4 +1,5 @@
 use super::super::{inflight, task_supervisor};
+use super::idle_transcript_scan::CodexTurnPrompt;
 use super::*;
 #[cfg(unix)]
 fn advance_codex_tui_runtime_binding_and_marker_offset(
@@ -95,10 +96,37 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                         &inflight,
                         &tmux_session_name,
                     ) {
-                        match scan_codex_idle_rollout_for_latest_prompt_matching(
-                            &rollout_path,
-                            &inflight.user_text,
-                        ) {
+                        // A row naming its native turn resumes only from that turn's record; a
+                        // rollout naming no turns keeps the text search.
+                        let resolved = match inflight.native_turn_id.as_deref() {
+                            Some(turn) => super::idle_transcript_scan::resolve_codex_turn_prompt_end(
+                                &rollout_path,
+                                turn,
+                                &inflight.user_text,
+                            ),
+                            None => Ok(CodexTurnPrompt::Unsupported),
+                        };
+                        let own_turn = matches!(resolved, Ok(CodexTurnPrompt::Found(_)))
+                            .then(|| inflight.native_turn_id.clone())
+                            .flatten();
+                        let selected = match resolved {
+                            Ok(CodexTurnPrompt::Found(line_end_offset)) => {
+                                Ok(Some(CodexIdleRolloutScan::Prompt {
+                                    prompt: inflight.user_text.clone(),
+                                    line_end_offset,
+                                    entry_id: None,
+                                }))
+                            }
+                            Ok(CodexTurnPrompt::NotYet) => Ok(None),
+                            Ok(CodexTurnPrompt::Unsupported) => {
+                                scan_codex_idle_rollout_for_latest_prompt_matching(
+                                    &rollout_path,
+                                    &inflight.user_text,
+                                )
+                            }
+                            Err(error) => Err(error),
+                        };
+                        match selected {
                             Ok(Some(CodexIdleRolloutScan::Prompt {
                                 prompt,
                                 line_end_offset,
@@ -106,9 +134,10 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                             })) => {
                                 let same_path = inflight.output_path.as_deref().map(Path::new)
                                     == Some(rollout_path.as_path());
-                                // A same-rollout match before the claim's start is an earlier turn's
-                                // prompt; wait for this turn's prompt and leave the row untouched.
+                                // A same-rollout text match before the claim's start is an earlier
+                                // turn's prompt; wait for this turn's prompt and leave the row untouched.
                                 if same_path
+                                    && own_turn.is_none()
                                     && inflight
                                         .turn_start_offset
                                         .is_some_and(|start| line_end_offset < start)
@@ -209,6 +238,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                             line_end_offset,
                                             prompt,
                                             tail_lease,
+                                            own_turn,
                                         )
                                         .await;
                                     }
@@ -278,12 +308,16 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                         entry_id,
                     } => {
                         let observed_at = chrono::Utc::now();
+                        let own_turn = super::idle_transcript_scan::codex_native_turn_at(
+                            &rollout_path,
+                            line_end_offset,
+                        );
                         let observation =
-                            crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_entry_id_at(
-                                ProviderKind::Codex.as_str(),
+                            crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at(
                                 &tmux_session_name,
                                 &prompt,
                                 entry_id.as_deref(),
+                                own_turn.as_deref(),
                                 observed_at,
                             );
                         tracing::info!(
@@ -395,6 +429,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                     line_end_offset,
                                     prompt,
                                     tail_lease,
+                                    own_turn,
                                 )
                                 .await;
                             }
@@ -449,6 +484,7 @@ async fn run_codex_idle_response_tail(
     start_offset: u64,
     prompt_text: String,
     lease: ExternalInputRelayLease,
+    own_turn: Option<String>,
 ) {
     #[cfg(test)]
     TAIL_STARTS.lock().unwrap().push(channel_id.get());
@@ -475,6 +511,7 @@ async fn run_codex_idle_response_tail(
                 None,
                 || crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_for_reader),
                 &tmux_for_reader,
+                own_turn,
             );
             failed_for_reader.store(read_result.is_err(), Ordering::Release);
             let _ = offset_tx.send(read_result);
@@ -595,6 +632,7 @@ pub(super) fn read_codex_idle_completion(
     cancel: Option<Arc<CancelToken>>,
     is_alive: impl FnMut() -> bool,
     tmux: &str,
+    own_turn: Option<String>,
 ) -> Result<claude_idle_bridge::IdleReaderCompletion, String> {
     let generation = crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(tmux);
     let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux)
@@ -611,6 +649,7 @@ pub(super) fn read_codex_idle_completion(
         cancel,
         is_alive,
         tmux,
+        own_turn,
     )
     .map(|(result, outcome)| {
         claude_idle_bridge::IdleReaderCompletion::from_harvest(result, outcome.harvest, generation)
