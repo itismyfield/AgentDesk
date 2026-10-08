@@ -6,8 +6,8 @@
 //! and the reconciler's terminal-or-defer verdict pair
 //! (`watcher_backstop_turn_is_terminal` / `watcher_backstop_signal_is_terminal`),
 //! plus the pure signal-truth-table unit test. The parent re-imports the
-//! consts + fns (`use self::watcher_backstop::{...}`) so the `reconcile` loop
-//! call sites stay byte-identical.
+//! consts + fns (`use self::watcher_backstop::{...}`) for the `reconcile` loop,
+//! which passes each ledger entry's key.
 
 use super::*;
 
@@ -50,10 +50,11 @@ pub(super) const WATCHER_BACKSTOP_TERMINAL_STREAK: u8 = 2;
 ///     deadline.
 pub(super) fn watcher_backstop_turn_is_terminal(
     shared: &Arc<SharedData>,
-    channel_id: ChannelId,
+    turn: impl Into<BackstopTurn>,
     provider: &ProviderKind,
     at_deadline: bool,
 ) -> bool {
+    let BackstopTurn { channel_id, ledger } = turn.into();
     let inflight_state =
         crate::services::discord::inflight::load_inflight_state(provider, channel_id.get());
     let inflight_tmux = inflight_state
@@ -104,13 +105,17 @@ pub(super) fn watcher_backstop_turn_is_terminal(
     let signal = match herdr {
         true => {
             // Only the held turn's own start, in the hold's transcript, can prove its abort.
-            let held = held_turn_start(inflight_state.as_ref(), herdr_hold.as_ref(), &output_path);
-            let held = held.as_ref();
+            let held = held_turn(
+                inflight_state.as_ref(),
+                herdr_hold.as_ref(),
+                &output_path,
+                ledger.as_ref(),
+            );
             super::completion_signal::herdr_completion_signal_from_transcript(
                 provider,
                 runtime_kind,
                 transcript,
-                held,
+                held.as_deref(),
             )
         }
         false => completion_signal_from_transcript(provider, runtime_kind, transcript),
@@ -202,13 +207,40 @@ fn herdr_hold_source(
     Some((name, path, false))
 }
 
-/// The own input start of the turn a Herdr hold names, from that turn's live token, only while the
-/// watcher reads the transcript the hold names.
-fn held_turn_start(
+/// The turn a backstop check is for: its channel and the finalize ledger's key for it.
+pub(super) struct BackstopTurn {
+    channel_id: ChannelId,
+    ledger: Option<TurnKey>,
+}
+
+impl From<TurnKey> for BackstopTurn {
+    fn from(key: TurnKey) -> Self {
+        Self {
+            channel_id: key.channel_id,
+            ledger: Some(key),
+        }
+    }
+}
+
+/// A channel-only check names no ledger turn, so no Herdr abort can end it.
+#[cfg(test)]
+impl From<ChannelId> for BackstopTurn {
+    fn from(channel_id: ChannelId) -> Self {
+        Self {
+            channel_id,
+            ledger: None,
+        }
+    }
+}
+
+/// The live interrupt state of the turn a Herdr hold names, only while the watcher reads the
+/// transcript the hold names and the ledger key is that row's own turn.
+fn held_turn(
     inflight_state: Option<&crate::services::discord::inflight::InflightTurnState>,
     hold: Option<&(String, String, bool)>,
     output_path: &str,
-) -> Option<crate::services::provider::cancel_token_claude_interrupt::HerdrTurnStart> {
+    ledger: Option<&TurnKey>,
+) -> Option<Arc<crate::services::provider::cancel_token_claude_interrupt::HerdrInterruptState>> {
     let state = inflight_state?;
     #[cfg(test)]
     let unheld;
@@ -225,20 +257,26 @@ fn held_turn_start(
         hold => hold,
     };
     let (logical, hold_path, _) = hold?;
-    let mut start = crate::services::provider::cancel_token_claude_interrupt::herdr_turn_start(
-        logical,
-        state.turn_nonce.as_deref()?,
-    );
+    let nonce = state
+        .turn_nonce
+        .as_deref()
+        .filter(|nonce| !nonce.is_empty())?;
+    let same_transcript = hold_path == output_path;
     #[cfg(test)]
-    if backstop_mutant("backstop_identity_skipped") {
-        // Any turn in the watcher's transcript, from its first record.
-        return start.map(|mut start| {
-            (start.source, start.file, start.offset) = (output_path.into(), None, 0);
-            start
-        });
+    let same_transcript = same_transcript || backstop_mutant("backstop_identity_skipped");
+    // A key without an episode, or of another episode or turn, proves nothing of this row's turn.
+    let own_ledger_turn = ledger.is_some_and(|key| {
+        key.episode.is_some()
+            && key.matches_episode_nonce(Some(nonce))
+            && key.user_msg_id != 0
+            && key.user_msg_id == state.finalizer_turn_id
+    });
+    #[cfg(test)]
+    let own_ledger_turn = own_ledger_turn || backstop_mutant("backstop_ledger_key_skipped");
+    if !(same_transcript && own_ledger_turn) {
+        return None;
     }
-    start = start.filter(|_| hold_path == output_path);
-    start
+    crate::services::provider::cancel_token_claude_interrupt::herdr_turn(logical, nonce)
 }
 
 /// Test-only effect mutations of the backstop's Herdr policy.
@@ -497,7 +535,10 @@ mod tests {
         shared: Arc<SharedData>,
         channel: ChannelId,
         marker: String,
-        _token: Arc<crate::services::provider::CancelToken>,
+        /// The ledger key of the row's own turn.
+        key: TurnKey,
+        herdr: Arc<crate::services::provider::cancel_token_claude_interrupt::HerdrInterruptState>,
+        token: Arc<crate::services::provider::CancelToken>,
     }
 
     #[cfg(unix)]
@@ -523,9 +564,12 @@ mod tests {
                 Some(session.clone()),
                 Some(held.display().to_string()),
                 None,
-                0,
+                1,
             );
             state.turn_nonce = token.turn_nonce().map(str::to_owned);
+            state.ensure_finalizer_turn_id();
+            let key = TurnKey::new(channel, state.finalizer_turn_id, 0)
+                .with_episode_nonce(token.turn_nonce());
             crate::services::discord::inflight::save_inflight_state(&state).unwrap();
             shared.tmux_watchers.insert(
                 channel,
@@ -566,17 +610,19 @@ mod tests {
                 shared,
                 channel,
                 marker,
-                _token: token,
+                key,
+                herdr,
+                token,
             }
         }
 
         fn terminal(&self) -> bool {
-            watcher_backstop_turn_is_terminal(
-                &self.shared,
-                self.channel,
-                &ProviderKind::Codex,
-                true,
-            )
+            watcher_backstop_turn_is_terminal(&self.shared, self.key, &ProviderKind::Codex, true)
+        }
+
+        /// Bytes the last backstop poll read of this turn.
+        fn polled(&self) -> u64 {
+            self.herdr.own_turn.lock().unwrap().polled
         }
     }
 
@@ -643,10 +689,12 @@ mod tests {
         .await;
     }
 
-    /// A held Herdr turn longer than the transcript tails still ends on its own abort.
+    /// A held Herdr turn longer than the transcript tails ends on its own abort, each poll reading
+    /// at most the poll budget and the next poll reading on from there.
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn a_long_held_herdr_turn_ends_on_its_own_abort() {
+        use crate::services::provider::cancel_token_claude_interrupt::OWN_TURN_POLL_BUDGET;
         super::super::tests::with_isolated_runtime_root(|| async move {
             let dir = tempfile::tempdir().unwrap();
             for kib in [70, 1100] {
@@ -654,8 +702,172 @@ mod tests {
                 let body =
                     codex("task_started", "b") + &reasoning(kib) + &codex("turn_aborted", "b");
                 std::fs::write(&path, body).unwrap();
-                assert!(HeldTurn::new(&path, 0, &path).terminal(), "{kib} KiB");
+                let held = HeldTurn::new(&path, 0, &path);
+                let mut polls = 1;
+                while !held.terminal() {
+                    assert!(
+                        held.polled() <= OWN_TURN_POLL_BUDGET,
+                        "{kib} KiB poll {polls}"
+                    );
+                    assert!(polls < 10, "{kib} KiB never reached its own abort");
+                    polls += 1;
+                }
+                assert!(held.polled() <= OWN_TURN_POLL_BUDGET, "{kib} KiB last poll");
+                assert!(kib < 1024 || polls > 4, "1100 KiB read over {polls} polls");
             }
+        })
+        .await;
+    }
+
+    /// A partial line, a transcript cut short or another file at the path is no abort on that
+    /// poll; the read goes on at the next poll.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_held_turns_unfinished_or_changed_transcript_is_no_abort() {
+        super::super::tests::with_isolated_runtime_root(|| async move {
+            use std::io::Write;
+            let dir = tempfile::tempdir().unwrap();
+            let own = codex("task_started", "b") + &codex("turn_aborted", "b");
+
+            let partial = dir.path().join("partial.jsonl");
+            std::fs::write(&partial, own.trim_end()).unwrap();
+            let held = HeldTurn::new(&partial, 0, &partial);
+            assert!(!held.terminal() && !held.terminal(), "a partial abort line");
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&partial)
+                .unwrap();
+            file.write_all(b"\n").unwrap();
+            assert!(held.terminal(), "the completed line is read on");
+
+            let cut = dir.path().join("cut.jsonl");
+            std::fs::write(&cut, codex("task_started", "b") + &reasoning(4)).unwrap();
+            let held = HeldTurn::new(&cut, 0, &cut);
+            assert!(!held.terminal());
+            std::fs::write(&cut, &own).unwrap();
+            assert!(
+                !held.terminal(),
+                "a transcript cut below the read is no abort"
+            );
+            assert!(held.terminal(), "the next poll reads again from the start");
+
+            let swapped = dir.path().join("swapped.jsonl");
+            std::fs::write(&swapped, codex("task_started", "b")).unwrap();
+            let held = HeldTurn::new(&swapped, 0, &swapped);
+            assert!(!held.terminal());
+            let other = dir.path().join("other.jsonl");
+            std::fs::write(&other, &own).unwrap();
+            std::fs::rename(&other, &swapped).unwrap();
+            assert!(
+                !held.terminal() && !held.terminal(),
+                "another file at the path"
+            );
+        })
+        .await;
+    }
+
+    /// Once the reader saw the held turn's start as `a`, only `a`'s abort ends it, even after the
+    /// transcript is rewritten in place with another turn at that start.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_held_turn_ends_only_on_the_turn_its_reader_saw() {
+        use std::os::unix::fs::MetadataExt;
+        super::super::tests::with_isolated_runtime_root(|| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let seen_start = codex("task_started", "a");
+            for (name, rewrite, ends) in [("other", "b", false), ("own", "a", true)] {
+                let path = dir.path().join(format!("{name}.jsonl"));
+                std::fs::write(&path, &seen_start).unwrap();
+                let held = HeldTurn::new(&path, 0, &path);
+                held.herdr.own_start_observed(seen_start.len() as u64, "a");
+                let inode = std::fs::metadata(&path).unwrap().ino();
+                let body = codex("task_started", rewrite) + &codex("turn_aborted", rewrite);
+                std::fs::write(&path, body).unwrap();
+                assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+                assert_eq!(held.terminal(), ends, "seen a, rewritten {rewrite}");
+            }
+        })
+        .await;
+    }
+
+    /// The reconciler ends a ledger turn on a held Herdr abort only when its key is the row's own
+    /// turn: another episode, turn or an uncaptured episode keeps its entry and B's mailbox.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_held_abort_advances_only_its_own_ledger_turn() {
+        use serenity::model::id::{MessageId, UserId};
+        super::super::tests::with_isolated_runtime_root(|| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("b.jsonl");
+            std::fs::write(
+                &path,
+                codex("task_started", "b") + &codex("turn_aborted", "b"),
+            )
+            .unwrap();
+            let held = HeldTurn::new(&path, 0, &path);
+            let (shared, own) = (held.shared.clone(), held.key);
+            shared
+                .tmux_relay_coord(held.channel)
+                .confirmed_end_offset
+                .store(1, std::sync::atomic::Ordering::Release);
+            let message = MessageId::new(own.user_msg_id);
+            let mailbox = shared.mailbox(held.channel);
+            mailbox
+                .restore_active_turn(held.token.clone(), UserId::new(7), message)
+                .await;
+            let entry = |turn_key: TurnKey, deadline: Instant| LedgerEntry {
+                recovery_lease: None,
+                phase: Phase::Pending,
+                relay_owner: RelayOwnerKind::Watcher,
+                provider: ProviderKind::Codex,
+                turn_key,
+                terminal_deadline: None,
+                watcher_backstop_deadline: Some(deadline),
+                watcher_backstop_probe_at: None,
+                watcher_backstop_terminal_streak: 0,
+                watcher_backstop_deadline_pulled: false,
+                completion_admission: CompletionAdmission::new(CompletionAdmissionPlan::Immediate),
+                finalized_at: None,
+            };
+            let (now, far) = (Instant::now(), Instant::now() + WATCHER_REGISTER_BACKSTOP);
+            let others = [
+                TurnKey::new(held.channel, own.user_msg_id, 0).with_episode_nonce(Some("a")),
+                TurnKey {
+                    user_msg_id: own.user_msg_id + 1,
+                    ..own
+                },
+                TurnKey::new(held.channel, own.user_msg_id, 0),
+            ];
+            let mut ledger = HashMap::new();
+            for (n, key) in (1u64..).zip(others) {
+                for (generation, deadline) in [(2 * n, now), (2 * n + 1, far)] {
+                    let key = TurnKey { generation, ..key };
+                    ledger.insert(key.exact_key(), entry(key, deadline));
+                }
+            }
+            ledger.insert(own.exact_key(), entry(own, far));
+
+            reconcile::reconcile(&mut ledger, &mut HashMap::new(), &shared).await;
+            let theirs = |entry: &&LedgerEntry| entry.turn_key.exact_key() != own.exact_key();
+            for entry in ledger.values().filter(theirs) {
+                let key = entry.turn_key;
+                assert!(
+                    entry.phase == Phase::Pending,
+                    "{key:?} advanced on B's abort"
+                );
+                assert_eq!(entry.watcher_backstop_terminal_streak, 0, "{key:?}");
+            }
+            assert_eq!(ledger[&own.exact_key()].watcher_backstop_terminal_streak, 1);
+            assert!(
+                mailbox.has_active_turn().await.unwrap(),
+                "B's mailbox is kept"
+            );
+            assert!(
+                !held
+                    .token
+                    .cancelled
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
         })
         .await;
     }
