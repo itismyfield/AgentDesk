@@ -1,6 +1,10 @@
 //! Reads the active Claude composer and the status row right above its top border from one
 //! `capture-pane -e` capture. Anything outside the recognised layout reads as Unknown.
 
+use unicode_width::UnicodeWidthChar;
+
+use crate::services::tui_input::actor::gate::{claude_border_row, claude_prompt_row};
+
 /// Draft chips whose payload is not measured to survive a stash round trip.
 const UNMEASURED_CHIPS: [&str; 3] = [
     "[Image #",
@@ -271,16 +275,31 @@ pub(super) enum Drawn {
 /// wraps at width-4 and the composer shows at most (rows-10)/2 rows. `None` when not predictable.
 pub(super) fn drawn(frame: &str, size: Option<(usize, usize)>) -> Option<Drawn> {
     let (width, height) = size?;
+    // Claude may rewrite a tab or CR, changing even a folded paste's line count.
+    if frame
+        .split('\n')
+        .any(|line| line.chars().any(char::is_control))
+    {
+        return None;
+    }
     let newlines = frame.matches('\n').count();
     if frame.encode_utf16().count() > 800 || newlines > height.saturating_sub(10).min(2) {
         return Some(Drawn::Folded);
     }
     let mut rows = Vec::new();
     for line in frame.split('\n') {
-        if line.trim_end() != line || line.chars().any(char::is_control) {
+        if line.trim_end() != line {
             return None;
         }
         rows.extend(wrap(line, width.checked_sub(4).filter(|&c| c >= 2)?)?);
+    }
+    // A row the composer reader would take for the prompt or a border could not prove the paste.
+    let misread = |row: &String| {
+        let shown = format!("  {row}");
+        claude_prompt_row(&shown) || claude_border_row(&shown)
+    };
+    if rows[1..].iter().any(misread) {
+        return None;
     }
     (rows.len() <= height.saturating_sub(10) / 2).then_some(Drawn::Rows(rows))
 }
@@ -288,6 +307,10 @@ pub(super) fn drawn(frame: &str, size: Option<(usize, usize)>) -> Option<Drawn> 
 /// One line as wrap-ansi `hard` without trim lays it out; Claude drops the leading spaces of each
 /// wrapped row and the capture drops trailing ones. `None` for a wrap past measured characters.
 fn wrap(line: &str, columns: usize) -> Option<Vec<String>> {
+    // Zero-width joiners, selectors, combining marks and modifiers may merge into one glyph.
+    if line.chars().any(may_join) {
+        return None;
+    }
     // No character is wider than two columns, so this bound proves a line stays on one row.
     let bound: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
     if bound <= columns {
@@ -345,6 +368,13 @@ fn wrap(line: &str, columns: usize) -> Option<Vec<String>> {
         .to_string()
     };
     Some(rows.into_iter().enumerate().map(shown).collect())
+}
+
+/// A character with no cell of its own, or a flag or skin-tone half that joins its neighbour.
+fn may_join(c: char) -> bool {
+    !matches!(c.width(), Some(1 | 2))
+        || ('\u{1f1e6}'..='\u{1f1ff}').contains(&c)
+        || ('\u{1f3fb}'..='\u{1f3ff}').contains(&c)
 }
 
 /// Columns measured in Claude's composer: printable ASCII one, Hangul syllables and jamo two.

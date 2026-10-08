@@ -148,13 +148,12 @@ fn claude_composer_rows(plain: &str) -> Option<Vec<&str>> {
         return None;
     }
     let lines: Vec<_> = plain.lines().collect();
-    let start = lines
-        .iter()
-        .rposition(|line| line.trim_start().starts_with('❯'))?;
-    let end = (start + 1..lines.len()).find(|&i| {
-        let line = lines[i].trim();
-        line.chars().all(|c| c == '─') && line.len() >= 3
-    })?;
+    let start = lines.iter().rposition(|line| claude_prompt_row(line))?;
+    let end = (start + 1..lines.len()).find(|&i| claude_border_row(lines[i]))?;
+    // An indented border-like row is pasted text, so the real border cannot be told apart.
+    if lines[end].starts_with(char::is_whitespace) {
+        return None;
+    }
     let first = lines[start].trim_start().strip_prefix('❯')?;
     let first = first
         .strip_prefix(' ')
@@ -167,4 +166,15 @@ fn claude_composer_rows(plain: &str) -> Option<Vec<&str>> {
         rows.push(line.strip_prefix("  ").or(line.is_empty().then_some(""))?);
     }
     Some(rows)
+}
+
+/// A row the Claude composer reader takes for the prompt.
+pub(crate) fn claude_prompt_row(line: &str) -> bool {
+    line.trim_start().starts_with('❯')
+}
+
+/// A row the Claude composer reader takes for a border.
+pub(crate) fn claude_border_row(line: &str) -> bool {
+    let line = line.trim();
+    line.chars().all(|c| c == '─') && line.len() >= 3
 }
