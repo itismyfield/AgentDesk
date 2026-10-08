@@ -3133,7 +3133,8 @@ fn external_lease_fence_serializes_writer_and_rejects_stale_capture() {
     );
 }
 
-/// An earlier relay's withdrawal leaves the newer turn's reservation, so its steer still joins.
+/// A late withdrawal by an earlier observation keeps a newer reservation of another turn or of the
+/// same turn, and a deferred worker settles only the turn handed to it.
 #[test]
 fn withdrawing_an_earlier_native_reservation_keeps_the_newer_one() {
     let _guard = TEST_LOCK
@@ -3147,22 +3148,29 @@ fn withdrawing_an_earlier_native_reservation_keeps_the_newer_one() {
             observe_codex_prompt_in_turn_at(tmux, prompt, None, Some(turn), Utc::now());
         let event = std::iter::from_fn(|| rx.try_recv().ok())
             .find(|event| event.tmux_session_name == tmux && event.prompt == prompt);
-        (observation, event)
+        (observation, event.expect("observation published"))
     };
+    let joined = PromptObservation::JoinedNativeTurn;
     let (_, first) = observe("first input", "turn-1");
     let (_, second) = observe("second input", "turn-2");
-    let (first, second) = (
-        first.expect("first published"),
-        second.expect("second published"),
-    );
     withdraw_unowned_native_turn(&first);
-    assert_eq!(
-        observe("steer of the second", "turn-2").0,
-        PromptObservation::JoinedNativeTurn
-    );
+    assert_eq!(observe("steer of the second", "turn-2").0, joined);
+    withdraw_unowned_native_turn(&second);
+    let (reopened, third) = observe("input after the withdrawal", "turn-2");
+    assert_eq!(reopened, PromptObservation::PublishedSshDirect);
     withdraw_unowned_native_turn(&second);
     assert_eq!(
-        observe("input after the withdrawal", "turn-2").0,
+        observe("steer after a stale withdrawal", "turn-2").0,
+        joined
+    );
+    hand_native_turn_to_worker(&third, 7);
+    withdraw_unowned_native_turn(&third);
+    assert_eq!(observe("steer of the handed turn", "turn-2").0, joined);
+    settle_worker_native_turn("codex", tmux, 8, false);
+    assert_eq!(observe("steer after another worker", "turn-2").0, joined);
+    settle_worker_native_turn("codex", tmux, 7, false);
+    assert_eq!(
+        observe("input after its worker", "turn-2").0,
         PromptObservation::PublishedSshDirect
     );
 }

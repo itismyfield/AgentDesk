@@ -205,7 +205,8 @@ impl RelaySink for CountingSink {
     }
 }
 
-/// `(method, path, body)` of every Discord REST request.
+/// `(method, path, body)` of every Discord REST request the mock accepted; a rejected one is not
+/// recorded, so it never counts as delivered.
 type Requests = Arc<std::sync::Mutex<Vec<(String, String, String)>>>;
 
 async fn recording_discord(channel: u64) -> (Requests, Arc<serenity::Http>, AbortOnDrop) {
@@ -229,10 +230,6 @@ async fn recording_discord_failing(
             async move {
                 let path = uri.path().to_string();
                 let body = String::from_utf8_lossy(&body).into_owned();
-                recorded
-                    .lock()
-                    .unwrap()
-                    .push((method.to_string(), path.clone(), body));
                 if method == Method::POST
                     && path.ends_with("/messages")
                     && failing
@@ -242,6 +239,10 @@ async fn recording_discord_failing(
                     let error = serde_json::json!({"code": 50035, "message": "Invalid Form Body"});
                     return (StatusCode::BAD_REQUEST, axum::Json(error)).into_response();
                 }
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((method.to_string(), path.clone(), body));
                 if method == Method::DELETE || method == Method::PUT || path.ends_with("/typing") {
                     return StatusCode::NO_CONTENT.into_response();
                 }

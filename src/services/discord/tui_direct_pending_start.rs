@@ -195,9 +195,17 @@ pub(super) fn spawn_worker(
 ) {
     let effect = restore_gate::input_effect(&record);
     let active_guard = active_worker_guard_for_spawn(&record.provider, record.channel_id);
+    let native_turn = WorkerNativeTurn {
+        provider: record.provider.clone(),
+        tmux_session_name: record.tmux_session_name.clone(),
+        anchor: record.anchor_message_id,
+        claimed: false,
+    };
     restore_gate::spawn_admitted(effect, async move {
         let _active_guard = active_guard;
-        run_worker_inner(
+        // Bind the whole guard so the block owns it, not only its `claimed` field.
+        let mut native_turn = native_turn;
+        native_turn.claimed = run_worker_inner(
             shared,
             record,
             view_fn,
@@ -207,6 +215,25 @@ pub(super) fn spawn_worker(
         )
         .await;
     });
+}
+
+/// Settles the native turn a relay handed to this worker once the worker ends or is never run.
+struct WorkerNativeTurn {
+    provider: String,
+    tmux_session_name: String,
+    anchor: u64,
+    claimed: bool,
+}
+
+impl Drop for WorkerNativeTurn {
+    fn drop(&mut self) {
+        crate::services::tui_prompt_dedupe::settle_worker_native_turn(
+            &self.provider,
+            &self.tmux_session_name,
+            self.anchor,
+            self.claimed,
+        );
+    }
 }
 
 /// Why the worker's wait loop ended this cycle.
@@ -243,6 +270,7 @@ async fn run_worker(
     .await;
 }
 
+/// Waits for the prior turn and claims; `true` only when the claim succeeded.
 async fn run_worker_inner(
     shared: Arc<SharedData>,
     mut record: TuiDirectPendingStart,
@@ -250,7 +278,7 @@ async fn run_worker_inner(
     claim_fn: ClaimFn,
     abort_cleanup_fn: AbortCleanupFn,
     reclaim_orphan_fn: ReclaimOrphanFn,
-) {
+) -> bool {
     let lock = channel_lock(&record.provider, record.channel_id);
     let _guard = lock.lock().await;
 
@@ -292,7 +320,7 @@ async fn run_worker_inner(
             tokio::time::sleep(PENDING_START_POLL).await;
         };
         if take_retired(&record) {
-            return;
+            return false;
         }
 
         match outcome {
@@ -345,7 +373,7 @@ async fn run_worker_inner(
                             anchor_message_id = record.anchor_message_id,
                             "captured TUI source still blocked by foreign owner; retaining pending restart obligation"
                         );
-                        return;
+                        return false;
                     }
                     // ABORT SAFELY (P1-1): a foreign prior inflight stayed live
                     // across the escalation budget. We refuse to overwrite it.
@@ -362,7 +390,7 @@ async fn run_worker_inner(
                     // owner's identity-guarded completion can never clear OUR
                     // anchor out of it. Release it here (process-local only).
                     if take_retired(&record) {
-                        return;
+                        return false;
                     }
                     let anchor_slot_released = release_prompt_anchor_slot(&record);
                     tracing::warn!(
@@ -399,7 +427,7 @@ async fn run_worker_inner(
                     // loss). The phantom row, if any, is reaped later by its own
                     // commit/finalize or the bounded ⏳ sweep — never evicted here.
                     promote_queued_follow_up_after_abort(&shared, &record);
-                    return;
+                    return false;
                 }
                 tracing::warn!(
                     provider = %record.provider,
@@ -417,7 +445,7 @@ async fn run_worker_inner(
 
         // ---- Claim. Only delete the durable record on a SUCCESSFUL claim. ----
         if restore_gate::already_finished(&shared, &record).await && take_retired(&record) {
-            return;
+            return false;
         }
         let claimed = claim_fn(&shared, &record).await;
         if claimed {
@@ -441,11 +469,11 @@ async fn run_worker_inner(
             // re-runs and the claim adopts the matching anchor's existing
             // inflight idempotently, then deletes.
             delete(&record);
-            return;
+            return true;
         }
 
         if take_retired(&record) {
-            return;
+            return false;
         }
         // Transient claim failure: do NOT delete (P1-2). Retry, bounded.
         claim_attempts = claim_attempts.saturating_add(1);
@@ -468,7 +496,7 @@ async fn run_worker_inner(
             );
             // Leave the durable record in place: a later restart restore will
             // re-attempt idempotently rather than silently lose the prompt.
-            return;
+            return false;
         }
         tracing::warn!(
             provider = %record.provider,

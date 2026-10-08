@@ -303,6 +303,244 @@ fn codex_direct_steer_after_a_failed_announcement_answers_on_its_own_anchor() {
     });
 }
 
+/// A steer text repeated past the recent-duplicate window is a new submit and is echoed again, as
+/// is a later steer repeating the opening text; the running turn keeps its anchor, lease and tail.
+#[test]
+fn codex_direct_repeated_steer_text_past_the_duplicate_window_is_echoed_again() {
+    run(|root| {
+        Box::pin(async move {
+            let _live_pane = live_pane_tmux(&root);
+            let mut fx = Fixture::start(&root, 5_705_044, "AgentDesk-codex-5704-steer-again").await;
+            let t1 = turn(1);
+            let first = fx.hook(PROMPT, &t1).await;
+            let end = fx.append(&(opening(&t1, PROMPT) + &item_completed_line_for(&t1)));
+            fx.scanned_past(end).await;
+            super::super::super::super::relay_observed_prompt(&fx.shared, first).await;
+            let anchor = fx.codex.row().expect("claim").user_msg_id;
+            assert!(
+                wait_for(Duration::from_secs(10), || tail_starts(fx.codex.channel)
+                    == 1)
+                .await,
+                "the running turn's tail never started"
+            );
+            let lease = fx.lease();
+            let mut echoes = Vec::new();
+            for text in [PROMPT2, PROMPT2, PROMPT] {
+                crate::services::tui_prompt_dedupe::age_observed_prompt_records_for_tests(
+                    "codex",
+                    &fx.codex.tmux,
+                    Duration::from_secs(31),
+                );
+                let hooked = fx.steer_hook(text, &t1).await;
+                fx.append(&(user_line_for(text) + &item_completed_line_for(&t1)));
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                echoes.push(hooked + fx.relay_echoes(text).await);
+            }
+            assert_eq!(echoes, [1, 1, 1], "each submit is echoed once");
+            assert_eq!(fx.lease(), lease, "an echo replaced the running lease");
+            fx.append(&answer_for(&t1, RESPONSE2));
+            assert!(
+                fx.delivered(RESPONSE2).await,
+                "the turn's answer never reached Discord: {:?}",
+                fx.requests.lock().unwrap()
+            );
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            // PROMPT is a prefix of PROMPT2, so its count leaves PROMPT2's messages out.
+            let posts = |text: &str| {
+                let sent = fx.sent(text).into_iter();
+                sent.filter(|(method, _, body)| {
+                    method == "POST" && (text == PROMPT2 || !body.contains(PROMPT2))
+                })
+                .count()
+            };
+            assert_eq!(
+                (posts(PROMPT2), posts(PROMPT)),
+                (2, 2),
+                "two steer echoes; the announcement and one opening-text echo"
+            );
+            let target = format!("/channels/{}/messages/{anchor}", fx.codex.channel.get());
+            assert!(
+                fx.sent(RESPONSE2)
+                    .iter()
+                    .all(|(method, path, _)| method == "PATCH" && path.ends_with(&target))
+            );
+            assert_eq!(fx.completed_turns(), 1, "one native turn, one bridge turn");
+            assert_eq!(tail_starts(fx.codex.channel), 1, "one tail");
+            assert!(fx.pending_starts().is_empty());
+            fx.assert_released().await;
+            fx.finish();
+        })
+    });
+}
+
+/// Leaves the durable pending-start store unwritable until dropped: a file stands at its path.
+struct UnwritablePendingStore(PathBuf);
+
+impl UnwritablePendingStore {
+    fn new() -> Self {
+        let root = crate::services::discord::runtime_store::tui_direct_pending_start_root()
+            .expect("pending-start root");
+        std::fs::create_dir_all(root.parent().expect("runtime root")).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::write(&root, b"").unwrap();
+        Self(root)
+    }
+}
+
+impl Drop for UnwritablePendingStore {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// The next deferred worker on this thread sees its prior turn finalized and fails every claim.
+fn refuse_deferred_claims(attempts: Arc<AtomicUsize>) {
+    use crate::services::discord::tui_direct_pending_start::{PriorTurnObservation, PriorTurnView};
+    synthetic_start::RESTORE_VIEW_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(|_shared, _record| {
+            Box::pin(async {
+                Some(PriorTurnObservation {
+                    view: PriorTurnView {
+                        inflight_present: false,
+                        inflight_is_own_anchor: false,
+                        mailbox_blocking_turn_present: false,
+                        mailbox_turn_is_own_anchor: false,
+                        runtime_binding_present: true,
+                    },
+                    foreign_inflight_identity: None,
+                })
+            })
+        }))
+    });
+    synthetic_start::RESTORE_CLAIM_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move |_shared, _record| {
+            let attempts = attempts.clone();
+            Box::pin(async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                false
+            })
+        }))
+    });
+}
+
+/// A deferred input whose pending record cannot be written is still answered by its in-memory
+/// worker on its own anchor, and once the worker claims, its turn owns the turn's steers.
+#[test]
+fn codex_direct_deferred_input_with_an_unwritable_pending_record_is_answered_by_its_worker() {
+    run(|root| {
+        Box::pin(async move {
+            let _live_pane = live_pane_tmux(&root);
+            let mut fx = Fixture::start(&root, 5_705_070, "AgentDesk-codex-5704-unwritable").await;
+            let _store = UnwritablePendingStore::new();
+            let (t1, t2) = (turn(1), turn(2));
+            let (first, second) = (fx.hook(PROMPT, &t1).await, fx.hook(PROMPT2, &t2).await);
+            fx.append(
+                &(opening(&t1, PROMPT)
+                    + &item_completed_line_for(&t1)
+                    + &answer_for(&t1, RESPONSE)),
+            );
+            let end = fx.append(&(opening(&t2, PROMPT2) + &item_completed_line_for(&t2)));
+            fx.scanned_past(end).await;
+            super::super::super::super::relay_observed_prompt(&fx.shared, first).await;
+            let first_anchor = fx.codex.row().expect("claim").user_msg_id;
+            super::super::super::super::relay_observed_prompt(&fx.shared, second).await;
+            assert!(
+                fx.pending_starts().is_empty(),
+                "the pending record was written"
+            );
+            // The worker drops its in-memory presence as it returns from a successful claim.
+            let channel = fx.codex.channel.get();
+            assert!(
+                wait_for(Duration::from_secs(20), || {
+                    fx.codex.row().is_some_and(|row| row.user_msg_id != first_anchor)
+                        && !crate::services::discord::tui_direct_pending_start::pending_synthetic_start_present("codex", channel)
+                })
+                .await,
+                "the worker never claimed the deferred input"
+            );
+            assert_eq!(
+                fx.steer_hook(PROMPT3, &t2).await,
+                1,
+                "the claimed turn owns its steer"
+            );
+            fx.append(
+                &(user_line_for(PROMPT3)
+                    + &item_completed_line_for(&t2)
+                    + &answer_for(&t2, RESPONSE2)),
+            );
+            fx.assert_answers_in_order(&[RESPONSE, RESPONSE2], Some(2))
+                .await;
+            fx.finish();
+        })
+    });
+}
+
+/// The worker of a deferred input with an unwritable pending record gives up: the turn it held is
+/// withdrawn, so a later steer of that turn is relayed and answered as its own input.
+#[test]
+fn codex_direct_steer_after_an_abandoned_deferred_input_answers_on_its_own_anchor() {
+    run(|root| {
+        Box::pin(async move {
+            let _live_pane = live_pane_tmux(&root);
+            let mut fx = Fixture::start(&root, 5_705_071, "AgentDesk-codex-5704-abandoned").await;
+            let _store = UnwritablePendingStore::new();
+            let (t1, t2) = (turn(1), turn(2));
+            let (first, second) = (fx.hook(PROMPT, &t1).await, fx.hook(PROMPT2, &t2).await);
+            fx.append(
+                &(opening(&t1, PROMPT)
+                    + &item_completed_line_for(&t1)
+                    + &answer_for(&t1, RESPONSE)),
+            );
+            let end = fx.append(&(opening(&t2, PROMPT2) + &item_completed_line_for(&t2)));
+            fx.scanned_past(end).await;
+            super::super::super::super::relay_observed_prompt(&fx.shared, first).await;
+            let first_anchor = fx.codex.row().expect("claim").user_msg_id;
+            let attempts = Arc::new(AtomicUsize::new(0));
+            refuse_deferred_claims(attempts.clone());
+            super::super::super::super::relay_observed_prompt(&fx.shared, second).await;
+            let limit = crate::services::discord::tui_direct_pending_start::PENDING_START_MAX_CLAIM_ATTEMPTS;
+            assert!(
+                wait_for(Duration::from_secs(10), || attempts.load(Ordering::SeqCst)
+                    >= limit as usize)
+                .await,
+                "the worker never gave up"
+            );
+            assert!(
+                fx.delivered(RESPONSE).await,
+                "the first answer never reached Discord"
+            );
+            assert!(
+                wait_for(Duration::from_secs(10), || fx.codex.row().is_none()).await,
+                "the first turn never released its row"
+            );
+            let steer = fx.hook(PROMPT3, &t2).await;
+            assert!(
+                !steer.steer_echo,
+                "the steer joined the turn its abandoned worker held"
+            );
+            super::super::super::super::relay_observed_prompt(&fx.shared, steer).await;
+            let anchor = fx.codex.row().expect("the steer claims").user_msg_id;
+            fx.append(
+                &(user_line_for(PROMPT3)
+                    + &item_completed_line_for(&t2)
+                    + &answer_for(&t2, RESPONSE3)),
+            );
+            assert!(
+                fx.delivered(RESPONSE3).await,
+                "the steer's answer never reached Discord: {:?}",
+                fx.requests.lock().unwrap()
+            );
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            fx.assert_answer(RESPONSE, first_anchor);
+            fx.assert_answer(RESPONSE3, anchor);
+            assert_eq!(fx.completed_turns(), 2);
+            assert_eq!(tail_starts(fx.codex.channel), 2);
+            fx.assert_released().await;
+            fx.finish();
+        })
+    });
+}
+
 /// A real deferral survives a restart: the reloaded pending record and the worker's row keep
 /// the native turn, and the row keeps its prompt end after the repair restamps its lease.
 #[test]

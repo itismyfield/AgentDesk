@@ -182,7 +182,7 @@ impl Drop for UnannouncedPromptIdGuard<'_> {
     }
 }
 
-/// Withdraws the native turn the prompt reserved when its relay ends with no row or pending start,
+/// Withdraws the native turn the prompt reserved when its relay ends with no row or deferred worker,
 /// so a later steer of that turn is relayed as its own input instead of joining nothing.
 pub(super) struct UnownedNativeTurnGuard<'a>(pub(super) &'a ObservedTuiPrompt);
 
@@ -493,6 +493,10 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
         .await;
         if super::super::tui_direct_pending_start::should_defer_synthetic_turn_start(prior.view) {
             deferred_synthetic_start = true;
+            crate::services::tui_prompt_dedupe::hand_native_turn_to_worker(
+                prompt,
+                anchor_message_id.get(),
+            );
             super::synthetic_start::defer_synthetic_turn_start(
                 shared,
                 &provider,
@@ -537,6 +541,8 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
                 // The provider already accepted this input. Preserve the original
                 // bytes and anchor in the existing bounded claim/restart worker.
                 deferred_synthetic_start = true;
+                let anchor = anchor_message_id.get();
+                crate::services::tui_prompt_dedupe::hand_native_turn_to_worker(prompt, anchor);
                 super::synthetic_start::defer_synthetic_turn_start(
                     shared,
                     &provider,
@@ -581,7 +587,7 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
             );
         }
     }
-    if claimed || deferred_synthetic_start {
+    if claimed {
         crate::services::tui_prompt_dedupe::adopt_native_turn(prompt);
     }
     deferred_synthetic_start

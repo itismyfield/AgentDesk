@@ -279,36 +279,26 @@ pub(crate) fn resolve_tmux_session_name(
         .map(|entry| entry.value.clone())
 }
 
-/// Joins `prompt` to `native_turn` when the latest published input opened it; `Some(true)` the
-/// first time this text joins, so its echo is shown once however often it is read.
-pub(super) fn join_native_turn(
+/// Whether `native_turn` is the turn the latest published Codex input opened.
+pub(super) fn native_turn_is_open(
     provider: &str,
     tmux_session_name: &str,
     native_turn: &str,
-    prompt: &str,
-) -> Option<bool> {
+) -> bool {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
-    let slot = &mut state
+    state
         .native_turn_by_tmux
-        .get_mut(&PromptKey::new(provider, tmux_session_name))
-        .filter(|open| open.value.turn == native_turn)?
-        .value;
-    if slot.shown.iter().any(|shown| shown == prompt) {
-        return Some(false);
-    }
-    slot.shown.push(prompt.to_string());
-    Some(true)
+        .get(&PromptKey::new(provider, tmux_session_name))
+        .is_some_and(|open| open.value.turn == native_turn)
 }
 
-/// Records `native_turn` as opened by observation `observed_by` with text `prompt`; `owned` when
-/// its answer already has an owner outside this relay.
+/// Records `native_turn` as opened by observation `observed_by` and answered by `owner`.
 pub(super) fn open_native_turn(
     provider: &str,
     tmux_session_name: &str,
     native_turn: &str,
-    prompt: &str,
-    (observed_by, owned): (u64, bool),
+    (observed_by, owner): (u64, NativeTurnOwner),
 ) {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.native_turn_by_tmux.insert(
@@ -317,25 +307,29 @@ pub(super) fn open_native_turn(
             value: NativeTurnSlot {
                 turn: native_turn.to_string(),
                 observed_by,
-                owned,
-                shown: vec![prompt.to_string()],
+                owner,
             },
             recorded_at: Instant::now(),
         },
     );
 }
 
-/// A row or durable pending start now answers the native turn `prompt` opened.
+/// A row now answers the native turn `prompt` opened.
 pub(crate) fn adopt_native_turn(prompt: &ObservedTuiPrompt) {
-    settle_native_turn(prompt, true);
+    settle_native_turn(prompt, Some(NativeTurnOwner::Answer));
+}
+
+/// The deferred start worker of `anchor` takes over the native turn `prompt` opened.
+pub(crate) fn hand_native_turn_to_worker(prompt: &ObservedTuiPrompt, anchor: u64) {
+    settle_native_turn(prompt, Some(NativeTurnOwner::Worker(anchor)));
 }
 
 /// The relay of `prompt` ended with no owner: its own unowned slot goes, a newer one stays.
 pub(crate) fn withdraw_unowned_native_turn(prompt: &ObservedTuiPrompt) {
-    settle_native_turn(prompt, false);
+    settle_native_turn(prompt, None);
 }
 
-fn settle_native_turn(prompt: &ObservedTuiPrompt, owned: bool) {
+fn settle_native_turn(prompt: &ObservedTuiPrompt, owner: Option<NativeTurnOwner>) {
     let observed_by = prompt.ssh_direct_observation_generation;
     let Some(turn) = prompt.native_turn_id.as_deref() else {
         return;
@@ -348,11 +342,36 @@ fn settle_native_turn(prompt: &ObservedTuiPrompt, owned: bool) {
     let Some(slot) = state.native_turn_by_tmux.get_mut(&key) else {
         return;
     };
-    if slot.value.turn != turn || slot.value.observed_by != observed_by || slot.value.owned {
+    if slot.value.turn != turn
+        || slot.value.observed_by != observed_by
+        || slot.value.owner != NativeTurnOwner::Relay
+    {
         return;
     }
-    if owned {
-        slot.value.owned = true;
+    match owner {
+        Some(owner) => slot.value.owner = owner,
+        None => drop(state.native_turn_by_tmux.remove(&key)),
+    }
+}
+
+/// The deferred start worker of `anchor` ended: a claimed row keeps its turn, any other exit drops
+/// it so a later steer of that turn is relayed as its own input.
+pub(crate) fn settle_worker_native_turn(
+    provider: &str,
+    tmux_session_name: &str,
+    anchor: u64,
+    claimed: bool,
+) {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let key = PromptKey::new(provider, tmux_session_name.trim());
+    let Some(slot) = state.native_turn_by_tmux.get_mut(&key) else {
+        return;
+    };
+    if slot.value.owner != NativeTurnOwner::Worker(anchor) {
+        return;
+    }
+    if claimed {
+        slot.value.owner = NativeTurnOwner::Answer;
     } else {
         state.native_turn_by_tmux.remove(&key);
     }

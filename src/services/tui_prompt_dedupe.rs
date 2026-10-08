@@ -275,10 +275,18 @@ struct NativeTurnSlot {
     turn: String,
     /// The opening observation's generation: only its relay may withdraw the slot.
     observed_by: u64,
-    /// A row or durable pending start answers the turn, so the slot outlives the relay.
-    owned: bool,
-    /// Texts already shown in Discord for this turn: the opening input and each echoed steer.
-    shown: Vec<String>,
+    owner: NativeTurnOwner,
+}
+
+/// Who answers an open native turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeTurnOwner {
+    /// The observing relay, until it adopts, hands over or withdraws the turn.
+    Relay,
+    /// The deferred start worker of this anchor message: its claim keeps the turn, its exit drops it.
+    Worker(u64),
+    /// A row or a Discord turn.
+    Answer,
 }
 
 #[derive(Clone, Debug)]
@@ -323,7 +331,7 @@ pub(crate) use shadow_peek::peek_tmux_runtime_binding;
 pub use extract::*;
 use extract::{
     is_discord_relayed_user_prompt, is_user_prefixed_subagent_notification_machine_event,
-    join_native_turn, normalize_line_endings, normalize_provider, open_native_turn,
+    native_turn_is_open, normalize_line_endings, normalize_provider, open_native_turn,
     record_relayed_entry_id, relayed_entry_id_already_seen, take_matching_pending_prompt,
     take_or_record_recent_observed_prompt,
 };

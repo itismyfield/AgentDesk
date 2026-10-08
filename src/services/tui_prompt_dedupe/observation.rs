@@ -342,19 +342,18 @@ fn observe_prompt_candidates_by_tmux_inner(
         .and_then(|prompt| classify_local_only_slash_control(prompt));
     if local_only_control.is_none() {
         // A steering input joins before any lease is recorded, so the running turn's ownership
-        // stays; only its text is shown once, unless Discord already holds it.
-        if let Some((turn, first)) = native_turn.and_then(|turn| {
-            join_native_turn(&provider, tmux_session_name, turn, &candidates[0])
-                .map(|first| (turn, first))
-        }) {
+        // stays; only its text is shown, by the same duplicate rules as an input that opens a turn.
+        if let Some(turn) =
+            native_turn.filter(|turn| native_turn_is_open(&provider, tmux_session_name, turn))
+        {
             let discord =
                 take_matching_pending_prompt(&provider, tmux_session_name, &candidates[0]);
-            let _ =
+            let repeated =
                 take_or_record_recent_observed_prompt(&provider, tmux_session_name, &candidates[0]);
             if let Some(entry_id) = entry_id {
                 record_relayed_entry_id(&provider, tmux_session_name, entry_id);
             }
-            if first && !discord {
+            if !discord && !repeated {
                 let _ = OBSERVED_PROMPTS.send(ObservedTuiPrompt {
                     provider: provider.clone(),
                     tmux_session_name: tmux_session_name.to_string(),
@@ -375,8 +374,11 @@ fn observe_prompt_candidates_by_tmux_inner(
             if take_matching_pending_prompt(&provider, tmux_session_name, prompt) {
                 // The Discord turn owns this native turn's answer.
                 if let Some(turn) = native_turn {
-                    let owner = (SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED, true);
-                    open_native_turn(&provider, tmux_session_name, turn, prompt, owner);
+                    let owner = (
+                        SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+                        NativeTurnOwner::Answer,
+                    );
+                    open_native_turn(&provider, tmux_session_name, turn, owner);
                 }
                 return PromptObservation::SuppressedDiscordDuplicate;
             }
@@ -455,18 +457,12 @@ fn observe_prompt_candidates_by_tmux_inner(
         native_turn_id: native_turn.map(str::to_string),
         steer_echo: false,
     };
-    // Reserved until the relay adopts it for a row or pending start, or withdraws it.
+    // Reserved until the relay adopts it for a row, hands it to a deferred worker, or withdraws it.
     if let Some(turn) = native_turn
         && local_only_control.is_none()
     {
-        let observed_by = (ssh_direct_observation_generation, false);
-        open_native_turn(
-            &event.provider,
-            tmux_session_name,
-            turn,
-            &event.prompt,
-            observed_by,
-        );
+        let observed_by = (ssh_direct_observation_generation, NativeTurnOwner::Relay);
+        open_native_turn(&event.provider, tmux_session_name, turn, observed_by);
     }
     let _ = OBSERVED_PROMPTS.send(event);
     PromptObservation::PublishedSshDirect
