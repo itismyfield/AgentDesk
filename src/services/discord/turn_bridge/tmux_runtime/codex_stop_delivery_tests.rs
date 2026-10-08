@@ -22,6 +22,17 @@ pub(super) fn take_after_send() -> Option<Box<dyn FnOnce() + Send>> {
     AFTER_SEND.lock().unwrap().take()
 }
 
+type Step = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+static BEFORE_LATE_STOP: Mutex<Option<Step>> = Mutex::new(None);
+
+/// Runs the step a test placed between a stop's first Pending and its late arming.
+pub(super) async fn before_late_stop() {
+    let step = BEFORE_LATE_STOP.lock().unwrap().take();
+    if let Some(step) = step {
+        step.await;
+    }
+}
+
 struct Switch;
 impl Switch {
     fn on() -> Self {
@@ -34,6 +45,7 @@ impl Drop for Switch {
         HERDR_CANCEL_OVERRIDE.set(None);
         *AFTER_IDENTITY.lock().unwrap() = None;
         *AFTER_SEND.lock().unwrap() = None;
+        *BEFORE_LATE_STOP.lock().unwrap() = None;
     }
 }
 
@@ -176,6 +188,15 @@ impl Case {
         let token = Arc::new(CancelToken::new());
         let observation = token.prepare_herdr_interrupt(provider.clone(), &owner);
         *observation.submission.lock().unwrap() = HerdrSubmission::Submitted;
+        if provider == ProviderKind::Codex {
+            assert!(observation.record_turn_start(HerdrTurnStart {
+                execution_nonce: record.execution_nonce.clone(),
+                source: path.clone(),
+                file: Some((dev, ino)),
+                offset: 0,
+                submitted_at: None,
+            }));
+        }
         assert!(
             crate::services::discord::mailbox_try_start_turn(
                 &shared,
@@ -783,5 +804,63 @@ fn herdr_writer_unwinding_after_its_escape_keeps_the_claim_spent() {
             "an uncertain Escape is never sent again"
         );
         assert_eq!(case.escapes(), 1);
+    });
+}
+
+/// A Codex stop whose own turn ended while the pane began another native turn sends nothing and
+/// keeps its intent; it never takes the later turn for its own.
+#[test]
+fn a_codex_stop_never_takes_a_later_native_turn_for_its_own() {
+    with_cases(|case, _fx, runtime| {
+        if case.provider != ProviderKind::Codex {
+            return;
+        }
+        let next = [
+            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a"}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-b"}}),
+        ];
+        let lines: String = next.iter().map(|line| format!("{line}\n")).collect();
+        let mut rollout = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&case.path)
+            .unwrap();
+        std::io::Write::write_all(&mut rollout, lines.as_bytes()).unwrap();
+        assert_eq!(
+            user_stop(case, runtime, "!stop"),
+            HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Identity))
+        );
+        assert_eq!(case.escapes(), 0);
+        let intent = case.token.herdr_interrupt_state().unwrap();
+        assert!(intent.user_stop.load(Ordering::SeqCst), "the intent stays");
+    });
+}
+
+/// A stop that found its turn unsubmitted after the reader had read that turn's start runs again
+/// only while its token is still the channel's turn.
+#[test]
+fn a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token() {
+    with_cases(|case, _fx, runtime| {
+        if case.provider != ProviderKind::Codex {
+            return;
+        }
+        let state = case.token.herdr_interrupt_state().unwrap();
+        *state.submission.lock().unwrap() = HerdrSubmission::Unsubmitted;
+        state.own_start_observed(0);
+        let (shared, channel, provider) =
+            (case.shared.clone(), case.channel, case.provider.clone());
+        // The turn is submitted and the channel takes another token before the stop runs again.
+        *BEFORE_LATE_STOP.lock().unwrap() = Some(Box::pin(async move {
+            *state.submission.lock().unwrap() = HerdrSubmission::Submitted;
+            crate::services::discord::mailbox_finish_turn(&shared, &provider, channel).await;
+            let (next, user) = (Arc::new(CancelToken::new()), UserId::new(7));
+            let message = MessageId::new(channel.get() + 2);
+            let start = crate::services::discord::mailbox_try_start_turn;
+            assert!(start(&shared, channel, next, user, message).await);
+        }));
+        assert_eq!(
+            user_stop(case, runtime, "!stop"),
+            HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Generation))
+        );
+        assert_eq!(case.escapes(), 0);
     });
 }

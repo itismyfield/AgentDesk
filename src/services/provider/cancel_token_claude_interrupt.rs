@@ -28,7 +28,11 @@ pub(crate) type LateStop = Box<dyn Fn() + Send>;
 
 pub(crate) enum OwnStart {
     Unseen(Option<LateStop>),
-    Seen,
+    /// `progress` is the reader's complete-record end; a kept retry runs once the reader passes `after`.
+    Seen {
+        progress: u64,
+        retry: Option<(LateStop, u64)>,
+    },
 }
 
 /// The source and offset an executor observed at this token's input, never taken from a frame.
@@ -60,20 +64,54 @@ impl HerdrInterruptState {
                 armed.get_or_insert(stop);
                 true
             }
-            OwnStart::Seen => false,
+            OwnStart::Seen { .. } => false,
         }
     }
 
-    /// The reader saw this turn's own start: an armed stop runs once, outside the slot.
-    pub(crate) fn own_start_observed(&self) {
+    /// The reader saw this turn's own start with its records complete up to `progress`: an armed
+    /// stop runs once, outside the slot, and a kept retry once the reader has passed its record.
+    pub(crate) fn own_start_observed(&self, progress: u64) {
         let mut slot = self.own_start.lock().unwrap_or_else(|e| e.into_inner());
-        let armed = match std::mem::replace(&mut *slot, OwnStart::Seen) {
-            OwnStart::Unseen(armed) => armed,
-            OwnStart::Seen => None,
+        let run = match &mut *slot {
+            OwnStart::Unseen(armed) => {
+                let armed = armed.take();
+                *slot = OwnStart::Seen {
+                    progress,
+                    retry: None,
+                };
+                armed
+            }
+            OwnStart::Seen {
+                progress: seen,
+                retry,
+            } => {
+                *seen = (*seen).max(progress);
+                match retry {
+                    Some((_, after)) if progress > *after => retry.take().map(|(stop, _)| stop),
+                    _ => None,
+                }
+            }
         };
         drop(slot);
-        if let Some(stop) = armed {
+        if let Some(stop) = run {
             stop();
+        }
+    }
+
+    /// The reader's complete-record end once it has seen this turn's own start.
+    pub(crate) fn seen_progress(&self) -> Option<u64> {
+        match &*self.own_start.lock().unwrap_or_else(|e| e.into_inner()) {
+            OwnStart::Seen { progress, .. } => Some(*progress),
+            OwnStart::Unseen(_) => None,
+        }
+    }
+
+    /// Keeps one more attempt of a stop that sent nothing for the reader's next record past `after`.
+    pub(crate) fn retry_late_stop(&self, stop: LateStop, after: u64) {
+        if let OwnStart::Seen { retry, .. } =
+            &mut *self.own_start.lock().unwrap_or_else(|e| e.into_inner())
+        {
+            retry.get_or_insert((stop, after));
         }
     }
 }
