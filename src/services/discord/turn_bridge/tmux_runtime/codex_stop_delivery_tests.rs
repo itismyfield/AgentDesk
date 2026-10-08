@@ -845,7 +845,7 @@ fn a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token() {
         }
         let state = case.token.herdr_interrupt_state().unwrap();
         *state.submission.lock().unwrap() = HerdrSubmission::Unsubmitted;
-        state.own_start_observed(0);
+        state.own_start_observed(0, "turn-a");
         let (shared, channel, provider) =
             (case.shared.clone(), case.channel, case.provider.clone());
         // The turn is submitted and the channel takes another token before the stop runs again.
@@ -862,5 +862,39 @@ fn a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token() {
             HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Generation))
         );
         assert_eq!(case.escapes(), 0);
+    });
+}
+
+/// Once the reader saw its turn's own start, a rollout rewritten in place to begin with another
+/// native turn is never taken for it: nothing is sent and the intent stays.
+#[test]
+fn a_rollout_rewritten_in_place_never_retargets_a_late_stop() {
+    with_cases(|case, _fx, runtime| {
+        if case.provider != ProviderKind::Codex {
+            return;
+        }
+        let state = case.token.herdr_interrupt_state().unwrap();
+        *state.submission.lock().unwrap() = HerdrSubmission::Unsubmitted;
+        state.own_start_observed(0, "turn-a");
+        let (path, observation) = (case.path.clone(), state.clone());
+        *BEFORE_LATE_STOP.lock().unwrap() = Some(Box::pin(async move {
+            let next =
+                json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-b"}});
+            std::fs::write(&path, format!("{next}\n")).unwrap();
+            *observation.submission.lock().unwrap() = HerdrSubmission::Submitted;
+        }));
+        let inode = |path: &Path| {
+            crate::services::tui_o::shadow::capture::file_identity(
+                &std::fs::metadata(path).unwrap(),
+            )
+        };
+        let before = inode(&case.path);
+        assert_eq!(
+            user_stop(case, runtime, "!stop"),
+            HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Identity))
+        );
+        assert_eq!(inode(&case.path), before, "the rollout keeps its inode");
+        assert_eq!(case.escapes(), 0);
+        assert!(state.user_stop.load(Ordering::SeqCst), "the intent stays");
     });
 }

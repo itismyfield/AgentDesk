@@ -29,9 +29,11 @@ pub(crate) type LateStop = Box<dyn Fn() + Send>;
 pub(crate) enum OwnStart {
     Unseen(Option<LateStop>),
     /// `progress` is the reader's complete-record end; a kept retry runs once the reader passes `after`.
+    /// `turn_id` is the native ID of the start the reader first saw; later reads never replace it.
     Seen {
         progress: u64,
         retry: Option<(LateStop, u64)>,
+        turn_id: String,
     },
 }
 
@@ -68,9 +70,9 @@ impl HerdrInterruptState {
         }
     }
 
-    /// The reader saw this turn's own start with its records complete up to `progress`: an armed
-    /// stop runs once, outside the slot, and a kept retry once the reader has passed its record.
-    pub(crate) fn own_start_observed(&self, progress: u64) {
+    /// The reader saw this turn's own start `turn_id`, records complete up to `progress`: an armed
+    /// stop runs once, outside the slot, and a kept retry once the reader passed its record.
+    pub(crate) fn own_start_observed(&self, progress: u64, turn_id: &str) {
         let mut slot = self.own_start.lock().unwrap_or_else(|e| e.into_inner());
         let run = match &mut *slot {
             OwnStart::Unseen(armed) => {
@@ -78,12 +80,14 @@ impl HerdrInterruptState {
                 *slot = OwnStart::Seen {
                     progress,
                     retry: None,
+                    turn_id: turn_id.to_owned(),
                 };
                 armed
             }
             OwnStart::Seen {
                 progress: seen,
                 retry,
+                ..
             } => {
                 *seen = (*seen).max(progress);
                 match retry {
@@ -102,6 +106,14 @@ impl HerdrInterruptState {
     pub(crate) fn seen_progress(&self) -> Option<u64> {
         match &*self.own_start.lock().unwrap_or_else(|e| e.into_inner()) {
             OwnStart::Seen { progress, .. } => Some(*progress),
+            OwnStart::Unseen(_) => None,
+        }
+    }
+
+    /// The native ID of this turn's start as its reader first saw it.
+    pub(crate) fn seen_turn_id(&self) -> Option<String> {
+        match &*self.own_start.lock().unwrap_or_else(|e| e.into_inner()) {
+            OwnStart::Seen { turn_id, .. } => Some(turn_id.clone()),
             OwnStart::Unseen(_) => None,
         }
     }
@@ -132,6 +144,123 @@ impl HerdrTurnStart {
             submitted_at,
         }
     }
+
+    /// The Codex turn that began at this input: the first record there of any turn must start a
+    /// named turn. `through_terminal` reads on until that turn's own end or another turn's start.
+    pub(crate) fn codex_own_turn(
+        &self,
+        through_terminal: bool,
+    ) -> Result<CodexOwnTurn, OwnTurnRead> {
+        use crate::services::agent_protocol::{codex_payload_turn_id, same_codex_turn};
+        use std::io::{BufRead, Seek};
+        let mut file = std::fs::File::open(&self.source).map_err(|_| OwnTurnRead::Unreadable)?;
+        let opened = file.metadata().ok();
+        if self.file.is_some() && opened.as_ref().and_then(file_identity) != self.file {
+            return Err(OwnTurnRead::Foreign);
+        }
+        file.seek(std::io::SeekFrom::Start(self.offset))
+            .map_err(|_| OwnTurnRead::Unreadable)?;
+        let mut reader = std::io::BufReader::new(file);
+        let (mut line, mut offset, mut own) = (String::new(), self.offset, None::<CodexOwnTurn>);
+        loop {
+            line.clear();
+            let position = offset;
+            let read = reader
+                .read_line(&mut line)
+                .map_err(|_| OwnTurnRead::Unreadable)?;
+            if read == 0 || !line.ends_with('\n') {
+                return match (own, read) {
+                    (Some(turn), _) => Ok(turn),
+                    (None, 0) => Err(OwnTurnRead::NotYet),
+                    (None, _) => Err(OwnTurnRead::Unreadable),
+                };
+            }
+            offset += read as u64;
+            let record: serde_json::Value =
+                serde_json::from_str(&line).map_err(|_| OwnTurnRead::Unreadable)?;
+            let payload = &record["payload"];
+            let kind = payload["type"].as_str().unwrap_or("");
+            let named = codex_payload_turn_id(payload);
+            let Some(turn) = own.as_mut() else {
+                match record["type"].as_str() {
+                    Some("event_msg") if kind == "task_started" => {
+                        let turn_id = named.ok_or(OwnTurnRead::Foreign)?.to_owned();
+                        let turn = CodexOwnTurn {
+                            started_at: position,
+                            turn_id,
+                            aborted: false,
+                        };
+                        if !through_terminal {
+                            return Ok(turn);
+                        }
+                        own = Some(turn);
+                    }
+                    Some("event_msg") if matches!(kind, "task_complete" | "turn_aborted") => {
+                        return Err(OwnTurnRead::Foreign);
+                    }
+                    Some("response_item") if codex_turn_content(payload) => {
+                        return Err(OwnTurnRead::Foreign);
+                    }
+                    _ => {}
+                }
+                continue;
+            };
+            let mine = same_codex_turn(Some(&turn.turn_id), named);
+            match kind {
+                "turn_aborted" if mine => turn.aborted = true,
+                "task_complete" if mine => {}
+                "task_started" if !mine => {}
+                _ => continue,
+            }
+            break;
+        }
+        own.ok_or(OwnTurnRead::NotYet)
+    }
+}
+
+/// The Codex turn a Herdr input began, as its rollout shows it from that input.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CodexOwnTurn {
+    pub(crate) started_at: u64,
+    pub(crate) turn_id: String,
+    /// Read through the turn: it ended on its own abort before any other turn began.
+    pub(crate) aborted: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum OwnTurnRead {
+    Unreadable,
+    /// No record of any turn follows the input yet.
+    NotYet,
+    /// Another file, or another turn's record before this turn's start.
+    Foreign,
+}
+
+/// Assistant text, a tool record or reasoning: content of whichever turn is running.
+fn codex_turn_content(payload: &serde_json::Value) -> bool {
+    match payload["type"].as_str().unwrap_or("") {
+        "message" => payload["role"].as_str() == Some("assistant"),
+        "function_call" | "custom_tool_call" | "tool_search_call" | "reasoning" => true,
+        "function_call_output" | "custom_tool_call_output" | "tool_search_output" => true,
+        _ => false,
+    }
+}
+
+/// Live Herdr turns by logical session, held weakly, so a synchronous reader finds a held turn's
+/// own start; a later turn on the session replaces its entry.
+static HERDR_TURNS: std::sync::LazyLock<Mutex<HerdrTurns>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Logical session → (turn nonce, that turn's interrupt state).
+type HerdrTurns = std::collections::HashMap<String, (String, std::sync::Weak<HerdrInterruptState>)>;
+
+/// The own input start of Herdr turn `turn_nonce` on `logical`, while that turn's token lives.
+pub(crate) fn herdr_turn_start(logical: &str, turn_nonce: &str) -> Option<HerdrTurnStart> {
+    let turns = HERDR_TURNS.lock().unwrap_or_else(|e| e.into_inner());
+    let (nonce, state) = turns.get(logical)?;
+    let state = (nonce == turn_nonce).then(|| state.upgrade()).flatten()?;
+    drop(turns);
+    state.turn_start.get().cloned()
 }
 
 /// The (dev, ino) of the descriptor a reader opened; `(0, 0)` names none.
@@ -185,6 +314,12 @@ impl CancelToken {
             own_start: Mutex::new(OwnStart::Unseen(None)),
         });
         self.bind_interrupt_session(provider, &owner.logical_key);
+        if let Some(nonce) = self.turn_nonce() {
+            let mut turns = HERDR_TURNS.lock().unwrap_or_else(|e| e.into_inner());
+            turns.retain(|_, (_, turn)| turn.strong_count() > 0);
+            let entry = (nonce.to_owned(), Arc::downgrade(&state));
+            turns.insert(owner.logical_key.clone(), entry);
+        }
         *slot = Some(state.clone());
         state
     }

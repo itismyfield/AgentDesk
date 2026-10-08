@@ -8632,6 +8632,7 @@ services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::turn_
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::wrapper_interrupt_is_fenced_but_can_cancel_submitted_generation
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::wrapper_submit_pending_overrides_prior_idle_state
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_codex_stop_never_takes_a_later_native_turn_for_its_own
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_rollout_rewritten_in_place_never_retargets_a_late_stop
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_generation_only_stale_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
@@ -8891,13 +8892,14 @@ services::discord::turn_finalizer::tests::watcher_pending_true_for_live_watcher_
 services::discord::turn_finalizer::tests::watcher_register_start_backstop_defers_paused_live_turn
 services::discord::turn_finalizer::tests::watcher_register_start_backstop_finalizes_unterminated_turn
 services::discord::turn_finalizer::tests::watcher_then_bridge_handoff_double_terminal_exactly_once
+services::discord::turn_finalizer::watcher_backstop::tests::a_held_herdr_turn_ends_only_on_its_own_abort
+services::discord::turn_finalizer::watcher_backstop::tests::a_long_held_herdr_turn_ends_on_its_own_abort
 services::discord::turn_finalizer::watcher_backstop::tests::done_with_zero_inflight_offset_defers_strict_finalize
 services::discord::turn_finalizer::watcher_backstop::tests::done_without_inflight_or_lease_defers_strict_finalize
 services::discord::turn_finalizer::watcher_backstop::tests::herdr_turn_without_watcher_ends_only_on_its_transcript
 services::discord::turn_finalizer::watcher_backstop::tests::missing_delivery_proof_never_confirms_terminal_end
 services::discord::turn_finalizer::watcher_backstop::tests::non_jsonl_signal_never_terminal_on_fast_path_probe
 services::discord::turn_finalizer::watcher_backstop::tests::o_delegated_done_turn_needs_no_legacy_delivery_confirmation
-services::discord::turn_finalizer::watcher_backstop::tests::only_a_held_herdr_turn_ends_on_its_own_codex_abort
 services::discord::turn_lease::registry::tests::turn_lease_registry_inspect_returns_rowless_lease_identity
 services::discord::turn_lease::registry::tests::turn_lease_registry_selects_owner_and_refuses_ambiguity
 services::discord::turn_lease::tests::claim_refuses_unbound_message_id_without_panic
