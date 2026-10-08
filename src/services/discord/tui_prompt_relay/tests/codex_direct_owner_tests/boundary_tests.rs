@@ -1109,5 +1109,7 @@ fn codex_direct_deferred_input_restored_under_a_later_lease_keeps_its_boundary()
     });
 }
 
+/// Answers ending around a Stop hook, a queued shell turn, or a Discord turn's steer.
+mod loss_tests;
 /// Native turn identity: fallback, steering joins, durable deferral.
 mod native_turn_tests;

@@ -7874,6 +7874,9 @@ services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_t
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_same_prompt_deferred_behind_an_empty_turn_keeps_its_own_boundary
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_same_prompt_published_twice_before_its_records_keeps_input_order
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_same_prompt_twice_keeps_each_answer_on_its_own_input
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_direct_answer_survives_a_stop_hook_ahead_of_task_complete
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_steer_into_a_discord_turn_only_echoes
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_turn_queued_behind_a_shell_turn_answers_on_its_anchor
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_answer_on_a_rollout_without_turn_ids_keeps_the_text_search
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_answer_skips_another_turn_with_the_same_prompt
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_answer_waits_for_its_turn_through_a_torn_opening

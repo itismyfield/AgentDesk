@@ -16,6 +16,10 @@ fn is_synthetic_tui_user_prompt(prompt: &str) -> bool {
     if prompt.starts_with("<environment_context>") && prompt.ends_with("</environment_context>") {
         return true;
     }
+    // Codex records a `!cmd` shell run as a user message; it is the shell turn's output, not input.
+    if prompt.starts_with("<user_shell_command>") && prompt.ends_with("</user_shell_command>") {
+        return true;
+    }
     prompt.starts_with("[Shared Agent Knowledge]\n")
         || prompt.starts_with("[Proactive Memory Guidance]\n")
         || prompt == "No response requested."
