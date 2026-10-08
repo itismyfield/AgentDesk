@@ -25,13 +25,13 @@ const SPINNER: &str = "✻ Thinking… (12s · esc to interrupt)";
 const BUSY_TURN: &str = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n\
     {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n";
 
-/// A scripted 80x24 `tmux`: the paste shows folded (flat with `draw`, `draw.rows` below the header)
-/// and the Enter queues its header as Claude does mid-turn. `gate`/`hold` park keys/capture to `go`.
-const FAKE_TMUX: &str = r#"#!/bin/sh
+/// Scripted `tmux` of `size` (80,24) pasting only at `live`: folded, or flat with `draw`/`draw.rows`;
+/// Enter queues the header as Claude does mid-turn. `gate`/`hold` park keys/capture until `go`.
+const FAKE_TMUX: &str = r##"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
 case "$2" in
-display-message) echo "$(cat "$d/attach"),,80,24" ;;
+display-message) echo "$(cat "$d/attach"),,$(cat "$d/size" 2>/dev/null || echo 80,24)" ;;
 capture-pane)
   if [ -f "$d/hold" ]; then
     rm -f "$d/hold"; touch "$d/at_hold"; i=0
@@ -42,6 +42,10 @@ load-buffer) for last do :; done; cp "$last" "$d/buffer" ;;
 if-shell)
   a=$(cat "$d/attach")
   if [ "$a" != 0 ]; then echo "agentdesk-busy-inject-vetoed $a"; exit 0; fi
+  live=$(cat "$d/live" 2>/dev/null || cat "$d/size" 2>/dev/null || echo 80,24)
+  case "$6" in *pane_width*)
+    case "$6" in *"#{==:#{pane_width},${live%,*}}"*"#{==:#{pane_height},${live#*,}}"*) ;;
+    *) echo "agentdesk-busy-inject-vetoed 0"; exit 0 ;; esac ;; esac
   if [ -f "$d/gate" ]; then
     touch "$d/at_gate"; i=0
     while [ ! -f "$d/go" ] && [ $i -lt 80 ]; do sleep 0.05; i=$((i+1)); done
@@ -59,7 +63,7 @@ if-shell)
   esac ;;
 esac
 exit 0
-"#;
+"##;
 
 /// A scripted pane with a busy transcript, the TUI-direct row and Claude binding naming it, and
 /// the switch forced for its channel until dropped.
@@ -573,6 +577,51 @@ async fn a_wrapped_paste_is_injected_only_when_its_rows_are_predicted_pg() {
             "queued handed_back veto=unpredictable_render keys= seen=false queued=1",
         ]
     );
+}
+
+/// A pasted `─` or `❯` row the composer reader would misread, a pane of unknown size, and a resize
+/// after the prediction each hand the input back unpasted.
+#[tokio::test(flavor = "current_thread")]
+async fn a_paste_its_rows_cannot_prove_is_handed_back_unpasted_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let x = |n: usize| "x".repeat(n);
+    let cases = [
+        (6_687_021, "─".to_string(), None),
+        (6_687_022, "───".to_string(), None),
+        (6_687_023, "❯ hello".to_string(), None),
+        (6_687_024, "status?".to_string(), Some(("size", ""))),
+        (6_687_025, x(77), Some(("live", "79,24"))),
+    ];
+    let handed_back = "queued handed_back veto=unpredictable_render keys= seen=false queued=1";
+    let expected: Vec<_> = cases
+        .iter()
+        .map(|case| format!("{}: {handed_back}", case.1))
+        .collect();
+    let registry = HealthRegistry::new();
+    let channels = cases.each_ref().map(|case| case.0);
+    let shared = register_inject_runtime(&registry, &channels, Some(pool)).await;
+    // The 79-column rows Claude would draw, so a paste the guard let through is not owned.
+    let resized = [format!("  {}", x(75)), "  xx".to_string()];
+    let mut observed = Vec::new();
+    for (ch, text, file) in cases {
+        let pane = InjectPane::new(ch, "all");
+        pane.draw_paste(
+            file.is_some_and(|(name, _)| name == "live")
+                .then_some(&resized[..]),
+        );
+        if let Some((name, value)) = file {
+            pane.set(name, value);
+        }
+        let outcome = deliver_text(&registry, ch, &text).await;
+        let queue = queue_texts(&shared, ch).await.len();
+        let (keys, seen) = (pane.keys().join("+"), pane.transcript_recorded_the_paste());
+        observed.push(format!(
+            "{text}: {outcome} keys={keys} seen={seen} queued={queue}"
+        ));
+    }
+    assert_eq!(observed, expected);
 }
 
 /// A channel whose input moved to the input runtime keeps its pane untouched.

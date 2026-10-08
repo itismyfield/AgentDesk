@@ -1,7 +1,8 @@
 //! The rows Claude draws a paste into, against composers captured from Claude Code 2.1.293.
 
 use super::screen::{Drawn, drawn};
-use crate::services::tui_input::actor::gate::own_wrapped_draft;
+use crate::services::tui_input::actor::gate::{own_draft, own_wrapped_draft};
+use crate::services::tui_o::shadow::ShadowProvider;
 
 const HEADER: &str = "[📱 s · a · n1]";
 const PANE: Option<(usize, usize)> = Some((80, 24));
@@ -106,8 +107,27 @@ fn a_paste_whose_rows_cannot_be_predicted_or_shown_whole_has_no_rows() {
         format!("{}…끝", "가".repeat(37)),
         "trailing ".to_string(),
         "tab\there".to_string(),
+        // Rows the composer reader would take for a border or the prompt.
+        "─".to_string(),
+        "───".to_string(),
+        "❯ hello".to_string(),
+        format!("{} ❯ y", x(76)),
+        format!("{} ───", x(76)),
+        // Characters that may join into one glyph, even on a short row.
+        "👨\u{200d}👩".to_string(),
+        "❤\u{fe0f}".to_string(),
+        "e\u{301}".to_string(),
+        "🇰🇷".to_string(),
+        "👍🏻".to_string(),
     ] {
         assert_eq!(rows(&text, PANE), None, "{text}");
+    }
+    // A tab or CR is refused before folding, since a rewrite would change the folded line count.
+    for text in [
+        format!("{}\tz", "z".repeat(900)),
+        "a\r\nb\nc\nd".to_string(),
+    ] {
+        assert_eq!(drawn(&format!("{HEADER}\n{text}"), PANE), None, "{text}");
     }
     assert_eq!(drawn(&format!("{HEADER}\nshort"), None), None);
     // Over 800 UTF-16 units or more than two line breaks, Claude folds instead.
@@ -153,6 +173,16 @@ fn a_wrapped_paste_is_owned_only_in_the_rows_claude_draws() {
         &predicted
     ));
     assert!(!own_wrapped_draft(&composer(&[&one, &two]), &predicted));
+    // Rows after a pasted border-like row are still the composer's; no reader may stop there.
+    let foreign = composer(&[&one, &two, &three, "  ─", "  foreign"]);
+    assert!(!own_wrapped_draft(&foreign, &predicted));
+    let short = format!("{border}\n❯\u{00a0}{HEADER}\n  hello\n  ───\n  foreign\n{border}\n");
+    assert!(!own_draft(
+        ShadowProvider::Claude,
+        &short,
+        &format!("{HEADER}\nhello"),
+        true
+    ));
     assert!(!own_wrapped_draft(
         &composer(&[&one, &two[1..], &three]),
         &predicted
