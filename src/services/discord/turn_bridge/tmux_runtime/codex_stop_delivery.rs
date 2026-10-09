@@ -116,7 +116,7 @@ impl CodexStopTurnIdentity {
         {
             return Err(HerdrNotSent::Identity);
         }
-        let own = start.codex_own_turn(false).map_err(|read| match read {
+        let own = start.codex_own_turn().map_err(|read| match read {
             OwnTurnRead::Foreign => HerdrNotSent::Identity,
             OwnTurnRead::Unreadable | OwnTurnRead::NotYet => unobserved(),
         })?;

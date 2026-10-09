@@ -260,7 +260,7 @@ pub(super) async fn reconcile(
     // the deadline in to GATE_BACKSTOP for the deadline arm's third (still
     // strict — the entry is flagged `pulled`) confirmation within seconds
     // instead of 1800s. Any non-terminal probe resets the streak.
-    let probe_due: Vec<(LedgerKey, ChannelId, ProviderKind)> = ledger
+    let probe_due: Vec<(LedgerKey, TurnKey, ProviderKind)> = ledger
         .iter()
         .filter_map(|(ledger_key, entry)| {
             let probe_spacing_elapsed = entry.watcher_backstop_probe_at.is_none_or(|at| {
@@ -272,18 +272,15 @@ pub(super) async fn reconcile(
                 && let Some(deadline) = entry.watcher_backstop_deadline
                 && deadline > now + GATE_BACKSTOP
             {
-                Some((
-                    *ledger_key,
-                    entry.turn_key.channel_id,
-                    entry.provider.clone(),
-                ))
+                Some((*ledger_key, entry.turn_key, entry.provider.clone()))
             } else {
                 None
             }
         })
         .collect();
-    for (ledger_key, channel_id, provider) in probe_due {
-        let terminal = watcher_backstop_turn_is_terminal(shared, channel_id, &provider, false);
+    for (ledger_key, turn_key, provider) in probe_due {
+        let channel_id = turn_key.channel_id;
+        let terminal = watcher_backstop_turn_is_terminal(shared, turn_key, &provider, false);
         let Some(entry) = ledger.get_mut(&ledger_key) else {
             continue;
         };
@@ -334,7 +331,7 @@ pub(super) async fn reconcile(
         // the deadline; a still-live one EXTENDS its backstop a full horizon.
         // A fast-path-PULLED deadline stays STRICT (codex r1) so a transiently
         // absent/stale handle cannot smuggle a busy turn past the third check.
-        if watcher_backstop_turn_is_terminal(shared, turn_key.channel_id, &provider, !pulled) {
+        if watcher_backstop_turn_is_terminal(shared, turn_key, &provider, !pulled) {
             run_backstop_finalize(ledger, ledger_key, turn_key, provider, shared, now).await;
         } else if let Some(entry) = ledger.get_mut(&ledger_key) {
             if entry.phase == Phase::Pending {
