@@ -48,7 +48,8 @@ class TargetEmptyIdentity(unittest.TestCase):
             self.source.write_text('fn main() {}\n' + extra, encoding='utf-8')
             self.assertEqual([k for k, _ in self.validate(
                 'cargo test --bin alias typo')], ['empty-target'])
-        self.assertEqual(self.validate('cargo test --bin alias'), [])
+        self.assertEqual([k for k, _ in self.validate(
+            'cargo test --bin alias')], ['empty-target'])
 
     def test_redirected_test_identity_and_libtest_selection(self):
         self.source.write_text('#[path="child.rs"]\nmod renamed;\n', encoding='utf-8')

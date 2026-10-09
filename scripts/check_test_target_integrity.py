@@ -6,14 +6,16 @@ pairing the wrong target flag (e.g. `--bin agentdesk`) with a lib-only module
 filter runs 0 tests while its required check stays green. This gate statically
 cross-checks tracked workflow and justfile `cargo test` commands' target
 selection with one test-ID oracle: Cargo's target selection (named targets,
-`--bins`/`--tests`/`--examples`/`--benches`/`--all-targets`, or the default
-`test = true` set) picks targets, and libtest's filter rule runs over their
-static test IDs (the checked-in lib manifest; other targets scanned from their
-crate roots, following `#[path = "..."]`; no compilation). A selection or
-module-path filter proven empty is flagged; module declarations only say where
-a missed filter points. Doctests, other crates and `--ignored` are reported
-as unjudged. A name sweep over a target class whose matches all lie in
-unselected targets is reported, not failed. Default mode remains
+`--bins`/`--tests`/`--examples`/`--benches`/`--all-targets` by each target's
+`test`/`bench` flag, or the default `test = true` set) picks targets, and
+libtest's filter rule runs over their static test IDs (the checked-in lib
+manifest; other targets scanned from their crate roots, following
+`#[path = "..."]`; no compilation). A selection or module-path filter proven
+empty is flagged; module declarations only say where a missed filter points.
+Other crates, `--doc`, and emptiness that the lib's doctests or unknown
+`#[ignore]` marks could change are reported as unjudged. A name sweep over a
+target class whose matches are live tests in unselected targets is reported,
+not failed. Default mode remains
 diagnostic (rc=0); CI uses `--enforce`, and opt-in `--run-list-check` runs
 `cargo test ... -- --list` (compiles) to flag lanes selecting 0 tests.
 Legitimately-empty lanes (platform `#[cfg]`) are excused via
@@ -36,7 +38,7 @@ import shlex
 import subprocess
 import sys
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 
@@ -66,10 +68,21 @@ CARGO_VALUE_OPTIONS = {
 # Named-target options and the Cargo target kind each one selects.
 TARGET_VALUE_OPTIONS = {"--bin": "bin", "--test": "test",
                         "--example": "example", "--bench": "bench"}
-# Multi-target flags; "tests" is every target with `test = true`.
-TARGET_CLASS_OPTIONS = {"--bins": "bin", "--tests": "tests",
-                        "--examples": "example", "--benches": "bench",
+# Multi-target flags; "tested"/"benched" are targets whose `test`/`bench`
+# manifest flag is on, and "all" is the union of the other four classes.
+TARGET_CLASS_OPTIONS = {"--bins": "bin", "--tests": "tested",
+                        "--examples": "example", "--benches": "benched",
                         "--all-targets": "all"}
+# The manifest flag each flag-based class reads.
+CLASS_FLAGS = {"tested": "test", "benched": "bench"}
+# Cargo's per-kind defaults for the `test`, `bench` and `doctest` flags.
+TARGET_FLAG_DEFAULTS = {
+    "lib": {"test": True, "bench": True, "doctest": True},
+    "bin": {"test": True, "bench": True, "doctest": False},
+    "example": {"test": False, "bench": False, "doctest": False},
+    "test": {"test": True, "bench": False, "doctest": False},
+    "bench": {"test": False, "bench": True, "doctest": False},
+}
 # Runs whose selection the static test IDs cannot model (left unjudged).
 UNJUDGED_OPTIONS = {
     "--doc": "doctests are not in the static test-ID inventory",
@@ -79,6 +92,9 @@ LIBTEST_VALUE_OPTIONS = frozenset({
     "--test-threads", "--format", "--color", "--logfile", "-Z",
 })
 SHELL_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+# A shell or just expansion whose value is unknown statically.
+DYNAMIC_TOKEN = re.compile(
+    r"\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)|\{\{[^{}]*\}\}")
 NICE_LEGACY_ADJUSTMENT = re.compile(r"^-[+-]?\d+$")
 LIST_SUMMARY = re.compile(r"(\d+) tests?, \d+ benchmarks")
 JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):(?:\s*#.*)?$")
@@ -1014,6 +1030,9 @@ class CommandSpec:
     classes: tuple[str, ...] = ()
     packages: tuple[str, ...] = ()
     unjudged: str = ""
+    manifest_path: str = ""
+    # libtest `--ignored`: only #[ignore] tests among the selection run.
+    ignored_only: bool = False
 
 
 def parse_command(words: list[str]) -> CommandSpec:
@@ -1029,13 +1048,12 @@ def parse_command(words: list[str]) -> CommandSpec:
     packages: list[str] = []
     exact = False
     unjudged = ""
+    manifest_path = ""
+    ignored_only = False
     target_inconclusive = False
 
     def dynamic(token: str) -> bool:
-        return bool(re.search(
-            r"\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)|\{\{[^{}]*\}\}",
-            token,
-        ))
+        return bool(DYNAMIC_TOKEN.search(token))
 
     def consume_filter_option(tokens: list[str], position: int) -> int | None:
         nonlocal exact
@@ -1054,7 +1072,7 @@ def parse_command(words: list[str]) -> CommandSpec:
             return None
         return position
     def option_value(name: str, value: str) -> None:
-        nonlocal target_inconclusive, unjudged
+        nonlocal target_inconclusive, unjudged, manifest_path
         if name in TARGET_VALUE_OPTIONS:
             if dynamic(value):
                 target_inconclusive = True
@@ -1064,9 +1082,8 @@ def parse_command(words: list[str]) -> CommandSpec:
             if dynamic(value):
                 unjudged = unjudged or "a dynamic package hides the selection"
             packages.append(value)
-        elif name == "--manifest-path" and value not in ("Cargo.toml",
-                                                         "./Cargo.toml"):
-            unjudged = unjudged or f"--manifest-path {value} is another crate"
+        elif name == "--manifest-path":
+            manifest_path = value
 
     index = 0
     while index < len(before):
@@ -1099,8 +1116,7 @@ def parse_command(words: list[str]) -> CommandSpec:
         elif token in LIBTEST_VALUE_OPTIONS:
             index += 1
         elif token == "--ignored":
-            unjudged = unjudged or ("--ignored runs only #[ignore] tests, "
-                                    "which the static inventory does not mark")
+            ignored_only = True
         elif not token.startswith("-") and not dynamic(token):
             filters.append(token)
         index += 1
@@ -1123,7 +1139,7 @@ def parse_command(words: list[str]) -> CommandSpec:
     return CommandSpec(
         targets_tuple, tuple(filters), tuple(skip_filters), exact, selection,
         bool(unjudged), target_inconclusive, classes_tuple,
-        tuple(dict.fromkeys(packages)), unjudged,
+        tuple(dict.fromkeys(packages)), unjudged, manifest_path, ignored_only,
     )
 
 
@@ -1191,18 +1207,26 @@ class PackageTestIds:
             self._ids[target] = found
         return self._ids[target]
 
-    def runs_by_default(self, target: str) -> bool:
-        """Cargo's `test` flag: on for lib/bin/test, off for example/bench."""
+    def target_flag(self, target: str, flag: str) -> bool:
+        """A target's `test`/`bench`/`doctest` flag: manifest, else Cargo's default."""
         kind, _, name = target.partition(":")
         manifest = self.manifest()
-        if kind == "lib":
-            return manifest.get("lib", {}).get("test", True) is not False
-        table = next((entry for entry in manifest.get(kind, [])
-                      if entry.get("name") == name), {})
-        return table.get("test", kind in ("bin", "test")) is True
+        table = manifest.get("lib", {}) if kind == "lib" else next(
+            (entry for entry in manifest.get(kind, [])
+             if entry.get("name") == name), {})
+        return table.get(flag, TARGET_FLAG_DEFAULTS[kind][flag]) is True
 
     def outside_package(self, spec: CommandSpec) -> str:
-        """Why `-p`/`--workspace` reach tests this inventory never sees."""
+        """Why `--manifest-path`/`-p`/`--workspace` reach tests this inventory never sees."""
+        if spec.manifest_path:
+            # Commands run from the repository root, where `$PWD` is that root.
+            path = re.sub(r"^\$(?:PWD\b|\{PWD\})", str(self.repo_root),
+                          spec.manifest_path)
+            if DYNAMIC_TOKEN.search(path):
+                return f"--manifest-path {spec.manifest_path} hides the crate"
+            if (self.repo_root / path).resolve() \
+                    != (self.repo_root / "Cargo.toml").resolve():
+                return f"--manifest-path {spec.manifest_path} is another crate"
         manifest = self.manifest()
         members = set(manifest.get("workspace", {}).get("members", [])) - {"."}
         for package in spec.packages:
@@ -1226,13 +1250,16 @@ def _selected_targets(spec: CommandSpec, universe: tuple[str, ...],
         )
     ]
     for kind in (*spec.classes,
-                 *(("tests",) if spec.selection is TargetSelection.DEFAULT
+                 *(("tested",) if spec.selection is TargetSelection.DEFAULT
                    else ())):
+        kinds = ("lib", "bin", "tested", "benched", "example") \
+            if kind == "all" else (kind,)
         picked.extend(
             key for key in universe
-            if kind == "all"
-            or (kind == "tests" and view.runs_by_default(key))
-            or key.startswith(f"{kind}:")
+            if any(key == "lib" if each == "lib"
+                   else view.target_flag(key, CLASS_FLAGS[each])
+                   if each in CLASS_FLAGS else key.startswith(f"{each}:")
+                   for each in kinds)
         )
     return tuple(dict.fromkeys(picked))
 
@@ -1283,8 +1310,6 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
         if notes is not None and (spec.filters or spec.skip_filters):
             notes.append("unjudged: a dynamic target value hides the selection")
         return findings
-    if not spec.filters and not spec.skip_filters:
-        return findings
     judged = tuple(target for target in selected_targets if target in inventories)
     selected_ids: set[str] = set()
     for target in judged:
@@ -1292,6 +1317,7 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
         if isinstance(ids, str):
             return findings + [("inventory-error", ids)]
         selected_ids.update(ids)
+    final = _lib_selection(spec, frozenset(selected_ids))
     selection_name = "/".join(judged) or "no target"
     sweep = spec.selection is not TargetSelection.EXPLICIT
     swept_elsewhere = 0
@@ -1304,26 +1330,44 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
         lead = next((part for part in filt.split("::") if part), "")
         declared: list[str] = []
         matched: list[str] = []
+        live = False
         for target, modules in sorted(inventories.items()):
             if target in judged:
                 continue
             if lead in modules and lead not in selected:
                 declared.append(f"{target} ({modules[lead]})")
             ids = view.ids(target)
-            count = 0 if isinstance(ids, str) else len(
-                _filter_matches(ids, filt, spec.exact))
-            if count:
-                matched.append(f"{target} ({count} test ID(s))")
+            hits = frozenset() if isinstance(ids, str) else _filter_matches(
+                ids, filt, spec.exact)
+            if hits:
+                matched.append(f"{target} ({len(hits)} test ID(s))")
+            # Only a test that survives the same --skip rule proves a sweep.
+            live = live or bool(_lib_selection(
+                replace(spec, filters=(filt,)), hits))
         elsewhere = "; ".join(
             ([f"module `{lead}` declared in {', '.join(declared)}"]
              if declared else [])
             + ([f"test IDs in {', '.join(matched)}"] if matched else []))
-        if elsewhere and ("::" in filt or not sweep):
-            findings.append(("target-mismatch", (
-                f"filter `{filt}` names {elsewhere}, but the command only "
-                f"selects {selection_name}; the filter matches 0 tests there "
-                "and cargo still exits 0")))
-        elif elsewhere:
+        mismatch = ("target-mismatch", (
+            f"filter `{filt}` names {elsewhere}, but the command only "
+            f"selects {selection_name}; the filter matches 0 tests there "
+            "and cargo still exits 0"))
+        if "::" in filt:
+            if elsewhere:
+                findings.append(mismatch)
+            elif lead and lead not in selected:
+                findings.append(("unknown-module", (
+                    f"module-path filter `{filt}`: `{lead}` is not a module in "
+                    "any known target and no test ID matches it")))
+            else:
+                empty.append(("zero-match", (
+                    f"module-path filter `{filt}` matches 0 test IDs in "
+                    f"{selection_name}")))
+        elif final:
+            continue  # libtest ORs the filters; the union already selects tests
+        elif elsewhere and not sweep:
+            findings.append(mismatch)
+        elif live:
             # A name sweep across a target class: an empty side is visible,
             # not fatal, while a typo matching nothing anywhere still fails.
             swept_elsewhere += 1
@@ -1331,27 +1375,25 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                 notes.append(
                     f"sweep-empty: filter `{filt}` selects 0 tests in "
                     f"{selection_name}; it points at {elsewhere}")
-        elif "::" in filt and lead and lead not in selected:
-            findings.append(("unknown-module", (
-                f"module-path filter `{filt}`: `{lead}` is not a module in "
-                "any known target and no test ID matches it")))
-        elif "::" in filt:
-            empty.append(("zero-match", (
-                f"module-path filter `{filt}` matches 0 test IDs in "
-                f"{selection_name}")))
-    if not findings and not empty \
-            and not _lib_selection(spec, frozenset(selected_ids)) \
+    if not findings and not empty and not final \
             and not (spec.filters and swept_elsewhere == len(spec.filters)):
         empty.append(("zero-match" if selected_ids else "empty-target", (
             f"selected target(s) {selection_name} final selection matches 0 "
             "statically discovered test IDs")))
-    if spec.selection is TargetSelection.DEFAULT and empty:
-        # A target-less run also runs doctests, which no static inventory
-        # lists, so emptiness there is reported rather than proven.
+    if spec.selection is TargetSelection.DEFAULT and empty \
+            and "lib" in inventories and view.target_flag("lib", "doctest"):
+        # A target-less run also runs the lib's doctests, which no static
+        # inventory lists, so emptiness there is reported rather than proven.
         if notes is not None:
             notes.extend(f"unjudged: {detail}; the default selection also "
                          "runs doctests" for _, detail in empty)
         empty = []
+    if spec.ignored_only and final and not findings and not empty \
+            and notes is not None:
+        # Candidates exist, but the static inventory cannot tell which of
+        # them are #[ignore]; an empty candidate set fails above instead.
+        notes.append(f"unjudged: --ignored keeps only #[ignore] tests among "
+                     f"{len(final)} candidate test ID(s)")
     return findings + empty
 
 
