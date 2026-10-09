@@ -4,9 +4,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use poise::serenity_prelude::ChannelId;
+use poise::serenity_prelude as serenity;
+use serenity::{ChannelId, MessageId};
 
-use super::super::runtime_store;
+use super::super::{router, runtime_store};
 use super::CatchUpFetchMode;
 use crate::services::provider::ProviderKind;
 
@@ -52,9 +53,28 @@ fn update(path: &Path, change: impl FnOnce(&mut Vec<u64>)) -> Result<(), String>
     store(path, &ids)
 }
 
-/// Holds `message` until it is handled. False when that could not be saved, so the caller
-/// recovers it now instead of leaving it to a cursor a restart would lose.
-pub(super) fn hold(provider: &ProviderKind, channel: ChannelId, message: u64) -> bool {
+/// Whether catch-up leaves `message` to its live arrival: a fresh message on a gated channel,
+/// held until handled. One that cannot be held is recovered now, not left to a lost cursor.
+pub(super) fn leave_to_live(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    message: MessageId,
+    phase: &str,
+) -> bool {
+    if !router::catch_up_yields(channel, message) || !hold(provider, channel, message.get()) {
+        return false;
+    }
+    tracing::info!(
+        phase,
+        channel_id = channel.get(),
+        message_id = message.get(),
+        "catch-up left a fresh message on a busy-inject channel to its live arrival"
+    );
+    true
+}
+
+/// Holds `message` until it is handled; false when that could not be saved.
+fn hold(provider: &ProviderKind, channel: ChannelId, message: u64) -> bool {
     let path = floor_path(provider, channel).ok_or_else(|| "runtime root unavailable".to_string());
     let held = path.and_then(|path| {
         update(&path, |ids| {
@@ -85,8 +105,20 @@ pub(in crate::services::discord) fn release(
     }
 }
 
-/// A scan lowered to its channel's oldest held message: up to the checkpoint it would have read
-/// from, only held messages are read, so input the checkpoint already passed is not replayed.
+/// Ends the hold on each fetched message up to `newest`, which the scan settled.
+pub(super) fn release_through(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    fetched: &[serenity::Message],
+    newest: u64,
+) {
+    let settled = fetched.iter().map(|message| message.id.get());
+    release(provider, channel, settled.filter(|id| *id <= newest));
+}
+
+/// A scan lowered to its channel's oldest held message. Up to the checkpoint it would have read
+/// from it reads only held messages, so input that checkpoint passed is not replayed.
+#[derive(Default)]
 pub(super) struct FloorScan {
     held: Vec<u64>,
     checkpoint: u64,
@@ -105,12 +137,12 @@ pub(super) fn lower(
     provider: &ProviderKind,
     channel: ChannelId,
     mode: CatchUpFetchMode,
-) -> (CatchUpFetchMode, Option<FloorScan>) {
+) -> (CatchUpFetchMode, FloorScan) {
     let CatchUpFetchMode::After(checkpoint) = mode else {
-        return (mode, None);
+        return (mode, FloorScan::default());
     };
     let Some(path) = floor_path(provider, channel) else {
-        return (mode, None);
+        return (mode, FloorScan::default());
     };
     let held = {
         let _held = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
@@ -120,15 +152,15 @@ pub(super) fn lower(
         Ok(held) => held,
         Err(error) => {
             tracing::warn!(channel_id = channel.get(), %error, "catch-up yield floor unreadable");
-            return (mode, None);
+            return (mode, FloorScan::default());
         }
     };
     match held.first() {
         Some(oldest) if *oldest <= checkpoint => {
             let lowered = CatchUpFetchMode::After(oldest.saturating_sub(1));
-            (lowered, Some(FloorScan { held, checkpoint }))
+            (lowered, FloorScan { held, checkpoint })
         }
-        _ => (mode, None),
+        _ => (mode, FloorScan::default()),
     }
 }
 
