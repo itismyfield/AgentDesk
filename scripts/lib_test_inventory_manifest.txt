@@ -1650,6 +1650,7 @@ services::claude::host_gate::tests::a_failed_pane_probe_never_reads_as_a_stale_s
 services::claude::host_gate::tests::a_failed_presence_probe_never_prepares_a_fresh_session
 services::claude::host_gate::tests::a_session_marked_for_another_host_is_never_probed_killed_or_relaunched
 services::claude::host_gate::tests::a_stale_tui_session_is_cleaned_only_under_its_clearance
+services::claude::host_gate::tests::a_test_turn_reaches_the_host_tmux_only_on_an_isolated_socket
 services::claude::host_gate::tests::the_wrapper_follow_up_poll_reads_dead_only_on_a_confirmed_death
 services::claude::launch_env_tests::binding_context_t3b_wrapper_clears_inherited_context
 services::claude::launch_env_tests::launch_env_exports_absolute_compact_window_behind_its_isolation_fence
