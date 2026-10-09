@@ -2,7 +2,7 @@
 //! included, and reports failed and unseen rows instead of stopping at the first.
 
 use super::super::*;
-use super::{RestartMarkReport, mark_restart_mode_blocking};
+use super::{RestartMarkReport, mark_restart_mode_blocking, short_pass_event_for_test};
 use crate::services::discord::input_runtime::{self, fence::Gate};
 
 fn row(channel_id: u64) -> InflightTurnState {
@@ -49,7 +49,9 @@ async fn c2b_async_marking_marks_protected_open_rows_and_reports_failed_and_unse
     make_old_format(&path(held));
     // A directory where the row lock file belongs makes that row's marker write fail.
     for channel in [failed_a, failed_b] {
-        std::fs::create_dir_all(path(channel).with_extension("json.lock")).unwrap();
+        let lock = path(channel).with_extension("json.lock");
+        std::fs::remove_file(&lock).unwrap();
+        std::fs::create_dir(&lock).unwrap();
     }
     std::fs::write(path(unreadable), [0xff, 0xfe, 0xfd]).unwrap();
     let held_before = std::fs::read(path(held)).unwrap();
@@ -84,6 +86,11 @@ async fn c2b_async_marking_marks_protected_open_rows_and_reports_failed_and_unse
         held_before,
         "held row untouched"
     );
+    let event = short_pass_event_for_test().expect("short pass reported as an error event");
+    let mut event_failed: Vec<u64> = serde_json::from_value(event["failed"].clone()).unwrap();
+    event_failed.sort_unstable();
+    assert_eq!(event_failed, vec![failed_a, failed_b]);
+    assert_eq!(event["incomplete"], true);
     let reasons = input_runtime::health_reasons();
     for channel in [open, held] {
         assert!(

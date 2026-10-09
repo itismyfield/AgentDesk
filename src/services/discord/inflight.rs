@@ -117,6 +117,8 @@ use self::removal::{
 };
 pub(super) use self::removal::{log_inflight_remove, log_inflight_remove_for_path};
 pub(in crate::services::discord) use self::restart_mark::mark_restart_mode_blocking;
+#[cfg(test)]
+pub(in crate::services::discord) use self::restart_mark::short_pass_event_for_test;
 
 mod watcher_state;
 pub(in crate::services::discord) use self::watcher_state::{

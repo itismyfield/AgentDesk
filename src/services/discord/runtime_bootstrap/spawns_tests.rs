@@ -147,6 +147,9 @@ async fn c2b_deferred_poller_marks_rows_and_proceeds_past_an_incomplete_scan() {
     .await;
 
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
+    let event = inflight::short_pass_event_for_test().expect("the short scan is an error event");
+    assert_eq!(event["incomplete"], true);
+    assert_eq!(event["failed"], serde_json::json!([]));
     assert!(deferred_row_marked(&plain_path));
     assert!(
         deferred_row_marked(&open_path),
@@ -173,7 +176,10 @@ async fn c2b_deferred_poller_retains_the_runtime_when_a_row_marker_fails() {
     let provider = ProviderKind::Codex;
     let plain_path = deferred_row(&provider, 6_325_953);
     let failed_path = deferred_row(&provider, 6_325_954);
-    std::fs::create_dir_all(failed_path.with_extension("json.lock")).unwrap();
+    // A directory where the row lock file belongs makes this row's marker write fail.
+    let lock = failed_path.with_extension("json.lock");
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::create_dir(&lock).unwrap();
     std::fs::write(temp.path().join("restart_pending"), "nonce=c2b-failed\n").unwrap();
     let shared = crate::services::discord::make_shared_data_for_tests();
     shared.restart.shutdown_remaining.store(2, Ordering::SeqCst);
@@ -197,6 +203,8 @@ async fn c2b_deferred_poller_retains_the_runtime_when_a_row_marker_fails() {
         "a failed row marker must retain the runtime"
     );
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 2);
+    let event = inflight::short_pass_event_for_test().expect("the failed row is an error event");
+    assert_eq!(event["failed"], serde_json::json!([6_325_954]));
 }
 
 #[tokio::test]

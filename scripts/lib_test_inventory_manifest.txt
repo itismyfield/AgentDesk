@@ -3778,7 +3778,9 @@ services::discord::health::watcher_respawn::idle_relay_absence::tests::live_sess
 services::discord::health::watcher_respawn::idle_relay_absence::tests::the_incident_gap_would_have_announced_itself
 services::discord::health::watcher_respawn::idle_relay_absence::tests::the_warn_waits_for_the_threshold_then_fires_once
 services::discord::health::watcher_respawn::idle_relay_absence::tests::two_sessions_mapping_to_one_channel_arm_it_once
+services::discord::health::watcher_respawn::live_bridge_guard::input_fence_tests::c2b_admitted_reclaim_downgrades_a_session_bound_orphan_without_a_refusal
 services::discord::health::watcher_respawn::live_bridge_guard::input_fence_tests::c2b_admitted_retry_holds_the_input_drain_until_it_returns
+services::discord::health::watcher_respawn::live_bridge_guard::input_fence_tests::c2b_admitted_retry_rebinds_an_old_format_row_through_a_closing_gate
 services::discord::health::watcher_respawn::live_bridge_guard::input_fence_tests::c2b_closed_gate_refuses_the_retry_before_any_read_and_keeps_its_budget
 services::discord::health::watcher_respawn::tests::a_channel_observed_on_this_tick_is_left_to_the_relay_work_sweep
 services::discord::health::watcher_respawn::tests::a_recovered_channel_can_announce_a_later_gap_again
@@ -5684,6 +5686,7 @@ services::discord::relay_recovery::tests::incarnation_follow_up::cancelled_finis
 services::discord::relay_recovery::tests::incarnation_follow_up::force_purge_finish_never_reaches_a_successor_actor
 services::discord::relay_recovery::tests::input_fence::c2_admitted_relay_apply_holds_input_drain_through_reserved_episode
 services::discord::relay_recovery::tests::input_fence::c2_closed_input_gate_skips_relay_recovery_before_reserving_or_mutating
+services::discord::relay_recovery::tests::input_fence::c2b_admitted_relay_reattach_rebinds_through_a_closing_gate_and_releases_the_drain
 services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_can_reattach_watcher_when_evidence_is_complete
 services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_without_mailbox_token_can_adopt_ownerless_inflight
 services::discord::relay_recovery::tests::manual_relay_recovery_plans_and_admits_on_one_captured_instant
@@ -8007,6 +8010,7 @@ services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_cl
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_disarm_preserves_lease
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_does_not_clobber_newer_lease
 services::discord::tui_prompt_relay::tests::owner_channel_chokepoint_triggers_drift_repair_on_drift_drop
+services::discord::tui_prompt_relay::tests::pending_start_input_fence_tests::c2b_admitted_pending_start_worker_writes_its_claimed_row_and_releases_the_drain
 services::discord::tui_prompt_relay::tests::registry_is_authoritative_for_owner_channel_resolution
 services::discord::tui_prompt_relay::tests::registry_miss_but_dedupe_hit_drops_and_does_not_use_mirror
 services::discord::tui_prompt_relay::tests::relay_prompt_decision_skips_model_two_half_transcript

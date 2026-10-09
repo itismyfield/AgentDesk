@@ -102,6 +102,33 @@ async fn settle() {
     }
 }
 
+/// An admitted worker is polled on the blocking pool: wait in real time, virtual time held.
+async fn settle_until(done: impl Fn() -> bool) {
+    for _ in 0..4_000 {
+        if done() {
+            return;
+        }
+        tokio::task::yield_now().await;
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("the admitted worker never reached the expected state");
+}
+
+/// Advances virtual time one poll at a time until the admitted worker reaches the state.
+async fn advance_until(done: impl Fn() -> bool) {
+    for _ in 0..4_000 {
+        if done() {
+            return;
+        }
+        tokio::time::advance(PENDING_START_POLL).await;
+        for _ in 0..2 {
+            tokio::task::yield_now().await;
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    panic!("the admitted worker never reached the expected state");
+}
+
 #[tokio::test(start_paused = true)]
 async fn c2_closed_input_gate_starts_no_pending_start_worker_and_keeps_the_record() {
     let _guard = worker_test_lock();
@@ -189,15 +216,22 @@ async fn c2_admitted_pending_start_worker_holds_the_input_drain_until_it_claims(
     let (cleanup, _, _) = recording_abort_cleanup();
     let claim_release = Arc::new(tokio::sync::Notify::new());
     let claim_started = Arc::new(AtomicBool::new(false));
+    let claim_on_worker = Arc::new(AtomicBool::new(false));
     let blocked_claim: ClaimFn = {
         let claims = claims.clone();
         let release = claim_release.clone();
         let started = claim_started.clone();
+        let on_worker = claim_on_worker.clone();
         Box::new(move |_shared, _record| {
             let claims = claims.clone();
             let release = release.clone();
             let started = started.clone();
+            let on_worker = on_worker.clone();
             Box::pin(async move {
+                on_worker.store(
+                    input_runtime::fence::require_worker().is_ok(),
+                    Ordering::SeqCst,
+                );
                 started.store(true, Ordering::SeqCst);
                 release.notified().await;
                 claims.fetch_add(1, Ordering::SeqCst);
@@ -220,20 +254,18 @@ async fn c2_admitted_pending_start_worker_holds_the_input_drain_until_it_claims(
         "the waiting worker holds the drain"
     );
     ready.store(true, Ordering::SeqCst);
-    tokio::time::advance(PENDING_START_POLL * 2).await;
-    settle().await;
-    assert!(claim_started.load(Ordering::SeqCst));
+    advance_until(|| claim_started.load(Ordering::SeqCst)).await;
+    assert!(
+        claim_on_worker.load(Ordering::SeqCst),
+        "the admitted claim runs where its row writer is allowed"
+    );
     assert!(
         closing.drain().now_or_never().is_none(),
         "claim in progress lost its permit"
     );
     claim_release.notify_one();
-    settle().await;
-    assert_eq!(claims.load(Ordering::SeqCst), 1);
-    assert!(
-        closing.drain().now_or_never().is_some(),
-        "the claim releases the drain"
-    );
+    settle_until(|| claims.load(Ordering::SeqCst) == 1 && closing.drain().now_or_never().is_some())
+        .await;
     assert!(!pending_synthetic_start_present("claude", channel));
     reset_present_for_tests();
 }
@@ -304,43 +336,27 @@ async fn c2_pending_start_drain_waits_for_reclaim_and_abort_cleanup() {
         cleanup,
         reclaim,
     );
-    settle().await;
-    tokio::time::advance(PENDING_START_BACKSTOP + PENDING_START_POLL).await;
-    settle().await;
-    assert_eq!(
-        stage.load(Ordering::SeqCst),
-        1,
-        "reclaim boundary not reached"
-    );
+    // The reclaim boundary is reached once the first backstop window expires.
+    advance_until(|| stage.load(Ordering::SeqCst) == 1).await;
     let closing = gate.close().unwrap();
     assert!(
         closing.drain().now_or_never().is_none(),
         "reclaim lost its permit"
     );
     release_reclaim.notify_one();
-    settle().await;
-    for _ in 0..PENDING_START_MAX_BACKSTOP_CYCLES {
-        tokio::time::advance(PENDING_START_BACKSTOP + PENDING_START_POLL).await;
-        settle().await;
-    }
-    assert_eq!(
-        stage.load(Ordering::SeqCst),
-        2,
-        "abort cleanup boundary not reached"
-    );
+    // The remaining backstop cycles run to the abort cleanup boundary.
+    advance_until(|| stage.load(Ordering::SeqCst) == 2).await;
     assert!(
         closing.drain().now_or_never().is_none(),
         "cleanup lost its permit"
     );
     assert!(pending_synthetic_start_present("claude", channel));
     release_cleanup.notify_one();
-    settle().await;
-    assert_eq!(stage.load(Ordering::SeqCst), 3);
+    settle_until(|| {
+        stage.load(Ordering::SeqCst) == 3 && !pending_synthetic_start_present("claude", channel)
+    })
+    .await;
     assert_eq!(claims.load(Ordering::SeqCst), 0);
-    assert!(!pending_synthetic_start_present("claude", channel));
-    assert!(
-        closing.drain().now_or_never().is_some(),
-        "cleanup leaked its permit"
-    );
+    settle_until(|| closing.drain().now_or_never().is_some()).await;
     reset_present_for_tests();
 }

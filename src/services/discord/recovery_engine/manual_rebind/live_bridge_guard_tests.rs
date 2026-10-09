@@ -187,8 +187,9 @@ async fn c2_admitted_rebind_holds_the_input_drain_until_it_returns() {
     }
 }
 
-/// An admitted rebind on a protected open channel, unpinned or adopting a pinned episode,
-/// completes its row write and watcher claim from async code; returning releases the drain.
+/// An admitted rebind on a protected open channel, through either entry, unpinned or adopting a
+/// pinned episode, completes its row write and watcher claim from async code; returning releases
+/// the drain.
 #[test]
 fn c2b_admitted_rebind_writes_its_row_and_releases_the_drain() {
     let _lock = crate::config::shared_test_env_lock()
@@ -201,8 +202,8 @@ fn c2b_admitted_rebind_writes_its_row_and_releases_the_drain() {
     );
     let provider = ProviderKind::Claude;
     let http = Arc::new(serenity::Http::new("Bot test-token"));
-    for pinned in [false, true] {
-        let channel = 6_325_520_000_000_005_u64 + u64::from(pinned);
+    for (from_offset, pinned) in [(false, false), (false, true), (true, false), (true, true)] {
+        let channel = 6_325_520_000_000_005_u64 + 2 * u64::from(from_offset) + u64::from(pinned);
         let (tmux, row) = live_orphan(tmp.path(), channel);
         let _live = InjectedLivenessGuard::set(HostSessionRef::tmux(&tmux), HostLiveness::Live);
         let before = std::fs::read(&row).expect("orphan row");
@@ -219,17 +220,34 @@ fn c2b_admitted_rebind_writes_its_row_and_releases_the_drain() {
             .build()
             .expect("current-thread runtime");
 
-        let rebound = runtime
-            .block_on(rebind_inflight_for_channel(
-                &http,
-                &shared,
-                &provider,
-                channel,
-                Some(tmux.clone()),
-                ManualRebindOverrides::default(),
-                pin.as_ref(),
-            ))
-            .unwrap_or_else(|error| panic!("pinned={pinned}: admitted rebind failed: {error:?}"));
+        let rebind = async {
+            if from_offset {
+                rebind_inflight_for_channel_with_minimum_start_offset(
+                    &http,
+                    &shared,
+                    &provider,
+                    channel,
+                    Some(tmux.clone()),
+                    None,
+                    pin.as_ref(),
+                )
+                .await
+            } else {
+                rebind_inflight_for_channel(
+                    &http,
+                    &shared,
+                    &provider,
+                    channel,
+                    Some(tmux.clone()),
+                    ManualRebindOverrides::default(),
+                    pin.as_ref(),
+                )
+                .await
+            }
+        };
+        let rebound = runtime.block_on(rebind).unwrap_or_else(|error| {
+            panic!("from_offset={from_offset} pinned={pinned}: admitted rebind failed: {error:?}")
+        });
 
         assert!(rebound.watcher_spawned, "pinned={pinned}");
         assert_eq!(shared.tmux_watchers.len(), 1, "pinned={pinned}");

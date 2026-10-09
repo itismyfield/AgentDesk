@@ -67,6 +67,13 @@ pub(in crate::services::discord) async fn retry_pending_watcher_respawn(
         .await
 }
 
+/// Synchronous row IO: on the input worker while an input permit is held, where a protected row's
+/// writer is allowed, and inline otherwise.
+pub(super) async fn row_io<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    use discord::input_runtime::fence;
+    fence::effect::run(fence::effect::current(), async move { work() }).await
+}
+
 #[cfg(all(test, unix))]
 #[path = "input_fence_tests.rs"]
 mod input_fence_tests;

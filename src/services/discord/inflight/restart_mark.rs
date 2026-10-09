@@ -63,7 +63,49 @@ pub(in crate::services::discord) async fn mark_restart_mode_blocking(
     for channel in &report.failed {
         fence::record_failure(&provider, *channel, &[], fence::Failure::Persistence);
     }
+    // A row left unmarked is retired by the next boot, so a short pass is an error event even
+    // when the caller goes on with its exit.
+    if report.incomplete || !report.failed.is_empty() {
+        let root = inflight_runtime_root().map(|root| root.display().to_string());
+        crate::services::observability::record_invariant_check(
+            false,
+            crate::services::observability::InvariantViolation {
+                provider: Some(provider.as_str()),
+                channel_id: None,
+                dispatch_id: None,
+                session_key: None,
+                turn_id: None,
+                invariant: RESTART_MARK_INVARIANT,
+                code_location: "src/services/discord/inflight/restart_mark.rs:mark_restart_mode_blocking",
+                message: "restart marking left inflight rows unmarked",
+                details: serde_json::json!({
+                    "marked": report.marked,
+                    "failed": report.failed,
+                    "incomplete": report.incomplete,
+                    "root": root,
+                }),
+            },
+        );
+    }
     report
+}
+
+/// Invariant name of the event a short restart-marking pass emits.
+const RESTART_MARK_INVARIANT: &str = "restart_marking_reaches_every_row";
+
+/// Details of the latest short-pass event for this inflight root, if any.
+#[cfg(test)]
+pub(in crate::services::discord) fn short_pass_event_for_test() -> Option<serde_json::Value> {
+    let root = inflight_runtime_root()?.display().to_string();
+    crate::services::observability::events::recent(usize::MAX)
+        .into_iter()
+        .rev()
+        .find(|event| {
+            event.event_type == "invariant_violation"
+                && event.payload["invariant"] == RESTART_MARK_INVARIANT
+                && event.payload["details"]["root"] == root.as_str()
+        })
+        .map(|event| event.payload["details"].clone())
 }
 
 #[cfg(test)]
