@@ -5,6 +5,7 @@ use crate::services::discord::host_teardown_gate::test_support::{
     Stored, busy_turn, channel_key, seed, shared_on,
 };
 use crate::services::discord::recovery_engine::herdr_admitted_restart::ADMITTED_ABORT_NOTICE;
+use crate::services::discord::recovery_engine::herdr_admitted_restart::test_hooks::STOP_AFTER_ACK;
 use crate::services::discord::recovery_engine::o_cut_recorder::DiscordRecorder;
 use crate::services::provider::cancel_token_claude_interrupt::{
     HERDR_SETTLEMENT_OVERRIDE, HerdrSubmission,
@@ -375,7 +376,6 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
 /// clears the row without writing to Discord again.
 #[tokio::test(flavor = "current_thread")]
 async fn an_admitted_ack_outlives_a_stop_before_cleanup_pg() {
-    use crate::services::discord::recovery_engine::herdr_admitted_restart::test_hooks::STOP_AFTER_ACK;
     if std::env::var("ADK_ACT7_PHASE").is_err() {
         let root = tempfile::tempdir().unwrap();
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
