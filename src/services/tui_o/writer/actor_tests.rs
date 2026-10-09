@@ -33,8 +33,12 @@ fn append(path: &Path, bytes: &[u8]) {
 
 /// A harness whose channel was switched over a transcript already holding `body`.
 fn switched_over(body: &[u8]) -> (Harness, PathBuf, SourceId) {
+    switched_over_on(CHANNEL, body)
+}
+
+fn switched_over_on(channel: u64, body: &[u8]) -> (Harness, PathBuf, SourceId) {
     let mut bound = None;
-    let harness = Harness::build(|runtime| {
+    let harness = Harness::build_channel(channel, |runtime| {
         let path = runtime.join("t.jsonl");
         std::fs::write(&path, body).unwrap();
         let source_id = source_id_for("s1", &path).unwrap();

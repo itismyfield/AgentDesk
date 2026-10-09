@@ -536,6 +536,25 @@ fn a_withheld_herdr_pane_switch_is_resent_through_the_relay_until_admitted() {
     use crate::config::TestEnvVarGuard as Guard;
     use crate::services::tui_prompt_dedupe::{admit_herdr_execution, withhold_herdr_execution};
     use std::os::unix::fs::PermissionsExt;
+    // The fake tmux below sits on the process PATH, so this runs in a process of its own: tmux
+    // run by a test beside it would land in the fake's log.
+    const CHILD: &str = "ADK_TEST_WITHHELD_HERDR_RELAY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let name = "a_withheld_herdr_pane_switch_is_resent_through_the_relay_until_admitted";
+        let exact = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &exact, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let (stdout, stderr) = (
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(stdout.contains("1 passed; 0 failed"), "{stdout}\n{stderr}");
+        return;
+    }
     for condition in ["tmux", "exit-127 tmux", "no tmux server"] {
         // `TqLocks::take`'s locks, taken here since this test writes PATH and TMUX under them.
         let root = tempfile::tempdir().unwrap();
