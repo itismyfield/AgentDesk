@@ -716,3 +716,95 @@ async fn a_replaced_gates_cleanup_never_unregisters_the_gate_that_replaced_it_pg
     pool.close().await;
     pg_db.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn command_drain_waits_before_reset_and_after_final_close_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let epoch = delegated(&pool).await;
+    let home = Arc::new(HomeGate::new(C, "gw"));
+    renew(&pool, &home, epoch).await;
+    register(home.clone());
+    let sink = Arc::new(Sink::default());
+    let actor = Actor::new("gw", &sink, &[]);
+    let permit = home.admit_recovery("claude").unwrap();
+    let step = drain_round(&pool, &home, &actor).await;
+    assert!(
+        matches!(step, DrainStep::Waiting(Blocker::CommandsInFlight(1))),
+        "{step:?}"
+    );
+    assert_eq!(actor.resets.load(Ordering::SeqCst), 0);
+    assert!(!home.final_closed(epoch));
+    assert_eq!(row(&pool).await.unwrap().0, HomeState::Releasing);
+    home.close();
+    let step = drain_round(&pool, &home, &actor).await;
+    assert!(
+        matches!(step, DrainStep::Waiting(Blocker::CommandsInFlight(1))),
+        "final-closed reentry: {step:?}"
+    );
+    drop(permit);
+    let step = drain_round(&pool, &home, &actor).await;
+    assert!(matches!(step, DrainStep::Left(_)), "{step:?}");
+    assert_eq!(row(&pool).await.unwrap().0, HomeState::Released);
+    channel_home::unregister(C);
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+struct RecoveryAtReset {
+    actor: Actor,
+    home: Arc<HomeGate>,
+    permit: Mutex<Option<channel_home::CommandPermit>>,
+}
+impl DrainPort for RecoveryAtReset {
+    async fn turn_running(&self) -> Option<bool> {
+        self.actor.turn_running().await
+    }
+    async fn owed(&self) -> Option<Owed> {
+        self.actor.owed().await
+    }
+    async fn posts_in_flight(&self) -> Option<usize> {
+        self.actor.posts_in_flight().await
+    }
+    async fn reset_legacy_source(&self) -> Result<(), ResetRefused> {
+        *self.permit.lock().unwrap() = self.home.admit_recovery("claude");
+        assert!(
+            self.permit.lock().unwrap().is_some(),
+            "recovery won before final close"
+        );
+        self.actor.reset_legacy_source().await
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn command_drain_rechecks_recovery_admitted_during_reset_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let epoch = delegated(&pool).await;
+    let home = Arc::new(HomeGate::new(C, "gw"));
+    renew(&pool, &home, epoch).await;
+    let sink = Arc::new(Sink::default());
+    let port = RecoveryAtReset {
+        actor: Actor::new("gw", &sink, &[]),
+        home: home.clone(),
+        permit: Mutex::default(),
+    };
+    let step = drain_round(&pool, &home, &port).await;
+    assert!(
+        matches!(step, DrainStep::Waiting(Blocker::CommandsInFlight(1))),
+        "{step:?}"
+    );
+    assert!(home.final_closed(epoch));
+    assert!(
+        home.admit_recovery("claude").is_none(),
+        "close wins against a later release"
+    );
+    assert_eq!(port.actor.resets.load(Ordering::SeqCst), 1);
+    drop(port.permit.lock().unwrap().take());
+    assert!(matches!(
+        drain_round(&pool, &home, &port).await,
+        DrainStep::Left(_)
+    ));
+    pool.close().await;
+    pg_db.drop().await;
+}

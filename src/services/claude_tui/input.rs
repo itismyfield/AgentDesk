@@ -8,9 +8,12 @@ use tokio::sync::Notify;
 use super::host_input;
 
 mod draft_hold;
-use draft_hold::{admit_automatic_write, dismiss_startup_dialog};
+use draft_hold::{admit_automatic_write, dismiss_startup_dialog, refuse_composer_draft};
+pub(crate) use draft_hold::{composer_refusal, stranded_draft_is_ours};
 #[cfg(test)]
 mod final_ready_tests;
+#[cfg(test)]
+mod timeout_draft_tests;
 
 pub(crate) fn submit_native_clear(
     target: &host_input::InputTarget,
@@ -81,12 +84,23 @@ pub enum PromptReadinessKind {
     ProvenWarmFollowup,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The follow-up readiness timeout this test thread uses instead of the configured one.
+    static FOLLOWUP_TIMEOUT_FOR_TESTS: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Resolve the Follow-up readiness budget from the live config snapshot,
 /// falling back to the compiled-in 45s default. `config_live_reload::current()`
 /// returns `None` before boot install and in unit tests, so the const stays the
 /// safe fallback. A configured `0` is treated as unset to avoid an
 /// immediate-timeout footgun. See `RuntimeSettingsConfig::followup_prompt_ready_timeout_secs`.
 fn followup_prompt_ready_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) = FOLLOWUP_TIMEOUT_FOR_TESTS.with(std::cell::Cell::get) {
+        return timeout;
+    }
     crate::config_live_reload::current()
         .and_then(|cfg| cfg.runtime.followup_prompt_ready_timeout_secs)
         .filter(|secs| *secs > 0)
@@ -436,6 +450,9 @@ fn send_prompt_with_readiness(
         if !prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
             return Err("claude tui composer changed before follow-up mutation".to_string());
         }
+        if readiness.is_followup() {
+            refuse_composer_draft(session_name, readiness)?;
+        }
         crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
             "claude",
             session_name,
@@ -671,6 +688,7 @@ pub fn send_selector_followup(
             if !prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &snapshot) {
                 return Err("claude tui composer changed before selector mutation".to_string());
             }
+            refuse_composer_draft(session_name, PromptReadinessKind::Followup)?;
             // The slash command is typed into Claude as a real composer entry,
             // so the transcript relay would otherwise classify it as SSH-direct
             // input and lease a spurious external turn. Record it under the same
@@ -1184,6 +1202,7 @@ pub fn send_followup_prompt_or_idle_transcript(
         if !proven_warm_followup_revalidates_prompt_ready(&snapshot, transcript_path) {
             return Err("claude tui composer changed before follow-up mutation".to_string());
         }
+        refuse_composer_draft(session_name, PromptReadinessKind::ProvenWarmFollowup)?;
         crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
             "claude",
             session_name,
@@ -1714,9 +1733,18 @@ fn wait_for_prompt_ready_polling(
                 // section (the readiness wait completed with a timeout, so no
                 // submit lock is held). Route it through the shared composer lock
                 // so it is mutually exclusive with a busy-pane auto `/compact`.
-                with_composer_cleanup_lock(session_name, || {
-                    clear_prompt_draft_before_error(session_name);
+                // Inside it only a prompt AgentDesk typed is cleared; other text keeps every key.
+                let held = with_composer_cleanup_lock(session_name, || {
+                    match stranded_draft_is_ours(session_name, readiness) {
+                        Ok(true) => clear_prompt_draft_before_error(session_name),
+                        Ok(false) => {}
+                        Err(held) => return Some(held),
+                    }
+                    None
                 });
+                if let Some(Some(held)) = held {
+                    return Err(held);
+                }
             }
             return Err(format!(
                 "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s; reason={}; previous_tui_turn_still_running={}; prompt_marker_detected={}; prompt_draft_detected={}; capture_available={}",
@@ -1953,11 +1981,12 @@ fn prompt_ready_timeout_reason(snapshot: &PromptReadinessSnapshot) -> &'static s
     }
 }
 
-/// Whether a readiness timeout should clear a stranded follow-up composer draft
+/// Whether a readiness timeout considers clearing a stranded follow-up composer draft
 /// before returning the error, so the requeued retry can re-inject cleanly. Only
 /// fires for follow-ups when requeue is enabled and the pane visibly holds a
 /// real, editable unsent draft (an idle-suggestion tail reports no backspace
-/// budget via `tmux_common`, so it is excluded). Pure for unit-testing.
+/// budget via `tmux_common`, so it is excluded). Pure for unit-testing; the clear
+/// itself still needs the attributed read to show a prompt AgentDesk typed.
 fn prompt_ready_timeout_should_clear_followup_draft(
     readiness: PromptReadinessKind,
     snapshot: &PromptReadinessSnapshot,
@@ -3826,7 +3855,7 @@ line 37";
     }
 
     #[test]
-    fn prompt_ready_timeout_clears_only_retryable_followup_drafts() {
+    fn prompt_ready_timeout_clear_candidates_are_only_retryable_followup_drafts() {
         let draft = PromptReadinessSnapshot {
             prompt_marker_detected: true,
             prompt_draft_detected: true,
@@ -3835,8 +3864,8 @@ line 37";
             pane_tail: "\u{276f} unsubmitted follow-up".to_string(),
         };
 
-        // A real, editable follow-up draft on a live pane with a backspace
-        // budget should be cleared (only when requeue is enabled).
+        // A real, editable follow-up draft on a live pane with a backspace budget is a
+        // candidate (only when requeue is enabled); whose text it is decides the clear.
         assert!(prompt_ready_timeout_should_clear_followup_draft(
             PromptReadinessKind::Followup,
             &draft,

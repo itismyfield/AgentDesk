@@ -484,8 +484,9 @@ def production_lines(path: Path):
     """Yield ``(lineno, stripped_code, is_production)`` for one Rust file."""
     state = StripState()
     brace_depth = 0
-    group_depth = 0  # `(` and `[` nesting, so `;` / `,` inside them are ignored
+    group_depth = 0  # `(` and `[` nesting
     mode = "normal"  # normal | armed (saw cfg(test) attr) | skip (in test item)
+    armed_start_depth = 0
     skip_start_depth = 0
     saw_body_keyword = False
     for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -495,10 +496,9 @@ def production_lines(path: Path):
         if mode == "normal":
             match = _cfg_test_only_match(code)
             if match:
-                # Arm at the closing parenthesis of the complete test-only
-                # cfg expression, so commas inside nested `all(...)`/`any(...)`
-                # cannot resolve the arm they are part of.
-                arm_at = match.end()
+                # Arm after the complete attribute so its own delimiters
+                # cannot affect the attributed statement's starting depth.
+                arm_at = match.attribute_end() - 1
         # Resolve the item-start keyword position BEFORE walking the line: the
         # comma that must not disarm (`-> HashMap<String, u64> {`) sits on the
         # same line as the `fn` that suppresses the comma rule, so deciding at
@@ -506,9 +506,6 @@ def production_lines(path: Path):
         item_start = ITEM_START_RE.search(code, arm_at if arm_at is not None else 0)
         item_start_at = item_start.end() if item_start else None
         for index, char in enumerate(code):
-            if arm_at is not None and index == arm_at:
-                mode = "armed"
-                saw_body_keyword = False
             if item_start_at is not None and index >= item_start_at:
                 saw_body_keyword = True
             if char in "([":
@@ -524,8 +521,12 @@ def production_lines(path: Path):
                 brace_depth -= 1
                 if mode == "skip" and brace_depth <= skip_start_depth:
                     mode = "normal"
-            elif char == ";" and mode == "armed" and group_depth <= 0:
-                mode = "normal"  # `#[cfg(test)] use ...;` / `mod tests;`
+            elif (
+                char == ";"
+                and mode == "armed"
+                and brace_depth + group_depth == armed_start_depth
+            ):
+                mode = "normal"  # Test-only statements / unbraced items end here.
             elif (
                 char == ","
                 and mode == "armed"
@@ -533,6 +534,16 @@ def production_lines(path: Path):
                 and not saw_body_keyword
             ):
                 mode = "normal"  # `#[cfg(test)] field: T,` / enum variant
+            if (
+                char in ")]}"
+                and mode == "armed"
+                and brace_depth + group_depth < armed_start_depth
+            ):
+                mode = "normal"
+            if arm_at is not None and index == arm_at:
+                mode = "armed"
+                armed_start_depth = brace_depth + group_depth
+                saw_body_keyword = False
         yield lineno, code, countable
 
 

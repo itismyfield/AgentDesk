@@ -41,6 +41,12 @@ fn recovery_output_path_with_tmux_fallback(
 
 #[cfg(unix)]
 fn herdr_turn_held(provider: &ProviderKind, state: &inflight::InflightTurnState) -> bool {
+    #[cfg(test)]
+    if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
+        "restart_none_as_complete",
+    ) {
+        return false;
+    }
     crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
         && state.tui_terminal_kind.is_none()
         && recovery_tmux_session_name(provider, state)
@@ -159,6 +165,12 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 channel_id = state.channel_id,
                 "recovery kept a held Herdr turn"
             );
+            continue;
+        }
+        // An admitted Herdr terminal settles from its persisted kind, never from a transcript read.
+        #[cfg(unix)]
+        if let Some(terminal) = super::herdr_admitted_restart::admitted(provider, &state) {
+            terminal.settle(http, shared, &state).await;
             continue;
         }
 

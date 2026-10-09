@@ -161,32 +161,60 @@ pub(super) async fn consume_codex_goal_lifecycle_command(
     command: GoalLifecycleCommand,
     stale_session_id: Option<String>,
 ) {
-    let active_turn = shared
-        .mailbox(channel_id)
-        .has_active_turn()
-        .await
-        .unwrap_or(true);
-    if matches!(command, GoalLifecycleCommand::Clear) && !active_turn {
-        let reset = super::super::super::commands::reset_channel_provider_state(
-            http,
-            shared,
-            provider,
-            channel_id,
-            "/goal clear",
-            true,
-            false,
-            false,
-        )
-        .await;
-        if reset.report(http, channel_id, "/goal clear").await {
-            return;
+    let permit = if matches!(command, GoalLifecycleCommand::Clear) {
+        match crate::services::cluster::channel_home::admit_command(
+            &channel_id.get().to_string(),
+            provider.as_str(),
+        ) {
+            Ok(permit) => permit,
+            Err(reason) => {
+                super::super::super::admin_host_guard::ManagedReset::Refused(reason.to_string())
+                    .report(http, channel_id, "/goal clear")
+                    .await;
+                return;
+            }
         }
-        if let Some(session_id) = stale_session_id.as_deref() {
-            let _ = super::super::super::internal_api::clear_stale_session_id(session_id).await;
+    } else {
+        None
+    };
+    #[cfg(test)]
+    let permit = if crate::services::cluster::channel_home::command_mutant("goal_permit_removed") {
+        drop(permit);
+        None
+    } else {
+        permit
+    };
+    crate::services::cluster::channel_home::command_scope(permit, async {
+        let active_turn = shared
+            .mailbox(channel_id)
+            .has_active_turn()
+            .await
+            .unwrap_or(true);
+        if matches!(command, GoalLifecycleCommand::Clear) && !active_turn {
+            let reset = super::super::super::commands::reset_channel_provider_state(
+                http,
+                shared,
+                provider,
+                channel_id,
+                "/goal clear",
+                true,
+                false,
+                false,
+            )
+            .await;
+            if reset.report(http, channel_id, "/goal clear").await {
+                return;
+            }
+            #[cfg(test)]
+            super::super::super::commands::control::home_fence::pause("goal_stale").await;
+            if let Some(session_id) = stale_session_id.as_deref() {
+                let _ = super::super::super::internal_api::clear_stale_session_id(session_id).await;
+            }
         }
-    }
 
-    send_codex_goal_lifecycle_notice(http, shared, channel_id, command, active_turn).await;
+        send_codex_goal_lifecycle_notice(http, shared, channel_id, command, active_turn).await;
+    })
+    .await;
 }
 
 pub(super) async fn record_fresh_session_context_boundary(
@@ -425,5 +453,67 @@ mod host_guard_tests {
             crate::services::session_backend::remove_process_session(&name);
         }
         db.drop().await;
+    }
+}
+
+#[cfg(test)]
+mod d2b_tests {
+    use super::*;
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn d2b_goal_clear_holds_home_through_stale_cleanup() {
+        use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
+        if !api_child(
+            "services::discord::router::message_handler::goal_lifecycle::d2b_tests::d2b_goal_clear_holds_home_through_stale_cleanup",
+        ) {
+            return;
+        }
+        let api = Recorder::start().await;
+        crate::services::discord::internal_api::init(api.port, None);
+        let http = api.http.clone();
+
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        use crate::services::cluster::channel_home;
+        use crate::services::discord::commands::control::home_fence::PAUSE;
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(9200000000000114);
+        let home = channel_home::register_for_test(
+            channel.get(),
+            Some(crate::db::o_channel_homes::HomeState::Worker),
+        );
+        let barrier = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+        PAUSE.with(|slot| *slot.borrow_mut() = Some(("goal_stale", barrier.clone())));
+        let owner = shared.clone();
+        let work = tokio::spawn(async move {
+            consume_codex_goal_lifecycle_command(
+                &http,
+                &owner,
+                &ProviderKind::Gemini,
+                channel,
+                GoalLifecycleCommand::Clear,
+                Some("d2b-stale".into()),
+            )
+            .await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.0.notified())
+            .await
+            .expect("effect boundary reached");
+        home.close_intake();
+        assert_eq!(
+            home.commands_in_flight(),
+            1,
+            "reset returned but stale cleanup is still outstanding"
+        );
+        barrier.1.notify_one();
+        work.await.unwrap();
+        assert_eq!(home.commands_in_flight(), 0);
+        assert!(
+            api.take()
+                .iter()
+                .any(|call| call.contains("clear-stale-session-id") && call.contains("d2b-stale")),
+            "stale DB route actually reached"
+        );
+        PAUSE.with(|slot| *slot.borrow_mut() = None);
     }
 }
