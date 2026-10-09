@@ -184,10 +184,14 @@ impl Drop for CodexPane {
     }
 }
 
-/// With Codex off, a Codex input is refused exactly as before, first and before the session
-/// transition or any pane call; enabling Codex is what lets the same input reach the transition.
+/// With the shipped constant off, a Codex input is refused exactly as before, first and before the
+/// session transition or any pane call; enabling Codex lets the same input reach the transition.
 #[tokio::test(flavor = "current_thread")]
 async fn codex_input_is_refused_as_before_until_codex_is_enabled() {
+    assert!(
+        !inject::CODEX_BUSY_INJECT_ENABLED,
+        "turning Codex injection on is its own change"
+    );
     let _root = crate::config::TestRuntimeRootGuard::new();
     let ch = 5_845_201;
     let shared = crate::services::discord::make_shared_data_for_tests();

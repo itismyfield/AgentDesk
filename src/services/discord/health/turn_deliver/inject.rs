@@ -102,18 +102,16 @@ pub(super) fn mode(channel_id: u64) -> InjectMode {
 }
 
 /// Codex TUI sessions take busy-turn input only once this is on, whichever mode the env sets.
-#[cfg(not(test))]
-const CODEX_BUSY_INJECT_ENABLED: bool = false;
+pub(super) const CODEX_BUSY_INJECT_ENABLED: bool = false;
 
-/// Tests never read the constant; a Codex channel injects only when a test enables it.
+/// Tests read the same constant; a test may also open one channel, as turning it on would.
 fn codex_enabled(channel_id: u64) -> bool {
     #[cfg(test)]
-    return test_hook::codex_enabled(channel_id);
-    #[cfg(not(test))]
-    {
-        let _ = channel_id;
-        CODEX_BUSY_INJECT_ENABLED
+    if test_hook::codex_enabled(channel_id) {
+        return true;
     }
+    let _ = channel_id;
+    CODEX_BUSY_INJECT_ENABLED
 }
 
 /// Who holds the channel at one read: the mailbox claim and the durable row.
