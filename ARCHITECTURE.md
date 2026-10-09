@@ -910,6 +910,7 @@ src/
 │   │   │   ├── watcher_respawn/
 │   │   │   │   ├── claude_original_tests.rs
 │   │   │   │   ├── idle_relay_absence.rs
+│   │   │   │   ├── input_fence_tests.rs
 │   │   │   │   └── live_bridge_guard.rs
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── legacy_supervision.rs
@@ -1002,7 +1003,9 @@ src/
 │   │   │   ├── ownership_ops.rs
 │   │   │   ├── rebind_reap.rs
 │   │   │   ├── removal.rs
+│   │   │   ├── restart_mark.rs
 │   │   │   ├── restart_mark_fence_tests.rs
+│   │   │   ├── restart_mark_tests.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
