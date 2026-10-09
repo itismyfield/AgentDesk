@@ -9,6 +9,17 @@ use test_executor::Checkpoint;
 
 const WORKER: &str = "replay-worker";
 
+async fn fixture_pool(fixture: &TestPostgresDb) -> PgPool {
+    let pool = fixture.connect_and_migrate().await;
+    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
+    let version: String = sqlx::query_scalar("SELECT version()")
+        .fetch_one(&pool)
+        .await
+        .expect("real PostgreSQL must answer before worker replay assertions");
+    eprintln!("replay worker real-PG fixture: {version}");
+    pool
+}
+
 async fn seed_agent(pool: &PgPool) {
     sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_id) VALUES ('replay-agent', 'Test', 'claude', 'unused')")
         .execute(pool)
@@ -91,8 +102,7 @@ async fn pending_without_provider_effect(pool: &PgPool, row: i64) {
 #[tokio::test(flavor = "current_thread")]
 async fn replay_hold_survives_worker_replacement_and_foreign_claim_owners_pg() {
     let fixture = TestPostgresDb::create().await;
-    let pool = fixture.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
+    let pool = fixture_pool(&fixture).await;
     seed_agent(&pool).await;
     let recorder = test_executor::record();
     for (offset, disposition) in [
@@ -165,8 +175,7 @@ async fn replay_hold_survives_worker_replacement_and_foreign_claim_owners_pg() {
 #[tokio::test(flavor = "current_thread")]
 async fn replay_hold_committed_after_worker_claim_blocks_accept_and_provider_pg() {
     let fixture = TestPostgresDb::create().await;
-    let pool = fixture.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
+    let pool = fixture_pool(&fixture).await;
     seed_agent(&pool).await;
     let channel = 6_008_620;
     let message = channel * 10;
@@ -237,8 +246,7 @@ async fn replay_hold_committed_after_worker_claim_blocks_accept_and_provider_pg(
 #[tokio::test(flavor = "current_thread")]
 async fn replay_schema_preserves_normal_worker_delivery_and_preaccept_attempt_budget_pg() {
     let fixture = TestPostgresDb::create().await;
-    let pool = fixture.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
+    let pool = fixture_pool(&fixture).await;
     seed_agent(&pool).await;
     sqlx::query(
         "INSERT INTO worker_nodes (instance_id, status, labels, capabilities, last_heartbeat_at)
