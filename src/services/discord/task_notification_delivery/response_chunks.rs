@@ -13,7 +13,8 @@ use super::store::{
 };
 use super::{ResponseDeliveryClaim, content_hash, response_chunk_nonce_for_generation};
 use crate::services::discord::{SharedData, rate_limit_wait};
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, IdentityError, claim_then_send};
+use crate::services::tui_o::channel_policy::LegacySend;
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, IdentityError, claim_then_send_held};
 
 /// Discord documents nonce reconciliation as only a recent-message contract.
 /// Stay strictly inside a conservative two-minute subset; the equality
@@ -205,6 +206,8 @@ pub(in crate::services::discord) struct ClaimAtPost<'a, T> {
     inner: &'a T,
     body: BodyClaim<'a>,
     state: std::sync::Mutex<PostClaim>,
+    /// The first post's claimed send, kept counted through the later chunks until this drops.
+    held: std::sync::Mutex<Option<LegacySend>>,
 }
 
 #[derive(Clone, Copy)]
@@ -222,6 +225,7 @@ pub(in crate::services::discord) fn claim_at_post<'a, T: ResponseChunkTransport>
         inner,
         body,
         state: std::sync::Mutex::new(PostClaim::Open),
+        held: std::sync::Mutex::default(),
     }
 }
 
@@ -276,12 +280,18 @@ impl<T: ResponseChunkTransport> ResponseChunkTransport for ClaimAtPost<'_, T> {
             self.inner
                 .post_chunk(channel_id, content, reference_message_id, nonce)
         };
-        match claim_then_send(claim, post).await {
-            Ok(BodySend::Sent(posted)) => {
+        match claim_then_send_held(claim, post).await {
+            Ok((BodySend::Sent(posted), send)) => {
                 self.set(PostClaim::Claimed);
+                if send.is_some() {
+                    *self
+                        .held
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner()) = send;
+                }
                 posted
             }
-            Ok(BodySend::OwnedByO) => {
+            Ok((BodySend::OwnedByO, _)) => {
                 self.set(PostClaim::Refused(None));
                 Err(ResponseChunkPostError::Transient(
                     "O owns this channel's body".to_string(),

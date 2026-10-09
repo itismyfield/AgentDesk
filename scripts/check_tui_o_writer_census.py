@@ -19,7 +19,8 @@ gated funnels. This gate keeps that cut honest on every intermediate head:
       read as Posted evidence. The `O_TUI_WRITER` token itself may appear only
       in the O_TUI_WRITER_FILES.
   (d) A claim is the `claim_then_send` helper, which claims just before the
-      send it runs; its closure is the transport call alone. `claim_at_post`
+      send it runs; its closure is the transport call alone. `claim_then_send_held`
+      also hands back the claimed send for a body sent in more steps. `claim_at_post`
       wraps a task-response transport so each chunk post claims that way. A
       raw claim (a claiming gate fn, or under tui_o any `.claim(` call or
       `::claim` path) may appear only in the RAW_CLAIM_SITES functions, each
@@ -71,15 +72,15 @@ PRIMITIVES: dict[str, str] = {
     "send_outbound_message": r"\bsend_outbound_message\s*\(",
     "edit_outbound_message": r"\bedit_outbound_message\s*\(",
 }
-_OWNS = r"o_owns_tui_output(?:_for_channel_tmux|_for_channel|_for_tmux_session|_with)?"
-_RAW_CLAIM = rf"\b{_OWNS}\b|\bcandidate\s*\.\s*claim\s*\("
+_OWNS = r"o_owns_tui_output(?:_for_channel_tmux|_for_channel|_for_tmux_session|_with)?(?:_reserving)?"
+_RAW_CLAIM = rf"\b{_OWNS}\b|\bcandidate\s*\.\s*claim(?:_body)?\s*\("
 RAW_CLAIM_RE = re.compile(_RAW_CLAIM)
-# `Candidate::claim` is visible only under tui_o, so there every `.claim(` call and every
-# `::claim` path counts, whatever the receiver or chain, and whether called or taken as a value.
+# `Candidate::claim` and `claim_body` are visible only under tui_o, so there every such call
+# and path counts, whatever the receiver or chain, and whether called or taken as a value.
 TUI_O_ROOT = "src/services/tui_o/"
-TUI_O_RAW_CLAIM_RE = re.compile(rf"{_RAW_CLAIM}|\.\s*claim\s*\(|::\s*claim\b")
+TUI_O_RAW_CLAIM_RE = re.compile(rf"{_RAW_CLAIM}|\.\s*claim(?:_body)?\s*\(|::\s*claim(?:_body)?\b")
 GATE_RES = {
-    "claim": re.compile(rf"{_RAW_CLAIM}|\bclaim_then_(?:direct_)?send\b|\bclaim_at_post\b"),
+    "claim": re.compile(rf"{_RAW_CLAIM}|\bclaim_then_(?:direct_)?send(?:_held)?\b|\bclaim_at_post\b"),
     "peek": re.compile(rf"\b(?:peek_{_OWNS}|bridge_o_body_peek_decision)\b"),
 }
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
@@ -422,7 +423,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/discord/tmux_watcher/terminal_direct_fallback.rs": (
         "apply_watcher_direct_fallback_send:claim",
-        "apply_watcher_direct_fallback_send:claim",
+        "replace_or_post_after_edit_failure:claim",
     ),
     "src/services/discord/tmux_watcher/terminal_long_chunks.rs": (
         "apply_watcher_long_chunks_legacy:claim",
@@ -476,13 +477,14 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     "src/services/tui_o/cutover/channel_gate.rs": (
         "claim:claim",
         "claim:claim",
+        "claim_then_send:claim",
         "decide_with_snapshot:claim",
     ),
 }
 # Functions where a raw claim may stand outside `claim_then_send`, keyed by file.
 RAW_CLAIM_SITES: dict[str, tuple[str, ...]] = {
     # The helper's own claim, and the adoption transition it reaches.
-    "src/services/tui_o/cutover/channel_gate.rs": ("claim", "claim_then_send", "decide_with_snapshot"),
+    "src/services/tui_o/cutover/channel_gate.rs": ("claim", "claim_then_send_held", "decide_with_snapshot"),
     # Re-exports; a placement releases a pending adoption by design, with no body.
     "src/services/tui_o/cutover.rs": ("<module>", "claim_for_placement"),
     # The writer host's once-per-channel actor slot, not an adoption.

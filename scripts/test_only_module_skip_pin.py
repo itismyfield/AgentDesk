@@ -34,6 +34,7 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/health/recovery/legacy_send_tests.rs",
         "src/services/discord/health/recovery/retirement_await_tests.rs",
         "src/services/discord/placeholder_sweeper/retirement_tests.rs",
         "src/services/discord/tmux_reaper/retirement_await_tests.rs",
