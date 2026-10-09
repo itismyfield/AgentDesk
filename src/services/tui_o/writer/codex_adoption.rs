@@ -1,8 +1,12 @@
 //! Adoption of a Codex channel that already holds output, dormant: one evaluator judges whether O
 //! may start at Legacy's settled boundaries. Nothing here reads runtime state or writes a store.
 
+pub mod coord;
+pub mod fold;
 pub mod judge;
+pub mod plan;
 pub mod probe;
+pub mod scan;
 
 use std::collections::BTreeMap;
 
@@ -167,6 +171,9 @@ pub enum Anchor {
 #[cfg(test)]
 #[path = "codex_adoption/judge_tests.rs"]
 mod judge_tests;
+#[cfg(test)]
+#[path = "codex_adoption/plan_tests.rs"]
+mod plan_tests;
 #[cfg(test)]
 #[path = "codex_adoption/probe_tests.rs"]
 mod probe_tests;

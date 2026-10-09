@@ -2352,10 +2352,15 @@ src/
 │   │   │   └── spool.rs
 │   │   ├── writer/
 │   │   │   ├── codex_adoption/
+│   │   │   │   ├── coord.rs
+│   │   │   │   ├── fold.rs
 │   │   │   │   ├── judge.rs
 │   │   │   │   ├── judge_tests.rs
+│   │   │   │   ├── plan.rs
+│   │   │   │   ├── plan_tests.rs
 │   │   │   │   ├── probe.rs
-│   │   │   │   └── probe_tests.rs
+│   │   │   │   ├── probe_tests.rs
+│   │   │   │   └── scan.rs
 │   │   │   ├── input_facts/
 │   │   │   │   ├── reactions.rs
 │   │   │   │   ├── resume_tests.rs

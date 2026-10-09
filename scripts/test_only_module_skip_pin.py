@@ -91,6 +91,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_presence/activity_tests.rs",
         "src/services/discord/turn_presence/admission_tests.rs",
         "src/services/tui_o/writer/codex_adoption/judge_tests.rs",
+        "src/services/tui_o/writer/codex_adoption/plan_tests.rs",
         "src/services/tui_o/writer/codex_adoption/probe_tests.rs",
         "src/services/discord/turn_presence/supervisor_tests.rs",
         "src/services/claude_tui/input/final_ready_tests.rs",
