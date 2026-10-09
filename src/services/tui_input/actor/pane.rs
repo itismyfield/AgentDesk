@@ -35,6 +35,9 @@ pub trait Pane {
     ) -> SendOutcome {
         self.submit(text)
     }
+    fn with_busy_composer<R>(&mut self, operation: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        self.with_composer(operation)
+    }
     fn with_composer<R>(&mut self, operation: impl FnOnce(&mut Self) -> R) -> Option<R> {
         Some(operation(self))
     }
@@ -53,6 +56,7 @@ pub struct TmuxPane {
     budget: Duration,
     provider: ShadowProvider,
     pre_empty: bool,
+    busy: bool,
     #[cfg(test)]
     test_nonce: Option<String>,
 }
@@ -69,6 +73,7 @@ impl TmuxPane {
             budget,
             provider: ShadowProvider::Claude,
             pre_empty: false,
+            busy: false,
             #[cfg(test)]
             test_nonce: None,
         }
@@ -199,6 +204,34 @@ fn stderr_of(output: &std::process::Output) -> String {
     )
 }
 
+pub(crate) fn canonical(provider: ShadowProvider, text: &str) -> String {
+    #[cfg(test)]
+    if super::super::transition::mutant("busy_raw_paste") {
+        return text.into();
+    }
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    match provider {
+        ShadowProvider::Claude => text.replace('\t', "    "),
+        ShadowProvider::Codex => text,
+    }
+}
+
+// Busy only relaxes the turn gate; modal and exact-empty checks still precede paste.
+pub(crate) fn ready(provider: ShadowProvider, capture: &str, busy: bool) -> PaneVerdict {
+    let verdict = judge_pane(provider, capture);
+    if !busy || provider != ShadowProvider::Claude || verdict != PaneVerdict::NotReady {
+        return verdict;
+    }
+    let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(capture);
+    if crate::services::tmux_common::tmux_capture_indicates_claude_tui_exact_empty_composer(&plain)
+        && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft(&plain)
+    {
+        PaneVerdict::Ready
+    } else {
+        verdict
+    }
+}
+
 impl Pane for TmuxPane {
     fn capture(&mut self) -> Result<String, String> {
         let output = self
@@ -294,7 +327,7 @@ impl Pane for TmuxPane {
         let callback = || {
             self.pre_empty = self
                 .capture()
-                .is_ok_and(|c| judge_pane(provider, &c) == PaneVerdict::Ready);
+                .is_ok_and(|c| ready(provider, &c, self.busy) == PaneVerdict::Ready);
             let result = operation(self);
             self.pre_empty = false;
             result
@@ -315,5 +348,12 @@ impl Pane for TmuxPane {
                 )
             }
         }
+    }
+
+    fn with_busy_composer<R>(&mut self, operation: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        self.busy = true;
+        let result = self.with_composer(operation);
+        self.busy = false;
+        result
     }
 }

@@ -1,10 +1,10 @@
-//! Dormant channel input actor: gate, inject and confirm the oldest open ledger row.
+//! Dormant channel input actor: durable guarded offers and exact input witnesses.
 
 use std::collections::BTreeSet;
 use std::io;
 use std::time::{Duration, Instant};
 
-use super::attempt::{Disposition, Tracking};
+use super::attempt::{AttemptMeta, Disposition, Effect, Tracking, WitnessKind, fresh_token};
 use super::ledger::Ledger;
 use super::rows::{AttemptEvidence, DoneReason, Entry, HeldReason, Row, RowState, Rows};
 use crate::services::tui_o::shadow::capture::SourceCapture;
@@ -12,15 +12,17 @@ use crate::services::tui_o::shadow::capture::SourceCapture;
 use crate::services::tui_o::shadow::SourceBinding;
 use crate::services::tui_o::writer::input_facts::{ChannelFact, TurnState};
 
+pub mod capability;
 pub mod gate;
 pub mod pane;
+pub mod resume;
 pub(crate) mod token;
 pub(crate) mod witness;
 
-use gate::{PaneVerdict, judge_pane};
+use gate::PaneVerdict;
 use pane::{Pane, SendOutcome};
 
-/// Without a user record or transcript activity this long after Enter, the input was not accepted.
+/// Watchdog for a missing registered input witness after Enter.
 pub const ACCEPT_WINDOW: Duration = Duration::from_secs(15);
 /// An idle channel whose pane stays unready this long holds the input for a person.
 pub const READY_WINDOW: Duration = Duration::from_secs(120);
@@ -38,6 +40,7 @@ struct Attempt {
     key: u64,
     entered_at: Instant,
     activity: bool,
+    tracked: bool,
 }
 
 pub struct InputActor<P> {
@@ -45,6 +48,7 @@ pub struct InputActor<P> {
     pane: P,
     attempt: Option<Attempt>,
     unready_since: Option<Instant>,
+    capability: capability::CapabilitySnapshot,
 }
 
 impl<P: Pane> InputActor<P> {
@@ -54,7 +58,15 @@ impl<P: Pane> InputActor<P> {
             pane,
             attempt: None,
             unready_since: None,
+            capability: capability::CapabilitySnapshot::default(),
         }
+    }
+
+    /// A fresh attach derives a memory-only capability; ordinary construction stays disabled.
+    pub fn attach(binding: SourceBinding, pane: P, evidence: capability::AttachEvidence) -> Self {
+        let mut actor = Self::new(binding, pane);
+        actor.capability = capability::CapabilitySnapshot::derive(evidence);
+        actor
     }
 
     #[cfg(test)]
@@ -78,7 +90,18 @@ impl<P: Pane> InputActor<P> {
         let Some((rows, foreign)) = self.observe(ledger)? else {
             return Ok(Step::Wait("witness_scan"));
         };
-        let Some((key, mut row)) = head(&rows) else {
+        let nonce = self
+            .capability
+            .enabled()
+            .then(|| self.pane.binding_nonce(&self.binding))
+            .flatten();
+        let busy = self.capability.validate(&self.binding, nonce.as_deref());
+        let selected = if busy {
+            busy_head(&rows, &self.binding, nonce.as_deref())
+        } else {
+            head(&rows)
+        };
+        let Some((key, mut row)) = selected else {
             self.attempt = None;
             return Ok(Step::Idle);
         };
@@ -107,10 +130,20 @@ impl<P: Pane> InputActor<P> {
         let fact = fact
             .filter(|fact| fact.binding == self.binding)
             .map(|fact| (&fact.state, fact.through));
+        let tracked = self.attempt.as_ref().is_some_and(|a| a.tracked);
+        #[cfg(test)]
+        let tracked = tracked
+            || (super::transition::mutant("legacy_tracked_watchdog")
+                && !row.attempts.is_empty()
+                && self.attempt.is_some());
         match row.state {
             // A frame this ledger never registered may be an old delivery: offer nothing new.
             RowState::Received | RowState::Ready if foreign => Ok(Step::Wait("foreign_frame")),
-            RowState::Received | RowState::Ready => self.offer(ledger, key, &row, fact, now).await,
+            RowState::Received | RowState::Ready => self.offer(ledger, key, &row, fact, now, None),
+            RowState::Queued if tracked && !has_current_q(&row) => {
+                self.confirm_tracked(ledger, key, now)
+            }
+            RowState::AwaitTurn if tracked => self.confirm_tracked(ledger, key, now),
             RowState::AwaitTurn if self.attempt.is_some() => {
                 self.confirm(ledger, key, &row, fact, now)
             }
@@ -130,11 +163,22 @@ impl<P: Pane> InputActor<P> {
         if !rows.open_rows().any(|(_, row)| !row.attempts.is_empty()) {
             return Ok(Some((rows, false)));
         }
-        let Ok(seen) = witness::scan_tracked(&self.binding, &rows) else {
+        let seen = if self.capability.enabled() {
+            witness::scan_lineage(&self.binding, &rows)
+        } else {
+            witness::scan_tracked(&self.binding, &rows)
+        };
+        let Ok(seen) = seen else {
             return Ok(None);
         };
         for (key, witness) in seen.witnesses {
+            #[cfg(test)]
+            let queued = witness.kind == WitnessKind::Queued;
             ledger.append_witness(key, witness)?;
+            #[cfg(test)]
+            if queued && super::transition::mutant("busy_q_running") {
+                set(ledger, key, RowState::Running)?;
+            }
         }
         let rows = ledger.rows()?;
         let state = |key| rows.row(key).map(|row| row.state);
@@ -169,38 +213,60 @@ impl<P: Pane> InputActor<P> {
         Ok(Some((ledger.rows()?, seen.foreign > 0)))
     }
 
-    async fn offer(
+    fn offer(
         &mut self,
         ledger: &mut Ledger,
         key: u64,
         row: &Row,
         fact: Option<(&TurnState, u64)>,
         now: Instant,
+        restart: Option<&resume::ResumeEvidence>,
     ) -> io::Result<Step> {
-        if !matches!(fact, Some((TurnState::Idle, _))) {
+        let busy = self.capability.enabled();
+        if !matches!(fact, Some((TurnState::Idle, _)))
+            && !(busy && matches!(fact, Some((TurnState::Open { .. }, _))))
+        {
             self.unready_since = None;
             return Ok(Step::Wait("turn_not_idle"));
         }
         let Some((mut text, source_ids)) = witness::frame(key, row) else {
             return set(ledger, key, RowState::Held(HeldReason::NotReady));
         };
-        if let Some(attempt) = &row.attempt {
+        if let Some(attempt) = row.attempt.as_ref().filter(|_| !busy) {
             if attempt.source_ids != source_ids {
                 return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
             }
             text = attempt.rendered_prompt.clone();
         }
+        let profile = token::profile(self.binding.provider);
+        let tracked = busy.then(|| {
+            text = pane::canonical(self.binding.provider, &text);
+            let token = fresh_token();
+            text = token::render(&token, &text);
+            (
+                token,
+                token::digest(profile, &text).expect("known frame profile"),
+            )
+        });
         let binding = self.binding.clone();
+        let capability = &mut self.capability;
         let unready_since = &mut self.unready_since;
         let mut entered = None;
-        let result = self.pane.with_composer(|pane| {
+        let operation = |pane: &mut P| {
             let verdict = pane
                 .capture()
-                .map(|c| judge_pane(binding.provider, &c))
+                .map(|c| pane::ready(binding.provider, &c, busy))
                 .unwrap_or(PaneVerdict::NotReady);
             match verdict {
                 PaneVerdict::Modal => return set(ledger, key, RowState::Held(HeldReason::Modal)),
                 PaneVerdict::NotReady => {
+                    if restart.is_some() {
+                        #[cfg(test)]
+                        if super::transition::mutant("resume_unready_wait") {
+                            return Ok(Step::Wait("pane_not_ready"));
+                        }
+                        return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+                    }
                     let since = *unready_since.get_or_insert(now);
                     if now.saturating_duration_since(since) >= READY_WINDOW {
                         *unready_since = None;
@@ -212,6 +278,35 @@ impl<P: Pane> InputActor<P> {
             }
             let Some(execution_nonce) = pane.binding_nonce(&binding) else {
                 return Ok(Step::Wait("execution_unknown"));
+            };
+            if busy && !capability.validate(&binding, Some(&execution_nonce)) {
+                return Ok(Step::Wait("capability_changed"));
+            }
+            let queue_end = if let Some(restart) = restart {
+                let mut fresh = restart.clone();
+                fresh.current_valid &=
+                    capability.validate(&binding, pane.binding_nonce(&binding).as_deref());
+                fresh.exact_empty &= pane.capture().is_ok_and(|capture| {
+                    pane::ready(binding.provider, &capture, busy) == PaneVerdict::Ready
+                });
+                let rows = ledger.rows()?;
+                let Ok(seen) = witness::scan_lineage(&binding, &rows) else {
+                    return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+                };
+                let complete = seen.complete && seen.altered.is_empty() && seen.foreign == 0;
+                for (key, witness) in seen.witnesses {
+                    ledger.append_witness(key, witness)?;
+                }
+                let rows = ledger.rows()?;
+                let row = rows.row(key).expect("resume row exists");
+                fresh.lineage_complete &= complete;
+                fresh.all_generations_clear &= witness::stable_current(restart);
+                let Some(end) = resume::decide(row, &binding, &execution_nonce, &fresh, now) else {
+                    return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+                };
+                Some(end)
+            } else {
+                None
             };
             let source = binding.source.clone();
             let Ok(eof) = std::fs::metadata(&source.path).map(|meta| meta.len()) else {
@@ -229,14 +324,41 @@ impl<P: Pane> InputActor<P> {
                 record_end: None,
                 native_turn_id: None,
             };
-            ledger.append_entry(
-                &Entry::Transition {
+            if let Some((token, digest)) = &tracked {
+                let meta = AttemptMeta {
+                    generation: row
+                        .attempts
+                        .last()
+                        .map_or(1, |a| a.generation.saturating_add(1)),
+                    token: token.clone(),
+                    frame_digest: digest.clone(),
+                    frame_profile: Some(profile.into()),
+                    execution_nonce: execution_nonce.clone(),
+                    source: binding.source.clone(),
+                    anchor: eof,
+                    effect: Effect::Intent,
+                    incarnation: None,
+                    queue_end: queue_end.clone(),
+                };
+                ledger.append_tracked(
                     key,
-                    state: RowState::Injecting,
-                    attempt: Some(evidence.clone()),
-                },
-                &[],
-            )?;
+                    RowState::Injecting,
+                    Some(evidence),
+                    &Tracking {
+                        attempt: Some(meta),
+                        ..Tracking::default()
+                    },
+                )?;
+            } else {
+                ledger.append_entry(
+                    &Entry::Transition {
+                        key,
+                        state: RowState::Injecting,
+                        attempt: Some(evidence.clone()),
+                    },
+                    &[],
+                )?;
+            }
             if pane.binding_nonce(&binding).as_deref() != Some(&execution_nonce) {
                 return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
             }
@@ -248,7 +370,12 @@ impl<P: Pane> InputActor<P> {
             };
             entered = (state == RowState::AwaitTurn).then(Instant::now);
             set(ledger, key, state)
-        });
+        };
+        let result = if busy {
+            self.pane.with_busy_composer(operation)
+        } else {
+            self.pane.with_composer(operation)
+        };
         let Some(result) = result else {
             return Ok(Step::Wait("composer_locked"));
         };
@@ -269,9 +396,79 @@ impl<P: Pane> InputActor<P> {
                     }
                 },
                 activity: false,
+                tracked: busy,
             });
         }
         Ok(step)
+    }
+
+    fn confirm_tracked(&mut self, ledger: &mut Ledger, key: u64, now: Instant) -> io::Result<Step> {
+        let attempt = self
+            .attempt
+            .as_ref()
+            .expect("tracked confirmation has Enter time");
+        if now
+            .checked_duration_since(attempt.entered_at)
+            .is_some_and(|d| d >= ACCEPT_WINDOW)
+        {
+            #[cfg(test)]
+            if super::transition::mutant("no_token_not_sent") {
+                return set(ledger, key, RowState::Ready);
+            }
+            #[cfg(test)]
+            if super::transition::mutant("no_token_retry") {
+                let row = ledger.rows()?.row(key).expect("attempt row").clone();
+                let text = &row.attempt.as_ref().expect("sent frame").rendered_prompt;
+                let binding = self.binding.clone();
+                let _ = self
+                    .pane
+                    .with_busy_composer(|pane| pane.submit_for_binding(text, &binding));
+                return Ok(Step::Wait("awaiting_input_witness"));
+            }
+            // The durable Held transition is the Notice intent; no token never proves NotSent.
+            return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+        }
+        Ok(Step::Wait("awaiting_input_witness"))
+    }
+
+    /// Only a verified queue termination opens a new generation; replayed episodes send nothing.
+    pub fn resume_queued(
+        &mut self,
+        ledger: &mut Ledger,
+        key: u64,
+        evidence: &resume::ResumeEvidence,
+        now: Instant,
+    ) -> io::Result<Step> {
+        let rows = ledger.rows()?;
+        let Some(row) = rows.row(key) else {
+            return Ok(Step::Idle);
+        };
+        if row
+            .attempts
+            .last()
+            .and_then(|a| a.queue_end.as_ref())
+            .is_some_and(|end| {
+                end.old_nonce == evidence.old_nonce
+                    && Some(end.new_nonce.as_str())
+                        == self.pane.binding_nonce(&self.binding).as_deref()
+            })
+        {
+            return Ok(Step::Blocked(key, row.state));
+        }
+        let nonce = self.pane.binding_nonce(&self.binding);
+        if !self.capability.validate(&self.binding, nonce.as_deref())
+            || busy_head(&rows, &self.binding, nonce.as_deref()).map(|r| r.0) != Some(key)
+        {
+            return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+        }
+        self.offer(
+            ledger,
+            key,
+            row,
+            Some((&TurnState::Idle, 0)),
+            now,
+            Some(evidence),
+        )
     }
 
     fn reconcile(&mut self, ledger: &mut Ledger, key: u64, row: &Row) -> io::Result<Step> {
@@ -382,6 +579,47 @@ pub(crate) fn head(rows: &Rows) -> Option<(u64, Row)> {
     rows.open_rows()
         .min_by_key(|(_, row)| row.received_seq.unwrap_or(0))
         .map(|(key, row)| (key, row.clone()))
+}
+
+fn busy_head(rows: &Rows, binding: &SourceBinding, nonce: Option<&str>) -> Option<(u64, Row)> {
+    #[cfg(test)]
+    if super::transition::mutant("busy_oldest_blocker") {
+        return head(rows);
+    }
+    let pass = |row: &Row| {
+        matches!(row.state, RowState::Queued | RowState::Running)
+            && row.attempts.last().is_some_and(|meta| {
+                meta.source == binding.source
+                    && Some(meta.execution_nonce.as_str()) == nonce
+                    && row.witnesses.iter().any(|seen| {
+                        seen.witness.token == meta.token
+                            && (seen.witness.kind == WitnessKind::Queued
+                                || seen.witness.kind.confirms_input())
+                    })
+            })
+    };
+    rows.open_rows()
+        .filter(|(_, row)| !pass(row))
+        .min_by_key(|(_, row)| row.received_seq.unwrap_or(0))
+        .map(|(key, row)| (key, row.clone()))
+        .or_else(|| head(rows))
+}
+
+fn has_current_q(row: &Row) -> bool {
+    #[cfg(test)]
+    if super::transition::mutant("watchdog_any_q") {
+        return row
+            .witnesses
+            .iter()
+            .any(|seen| seen.witness.kind == WitnessKind::Queued);
+    }
+    row.attempts.last().is_some_and(|meta| {
+        row.witnesses.iter().any(|seen| {
+            seen.witness.generation == meta.generation
+                && seen.witness.token == meta.token
+                && seen.witness.kind == WitnessKind::Queued
+        })
+    })
 }
 
 fn set(ledger: &mut Ledger, key: u64, state: RowState) -> io::Result<Step> {

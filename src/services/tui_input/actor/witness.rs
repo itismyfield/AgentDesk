@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::token;
+use super::{resume, token};
 use crate::services::tui_input::attempt::{AttemptMeta, Witness, WitnessKind};
 use crate::services::tui_input::rows::{AttemptEvidence, Row, Rows};
 use crate::services::tui_o::shadow::capture::SourceCapture;
@@ -244,15 +244,80 @@ pub(crate) fn carriers(provider: ShadowProvider, record: &Value) -> Vec<(Witness
 /// Reads the parent source from the lowest anchor of an open tracked attempt. Restarting there
 /// makes a re-read a no-op and finds whatever a failed append left unrecorded.
 pub(crate) fn scan_tracked(binding: &SourceBinding, rows: &Rows) -> Result<Tracked, String> {
+    scan_source(binding, rows, false)
+}
+
+pub(super) fn scan_lineage(binding: &SourceBinding, rows: &Rows) -> Result<Tracked, String> {
+    let mut sources = vec![binding.source.clone()];
+    for (_, _, meta) in rows.attempts() {
+        if !sources.contains(&meta.source) {
+            sources.push(meta.source.clone());
+        }
+    }
+    let mut all = Tracked {
+        complete: true,
+        ..Tracked::default()
+    };
+    for source in sources {
+        let seen = scan_source(
+            &SourceBinding {
+                source,
+                ..binding.clone()
+            },
+            rows,
+            true,
+        )?;
+        all.complete &= seen.complete;
+        all.witnesses.extend(seen.witnesses);
+        all.closed.extend(seen.closed);
+        all.altered.extend(seen.altered);
+        all.foreign += seen.foreign;
+    }
+    Ok(all)
+}
+
+pub(super) fn stable_current(evidence: &resume::ResumeEvidence) -> bool {
+    let Some(reads) = &evidence.stable_prefixes else {
+        return false;
+    };
+    let last = &reads[1];
+    let Ok(mut capture) = SourceCapture::open(last.source.clone(), 0) else {
+        return false;
+    };
+    for _ in 0..64 {
+        if !matches!(capture.poll(1024 * 1024), CaptureOutcome::Batch(_)) {
+            return false;
+        }
+        let Ok(len) = std::fs::metadata(&last.source.path).map(|m| m.len()) else {
+            return false;
+        };
+        if capture.captured_through() == len {
+            return len == last.eof
+                && capture.prefix_hash() == last.digest
+                && capture.verify_prefix().unwrap_or(false);
+        }
+        if capture.captured_through() >= last.eof {
+            return false;
+        }
+    }
+    false
+}
+
+fn scan_source(binding: &SourceBinding, rows: &Rows, lineage: bool) -> Result<Tracked, String> {
     let mut registered = HashMap::new();
     let mut anchor: Option<u64> = None;
     for (key, open, meta) in rows.attempts() {
-        if meta.source != binding.source {
+        if !lineage && meta.source != binding.source {
             continue;
         }
         registered.insert(meta.token.as_str(), (key, meta));
         if open {
-            anchor = Some(anchor.map_or(meta.anchor, |low| low.min(meta.anchor)));
+            let start = if meta.source == binding.source {
+                meta.anchor
+            } else {
+                0
+            };
+            anchor = Some(anchor.map_or(start, |low| low.min(start)));
         }
     }
     let Some(anchor) = anchor else {
@@ -354,7 +419,7 @@ impl Scan<'_> {
             self.seen.foreign += 1;
             return;
         };
-        if range.start < meta.anchor {
+        if range.source == meta.source && range.start < meta.anchor {
             self.seen.foreign += 1;
             return;
         }

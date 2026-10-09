@@ -1,5 +1,10 @@
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
+#[path = "actor/busy_tests.rs"]
+mod busy;
+#[path = "actor/resume_actor_tests.rs"]
+mod resume_actor_tests;
+
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
