@@ -200,7 +200,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let boot_config = crate::config::load_graceful();
     let homes = HomeSettings::of(&boot_config);
     // Judged before anything touches a delegated channel, so a misconfigured switch holds them.
-    let _home_availability = install_home_availability(&provider, &homes, pg_pool.is_some());
+    let home_availability = install_home_availability(&provider, &homes, pg_pool.is_some());
     let modules = boot_config.cluster.runtime_profile.modules();
     let voice_config = boot_config.voice;
     let voice_barge_in = Arc::new(if modules.voice {
@@ -252,6 +252,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         bot_settings,
         &provider,
         RuntimeServices {
+            home_availability,
             initial_skills,
             token_hash: token_hash.clone(),
             api_port,
@@ -1223,12 +1224,20 @@ mod restart_lifecycle_characterization_tests {
     fn build_shared_with_injected_shutdown_remaining(
         shutdown_remaining: &Arc<AtomicUsize>,
     ) -> Arc<SharedData> {
+        build_shared_with_home_availability(shutdown_remaining, None)
+    }
+
+    fn build_shared_with_home_availability(
+        shutdown_remaining: &Arc<AtomicUsize>,
+        home_availability: Option<home_availability::Registration>,
+    ) -> Arc<SharedData> {
         let voice = Arc::new(voice_barge_in::VoiceBargeInRuntime::disabled());
         let health_registry = Arc::new(health::HealthRegistry::new());
         run_bot_build_shared_data(
             DiscordBotSettings::default(),
             &ProviderKind::Claude,
             RuntimeServices {
+                home_availability,
                 initial_skills: Vec::new(),
                 token_hash: "s3-restart-characterization-token-hash".to_string(),
                 api_port: 9,
@@ -1273,6 +1282,33 @@ mod restart_lifecycle_characterization_tests {
             .start_paused(true)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn background_provider_keeps_availability_after_its_boot_future_returns() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        paused_rt().block_on(async {
+            let availability = home_availability::install(
+                "claude",
+                Err(home_availability::Unavailable::MissingPool),
+                || [7].into(),
+            );
+            let shared = build_shared_with_home_availability(
+                &Arc::new(AtomicUsize::new(1)),
+                Some(availability),
+            );
+            let background = Arc::clone(&shared);
+            drop(shared);
+            assert_eq!(
+                home_availability::refusal(7),
+                Some(home_availability::Unavailable::MissingPool)
+            );
+            drop(background);
+            assert_eq!(
+                home_availability::state("claude"),
+                home_availability::Availability::Off
+            );
+        });
     }
 
     #[test]

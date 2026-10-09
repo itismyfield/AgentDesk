@@ -335,8 +335,21 @@ pub struct ManagedWriterHandle {
     generation: u64,
     authority: Arc<OwnershipGate>,
     settled: Arc<AtomicBool>,
-    stop: watch::Sender<bool>,
+    stop: StopOnDrop,
     host: JoinHandle<()>,
+}
+
+struct StopOnDrop {
+    signal: watch::Sender<bool>,
+    armed: bool,
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.signal.send_replace(true);
+        }
+    }
 }
 
 /// A writer whose host, actor and admitted POST all ended, its claim released.
@@ -361,7 +374,8 @@ impl ManagedWriterHandle {
     }
 
     /// Leaves shutdown to the existing gateway lifecycle; the host still owns its claim.
-    pub fn into_detached(self) -> JoinHandle<()> {
+    pub fn into_detached(mut self) -> JoinHandle<()> {
+        self.stop.armed = false;
         self.host
     }
 
@@ -377,7 +391,7 @@ impl ManagedWriterHandle {
             stop,
             host,
         } = self;
-        stop.send_replace(true);
+        stop.signal.send_replace(true);
         let settle = tokio::spawn(async move {
             let joined = host.await;
             drop(stop);
@@ -468,7 +482,10 @@ pub fn start_managed<I: HostIo>(
             generation,
             authority,
             settled,
-            stop,
+            stop: StopOnDrop {
+                signal: stop,
+                armed: true,
+            },
             host,
         });
     }

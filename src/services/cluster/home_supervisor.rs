@@ -229,11 +229,7 @@ impl<B: HomeBundle> Supervisor<B> {
         if let Some(old) = old
             && let Settled::Stuck(detail) = old.stop_and_join(StopReason::Replaced).await
         {
-            let blocked = Slot::Blocked {
-                generation,
-                detail: detail.clone(),
-            };
-            finish.finish(Some(blocked));
+            finish.finish(Slot::settled(generation, Settled::Stuck(detail.clone())));
             return Err(Refused::Blocked(generation, detail));
         }
         let bundle = match build(generation).await {
@@ -388,11 +384,7 @@ pub fn stop_all_and_join(
         futures::future::join_all(stops)
             .await
             .into_iter()
-            .map(|stop| {
-                stop.unwrap_or_else(|error| {
-                    Settled::Stuck(format!("home cleanup ended abnormally: {error}"))
-                })
-            })
+            .map(|stop| stop.unwrap_or_else(|error| Settled::Stuck(error.to_string())))
             .collect()
     }
 }
