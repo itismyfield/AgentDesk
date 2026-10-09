@@ -671,7 +671,6 @@ pub(crate) fn run_legacy(
 }
 
 /// Submits only a prompt plan; the caller holds the existing composer mutex throughout.
-#[cfg(test)]
 pub(crate) fn run_prompt_submission_legacy(
     session_name: &str,
     actions: &[TuiInputAction],
@@ -719,7 +718,9 @@ pub(crate) fn run_prompt_submission_legacy(
                     )
                 },
                 || {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    if matches!(payload.last(), Some(TuiInputAction::Literal(_))) {
+                        std::thread::sleep(POST_LITERAL_SETTLE);
+                    }
                     let mut transport = transport.borrow_mut();
                     transport
                         .capture_draft(session_name)
@@ -740,8 +741,13 @@ pub(crate) fn run_prompt_submission_legacy(
 }
 
 /// Observes a guarded submit once, leaving every stranded draft untouched.
-#[cfg(test)]
-pub(crate) fn confirm_prompt_submission_passively(session_name: &str) -> Result<(), String> {
+pub(crate) fn confirm_prompt_submission_passively(
+    session_name: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
+    if cancel_requested(cancel_token) {
+        return Err(PROMPT_READY_CANCELLED_ERROR.to_string());
+    }
     let capture = with_transport_using(
         &mut crate::services::tui_input::submission_tmux::SubmissionTmux,
         |transport| {
@@ -750,6 +756,9 @@ pub(crate) fn confirm_prompt_submission_passively(session_name: &str) -> Result<
                 .filter(|_| transport.pane_alive(session_name))
         },
     );
+    if cancel_requested(cancel_token) {
+        return Err(PROMPT_READY_CANCELLED_ERROR.to_string());
+    }
     let Some(capture) = capture else {
         return Err("claude tui input held after mutation: confirmation unavailable".into());
     };
@@ -757,10 +766,12 @@ pub(crate) fn confirm_prompt_submission_passively(session_name: &str) -> Result<
         crate::services::tui_o::shadow::ShadowProvider::Claude,
         &capture,
     );
+    let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&capture);
     if verdict == crate::services::tui_input::actor::gate::PaneVerdict::Modal
-        || crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft(&capture)
+        || !crate::services::tui_input::actor::gate::claude_composer_empty_when_present(&capture)
+        || crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft(&plain)
         || !(verdict == crate::services::tui_input::actor::gate::PaneVerdict::Ready
-            || crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&capture))
+            || crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&plain))
     {
         return Err("claude tui input held after mutation: confirmation ambiguous".into());
     }
@@ -954,6 +965,9 @@ mod spy {
         /// Answer for the n-th send (load, literal, paste or keys), counted from 0.
         pub fail_send: Option<(usize, Result<Output, String>)>,
         pub captures: VecDeque<Option<String>>,
+        /// Captures after the first payload send, independent of readiness's read count.
+        pub captures_after_send: Option<VecDeque<Option<String>>>,
+        pub draft_capture_at: Option<(usize, Option<String>)>,
         pub dead: bool,
         pub absent: bool,
         pub sends: usize,
@@ -964,6 +978,15 @@ mod spy {
     pub(crate) struct Spy(pub Rc<RefCell<SpyState>>);
 
     impl SpyState {
+        fn capture(&mut self) -> Option<String> {
+            if self.sends > 0
+                && let Some(after) = &mut self.captures_after_send
+            {
+                return after.pop_front().flatten();
+            }
+            self.captures.pop_front().flatten()
+        }
+
         fn record(&mut self, call: String) {
             self.calls.push(call);
             if let Some((prefix, nth, token)) = &self.cancel_on
@@ -1039,17 +1062,19 @@ mod spy {
         fn capture(&mut self, _session: &str, _scroll_back: i32) -> Option<String> {
             let mut state = self.0.borrow_mut();
             state.record("capture".to_string());
-            state
-                .captures
-                .pop_front()
-                .flatten()
-                .map(|c| without_escapes(&c))
+            state.capture().map(|c| without_escapes(&c))
         }
 
         fn capture_draft(&mut self, _session: &str) -> Option<String> {
             let mut state = self.0.borrow_mut();
             state.record("capture:draft".to_string());
-            state.captures.pop_front().flatten()
+            let count = state.calls.iter().filter(|c| *c == "capture:draft").count();
+            if let Some((at, capture)) = &state.draft_capture_at
+                && *at == count
+            {
+                return capture.clone();
+            }
+            state.capture()
         }
 
         fn pane_alive(&mut self, _session: &str) -> bool {
@@ -1162,8 +1187,7 @@ mod tests {
     use super::spy::{Spy, SpyGuard, SpyState, exit};
     use super::*;
     use crate::services::claude_tui::input::{
-        CompactSubmitOutcome, claude_prompt_draft_backspace_budget_from_tail,
-        inject_steering_prompt, send_compact_while_busy,
+        CompactSubmitOutcome, inject_steering_prompt, send_compact_while_busy,
     };
     use crate::services::session_host::{SessionTargetInput, TargetSource, UnknownHost};
 
@@ -1220,9 +1244,36 @@ mod tests {
             (Some("✳ Architecting…"), true),
             (
                 Some(
+                    "✳ Architecting…\n────────────────────\n❯ [User: A (ID:1)] stranded\n────────────────────\n",
+                ),
+                false,
+            ),
+            (
+                Some(
                     "Do you want to proceed?\n  1. Yes\n  2. No\nEnter to confirm · esc to cancel\n✳ Architecting…",
                 ),
                 false,
+            ),
+            (Some("✳ Architecting…\n❯ \n"), false),
+            (
+                Some(
+                    "✳ Architecting…\n────────────────────\n❯ foreign\n  ❯ \n────────────────────\n",
+                ),
+                false,
+            ),
+            (
+                Some("✳ Architecting…\n❯ \nunindented continuation\n────────────────────\n"),
+                false,
+            ),
+            (
+                Some("✳ Architecting…\n────────────────────\n❯ \n────────────────────\n"),
+                true,
+            ),
+            (
+                Some(
+                    "❯ [User: A (ID:1)] previous prompt\n✳ Architecting…\n────────────────────\n❯ \n────────────────────\n",
+                ),
+                true,
             ),
         ] {
             let spy = SpyGuard::install(SpyState {
@@ -1230,7 +1281,7 @@ mod tests {
                 ..SpyState::default()
             });
             assert_eq!(
-                confirm_prompt_submission_passively("passive-confirmation").is_ok(),
+                confirm_prompt_submission_passively("passive-confirmation", None).is_ok(),
                 confirmed
             );
             assert!(
@@ -1241,7 +1292,39 @@ mod tests {
         }
     }
 
-    const EMPTY_COMPOSER: &str = "Claude Code v2.1.141\n\n\u{276f} \nstatus";
+    #[test]
+    fn passive_confirmation_checks_cancellation_before_and_after_its_only_capture() {
+        for cancel_after_capture in [false, true] {
+            let token = Arc::new(CancelToken::new());
+            let mut setup = state(&[Some(BUSY)]);
+            if cancel_after_capture {
+                setup.cancel_on = Some(("capture:draft", 1, token.clone()));
+            } else {
+                token.cancelled.store(true, Ordering::Relaxed);
+            }
+            let spy = SpyGuard::install(setup);
+            assert_eq!(
+                confirm_prompt_submission_passively("passive-cancel", Some(token.as_ref())),
+                Err(PROMPT_READY_CANCELLED_ERROR.to_string())
+            );
+            let calls = spy.calls();
+            assert_eq!(
+                calls.iter().filter(|c| c.starts_with("capture")).count(),
+                usize::from(cancel_after_capture)
+            );
+            assert!(
+                !calls
+                    .iter()
+                    .any(|c| c.starts_with("keys:") || c.starts_with("retire:"))
+            );
+            if !cancel_after_capture {
+                assert!(calls.is_empty());
+            }
+        }
+    }
+
+    const EMPTY_COMPOSER: &str =
+        "Claude Code v2.1.141\n\n────────────────────\n\u{276f} \n────────────────────\nstatus";
     const BUSY: &str = "\u{2733} Architecting\u{2026}";
     const DRAFT: &str = "\u{276f} 남은 초안 한글";
 
@@ -1369,10 +1452,6 @@ mod tests {
         }
     }
 
-    fn keys(names: &[&str]) -> Vec<String> {
-        names.iter().map(|name| format!("keys:{name}")).collect()
-    }
-
     fn run(spy: &mut Spy, gate: &dyn MutationGate, actions: &[TuiInputAction]) -> InputRun {
         let target = InputTarget::legacy_tmux("p6a1-spy-session");
         run_plan(&target, gate, spy, actions, None)
@@ -1410,53 +1489,69 @@ mod tests {
     }
 
     #[test]
-    fn steering_submit_keeps_the_legacy_tmux_key_order() {
+    fn steering_submit_keeps_payload_order_under_both_composer_guards() {
         let name = "p6a1-spy-steering";
         let prompt = format!("첫 줄 한글\n{}", "둘째 줄 긴 붙여넣기 ".repeat(800));
-        let guard = SpyGuard::install(state(&[Some(EMPTY_COMPOSER), Some(BUSY)]));
+        let own = "────────────────────\n❯ [Pasted text #8 +1 lines]\n────────────────────\n";
+        let guard = SpyGuard::install(state(&[
+            Some(EMPTY_COMPOSER),
+            Some(EMPTY_COMPOSER),
+            Some(own),
+            Some(BUSY),
+        ]));
         assert_eq!(inject_steering_prompt(name, &prompt), Ok(()));
-        let submitted = [
-            "capture".to_string(),
-            "alive".to_string(),
-            format!("load:{prompt}"),
-            "paste:delete=true".to_string(),
-            "keys:Enter".to_string(),
-            "capture".to_string(),
-            "alive".to_string(),
-        ];
-        assert_eq!(guard.calls(), submitted);
+        assert_eq!(
+            guard.calls(),
+            [
+                "capture".to_string(),
+                "alive".to_string(),
+                "capture:draft".to_string(),
+                "alive".to_string(),
+                format!("load:{prompt}"),
+                "paste:delete=true".to_string(),
+                "capture:draft".to_string(),
+                "alive".to_string(),
+                "keys:Enter".to_string(),
+                "capture:draft".to_string(),
+                "alive".to_string(),
+            ]
+        );
         drop(guard);
 
-        // A failed paste keeps the legacy draft cleanup and never sends Enter.
-        let budget = claude_prompt_draft_backspace_budget_from_tail(DRAFT).unwrap();
-        let mut failing = state(&[Some(EMPTY_COMPOSER), Some(DRAFT)]);
+        let mut failing = state(&[Some(EMPTY_COMPOSER), Some(EMPTY_COMPOSER)]);
         failing.fail_send = Some((1, Ok(exit(1, "no buffer\n"))));
         let guard = SpyGuard::install(failing);
-        assert_eq!(
-            inject_steering_prompt(name, &prompt),
-            Err("tmux send paste-buffer failed: no buffer".to_string())
+        let error = inject_steering_prompt(name, &prompt).unwrap_err();
+        assert!(
+            error.starts_with("claude tui input held after mutation:"),
+            "{error}"
         );
-        let mut expected = vec![
-            "capture".to_string(),
-            "alive".to_string(),
-            format!("load:{prompt}"),
-            "paste:delete=true".to_string(),
-            "capture".to_string(),
-            "alive".to_string(),
-        ];
-        expected.extend(keys(&["C-u", "Escape", "C-u"]));
-        expected.extend(keys(&[&vec!["BSpace"; budget].join("+")]));
-        assert_eq!(guard.calls(), expected);
+        assert_eq!(
+            guard.calls(),
+            [
+                "capture".to_string(),
+                "alive".to_string(),
+                "capture:draft".to_string(),
+                "alive".to_string(),
+                format!("load:{prompt}"),
+                "paste:delete=true".to_string(),
+            ]
+        );
         drop(guard);
 
-        // A long single line goes as 1800-char literal chunks, then Enter.
+        // Chunking is retained; a busy or unprovable post-payload pane withholds Enter.
         let line = "가".repeat(2000);
-        let guard = SpyGuard::install(state(&[Some(EMPTY_COMPOSER), Some(BUSY)]));
-        assert_eq!(inject_steering_prompt(name, &line), Ok(()));
+        let guard = SpyGuard::install(state(&[
+            Some(EMPTY_COMPOSER),
+            Some(EMPTY_COMPOSER),
+            Some(BUSY),
+        ]));
+        let error = inject_steering_prompt(name, &line).unwrap_err();
+        assert!(error.starts_with("claude tui input held after mutation:"));
         let calls = guard.calls();
-        assert_eq!(calls[2], format!("literal:{}", "가".repeat(1800)));
-        assert_eq!(calls[3], format!("literal:{}", "가".repeat(200)));
-        assert_eq!(calls[4], "keys:Enter");
+        assert_eq!(calls[4], format!("literal:{}", "가".repeat(1800)));
+        assert_eq!(calls[5], format!("literal:{}", "가".repeat(200)));
+        assert!(!calls.iter().any(|call| call.starts_with("keys:")));
     }
 
     #[test]

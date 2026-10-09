@@ -45,6 +45,7 @@ fn judge_claude(capture: &str) -> PaneVerdict {
     }
     let ready = !tmux_capture_indicates_claude_tui_prompt_draft(&pane)
         && tmux_capture_indicates_claude_tui_exact_empty_composer(&pane)
+        && claude_composer_empty_when_present(capture)
         && tmux_capture_indicates_claude_tui_ready_for_input(&pane)
         && !tmux_capture_indicates_claude_tui_busy(&pane);
     if ready {
@@ -134,6 +135,13 @@ pub(crate) fn own_wrapped_draft(capture: &str, rows: &[String]) -> bool {
         .is_some_and(|shown| shown.into_iter().eq(rows.iter().map(String::as_str)))
 }
 
+/// A visible composer must parse as exactly empty; a busy-only capture has no marker.
+pub(crate) fn claude_composer_empty_when_present(capture: &str) -> bool {
+    let plain = strip_ansi_escape_sequences(capture);
+    !plain.lines().any(claude_prompt_row)
+        || claude_composer_rows(&plain).is_some_and(|rows| rows.len() == 1 && rows[0].is_empty())
+}
+
 // The bottom Claude composer's rows, prompt and continuation indent removed; none under a modal.
 fn claude_composer_rows(plain: &str) -> Option<Vec<&str>> {
     if detect_claude_startup_dialog(plain).is_some()
@@ -149,7 +157,8 @@ fn claude_composer_rows(plain: &str) -> Option<Vec<&str>> {
     if lines[end].starts_with(char::is_whitespace) {
         return None;
     }
-    let first = lines[start].trim_start().strip_prefix('❯')?;
+    // An indented marker may be a pasted continuation, so it proves no composer boundary.
+    let first = lines[start].strip_prefix('❯')?;
     let first = first
         .strip_prefix(' ')
         .or_else(|| first.strip_prefix('\u{00a0}'))

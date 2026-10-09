@@ -1977,7 +1977,8 @@ services::claude_tui::host_input::tests::native_clear_refuses_drafts_deadlines_a
 services::claude_tui::host_input::tests::native_clear_unsupported_hosts_do_no_tmux_io
 services::claude_tui::host_input::tests::non_tmux_targets_send_nothing_and_are_never_recreated
 services::claude_tui::host_input::tests::passive_claude_confirmation_never_retries_or_clears_a_draft
-services::claude_tui::host_input::tests::steering_submit_keeps_the_legacy_tmux_key_order
+services::claude_tui::host_input::tests::passive_confirmation_checks_cancellation_before_and_after_its_only_capture
+services::claude_tui::host_input::tests::steering_submit_keeps_payload_order_under_both_composer_guards
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_notice_keeps_legacy_done_when_requeue_is_disabled
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_notice_reports_manual_resend_when_requeue_is_disabled
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_retry_emits_no_stream_frames
@@ -1993,6 +1994,14 @@ services::claude_tui::hosting::warm_followup::followup_wait_error_requeue_tests:
 services::claude_tui::hosting::warm_followup::pre_submit_cancel_tests::only_a_sourceless_cleanup_teardown_fails_and_stops_stay_silent
 services::claude_tui::input::active_turn_wait_extension_tests::extends_only_when_pane_alive_and_turn_active_within_ceiling
 services::claude_tui::input::final_ready_tests::final_readiness_vetoes_spinner_auth_draft_blind_and_dead_panes
+services::claude_tui::input::submission_guard_tests::claude_actual_entries_do_not_classify_ambiguous_send_errors_as_pre_submit_timeouts
+services::claude_tui::input::submission_guard_tests::claude_actual_entries_leave_post_enter_drafts_and_blind_confirmation_untouched
+services::claude_tui::input::submission_guard_tests::claude_actual_entries_never_retry_or_clear_after_uncertain_enter_ack
+services::claude_tui::input::submission_guard_tests::claude_actual_entries_recheck_raw_empty_composer_before_payload
+services::claude_tui::input::submission_guard_tests::claude_actual_entries_submit_owned_expanded_and_folded_drafts_once
+services::claude_tui::input::submission_guard_tests::claude_actual_entries_withhold_enter_after_late_foreign_modal_or_blind_capture
+services::claude_tui::input::submission_guard_tests::claude_actual_fresh_entry_withholds_enter_for_unattested_eighty_column_wrap
+services::claude_tui::input::submission_guard_tests::claude_actual_token_entries_stop_after_enter_cancellation_without_confirmation
 services::claude_tui::input::tests::busy_followup_wait_session_died_error_is_not_a_timeout
 services::claude_tui::input::tests::busy_followup_wait_timeout_message_uses_followup_label
 services::claude_tui::input::tests::cancel_uses_escape
@@ -2016,7 +2025,6 @@ services::claude_tui::input::tests::fast_path_returns_within_budget_even_with_pr
 services::claude_tui::input::tests::fast_path_works_without_ambient_runtime
 services::claude_tui::input::tests::followup_timeout_falls_back_to_default_without_live_config
 services::claude_tui::input::tests::foreground_streaming_with_background_agents_still_vetoes_readiness
-services::claude_tui::input::tests::fresh_prompt_left_unsubmitted_in_the_composer_gets_enter_again
 services::claude_tui::input::tests::global_prompt_ready_notify_round_trips_via_hook_server_helper
 services::claude_tui::input::tests::idle_terminator_with_background_agents_and_composer_allows_readiness
 services::claude_tui::input::tests::idle_transcript_accepts_claude_suggestion_prompt_chrome
@@ -2047,12 +2055,7 @@ services::claude_tui::input::tests::prompt_ready_timeouts_are_split_for_fresh_an
 services::claude_tui::input::tests::prompt_rejects_bare_escape_and_bell
 services::claude_tui::input::tests::prompt_rejects_terminal_control_characters
 services::claude_tui::input::tests::prompt_submit_chunks_8kib_single_line_into_literals_then_enter
-services::claude_tui::input::tests::prompt_submit_cleanup_on_error_is_limited_to_paste_actions
-services::claude_tui::input::tests::prompt_submit_confirmation_decision_handles_submitted_and_dead_pane
-services::claude_tui::input::tests::prompt_submit_confirmation_decision_retries_capture_without_enter
-services::claude_tui::input::tests::prompt_submit_confirmation_decision_retries_enter_then_fails_stuck_draft
 services::claude_tui::input::tests::prompt_submit_preserves_emoji_and_korean_in_literal_chunk
-services::claude_tui::input::tests::prompt_submit_retries_only_when_live_pane_still_has_draft
 services::claude_tui::input::tests::prompt_submit_settle_uses_short_initial_and_long_retry_delay
 services::claude_tui::input::tests::prompt_submit_treats_codeblock_multiline_as_single_paste_buffer
 services::claude_tui::input::tests::prompt_submit_uses_literal_chunks_then_enter

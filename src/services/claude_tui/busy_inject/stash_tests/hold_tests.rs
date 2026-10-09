@@ -56,6 +56,21 @@ fn spy(captures: &[&str], cancel: Option<(&'static str, usize, Arc<CancelToken>)
     })
 }
 
+// Readiness reads the empty pane; only a payload send changes it to the owned composer.
+fn submission_spy(
+    pane: &str,
+    prompt: &str,
+    cancel: Option<(&'static str, usize, Arc<CancelToken>)>,
+) -> SpyGuard {
+    let own = format!("────────────────────\n❯ {prompt}\n────────────────────\n");
+    SpyGuard::install(SpyState {
+        captures: vec![Some(pane.to_string()); 16].into(),
+        captures_after_send: Some([Some(own), Some(BUSY.to_string())].into()),
+        cancel_on: cancel,
+        ..SpyState::default()
+    })
+}
+
 /// Pane writes among the spy's calls: keys, typed text, buffer loads, pastes and retires.
 fn writes(calls: &[String]) -> Vec<String> {
     let write = |c: &&String| {
@@ -70,9 +85,7 @@ fn writes(calls: &[String]) -> Vec<String> {
 fn warm_follow_up(tui: &Tui, pane: &str) -> (Result<(), String>, Vec<String>) {
     let (session, transcript) = (tui.session(), idle(tui));
     let token = Arc::new(CancelToken::new());
-    let mut captures = vec![pane; 12];
-    captures.push(BUSY);
-    let guard = spy(&captures, Some(("keys:Enter", 1, token.clone())));
+    let guard = submission_spy(pane, "C follow-up", Some(("keys:Enter", 1, token.clone())));
     let host = FollowupHost::legacy_tmux(&session);
     let (sender, _stream) = std::sync::mpsc::channel();
     let path = transcript.display().to_string();
@@ -267,13 +280,10 @@ fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
     tui.put("composer", "");
     tui.put("footer", FOOTER);
     let recovered = tui.capture();
-    let guard = spy(
-        &[&recovered, &recovered, &recovered, &recovered, BUSY],
-        None,
-    );
+    let guard = submission_spy(&recovered, "follow-up", None);
     let ended = send_followup_prompt_or_idle_transcript(&session, "follow-up", None, &idle);
     assert_eq!(ended, Ok(()));
-    assert!(writes(&guard.calls()).contains(&"keys:Enter".to_string()));
+    assert_eq!(writes(&guard.calls()), ["literal:follow-up", "keys:Enter"]);
     drop(guard);
     let mut sent = 0;
     let clear = native_clear_once(
@@ -379,6 +389,13 @@ fn a_restored_draft_is_never_sent_with_the_next_follow_up() {
     let shown = tui.capture();
     assert!(shown.contains(&format!("\x1b[2m{PLACEHOLDER}")));
     let (ended, calls) = warm_follow_up(&tui, &shown);
+    assert!(
+        ended.is_err_and(|error| error.contains("refused before mutation: Composer(NotReady)"))
+    );
+    assert_eq!(writes(&calls), Vec::<String>::new());
+    // The strict submission guard requires a bare empty composer before writing.
+    tui.put("placeholder", "");
+    let (ended, calls) = warm_follow_up(&tui, &tui.capture());
     assert_eq!(ended, Ok(()));
     assert_eq!(writes(&calls), ["literal:C follow-up", "keys:Enter"]);
     crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
