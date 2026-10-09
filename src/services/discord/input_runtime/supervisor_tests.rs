@@ -938,6 +938,12 @@ async fn unused_registry_leaves_health_to_the_fence() {
         return;
     }
     let unused = sandbox();
+    if mutant("off_register") {
+        let registration = REGISTRY
+            .register(&ProviderKind::Claude, 6_325_717, unused.path())
+            .unwrap();
+        drop(registration);
+    }
     let before = super::super::health_reasons();
     assert!(before.is_empty());
     assert!(fence::lookup(&ProviderKind::Claude, 6_325_717).is_none());

@@ -14,6 +14,9 @@ use std::future::Future;
 use std::io::Write;
 use std::pin::Pin;
 
+#[path = "receipt_entry_tests.rs"]
+mod receipt_entry;
+
 /// A named binding state a test plants before the drive's first pass.
 type Fixture = (&'static str, fn(&Rig));
 

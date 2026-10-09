@@ -444,6 +444,7 @@ impl<P: Ports> Supervisor<P> {
                     mode,
                     Some(fence::Mode::Frozen | fence::Mode::Held | fence::Mode::LedgerOpen)
                 ),
+            // Fresh pane and facts proof belongs to the actor's step.
             false,
         )
     }
@@ -504,6 +505,9 @@ impl<P: Ports> Supervisor<P> {
         let (Some(rows), true, false) = (rows, drive.ready, drive.unreadable) else {
             return;
         };
+        if !self.order.offer_ready() {
+            return;
+        }
         let Some((key, row)) = actor::head(&rows) else {
             return self.hold(drive, None, now).await;
         };

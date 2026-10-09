@@ -10,8 +10,9 @@ use std::time::Duration;
 
 use tokio::sync::{OwnedMutexGuard, watch};
 
-use self::command::SupervisorCmd;
-use self::receipt::Deferred;
+use self::command::{ScanCommit, SupervisorCmd};
+use self::ordering::AdmissionOrder;
+use self::receipt::{Deferred, Receipt};
 use super::clear::{self, ClearHost, Step, Unresolved};
 use super::fence::{self, Closing, Failure, Gate, Mode};
 use super::reconcile::{self, HoldCause};
@@ -24,6 +25,8 @@ use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents};
 pub(crate) mod admission;
 #[path = "command.rs"]
 pub(crate) mod command;
+#[path = "ordering.rs"]
+pub(crate) mod ordering;
 #[path = "receipt.rs"]
 pub(crate) mod receipt;
 #[path = "source.rs"]
@@ -365,8 +368,11 @@ pub(crate) struct Supervisor<P: Ports> {
     movement: Option<Move>,
     sent: BTreeSet<(Option<u64>, &'static str)>,
     admitted: bool,
+    order: AdmissionOrder,
     admission_gen: u64,
     closed: bool,
+    #[cfg(test)]
+    pub(crate) after_receipt_io: Option<ordering::PendingOverflow>,
     #[cfg(test)]
     pub(crate) handbacks: usize,
 }
@@ -384,6 +390,7 @@ impl<P: Ports> Supervisor<P> {
     ) -> Result<Self, Refused> {
         let mut registration = registry.register(&config.provider, config.channel, &config.root)?;
         let slot = registration.slot().ok_or(Refused::Duplicate)?;
+        let order = AdmissionOrder::new(config.provider.clone(), config.channel, 1, 0);
         Ok(Self {
             config,
             ports,
@@ -395,8 +402,11 @@ impl<P: Ports> Supervisor<P> {
             movement: None,
             sent: BTreeSet::new(),
             admitted: false,
+            order,
             admission_gen: 1,
             closed: false,
+            #[cfg(test)]
+            after_receipt_io: None,
             #[cfg(test)]
             handbacks: 0,
         })
@@ -408,6 +418,14 @@ impl<P: Ports> Supervisor<P> {
         #[cfg(test)]
         let closed = closed && !mutant("close_allows_commit");
         self.admitted && !closed && !self.slot.loaned()
+    }
+
+    pub(crate) fn pending_overflow(&self) -> ordering::PendingOverflow {
+        self.order.pending_overflow()
+    }
+
+    pub(crate) fn pending_snapshot(&self) -> ordering::PendingSource {
+        self.order.pending_snapshot()
     }
 
     pub(crate) fn cursor(&mut self) -> Option<&mut Cursor> {
@@ -440,13 +458,14 @@ impl<P: Ports> Supervisor<P> {
         match self.admission_gen.checked_add(1) {
             Some(epoch) => {
                 self.admission_gen = epoch;
+                self.order.invalidate(epoch);
             }
             None => self.admitted = false,
         }
     }
 
-    /// Requests share the existing loan; durable submission remains a separate decision.
-    async fn input_command(&mut self, command: SupervisorCmd, _receipt_open: bool) {
+    /// All receipt work borrows the existing slot; readiness for Enter is a separate decision.
+    async fn input_command(&mut self, command: SupervisorCmd, receipt_open: bool) {
         use crate::services::tui_input::rows::receipt_identity::Responsibility;
         match command {
             SupervisorCmd::Clear => {}
@@ -465,6 +484,12 @@ impl<P: Ports> Supervisor<P> {
                     .report(&held("ledger_close_flush_unconfirmed"), result.is_err());
                 let _ = ack.send(result);
             }
+            SupervisorCmd::FetchTicket { reply } => {
+                let _ = reply.send(self.order.fetch_ticket(self.admission_gen));
+            }
+            SupervisorCmd::PendingSource { sources, reply } => {
+                let _ = reply.send(self.order.pending(&sources));
+            }
             SupervisorCmd::LookupResponsibility { identity, reply } => {
                 let result = if identity.execution_channel_id != self.config.channel {
                     Responsibility::Conflict
@@ -479,6 +504,126 @@ impl<P: Ports> Supervisor<P> {
                     .await
                     .unwrap_or(Responsibility::Unknown)
                 };
+                let _ = reply.send(result);
+            }
+            SupervisorCmd::BeginScan {
+                ticket,
+                sources,
+                horizon,
+                complete_fetch,
+                reply,
+            } => {
+                let result = self.order.begin_scan(
+                    ticket,
+                    self.admission_gen,
+                    sources,
+                    horizon,
+                    complete_fetch,
+                );
+                let _ = reply.send(result);
+            }
+            SupervisorCmd::CommitFromScan {
+                source,
+                mut capability,
+                reply,
+            } => {
+                let key = source.key();
+                let sources = source.identity().source_ids.clone();
+                let permits_new = self
+                    .order
+                    .permits_sources(&capability, self.admission_gen, &sources)
+                    .is_ok();
+                let mut attempted = false;
+                let result = if !receipt_open || !self.admission_open() {
+                    Receipt::Deferred(Deferred::Closed)
+                } else if source.identity().execution_channel_id != self.config.channel
+                    || (!permits_new
+                        && self
+                            .order
+                            .permits(&capability, self.admission_gen, key)
+                            .is_err())
+                {
+                    Receipt::Deferred(Deferred::Order)
+                } else {
+                    attempted = true;
+                    loan(&mut self.slot, move |lease| {
+                        receipt::commit(lease, *source, permits_new)
+                    })
+                    .await
+                    .unwrap_or(Receipt::Deferred(Deferred::SupervisorLost))
+                };
+                self.registration.report(
+                    &held("ledger_receipt_unconfirmed"),
+                    result == Receipt::Deferred(Deferred::Persistence),
+                );
+                let durable = matches!(
+                    &result,
+                    Receipt::Accepted(_)
+                        | Receipt::DuplicateQueued(_)
+                        | Receipt::LegacyResponsibility(_)
+                );
+                #[cfg(test)]
+                if attempted && let Some(overflow) = self.after_receipt_io.take() {
+                    overflow.mark_dirty();
+                }
+                let settlement = match &result {
+                    Receipt::Accepted(_) => {
+                        self.order
+                            .settle_sources(&mut capability, self.admission_gen, &sources)
+                    }
+                    Receipt::DuplicateQueued(_) | Receipt::LegacyResponsibility(_) => {
+                        let whole_prefix = permits_new;
+                        #[cfg(test)]
+                        let whole_prefix = whole_prefix && !mutant("primary_key_only_settle");
+                        if whole_prefix {
+                            self.order
+                                .settle_sources(&mut capability, self.admission_gen, &sources)
+                        } else {
+                            self.order.settle(&mut capability, self.admission_gen, key)
+                        }
+                    }
+                    Receipt::Deferred(_) => {
+                        let whole_prefix = permits_new;
+                        #[cfg(test)]
+                        let whole_prefix = whole_prefix && !mutant("primary_key_only_defer");
+                        let head = if whole_prefix { sources[0] } else { key };
+                        self.order.defer(&capability, self.admission_gen, head)
+                    }
+                };
+                let unresolved = attempted && matches!(&result, Receipt::Deferred(_));
+                #[cfg(test)]
+                let unresolved = unresolved && !mutant("drop_uncertain_retry");
+                let retain = (durable || unresolved) && settlement.is_err();
+                #[cfg(test)]
+                let retain = retain && !mutant("drop_settlement_retry");
+                if retain {
+                    // Only the scope checked before the loan becomes a retry obligation.
+                    if permits_new {
+                        self.order.pending(&sources);
+                    } else {
+                        self.order.pending(&[key]);
+                    }
+                }
+                let _ = reply.send(ScanCommit {
+                    receipt: result,
+                    settlement,
+                    capability,
+                });
+            }
+            SupervisorCmd::SettleFromScan {
+                source,
+                disposition: _,
+                mut capability,
+                reply,
+            } => {
+                let result = self
+                    .order
+                    .settle(&mut capability, self.admission_gen, source)
+                    .map(|()| capability);
+                let _ = reply.send(result);
+            }
+            SupervisorCmd::CompleteScan { capability, reply } => {
+                let result = self.order.complete(capability, self.admission_gen);
                 let _ = reply.send(result);
             }
         }
