@@ -1015,8 +1015,7 @@ src/
 │   │   │   ├── supervisor/
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_entry_tests.rs
-│   │   │   │   ├── drive_tests.rs
-│   │   │   │   └── receipt_entry_tests.rs
+│   │   │   │   └── drive_tests.rs
 │   │   │   ├── admission.rs
 │   │   │   ├── clear.rs
 │   │   │   ├── clear_tests.rs
@@ -1028,8 +1027,6 @@ src/
 │   │   │   ├── fence.rs
 │   │   │   ├── fence_tests.rs
 │   │   │   ├── mod.rs
-│   │   │   ├── ordering.rs
-│   │   │   ├── ordering_tests.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── receipt_tests.rs
 │   │   │   ├── reconcile.rs

@@ -101,96 +101,10 @@ fn e1_committed_move_opens_the_ledger_and_handback_release_keeps_the_order_barri
                 order_barrier(&ProviderKind::Claude, channel),
                 "a stale release must preserve an already installed catch-up barrier"
             );
-            let mut order = AdmissionOrder::new(ProviderKind::Claude, channel, 1, 0);
-            let cap = order.begin_scan(1, vec![], 0, true).unwrap();
-            let cap = order.complete(cap, 1).unwrap();
-            assert_eq!(settle_order_barrier(&order, cap, 1), Ok(true));
+            assert!(settle_order_barrier(&ProviderKind::Claude, channel));
             assert!(!order_barrier(&ProviderKind::Claude, channel));
             drop(transition);
         });
-}
-
-#[test]
-fn g1a_handback_settle_rechecks_current_capability_and_retains_barrier_on_refusal() {
-    let channel = 6_325_714;
-    let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
-    closing.begin_handback().unwrap();
-    closing.release_after_handback().unwrap();
-    let mut order = AdmissionOrder::new(ProviderKind::Claude, channel, 7, 10);
-    order.pending(&[11]);
-    let mut cap = order.begin_scan(7, vec![11], 11, true).unwrap();
-    order.settle(&mut cap, 7, 11).unwrap();
-    let cap = order.complete(cap, 7).unwrap();
-    let mut other = AdmissionOrder::new(ProviderKind::Claude, channel, 7, 11);
-    assert!(other.begin_scan(7, vec![], 11, true).is_err());
-    order.pending(&[12]);
-    assert_eq!(
-        settle_order_barrier(&order, cap, 7),
-        Err(Failure::StalePermit)
-    );
-    assert!(order_barrier(&ProviderKind::Claude, channel));
-    let mut cap = order.begin_scan(7, vec![12], 12, true).unwrap();
-    order.settle(&mut cap, 7, 12).unwrap();
-    let cap = order.complete(cap, 7).unwrap();
-    order.invalidate(8);
-    assert_eq!(
-        settle_order_barrier(&order, cap, 8),
-        Err(Failure::StalePermit)
-    );
-    assert!(order_barrier(&ProviderKind::Claude, channel));
-    let cap = order.begin_scan(8, vec![], 12, true).unwrap();
-    let cap = order.complete(cap, 8).unwrap();
-    assert_eq!(settle_order_barrier(&order, cap, 8), Ok(true));
-}
-
-#[test]
-fn g1a_a_later_handback_rejects_the_previous_complete_capability() {
-    let channel = 6_325_715;
-    let first = Closing::frozen_for_test(ProviderKind::Claude, channel);
-    first.begin_handback().unwrap();
-    first.release_after_handback().unwrap();
-    let mut order = AdmissionOrder::new(ProviderKind::Claude, channel, 7, 10);
-    let cap = order.begin_scan(7, vec![], 10, true).unwrap();
-    let old = order.complete(cap, 7).unwrap();
-    let second = Closing::frozen_for_test(ProviderKind::Claude, channel);
-    second.begin_handback().unwrap();
-    second.release_after_handback().unwrap();
-    let (_, _, owner) = old.scope();
-    claim_order_barrier(&ProviderKind::Claude, channel, owner).unwrap();
-    assert_eq!(
-        settle_order_barrier(&order, old, 7),
-        Err(Failure::StalePermit)
-    );
-    assert!(order_barrier(&ProviderKind::Claude, channel));
-    let cap = order.begin_scan(7, vec![], 10, true).unwrap();
-    let cap = order.complete(cap, 7).unwrap();
-    assert_eq!(settle_order_barrier(&order, cap, 7), Ok(true));
-}
-
-#[test]
-fn g1a_dropped_controller_releases_only_its_claim_and_keeps_the_handback_barrier() {
-    let channel = 6_325_716;
-    let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
-    closing.begin_handback().unwrap();
-    closing.release_after_handback().unwrap();
-    let mut first = AdmissionOrder::new(ProviderKind::Claude, channel, 7, 10);
-    let cap = first.begin_scan(7, vec![], 10, true).unwrap();
-    let old = first.complete(cap, 7).unwrap();
-    let mut second = AdmissionOrder::new(ProviderKind::Claude, channel, 7, 10);
-    assert!(second.begin_scan(7, vec![], 10, true).is_err());
-    drop(second);
-    let mut second = AdmissionOrder::new(ProviderKind::Claude, channel, 7, 10);
-    assert!(second.begin_scan(7, vec![], 10, true).is_err());
-    drop(first);
-    assert!(order_barrier(&ProviderKind::Claude, channel));
-    let cap = second.begin_scan(7, vec![], 10, true).unwrap();
-    let fresh = second.complete(cap, 7).unwrap();
-    assert_eq!(
-        settle_order_barrier(&second, old, 7),
-        Err(Failure::StalePermit)
-    );
-    assert!(order_barrier(&ProviderKind::Claude, channel));
-    assert_eq!(settle_order_barrier(&second, fresh, 7), Ok(true));
 }
 
 #[test]

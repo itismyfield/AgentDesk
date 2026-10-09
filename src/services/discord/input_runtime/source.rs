@@ -5,8 +5,8 @@ use std::io;
 use serde_json::Value;
 
 use crate::services::tui_input::blob::BlobPin;
-use crate::services::tui_input::receipt_identity::ReceiptIdentity;
 use crate::services::tui_input::rows::Entry;
+use crate::services::tui_input::rows::receipt_identity::ReceiptIdentity;
 
 pub(crate) struct Source {
     key: u64,

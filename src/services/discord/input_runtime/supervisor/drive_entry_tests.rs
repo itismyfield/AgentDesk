@@ -14,9 +14,6 @@ use std::future::Future;
 use std::io::Write;
 use std::pin::Pin;
 
-#[path = "receipt_entry_tests.rs"]
-mod receipt_entry;
-
 /// A named binding state a test plants before the drive's first pass.
 type Fixture = (&'static str, fn(&Rig));
 
@@ -921,4 +918,55 @@ async fn clear_retry_budget_is_eight_and_exhaustion_stays_held() {
     );
     assert!(rig.health().contains(&line));
     assert!(driven.release());
+}
+
+#[tokio::test]
+async fn g1a_close_request_holds_gate_before_flush_ack() {
+    let rig = Rig::new(6_325_930);
+    let screen = Arc::new(Screen::default());
+    let mut supervisor = admitted(&rig, &[]).await;
+    let before = supervisor
+        .slot()
+        .get()
+        .unwrap()
+        .rows()
+        .unwrap()
+        .folded_seq();
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    let script = async {
+        super::super::command::request(&sender, |ack| SupervisorCmd::Close { ack })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rig.gate.mode(), Mode::Held);
+        drop(sender);
+    };
+    tokio::join!(supervisor.run(DriveFake(screen), receiver), script);
+    assert_eq!(
+        supervisor
+            .slot()
+            .reopen()
+            .unwrap()
+            .rows()
+            .unwrap()
+            .folded_seq(),
+        before
+    );
+    assert!(supervisor.release());
+    drop(rig);
+
+    let rig = Rig::new(6_325_935);
+    let mut supervisor = admitted(&rig, &[]).await;
+    let generation = supervisor.admission_gen;
+    let (ack, response) = tokio::sync::oneshot::channel();
+    supervisor
+        .input_command(SupervisorCmd::Close { ack }, true)
+        .await;
+    response.await.unwrap().unwrap();
+    assert!(
+        !supervisor.admission_open(),
+        "close is enforced independently of drive readiness"
+    );
+    assert!(supervisor.admission_gen > generation);
+    assert!(supervisor.release());
 }

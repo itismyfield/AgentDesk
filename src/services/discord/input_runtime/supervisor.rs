@@ -10,17 +10,28 @@ use std::time::Duration;
 
 use tokio::sync::{OwnedMutexGuard, watch};
 
+use self::command::SupervisorCmd;
+use self::receipt::Deferred;
 use super::clear::{self, ClearHost, Step, Unresolved};
-use super::command::{ScanCommit, SupervisorCmd};
 use super::fence::{self, Closing, Failure, Gate, Mode};
-use super::ordering::AdmissionOrder;
-use super::receipt::{self, Deferred, Receipt};
 use super::reconcile::{self, HoldCause};
 use crate::services::provider::ProviderKind;
 use crate::services::tui_input::ledger::{Ledger, LedgerLease, LedgerSlot, Presence};
 use crate::services::tui_input::transition::{self, Host, Move, Outcome};
 use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents};
 
+#[path = "admission.rs"]
+pub(crate) mod admission;
+#[path = "command.rs"]
+pub(crate) mod command;
+#[path = "receipt.rs"]
+pub(crate) mod receipt;
+#[path = "source.rs"]
+pub(crate) mod source;
+#[cfg(test)]
+pub(crate) fn mutant(name: &str) -> bool {
+    std::env::var("ADK_TEST_INPUT_G1A_MUTANT").is_ok_and(|value| value == name)
+}
 pub(crate) mod drive;
 
 /// Retries per boot for a held stage; an exhausted stage stays held until the next boot.
@@ -132,13 +143,33 @@ impl Registration {
     }
 
     pub(crate) fn report(&self, cause: &HoldCause, held: bool) {
+        // Receipt success clears only its own marker, preserving other held stages.
+        let slot = match cause {
+            HoldCause::TransitionHeld(reason)
+                if matches!(
+                    *reason,
+                    "ledger_receipt_identity_missing"
+                        | "ledger_receipt_unconfirmed"
+                        | "ledger_close_flush_unconfirmed"
+                ) =>
+            {
+                *reason
+            }
+            _ => cause.slot(),
+        };
+        #[cfg(test)]
+        let slot = if mutant("receipt_health_slot") {
+            cause.slot()
+        } else {
+            slot
+        };
         let mut entries = (self.registry.entries.lock()).unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = entries.get_mut(&self.key).filter(|e| !e.poisoned) {
             match held {
                 true => entry
                     .health
-                    .insert(cause.slot(), cause.health(&self.key.0, self.key.1)),
-                false => entry.health.remove(cause.slot()),
+                    .insert(slot, cause.health(&self.key.0, self.key.1)),
+                false => entry.health.remove(slot),
             };
         }
     }
@@ -334,8 +365,8 @@ pub(crate) struct Supervisor<P: Ports> {
     movement: Option<Move>,
     sent: BTreeSet<(Option<u64>, &'static str)>,
     admitted: bool,
-    order: AdmissionOrder,
-    admission_epoch: u64,
+    admission_gen: u64,
+    closed: bool,
     #[cfg(test)]
     pub(crate) handbacks: usize,
 }
@@ -353,7 +384,6 @@ impl<P: Ports> Supervisor<P> {
     ) -> Result<Self, Refused> {
         let mut registration = registry.register(&config.provider, config.channel, &config.root)?;
         let slot = registration.slot().ok_or(Refused::Duplicate)?;
-        let order = AdmissionOrder::new(config.provider.clone(), config.channel, 1, 0);
         Ok(Self {
             config,
             ports,
@@ -365,8 +395,8 @@ impl<P: Ports> Supervisor<P> {
             movement: None,
             sent: BTreeSet::new(),
             admitted: false,
-            order,
-            admission_epoch: 1,
+            admission_gen: 1,
+            closed: false,
             #[cfg(test)]
             handbacks: 0,
         })
@@ -374,7 +404,10 @@ impl<P: Ports> Supervisor<P> {
 
     /// The ledger owns the channel and no clear, loan or close is outstanding.
     pub(crate) fn admission_open(&self) -> bool {
-        self.admitted && !self.slot.loaned()
+        let closed = self.closed;
+        #[cfg(test)]
+        let closed = closed && !mutant("close_allows_commit");
+        self.admitted && !closed && !self.slot.loaned()
     }
 
     pub(crate) fn cursor(&mut self) -> Option<&mut Cursor> {
@@ -404,22 +437,33 @@ impl<P: Ports> Supervisor<P> {
     }
 
     fn invalidate_order(&mut self) {
-        match self.admission_epoch.checked_add(1) {
+        match self.admission_gen.checked_add(1) {
             Some(epoch) => {
-                self.admission_epoch = epoch;
-                self.order.invalidate(epoch);
+                self.admission_gen = epoch;
             }
             None => self.admitted = false,
         }
     }
 
-    /// All receipt work borrows the existing slot; readiness for Enter is a separate decision.
-    async fn input_command(&mut self, command: SupervisorCmd, receipt_open: bool) {
-        use crate::services::tui_input::receipt_identity::Responsibility;
+    /// Requests share the existing loan; durable submission remains a separate decision.
+    async fn input_command(&mut self, command: SupervisorCmd, _receipt_open: bool) {
+        use crate::services::tui_input::rows::receipt_identity::Responsibility;
         match command {
             SupervisorCmd::Clear => {}
-            SupervisorCmd::PendingSource { sources, reply } => {
-                let _ = reply.send(self.order.pending(&sources));
+            SupervisorCmd::Close { ack } => {
+                self.closed = true;
+                self.invalidate_order();
+                let result = loan(&mut self.slot, |lease| {
+                    let result = lease.get().and_then(|ledger| ledger.rows()).map(|_| ());
+                    lease.needs_reopen |= result.is_err();
+                    result
+                })
+                .await
+                .ok_or(Deferred::SupervisorLost)
+                .and_then(|result| result.map_err(|_| Deferred::Persistence));
+                self.registration
+                    .report(&held("ledger_close_flush_unconfirmed"), result.is_err());
+                let _ = ack.send(result);
             }
             SupervisorCmd::LookupResponsibility { identity, reply } => {
                 let result = if identity.execution_channel_id != self.config.channel {
@@ -435,68 +479,6 @@ impl<P: Ports> Supervisor<P> {
                     .await
                     .unwrap_or(Responsibility::Unknown)
                 };
-                let _ = reply.send(result);
-            }
-            SupervisorCmd::BeginScan {
-                sources,
-                horizon,
-                complete_fetch,
-                reply,
-            } => {
-                let result =
-                    self.order
-                        .begin_scan(self.admission_epoch, sources, horizon, complete_fetch);
-                let _ = reply.send(result);
-            }
-            SupervisorCmd::CommitFromScan {
-                source,
-                mut capability,
-                reply,
-            } => {
-                let key = source.key();
-                let result = if !receipt_open || !self.admission_open() {
-                    Receipt::Deferred(Deferred::Closed)
-                } else if source.identity().execution_channel_id != self.config.channel
-                    || self
-                        .order
-                        .permits(&capability, self.admission_epoch, key)
-                        .is_err()
-                {
-                    Receipt::Deferred(Deferred::Order)
-                } else {
-                    loan(&mut self.slot, move |lease| receipt::commit(lease, *source))
-                        .await
-                        .unwrap_or(Receipt::Deferred(Deferred::SupervisorLost))
-                };
-                match &result {
-                    Receipt::Accepted(_) | Receipt::DuplicateQueued(_) => {
-                        let _ = self
-                            .order
-                            .settle(&mut capability, self.admission_epoch, key);
-                    }
-                    Receipt::Deferred(_) => {
-                        let _ = self.order.defer(&capability, self.admission_epoch, key);
-                    }
-                }
-                let _ = reply.send(ScanCommit {
-                    receipt: result,
-                    capability,
-                });
-            }
-            SupervisorCmd::SettleFromScan {
-                source,
-                disposition: _,
-                mut capability,
-                reply,
-            } => {
-                let result = self
-                    .order
-                    .settle(&mut capability, self.admission_epoch, source)
-                    .map(|()| capability);
-                let _ = reply.send(result);
-            }
-            SupervisorCmd::CompleteScan { capability, reply } => {
-                let result = self.order.complete(capability, self.admission_epoch);
                 let _ = reply.send(result);
             }
         }
