@@ -1064,6 +1064,7 @@ server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_a
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
 server::routes::agents::host_guard_tests::auth_login_routes_refuse_a_target_another_host_claims
 server::routes::agents::host_guard_tests::command_agent_and_dispatch_refusal_leave_session_and_dispatch_working_pg
+server::routes::agents::host_guard_tests::command_unattributed_legacy_stop_and_dispatch_keep_off_fallback_pg
 server::routes::agents::host_guard_tests::diagnostics_routes_never_probe_a_non_legacy_session_pg
 server::routes::agents::host_guard_tests::stop_routes_keep_a_runtime_turn_on_another_host_pg
 server::routes::agents::tmux_relay_adoption_state_tests::absent_and_probe_error_states_are_distinct
@@ -2200,6 +2201,7 @@ services::cluster::channel_home::tests::command_admission_expires_at_the_renewal
 services::cluster::channel_home::tests::command_dormant_admission_does_not_lookup_or_start_a_task
 services::cluster::channel_home::tests::command_permit_drop_panic_and_blocking_abort_are_not_unknown
 services::cluster::channel_home::tests::command_permit_linearizes_close_and_preserves_children
+services::cluster::channel_home::tests::command_registration_never_discards_a_preexisting_local_execution
 services::cluster::channel_home::tests::command_registry_unregister_is_immediate_and_reuses_pending_count
 services::cluster::channel_home::tests::command_replacement_and_resume_keep_counter_and_intake_closed
 services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate

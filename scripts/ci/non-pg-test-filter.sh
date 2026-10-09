@@ -396,6 +396,7 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::channel_home::tests::command_dormant_admission_does_not_lookup_or_start_a_task
   services::cluster::channel_home::tests::command_permit_drop_panic_and_blocking_abort_are_not_unknown
   services::cluster::channel_home::tests::command_permit_linearizes_close_and_preserves_children
+  services::cluster::channel_home::tests::command_registration_never_discards_a_preexisting_local_execution
   services::cluster::channel_home::tests::command_registry_unregister_is_immediate_and_reuses_pending_count
   services::cluster::channel_home::tests::command_replacement_and_resume_keep_counter_and_intake_closed
   services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate

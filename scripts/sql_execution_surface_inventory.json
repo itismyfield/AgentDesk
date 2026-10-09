@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "0447339e2b2c501af0d50450a196524f393a4733",
+  "measured_at_sha": "dba471b2c34f2ce97898cb2dca0036d9186e9ead",
   "records": [
     {
       "root": "migrations/postgres",
@@ -17775,6 +17775,24 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:85326bb0b489a34c9563e4b1943f78aa17a19c19f21037ff982b5ff80eb43b6d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/agents_host_guard_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:897756af7efcd64543c0be631d0ecf253138698a8fafa6b697f9f74f2b6b3d83"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/agents_host_guard_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:8c3fefd93517f02180bd190842b706bdeefc0fabc8fd4c73ea34019bd8765738"
     },
     {
@@ -17785,6 +17803,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:a1b1534b8f7cb4a89d0375c686a83f6c10458f630ab3869d34de542f0b966012"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/agents_host_guard_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d2af3f3a32deca7df85e498f77d7c27157905ebd544b8536124bbf9c2605d913"
     },
     {
       "root": "src",
@@ -17803,6 +17830,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:6bd8ed438a2909155ab362f746ff4eadadb10a8327fa518ba280e35f880967bd"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/agents_host_guard_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:89d4207f23ebbde09f17c12b0dccd60f5d6f1470781006801b905de5aba211ea"
     },
     {
       "root": "src",

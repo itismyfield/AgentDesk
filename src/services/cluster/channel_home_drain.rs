@@ -171,6 +171,12 @@ pub(crate) async fn drain_round<P: DrainPort>(
         }
         // Takes the admission lock, so an admission in progress finishes first and none follows.
         home.close();
+        #[cfg(test)]
+        if channel_home::command_mutant("recheck_only_in_first_close")
+            && let Some(blocker) = commands_blocker(home)
+        {
+            return DrainStep::Waiting(blocker);
+        }
     }
     #[cfg(test)]
     let skip_recheck = channel_home::command_mutant("recheck_after_close_removed")

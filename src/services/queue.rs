@@ -230,14 +230,14 @@ impl QueueService {
                 let permit = match active_turn.as_ref() {
                     None => None,
                     Some(turn) => {
-                        let channel = turn.channel_id.as_deref().ok_or_else(|| {
-                            ServiceError::conflict("active turn channel unobserved")
-                        })?;
-                        crate::services::cluster::channel_home::admit_command(
-                            channel,
-                            turn.provider_name.as_deref().unwrap_or("cancel_dispatch"),
-                        )
-                        .map_err(|reason| ServiceError::conflict(reason.to_string()))?
+                        let admission = match turn.channel_id.as_deref() {
+                            Some(channel) => crate::services::cluster::channel_home::admit_command(
+                                channel,
+                                turn.provider_name.as_deref().unwrap_or("cancel_dispatch"),
+                            ),
+                            None => crate::services::cluster::channel_home::admit_unattributed(),
+                        };
+                        admission.map_err(|reason| ServiceError::conflict(reason.to_string()))?
                     }
                 };
                 crate::services::cluster::channel_home::command_scope(permit, async {

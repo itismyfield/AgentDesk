@@ -781,3 +781,22 @@ async fn command_dormant_admission_does_not_lookup_or_start_a_task() {
     }
     COMMAND_LOOKUPS.with(|calls| assert_eq!(calls.get(), 0));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn command_registration_never_discards_a_preexisting_local_execution() {
+    let old = register_for_test(9200000000000202, Some(HomeState::Worker));
+    let new = Arc::new(HomeGate::new(old.channel_id(), "mini"));
+    let write = HeldHome::for_test(old.channel_id(), "mini", 2, HomeState::Worker);
+    new.confirm(&write, Instant::now()).unwrap();
+    let permit = new.admit_recovery("claude").unwrap();
+    register(new.clone());
+    assert_eq!(new.commands_in_flight(), 1);
+    assert!(
+        Arc::ptr_eq(&registered(old.channel_id()).unwrap(), &old),
+        "unsafe replacement is not published"
+    );
+    drop(permit);
+    register(new.clone());
+    assert!(Arc::ptr_eq(&registered(old.channel_id()).unwrap(), &new));
+    unregister(old.channel_id());
+}

@@ -178,6 +178,19 @@ impl<F: Future> Drop for CommandFuture<F> {
     }
 }
 
+/// An unattributed command keeps Legacy behavior only before this process participates in homes.
+pub(crate) fn admit_unattributed() -> Result<Option<CommandPermit>, HomeRefusal> {
+    #[cfg(test)]
+    if command_mutant("unattributed_refused_while_off") {
+        return Err(HomeRefusal::NotHeld);
+    }
+    if with_homes(|homes| homes.get().is_some()) {
+        Err(HomeRefusal::NotHeld)
+    } else {
+        Ok(None)
+    }
+}
+
 /// Legacy channels do not allocate a permit; a registered home's refusal never becomes Legacy.
 pub(crate) fn admit_command(
     channel: &str,
@@ -621,10 +634,21 @@ pub(crate) fn register(home: Arc<HomeGate>) {
             return;
         }
         registry.prune();
+        let mut local = home.locked();
+        if registry
+            .commands
+            .get(&home.channel_id)
+            .is_some_and(|count| {
+                !Arc::ptr_eq(count, &local.commands)
+                    && local.commands.count.load(Ordering::Acquire) != 0
+            })
+        {
+            tracing::error!(channel = %home.channel_id, "home registration refused: unrelated command counter already active");
+            return;
+        }
         if let Some(old) = registry.gates.get(&home.channel_id) {
             old.withdraw();
         }
-        let mut local = home.locked();
         #[cfg(test)]
         if command_mutant("register_ignores_pending_count") {
             registry.commands.remove(&home.channel_id);

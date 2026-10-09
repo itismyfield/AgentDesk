@@ -62,16 +62,14 @@ pub async fn stop_agent_turn(
         );
     }
 
-    let Some(channel) = session.runtime_channel_id.as_deref() else {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({"error": "active turn channel unobserved"})),
-        );
+    let admission = match session.runtime_channel_id.as_deref() {
+        Some(channel) => crate::services::cluster::channel_home::admit_command(
+            channel,
+            session.provider.as_deref().unwrap_or("agent_stop"),
+        ),
+        None => crate::services::cluster::channel_home::admit_unattributed(),
     };
-    let permit = match crate::services::cluster::channel_home::admit_command(
-        channel,
-        session.provider.as_deref().unwrap_or("agent_stop"),
-    ) {
+    let permit = match admission {
         Ok(permit) => permit,
         Err(reason) => {
             return (

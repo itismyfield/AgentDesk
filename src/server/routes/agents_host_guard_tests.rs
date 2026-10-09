@@ -364,3 +364,104 @@ async fn command_agent_and_dispatch_refusal_leave_session_and_dispatch_working_p
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn command_unattributed_legacy_stop_and_dispatch_keep_off_fallback_pg() {
+    use crate::db::o_channel_homes::HomeState;
+    use crate::services::cluster::channel_home;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ScriptedTmux::install();
+    let (db, pool) = postgres().await;
+    assert!(
+        channel_home::admit_unattributed().is_ok(),
+        "fresh registry is off"
+    );
+    for registered in [false, true] {
+        let gate = registered
+            .then(|| channel_home::register_for_test(9200000000000200, Some(HomeState::Worker)));
+        for dispatch_case in [false, true] {
+            let label = format!("home-unattributed-{registered}-{dispatch_case}");
+            let provider = crate::services::provider::ProviderKind::Claude;
+            let name = provider.build_tmux_session_name(&label);
+            let id = seed_turn(
+                &pool,
+                Case::Stored(Stored::Legacy),
+                (&label, &name),
+                "remote-home",
+                9200000000000201 + u64::from(registered) * 2 + u64::from(dispatch_case),
+            )
+            .await;
+            sqlx::query("UPDATE sessions SET thread_channel_id=NULL WHERE id=$1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO task_dispatches (id,title,dispatch_type,status) VALUES ($1,'unattributed','implementation','dispatched')").bind(&label).execute(&pool).await.unwrap();
+            sqlx::query("UPDATE sessions SET active_dispatch_id=$2 WHERE id=$1")
+                .bind(id)
+                .bind(&label)
+                .execute(&pool)
+                .await
+                .unwrap();
+            tmux.take_calls();
+            if dispatch_case {
+                let result = crate::services::queue::QueueService::new(Some(pool.clone()))
+                    .cancel_dispatch(None, &label)
+                    .await;
+                if registered {
+                    assert_eq!(result.unwrap_err().status(), StatusCode::CONFLICT);
+                } else {
+                    assert!(result.unwrap()["ok"].as_bool().unwrap());
+                }
+            } else {
+                let (status, Json(body)) =
+                    super::stop_agent_turn(State(state(pool.clone())), Path(label.clone())).await;
+                assert_eq!(
+                    status,
+                    if registered {
+                        StatusCode::CONFLICT
+                    } else {
+                        StatusCode::OK
+                    },
+                    "{body}"
+                );
+            }
+            assert_eq!(
+                row_status(&pool, id).await,
+                if registered {
+                    "turn_active"
+                } else {
+                    "disconnected"
+                }
+            );
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id=$1")
+                    .bind(&label)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                status,
+                if !registered && dispatch_case {
+                    "cancelled"
+                } else {
+                    "dispatched"
+                }
+            );
+            let calls = tmux.take_calls();
+            if registered {
+                assert!(calls.iter().all(|call| !call.contains("kill")), "{calls:?}");
+            } else {
+                assert!(
+                    calls.iter().any(|call| call.contains(&name)),
+                    "Legacy tmux-name fallback: {calls:?}"
+                );
+            }
+        }
+        if let Some(gate) = gate {
+            channel_home::unregister(gate.channel_id());
+        }
+    }
+    pool.close().await;
+    db.drop().await;
+}
