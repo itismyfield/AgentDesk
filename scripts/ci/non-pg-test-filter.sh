@@ -251,6 +251,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::stale_turn_reconciler::tests
   --skip services::tmux_turn_liveness::tests_pg
   --skip services::tui_o::alarm::postgres_tests
+  --skip services::tui_o::exact_pg::tests
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
@@ -770,14 +771,8 @@ NON_PG_FILTER_REPLAY=(
   services::settings::tests::settings_response_dtos_serialize_existing_contract_fields
   services::settings::tests::settings_write_response_serializes_ok_contract
   services::stale_turn_reconciler::tests::tmux_identity_rejects_provider_mismatch_and_spinner_is_busy
-  services::tui_o::exact_pg::tests::exact_ack_pg_waits_for_commit_barrier
-  services::tui_o::exact_pg::tests::exact_child_ack_precedes_terminal_seal_pg
   services::tui_o::exact_pg::tests::exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt
-  services::tui_o::exact_pg::tests::exact_metadata_pg_restore_and_terminal_port_stub
   services::tui_o::exact_pg::tests::exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged
-  services::tui_o::exact_pg::tests::exact_off_pg_statement_trace_and_files_zero
-  services::tui_o::exact_pg::tests::exact_pg_process_reader_uses_only_metadata
-  services::tui_o::exact_pg::tests::exact_settled_ack_names_normalized_pg_payload
   services::tui_o::exact_pg::tests::exact_snapshot_sibling_construction_is_compile_rejected
   services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
@@ -1038,6 +1033,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::stale_turn_reconciler::tests
   services::tmux_turn_liveness::tests_pg
   services::tui_o::alarm::postgres_tests
+  services::tui_o::exact_pg::tests
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests
   voice::announce_meta::tests
