@@ -116,6 +116,12 @@ pub enum WriterAlarm {
     },
     /// Capture waits until delivered segments are collected; nothing is dropped.
     SpoolFull,
+    /// Ready or Prepared work has waited more than five minutes; this only reports the wait.
+    WaitingTooLong {
+        incident: String,
+        ready: usize,
+        prepared: Option<u64>,
+    },
     /// The binding log skipped a seq; the channel stops before applying anything past it.
     BindingGap {
         expected: u64,
@@ -156,6 +162,8 @@ pub enum WriterAlarm {
 
 pub trait AlarmSink: Send + Sync {
     fn raise(&self, channel: u64, alarm: WriterAlarm);
+    /// No overdue work remains; a later overdue wait is a new incident.
+    fn waiting_cleared(&self, _channel: u64) {}
     fn reconcile_reader_count(&self, _channel: u64, _count: usize) {}
     /// Whether the host will start the halted writer again after a wait.
     fn resume_pending(&self, _channel: u64, _pending: bool) {}

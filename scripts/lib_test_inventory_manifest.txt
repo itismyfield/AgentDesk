@@ -10806,6 +10806,7 @@ services::tui_input::transition_tests::supported::staged_order_survives_checkpoi
 services::tui_input::transition_tests::supported::staged_order_survives_commit_and_checkpoint
 services::tui_o::alarm::postgres_tests::distinct_channels_and_kinds_enqueue_once_pg
 services::tui_o::alarm::postgres_tests::suppression_settles_existing_rows_and_errors_retry_pg
+services::tui_o::alarm::postgres_tests::waiting_incidents_repeat_once_recur_and_replay_independently_pg
 services::tui_o::alarm::postgres_tests::writer_alarm_retries_after_insert_failure_without_another_raise_pg
 services::tui_o::alarm::tests::a_pause_ends_on_gateway_return_while_blocked_and_history_stay
 services::tui_o::alarm::tests::a_pending_resume_shows_until_settled_and_a_cleared_halt_leaves_every_other_reason
@@ -10816,6 +10817,7 @@ services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
 services::tui_o::alarm::tests::not_found_frequency_clears_when_its_window_passes_without_new_events
 services::tui_o::alarm::tests::p2_2_reader_recovery_preserves_history_other_reasons_and_first_notification_latch
 services::tui_o::alarm::tests::retry_backoff_caps_without_ending_and_attempt_timeout_has_an_exact_boundary
+services::tui_o::alarm::tests::waiting_clear_keeps_other_health_and_owned_retry_slots
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
 services::tui_o::channel_policy::tests::a_body_releases_a_pending_adoption_while_a_peek_or_another_channel_leaves_it
 services::tui_o::channel_policy::tests::a_channel_both_nodes_dropped_stays_o_on_the_home_and_turns_legacy_on_the_standby
@@ -10976,6 +10978,7 @@ services::tui_o::writer::tests::a_stop_keeps_its_store_error_and_names_a_prepare
 services::tui_o::writer::tests::a_tool_call_is_left_to_the_panel_and_only_the_body_posts
 services::tui_o::writer::tests::a_violation_recorded_while_running_stops_the_writer_before_the_next_post
 services::tui_o::writer::tests::actor::a_full_spool_pauses_capture_until_delivered_segments_are_collected
+services::tui_o::writer::tests::actor::a_recovered_actor_clears_waiting_health_through_its_shared_sink
 services::tui_o::writer::tests::actor::a_source_rewritten_behind_the_cursor_halts_the_channel_before_any_post
 services::tui_o::writer::tests::actor::a_stop_an_abort_or_eof_settles_nothing_the_channel_still_owes
 services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until_it_is_sealed_and_posted
@@ -11071,6 +11074,9 @@ services::tui_o::writer::tests::actor::host_start::rotation_unsettled::consecuti
 services::tui_o::writer::tests::actor::host_start::rotation_unsettled::resume::a_resumed_actor_publishes_its_unretired_predecessor_and_never_an_unread_zero
 services::tui_o::writer::tests::actor::host_start::rotation_unsettled::the_readiness_map_reports_a_running_actors_projection_only
 services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
+services::tui_o::writer::tests::actor::overdue_ready_is_observed_by_the_loop_at_strict_boundary_and_recurrence
+services::tui_o::writer::tests::actor::ready_item_ages_and_channels_are_independent
+services::tui_o::writer::tests::actor::restored_prepared_uses_durable_utc_age_and_clamps_future_time
 services::tui_o::writer::tests::actor::rotation::a_bind_waiting_for_its_file_alarms_once_late_and_its_resolution_attaches_it
 services::tui_o::writer::tests::actor::rotation::a_body_the_parent_only_announced_is_posted_from_the_resumed_source
 services::tui_o::writer::tests::actor::rotation::a_channel_whose_binding_log_names_no_switched_source_halts_before_capture
