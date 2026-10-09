@@ -523,10 +523,30 @@ impl StopCancel {
         if slot.as_ref().is_some_and(|slot| slot.is_some()) {
             return Self::Herdr(token.clone());
         }
+        #[cfg(test)]
+        let slot = if herdr_interrupt_mutant("p2b_unlock_before_publish") {
+            drop(slot);
+            None
+        } else {
+            slot
+        };
+        #[cfg(test)]
+        run_decide_hook();
         token.publish_cancel(reason);
         drop(slot);
         Self::Published(token)
     }
+}
+
+/// Test seam between a stop's slot judgement and its publish: the decide thread's hook observes
+/// the window a concurrent prepare must not enter.
+#[cfg(test)]
+fn run_decide_hook() {
+    DECIDE_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook();
+        }
+    });
 }
 
 /// Provider-terminal settlement is not yet wired; tests exercise only delivery machinery.
@@ -574,6 +594,7 @@ thread_local! {
     pub(crate) static HERDR_CANCEL_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     #[cfg(unix)]
     pub(crate) static HERDR_SETTLEMENT_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    static DECIDE_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
 pub(crate) struct ClaudeInterruptDeliveryGuard<'a> {
@@ -1088,6 +1109,111 @@ mod tests {
             matches!(decided, StopCancel::Published(_)),
             "without settlement it cancels"
         );
+        assert!(unsettled.cancelled.load(Ordering::SeqCst));
+    }
+
+    /// With settlement a stop holds the Herdr slot from its judgement through its publish: a
+    /// prepare racing into that window waits, then sees the cancel and installs nothing. Without
+    /// settlement the stop takes no slot.
+    #[cfg(unix)]
+    #[test]
+    fn p2b_decide_holds_slot_lock_until_publish() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct HookReset;
+        impl Drop for HookReset {
+            fn drop(&mut self) {
+                DECIDE_HOOK.with(|hook| hook.borrow_mut().take());
+                HERDR_SETTLEMENT_OVERRIDE.set(true);
+            }
+        }
+        let _reset = HookReset;
+        let owner = herdr_owner("1", "AgentDesk-codex-stop-lock-window");
+        let reason = || "mailbox_cancel_active_turn".to_string();
+
+        let token = Arc::new(CancelToken::new());
+        let (done_tx, done_rx) = mpsc::channel::<bool>();
+        let done_rx = std::rc::Rc::new(done_rx);
+        let hook_runs = Arc::new(AtomicUsize::new(0));
+        {
+            let token = token.clone();
+            let owner = owner.clone();
+            let hook_runs = hook_runs.clone();
+            let done_rx = done_rx.clone();
+            DECIDE_HOOK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    hook_runs.fetch_add(1, Ordering::SeqCst);
+                    let (started_tx, started_rx) = mpsc::channel::<()>();
+                    let racer = token.clone();
+                    let owner = owner.clone();
+                    let done_tx = done_tx.clone();
+                    std::thread::spawn(move || {
+                        started_tx.send(()).unwrap();
+                        let prepared =
+                            racer.try_prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+                        done_tx.send(prepared.is_some()).unwrap();
+                    });
+                    started_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("the racing prepare starts");
+                    let raced = done_rx.recv_timeout(Duration::from_millis(500));
+                    assert!(
+                        matches!(raced, Err(mpsc::RecvTimeoutError::Timeout)),
+                        "the racing prepare is not past the slot while the stop holds it: {raced:?}"
+                    );
+                    assert!(
+                        token.herdr_interrupt.try_lock().is_err(),
+                        "the stop holds the slot between its judgement and its publish"
+                    );
+                    assert!(!token.cancelled.load(Ordering::SeqCst));
+                }));
+            });
+        }
+        let decided = StopCancel::decide(Some(token.clone()), reason());
+        assert_eq!(
+            hook_runs.load(Ordering::SeqCst),
+            1,
+            "the window was observed"
+        );
+        assert!(matches!(decided, StopCancel::Published(_)));
+        let installed = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the racing prepare finishes once the slot is released");
+        assert!(
+            !installed,
+            "the prepare sees the published cancel and takes nothing"
+        );
+        assert!(token.cancelled.load(Ordering::SeqCst));
+        assert!(token.herdr_interrupt_state().is_none());
+        assert!(
+            token.tmux_session_name().is_none(),
+            "a refused prepare binds nothing"
+        );
+
+        HERDR_SETTLEMENT_OVERRIDE.set(false);
+        let unsettled = Arc::new(CancelToken::new());
+        let unsettled_runs = Arc::new(AtomicUsize::new(0));
+        {
+            let unsettled = unsettled.clone();
+            let unsettled_runs = unsettled_runs.clone();
+            DECIDE_HOOK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    unsettled_runs.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        unsettled.herdr_interrupt.try_lock().is_ok(),
+                        "without settlement the stop takes no slot"
+                    );
+                }));
+            });
+        }
+        let decided = StopCancel::decide(Some(unsettled.clone()), reason());
+        assert_eq!(
+            unsettled_runs.load(Ordering::SeqCst),
+            1,
+            "the window was observed"
+        );
+        assert!(matches!(decided, StopCancel::Published(_)));
         assert!(unsettled.cancelled.load(Ordering::SeqCst));
     }
 }
