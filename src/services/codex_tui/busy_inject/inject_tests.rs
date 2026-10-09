@@ -547,3 +547,99 @@ fn attach_and_foreign_composer_text_withhold_the_enter() {
     );
     assert_eq!(fake.enters(), 0);
 }
+
+/// The capture with a remote image row drawn above its textarea, as Codex shows a restored draft.
+fn with_image(capture: &str) -> String {
+    let mut rows: Vec<&str> = capture.lines().collect();
+    let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences;
+    let prompt = rows.iter().rposition(|row| plain(row).starts_with('›'));
+    rows.splice(prompt.unwrap()..prompt.unwrap(), ["  [Image #1]", ""]);
+    rows.join("\n")
+}
+
+/// An image left above an empty textarea is a draft an Enter would submit: it is refused before
+/// any write, and an image that appears after the paste keeps the Enter back.
+#[test]
+fn an_image_draft_is_refused_before_the_paste_and_never_owned() {
+    let shown = screen::read(&with_image(&fixture("busy_empty.ansi")));
+    assert_eq!(
+        (shown.composer, shown.attachments),
+        (screen::Composer::Empty, true)
+    );
+    // Only the rows next to the composer count: an image named further up is transcript, while
+    // an adjacent row naming one in another shape is not read at all.
+    let far = fixture("busy_empty.ansi").replacen("Working", "[Image #1] Working", 1);
+    assert_eq!(screen::read(&far).composer, screen::Composer::Empty);
+    let odd = with_image(&fixture("busy_empty.ansi")).replace("[Image #1]", "[Image #1] (x)");
+    assert_eq!(screen::read(&odd).composer, screen::Composer::Unread);
+    let fake = Fake::new();
+    fake.answers("cap", &[&with_image(&fixture("busy_empty.ansi"))]);
+    let ledger = FakeLedger::default();
+    assert_eq!(fake.run(&ledger), Outcome::NotSent(Veto::Draft));
+    let writes = fake.calls("load-buffer") + fake.calls("paste-buffer") + fake.enters();
+    assert_eq!((writes, ledger.registered.get()), (0, 0));
+    let fake = Fake::new();
+    let after = with_image(&fixture("busy_frame.ansi"));
+    fake.answers("cap", &[&fixture("busy_empty.ansi"), &after]);
+    let outcome = fake.run(&FakeLedger::default());
+    assert_eq!(outcome, Outcome::Unconfirmed(Unconfirmed::DraftNotOwned));
+    assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 0));
+}
+
+/// Bodies the screen reader could not prove after the paste go back to the queue before any
+/// write: a blank or blank-looking line, or more rows than the reader scans in a tall pane.
+#[test]
+fn bodies_the_reader_cannot_prove_are_refused_before_any_write() {
+    let tall: Vec<String> = (0..40).map(|row| format!("row {row}")).collect();
+    let bodies = [
+        "first\n\nsecond".to_string(),
+        "first\n   \nsecond".to_string(),
+        "first\n".to_string(),
+        tall.join("\n"),
+    ];
+    for body in bodies {
+        let fake = Fake::new();
+        fake.answers("attach", &["0,,80,100"]);
+        let ledger = FakeLedger::default();
+        let outcome = fake.run_with(&ledger, &body);
+        assert_eq!(
+            outcome,
+            Outcome::NotSent(Veto::UnpredictableRender),
+            "{body:?}"
+        );
+        let writes = fake.calls("load-buffer") + fake.calls("paste-buffer") + fake.enters();
+        assert_eq!((writes, ledger.registered.get()), (0, 0), "{body:?}");
+    }
+}
+
+/// A start without a usable root, a review entry without a name, or a review exit that is not the
+/// open review's own never reads as a steerable model turn; the open review's exit still does.
+#[test]
+fn unproven_roots_and_reviews_never_read_as_steerable() {
+    let raw = |payload: serde_json::Value| {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "event_msg", "payload": payload})
+        )
+    };
+    let rest = context("t1", "danger-full-access") + &item("t1", "UserMessage", "go");
+    for root in [
+        serde_json::Value::Null,
+        serde_json::json!(7),
+        serde_json::json!(" "),
+    ] {
+        let start =
+            raw(serde_json::json!({"type": "task_started", "turn_id": "t1", "root_turn_id": root}));
+        assert_eq!(verdict(&(start + &rest)), TurnVerdict::Unknown, "{root}");
+    }
+    let rootless = raw(serde_json::json!({"type": "task_started", "turn_id": "t1"}));
+    assert_eq!(verdict(&(rootless + &rest)), TurnVerdict::Unknown);
+    let unnamed = raw(serde_json::json!({"type": "item_completed",
+        "item": {"type": "EnteredReviewMode", "id": "i1"}}));
+    assert_eq!(verdict(&(unnamed + &model("t1"))), TurnVerdict::Unknown);
+    let entered = item("r1", "EnteredReviewMode", "");
+    let foreign = entered.clone() + &item("q9", "ExitedReviewMode", "") + &model("t1");
+    assert_eq!(verdict(&foreign), non_steerable("t1"));
+    let own = entered + &item("r1", "ExitedReviewMode", "") + &model("t1");
+    assert_eq!(verdict(&own), steerable("t1"));
+}

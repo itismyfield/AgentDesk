@@ -35,6 +35,15 @@ struct Open {
     unreadable: bool,
 }
 
+/// Review mode as the window shows it; an entry without a name proves no review closed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum Review {
+    #[default]
+    Clear,
+    Active(String),
+    Unknown,
+}
+
 fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
@@ -53,7 +62,7 @@ pub(crate) fn read_turn(path: &Path) -> Option<TurnVerdict> {
         lines.next();
     }
     let mut open: Option<Open> = None;
-    let mut review: Option<String> = None;
+    let mut review = Review::Clear;
     // A line without its newline may still be mid-write.
     for line in lines.filter(|line| line.ends_with(b"\n")) {
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
@@ -76,7 +85,9 @@ pub(crate) fn read_turn(path: &Path) -> Option<TurnVerdict> {
         TurnVerdict::Unknown
     } else if open.closed {
         TurnVerdict::NotBusy
-    } else if open.turn != open.root || review.is_some() || open.compaction {
+    } else if review == Review::Unknown {
+        TurnVerdict::Unknown
+    } else if open.turn != open.root || review != Review::Clear || open.compaction {
         TurnVerdict::NonSteerable(turn)
     } else if !open.context || !open.full_access {
         TurnVerdict::NonSteerable(turn)
@@ -87,16 +98,18 @@ pub(crate) fn read_turn(path: &Path) -> Option<TurnVerdict> {
     })
 }
 
-fn apply(record: &Value, open: &mut Option<Open>, review: &mut Option<String>) {
+fn apply(record: &Value, open: &mut Option<Open>, review: &mut Review) {
     let Some(payload) = record.get("payload") else {
         return;
     };
     let turn_id = crate::services::agent_protocol::codex_payload_turn_id(payload);
     match (text(record, "type"), text(payload, "type")) {
         (Some("event_msg"), Some("task_started")) => {
-            let next = turn_id.map(|turn| Open {
+            // A start that does not name its root cannot prove a model turn of its own.
+            let root = text(payload, "root_turn_id").filter(|root| !root.trim().is_empty());
+            let next = turn_id.zip(root).map(|(turn, root)| Open {
                 turn: turn.to_string(),
-                root: text(payload, "root_turn_id").unwrap_or(turn).to_string(),
+                root: root.to_string(),
                 ..Open::default()
             });
             *open = Some(next.unwrap_or(Open {
@@ -115,8 +128,11 @@ fn apply(record: &Value, open: &mut Option<Open>, review: &mut Option<String>) {
         (Some("event_msg"), Some("item_completed")) => {
             let item = payload.get("item").and_then(|item| text(item, "type"));
             match item {
-                Some("EnteredReviewMode") => *review = turn_id.map(str::to_string),
-                Some("ExitedReviewMode") => *review = None,
+                Some("EnteredReviewMode") => {
+                    *review = turn_id.map_or(Review::Unknown, |id| Review::Active(id.to_string()));
+                }
+                // Only the open review's own exit ends it.
+                Some("ExitedReviewMode") if ends(review, turn_id) => *review = Review::Clear,
                 _ => {}
             }
             let Some(open) = open.as_mut().filter(|open| turn_id == Some(&open.turn)) else {
@@ -129,8 +145,8 @@ fn apply(record: &Value, open: &mut Option<Open>, review: &mut Option<String>) {
             }
         }
         (Some("event_msg"), Some("task_complete" | "turn_aborted")) => {
-            if review.is_some() && review.as_deref() == turn_id {
-                *review = None;
+            if ends(review, turn_id) {
+                *review = Review::Clear;
             }
             // An unnamed end may be this turn's, so the turn reads as Unknown.
             if let Some(open) = open.as_mut() {
@@ -143,6 +159,10 @@ fn apply(record: &Value, open: &mut Option<Open>, review: &mut Option<String>) {
         }
         _ => {}
     }
+}
+
+fn ends(review: &Review, turn_id: Option<&str>) -> bool {
+    matches!(review, Review::Active(open) if turn_id == Some(open.as_str()))
 }
 
 /// The turn a complete user record after `offset` carrying the nonce names, the first one found.
