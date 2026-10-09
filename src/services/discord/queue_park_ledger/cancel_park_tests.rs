@@ -512,27 +512,35 @@ async fn disappearance_without_claim_or_exit_is_unknown_not_resumed() {
     shared
         .queue_park_ledger
         .register(channel, &tracked, Origin::PostCancelPreserved);
-    let first_seen =
-        shared.queue_park_ledger.channels.lock().unwrap().sources[&channel][&6_016_162].first_seen;
     shared
         .queue_park_ledger
         .evaluate(&shared, &ProviderKind::Claude, channel, &Default::default());
     assert_eq!(capture.outcome("tracked source left the queue"), 1);
     assert_eq!(capture.outcome("resumed"), 0);
+    assert_eq!(capture.outcome("explicitly_removed"), 0);
+    assert_eq!(capture.errors(), 0);
+    let captured = capture.text();
+    let unknown = captured
+        .lines()
+        .find(|line| line.contains("queue_park") && line.contains("tracked source left the queue"))
+        .expect("the successful observation reports the source's unknown disposition");
+    assert!(unknown.contains("INFO"), "{unknown}");
+    {
+        let state = shared.queue_park_ledger.channels.lock().unwrap();
+        assert!(!state.sources.contains_key(&channel));
+        assert!(state.revisions.contains_key(&channel));
+    }
     let projection = shared.queue_park_ledger.project(
         &shared,
         &ProviderKind::Claude,
         channel,
         &Default::default(),
     );
-    assert_eq!(
-        projection.reason.as_deref(),
-        Some("source_disposition_unknown")
-    );
-    assert_eq!(projection.recovery_state, Some("unknown"));
-    assert_eq!(projection.tracked_source_ids, vec![6_016_162]);
-    assert_eq!(projection.tracked_source_count, 1);
-    assert_eq!(projection.oldest_tracked_secs, Some(0));
+    assert_eq!(projection.reason.as_deref(), Some("idle_no_start"));
+    assert_eq!(projection.recovery_state, None);
+    assert!(projection.tracked_source_ids.is_empty());
+    assert_eq!(projection.tracked_source_count, 0);
+    assert_eq!(projection.oldest_tracked_secs, None);
     tokio::time::advance(Duration::from_secs(600)).await;
     let unrelated_live = ChannelMailboxSnapshot {
         cancel_token: Some(Arc::new(CancelToken::new())),
@@ -552,58 +560,208 @@ async fn disappearance_without_claim_or_exit_is_unknown_not_resumed() {
         .evaluate(&shared, &ProviderKind::Claude, channel, &unrelated_live);
     assert_eq!(
         capture.errors(),
-        1,
-        "unresolved disappearance still reaches the park deadline"
+        0,
+        "a resolved unknown disposition cannot reach the park deadline"
     );
-    let captured = capture.text();
-    let error = captured
-        .lines()
-        .find(|line| {
-            line.contains("queue_park")
-                && line.contains("ERROR")
-                && line.contains("source_disposition_unknown")
-        })
-        .expect("the unresolved source emits its own error despite the unrelated live turn");
-    assert!(error.contains("recovery_owner=\"none\""), "{error}");
-    assert!(error.contains("recovery_state=\"unknown\""), "{error}");
     assert_eq!(
         capture.outcome("tracked source left the queue"),
         1,
-        "unknown is reported once without erasing the source"
+        "the removed source is reported only once"
     );
     let aged =
         shared
             .queue_park_ledger
             .project(&shared, &ProviderKind::Claude, channel, &unrelated_live);
-    assert_eq!(aged.reason.as_deref(), Some("source_disposition_unknown"));
-    assert_eq!(aged.owner, Some("none"));
-    assert_eq!(aged.recovery_state, Some("unknown"));
-    assert_eq!(aged.oldest_tracked_secs, Some(600));
-    assert_eq!(aged.tracked_source_ids, vec![6_016_162]);
-    {
-        let state = shared.queue_park_ledger.channels.lock().unwrap();
-        let source = &state.sources[&channel][&6_016_162];
-        assert_eq!(source.first_seen, first_seen);
-        assert!(source.disposition_unknown);
-        assert!(source.escalated);
-    }
+    assert_eq!(aged.reason.as_deref(), Some("live_turn_active"));
+    assert_eq!(aged.owner, Some("active_turn_completion"));
+    assert_eq!(aged.recovery_state, None);
+    assert_eq!(aged.oldest_tracked_secs, None);
+    assert!(aged.tracked_source_ids.is_empty());
+    assert_eq!(aged.tracked_source_count, 0);
     tokio::time::advance(Duration::from_secs(600)).await;
     shared
         .queue_park_ledger
         .evaluate(&shared, &ProviderKind::Claude, channel, &Default::default());
-    assert_eq!(capture.errors(), 1);
-    shared.queue_park_ledger.exit(
-        channel,
-        &[crate::services::turn_orchestrator::QueueExitEvent {
-            intervention: tracked.intervention_queue[0].clone(),
-            kind: crate::services::turn_orchestrator::QueueExitKind::Cancelled,
-        }],
-    );
-    assert_eq!(capture.outcome("explicitly_removed"), 1);
+    assert_eq!(capture.errors(), 0);
+    assert_eq!(capture.outcome("tracked source left the queue"), 1);
+    assert_eq!(capture.outcome("explicitly_removed"), 0);
     assert_eq!(capture.outcome("resumed"), 0);
     let state = shared.queue_park_ledger.channels.lock().unwrap();
     assert!(!state.sources.contains_key(&channel));
     assert!(state.revisions.contains_key(&channel));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn short_claim_between_evaluations_resolves_unknown_without_error() {
+    use crate::services::turn_orchestrator::TokenFinish;
+
+    let _root = isolated_agentdesk_root();
+    let capture = LogCapture::default();
+    let _capture = capture.install();
+    let channel = ChannelId::new(6_016_371);
+    let source_id = MessageId::new(6_016_372);
+    let (registry, shared) = held_fixture(channel).await;
+    discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(enqueue(
+        &shared,
+        channel,
+        source_id.get(),
+        false,
+    ))
+    .await;
+    let drain = recovery::schedule_pending_queue_drain_after_cancel(
+        &registry,
+        "claude",
+        channel,
+        "queue-park-short-claim-test",
+    )
+    .await;
+    assert!(drain.scheduled);
+    assert_eq!(drain.queue_depth_after, Some(1));
+    assert!(
+        shared.queue_park_ledger.channels.lock().unwrap().sources[&channel]
+            .contains_key(&source_id.get())
+    );
+    let cancelled_anchor = snapshot(&shared, channel).await.cancel_token.unwrap();
+    let TokenFinish::Finished(released) = discord::mailbox_finish_judged_turn(
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+        Some(&cancelled_anchor),
+        discord::MailboxLookup::Peek,
+    )
+    .await
+    else {
+        panic!("the judged finish must release the exact cancelled anchor");
+    };
+    assert!(Arc::ptr_eq(
+        released.removed_token.as_ref().unwrap(),
+        &cancelled_anchor
+    ));
+    assert!(released.has_pending);
+    assert!(released.queue_exit_events.is_empty());
+    let taken = shared
+        .mailbox(channel)
+        .take_next_soft(discord::queue_persistence_context(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+        ))
+        .await;
+    let item = taken.intervention.expect("the queued source is dequeued");
+    let _dispatch_lease = taken
+        .dispatch_lease
+        .expect("the dequeue reserves its source");
+    assert_eq!(item.message_id, source_id);
+    let reserved = snapshot(&shared, channel).await;
+    assert_eq!(reserved.pending_user_dispatch, Some(source_id));
+    assert!(reserved.intervention_queue.is_empty());
+    let token = Arc::new(CancelToken::new());
+    assert!(
+        discord::mailbox_try_start_turn(
+            &shared,
+            channel,
+            token.clone(),
+            item.author_id,
+            item.message_id,
+        )
+        .await,
+        "the operational admission must claim the dequeued source"
+    );
+    let claimed = snapshot(&shared, channel).await;
+    assert_eq!(claimed.active_user_message_id, Some(source_id));
+    assert!(Arc::ptr_eq(claimed.cancel_token.as_ref().unwrap(), &token));
+    assert!(claimed.pending_user_dispatch.is_none());
+    assert!(claimed.pending_user_dispatch_source_ids.is_empty());
+    assert_eq!(
+        shared.queue_park_ledger.evaluations.load(Ordering::SeqCst),
+        0
+    );
+    let TokenFinish::Finished(finished) = discord::mailbox_finish_judged_turn(
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+        Some(&token),
+        discord::MailboxLookup::Peek,
+    )
+    .await
+    else {
+        panic!("the short claim must finish before any park evaluation");
+    };
+    assert!(Arc::ptr_eq(
+        finished.removed_token.as_ref().unwrap(),
+        &token
+    ));
+    assert!(finished.mailbox_online);
+    assert!(!finished.has_pending);
+    assert!(finished.queue_exit_events.is_empty());
+    assert!(finished.persistence_error.is_none());
+    let completed = snapshot(&shared, channel).await;
+    assert!(completed.cancel_token.is_none());
+    assert!(completed.active_user_message_id.is_none());
+    assert!(completed.active_absorbed_source_ids.is_empty());
+    assert!(completed.intervention_queue.is_empty());
+    assert!(completed.pending_user_dispatch.is_none());
+    assert!(completed.pending_user_dispatch_source_ids.is_empty());
+    assert_eq!(
+        shared.queue_park_ledger.evaluations.load(Ordering::SeqCst),
+        0
+    );
+
+    evaluate_provider(&registry, &ProviderKind::Claude).await;
+    assert_eq!(capture.outcome("tracked source left the queue"), 1);
+    assert_eq!(capture.outcome("resumed"), 0);
+    assert_eq!(capture.outcome("explicitly_removed"), 0);
+    assert!(
+        !shared
+            .queue_park_ledger
+            .channels
+            .lock()
+            .unwrap()
+            .sources
+            .contains_key(&channel),
+        "a completed claim between evaluations must resolve the unknown source"
+    );
+    let captured = capture.text();
+    let unknown = captured
+        .lines()
+        .find(|line| line.contains("queue_park") && line.contains("tracked source left the queue"))
+        .expect("the transient claim has an observed unknown disposition");
+    assert!(unknown.contains("INFO"), "{unknown}");
+    tokio::time::advance(Duration::from_secs(600)).await;
+    evaluate_provider(&registry, &ProviderKind::Claude).await;
+    assert_eq!(capture.errors(), 0);
+    assert_eq!(capture.outcome("tracked source left the queue"), 1);
+    assert_eq!(capture.outcome("resumed"), 0);
+    let actual = snapshot(&shared, channel).await;
+    let classified = super::classify(&shared, &ProviderKind::Claude, channel, &actual);
+    assert_eq!(classified.reason.as_deref(), Some("idle_no_start"));
+    let json = serde_json::to_value(recovery::build_health_snapshot(&registry).await)
+        .expect("serialize health after the short claim has finished");
+    let mailbox = json["mailboxes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["provider"] == "claude" && entry["channel_id"] == channel.get())
+        .expect("actual health reports the completed claim's mailbox");
+    assert_eq!(mailbox["queue_park_reason"], classified.reason.unwrap());
+    assert_eq!(
+        mailbox["queue_park_tracked_source_ids"],
+        serde_json::json!([])
+    );
+    assert_eq!(mailbox["queue_park_tracked_source_count"], 0);
+    assert_eq!(
+        mailbox["queue_park_oldest_tracked_secs"],
+        serde_json::Value::Null
+    );
+    assert!(
+        !shared
+            .queue_park_ledger
+            .channels
+            .lock()
+            .unwrap()
+            .sources
+            .contains_key(&channel)
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1254,7 +1412,6 @@ async fn failed_mailbox_observations_preserve_sources_age_and_escalation() {
                 "{case} cannot reset the observed age"
             );
             assert!(!source.escalated);
-            assert!(!source.disposition_unknown);
             assert!(matches!(source.origin, Origin::PostCancelPreserved));
             assert_eq!(state.unavailable.get(&channel), Some(&failure));
         }
@@ -1347,7 +1504,6 @@ async fn failed_mailbox_observations_preserve_sources_age_and_escalation() {
             let source = &state.sources[&channel][&source_id];
             assert_eq!(source.first_seen, first_seen);
             assert!(source.escalated);
-            assert!(!source.disposition_unknown);
             assert!(!state.unavailable.contains_key(&channel));
         }
         let restored = snapshot(&shared, channel).await;

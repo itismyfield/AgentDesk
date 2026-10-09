@@ -5263,6 +5263,7 @@ services::discord::queue_park_ledger::tests::observation_keeps_legacy_inflight_b
 services::discord::queue_park_ledger::tests::periodic_discovery_records_cancelled_anchor_origin_without_drain
 services::discord::queue_park_ledger::tests::provider_evaluator_visits_all_registered_runtimes
 services::discord::queue_park_ledger::tests::selective_dequeue_of_later_item_keeps_head_waiting
+services::discord::queue_park_ledger::tests::short_claim_between_evaluations_resolves_unknown_without_error
 services::discord::queue_park_ledger::tests::stale_cancelled_snapshot_cannot_rediscover_explicitly_removed_source
 services::discord::queue_park_ledger::tests::stall_watchdog_task_evaluates_parks_without_backstop_or_health_calls
 services::discord::queue_park_ledger::tests::unobserved_source_age_is_none_instead_of_zero

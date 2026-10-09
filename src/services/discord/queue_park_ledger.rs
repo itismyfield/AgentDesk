@@ -22,7 +22,6 @@ struct TrackedSource {
     first_seen: Instant,
     origin: Origin,
     escalated: bool,
-    disposition_unknown: bool,
 }
 
 #[derive(Default)]
@@ -222,7 +221,6 @@ impl QueueParkLedger {
                 first_seen: Instant::now(),
                 origin,
                 escalated: false,
-                disposition_unknown: false,
             });
         }
     }
@@ -262,14 +260,6 @@ impl QueueParkLedger {
         let channels = self.channels.lock().unwrap_or_else(|e| e.into_inner());
         if observation.is_err() {
             result.reason = Some("observation_unavailable".to_string());
-            result.owner = Some("none");
-            result.recovery_state = Some("unknown");
-        } else if channels
-            .sources
-            .get(&channel)
-            .is_some_and(|tracked| tracked.values().any(|source| source.disposition_unknown))
-        {
-            result.reason = Some("source_disposition_unknown".to_string());
             result.owner = Some("none");
             result.recovery_state = Some("unknown");
         }
@@ -396,18 +386,11 @@ impl QueueParkLedger {
                 return false;
             }
             if !waiting.contains(id) {
-                if !source.disposition_unknown {
-                    tracing::warn!(target: "agentdesk::discord::queue_park", provider = provider.as_str(), channel_id = channel.get(), source_id = id, ?source.origin, age_secs, "tracked source left the queue without an observed claim: unknown");
-                    source.disposition_unknown = true;
-                }
-            } else {
-                source.disposition_unknown = false;
+                tracing::info!(target: "agentdesk::discord::queue_park", provider = provider.as_str(), channel_id = channel.get(), source_id = id, ?source.origin, age_secs, "tracked source left the queue without an observed claim: unknown");
+                return false;
             }
-            if age_secs >= QUEUE_PARK_ERROR_SECS && (source.disposition_unknown || projection.reason.as_deref() != Some("live_turn_active")) && !source.escalated {
-                let park_reason = if source.disposition_unknown { Some("source_disposition_unknown") } else { projection.reason.as_deref() };
-                let recovery_owner = if source.disposition_unknown { Some("none") } else { projection.owner };
-                let recovery_state = if source.disposition_unknown { Some("unknown") } else { projection.recovery_state };
-                tracing::error!(target: "agentdesk::discord::queue_park", provider = provider.as_str(), channel_id = channel.get(), source_id = id, ?source.origin, age_secs, park_reason, recovery_owner, inflight_row_kind = projection.inflight_row_kind, recovery_state, "cancel-preserved source remains parked");
+            if age_secs >= QUEUE_PARK_ERROR_SECS && projection.reason.as_deref() != Some("live_turn_active") && !source.escalated {
+                tracing::error!(target: "agentdesk::discord::queue_park", provider = provider.as_str(), channel_id = channel.get(), source_id = id, ?source.origin, age_secs, park_reason = projection.reason.as_deref(), recovery_owner = projection.owner, inflight_row_kind = projection.inflight_row_kind, recovery_state = projection.recovery_state, "cancel-preserved source remains parked");
                 source.escalated = true;
             }
             true
