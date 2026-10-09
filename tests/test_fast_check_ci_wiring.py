@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -358,9 +359,11 @@ def selects(patterns: list[str], path: str) -> bool:
     return any(glob_matcher(pattern).match(path) for pattern in patterns)
 
 
-def derived_cross_os_consumers() -> tuple[str, ...]:
+def derived_cross_os_consumers(
+    output_format: str = "paths", scope: str = "src/services/discord"
+) -> tuple[str, ...]:
     completed = subprocess.run(
-        [sys.executable, str(CROSS_OS_CONSUMER_SCRIPT), "--format", "paths"],
+        [sys.executable, str(CROSS_OS_CONSUMER_SCRIPT), "--format", output_format, "--scope", scope],
         capture_output=True,
         text=True,
         check=True,
@@ -371,7 +374,7 @@ def derived_cross_os_consumers() -> tuple[str, ...]:
 
 def unreachable_rust_files() -> tuple[str, ...]:
     completed = subprocess.run(
-        [sys.executable, str(CROSS_OS_CONSUMER_SCRIPT), "--format", "unreachable"],
+        [sys.executable, str(CROSS_OS_CONSUMER_SCRIPT), "--format", "unreachable", "--scope", "src"],
         capture_output=True,
         text=True,
         check=True,
@@ -647,6 +650,45 @@ class FastCheckCiWiringTests(unittest.TestCase):
             )
             for mutated in mutations:
                 self.assertNotEqual(self.run_hardening_fixture(mutated).returncode, 0)
+
+    def test_cross_os_derived_selectors_match_source(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        selectors = paths_filter_definitions(workflow)["cross_os_rust"]
+        self.assertEqual(
+            tuple(path for path in selectors if path.startswith("src/services/discord/")),
+            derived_cross_os_consumers("globs"),
+        )
+
+    def test_cfg_consumers_across_src_select_windows(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        filters = paths_filter_definitions(workflow)
+        consumers = derived_cross_os_consumers(scope="src")
+        self.assertTrue(consumers)
+        for selector in ("rust_compile", "cross_os_rust"):
+            with self.subTest(filter=selector):
+                self.assertEqual([path for path in consumers if not selects(filters[selector], path)], [])
+
+    def test_turn_bridge_and_historical_diff_select_windows(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        filters = paths_filter_definitions(workflow)
+        fixture = json.loads(
+            (REPO_ROOT / "tests/fixtures/ci_cross_os_5813.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(fixture["commit"], "d91d59d1d5fb4bcdd1602e29b7e2c980f0cece25")
+        turn_bridge = REPO_ROOT / "src/services/discord/turn_bridge"
+        paths = [path.relative_to(REPO_ROOT).as_posix() for path in turn_bridge.rglob("*.rs")]
+        self.assertTrue(paths)
+        cases = [(path, [path]) for path in paths]
+        cases.append(("new turn_bridge module", ["src/services/discord/turn_bridge/new/module.rs"]))
+        cases.append(("historical diff", fixture["paths"]))
+        self.assertTrue(fixture["paths"])
+        for name, changed_paths in cases:
+            with self.subTest(diff=name):
+                selected = {
+                    key: any(selects(filters[key], path) for path in changed_paths)
+                    for key in ("rust_compile", "cross_os_rust")
+                }
+                self.assertEqual(selected, {"rust_compile": True, "cross_os_rust": True})
 
     def test_cfg_gated_relay_consumers_select_windows(self) -> None:
         """cross_os_rust must select every derived cfg-shim consumer (#5832).
