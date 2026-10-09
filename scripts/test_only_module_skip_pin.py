@@ -34,6 +34,10 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/tui_o/exact_episode_tests.rs",
+        "src/services/tui_o/exact_pg_tests.rs",
+        "src/services/discord/health/recovery/legacy_send_tests.rs",
+        "src/db/session_observability/background_ordering_pg_tests.rs",
         "src/services/cluster/home_supervisor_tests.rs",
         "src/services/tui_o/writer/host_managed_tests.rs",
         "src/services/tui_o/writer/host_io_tests.rs",
@@ -45,6 +49,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_direct_pending_start/retirement_recheck_tests.rs",
         "src/services/discord/inflight/removal/input_fence_reaper_tests.rs",
         "src/services/discord/inflight/restart_mark_fence_tests.rs",
+        "src/services/discord/inflight/restart_mark_tests.rs",
+        "src/services/discord/health/watcher_respawn/input_fence_tests.rs",
         "src/services/discord/recovery_engine/manual_rebind/live_bridge_guard_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_recovery_fence_tests.rs",
         "src/services/discord/runtime_bootstrap/shutdown_input_fence_tests.rs",
@@ -272,6 +278,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/outbound/manual_delivery/production_nonce_tests.rs",
         "src/services/discord/outbound/turn_output_controller/fresh_send_tests.rs",
         "src/services/discord/outbound/source_registry_scan_tests.rs",
+        "src/services/discord/outbound/o_writer_repost_io_tests.rs",
         "src/services/discord/placeholder_controller/queued_card_gate/tests.rs",
         "src/services/discord/placeholder_live_events/probe_fixtures_tests.rs",
         "src/services/discord/placeholder_live_events/tests.rs",
@@ -319,6 +326,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_placeholder_suppression/unicode_units_tests.rs",
         "src/services/discord/tmux_watcher/cancel_handoff/interrupted_adoption_tests.rs",
         "src/services/discord/tmux_watcher/completion_gate_tests.rs",
+        "src/services/discord/tmux_watcher/terminal_direct_fallback_send_tests.rs",
         "src/services/discord/tmux_watcher/jsonl_rotation/backstop_tests.rs",
         "src/services/discord/tmux_watcher/loop_poll_prologue/post_terminal_disposal_tests.rs",
         "src/services/discord/tmux_watcher/o_delegated_watcher_tests.rs",
@@ -349,12 +357,14 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_direct_pending_start/tests/retire_tests.rs",
         "src/services/discord/tui_prompt_relay/rehydration/idempotency_tests.rs",
         "src/services/discord/tui_prompt_relay/tests.rs",
+        "src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/loss_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/native_turn_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/fenced_admission_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/o_tool_first_panel_tests.rs",
+        "src/services/discord/tui_prompt_relay/tests/pending_start_input_fence_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/retired_pending_start_claim_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/synthetic_terminal_ordering_tests.rs",
@@ -374,6 +384,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/stream_tick/o_adoption_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests.rs",
+        "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/background_child_ordering_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/o_after_done_chain_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/preloop_cleanup_tests.rs",
@@ -462,6 +473,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/router/intake_gate/stale_turn_host_tests.rs",
         "src/cli/herdr_tests.rs",
         "src/services/discord/recovery_engine/herdr_reader_tests.rs",
+        "src/services/discord/recovery_engine/herdr_admitted_restart_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs",
         "src/services/session_host/herdr_clear_adapter_tests.rs",
         "src/services/tui_o/writer/rotation_unsettled_tests.rs",
@@ -476,12 +488,19 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/rotation_unsettled_resume_tests.rs",
         "src/services/codex_tui/rollout_tail/parser/herdr_terminal_tests.rs",
         "src/services/claude/herdr_turn/provider_terminal_tests.rs",
+        "src/services/codex_tui/rollout_tail/provenance_tests.rs",
+        "src/services/tui_o/store/rotation/provenance_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/provenance_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant_tests.rs",
     }
 )
 
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/codex_tui/rollout_tail/provenance.rs",
+        "src/services/tui_o/writer/rotation/provenance.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant.rs",
         "src/services/discord/relay_recovery/tests/retirement.rs",
         "src/services/discord/recovery_engine/o_cut_recorder.rs",
         "src/services/tui_o/channel_policy/adoption/body_check.rs",

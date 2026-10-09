@@ -151,7 +151,10 @@ pub(crate) mod tui_o {
     pub(crate) mod alarm;
     pub(crate) mod channel_policy;
     pub(crate) mod cutover;
+    pub(crate) mod exact_episode;
+    pub(crate) mod exact_pg;
     pub(crate) mod ownership;
+    pub(crate) mod repost;
     pub(crate) mod shadow;
     pub(crate) mod shadow_host;
     pub(crate) mod store;
