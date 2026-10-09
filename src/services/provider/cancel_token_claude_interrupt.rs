@@ -1112,9 +1112,8 @@ mod tests {
         assert!(unsettled.cancelled.load(Ordering::SeqCst));
     }
 
-    /// With settlement a stop holds the Herdr slot from its judgement through its publish: a
-    /// prepare racing into that window waits, then sees the cancel and installs nothing. Without
-    /// settlement the stop takes no slot.
+    /// With settlement a prepare racing into a stop's judgement-to-publish window waits on the
+    /// slot, then sees the cancel and installs nothing; without settlement the stop takes no slot.
     #[cfg(unix)]
     #[test]
     fn p2b_decide_holds_slot_lock_until_publish() {
