@@ -463,6 +463,7 @@ mod tests {
                 "services/discord/tui_prompt_relay/claude_idle_bridge.rs",
                 "services/discord/turn_bridge/entry_abort_mailbox_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/o_after_done_chain_tests.rs",
+                "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
             ],
             "every bridge entry file must declare its mailbox token-registration contract"
         );
