@@ -230,6 +230,7 @@ jobs:
               - 'src/db/o_channel_activation.rs'
               - 'src/db/o_channel_homes_tests.rs'
               - 'src/db/postgres.rs'
+              - 'src/db/postgres/advisory_lock_tests.rs'
               - 'src/db/postgres/test_db_reclaim.rs'
               - 'src/db/prompt_manifests/tests.rs'
               - 'src/db/relay_dead_letter.rs'

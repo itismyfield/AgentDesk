@@ -60,6 +60,9 @@ cluster:
   # online, and takes it when this node is offline (failover is unchanged).
   # gateway_preferred_instance_id: "example-main-node"
   # gateway_yield_grace_secs: 90
+  # An idle gateway lease session is ended by PostgreSQL after this many seconds,
+  # so a holder that lost its network path cannot keep the lease. 0 disables it.
+  # gateway_lease_idle_expiry_secs: 300
 
 discord:
   guild_id: "YOUR_GUILD_ID"

@@ -41,6 +41,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::intake_outbox_dispatched_audit::postgres_tests
   --skip db::o_channel_activation::postgres_tests
   --skip db::o_channel_homes::tests
+  --skip db::postgres::advisory_lock::tests
   --skip db::postgres::test_db_reclaim::tests
   --skip db::postgres::tests
   --skip db::prompt_manifests::tests
@@ -790,6 +791,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::intake_outbox_dispatched_audit::postgres_tests
   db::o_channel_activation::postgres_tests
   db::o_channel_homes::tests
+  db::postgres::advisory_lock::tests
   db::postgres::test_db_reclaim::tests
   db::postgres::tests
   db::prompt_manifests::tests
