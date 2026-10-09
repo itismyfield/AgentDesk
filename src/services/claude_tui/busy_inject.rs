@@ -447,6 +447,25 @@ pub(crate) fn draft_sighting(capture: &str) -> DraftSighting {
     }
 }
 
+/// The composer before an automatic submit types: empty or faint is `Settled`, typed text whose
+/// removal a later capture can see is `PersonDraft`, anything else `Unsettled`.
+pub(crate) fn submit_sighting(capture: &str) -> DraftSighting {
+    match screen::typed(capture) {
+        Some(false) => DraftSighting::Settled,
+        Some(true) => {
+            let screen = screen::read(capture);
+            if screen.stash == screen::Stash::AbsentInRecognizedLayout
+                && screen.composer != screen::Composer::Empty
+            {
+                DraftSighting::PersonDraft
+            } else {
+                DraftSighting::Unsettled
+            }
+        }
+        None => DraftSighting::Unsettled,
+    }
+}
+
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.
 pub(crate) const STASH_CHANNELS_ENV: &str = "ADK_BUSY_INJECT_STASH_CHANNELS";
 

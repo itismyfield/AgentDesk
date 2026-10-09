@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 use super::host_input;
 
 mod draft_hold;
-use draft_hold::{admit_automatic_write, dismiss_startup_dialog};
+use draft_hold::{admit_automatic_write, dismiss_startup_dialog, refuse_composer_draft};
 #[cfg(test)]
 mod final_ready_tests;
 
@@ -436,6 +436,9 @@ fn send_prompt_with_readiness(
         if !prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
             return Err("claude tui composer changed before follow-up mutation".to_string());
         }
+        if readiness.is_followup() {
+            refuse_composer_draft(session_name, readiness)?;
+        }
         crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
             "claude",
             session_name,
@@ -671,6 +674,7 @@ pub fn send_selector_followup(
             if !prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, &snapshot) {
                 return Err("claude tui composer changed before selector mutation".to_string());
             }
+            refuse_composer_draft(session_name, PromptReadinessKind::Followup)?;
             // The slash command is typed into Claude as a real composer entry,
             // so the transcript relay would otherwise classify it as SSH-direct
             // input and lease a spurious external turn. Record it under the same
@@ -1184,6 +1188,7 @@ pub fn send_followup_prompt_or_idle_transcript(
         if !proven_warm_followup_revalidates_prompt_ready(&snapshot, transcript_path) {
             return Err("claude tui composer changed before follow-up mutation".to_string());
         }
+        refuse_composer_draft(session_name, PromptReadinessKind::ProvenWarmFollowup)?;
         crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
             "claude",
             session_name,

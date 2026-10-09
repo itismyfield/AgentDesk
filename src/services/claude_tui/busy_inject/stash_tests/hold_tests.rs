@@ -267,7 +267,10 @@ fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
     tui.put("composer", "");
     tui.put("footer", FOOTER);
     let recovered = tui.capture();
-    let guard = spy(&[&recovered, &recovered, &recovered, BUSY], None);
+    let guard = spy(
+        &[&recovered, &recovered, &recovered, &recovered, BUSY],
+        None,
+    );
     let ended = send_followup_prompt_or_idle_transcript(&session, "follow-up", None, &idle);
     assert_eq!(ended, Ok(()));
     assert!(writes(&guard.calls()).contains(&"keys:Enter".to_string()));
