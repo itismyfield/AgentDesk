@@ -3,8 +3,8 @@
 use crate::services::claude_tui::prompt_readiness::normalize_prompt_readiness_panel_in_capture;
 use crate::services::claude_tui::startup_dialog::detect_claude_startup_dialog;
 use crate::services::codex_tui::input::{
-    PromptReadinessSnapshot, active_composer_visible_prompt_draft_in_pane,
-    prompt_readiness_from_ansi_pane, steering_snapshot_decision, strip_ansi_escape_sequences,
+    prompt_readiness_from_ansi_pane, strip_ansi_escape_sequences, submission_draft_in_pane,
+    submission_modal_in_pane,
 };
 use crate::services::tmux_common::{
     tmux_capture_indicates_claude_tui_busy, tmux_capture_indicates_claude_tui_exact_empty_composer,
@@ -14,9 +14,6 @@ use crate::services::tmux_common::{
     tmux_capture_indicates_claude_tui_ready_for_input,
 };
 use crate::services::tui_o::shadow::ShadowProvider;
-
-// Codex steering judges modal wording over this many trailing lines.
-const CODEX_MODAL_TAIL_LINES: usize = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneVerdict {
@@ -58,24 +55,16 @@ fn judge_claude(capture: &str) -> PaneVerdict {
 }
 
 fn judge_codex(capture: &str) -> PaneVerdict {
-    let (composer_marker_detected, prompt_draft_detected, pane) =
+    let (composer_marker_detected, prompt_draft_detected, _) =
         prompt_readiness_from_ansi_pane(capture);
-    let lines: Vec<&str> = pane.lines().collect();
-    let tail = lines[lines.len().saturating_sub(CODEX_MODAL_TAIL_LINES)..].join("\n");
-    let raw = PromptReadinessSnapshot {
-        composer_marker_detected,
-        prompt_draft_detected,
-        tmux_pane_alive: true,
-        capture_available: true,
-        pane_tail: tail,
-    };
-    if steering_snapshot_decision(&raw).is_err() {
+    let plain = strip_ansi_escape_sequences(capture);
+    if submission_modal_in_pane(&plain) {
         return PaneVerdict::Modal;
     }
     if composer_marker_detected && !prompt_draft_detected {
         PaneVerdict::Ready
     } else {
-        PaneVerdict::NotReady
+        PaneVerdict::Modal
     }
 }
 
@@ -95,12 +84,18 @@ pub(crate) fn own_draft(
     }
     let plain = strip_ansi_escape_sequences(capture);
     if provider == ShadowProvider::Codex {
-        let Some(draft) = active_composer_visible_prompt_draft_in_pane(&plain) else {
+        let (empty_marker, has_draft, _) = prompt_readiness_from_ansi_pane(capture);
+        if empty_marker && !has_draft {
+            return false;
+        }
+        let Some(draft) = submission_draft_in_pane(&plain) else {
             return false;
         };
-        return draft == frame
-            && !plain.contains("[Pasted Content ")
-            && !plain.to_ascii_lowercase().contains("approval required");
+        let folded = draft
+            .strip_prefix("[Pasted Content ")
+            .and_then(|count| count.strip_suffix(" chars]"))
+            .is_some_and(|count| !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()));
+        return draft == frame && !folded && !submission_modal_in_pane(&plain);
     }
     let Some(rows) = claude_composer_rows(&plain) else {
         return false;

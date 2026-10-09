@@ -5,7 +5,6 @@ use std::process::Output;
 use std::time::Duration;
 
 use super::input::{PROMPT_READY_CANCELLED_ERROR, TuiInputAction};
-#[cfg(test)]
 pub(crate) use crate::services::claude_tui::host_input::InputRefusal;
 use crate::services::claude_tui::host_input::{HerdrInput, InputTransport};
 pub(crate) use crate::services::claude_tui::host_input::{
@@ -17,6 +16,7 @@ use crate::services::provider::{CancelToken, cancel_requested};
 #[cfg(unix)]
 use crate::services::session_host::HerdrTarget;
 use crate::services::session_host::{HostKey, TmuxHost};
+use crate::services::tui_input::submission_tmux::SubmissionTmux;
 
 const PROMPT_INPUT_BEFORE_ENTER_SETTLE: Duration = Duration::from_millis(200);
 
@@ -91,6 +91,65 @@ impl CodexWrites for TmuxCodexInput {
     }
 }
 
+impl CodexWrites for SubmissionTmux {
+    fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String> {
+        InputTransport::send_literal(self, session, text)
+    }
+
+    fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String> {
+        InputTransport::load_buffer(self, buffer, text)
+    }
+
+    fn paste_buffer(
+        &mut self,
+        session: &str,
+        buffer: &str,
+        delete: bool,
+    ) -> Result<Output, String> {
+        InputTransport::paste_buffer(self, session, buffer, delete)
+    }
+
+    fn send_keys(&mut self, session: &str, keys: &[HostKey]) -> Result<Output, String> {
+        InputTransport::send_keys(self, session, keys)
+    }
+}
+
+impl CodexTransport for SubmissionTmux {
+    fn capture_ansi(&mut self, session: &str, scroll_back: i32) -> Option<String> {
+        InputTransport::capture(self, session, scroll_back)
+    }
+
+    fn capture_bounded(
+        &mut self,
+        session: &str,
+        scroll_back: i32,
+        _timeout: Duration,
+    ) -> Option<String> {
+        InputTransport::capture(self, session, scroll_back)
+    }
+
+    fn pane_alive(&mut self, session: &str) -> bool {
+        InputTransport::pane_alive(self, session)
+    }
+
+    fn pane_pid(&mut self, _session: &str) -> Option<u32> {
+        None
+    }
+
+    fn kill_tree(&mut self, _pid: u32, _identity: ProcessIdentity) -> bool {
+        false
+    }
+
+    fn kill_session(&mut self, _session: &str, _reason: &str) -> bool {
+        false
+    }
+
+    #[cfg(unix)]
+    fn pane_stopped(&mut self, _session: &str, _pid: u32, _identity: ProcessIdentity) -> bool {
+        false
+    }
+}
+
 impl CodexTransport for TmuxCodexInput {
     fn capture_ansi(&mut self, session: &str, scroll_back: i32) -> Option<String> {
         tmux::capture_pane_with_escapes(session, scroll_back)
@@ -146,13 +205,20 @@ thread_local! {
 }
 
 fn with_legacy<R>(operation: impl FnOnce(&mut dyn CodexTransport, &dyn MutationGate) -> R) -> R {
+    with_legacy_using(&mut TmuxCodexInput, operation)
+}
+
+fn with_legacy_using<R>(
+    default_transport: &mut dyn CodexTransport,
+    operation: impl FnOnce(&mut dyn CodexTransport, &dyn MutationGate) -> R,
+) -> R {
     #[cfg(test)]
     if let Some((mut transport, gate)) = INJECTED.with(|slot| slot.borrow_mut().take()) {
         let result = operation(transport.as_mut(), gate.as_ref());
         INJECTED.with(|slot| *slot.borrow_mut() = Some((transport, gate)));
         return result;
     }
-    operation(&mut TmuxCodexInput, &LegacyTmuxGate)
+    operation(default_transport, &LegacyTmuxGate)
 }
 
 /// A plan's stop point plus what the legacy submit reads from it.
@@ -338,7 +404,10 @@ pub(crate) fn refused_by_gate(run: &InputRun) -> bool {
 }
 
 pub(crate) fn refusal_error(run: &InputRun) -> String {
-    format!("codex tui input refused before mutation: {run:?}")
+    match run {
+        InputRun::Indeterminate { .. } => format!("codex tui input held after mutation: {run:?}"),
+        _ => format!("codex tui input refused before mutation: {run:?}"),
+    }
 }
 
 /// The `Result` legacy tmux callers read, with their original error text.
@@ -354,14 +423,146 @@ pub(crate) fn legacy_result(run: InputRun) -> Result<(), String> {
     }
 }
 
-/// A plan on the legacy tmux session of `session_name`.
-pub(crate) fn run_legacy(
+struct SubmissionWrites<'a> {
+    transport: &'a mut dyn CodexTransport,
+    attempted: &'a std::cell::Cell<bool>,
+}
+
+impl CodexWrites for SubmissionWrites<'_> {
+    fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String> {
+        self.attempted.set(true);
+        self.transport.send_literal(session, text)
+    }
+    fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String> {
+        self.transport.load_buffer(buffer, text)
+    }
+    fn paste_buffer(
+        &mut self,
+        session: &str,
+        buffer: &str,
+        delete: bool,
+    ) -> Result<Output, String> {
+        self.attempted.set(true);
+        self.transport.paste_buffer(session, buffer, delete)
+    }
+    fn send_keys(&mut self, session: &str, keys: &[HostKey]) -> Result<Output, String> {
+        self.transport.send_keys(session, keys)
+    }
+}
+
+/// Submit one guarded prompt; the caller holds the composer lock across these steps.
+pub(crate) fn run_prompt_submission_legacy(
     session_name: &str,
     actions: &[TuiInputAction],
+    before: Option<&str>,
     cancel_token: Option<&CancelToken>,
 ) -> PlanRun {
+    use std::cell::{Cell, RefCell};
+
+    use crate::services::tui_input::submission::{
+        Refusal, Submission, run_prompt_submission_using,
+    };
+    use crate::services::tui_o::shadow::ShadowProvider;
+
+    let invalid = || PlanRun {
+        run: InputRun::Refused(InputRefusal::Composer(Refusal::InvalidPrompt)),
+        composer_mutated: false,
+        enter_attempted: false,
+    };
+    let Some((TuiInputAction::Enter, payload)) = actions.split_last() else {
+        return invalid();
+    };
+    let mut frame = String::new();
+    for action in payload {
+        match action {
+            TuiInputAction::Literal(text) | TuiInputAction::PasteBuffer(text) => {
+                frame.push_str(text);
+            }
+            _ => return invalid(),
+        }
+    }
     let target = InputTarget::legacy_tmux(session_name);
-    with_legacy(|transport, gate| run_plan(&target, gate, transport, actions, cancel_token))
+    with_legacy_using(&mut SubmissionTmux, |transport, gate| {
+        let transport = RefCell::new(transport);
+        let payload_run = RefCell::new(PlanRun {
+            run: InputRun::Applied,
+            composer_mutated: false,
+            enter_attempted: false,
+        });
+        let stopped = RefCell::new(None);
+        let composer_attempted = Cell::new(false);
+        let enter_attempted = Cell::new(false);
+        let run = run_prompt_submission_using(
+            Submission {
+                provider: ShadowProvider::Codex,
+                frame: &frame,
+                before,
+                mutations: payload.len(),
+            },
+            cancel_token,
+            || {
+                let mut transport = transport.borrow_mut();
+                let mut writes = SubmissionWrites {
+                    transport: &mut **transport,
+                    attempted: &composer_attempted,
+                };
+                let mut result = run_plan(&target, gate, &mut writes, payload, cancel_token);
+                // An unacknowledged pane write can have landed; only load-only proves no effect.
+                result.composer_mutated |= composer_attempted.get();
+                let run = result.run.clone();
+                *payload_run.borrow_mut() = result;
+                run
+            },
+            || {
+                // Settle before the fresh capture, so no delay separates its guard from Enter.
+                std::thread::sleep(PROMPT_INPUT_BEFORE_ENTER_SETTLE);
+                if cancel_requested(cancel_token) {
+                    *stopped.borrow_mut() = Some(InputRun::Cancelled {
+                        confirmed: payload.len(),
+                    });
+                    return None;
+                }
+                if let Err(refusal) = gate.admit(session_name) {
+                    *stopped.borrow_mut() = Some(InputRun::Indeterminate {
+                        confirmed: payload.len(),
+                        cause: StopCause::Refused(refusal),
+                    });
+                    return None;
+                }
+                let mut transport = transport.borrow_mut();
+                let pane = transport.capture_ansi(session_name, -80);
+                let alive = transport.pane_alive(session_name);
+                alive.then_some(pane).flatten()
+            },
+            || {
+                let mut transport = transport.borrow_mut();
+                let mut plan = Plan {
+                    session: session_name,
+                    gate,
+                    transport: &mut **transport,
+                    cancel_token,
+                    confirmed: 0,
+                    composer_mutated: false,
+                    enter_attempted: false,
+                };
+                let run = match plan.check_cancel().and_then(|()| {
+                    plan.mutate(&TuiInputAction::Enter, |transport| {
+                        transport.send_keys(session_name, &[HostKey::Enter])
+                    })
+                }) {
+                    Ok(()) => InputRun::Applied,
+                    Err(run) => run,
+                };
+                enter_attempted.set(plan.enter_attempted);
+                run
+            },
+        );
+        PlanRun {
+            run: stopped.into_inner().unwrap_or(run),
+            composer_mutated: payload_run.into_inner().composer_mutated,
+            enter_attempted: enter_attempted.get(),
+        }
+    })
 }
 
 /// One key write on the legacy tmux session, admitted by the gate first.
@@ -376,6 +577,16 @@ pub(crate) fn legacy_keys(session_name: &str, keys: &[HostKey]) -> Result<Output
 /// ANSI capture, then pane liveness: the order the readiness snapshot reads them.
 pub(crate) fn observe_legacy(session_name: &str, scroll_back: i32) -> (Option<String>, bool) {
     with_legacy(|transport, _| {
+        let capture = transport.capture_ansi(session_name, scroll_back);
+        (capture, transport.pane_alive(session_name))
+    })
+}
+
+pub(crate) fn observe_prompt_submission(
+    session_name: &str,
+    scroll_back: i32,
+) -> (Option<String>, bool) {
+    with_legacy_using(&mut SubmissionTmux, |transport, _| {
         let capture = transport.capture_ansi(session_name, scroll_back);
         (capture, transport.pane_alive(session_name))
     })
@@ -525,12 +736,34 @@ pub(super) mod spy {
         pub dead: bool,
         pub pane_pid: Option<u32>,
         pub sends: usize,
+        pub assert_composer_lock: Option<String>,
     }
 
     pub(crate) struct Spy(pub Rc<RefCell<SpyState>>);
 
     impl Spy {
+        fn assert_lock(&self) {
+            if let Some(session) = self.0.borrow().assert_composer_lock.as_deref() {
+                std::thread::scope(|scope| {
+                    assert!(
+                        scope
+                            .spawn(|| {
+                                crate::services::codex_tui::input::try_with_composer_mutation_lock(
+                                    session,
+                                    || (),
+                                )
+                            })
+                            .join()
+                            .unwrap()
+                            .is_none(),
+                        "competing writer entered during submission"
+                    );
+                });
+            }
+        }
+
         fn send(&mut self, call: String) -> Result<Output, String> {
+            self.assert_lock();
             let mut state = self.0.borrow_mut();
             state.calls.push(call);
             let index = state.sends;
@@ -550,12 +783,14 @@ pub(super) mod spy {
         }
 
         fn read(&mut self, call: &str) -> Option<String> {
+            self.assert_lock();
             let mut state = self.0.borrow_mut();
             state.calls.push(call.to_string());
             state.captures.pop_front().flatten()
         }
 
         fn record(&mut self, call: &str) -> std::cell::RefMut<'_, SpyState> {
+            self.assert_lock();
             let mut state = self.0.borrow_mut();
             state.calls.push(call.to_string());
             state
@@ -753,7 +988,8 @@ mod tests {
     fn followup_submit_keeps_the_legacy_tmux_key_order() {
         let name = "p6b-spy-submit";
         let line = "한글 한 줄 후속 입력";
-        let guard = SpyGuard::install(state(&[READY, READY]));
+        let own_line = draft_pane(line);
+        let guard = SpyGuard::install(state(&[READY, &own_line, READY]));
         let outcome = submit_codex_followup_prompt(name, line, None);
         assert!(matches!(
             outcome,
@@ -764,6 +1000,8 @@ mod tests {
             "capture_ansi",
             "alive",
             &literal,
+            "capture_ansi",
+            "alive",
             "keys:Enter",
             "capture_ansi",
             "alive",
@@ -773,7 +1011,11 @@ mod tests {
 
         // A large multi-line Korean prompt goes load → paste → Enter through one buffer.
         let paste = format!("첫 줄 한글\n{}", "둘째 줄 긴 붙여넣기 ".repeat(800));
-        let guard = SpyGuard::install(state(&[READY, READY]));
+        let own_paste = format!(
+            "› {}\n\n  gpt-5.4 · Fast off · Context 100% left",
+            paste.replace('\n', "\n  ")
+        );
+        let guard = SpyGuard::install(state(&[READY, &own_paste, READY]));
         let outcome = submit_codex_followup_prompt(name, &paste, None);
         assert!(matches!(
             outcome,
@@ -785,6 +1027,8 @@ mod tests {
             "alive",
             &load,
             "paste:delete=true",
+            "capture_ansi",
+            "alive",
             "keys:Enter",
             "capture_ansi",
             "alive",
@@ -798,12 +1042,18 @@ mod tests {
 
         // A long single line goes as 1800-char literal chunks, then Enter.
         let long = "가".repeat(2000);
-        let guard = SpyGuard::install(state(&[READY, READY]));
-        submit_codex_followup_prompt(name, &long, None);
+        let own_long = draft_pane(&long);
+        let guard = SpyGuard::install(state(&[READY, &own_long, READY]));
+        assert!(matches!(
+            submit_codex_followup_prompt(name, &long, None),
+            CodexFollowupPromptSubmitOutcome::Submitted
+        ));
         let sent = guard.calls();
         assert_eq!(sent[2], format!("literal:{}", "가".repeat(1800)));
         assert_eq!(sent[3], format!("literal:{}", "가".repeat(200)));
-        assert_eq!(sent[4], "keys:Enter");
+        assert_eq!(sent[4], "capture_ansi");
+        assert_eq!(sent[5], "alive");
+        assert_eq!(sent[6], "keys:Enter");
         drop(guard);
 
         // The busy signal reads the bounded capture of the same transport.
@@ -908,7 +1158,12 @@ mod tests {
         let guard = SpyGuard::install(lost);
         let outcome = submit_codex_followup_prompt("p6b-spy-lost", "x", None);
         assert!(
-            matches!(&outcome, CodexFollowupPromptSubmitOutcome::NotSubmitted { error } if error == "ack lost"),
+            matches!(&outcome, CodexFollowupPromptSubmitOutcome::Refused {
+                run: InputRun::Indeterminate {
+                    confirmed: 0,
+                    cause: StopCause::Send(error),
+                },
+            } if error == "ack lost"),
             "{outcome:?}"
         );
         assert_eq!(
@@ -917,8 +1172,44 @@ mod tests {
         );
         drop(guard);
 
+        // A load failure proves no pane effect, so the existing fallback remains legal.
+        let mut load = state(&[READY]);
+        load.fail_send = Some((0, Err("load failed".to_string())));
+        let guard = SpyGuard::install(load);
+        let outcome = submit_codex_followup_prompt("load-no-pane-effect", "first\nsecond", None);
+        assert!(
+            matches!(outcome, CodexFollowupPromptSubmitOutcome::NotSubmitted { error } if error == "load failed")
+        );
+        assert_eq!(
+            guard.calls(),
+            calls(&["capture_ansi", "alive", "load:first\nsecond"])
+        );
+        drop(guard);
+
+        // A lost paste ACK cannot prove no effect even with zero confirmed writes.
+        let mut paste = state(&[READY]);
+        paste.fail_send = Some((1, Err("paste ack lost".to_string())));
+        let guard = SpyGuard::install(paste);
+        let outcome = submit_codex_followup_prompt("paste-may-have-landed", "first\nsecond", None);
+        assert!(
+            matches!(&outcome, CodexFollowupPromptSubmitOutcome::Refused {
+            run: InputRun::Indeterminate { confirmed: 0, cause: StopCause::Send(error) },
+        } if error == "paste ack lost")
+        );
+        assert_eq!(
+            guard.calls(),
+            calls(&[
+                "capture_ansi",
+                "alive",
+                "load:first\nsecond",
+                "paste:delete=true"
+            ])
+        );
+        drop(guard);
+
         // A failed Enter is sent once and only confirmed by reading the pane.
-        let mut enter = state(&[READY, READY]);
+        let own_x = draft_pane("x");
+        let mut enter = state(&[READY, &own_x, READY]);
         enter.fail_send = Some((1, Ok(exit(1, "no pane"))));
         let guard = SpyGuard::install(enter);
         let outcome = submit_codex_followup_prompt("p6b-spy-enter", "x", None);
@@ -930,6 +1221,8 @@ mod tests {
             "capture_ansi",
             "alive",
             "literal:x",
+            "capture_ansi",
+            "alive",
             "keys:Enter",
             "capture_ansi",
             "alive",

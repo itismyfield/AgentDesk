@@ -123,6 +123,7 @@ pub(crate) enum InputRefusal {
     Unknown,
     Conflict,
     IdentityMismatch,
+    Composer(crate::services::tui_input::submission::Refusal),
     Herdr(HerdrGateRefusal),
 }
 
@@ -395,13 +396,20 @@ thread_local! {
 }
 
 fn with_transport<R>(operation: impl FnOnce(&mut dyn InputTransport) -> R) -> R {
+    with_transport_using(&mut TmuxInput, operation)
+}
+
+fn with_transport_using<R>(
+    default: &mut dyn InputTransport,
+    operation: impl FnOnce(&mut dyn InputTransport) -> R,
+) -> R {
     #[cfg(test)]
     if let Some(mut injected) = INJECTED.with(|slot| slot.borrow_mut().take()) {
         let result = operation(injected.as_mut());
         INJECTED.with(|slot| *slot.borrow_mut() = Some(injected));
         return result;
     }
-    operation(&mut TmuxInput)
+    operation(default)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -435,11 +443,11 @@ impl InputRun {
                 cause: StopCause::Send(error),
                 ..
             } => Err(error),
-            Self::Refused(refusal)
-            | Self::Indeterminate {
+            Self::Refused(refusal) => Err(refused_message(refusal)),
+            Self::Indeterminate {
                 cause: StopCause::Refused(refusal),
                 ..
-            } => Err(refused_message(refusal)),
+            } => Err(format!("claude tui input held after mutation: {refusal:?}")),
         }
     }
 }
@@ -660,6 +668,103 @@ pub(crate) fn run_legacy(
 ) -> InputRun {
     let target = InputTarget::legacy_tmux(session_name);
     with_transport(|transport| run_plan(&target, &LegacyTmuxGate, transport, actions, cancel_token))
+}
+
+/// Submits only a prompt plan; the caller holds the existing composer mutex throughout.
+#[allow(dead_code)]
+pub(crate) fn run_prompt_submission_legacy(
+    session_name: &str,
+    actions: &[TuiInputAction],
+    cancel_token: Option<&CancelToken>,
+) -> InputRun {
+    use crate::services::tui_input::submission::{
+        Refusal, Submission, run_prompt_submission_using,
+    };
+    use crate::services::tui_o::shadow::ShadowProvider;
+    let Some((TuiInputAction::Enter, payload)) = actions.split_last() else {
+        return InputRun::Refused(InputRefusal::Composer(Refusal::InvalidPrompt));
+    };
+    let mut frame = String::new();
+    for action in payload {
+        match action {
+            TuiInputAction::Literal(text) | TuiInputAction::PasteBuffer(text) => {
+                frame.push_str(text)
+            }
+            _ => return InputRun::Refused(InputRefusal::Composer(Refusal::InvalidPrompt)),
+        }
+    }
+    with_transport_using(
+        &mut crate::services::tui_input::submission_tmux::SubmissionTmux,
+        |transport| {
+            let before = transport
+                .capture_draft(session_name)
+                .filter(|_| transport.pane_alive(session_name));
+            let transport = std::cell::RefCell::new(transport);
+            let target = InputTarget::legacy_tmux(session_name);
+            run_prompt_submission_using(
+                Submission {
+                    provider: ShadowProvider::Claude,
+                    frame: &frame,
+                    before: before.as_deref(),
+                    mutations: payload.len(),
+                },
+                cancel_token,
+                || {
+                    run_plan(
+                        &target,
+                        &LegacyTmuxGate,
+                        &mut **transport.borrow_mut(),
+                        payload,
+                        cancel_token,
+                    )
+                },
+                || {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    let mut transport = transport.borrow_mut();
+                    transport
+                        .capture_draft(session_name)
+                        .filter(|_| transport.pane_alive(session_name))
+                },
+                || {
+                    run_plan(
+                        &target,
+                        &LegacyTmuxGate,
+                        &mut **transport.borrow_mut(),
+                        &[TuiInputAction::Enter],
+                        cancel_token,
+                    )
+                },
+            )
+        },
+    )
+}
+
+/// Observes a guarded submit once, leaving every stranded draft untouched.
+#[allow(dead_code)]
+pub(crate) fn confirm_prompt_submission_passively(session_name: &str) -> Result<(), String> {
+    let capture = with_transport_using(
+        &mut crate::services::tui_input::submission_tmux::SubmissionTmux,
+        |transport| {
+            transport
+                .capture_draft(session_name)
+                .filter(|_| transport.pane_alive(session_name))
+        },
+    );
+    let Some(capture) = capture else {
+        return Err("claude tui input held after mutation: confirmation unavailable".into());
+    };
+    let verdict = crate::services::tui_input::actor::gate::judge_pane(
+        crate::services::tui_o::shadow::ShadowProvider::Claude,
+        &capture,
+    );
+    if verdict == crate::services::tui_input::actor::gate::PaneVerdict::Modal
+        || crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft(&capture)
+        || !(verdict == crate::services::tui_input::actor::gate::PaneVerdict::Ready
+            || crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&capture))
+    {
+        return Err("claude tui input held after mutation: confirmation ambiguous".into());
+    }
+    Ok(())
 }
 
 /// Bounds the draft-protection capture of a pane.
@@ -1061,6 +1166,80 @@ mod tests {
         inject_steering_prompt, send_compact_while_busy,
     };
     use crate::services::session_host::{SessionTargetInput, TargetSource, UnknownHost};
+
+    #[test]
+    fn guarded_claude_helper_submits_folded_own_draft_and_keeps_late_refusal() {
+        let idle = include_str!("../../../tests/fixtures/tui_input/claude-2.1.293-idle.txt");
+        let own = "────────────────────\n❯ [Pasted text #8 +2 lines]\n────────────────────\n";
+        let frame = "[adk:source:1]\n한글\n[adk:end]";
+        for (after, sent) in [(own, true), ("foreign draft", false)] {
+            let spy = SpyGuard::install(SpyState {
+                captures: [idle, after].map(|s| Some(s.to_string())).into(),
+                ..SpyState::default()
+            });
+            let actions = crate::services::claude_tui::input::plan_prompt_submit(frame).unwrap();
+            let run = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+                "guarded-claude-helper",
+                || run_prompt_submission_legacy("guarded-claude-helper", &actions, None),
+            );
+            assert_eq!(
+                spy.calls().iter().filter(|c| *c == "keys:Enter").count(),
+                usize::from(sent)
+            );
+            assert!(
+                !spy.calls()
+                    .iter()
+                    .any(|c| c == "keys:C-u" || c.starts_with("retire:"))
+            );
+            if sent {
+                assert_eq!(run, InputRun::Applied);
+            } else {
+                assert!(matches!(
+                    run,
+                    InputRun::Indeterminate {
+                        cause: StopCause::Refused(_),
+                        ..
+                    }
+                ));
+                assert!(!InputTarget::legacy_tmux("guarded-claude-helper").keys_may_follow(&run));
+                let error = run.into_legacy().unwrap_err();
+                assert!(error.starts_with("claude tui input held after mutation:"));
+                assert!(!crate::services::claude_tui::input::is_prompt_ready_timeout_error(&error));
+            }
+        }
+    }
+
+    #[test]
+    fn passive_claude_confirmation_never_retries_or_clears_a_draft() {
+        let idle = include_str!("../../../tests/fixtures/tui_input/claude-2.1.293-idle.txt");
+        for (capture, confirmed) in [
+            (Some("unknown screen"), false),
+            (Some("❯ foreign draft"), false),
+            (None, false),
+            (Some(idle), true),
+            (Some("✳ Architecting…"), true),
+            (
+                Some(
+                    "Do you want to proceed?\n  1. Yes\n  2. No\nEnter to confirm · esc to cancel\n✳ Architecting…",
+                ),
+                false,
+            ),
+        ] {
+            let spy = SpyGuard::install(SpyState {
+                captures: [capture.map(str::to_string)].into(),
+                ..SpyState::default()
+            });
+            assert_eq!(
+                confirm_prompt_submission_passively("passive-confirmation").is_ok(),
+                confirmed
+            );
+            assert!(
+                !spy.calls()
+                    .iter()
+                    .any(|c| c.starts_with("keys:") || c.starts_with("retire:"))
+            );
+        }
+    }
 
     const EMPTY_COMPOSER: &str = "Claude Code v2.1.141\n\n\u{276f} \nstatus";
     const BUSY: &str = "\u{2733} Architecting\u{2026}";

@@ -105,6 +105,9 @@ const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 
 mod composer_content;
 mod composer_lock;
+mod submission;
+use submission::prompt_readiness_snapshot_with_pane;
+pub(crate) use submission::{submission_draft_in_pane, submission_modal_in_pane};
 mod composer_status;
 mod inline_banner;
 use composer_content::boxed_composer_body;
@@ -415,22 +418,7 @@ pub fn is_prompt_ready_cancelled_error(error: &str) -> bool {
 /// is visible. Returned regardless of timing so callers can log the
 /// state at decision points.
 pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot {
-    // ANSI capture is the canonical snapshot. Its deterministic plain-text
-    // projection keeps marker and draft classification tied to the same pane
-    // revision, while retaining the dim-placeholder signal plain capture loses.
-    let (pane_with_escapes, tmux_pane_alive) =
-        host_input::observe_legacy(session_name, PROMPT_READY_CAPTURE_SCROLLBACK);
-    let (composer_marker_detected, prompt_draft_detected, pane_tail) = pane_with_escapes
-        .as_deref()
-        .map(prompt_readiness_from_ansi_pane)
-        .unwrap_or_else(|| (false, false, "<capture unavailable>".to_string()));
-    PromptReadinessSnapshot {
-        composer_marker_detected,
-        prompt_draft_detected,
-        tmux_pane_alive,
-        capture_available: pane_with_escapes.is_some(),
-        pane_tail,
-    }
+    prompt_readiness_snapshot_with_pane(session_name, false).0
 }
 
 pub(crate) fn prompt_readiness_from_ansi_pane(pane_with_escapes: &str) -> (bool, bool, String) {
@@ -1189,11 +1177,12 @@ fn submit_codex_followup_prompt_under_lock(
     // Take one final canonical snapshot immediately before mutating the
     // composer so a just-arrived user draft or active turn is never appended
     // to or submitted as the Discord follow-up.
-    let mut final_snapshot = prompt_readiness_snapshot(session_name);
+    let (mut final_snapshot, mut before) = prompt_readiness_snapshot_with_pane(session_name, true);
     if snapshot_allows_warm_followup_submit(&final_snapshot)
         && inline_banner::pane_has_dismissible_action_banner(&final_snapshot.pane_tail)
     {
-        final_snapshot = inline_banner::dismiss_action_banner_once(session_name);
+        let _ = inline_banner::dismiss_action_banner_once(session_name);
+        (final_snapshot, before) = prompt_readiness_snapshot_with_pane(session_name, true);
     }
     if !snapshot_allows_warm_followup_submit(&final_snapshot)
         || inline_banner::pane_has_dismissible_action_banner(&final_snapshot.pane_tail)
@@ -1202,8 +1191,21 @@ fn submit_codex_followup_prompt_under_lock(
             error: "Codex TUI warm follow-up final pane snapshot rejected submit".to_string(),
         };
     }
-    let submit = host_input::run_legacy(session_name, &actions, cancel_token);
+    let submit = host_input::run_prompt_submission_legacy(
+        session_name,
+        &actions,
+        before.as_deref(),
+        cancel_token,
+    );
     if host_input::refused_by_gate(&submit.run) {
+        return CodexFollowupPromptSubmitOutcome::Refused { run: submit.run };
+    }
+    if matches!(
+        submit.run,
+        crate::services::claude_tui::host_input::InputRun::Indeterminate { .. }
+    ) && submit.composer_mutated
+        && !submit.enter_attempted
+    {
         return CodexFollowupPromptSubmitOutcome::Refused { run: submit.run };
     }
     let action_result = host_input::legacy_result(submit.run.clone());
@@ -1227,7 +1229,7 @@ fn submit_codex_followup_prompt_under_lock(
     if cancel_requested(cancel_token) {
         return CodexFollowupPromptSubmitOutcome::Cancelled;
     }
-    let first = prompt_readiness_snapshot(session_name);
+    let first = prompt_readiness_snapshot_with_pane(session_name, true).0;
     let needs_recheck = snapshot_has_retry_safe_prompt_draft(&first)
         || !first.tmux_pane_alive
         || !first.capture_available;
@@ -1236,7 +1238,7 @@ fn submit_codex_followup_prompt_under_lock(
         if cancel_requested(cancel_token) {
             return CodexFollowupPromptSubmitOutcome::Cancelled;
         }
-        prompt_readiness_snapshot(session_name)
+        prompt_readiness_snapshot_with_pane(session_name, true).0
     } else {
         first.clone()
     };
@@ -1351,7 +1353,7 @@ pub(crate) fn herdr_turn_in_progress(pane: &str) -> bool {
         && active_composer_visible_prompt_draft_in_pane(pane).is_none()
 }
 
-fn pane_has_codex_active_turn_in_pane(pane: &str) -> bool {
+pub(crate) fn pane_has_codex_active_turn_in_pane(pane: &str) -> bool {
     recent_codex_active_turn_marker(pane).is_some()
 }
 
@@ -2244,6 +2246,96 @@ mod tests {
 
         assert_eq!(error, PROMPT_READY_CANCELLED_ERROR);
         assert_eq!(executor.calls, vec!["load-buffer:multi\nline"]);
+    }
+
+    #[test]
+    fn idle_submission_checks_current_owned_draft_before_enter() {
+        use super::host_input::spy::{SpyGuard, SpyState};
+        use crate::services::claude_tui::host_input::{InputRun, StopCause};
+        let ready = "╭────────────────────╮\n│ ▌                  │\n╰────────────────────╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send";
+        let own = "╭────────────────────╮\n│ hello ▌            │\n╰────────────────────╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send";
+        for after in [
+            Some(format!("Sign in\n{own}")),
+            Some(format!("Approval required: Allow command `foo`\n{own}")),
+            Some(format!("Do you trust this folder?\n{own}")),
+            Some(format!("• Working (1s • esc to interrupt)\n{own}")),
+            Some(own.replace("hello", "foreign")),
+            Some(own.replace("hello", "[Pasted Content 5 chars]")),
+            Some(format!("{own}\nforeign draft")),
+            None,
+        ] {
+            let spy = SpyGuard::install(SpyState {
+                captures: [Some(ready.to_string()), after, Some(ready.to_string())].into(),
+                ..SpyState::default()
+            });
+            let outcome = submit_codex_followup_prompt("idle-submit-veto", "hello", None);
+            assert!(
+                matches!(
+                    outcome,
+                    CodexFollowupPromptSubmitOutcome::Refused {
+                        run: InputRun::Indeterminate {
+                            cause: StopCause::Refused(_),
+                            ..
+                        }
+                    }
+                ),
+                "{outcome:?}"
+            );
+            assert!(
+                !spy.calls()
+                    .iter()
+                    .any(|c| c.starts_with("keys:") || c.starts_with("kill"))
+            );
+            let error = match outcome {
+                CodexFollowupPromptSubmitOutcome::Refused { run } => {
+                    host_input::refusal_error(&run)
+                }
+                _ => unreachable!(),
+            };
+            assert!(!is_prompt_ready_timeout_error(&error));
+            assert!(!crate::services::claude_tui::input::is_prompt_ready_timeout_error(&error));
+        }
+        let spy = SpyGuard::install(SpyState {
+            captures: [ready, own, ready].map(|s| Some(s.to_string())).into(),
+            assert_composer_lock: Some("idle-submit-own".into()),
+            ..SpyState::default()
+        });
+        assert!(matches!(
+            submit_codex_followup_prompt("idle-submit-own", "hello", None),
+            CodexFollowupPromptSubmitOutcome::Submitted
+        ));
+        assert_eq!(spy.calls().iter().filter(|c| *c == "keys:Enter").count(), 1);
+    }
+
+    #[test]
+    fn idle_submission_requires_the_whole_visible_codex_draft() {
+        use super::host_input::spy::{SpyGuard, SpyState};
+        let ready = "› \n\n  gpt-5.4 · Fast off · Context 100% left";
+        let own = "› 첫 줄\n  둘째 줄\n\n  gpt-5.4 · Fast off · Context 100% left";
+        for (after, allowed) in [
+            (own.to_string(), true),
+            (own.replace("둘째 줄", "남의 둘째 줄"), false),
+            (own.replace("  둘째 줄", "둘째 줄"), false),
+            (own.replace("첫 줄", "[Pasted Content 12 chars]"), false),
+            (format!("{own}\nforeign draft"), false),
+        ] {
+            let spy = SpyGuard::install(SpyState {
+                captures: [Some(ready.into()), Some(after), Some(ready.into())].into(),
+                assert_composer_lock: Some("idle-submit-multiline".into()),
+                ..SpyState::default()
+            });
+            let outcome =
+                submit_codex_followup_prompt("idle-submit-multiline", "첫 줄\n둘째 줄", None);
+            assert_eq!(
+                matches!(outcome, CodexFollowupPromptSubmitOutcome::Submitted),
+                allowed,
+                "{outcome:?}"
+            );
+            assert_eq!(
+                spy.calls().iter().filter(|c| *c == "keys:Enter").count(),
+                usize::from(allowed)
+            );
+        }
     }
 
     fn submit_snapshot(

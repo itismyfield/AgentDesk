@@ -1957,10 +1957,12 @@ services::claude_tui::host_input::tests::blind_truncated_or_failed_reads_are_nev
 services::claude_tui::host_input::tests::compact_literal_failure_never_sends_enter
 services::claude_tui::host_input::tests::draft_cleanup_follows_a_stop_only_on_a_confirmed_tmux_session
 services::claude_tui::host_input::tests::every_mutation_passes_the_gate_and_a_refusal_stops_before_enter
+services::claude_tui::host_input::tests::guarded_claude_helper_submits_folded_own_draft_and_keeps_late_refusal
 services::claude_tui::host_input::tests::native_clear_indeterminate_never_retries_and_keeps_discord_provenance
 services::claude_tui::host_input::tests::native_clear_refuses_drafts_deadlines_and_changed_execution_before_send
 services::claude_tui::host_input::tests::native_clear_unsupported_hosts_do_no_tmux_io
 services::claude_tui::host_input::tests::non_tmux_targets_send_nothing_and_are_never_recreated
+services::claude_tui::host_input::tests::passive_claude_confirmation_never_retries_or_clears_a_draft
 services::claude_tui::host_input::tests::steering_submit_keeps_the_legacy_tmux_key_order
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_notice_keeps_legacy_done_when_requeue_is_disabled
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests::busy_followup_notice_reports_manual_resend_when_requeue_is_disabled
@@ -2587,6 +2589,8 @@ services::codex_tui::input::composer_status::tests::generalized_codex_footer_sub
 services::codex_tui::input::inline_banner::tests::banner_that_survives_one_escape_gets_no_second_escape_or_input
 services::codex_tui::input::inline_banner::tests::blocking_menu_above_the_composer_gets_no_escape
 services::codex_tui::input::inline_banner::tests::security_banner_pane_is_ready_and_followup_dismisses_it_once
+services::codex_tui::input::submission::tests::idle_submission_does_not_own_an_unchanged_dim_suggestion
+services::codex_tui::input::submission::tests::idle_submission_preserves_box_rows_and_modal_choices
 services::codex_tui::input::tests::alternate_footer_phrasing_still_matches
 services::codex_tui::input::tests::assistant_output_with_box_drawing_alone_is_not_ready
 services::codex_tui::input::tests::bare_control_bytes_are_rejected
@@ -2628,6 +2632,8 @@ services::codex_tui::input::tests::empty_prompt_is_rejected
 services::codex_tui::input::tests::followup_timeout_falls_back_to_default_without_live_config
 services::codex_tui::input::tests::footer_at_bottom_without_nearby_box_edge_is_not_ready
 services::codex_tui::input::tests::footer_phrase_inside_quoted_assistant_text_is_not_ready_without_box_edge
+services::codex_tui::input::tests::idle_submission_checks_current_owned_draft_before_enter
+services::codex_tui::input::tests::idle_submission_requires_the_whole_visible_codex_draft
 services::codex_tui::input::tests::marking_composer_busy_clears_rollout_ready_signal
 services::codex_tui::input::tests::post_turn_handoff_probe_fits_inside_bridge_drain_window
 services::codex_tui::input::tests::post_turn_handoff_wait_caps_sleep_to_remaining_budget
@@ -10685,6 +10691,13 @@ services::tui_input::rows_tests::tracked::a_witness_learns_its_turn_once_and_kee
 services::tui_input::rows_tests::tracked::an_old_snapshot_folds_without_guessing_a_token
 services::tui_input::rows_tests::tracked::queue_witnesses_queue_a_row_and_only_model_records_run_it
 services::tui_input::rows_tests::tracked::the_ledger_refuses_reused_unknown_or_unproven_attempts_before_writing
+services::tui_input::submission::tests::byte_bound_and_terminal_controls_are_checked_before_payload
+services::tui_input::submission::tests::cancellation_keeps_counts_and_stops_later_callbacks
+services::tui_input::submission::tests::enter_failure_cannot_erase_confirmed_payload_mutations
+services::tui_input::submission::tests::late_guard_keeps_payload_effect_indeterminate_and_enter_unsent
+services::tui_input::submission::tests::pre_guard_refuses_without_callbacks
+services::tui_input::submission::tests::provider_visible_normalization_is_used_only_for_ownership
+services::tui_input::submission::tests::submission_orders_payload_capture_and_one_enter
 services::tui_input::transition_fixture_tests::a_tracked_handback_key_keeps_the_next_move_legacy
 services::tui_input::transition_fixture_tests::bounded_retry_resumes_transient_failure_and_holds_permanent_failure
 services::tui_input::transition_fixture_tests::deletion_boundaries_restart_keep_one_owner_and_order

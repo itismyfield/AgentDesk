@@ -135,12 +135,24 @@ fn context_window(value: &str) -> bool {
 mod tests {
     use super::super::*;
 
+    fn own_draft(pane: &str) -> String {
+        pane.replace(
+            "\x1b[2mAsk Codex to do anything\x1b[0m",
+            "fixture follow-up",
+        )
+        .replace(
+            "\x1b[2mUse /skills to list available skills\x1b[0m",
+            "fixture follow-up",
+        )
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn current_codex_status_fixture_allows_followup_without_kill() {
         use super::super::super::host_input::spy::{SpyGuard, SpyState};
         let pane = include_str!("../../../../tests/fixtures/tui_input/codex-0.160.0-idle.ansi");
+        let draft = own_draft(pane);
         let guard = SpyGuard::install(SpyState {
-            captures: [pane, pane, pane, pane]
+            captures: [pane, pane, pane, &draft, pane]
                 .into_iter()
                 .map(|p| Some(p.to_string()))
                 .collect(),
@@ -219,18 +231,23 @@ new output"
             "legacy-fast-first",
         ] {
             let pane = if model == "legacy-fast-first" {
-                include_str!("../../../../tests/fixtures/tui_input/codex-idle-dim.ansi").replace(
-                    "\x1b[0;1m›",
-                    "Approval required: this is answer prose.\n\n\x1b[0;1m›",
-                )
+                include_str!("../../../../tests/fixtures/tui_input/codex-idle-dim.ansi")
+                    .replace("╭", "Approval required: this is answer prose.\n\n╭")
             } else {
                 idle.replace("GPT-6.1-Sol xhigh", model).replace(
                     "FIXTURE_READY",
                     "Fixture answer\nApproval required: this is answer prose.",
                 )
             };
+            let draft = own_draft(&pane);
             let guard = SpyGuard::install(SpyState {
-                captures: vec![Some(pane); 3].into(),
+                captures: vec![
+                    Some(pane.clone()),
+                    Some(draft),
+                    Some(pane.clone()),
+                    Some(pane),
+                ]
+                .into(),
                 ..SpyState::default()
             });
             let session = "composer-generalized-fixture";

@@ -739,7 +739,8 @@ src/
 │   │   │   ├── composer_content.rs
 │   │   │   ├── composer_lock.rs
 │   │   │   ├── composer_status.rs
-│   │   │   └── inline_banner.rs
+│   │   │   ├── inline_banner.rs
+│   │   │   └── submission.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── parser/
 │   │   │   │   ├── herdr_replay.rs
@@ -2298,6 +2299,8 @@ src/
 │   │   ├── mod.rs
 │   │   ├── rows.rs
 │   │   ├── rows_tests.rs
+│   │   ├── submission.rs
+│   │   ├── submission_tmux.rs
 │   │   ├── transition.rs
 │   │   ├── transition_fixture_tests.rs
 │   │   └── transition_tests.rs
