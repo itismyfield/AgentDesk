@@ -1159,35 +1159,6 @@ impl InflightTurnState {
         }
     }
 
-    pub(in crate::services::discord) fn replay_rerun_blocked(&self) -> bool {
-        !self.replay_hold_reasons.is_empty()
-    }
-
-    /// Keep a projected episode's receipt and hold reasons; refuse a different projected episode
-    /// or a conflicting receipt before the guarded writer can persist anything.
-    pub(in crate::services::discord) fn merge_replay_projection(&mut self, other: &Self) -> bool {
-        let has_projection = self.replay_receipt_id.or(other.replay_receipt_id).is_some()
-            || self.replay_rerun_blocked()
-            || other.replay_rerun_blocked();
-        if (has_projection && self.turn_nonce != other.turn_nonce)
-            || self
-                .replay_receipt_id
-                .zip(other.replay_receipt_id)
-                .is_some_and(|(a, b)| a != b)
-        {
-            return false;
-        }
-        if self.replay_receipt_id.is_none() {
-            self.replay_receipt_id = other.replay_receipt_id;
-        }
-        for reason in &other.replay_hold_reasons {
-            if !self.replay_hold_reasons.contains(reason) {
-                self.replay_hold_reasons.push(reason.clone());
-            }
-        }
-        true
-    }
-
     /// Adopt the intake outbox identity at the sole production construction
     /// boundary. Deserialization separately restores persisted state and is not
     /// a runtime wiring entry point. Once present, the identity is immutable so
