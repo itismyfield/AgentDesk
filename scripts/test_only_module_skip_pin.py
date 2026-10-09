@@ -34,6 +34,7 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/db/session_observability/background_ordering_pg_tests.rs",
         "src/services/cluster/home_supervisor_tests.rs",
         "src/services/tui_o/writer/host_managed_tests.rs",
         "src/services/tui_o/writer/host_io_tests.rs",
@@ -482,7 +483,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
-        "src/db/session_observability/tests_pg.rs",
         "src/services/discord/relay_recovery/tests/retirement.rs",
         "src/services/discord/recovery_engine/o_cut_recorder.rs",
         "src/services/tui_o/channel_policy/adoption/body_check.rs",

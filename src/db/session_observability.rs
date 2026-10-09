@@ -301,5 +301,5 @@ fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
 }
 
 #[cfg(test)]
-#[path = "session_observability/tests_pg.rs"]
+#[path = "session_observability/background_ordering_pg_tests.rs"]
 mod tests_pg;

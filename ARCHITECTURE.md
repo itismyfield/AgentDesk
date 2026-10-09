@@ -177,7 +177,7 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
 │   ├── session_observability/
-│   │   └── tests_pg.rs
+│   │   └── background_ordering_pg_tests.rs
 │   ├── agent_read.rs
 │   ├── agents.rs
 │   ├── automation_candidate_card_program.rs
