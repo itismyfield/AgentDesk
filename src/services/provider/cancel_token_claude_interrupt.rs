@@ -279,9 +279,13 @@ impl OwnTurnCursor {
 }
 
 impl HerdrInterruptState {
-    /// This turn read on from its own start in `source`, at most `OWN_TURN_POLL_BUDGET` bytes a
-    /// call: `Some` once its end was read. A partial line or a changed file proves nothing.
-    pub(crate) fn read_own_codex_turn(&self, source: &std::path::Path) -> Option<CodexOwnTurn> {
+    /// This turn read from its start in `source`, `OWN_TURN_POLL_BUDGET` bytes a call, once its end
+    /// is read; a partial line, a changed file or a turn the reader did not see proves nothing.
+    pub(crate) fn read_own_codex_turn(
+        &self,
+        source: &std::path::Path,
+        expected: Option<&str>,
+    ) -> Option<CodexOwnTurn> {
         let start = self.turn_start.get()?;
         #[cfg(test)]
         let start = &identity_mutant(start, source);
@@ -307,6 +311,16 @@ impl HerdrInterruptState {
         }
         if !cursor.over {
             cursor.read_on(file, consumed).ok()?;
+        }
+        let other = cursor.own.as_ref().zip(expected);
+        if other.is_some_and(|(own, expected)| own.turn_id != expected) {
+            // Not the turn the reader saw here: never cached, the next poll reads the start again.
+            #[cfg(test)]
+            if herdr_interrupt_mutant("backstop_mismatch_cursor_retained") {
+                return None;
+            }
+            *cursor = OwnTurnCursor::default();
+            return None;
         }
         cursor.over.then(|| cursor.own.clone()).flatten()
     }
