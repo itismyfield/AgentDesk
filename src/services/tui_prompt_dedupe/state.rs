@@ -72,6 +72,7 @@ impl TuiPromptDedupeState {
             }
             !queue.is_empty()
         });
+        self.purge_expired_injected_steers(now);
         // Prompt ids wait for the scanner, which reaches a row only after the turn
         // ends; 4h is the observation-delay budget, not a guaranteed turn bound.
         self.relayed_prompt_ids_by_tmux.retain(|_, queue| {

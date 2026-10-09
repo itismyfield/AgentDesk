@@ -12,6 +12,7 @@ use tokio::time::Instant;
 use super::binding::{BindingCause, BindingEvent, BindingEvents, BindingRecord, BindingTarget};
 use super::deliver::ChannelWriter;
 use super::pieces::{Derived, UnitDeriver};
+use super::renumbered::{self, Reopen, reopen, stored_names};
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm};
 use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::tui_o::shadow::capture::SourceCapture;
@@ -272,6 +273,7 @@ impl<B: BindingEvents> Sources<B> {
     ) -> Result<(), WriterAlarm> {
         let resolved = writer.store().apply_resolved_boundaries();
         resolved.map_err(halted("resolved boundary"))?;
+        renumbered::unique(writer.store().cursors()).map_err(halt)?;
         self.rotation = writer.store().rotation().map_err(halted("rotation"))?;
         let checkpoint = writer.store().binding_checkpoint();
         self.checkpoint = checkpoint.map_err(halted("binding checkpoint"))?;
@@ -311,18 +313,11 @@ impl<B: BindingEvents> Sources<B> {
                 }
             });
             replay.map_err(halted("spool replay"))?;
-            let opened = SourceCapture::open(cursor.source.clone(), cursor.captured_through);
-            let capture = match opened {
+            let capture = match reopen(&cursor) {
                 Ok(capture) => Some(capture),
-                Err(_) if cursor.retired => None,
-                Err(error) => return Err(halt(format!("source reopen: {error}"))),
+                Err(Reopen::Unread(_)) if cursor.retired => None,
+                Err(failed) => return Err(failed.halt()),
             };
-            if capture
-                .as_ref()
-                .is_some_and(|capture| capture.prefix_hash() != cursor.prefix_hash)
-            {
-                return Err(halt("source bytes before the cursor changed"));
-            }
             let mut reader = Reader::new(cursor.source.clone(), capture);
             reader.captured_any = captured_any
                 || !writer
@@ -346,7 +341,7 @@ impl<B: BindingEvents> Sources<B> {
             }
             self.readers.push(reader);
         }
-        self.restore_legacy_hops();
+        self.restore_legacy_hops(writer);
         self.flush(writer)
     }
 
@@ -372,7 +367,10 @@ impl<B: BindingEvents> Sources<B> {
 
     /// Takes each unproven record's missing pane and seq from the last applied hop of its old
     /// source; a record that hop does not match stays unproven.
-    fn restore_legacy_hops(&mut self) {
+    fn restore_legacy_hops<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+    ) {
         let legacy = |next: &Successor| next.seq.is_none() && next.proof.is_none();
         let Some(checkpoint) = self.checkpoint else {
             return;
@@ -380,9 +378,10 @@ impl<B: BindingEvents> Sources<B> {
         if !self.rotation.successors.values().any(legacy) {
             return;
         }
-        let Ok(events) = self.bindings.binding_events_since(self.channel, 0) else {
+        let Ok(mut events) = self.bindings.binding_events_since(self.channel, 0) else {
             return;
         };
+        stored_names(writer, &mut events);
         let applied = &events[..events.partition_point(|e| e.seq <= checkpoint)];
         for (key, next) in self.rotation.successors.iter().filter(|(_, n)| legacy(n)) {
             let last = applied.iter().rev().find_map(|e| {
@@ -486,12 +485,13 @@ impl<B: BindingEvents> Sources<B> {
     /// Reads binding events past `after`; a failed read alarms once per outage and applies nothing.
     fn read_log<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
-        writer: &ChannelWriter<P, L, A>,
+        writer: &mut ChannelWriter<P, L, A>,
         after: u64,
     ) -> Option<Vec<BindingEvent>> {
         match self.bindings.binding_events_since(self.channel, after) {
-            Ok(events) => {
+            Ok(mut events) => {
                 self.log_alarmed = false;
+                stored_names(writer, &mut events);
                 Some(events)
             }
             Err(detail) => {
@@ -590,6 +590,14 @@ impl<B: BindingEvents> Sources<B> {
         cause: BindingCause,
         parent_hint: Option<&SourceId>,
     ) -> Result<(), WriterAlarm> {
+        // A source an earlier event of this batch attached is the stored name of its file now.
+        let mut stored = |source: &SourceId| {
+            renumbered::canonical(writer.store().cursors(), source).map_err(halt)
+        };
+        let new = stored(&new)?;
+        let old = old.map(&mut stored).transpose()?;
+        let parent_hint = parent_hint.map(&mut stored).transpose()?;
+        let (old, parent_hint) = (old.as_ref(), parent_hint.as_ref());
         let key = source_key(&new);
         let cursor = writer.store().cursor(&new).cloned();
         if cursor.is_none() && !self.rotation.links.contains_key(&key) {
@@ -645,8 +653,8 @@ impl<B: BindingEvents> Sources<B> {
         match cursor {
             None => {
                 let attached = writer.store().attach_source(&new);
-                attached.map_err(halted("attach"))?;
-                let opened = SourceCapture::open(new.clone(), 0);
+                let attached = attached.map_err(halted("attach"))?;
+                let opened = SourceCapture::reopen(new.clone(), 0, &attached.prefix_hash);
                 let capture = opened.map_err(|error| halt(format!("bound source: {error}")))?;
                 self.readers.push(Reader::new(new, Some(capture)));
                 Ok(())
@@ -670,12 +678,7 @@ impl<B: BindingEvents> Sources<B> {
         if reader.capture.is_none() {
             let cursor = writer.store().cursor(source).cloned();
             let cursor = cursor.ok_or_else(|| halt("retired source lost its cursor"))?;
-            let opened = SourceCapture::open(source.clone(), cursor.captured_through);
-            let capture = opened.map_err(|error| halt(format!("source reopen: {error}")))?;
-            if capture.prefix_hash() != cursor.prefix_hash {
-                return Err(halt("source bytes before the cursor changed"));
-            }
-            reader.capture = Some(capture);
+            reader.capture = Some(reopen(&cursor).map_err(Reopen::halt)?);
         }
         Ok(())
     }

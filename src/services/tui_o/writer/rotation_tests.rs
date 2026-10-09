@@ -470,6 +470,9 @@ async fn an_old_tail_the_full_spool_refuses_behind_an_announced_unit_stops_the_c
 mod fork_tests;
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
+#[cfg(unix)]
+#[path = "renumber_tests.rs"]
+mod renumber_tests;
 #[path = "retire_tests.rs"]
 mod retire_tests;
 #[path = "switch_tests.rs"]

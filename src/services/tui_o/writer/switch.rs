@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use super::binding::BindingEvents;
 use super::rotation::binding_baseline;
 use crate::services::tui_o::shadow::SourceId;
+use crate::services::tui_o::shadow::capture::same_file;
 use crate::services::tui_o::store::{Initialized, OEra, OStore, StoreError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,7 +67,8 @@ fn baseline_gap<B: BindingEvents>(
         Ok(events) => events,
         Err(detail) => return Some(format!("binding log unreadable: {detail}")),
     };
-    let attached = |source: &SourceId| init.sources.iter().any(|s| s.source_id == *source);
+    let attached =
+        |source: &SourceId| (init.sources.iter()).any(|s| same_file(&s.source_id, source));
     let baseline = binding_baseline(&events, attached);
     baseline
         .is_none()

@@ -370,3 +370,14 @@ fn a_turn_legacys_reader_has_not_ended_is_reported_undelivered() {
     let quiet = line_len(&system("turn_duration"));
     assert_eq!(abandoned_past_frontier(&channel), quiet);
 }
+
+#[test]
+fn a_renumbered_pin_reads_unchanged_until_its_file_moves() {
+    let channel = Channel::new(6718);
+    let _reboot =
+        crate::services::tui_o::shadow::capture::renumber::shift(&channel.source.path, 1 << 40);
+    let snapshot = channel.pin().unwrap();
+    assert!(snapshot.unchanged(&channel.legacy, channel.channel));
+    append(&channel.source.path, &turn("second"));
+    assert!(!snapshot.unchanged(&channel.legacy, channel.channel));
+}

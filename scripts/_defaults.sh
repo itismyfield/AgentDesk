@@ -1655,7 +1655,7 @@ _release_runtime_is_serving() {
     local port="$1" rc=0
     [ -n "$port" ] || return 0
     curl -s -o /dev/null --max-time 3 \
-        -H "$(_health_origin_header)" \
+        -H "$(_health_origin_header "$port")" \
         "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health" >/dev/null 2>&1 || rc=$?
     [ "$rc" != "7" ]
 }
