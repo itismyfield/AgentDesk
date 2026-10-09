@@ -389,13 +389,6 @@ fn a_restored_draft_is_never_sent_with_the_next_follow_up() {
     let shown = tui.capture();
     assert!(shown.contains(&format!("\x1b[2m{PLACEHOLDER}")));
     let (ended, calls) = warm_follow_up(&tui, &shown);
-    assert!(
-        ended.is_err_and(|error| error.contains("refused before mutation: Composer(NotReady)"))
-    );
-    assert_eq!(writes(&calls), Vec::<String>::new());
-    // The strict submission guard requires a bare empty composer before writing.
-    tui.put("placeholder", "");
-    let (ended, calls) = warm_follow_up(&tui, &tui.capture());
     assert_eq!(ended, Ok(()));
     assert_eq!(writes(&calls), ["literal:C follow-up", "keys:Enter"]);
     crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(

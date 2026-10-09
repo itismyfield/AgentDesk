@@ -2,6 +2,7 @@
 
 use crate::services::claude_tui::prompt_readiness::normalize_prompt_readiness_panel_in_capture;
 use crate::services::claude_tui::startup_dialog::detect_claude_startup_dialog;
+use crate::services::claude_tui::{busy_inject, composer_lock::DraftSighting};
 use crate::services::codex_tui::input::{
     prompt_readiness_from_ansi_pane, strip_ansi_escape_sequences, submission_draft_in_pane,
     submission_modal_in_pane,
@@ -44,7 +45,8 @@ fn judge_claude(capture: &str) -> PaneVerdict {
         return PaneVerdict::Modal;
     }
     let ready = !tmux_capture_indicates_claude_tui_prompt_draft(&pane)
-        && tmux_capture_indicates_claude_tui_exact_empty_composer(&pane)
+        && (tmux_capture_indicates_claude_tui_exact_empty_composer(&pane)
+            || claude_measured_composer_empty(capture))
         && claude_composer_empty_when_present(capture)
         && tmux_capture_indicates_claude_tui_ready_for_input(&pane)
         && !tmux_capture_indicates_claude_tui_busy(&pane);
@@ -98,6 +100,9 @@ pub(crate) fn own_draft(
             .is_some_and(|count| !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()));
         return draft == frame && !folded && !submission_modal_in_pane(&plain);
     }
+    if !claude_composer_not_known_empty(capture) {
+        return false;
+    }
     let Some(rows) = claude_composer_rows(&plain) else {
         return false;
     };
@@ -131,15 +136,28 @@ pub(crate) fn own_draft(
 /// The composer shows exactly `rows`, as Claude wraps a paste; nothing folded or typed besides.
 pub(crate) fn own_wrapped_draft(capture: &str, rows: &[String]) -> bool {
     let plain = strip_ansi_escape_sequences(capture);
-    claude_composer_rows(&plain)
-        .is_some_and(|shown| shown.into_iter().eq(rows.iter().map(String::as_str)))
+    claude_composer_not_known_empty(capture)
+        && claude_composer_rows(&plain)
+            .is_some_and(|shown| shown.into_iter().eq(rows.iter().map(String::as_str)))
+}
+
+// Only the existing measured raw layout can identify a native hint as an empty composer.
+fn claude_measured_composer_empty(capture: &str) -> bool {
+    busy_inject::draft_sighting(capture) == DraftSighting::Settled
+}
+
+// An empty field cannot prove our payload even when its native hint matches the frame.
+fn claude_composer_not_known_empty(capture: &str) -> bool {
+    busy_inject::composer_owner(capture) != busy_inject::ComposerOwner::Empty
 }
 
 /// A visible composer must parse as exactly empty; a busy-only capture has no marker.
 pub(crate) fn claude_composer_empty_when_present(capture: &str) -> bool {
     let plain = strip_ansi_escape_sequences(capture);
     !plain.lines().any(claude_prompt_row)
-        || claude_composer_rows(&plain).is_some_and(|rows| rows.len() == 1 && rows[0].is_empty())
+        || claude_composer_rows(&plain).is_some_and(|rows| {
+            rows.len() == 1 && (rows[0].is_empty() || claude_measured_composer_empty(capture))
+        })
 }
 
 // The bottom Claude composer's rows, prompt and continuation indent removed; none under a modal.

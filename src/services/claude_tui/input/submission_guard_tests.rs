@@ -40,13 +40,22 @@ const ENTRIES: [Entry; 4] = [
 ];
 
 fn submit(entry: Entry, session: &str, token: Option<&CancelToken>) -> Result<(), String> {
+    submit_text(entry, session, PROMPT, token)
+}
+
+fn submit_text(
+    entry: Entry,
+    session: &str,
+    prompt: &str,
+    token: Option<&CancelToken>,
+) -> Result<(), String> {
     // Hosted dispatch supplies a token; its polling path stays on the thread owning this spy.
     let local = CancelToken::new();
     let token = Some(token.unwrap_or(&local));
     match entry {
-        Entry::Fresh => send_fresh_prompt(session, PROMPT, token),
-        Entry::Followup => send_followup_prompt(session, PROMPT, token),
-        Entry::Steering => inject_steering_prompt(session, PROMPT),
+        Entry::Fresh => send_fresh_prompt(session, prompt, token),
+        Entry::Followup => send_followup_prompt(session, prompt, token),
+        Entry::Steering => inject_steering_prompt(session, prompt),
         Entry::ProvenWarm => {
             let transcript = tempfile::NamedTempFile::new().unwrap();
             std::fs::write(
@@ -54,7 +63,7 @@ fn submit(entry: Entry, session: &str, token: Option<&CancelToken>) -> Result<()
                 "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
             )
             .unwrap();
-            send_followup_prompt_or_idle_transcript(session, PROMPT, token, transcript.path())
+            send_followup_prompt_or_idle_transcript(session, prompt, token, transcript.path())
         }
     }
 }
@@ -90,6 +99,131 @@ fn assert_late_hold(error: &str) {
         !error.contains("follow-up prompt input readiness"),
         "{error}"
     );
+}
+
+// These attributes, 120-column borders and footer were captured from Claude's idle composer.
+fn measured_composer(row: &str) -> String {
+    let border = format!("\x1b[38;5;244m{}", "─".repeat(120));
+    let footer = "\x1b[39m  \x1b[38;5;211m⏵⏵ bypass permissions on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m";
+    format!("⏺ Done.\n\n\n{border}\n{row}\n{border}\n{footer}\n")
+}
+
+#[test]
+fn claude_actual_idle_entries_withhold_enter_when_native_empty_hint_matches_prompt_text() {
+    use crate::services::tui_input::actor::gate::{own_draft, own_wrapped_draft};
+    use crate::services::tui_o::shadow::ShadowProvider;
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let prompt = "Try \"refactor <filepath>\"";
+    let empty = measured_composer(&format!("\x1b[39m❯\u{a0}\x1b[2m{prompt}\x1b[0m"));
+    let stashed = empty.replacen("⏺ Done.\n\n\n", "⏺ Done.\n\n› stashed\n", 1);
+    let typed = measured_composer(&format!("\x1b[39m❯\u{a0}{prompt}"));
+    assert_eq!(
+        crate::services::claude_tui::busy_inject::draft_sighting(&empty),
+        crate::services::claude_tui::composer_lock::DraftSighting::Settled
+    );
+    assert_eq!(
+        crate::services::claude_tui::busy_inject::draft_sighting(&stashed),
+        crate::services::claude_tui::composer_lock::DraftSighting::Unsettled
+    );
+    assert!(own_draft(ShadowProvider::Claude, &typed, prompt, true));
+    assert!(own_wrapped_draft(&typed, &[prompt.to_string()]));
+    for after in [&empty, &stashed] {
+        for entry in [Entry::Fresh, Entry::Followup, Entry::ProvenWarm] {
+            let session = format!("claude-guard-hint-alias-{}", uuid::Uuid::new_v4());
+            let spy = SpyGuard::install(state(&[Some(after), Some(BUSY)]));
+            let result = submit_text(entry, &session, prompt, None);
+            let calls = spy.calls();
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|c| *c == &format!("literal:{prompt}"))
+                    .count(),
+                1,
+                "{entry:?}: {result:?}: {calls:?}"
+            );
+            assert_eq!(
+                calls.iter().filter(|c| *c == "keys:Enter").count(),
+                0,
+                "{entry:?}: {result:?}: {calls:?}"
+            );
+            assert_late_hold(&result.unwrap_err());
+            assert_no_cleanup(&calls);
+        }
+        assert!(!own_draft(ShadowProvider::Claude, after, prompt, true));
+        assert!(!own_wrapped_draft(after, &[prompt.to_string()]));
+    }
+}
+
+#[test]
+fn claude_actual_idle_entries_preserve_measured_faint_empty_composer_semantics() {
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let hint = "\x1b[39m❯\u{a0}\x1b[2mTry \"refactor <filepath>\"\x1b[0m";
+    let empty = measured_composer(hint);
+    assert_eq!(
+        crate::services::claude_tui::busy_inject::draft_sighting(&empty),
+        crate::services::claude_tui::composer_lock::DraftSighting::Settled
+    );
+    let invalid = [
+        measured_composer("\x1b[39m❯\u{a0}Try \"refactor <filepath>\""),
+        measured_composer("\x1b[39m❯\u{a0}\x1b[2mTry \"x\"\x1b[22m"),
+        measured_composer("\x1b[39m❯ \x1b[2mTry \"x\"\x1b[0m"),
+        measured_composer("\x1b[39m❯\u{a0}\x1b[2m\x1b[38;5;246mTry \"x\"\x1b[0m"),
+        measured_composer("\x1b[39m❯\u{a0}/he\x1b[2mlp\x1b[0m"),
+        measured_composer("\x1b[39m❯\u{a0}\x1b[2mTry \"x\"\x1b[0m\x1b[2m more\x1b[0m"),
+        measured_composer(&format!("{hint}\n  \x1b[2mTry \"another file\"\x1b[0m")),
+        measured_composer(&format!("{hint}\n  foreign continuation")),
+        measured_composer(&format!("  {hint}")),
+        measured_composer("❯\u{a0}[User: A (ID:1)] stranded"),
+    ];
+    for entry in [Entry::Fresh, Entry::Followup, Entry::ProvenWarm] {
+        for changed in &invalid {
+            let session = format!("claude-guard-faint-pre-{}", uuid::Uuid::new_v4());
+            let mut setup = state(&[Some(OWN), Some(BUSY)]);
+            let draft_read = if matches!(entry, Entry::Fresh) { 1 } else { 2 };
+            setup.draft_capture_at = Some((draft_read, Some(changed.clone())));
+            let spy = SpyGuard::install(setup);
+            let result = submit(entry, &session, None);
+            let calls = spy.calls();
+            assert!(
+                !calls
+                    .iter()
+                    .any(|call| ["literal:", "load:", "paste:", "keys:"]
+                        .iter()
+                        .any(|prefix| call.starts_with(prefix))),
+                "{entry:?}: {result:?}: {changed:?}: {calls:?}"
+            );
+            assert!(
+                result.is_err_and(
+                    |error| error.starts_with("claude tui input refused before mutation:")
+                ),
+                "{entry:?}: {changed:?}"
+            );
+            assert_no_cleanup(&calls);
+        }
+        for confirmation in [&*empty, BUSY] {
+            let session = format!("claude-guard-faint-owned-{}", uuid::Uuid::new_v4());
+            let mut setup = state(&[Some(OWN), Some(confirmation)]);
+            setup.captures = std::iter::repeat_n(Some(empty.clone()), 16).collect();
+            let spy = SpyGuard::install(setup);
+            let result = submit(entry, &session, None);
+            let calls = spy.calls();
+            assert_eq!(result, Ok(()), "{entry:?}: {calls:?}");
+            assert_eq!(
+                calls.iter().filter(|c| *c == "paste:delete=true").count(),
+                1
+            );
+            assert_eq!(calls.iter().filter(|c| *c == "keys:Enter").count(), 1);
+            let paste = calls.iter().position(|c| c == "paste:delete=true").unwrap();
+            let enter = calls.iter().position(|c| c == "keys:Enter").unwrap();
+            assert_eq!(&calls[paste + 1..enter], ["capture:draft", "alive"]);
+            assert_eq!(&calls[enter + 1..], ["capture:draft", "alive"]);
+            assert_no_cleanup(&calls);
+        }
+    }
 }
 
 #[test]

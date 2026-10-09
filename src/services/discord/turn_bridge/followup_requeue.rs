@@ -855,12 +855,14 @@ mod tests {
         prompt: &str,
     ) -> (Result<(), String>, Vec<String>) {
         use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
-        let captures = std::iter::repeat_n(pane, 3)
-            .chain(["\u{2733} Architecting\u{2026}"])
-            .map(|capture| Some(capture.to_string()))
-            .collect();
+        let captures = std::iter::repeat_n(Some(pane.to_string()), 8).collect();
+        let row = format!("\u{276f}\u{a0}{}", prompt.replace('\n', "\n  "));
+        let own = idle_pane_with("", &row);
         let spy = SpyGuard::install(SpyState {
             captures,
+            captures_after_send: Some(
+                [Some(own), Some("\u{2733} Architecting\u{2026}".to_string())].into(),
+            ),
             ..SpyState::default()
         });
         let submitted = crate::services::claude_tui::input::send_followup_prompt_or_idle_transcript(
