@@ -231,8 +231,19 @@ pub(super) async fn handle_stream_tool_message(
                     };
                     match insert_background_child_pg(pg_pool, &spawn).await {
                         Ok(Some(child_session_id)) => {
-                            active_background_child_session_ids
-                                .push(child_session_id);
+                            // A transcript completion read before this insert
+                            // committed found no child, so recheck it here.
+                            #[cfg(unix)]
+                            let finished = crate::services::discord::tui_prompt_relay::background_child_completion::registered_child_already_finished(
+                                pg_pool, parent_session_key, tool_use_id.as_deref(), inflight_state,
+                            )
+                            .await;
+                            #[cfg(not(unix))]
+                            let finished = false;
+                            if !finished {
+                                active_background_child_session_ids
+                                    .push(child_session_id);
+                            }
                         }
                         Ok(None) => {}
                         Err(error) => {

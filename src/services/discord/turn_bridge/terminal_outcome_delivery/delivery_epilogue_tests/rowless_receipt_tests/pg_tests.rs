@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[path = "background_child_ordering_tests.rs"]
+#[cfg(unix)]
+mod background_child_ordering_tests;
+
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_unknown_foreign_anchor_preserves_retry_5521() {
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);

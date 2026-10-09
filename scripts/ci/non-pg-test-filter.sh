@@ -46,6 +46,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::prompt_manifests::tests
   --skip db::relay_dead_letter::tests
   --skip db::scheduled_messages::postgres_tests
+  --skip db::session_observability::tests_pg
   --skip db::session_transcripts::clear_fence_pg_tests
   --skip db::session_transcripts::native_clear_pg_tests
   --skip dispatch::dispatch_cancel::pg_observability_tests
@@ -211,6 +212,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::resume_pin_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
+  --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests
   --skip services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
   --skip services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   --skip services::discord::turn_bridge::tmux_runtime::stop_host::tests
@@ -796,6 +798,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::prompt_manifests::tests
   db::relay_dead_letter::tests
   db::scheduled_messages::postgres_tests
+  db::session_observability::tests_pg
   db::session_transcripts::clear_fence_pg_tests
   db::session_transcripts::native_clear_pg_tests
   dispatch::dispatch_cancel::pg_observability_tests
@@ -961,6 +964,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::turn_bridge::resume_pin_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
+  services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
   services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   services::discord::turn_bridge::tmux_runtime::stop_host::tests

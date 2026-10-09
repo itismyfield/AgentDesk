@@ -13,8 +13,15 @@ use crate::db::session_observability::{
 /// Read position per tmux session, separate from the prompt cursor so records a
 /// running turn already consumed are still read here.
 static COMPLETION_CURSORS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, (PathBuf, u64)>>,
+    std::sync::Mutex<std::collections::HashMap<String, CompletionCursor>>,
 > = std::sync::LazyLock::new(Default::default);
+
+#[derive(Clone, PartialEq, Eq)]
+struct CompletionCursor {
+    path: PathBuf,
+    offset: u64,
+    revision: u64,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct ChildCompletion {
@@ -25,7 +32,7 @@ struct ChildCompletion {
 
 /// Applies each Claude TUI binding's new transcript completions before the idle
 /// tick's per-binding skips (inflight, no channel), then returns the bindings.
-pub(super) async fn claude_bindings_after_child_completions(
+pub(in crate::services::discord) async fn claude_bindings_after_child_completions(
     shared: &Arc<SharedData>,
 ) -> Vec<(
     String,
@@ -63,10 +70,11 @@ async fn close_children_finished_in_transcript(
         &ProviderKind::Claude,
         tmux_session_name,
     );
-    let known = completion_cursors()
-        .get(tmux_session_name)
-        .filter(|(path, offset)| path == transcript_path && *offset <= len)
-        .map(|(_, offset)| *offset);
+    let observed = completion_cursors().get(tmux_session_name).cloned();
+    let known = observed
+        .as_ref()
+        .filter(|cursor| cursor.path == transcript_path && cursor.offset <= len)
+        .map(|cursor| cursor.offset);
     let start = match known {
         Some(offset) => offset,
         // Unread history can hold a completion only if a child is still open.
@@ -90,13 +98,7 @@ async fn close_children_finished_in_transcript(
         };
         cursor = end;
         for completion in completions {
-            let close_status =
-                if super::super::placeholder_live_events::notification_is_error(&completion.status)
-                {
-                    "aborted"
-                } else {
-                    "completed"
-                };
+            let close_status = close_status_for(&completion.status);
             match close_background_child_for_tool_use_pg(
                 pool,
                 &parent,
@@ -122,14 +124,104 @@ async fn close_children_finished_in_transcript(
             }
         }
     }
-    completion_cursors().insert(
-        tmux_session_name.to_string(),
-        (transcript_path.to_path_buf(), cursor),
-    );
+    let mut cursors = completion_cursors();
+    // A registration retry may rewind while this scan is awaiting the database.
+    if cursors.get(tmux_session_name) == observed.as_ref() {
+        cursors.insert(
+            tmux_session_name.to_string(),
+            CompletionCursor {
+                path: transcript_path.to_path_buf(),
+                offset: cursor,
+                revision: observed.map_or(0, |cursor| cursor.revision.wrapping_add(1)),
+            },
+        );
+    }
+}
+
+/// Closes a child the bridge just registered when the turn's transcript already
+/// holds its terminal completion; returns whether the child is now closed.
+pub(in crate::services::discord) async fn registered_child_already_finished(
+    pool: &sqlx::PgPool,
+    parent_session_key: &str,
+    tool_use_id: Option<&str>,
+    turn: &InflightTurnState,
+) -> bool {
+    let (Some(RuntimeHandoffKind::ClaudeTui), Some(tool_use_id), Some(path)) = (
+        turn.runtime_kind,
+        tool_use_id.map(str::trim).filter(|id| !id.is_empty()),
+        turn.output_path.clone(),
+    ) else {
+        return false;
+    };
+    // Old restored turns without a start offset require a full transcript read.
+    let from = turn
+        .turn_start_offset
+        .map_or(0, |offset| offset.min(turn.last_offset));
+    let scan_path = path.clone();
+    let Ok(Ok((completions, _))) = tokio::task::spawn_blocking(move || {
+        let len = std::fs::metadata(&scan_path)?.len();
+        read_child_completions(Path::new(&scan_path), if from > len { 0 } else { from })
+    })
+    .await
+    else {
+        schedule_registration_retry(turn, Path::new(&path), from);
+        return false;
+    };
+    let Some(completion) = completions
+        .into_iter()
+        .find(|completion| completion.tool_use_id == tool_use_id)
+    else {
+        // A pre-registration scan may have sampled EOF inside this record.
+        schedule_registration_retry(turn, Path::new(&path), from);
+        return false;
+    };
+    match close_background_child_for_tool_use_pg(
+        pool,
+        parent_session_key,
+        tool_use_id,
+        close_status_for(&completion.status),
+    )
+    .await
+    {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!(parent_session_key, tool_use_id, %error,
+                "background child finished before registration but its close failed");
+            schedule_registration_retry(turn, Path::new(&path), from);
+            false
+        }
+    }
+}
+
+fn schedule_registration_retry(turn: &InflightTurnState, path: &Path, from: u64) {
+    let Some(tmux) = turn.tmux_session_name.as_deref() else {
+        return;
+    };
+    let mut cursors = completion_cursors();
+    let cursor = cursors.entry(tmux.to_owned()).or_insert(CompletionCursor {
+        path: path.to_path_buf(),
+        offset: from,
+        revision: 0,
+    });
+    cursor.offset = if cursor.path == path {
+        cursor.offset.min(from)
+    } else {
+        from
+    };
+    cursor.path = path.to_path_buf();
+    cursor.revision = cursor.revision.wrapping_add(1);
+}
+
+fn close_status_for(notification_status: &str) -> &'static str {
+    if super::super::placeholder_live_events::notification_is_error(notification_status) {
+        "aborted"
+    } else {
+        "completed"
+    }
 }
 
 fn completion_cursors()
--> std::sync::MutexGuard<'static, std::collections::HashMap<String, (PathBuf, u64)>> {
+-> std::sync::MutexGuard<'static, std::collections::HashMap<String, CompletionCursor>> {
     COMPLETION_CURSORS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -137,7 +229,7 @@ fn completion_cursors()
 
 /// Process restart: every read position is forgotten.
 #[cfg(test)]
-pub(super) fn forget_completion_cursors_for_tests() {
+pub(in crate::services::discord) fn forget_completion_cursors_for_tests() {
     completion_cursors().clear();
 }
 

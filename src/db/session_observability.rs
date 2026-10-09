@@ -164,6 +164,12 @@ pub async fn close_background_child_pg(
     // A parent whose turn ended waiting only on background work is idle once
     // its last open child closes.
     if let Some(parent_session_id) = parent_session_id {
+        // Lock first so the open-child check runs on a snapshot taken after any
+        // sibling close that held the parent commits.
+        sqlx::query("SELECT 1 FROM sessions WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(parent_session_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             "UPDATE sessions
                 SET active_children = GREATEST(active_children - 1, 0),
@@ -293,3 +299,7 @@ fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
     }
     value[..end].to_string()
 }
+
+#[cfg(test)]
+#[path = "session_observability/tests_pg.rs"]
+mod tests_pg;

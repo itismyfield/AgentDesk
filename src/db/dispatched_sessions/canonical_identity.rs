@@ -150,7 +150,7 @@ pub(crate) async fn upsert_hook_session_with_actor_pin_pg(
     }
     let active_turn_nonce = params.turn_start_nonce.map(str::to_owned);
     let status = Some(params.status.to_owned());
-    let (_, id) = upsert_hook_session_pg(pool, params, None, Some(pin)).await?;
+    let (_, id) = upsert_hook_session_pg(pool, params, None, Some(pin), None).await?;
     Ok(HookSessionActorPin::Existing {
         id,
         active_turn_nonce,
@@ -173,7 +173,28 @@ pub(crate) async fn upsert_hook_session_with_identity_pg(
     params: HookSessionUpsert<'_>,
     identity: Option<CanonicalSessionIdentity<'_>>,
 ) -> Result<HookSessionUpsertOutcome, HookSessionUpsertError> {
-    upsert_hook_session_pg(pool, params, identity, None)
+    upsert_hook_session_pg(pool, params, identity, None, None)
+        .await
+        .map(|(outcome, _)| outcome)
+}
+
+pub(crate) async fn upsert_hook_session_terminal_pg(
+    pool: &PgPool,
+    params: HookSessionUpsert<'_>,
+    identity: Option<CanonicalSessionIdentity<'_>>,
+    expected_turn_nonce: &str,
+) -> Result<HookSessionUpsertOutcome, HookSessionUpsertError> {
+    if expected_turn_nonce.trim().is_empty()
+        || params.turn_start_nonce.is_some()
+        || !(params.status.eq_ignore_ascii_case("idle")
+            || params.status.eq_ignore_ascii_case("awaiting_bg"))
+    {
+        return Err(conflict(
+            SessionIdentityConflictKind::OwnershipMismatch,
+            "terminal hook requires an existing actor nonce and a terminal status",
+        ));
+    }
+    upsert_hook_session_pg(pool, params, identity, None, Some(expected_turn_nonce))
         .await
         .map(|(outcome, _)| outcome)
 }
@@ -183,6 +204,7 @@ async fn upsert_hook_session_pg(
     params: HookSessionUpsert<'_>,
     identity: Option<CanonicalSessionIdentity<'_>>,
     actor_pin: Option<&HookSessionActorPin>,
+    expected_terminal_nonce: Option<&str>,
 ) -> Result<(HookSessionUpsertOutcome, i64), HookSessionUpsertError> {
     let mut tx = pool.begin().await.map_err(database_error)?;
 
@@ -227,7 +249,15 @@ async fn upsert_hook_session_pg(
     let outcome = match target {
         Some(target) => {
             validate_target_identity(&target, params.provider, params.channel_id, identity)?;
-            update_target(&mut tx, target.id, &params, identity, expected_actor).await?;
+            update_target(
+                &mut tx,
+                target.id,
+                &params,
+                identity,
+                expected_actor,
+                expected_terminal_nonce,
+            )
+            .await?;
             preserve_alias(&mut tx, params.session_key, target.id).await?;
             (
                 HookSessionUpsertOutcome {
@@ -236,6 +266,12 @@ async fn upsert_hook_session_pg(
                 },
                 target.id,
             )
+        }
+        None if expected_terminal_nonce.is_some() => {
+            return Err(conflict(
+                SessionIdentityConflictKind::OwnershipMismatch,
+                "terminal hook actor row no longer exists",
+            ));
         }
         None => insert_target(&mut tx, &params, identity).await?,
     };
@@ -693,10 +729,24 @@ async fn update_target(
     params: &HookSessionUpsert<'_>,
     identity: Option<CanonicalSessionIdentity<'_>>,
     expected_actor: Option<(Option<&str>, Option<&str>)>,
+    expected_terminal_nonce: Option<&str>,
 ) -> Result<(), HookSessionUpsertError> {
+    // Recheck background occupancy under the parent lock so a late terminal
+    // publication cannot restore awaiting_bg after the last child closed.
+    let terminal_actor_fenced = expected_terminal_nonce.is_some();
     let updated = sqlx::query(
         "UPDATE sessions SET
-            status = $2,
+            status = CASE
+              WHEN lower($2) = 'awaiting_bg'
+               AND COALESCE(active_children, 0) = 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM sessions child
+                    WHERE child.parent_session_id = sessions.id
+                      AND child.closed_at IS NULL
+               )
+              THEN 'idle'
+              ELSE $2
+            END,
             instance_id = COALESCE(NULLIF(BTRIM($3), ''), instance_id),
             provider = $4,
             session_info = COALESCE($5, session_info),
@@ -729,7 +779,8 @@ async fn update_target(
             END,
             last_heartbeat = NOW()
          WHERE id = $1 AND (NOT $19 OR (
-             active_turn_nonce IS NOT DISTINCT FROM $20 AND status IS NOT DISTINCT FROM $21))",
+             active_turn_nonce IS NOT DISTINCT FROM $20 AND status IS NOT DISTINCT FROM $21))
+           AND (NOT $22 OR active_turn_nonce IS NOT DISTINCT FROM $23)",
     )
     .bind(session_id)
     .bind(params.status)
@@ -752,10 +803,12 @@ async fn update_target(
     .bind(expected_actor.is_some())
     .bind(expected_actor.and_then(|(_, nonce)| nonce))
     .bind(expected_actor.and_then(|(status, _)| status))
+    .bind(terminal_actor_fenced)
+    .bind(expected_terminal_nonce)
     .execute(&mut **tx)
     .await
     .map_err(database_error)?;
-    if expected_actor.is_some() && updated.rows_affected() != 1 {
+    if (expected_actor.is_some() || terminal_actor_fenced) && updated.rows_affected() != 1 {
         return Err(conflict(
             SessionIdentityConflictKind::OwnershipMismatch,
             "hook session actor state changed after observation",
