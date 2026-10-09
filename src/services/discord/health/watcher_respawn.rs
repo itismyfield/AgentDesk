@@ -817,9 +817,14 @@ async fn retry_pending_watcher_respawn_admitted(
     // `WatcherReattach` arm clears the canonical row and re-mints a synthetic
     // one; pinned, the same arm adopts it, and a row that changed underneath us
     // fails the rebind instead of being overwritten.
-    let expected_episode = discord::inflight::load_inflight_state(provider, channel_id.get())
-        .as_ref()
-        .map(discord::inflight::InflightEpisodePin::from_state);
+    // The read can backfill an old-format row, so an admitted retry runs it on the input worker.
+    let expected_episode = live_bridge_guard::row_io({
+        let (provider, channel_id) = (provider.clone(), channel_id.get());
+        move || discord::inflight::load_inflight_state(&provider, channel_id)
+    })
+    .await
+    .as_ref()
+    .map(discord::inflight::InflightEpisodePin::from_state);
     if let Some(pin) = expected_episode.as_ref() {
         reclaim_watcherless_session_bound_relay(registry, provider, channel_id, pin).await;
     }
@@ -875,12 +880,15 @@ pub(in crate::services::discord) async fn reclaim_watcherless_session_bound_rela
             None => return,
         },
     };
-    let outcome = discord::inflight::reclaim_watcherless_session_bound_relay_owner(
-        &shared,
-        provider,
-        channel_id.get(),
-        pin,
-    );
+    let outcome = live_bridge_guard::row_io({
+        let (provider, channel_id, pin) = (provider.clone(), channel_id.get(), pin.clone());
+        move || {
+            discord::inflight::reclaim_watcherless_session_bound_relay_owner(
+                &shared, &provider, channel_id, &pin,
+            )
+        }
+    })
+    .await;
     if outcome == discord::inflight::OrphanRelayReclaimOutcome::Downgraded {
         tracing::warn!(
             channel_id = channel_id.get(),

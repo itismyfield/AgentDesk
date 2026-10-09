@@ -75,6 +75,27 @@ impl InflightTurnState {
         !self.replay_hold_reasons.is_empty()
     }
 
+    /// Keep a held recovery request's body, session and delivery with its existing owner.
+    pub(in crate::services::discord) fn warn_replay_held(
+        &self,
+        channel_id: poise::serenity_prelude::ChannelId,
+    ) -> bool {
+        #[cfg(test)]
+        if std::env::var("ADK_REPLAY_FENCE_MUTANT").ok().as_deref() == Some("recovery-retry") {
+            return false;
+        }
+        if !self.replay_rerun_blocked() {
+            return false;
+        }
+        tracing::warn!(
+            target: "agentdesk::services::discord::turn_bridge::terminal_outcome_delivery::recovery_retry",
+            channel_id = %channel_id,
+            reasons = ?self.replay_hold_reasons,
+            "session died during recovery of a held request; not retried"
+        );
+        true
+    }
+
     /// Keep a projected episode's receipt and hold reasons; refuse a different projected episode
     /// or a conflicting receipt before the guarded writer can persist anything.
     pub(in crate::services::discord) fn merge_replay_projection(&mut self, other: &Self) -> bool {

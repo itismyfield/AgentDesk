@@ -48,3 +48,58 @@ async fn claim_then_send_releases_a_pending_adoption_only_for_the_send_it_runs()
     assert_eq!(indirect, Ok(BodySend::OwnedByO));
     assert!(!ran.get(), "nothing is sent on O's channel");
 }
+
+// A claimed Legacy body stays counted against its channel's adoption until its transport is done,
+// a held one until the caller drops it; O's channel, a peek and an unclaimed send count nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn a_claimed_legacy_send_stays_counted_until_its_transport_is_done() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::channel_policy::{Adoption, Candidate};
+    let claim = |channel| Some(BodyClaim::new(channel, Some(ClaudeTui)));
+    let candidate = |channel| -> Candidate {
+        test_override::with_channels(|boot| boot?.candidate(channel).cloned()).unwrap()
+    };
+    let _pending = test_override::force_candidates(&[(61, ClaudeTui), (62, ClaudeTui)]);
+    let (pending, deferred) = (candidate(61), candidate(62));
+    assert!(deferred.defer(62));
+    for (channel, adoption) in [(61, &pending), (62, &deferred)] {
+        let during = claim_then_send(claim(channel), || async { adoption.sends() }).await;
+        assert_eq!(
+            during,
+            Ok(BodySend::Sent((1, 0))),
+            "{channel}: counted while it sends"
+        );
+        assert_eq!(adoption.sends(), (1, 1), "{channel}: done once the send is");
+    }
+    assert_eq!(
+        deferred.peek(),
+        Adoption::Deferred,
+        "a body leaves a deferral in place"
+    );
+    let held = claim_then_send_held(claim(62), || async { deferred.sends() }).await;
+    let (sent, held) = held.unwrap();
+    assert_eq!(sent, BodySend::Sent((2, 1)));
+    assert_eq!(
+        deferred.sends(),
+        (2, 1),
+        "still counted after its first step"
+    );
+    drop(held);
+    assert_eq!(deferred.sends(), (2, 2));
+    let unclaimed = claim_then_send(None, || async { deferred.sends() }).await;
+    assert_eq!(unclaimed, Ok(BodySend::Sent((2, 2))));
+    assert_eq!(
+        peek_o_owns_tui_output_for_channel(62, Some(ClaudeTui)),
+        Ok(false)
+    );
+    assert_eq!(deferred.sends(), (2, 2), "a peek sends nothing");
+
+    let _owned = test_override::force_channels(&[(63, ClaudeTui)]);
+    let owned = claim_then_send_held(claim(63), || async {}).await;
+    assert!(matches!(owned, Ok((BodySend::OwnedByO, None))));
+    assert_eq!(
+        candidate(63).sends(),
+        (0, 0),
+        "O's channel reserves no Legacy send"
+    );
+}

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "00788fcd25e72736b8122640473da2c8743355f1",
+  "measured_at_sha": "5e7b2d29a430f8596d0618cf3b7800a3a81bf828",
   "records": [
     {
       "root": "migrations/postgres",
@@ -31708,6 +31708,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:95b8fdefd716c88e4983abbb42a2e39febc1d4c0c82701b17a767b66d639dd38"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:50b5c168320beb4d910c79ca2410e4d635032fabef1ba0dac979c2255245e530"
     },
     {
       "root": "src",
