@@ -5,13 +5,14 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use sqlx::Connection;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{PgPool, Row};
 
 use crate::config::{AgentChannel, AgentDef, Config};
 
+mod advisory_lock;
+pub use advisory_lock::AdvisoryLockLease;
 mod shared_config;
 pub(crate) use shared_config::shared_config_sync_enabled;
 pub use shared_config::{startup_reseed, startup_reseed_with_warmup_pool};
@@ -153,87 +154,6 @@ impl PgConnectFailure {
 impl fmt::Display for PgConnectFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.message)
-    }
-}
-
-/// Session-scoped PostgreSQL advisory lock lease.
-///
-/// The lock remains held for the lifetime of the dedicated connection.
-/// Dropping the lease releases the lock implicitly; callers may also call
-/// `unlock()` for an explicit release.
-pub struct AdvisoryLockLease {
-    conn: PgConnection,
-    lock_id: i64,
-    label: String,
-}
-
-impl AdvisoryLockLease {
-    pub async fn try_acquire(
-        pool: &PgPool,
-        lock_id: i64,
-        label: impl Into<String>,
-    ) -> Result<Option<Self>, String> {
-        Self::try_acquire_with_application_name(pool, lock_id, label, None).await
-    }
-
-    /// Acquire a lease on a dedicated connection with an optional PostgreSQL
-    /// `application_name`. A stable owner identity lets recovery code distinguish
-    /// an abandoned AgentDesk lease from an unrelated or live backend.
-    pub async fn try_acquire_named(
-        pool: &PgPool,
-        lock_id: i64,
-        label: impl Into<String>,
-        application_name: impl Into<String>,
-    ) -> Result<Option<Self>, String> {
-        Self::try_acquire_with_application_name(pool, lock_id, label, Some(application_name.into()))
-            .await
-    }
-
-    async fn try_acquire_with_application_name(
-        pool: &PgPool,
-        lock_id: i64,
-        label: impl Into<String>,
-        application_name: Option<String>,
-    ) -> Result<Option<Self>, String> {
-        let label = label.into();
-        let mut options = (*pool.connect_options()).clone();
-        if let Some(application_name) = application_name {
-            options = options.application_name(&application_name);
-        }
-        let mut conn = PgConnection::connect_with(&options)
-            .await
-            .map_err(|error| format!("{label} acquire advisory lock connection: {error}"))?;
-        let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
-            .bind(lock_id)
-            .fetch_one(&mut conn)
-            .await
-            .map_err(|error| format!("{label} try advisory lock: {error}"))?;
-        if acquired {
-            Ok(Some(Self {
-                conn,
-                lock_id,
-                label,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub async fn keepalive(&mut self) -> Result<(), String> {
-        sqlx::query("SELECT 1")
-            .execute(&mut self.conn)
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("{} advisory lock keepalive: {error}", self.label))
-    }
-
-    pub async fn unlock(mut self) -> Result<(), String> {
-        sqlx::query("SELECT pg_advisory_unlock($1)")
-            .bind(self.lock_id)
-            .execute(&mut self.conn)
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("{} advisory unlock {}: {error}", self.label, self.lock_id))
     }
 }
 

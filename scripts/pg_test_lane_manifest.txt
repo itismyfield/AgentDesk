@@ -25,6 +25,7 @@ src/db/intake_outbox_home_tests.rs
 src/db/o_channel_activation.rs
 src/db/o_channel_homes_tests.rs
 src/db/postgres.rs
+src/db/postgres/advisory_lock_tests.rs
 src/db/postgres/test_db_reclaim.rs
 src/db/prompt_manifests/tests.rs
 src/db/relay_dead_letter.rs
@@ -250,6 +251,7 @@ db::intake_outbox_dispatch_stamp::tests
 db::intake_outbox_dispatched_audit::postgres_tests
 db::o_channel_activation::postgres_tests
 db::o_channel_homes::tests
+db::postgres::advisory_lock::tests
 db::postgres::test_db_reclaim::tests
 db::postgres::tests
 db::prompt_manifests::tests
@@ -704,6 +706,9 @@ db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_w
 db::o_channel_homes::tests::every_home_transition_applies_only_under_its_exact_condition_pg
 db::o_channel_homes::tests::force_never_runs_inside_f_and_leaves_an_orphan_nobody_adopts_pg
 db::o_channel_homes::tests::force_orphans_only_a_holder_silent_past_the_window_and_adopts_nothing_pg
+db::postgres::advisory_lock::tests::expiry_is_in_force_before_the_lock_is_granted_pg
+db::postgres::advisory_lock::tests::idle_expiry_ends_only_the_expiring_lease_session_pg
+db::postgres::advisory_lock::tests::keepalive_holds_an_expiring_lease_and_silence_releases_it_pg
 db::postgres::test_db_reclaim::tests::pg_reclaim_create_boundaries_protect_live_owner
 db::postgres::test_db_reclaim::tests::pg_reclaim_dead_owner_young_database_is_reclaimed_immediately
 db::postgres::test_db_reclaim::tests::pg_reclaim_dry_run
@@ -1336,8 +1341,11 @@ services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_regi
 services::discord::runtime_bootstrap::channel_homes_tests::the_entry_reads_nothing_off_and_starts_nothing_without_a_row_pg
 services::discord::runtime_bootstrap::channel_homes_tests::the_legacy_reset_runs_the_existing_reset_and_keeps_a_local_pane_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::backend_exit_removes_home_waiter_until_live_home_takes_handback_pg
+services::discord::runtime_bootstrap::gateway_handback_integration_tests::configured_idle_expiry_reaches_the_lease_session_and_zero_disables_it_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self_fences_pg
+services::discord::runtime_bootstrap::gateway_handback_integration_tests::idle_expired_holder_loses_the_lease_to_a_peer_and_self_fences_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::observed_acquisition_settles_each_pending_handback_pg
+services::discord::runtime_bootstrap::gateway_handback_integration_tests::preferred_node_takes_the_lease_once_a_silent_holder_session_expires_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::activation_facts_use_only_the_published_self_id_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::activation_facts_use_the_configured_home_id_and_local_starts_hold_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_existing_handoff_returns_true_and_preserves_every_runtime_fence_pg

@@ -155,6 +155,8 @@ src/
 │   │   ├── mod.rs
 │   │   └── transitions.rs
 │   ├── postgres/
+│   │   ├── advisory_lock.rs
+│   │   ├── advisory_lock_tests.rs
 │   │   ├── shared_config.rs
 │   │   └── test_db_reclaim.rs
 │   ├── prompt_manifests/
@@ -703,6 +705,9 @@ src/
 │   │   ├── channel_home_tests.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
+│   │   ├── home_availability.rs
+│   │   ├── home_supervisor.rs
+│   │   ├── home_supervisor_tests.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs
@@ -1341,6 +1346,7 @@ src/
 │   │   │   ├── gateway_handback_integration_tests.rs
 │   │   │   ├── gateway_handback_mock.rs
 │   │   │   ├── gateway_lease.rs
+│   │   │   ├── gateway_lease_expiry.rs
 │   │   │   ├── gateway_lease_recovery.rs
 │   │   │   ├── gateway_lease_recovery_tests.rs
 │   │   │   ├── gateway_lease_tests.rs
@@ -2368,6 +2374,8 @@ src/
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_home_tests.rs
+│   │   │   ├── host_io_tests.rs
+│   │   │   ├── host_managed_tests.rs
 │   │   │   ├── host_renumber_tests.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── input_facts.rs
