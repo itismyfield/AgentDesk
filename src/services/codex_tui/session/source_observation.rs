@@ -237,6 +237,12 @@ fn path_identity(path: &Path) -> SourceFileIdentity {
     if let Ok(metadata) = std::fs::metadata(path) {
         use std::os::unix::fs::MetadataExt;
         return SourceFileIdentity::Unix {
+            #[cfg(test)]
+            dev: crate::services::tui_o::shadow::capture::renumber::dev(
+                metadata.dev(),
+                metadata.ino(),
+            ),
+            #[cfg(not(test))]
             dev: metadata.dev(),
             ino: metadata.ino(),
         };

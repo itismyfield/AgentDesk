@@ -12,6 +12,7 @@ use super::binding::BindingEvents;
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
+use crate::services::tui_o::shadow::capture::same_file;
 use crate::services::tui_o::store::{InitSource, Initialized, OStore};
 
 /// What the gateway reports about a channel before its first activation.
@@ -224,6 +225,7 @@ fn create(store: &OStore, channel: u64, sources: Vec<InitSource>) -> Result<(), 
 fn empty_sources<B: BindingEvents>(bindings: &B, channel: u64) -> Result<Vec<InitSource>, String> {
     let events = bindings.binding_events_since(channel, 0);
     let events = events.map_err(|error| format!("binding log: {error}"))?;
+    let events = super::renumbered::first_named(events);
     let (bound, named) = logged(&events).map_err(|refused| refused.to_string())?;
     for source in bound.iter().chain(&named) {
         still_empty(source)?;
@@ -246,7 +248,8 @@ pub(super) fn still_empty(source: &SourceId) -> Result<(), String> {
     let path = source.path.display();
     let current = source_id_for(&source.session_id, &source.path);
     let current = current.map_err(|error| format!("source {path}: {error}"))?;
-    if current != *source {
+    // An empty file needs no bytes to prove it is the same after a renumbered dev.
+    if !same_file(&current, source) {
         return Err(format!("source {path} was replaced"));
     }
     let len = std::fs::metadata(&source.path).map_err(|error| format!("source {path}: {error}"));
