@@ -729,6 +729,10 @@ src/
 │   ├── codex_tmux_wrapper/
 │   │   └── input.rs
 │   ├── codex_tui/
+│   │   ├── busy_inject/
+│   │   │   ├── inject_tests.rs
+│   │   │   ├── rollout.rs
+│   │   │   └── screen.rs
 │   │   ├── input/
 │   │   │   ├── tests/
 │   │   │   │   └── startup_update_tests.rs
@@ -748,6 +752,7 @@ src/
 │   │   │   └── source_observation_tests.rs
 │   │   ├── verified_tail/
 │   │   │   └── diagnostic_tests.rs
+│   │   ├── busy_inject.rs
 │   │   ├── canary.rs
 │   │   ├── host_input.rs
 │   │   ├── input.rs
@@ -898,6 +903,7 @@ src/
 │   │   │   │   └── redrive_grace.rs
 │   │   │   ├── turn_deliver/
 │   │   │   │   ├── inject.rs
+│   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   └── inject_tests.rs
 │   │   │   ├── watcher_respawn/
 │   │   │   │   ├── claude_original_tests.rs
@@ -2399,6 +2405,8 @@ src/
 │   │   ├── binding_context.rs
 │   │   ├── binding_events.rs
 │   │   ├── extract.rs
+│   │   ├── injected_steer.rs
+│   │   ├── injected_steer_tests.rs
 │   │   ├── native_clear.rs
 │   │   ├── observation.rs
 │   │   ├── pending.rs
