@@ -558,6 +558,89 @@ async fn a_row_read_during_a_refused_announcement_is_announced_afterwards() {
     drop(hook_tx);
 }
 
+/// The scanner publishes the row 31s on while the hook's announcement POST is open, so the row
+/// waits behind that relay; it is announced only when the hook's announcement was refused.
+async fn a_row_queued_behind_an_open_announcement(tmux: &str, session: &str, answer: NoteAnswer) {
+    let refused = matches!(answer, NoteAnswer::Refuse);
+    let (hook_tx, hook_rx) = broadcast::channel(8);
+    // A stalled POST outlives the client's timeout, so its result stays unknown.
+    let setup = match answer {
+        NoteAnswer::Stall => Setup {
+            notify_timeout: Some(Duration::from_secs(2)),
+            ..READY
+        },
+        _ => READY,
+    };
+    let (harness, relayed) = start(tmux, &[session], hook_rx, setup).await;
+    harness.answer_notes_with(answer);
+    harness.hold_next_note();
+    hook_tx
+        .send(hook_event(session))
+        .expect("observer subscribed");
+    assert!(
+        harness.wait_for_held_note(WAIT).await,
+        "no announcement POST"
+    );
+    assert_eq!(
+        scanner_sees_the_row(tmux),
+        dedupe::PromptObservation::PublishedSshDirect
+    );
+    if refused {
+        // The row's own POST is held too, so it is created after the hook's was refused.
+        harness.hold_next_note();
+        harness.release_held_note();
+        assert!(
+            harness.wait_for_held_note(WAIT).await,
+            "the row was not announced"
+        );
+        harness.answer_notes_with(NoteAnswer::Create);
+    }
+    harness.release_held_note();
+    wait_for_relays(&relayed, 2).await;
+    let expected = match answer {
+        NoteAnswer::Refuse => (2, 1, 1),
+        NoteAnswer::Create => (1, 1, 1),
+        NoteAnswer::Stall => (1, 1, 0),
+    };
+    assert_eq!(settled_counts(&harness).await, expected);
+    let lease = dedupe::external_input_relay_lease_present(PROVIDER_KEY, tmux, super::CHANNEL_ID);
+    assert!(
+        refused || !lease,
+        "the dropped row keeps no lease of its own"
+    );
+    drop(hook_tx);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_row_queued_behind_a_created_announcement_is_not_announced_again() {
+    a_row_queued_behind_an_open_announcement(
+        "AgentDesk-claude-5845-held-created-hook",
+        "5845e2e0-0000-0000-0000-0000000000cb",
+        NoteAnswer::Create,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_row_queued_behind_a_timed_out_announcement_is_not_announced_again() {
+    a_row_queued_behind_an_open_announcement(
+        "AgentDesk-claude-5845-held-stalled-hook",
+        "5845e2e0-0000-0000-0000-0000000000cd",
+        NoteAnswer::Stall,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_row_queued_behind_a_refused_announcement_is_announced() {
+    a_row_queued_behind_an_open_announcement(
+        "AgentDesk-claude-5845-held-refused-queued-hook",
+        "5845e2e0-0000-0000-0000-0000000000cc",
+        NoteAnswer::Refuse,
+    )
+    .await;
+}
+
 /// The relay returns before any announcement POST; once that cause is repaired, the
 /// scanner's row 31s later is announced exactly once.
 async fn a_prompt_unsent_before_its_post_is_announced_by_the_scanner(

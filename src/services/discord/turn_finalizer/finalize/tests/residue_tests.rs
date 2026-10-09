@@ -64,6 +64,13 @@ fn seed_inflight_row(channel_id: ChannelId) -> std::path::PathBuf {
 }
 
 async fn reconcile_once(shared: &Arc<SharedData>) {
+    #[cfg(unix)]
+    let tmp = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    let _tmux =
+        crate::services::discord::zombie_foreground_release::tests::fixtures::missing_tmux_fixture(
+            &tmp,
+        );
     let mut ledger = HashMap::new();
     let mut pending_admission = HashMap::new();
     reconcile::reconcile(&mut ledger, &mut pending_admission, shared).await;
@@ -92,6 +99,20 @@ async fn seed_owner(
     queued_user_msg_id: u64,
     token: Arc<CancelToken>,
 ) -> Arc<CancelToken> {
+    token.bind_unmanaged_session_name(&format!("AgentDesk-claude-measured-residue-{channel_id}"));
+    #[cfg(unix)]
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let _tmux = crate::services::discord::zombie_foreground_release::tests::fixtures::missing_tmux_fixture(&tmp);
+        assert_eq!(
+            crate::services::discord::zombie_foreground_release::tui_structurally_idle(
+                &ProviderKind::Claude,
+                &token
+            ),
+            Some(true),
+            "nonce and inflight guards need independent measured-idle evidence",
+        );
+    }
     assert!(
         crate::services::discord::mailbox_try_start_turn(
             shared,
@@ -222,6 +243,7 @@ async fn health_names_the_permanently_held_residue_instead_of_calling_it_active(
 /// showing. This pins that claim against the reconciler's real behaviour in the
 /// same fixture: the reconciler HOLDS (the row is on disk) and health
 /// nevertheless reports `residual`, not `active` and not `residual_held`.
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn health_still_shows_residual_while_an_inflight_owner_holds_the_release() {
     crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root(|| async move {
@@ -265,6 +287,7 @@ async fn health_still_shows_residual_while_an_inflight_owner_holds_the_release()
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn owned_row_backstop_miss_clears_only_its_episode_without_manual_unlink() {
     crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root(|| async {
@@ -368,6 +391,7 @@ async fn owned_row_backstop_miss_clears_only_its_episode_without_manual_unlink()
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn producer_bound_same_episode_miss_keeps_residue_recovery_owner_r3() {
     crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root(|| async {
@@ -422,6 +446,7 @@ async fn producer_bound_same_episode_miss_keeps_residue_recovery_owner_r3() {
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn guarded_miss_residue_reconcile_releases_same_terminal_episode_and_rearms_queue() {
     crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root(|| async move {
@@ -494,6 +519,23 @@ async fn guarded_miss_residue_reconcile_releases_same_terminal_episode_and_rearm
         );
         std::fs::remove_file(&inflight_row).expect("clear inflight row");
 
+        let tmux_name = token.tmux_session_name().unwrap();
+        *token.tmux_binding.lock().unwrap() = None;
+        reconcile_once(&shared).await;
+        let held = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert!(
+            held.cancel_token
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, &token))
+        );
+        assert_eq!(held.intervention_queue.len(), 1);
+        assert!(
+            shared
+                .turn_finalizer
+                .guarded_finish_residues()
+                .contains_key(&channel_id)
+        );
+        token.bind_unmanaged_session_name(&tmux_name);
         reconcile_once(&shared).await;
 
         let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;

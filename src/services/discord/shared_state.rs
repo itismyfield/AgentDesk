@@ -653,6 +653,9 @@ pub(in crate::services::discord) fn clear_codex_goals_reset_pending_for_channel(
 /// plain atomic would silently fork the process-global counter per provider
 /// and break the deferred-restart / shutdown barrier arithmetic.
 pub(in crate::services) struct RestartLifecycle {
+    /// Keeps delegation judgement alive for background runtimes after their boot future returns.
+    pub(in crate::services) _home_availability:
+        Option<crate::services::cluster::home_availability::Registration>,
     /// Per-channel restart-resume marker: Instant when recovery started, for
     /// stale-recovery timeout.
     pub(in crate::services) recovering_channels: dashmap::DashMap<ChannelId, std::time::Instant>,

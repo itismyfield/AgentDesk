@@ -565,6 +565,7 @@ class DeploymentWiringTests(unittest.TestCase):
                     "export EVENT_LOG\n"
                     "request_restart_drain_mode_or_fail() { "
                     "printf 'restart-request\\n' >> \"$EVENT_LOG\"; }\n"
+                    "_prepare_release_migrations() { :; }\n"
                     "launchctl() { printf 'bootout:%s\\n' \"$*\" >> \"$EVENT_LOG\"; }\n"
                     + migration_block
                 )

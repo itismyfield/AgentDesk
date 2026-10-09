@@ -8,6 +8,7 @@ use poise::serenity_prelude::ChannelId;
 use super::stop_host::{LegacyTmuxName, StopOutcome, StopTarget};
 use super::{TmuxCleanupPolicy, bind_judged_legacy, stop_active_turn_on};
 use crate::services::discord::{SharedData, inflight};
+use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::CancelActiveTurnResult;
 
@@ -167,17 +168,37 @@ impl ChannelStop {
         let result = mailbox
             .cancel_active_turn_if_current_with_reason(expected, reason)
             .await;
-        if result.token.is_some() {
-            let name = self.tombstone_name.as_deref();
-            let record = crate::services::discord::record_turn_stop_tombstone;
-            record(self.channel, name, CANCEL_REASON).await;
-        }
-        let cancelled_now = result.token.is_some() && !result.already_stopping;
+        self.record(&decision_of(&result)).await;
+        result
+    }
+
+    /// A user stop's cancel as the mailbox decided it under the token's Herdr slot.
+    async fn cancel_user(&self) -> StopCancel {
+        let mailbox = self.shared.mailbox(self.channel);
+        let reason = CANCEL_REASON.to_string();
+        let expected = self.token.clone();
+        let decision = mailbox
+            .cancel_active_turn_if_current_unless_herdr(expected, reason)
+            .await;
+        self.record(&decision).await;
+        decision
+    }
+
+    /// A cancelling token leaves the tombstone under the judged name, and one this stop cancelled
+    /// binds the name the judge read; a token the mailbox handed to its Herdr state does neither.
+    async fn record(&self, decision: &StopCancel) {
+        let cancelled_now = match decision {
+            StopCancel::Published(_) => true,
+            StopCancel::AlreadyStopping(_) => false,
+            StopCancel::NotCurrent | StopCancel::Herdr(_) => return,
+        };
+        let name = self.tombstone_name.as_deref();
+        let record = crate::services::discord::record_turn_stop_tombstone;
+        record(self.channel, name, CANCEL_REASON).await;
         if let (true, Some(name)) = (cancelled_now, self.bind_name.as_ref()) {
             let reason = "text command stop mailbox lookup";
             bind_judged_legacy(&self.provider, &self.token, name, reason);
         }
-        result
     }
 
     /// Stops the judged token on the judged target.
@@ -210,6 +231,15 @@ fn judge_next_as(target: StopTarget) {
     NEXT_TARGET.with_borrow_mut(|next| *next = Some(target));
 }
 
+/// The decision the existing guarded cancel reply carries.
+fn decision_of(result: &CancelActiveTurnResult) -> StopCancel {
+    match (result.token.clone(), result.already_stopping) {
+        (None, _) => StopCancel::NotCurrent,
+        (Some(token), true) => StopCancel::AlreadyStopping(token),
+        (Some(token), false) => StopCancel::Published(token),
+    }
+}
+
 /// The session `provider`'s row on `channel` names; a row that fails to read or parse is an
 /// error, never "no name".
 fn inflight_name(provider: &ProviderKind, channel: ChannelId) -> Result<Option<String>, String> {
@@ -238,7 +268,8 @@ pub(in crate::services::discord) enum CommandStop {
     Herdr(super::codex_stop_delivery::HerdrStop),
 }
 
-/// A user stop: judged before any write, then cancelled only when the host is admitted.
+/// Historical unnamed-stop behavior, retained only for regression tests and mutations.
+#[cfg(test)]
 pub(in crate::services::discord) async fn begin_command_stop(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -248,8 +279,7 @@ pub(in crate::services::discord) async fn begin_command_stop(
     begin_stop(shared, provider, channel, bind_unbound, None).await
 }
 
-/// [`begin_command_stop`] for a stop naming its command: a Herdr turn takes the intent and
-/// Escape path instead of any cancel.
+/// A named user stop takes Herdr intent and Escape instead of any cancel.
 pub(in crate::services::discord) async fn begin_user_stop(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -307,12 +337,36 @@ async fn begin_stop(
     let Ok(Some(stop)) = judgement else {
         return CommandStop::NoActiveTurn;
     };
-    let result = stop.cancel().await;
-    match result.token {
-        None => CommandStop::NoActiveTurn,
-        Some(_) if result.already_stopping => CommandStop::AlreadyStopping,
-        Some(_) => CommandStop::Stop(stop),
+    #[cfg(all(test, unix))]
+    tests::before_stop_cancel();
+    let decision = stop.cancel_user().await;
+    #[cfg(all(test, unix))]
+    let decision = tests::after_stop_decision(decision);
+    // The mailbox's decision, as it made it: a token changed since never turns it into another.
+    match decision {
+        StopCancel::NotCurrent => CommandStop::NoActiveTurn,
+        StopCancel::AlreadyStopping(_) => CommandStop::AlreadyStopping,
+        StopCancel::Published(_) => CommandStop::Stop(stop),
+        StopCancel::Herdr(token) => deferred_stop(shared, provider, channel, &token, reason).await,
     }
+}
+
+/// A stop the mailbox left to the turn's Herdr state: a named command takes the turn's intent
+/// path; an unnamed one cancels nothing.
+async fn deferred_stop(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    token: &Arc<CancelToken>,
+    reason: Option<&str>,
+) -> CommandStop {
+    #[cfg(unix)]
+    if let Some(reason) = reason {
+        let stop = super::codex_stop_delivery::herdr_command_stop;
+        return CommandStop::Herdr(stop(shared, provider, channel, token, reason).await);
+    }
+    let _ = (shared, provider, channel, token, reason);
+    CommandStop::HostRefused
 }
 
 /// The judged token when it is a Herdr turn's; settlement is checked first, so nothing else is

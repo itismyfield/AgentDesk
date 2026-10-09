@@ -7,7 +7,7 @@
 
 | Method | Path | Handler | Handler Source | Route Decl |
 | --- | --- | --- | --- | --- |
-| `GET` | `/` | `runner_entry` | `src/server/web_surface.rs:48` | `src/server/web_surface.rs:45` |
+| `GET` | `/` | `runner_entry` | `src/server/web_surface.rs:54` | `src/server/web_surface.rs:48` |
 | `GET` | `/api/achievements` | `analytics::achievements` | `src/server/routes/analytics.rs:431` | `src/server/routes/domains/analytics.rs:16` |
 | `GET` | `/api/activity-heatmap` | `analytics::activity_heatmap` | `src/server/routes/analytics.rs:446` | `src/server/routes/domains/analytics.rs:17` |
 | `GET` | `/api/agents` | `agents_crud::list_agents` | `src/server/routes/agents_crud.rs:381` | `src/server/routes/domains/agents.rs:16` |
@@ -25,18 +25,18 @@
 | `PUT` | `/api/agents/{id}/execution-node` | `execution_requirements::put_node` | `src/server/routes/execution_requirements.rs:29` | `src/server/routes/domains/agents.rs:41` |
 | `GET` | `/api/agents/{id}/execution-requirements` | `execution_requirements::get` | `src/server/routes/execution_requirements.rs:62` | `src/server/routes/domains/agents.rs:37` |
 | `PUT` | `/api/agents/{id}/execution-requirements` | `execution_requirements::put` | `src/server/routes/execution_requirements.rs:77` | `src/server/routes/domains/agents.rs:37` |
-| `POST` | `/api/agents/{id}/handoff` | `agents::agent_handoff` | `src/server/routes/agents.rs:1172` | `src/server/routes/domains/agents.rs:48` |
-| `POST` | `/api/agents/{id}/message` | `agents::agent_message` | `src/server/routes/agents.rs:1124` | `src/server/routes/domains/agents.rs:47` |
+| `POST` | `/api/agents/{id}/handoff` | `agents::agent_handoff` | `src/server/routes/agents.rs:1069` | `src/server/routes/domains/agents.rs:48` |
+| `POST` | `/api/agents/{id}/message` | `agents::agent_message` | `src/server/routes/agents.rs:1021` | `src/server/routes/domains/agents.rs:47` |
 | `GET` | `/api/agents/{id}/quality` | `agents::agent_quality` | `src/server/routes/agents.rs:140` | `src/server/routes/domains/agents.rs:32` |
 | `GET` | `/api/agents/{id}/session-evidence` | `super::super::session_evidence::get` | `src/server/routes/session_evidence.rs:12` | `src/server/routes/domains/agents.rs:33` |
-| `POST` | `/api/agents/{id}/signal` | `agents::agent_signal` | `src/server/routes/agents.rs:1083` | `src/server/routes/domains/agents.rs:46` |
+| `POST` | `/api/agents/{id}/signal` | `agents::agent_signal` | `src/server/routes/agents.rs:980` | `src/server/routes/domains/agents.rs:46` |
 | `GET` | `/api/agents/{id}/skills` | `agents::agent_skills` | `src/server/routes/agents.rs:653` | `src/server/routes/domains/agents.rs:50` |
-| `GET` | `/api/agents/{id}/timeline` | `agents::agent_timeline` | `src/server/routes/agents.rs:1028` | `src/server/routes/domains/runtime.rs:143` |
-| `GET` | `/api/agents/{id}/transcripts` | `agents::agent_transcripts` | `src/server/routes/agents.rs:1051` | `src/server/routes/domains/runtime.rs:142` |
+| `GET` | `/api/agents/{id}/timeline` | `agents::agent_timeline` | `src/server/routes/agents.rs:925` | `src/server/routes/domains/runtime.rs:143` |
+| `GET` | `/api/agents/{id}/transcripts` | `agents::agent_transcripts` | `src/server/routes/agents.rs:948` | `src/server/routes/domains/runtime.rs:142` |
 | `GET` | `/api/agents/{id}/turn` | `agents::agent_turn` | `src/server/routes/agents.rs:702` | `src/server/routes/domains/runtime.rs:135` |
 | `POST` | `/api/agents/{id}/turn/deliver` | `agents_turn_deliver::deliver_turn_input` | `src/server/routes/agents_turn_deliver.rs:60` | `src/server/routes/domains/runtime.rs:137` |
 | `POST` | `/api/agents/{id}/turn/start` | `agents::start_agent_turn` | `src/server/routes/agents.rs:720` | `src/server/routes/domains/runtime.rs:136` |
-| `POST` | `/api/agents/{id}/turn/stop` | `agents::stop_agent_turn` | `src/server/routes/agents.rs:921` | `src/server/routes/domains/runtime.rs:141` |
+| `POST` | `/api/agents/{id}/turn/stop` | `agents::stop_agent_turn` | `src/server/routes/agents_stop.rs:4` | `src/server/routes/domains/runtime.rs:141` |
 | `GET` | `/api/analytics` | `analytics::analytics` | `src/server/routes/analytics.rs:267` | `src/server/routes/domains/analytics.rs:10` |
 | `GET` | `/api/analytics/invariants` | `analytics::invariants` | `src/server/routes/analytics.rs:372` | `src/server/routes/domains/analytics.rs:11` |
 | `GET` | `/api/analytics/observability` | `analytics::observability` | `src/server/routes/analytics.rs:351` | `src/server/routes/domains/analytics.rs:12` |
@@ -322,5 +322,5 @@
 | `PUT` | `/api/voice/config` | `voice_config::put_voice_config` | `src/server/routes/voice_config.rs:165` | `src/server/routes/domains/admin.rs:66` |
 | `POST` | `/api/voice/speak` | `voice_audio::speak` | `src/server/routes/voice_audio.rs:73` | `src/server/routes/domains/runtime.rs:146` |
 | `POST` | `/api/voice/transcribe` | `voice_audio::transcribe` | `src/server/routes/voice_audio.rs:40` | `src/server/routes/domains/runtime.rs:145` |
-| `GET` | `/settings` | `runner_entry` | `src/server/web_surface.rs:48` | `src/server/web_surface.rs:46` |
-| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:27` | `src/server/web_surface.rs:19` |
+| `GET` | `/settings` | `runner_entry` | `src/server/web_surface.rs:54` | `src/server/web_surface.rs:49` |
+| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:27` | `src/server/web_surface.rs:22` |

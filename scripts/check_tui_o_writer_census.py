@@ -120,7 +120,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "abandon_request_store.rs": {"edit_outbound_message": 1},
     "admin_host_guard.rs": {".say": 1},
     "commands/config.rs": {".say": 12, "send_long_message*": 1},
-    "commands/control.rs": {".say": 15, "send_long_message*": 1},
+    "commands/control.rs": {".say": 13, "send_long_message*": 1},
     "commands/control/home_fence.rs": {".say": 1},
     "commands/control/input_clear.rs": {".say": 1},
     "commands/diagnostics/mod.rs": {".say": 9, "send_long_message*": 7},
@@ -486,7 +486,7 @@ RAW_CLAIM_SITES: dict[str, tuple[str, ...]] = {
     # Re-exports; a placement releases a pending adoption by design, with no body.
     "src/services/tui_o/cutover.rs": ("<module>", "claim_for_placement"),
     # The writer host's once-per-channel actor slot, not an adoption.
-    "src/services/tui_o/writer/host.rs": ("spawn_hosts",),
+    "src/services/tui_o/writer/host.rs": ("start_managed",),
     # Claimed right before the first unconfirmed chunk's edit or post, across a resumable loop.
     "src/services/discord/health/recovery.rs": ("maybe_recover_completed_stale_leak",),
 }

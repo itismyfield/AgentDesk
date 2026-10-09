@@ -41,6 +41,12 @@ fn recovery_output_path_with_tmux_fallback(
 
 #[cfg(unix)]
 fn herdr_turn_held(provider: &ProviderKind, state: &inflight::InflightTurnState) -> bool {
+    #[cfg(test)]
+    if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
+        "restart_none_as_complete",
+    ) {
+        return false;
+    }
     crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
         && state.tui_terminal_kind.is_none()
         && recovery_tmux_session_name(provider, state)

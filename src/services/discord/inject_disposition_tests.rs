@@ -141,7 +141,9 @@ fn a_full_ring_drops_its_oldest_entry_and_a_rerecorded_message_keeps_one() {
 }
 
 /// A writer held between its read and its write keeps a second writer, seen reaching the flock,
-/// from finishing until it lands, so neither entry is lost.
+/// from finishing until it lands, so neither entry is lost. Unix only: off Unix the record lock
+/// takes no flock.
+#[cfg(unix)]
 #[test]
 fn a_writer_between_read_and_write_holds_the_second_writer_off() {
     let _root = crate::config::TestRuntimeRootGuard::new();

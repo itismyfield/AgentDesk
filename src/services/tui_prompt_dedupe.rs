@@ -118,6 +118,9 @@ pub struct ObservedTuiPrompt {
     /// Hook-submitted Claude `prompt_id`, held unannounced until the relay's
     /// announcement POST result settles it.
     pub(crate) hook_prompt_id: Option<String>,
+    /// A transcript row's `prompt_id` that was still unannounced when the scanner published the
+    /// row; only looked up again before the relay announces, never settled by it.
+    pub(crate) row_prompt_id: Option<String>,
     /// Codex native turn this input opened, when its hook or record named one.
     pub(crate) native_turn_id: Option<String>,
     /// A steering input that joined its running native turn: its text is shown, nothing is owned.
@@ -268,6 +271,8 @@ struct TuiPromptDedupeState {
     relayed_prompt_ids_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<RelayedPromptId>>>,
     // Latest Codex native turn an observed input opened; a later input naming it steers that turn.
     native_turn_by_tmux: HashMap<PromptKey, TimedValue<NativeTurnSlot>>,
+    // Nonces pasted into a running Codex turn; the first observation naming a native turn settles each.
+    injected_steer_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<InjectedSteer>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -317,6 +322,7 @@ impl PromptKey {
 }
 
 mod extract;
+mod injected_steer;
 pub(crate) mod native_clear;
 mod observation;
 mod prompt_identity;
@@ -335,6 +341,8 @@ use extract::{
     record_relayed_entry_id, relayed_entry_id_already_seen, take_matching_pending_prompt,
     take_or_record_recent_observed_prompt,
 };
+use injected_steer::{Claim, InjectedSteer, claim_injected_steer};
+pub(crate) use injected_steer::{register_injected_steer, withdraw_injected_steer};
 use observation::clear_ssh_direct_observation_pending;
 pub use observation::*;
 #[cfg(test)]
@@ -346,6 +354,8 @@ pub use prompt_identity::{
 use prompt_identity::{PromptIdMatch, check_relayed_prompt_id, record_observed_hook_prompt_id};
 pub use runtime_binding::*;
 
+#[cfg(test)]
+mod injected_steer_tests;
 #[cfg(test)]
 mod tests;
 
@@ -434,7 +444,8 @@ mod test_clock {
                 pending_by_tmux,
                 recent_observed_by_tmux,
                 relayed_entry_ids_by_tmux,
-                relayed_prompt_ids_by_tmux
+                relayed_prompt_ids_by_tmux,
+                injected_steer_by_tmux
             );
             *offset() += age;
             recorded

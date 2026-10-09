@@ -237,6 +237,11 @@ impl Pane {
         }
     }
 
+    /// The `={session}:` target every command names.
+    pub(crate) fn target(&self) -> &str {
+        &self.target
+    }
+
     fn run(&self, args: &[&str]) -> Result<Output, BoundedTmuxError> {
         let mut command = Command::new(&self.program);
         command.arg("-u").args(args);
@@ -260,14 +265,14 @@ impl Pane {
         })
     }
 
-    fn ok(&self, args: &[&str]) -> Option<String> {
+    pub(crate) fn ok(&self, args: &[&str]) -> Option<String> {
         self.run(args)
             .ok()
             .filter(|output| output.status.success())
             .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    fn state(&self) -> Option<PaneState> {
+    pub(crate) fn state(&self) -> Option<PaneState> {
         let out = self.ok(&[
             "display-message",
             "-p",
@@ -290,13 +295,18 @@ impl Pane {
         })
     }
 
-    fn generation(&self) -> Option<Generation> {
+    pub(crate) fn generation(&self) -> Option<Generation> {
         self.state().map(|state| state.generation)
     }
 
     /// Runs `command` in the server only while no client is attached, none attached since `g0`,
     /// and the pane is still `size`. tmux runs a client's queued commands in one pass.
-    fn guarded(&self, g0: &Generation, size: Option<(usize, usize)>, command: &str) -> Guard {
+    pub(crate) fn guarded(
+        &self,
+        g0: &Generation,
+        size: Option<(usize, usize)>,
+        command: &str,
+    ) -> Guard {
         let vetoed = format!(
             "display-message -p -t '{}' '{VETOED} #{{session_attached}} #{{session_last_attached}}'",
             self.target
@@ -341,7 +351,7 @@ impl Pane {
         }
     }
 
-    fn capture(&self) -> Option<String> {
+    pub(crate) fn capture(&self) -> Option<String> {
         self.ok(&[
             "capture-pane",
             "-p",
@@ -354,7 +364,7 @@ impl Pane {
     }
 }
 
-enum Guard {
+pub(crate) enum Guard {
     Applied,
     Vetoed,
     /// Only a sized guard: the pane is no longer the size the command was planned for.
@@ -365,15 +375,15 @@ enum Guard {
 
 /// Attach count and last attach second; a change between two reads means a person could type.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Generation {
-    attached: u32,
-    last: String,
+pub(crate) struct Generation {
+    pub(crate) attached: u32,
+    pub(crate) last: String,
 }
 
-struct PaneState {
-    generation: Generation,
+pub(crate) struct PaneState {
+    pub(crate) generation: Generation,
     /// Columns and rows, which decide whether Claude folds or wraps a paste.
-    size: Option<(usize, usize)>,
+    pub(crate) size: Option<(usize, usize)>,
 }
 
 fn modal(capture: &str) -> bool {
@@ -445,6 +455,44 @@ pub(crate) fn draft_sighting(capture: &str) -> DraftSighting {
         }
         _ => DraftSighting::Unsettled,
     }
+}
+
+/// Whose text the composer holds before an automatic key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ComposerOwner {
+    /// Nothing typed: an empty `❯` or a faint placeholder.
+    Empty,
+    /// A Discord prompt AgentDesk typed (`[User: …]`) that never left the composer.
+    AgentDesk,
+    /// Typed text in the measured layout whose removal a later capture can see.
+    Person,
+    Unread,
+}
+
+pub(crate) fn composer_owner(capture: &str) -> ComposerOwner {
+    match screen::typed(capture) {
+        Some(false) => ComposerOwner::Empty,
+        Some(true) => {
+            let screen = screen::read(capture);
+            if screen.stash != screen::Stash::AbsentInRecognizedLayout {
+                return ComposerOwner::Unread;
+            }
+            match screen.composer {
+                screen::Composer::Text(rows) if agentdesk_prompt(&rows) => ComposerOwner::AgentDesk,
+                screen::Composer::Empty => ComposerOwner::Unread,
+                _ => ComposerOwner::Person,
+            }
+        }
+        None => ComposerOwner::Unread,
+    }
+}
+
+/// AgentDesk frames every Discord prompt it types as `[User: …]`.
+fn agentdesk_prompt(rows: &[String]) -> bool {
+    let first = rows.first().map(|row| row.trim_start()).unwrap_or_default();
+    first
+        .get(..6)
+        .is_some_and(|head| head.eq_ignore_ascii_case("[User:"))
 }
 
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.
@@ -543,7 +591,7 @@ pub(crate) fn at_offsets<T>(
     None
 }
 
-fn unix_seconds() -> u64 {
+pub(crate) fn unix_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())

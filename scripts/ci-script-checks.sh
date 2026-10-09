@@ -362,9 +362,13 @@ if run_check guards "Hotfile LOC ratchet guard (#3565)"; then
 "$PYTHON" scripts/check_hotfile_ratchet.py
 "$PYTHON" -m unittest scripts.test_ratchet_admission
 "$PYTHON" -m unittest scripts.test_pr_cap_check
-"$PYTHON" scripts/check_dead_code_allow_ratchet.py
-"$PYTHON" -m unittest tests.test_pr_cap_ci_wiring tests.test_clippy_warning_count tests.test_dead_code_allow_ratchet tests.test_rust_quality_gates
+"$PYTHON" -m unittest tests.test_pr_cap_ci_wiring tests.test_clippy_warning_count tests.test_rust_quality_gates
 "$PYTHON" -m unittest scripts.test_intervention_log
+fi
+
+if run_check guards "Dead-code suppression ratchet"; then
+"$PYTHON" scripts/check_dead_code_allow_ratchet.py
+"$PYTHON" -m unittest tests.test_dead_code_allow_ratchet
 fi
 
 if run_check guards "Discord log field-key drift guard (#4218)"; then
