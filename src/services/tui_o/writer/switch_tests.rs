@@ -79,17 +79,25 @@ fn the_era_leaves_out_and_reports_channels_without_a_binding_baseline() {
 
 /// Points the P5 log at `root` for this thread and writes `lines` as channel 7's log.
 fn p5_log(root: &Path, lines: &[Vec<u8>]) {
+    p5_log_on(CHANNEL, root, lines);
+}
+
+fn p5_log_on(channel: u64, root: &Path, lines: &[Vec<u8>]) {
     p5::set_test_root(Some(root));
     let dir = root.join(p5::BINDING_EVENTS_DIR);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{CHANNEL}.log"));
+    let path = dir.join(format!("{channel}.log"));
     std::fs::write(path, lines.concat()).unwrap();
 }
 
 fn p5_line(seq: u64, provider: &str, new: p5::BindingTarget) -> Vec<u8> {
+    p5_line_on(CHANNEL, seq, provider, new)
+}
+
+fn p5_line_on(channel: u64, seq: u64, provider: &str, new: p5::BindingTarget) -> Vec<u8> {
     let event = p5::BindingEvent {
         seq,
-        channel_id: CHANNEL,
+        channel_id: channel,
         provider: provider.into(),
         tmux_session: "tmux".into(),
         execution_nonce: None,
@@ -160,13 +168,22 @@ fn the_binding_log_port_reads_p5_events_and_refuses_what_it_cannot_carry() {
     p5::set_test_root(None);
 }
 
+/// No other test maps a pane to this channel. The actor judges a pane mapped to its channel
+/// against this thread's corrupt log, and that judgment holds its delivery.
+const CORRUPT_LOG_CHANNEL: u64 = 7_017;
+
 #[tokio::test(start_paused = true)]
 async fn a_corrupt_binding_log_alarms_through_the_port_and_capture_waits_for_a_clean_read() {
-    let (harness, a_path, a) = switched_over(&row("m0", "before the switch"));
+    let channel = CORRUPT_LOG_CHANNEL;
+    let (harness, a_path, a) = switched_over_on(channel, &row("m0", "before the switch"));
     harness.gate.acquired();
     let root = a_path.parent().unwrap().join("p5");
-    let startup = p5_line(1, "claude", p5::BindingTarget::Source(a));
-    p5_log(&root, &[startup.clone(), b"{torn middle\n".to_vec()]);
+    let startup = p5_line_on(channel, 1, "claude", p5::BindingTarget::Source(a));
+    p5_log_on(
+        channel,
+        &root,
+        &[startup.clone(), b"{torn middle\n".to_vec()],
+    );
     let bindings = Arc::new(BindingLog);
     let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings);
     append(&a_path, &row("m1", "after the switch"));
@@ -178,12 +195,12 @@ async fn a_corrupt_binding_log_alarms_through_the_port_and_capture_waits_for_a_c
         matches!(alarms.as_slice(), [a] if unavailable(a)),
         "{alarms:?}"
     );
-    p5_log(&root, &[startup]);
+    p5_log_on(channel, &root, &[startup]);
     polls(3).await;
     assert_eq!(harness.port.posts(), ["after the switch"]);
     assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(1));
     halt(stop, task).await;
-    p5::forget_channel_for_tests(CHANNEL);
+    p5::forget_channel_for_tests(channel);
     p5::set_test_root(None);
 }
 

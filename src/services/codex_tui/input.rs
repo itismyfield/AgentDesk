@@ -2993,6 +2993,14 @@ The diagram shows ╭ here.\n\
             uuid::Uuid::new_v4().simple()
         );
         record_rollout_composer_ready(&session);
+        // The pane reads as gone here, not through tmux: a fake tmux another test puts on the
+        // process PATH answers every capture.
+        let _dead = super::super::host_input::spy::SpyGuard::install(
+            super::super::host_input::spy::SpyState {
+                dead: true,
+                ..Default::default()
+            },
+        );
 
         let result =
             wait_until_codex_tui_input_ready(&session, PromptReadinessKind::PostTurnHandoff, None);
