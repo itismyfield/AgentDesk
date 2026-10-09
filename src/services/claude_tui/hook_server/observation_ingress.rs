@@ -18,7 +18,8 @@ use super::relay_receipts::{RELAY_PUBLISHED_AT_HEADER, RelayReceiptLedger, Relay
 use crate::services::tui_prompt_dedupe::AdoptSkip;
 use crate::services::tui_prompt_dedupe::binding_events::HookSignal;
 
-/// Without a listed tmux, unmapped hooks stop being refused this long after the receiver starts.
+/// Without a listed tmux, unmapped hooks of panes this runtime did not launch stop being refused
+/// this long after the receiver starts.
 const DISCOVERY_GRACE: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,7 +96,8 @@ pub(crate) fn boot_discovery_done() -> bool {
     DISCOVERY_DONE.load(Ordering::Acquire)
 }
 
-fn discovery_done() -> bool {
+/// `(a rehydrate pass listed tmux, time since the receiver started)`.
+fn discovery_clock() -> (bool, Duration) {
     let clock = (
         DISCOVERY_DONE.load(Ordering::Acquire),
         RECEIVER_STARTED.elapsed(),
@@ -105,12 +107,19 @@ fn discovery_done() -> bool {
         let _ = clock;
         TEST_DISCOVERY_CLOCK.get()
     };
+    clock
+}
+
+fn discovery_done() -> bool {
+    let clock = discovery_clock();
     if clock.0 {
         return true;
     }
     let expired = clock.1 >= DISCOVERY_GRACE;
     if expired && !GRACE_WARNED.swap(true, Ordering::AcqRel) {
-        tracing::warn!("no rehydrate pass listed tmux in time; unmapped Claude hooks are accepted");
+        tracing::warn!(
+            "no rehydrate pass listed tmux in time; unmapped hooks of unlaunched panes are accepted"
+        );
     }
     expired
 }
@@ -250,7 +259,9 @@ fn classify_skip(
         {
             Unavailable(UnavailableReason::PaneRegistrationFailed)
         }
-        AdoptSkip::UnmappedCommandSession if !discovery_done() => {
+        AdoptSkip::UnmappedCommandSession
+            if !discovery_done() || (!discovery_clock().0 && managed_here(envelope)) =>
+        {
             Unavailable(UnavailableReason::RestoreNotReady)
         }
         AdoptSkip::UnmappedCommandSession => {
@@ -271,6 +282,18 @@ fn classify_skip(
         AdoptSkip::SourceUnreadable => Unavailable(UnavailableReason::SourceUnreadable),
         AdoptSkip::HostNotAdmitted => Unavailable(UnavailableReason::HostNotAdmitted),
     }
+}
+
+/// A hook from a Claude pane this runtime launched; the grace expiry never gives up on it, only
+/// a rehydrate pass that listed tmux does.
+fn managed_here(
+    envelope: Option<&crate::services::tui_prompt_dedupe::binding_context::HookBindingEnvelope>,
+) -> bool {
+    use crate::services::tui_prompt_dedupe::binding_context::CapturedContext;
+    matches!(envelope.map(|e| &e.context), Some(CapturedContext::Captured(ctx))
+        if ctx.schema == 1
+            && ctx.provider == "claude"
+            && ctx.owner_runtime_root == crate::services::tmux_common::current_tmux_owner_marker())
 }
 
 /// 425 for a refused outcome; the in-flight receipt is dropped so the same request id retries.

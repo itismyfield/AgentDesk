@@ -1662,6 +1662,7 @@ fn local_compact_entry_id_is_recorded_only_after_a_successful_note_delivery() {
         external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        row_prompt_id: None,
         native_turn_id: None,
         steer_echo: false,
     });
@@ -1729,6 +1730,7 @@ fn local_note_delivery_ack_does_not_record_nonlocal_entries() {
         external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
         ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        row_prompt_id: None,
         native_turn_id: None,
         steer_echo: false,
     };

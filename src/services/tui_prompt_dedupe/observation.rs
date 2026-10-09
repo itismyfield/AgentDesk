@@ -318,6 +318,7 @@ fn observe_prompt_candidates_by_tmux_inner(
             external_input_lease_generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
             ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
             hook_prompt_id: None,
+            row_prompt_id: None,
             native_turn_id: None,
             steer_echo: false,
         };
@@ -395,6 +396,7 @@ fn observe_prompt_candidates_by_tmux_inner(
                         EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
                     ssh_direct_observation_generation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
                     hook_prompt_id: None,
+                    row_prompt_id: None,
                     native_turn_id: Some(turn.to_string()),
                     steer_echo: true,
                 });
@@ -485,6 +487,9 @@ fn observe_prompt_candidates_by_tmux_inner(
         external_input_lease_generation,
         ssh_direct_observation_generation,
         hook_prompt_id,
+        row_prompt_id: prompt_id_match
+            .filter(|(_, found)| *found == PromptIdMatch::Unannounced)
+            .map(|(prompt_id, _)| prompt_id.to_string()),
         native_turn_id: native_turn.map(str::to_string),
         steer_echo: false,
     };
@@ -787,6 +792,26 @@ pub(super) fn clear_ssh_direct_observation_pending(provider: &str, tmux_session_
     state
         .ssh_direct_observation_by_tmux
         .remove(&PromptKey::new(&provider, tmux_session_name));
+}
+
+/// Whether the hook relay announced this scanner row's prompt after the row was published. When
+/// it did, only the lease and marker this row's own observation recorded are released.
+pub(crate) fn withdraw_row_announced_by_its_hook(
+    prompt: &ObservedTuiPrompt,
+    channel_id: u64,
+) -> bool {
+    let Some(prompt_id) = prompt.row_prompt_id.as_deref() else {
+        return false;
+    };
+    let (provider, tmux) = (prompt.provider.as_str(), prompt.tmux_session_name.as_str());
+    if check_relayed_prompt_id(provider, tmux, prompt_id, &prompt.prompt) != PromptIdMatch::Same {
+        return false;
+    }
+    let lease = prompt.external_input_lease_generation;
+    clear_external_input_relay_lease_if_generation_matches(provider, tmux, channel_id, lease);
+    let marker = prompt.ssh_direct_observation_generation;
+    clear_ssh_direct_observation_pending_if_generation_matches(provider, tmux, marker);
+    true
 }
 
 fn clear_ssh_direct_observation_pending_if_generation_matches(

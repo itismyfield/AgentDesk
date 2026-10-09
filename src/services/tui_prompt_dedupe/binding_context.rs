@@ -539,9 +539,40 @@ pub(crate) mod tests {
     /// `fixture` for a caller that already holds the shared env lock, so it can
     /// take that lock before `TEST_LOCK` (the env -> dedupe order).
     pub(crate) fn fixture_after_shared_test_env_lock() -> (tempfile::TempDir, [Guard; 2]) {
+        crate::config::test_env_lock::assert_shared_test_env_lock_held();
         let root = tempfile::tempdir().unwrap();
         let env = Guard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
         with_config(root, env)
+    }
+    #[test]
+    fn the_after_lock_fixture_needs_the_env_lock_and_restores_on_drop() {
+        use crate::config::test_env_lock::acquire_shared_test_env_lock as lock;
+        let before = {
+            let _lock = lock();
+            std::env::var_os("AGENTDESK_ROOT_DIR")
+        };
+        let refused = std::thread::spawn(|| {
+            std::panic::catch_unwind(fixture_after_shared_test_env_lock).is_err()
+        });
+        assert!(
+            refused.join().unwrap(),
+            "a thread without the lock is refused"
+        );
+        {
+            let _lock = lock();
+            let (root, _env) = fixture_after_shared_test_env_lock();
+            assert_eq!(
+                std::env::var_os("AGENTDESK_ROOT_DIR"),
+                Some(root.path().into())
+            );
+        }
+        // Dropping the guard released the lock flag, or this would panic as a re-entry.
+        let _lock = lock();
+        assert_eq!(
+            std::env::var_os("AGENTDESK_ROOT_DIR"),
+            before,
+            "env restored"
+        );
     }
     fn with_config(root: tempfile::TempDir, env: Guard) -> (tempfile::TempDir, [Guard; 2]) {
         let config = root.path().join("config.yaml");

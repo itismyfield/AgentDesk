@@ -30,10 +30,18 @@ fn view<T>(read: impl Fn(&View) -> T) -> Option<T> {
     readers.push(std::thread::current().id());
     Some(seen)
 }
+thread_local! { static BEFORE_STAT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) }; }
+/// Runs once where the pass is about to register a binding it judged earlier.
+pub(super) fn before_stat_registration() {
+    if let Some(seam) = BEFORE_STAT.with_borrow_mut(Option::take) {
+        seam();
+    }
+}
 struct Reset;
 impl Drop for Reset {
     fn drop(&mut self) {
         VIEW.with_borrow_mut(|v| *v = None);
+        BEFORE_STAT.with_borrow_mut(|v| *v = None);
         dedupe::pane_registration::BLOCK_ALIAS.set(false);
         dedupe::pane_registration::BEFORE_COMPLETE.with_borrow_mut(|v| *v = None);
     }
@@ -647,6 +655,95 @@ fn registration_alias_conflict_keeps_original_pane_unready() {
         ),
         (1, 0, 2)
     );
+}
+
+/// A hook adopts B while the pass holds an older snapshot of the pane; the pass must not put that
+/// snapshot's source back, now or on the next pass. `launch` takes the launch-script refresh.
+fn stale_snapshot_keeps_the_adoption(launch: bool) {
+    use crate::services::claude_tui::hook_server::adoption_retry::{
+        AdoptionHttp, DurableKind, adopt_from_hook,
+    };
+    let (root, _env) = crate::services::tui_prompt_dedupe::binding_context::tests::fixture();
+    let ingress = Ingress::new();
+    let _reset = Reset;
+    let race = RegistrationRace::new(root.path(), if launch { 7_497 } else { 7_498 });
+    let (tmux, channel, b) = (race.tmux.clone(), race.channel, race.b.clone());
+    let a_path = ingress_transcript_dir(&race).join(format!("{}.jsonl", race.a));
+    let (stale, stale_path) = if launch {
+        // A binding the launch script may replace: its transcript is gone.
+        let x = uuid();
+        (x.clone(), a_path.with_file_name(format!("{x}.jsonl")))
+    } else {
+        use crate::services::tmux_common as tc;
+        std::fs::remove_file(tc::session_temp_path(
+            &tmux,
+            tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
+        ))
+        .unwrap();
+        (race.a.clone(), a_path)
+    };
+    dedupe::register_provider_session("claude", &stale, &tmux);
+    if launch {
+        dedupe::register_tmux_channel(&tmux, channel);
+    }
+    dedupe::register_tmux_runtime_binding(&tmux, claude(&stale_path, &stale));
+    let names = |session: &str| {
+        let names = |e: &BindingEvent| match &e.new {
+            BindingTarget::Source(s) | BindingTarget::Resolved { source: s, .. } => {
+                s.session_id == session
+            }
+            _ => false,
+        };
+        events(channel).iter().filter(|e| names(e)).count()
+    };
+    let (seam_stale, seam_b, payload) = (stale.clone(), b.clone(), race.payload.clone());
+    BEFORE_STAT.with_borrow_mut(|v| {
+        *v = Some(Box::new(move || {
+            let hook = HookSignal::from_payload("session_start", &payload);
+            let adopted = adopt_from_hook(&seam_stale, &seam_b, &hook);
+            assert_eq!(adopted, AdoptionHttp::Durable(DurableKind::Adopted));
+        }))
+    });
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    rehydrate_existing_claude_tui_bindings(&shared);
+    assert!(
+        BEFORE_STAT.with_borrow(Option::is_none),
+        "the pass reached its registration"
+    );
+    let bound = || dedupe::runtime_binding_for_tmux_session(&tmux).and_then(|b| b.session_id);
+    assert_eq!(bound(), Some(b.clone()), "the adoption stands");
+    let logged = events(channel).len();
+    assert_eq!(names(&b), 1, "B logged once");
+    assert_eq!(names(&stale), 0, "the stale source is not logged");
+    let refused = dedupe::pane_registration::pane_registration_failed(&stale, None);
+    assert!(
+        !refused,
+        "the given-up registration leaves the pane's hooks admitted"
+    );
+    let _ = dedupe::clear_claude_session_rotation(&tmux);
+    rehydrate_existing_claude_tui_bindings(&shared);
+    assert_eq!(bound(), Some(b.clone()), "the next pass keeps B");
+    assert_eq!(names(&stale), 0);
+    assert_eq!(
+        events(channel).len(),
+        logged,
+        "the next pass logs nothing new"
+    );
+}
+
+fn ingress_transcript_dir(race: &RegistrationRace) -> PathBuf {
+    let path = race.payload["transcript_path"].as_str().unwrap();
+    Path::new(path).parent().unwrap().to_path_buf()
+}
+
+#[test]
+fn a_stale_snapshot_never_re_registers_over_a_hook_adoption() {
+    stale_snapshot_keeps_the_adoption(false);
+}
+
+#[test]
+fn a_stale_snapshot_never_lets_the_launch_script_replace_a_hook_adoption() {
+    stale_snapshot_keeps_the_adoption(true);
 }
 
 const NEIGHBOUR_CHILD: &str = "ADK_T3BB_NEIGHBOUR_CHILD";

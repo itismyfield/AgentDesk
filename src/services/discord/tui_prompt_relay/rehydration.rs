@@ -19,7 +19,7 @@ use super::launch_script::{
     claude_launch_observation, claude_launch_transcript, claude_tui_rehydrated_binding,
 };
 use super::*;
-use crate::services::tui_prompt_dedupe::pane_registration::register_launched_claude_pane;
+use crate::services::tui_prompt_dedupe::pane_registration::register_judged_claude_pane;
 use std::collections::HashMap;
 
 #[cfg(unix)]
@@ -394,11 +394,14 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
             None => true,
         };
         if should_refresh {
-            if !register_launched_claude_pane(
+            #[cfg(test)]
+            claude_pass_tests::before_stat_registration();
+            if !register_judged_claude_pane(
                 tmux_session_name,
                 channel_id,
                 fresh.clone(),
                 launch_context.as_deref(),
+                existing_binding.as_ref(),
             ) {
                 return;
             }
@@ -417,11 +420,18 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
             return;
         }
         if Path::new(&binding.output_path).exists() {
-            crate::services::tui_prompt_dedupe::pane_registration::register_claude_pane(
+            #[cfg(test)]
+            claude_pass_tests::before_stat_registration();
+            let judged = Some(&binding);
+            if !register_judged_claude_pane(
                 tmux_session_name,
                 channel_id,
                 binding.clone(),
-            );
+                None,
+                judged,
+            ) {
+                return;
+            }
             tracing::info!(
                 tmux_session_name = %tmux_session_name,
                 channel_id,

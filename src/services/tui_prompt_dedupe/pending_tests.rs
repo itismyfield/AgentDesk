@@ -897,6 +897,69 @@ fn a_late_hook_refused_as_left_leaves_the_waiting_pending_queued() {
     assert_eq!(bound_session(tmux), Some(d));
 }
 
+#[test]
+fn a_waiting_pending_stays_queued_when_the_candidate_behind_it_is_refused() {
+    let lane = Lane::new();
+    let (channel, tmux) = (7_519, "p2b-yield");
+    let a = launched(&lane, channel, tmux);
+    let (h, b, c) = (uuid(), uuid(), uuid());
+    register_provider_session("claude", &h, tmux);
+    let pending = AdoptionHttp::Durable(DurableKind::Pending);
+    assert_eq!(adopt_from_hook(&a, &b, &clear(&lane.path(&b))), pending);
+    lane.touch(&c);
+    APPEND_FAULT.with(|fault| fault.set(Some("write")));
+    let refused = adopt_from_hook(&h, &c, &clear(&lane.path(&c)));
+    APPEND_FAULT.with(|fault| fault.set(None));
+    assert_eq!(refused, AdoptionHttp::NotDurable(NotDurableReason::Append));
+    assert_eq!(deferred_adoption_count(), 2, "C waits behind B");
+
+    // C's command now names another pane, so the poll refuses C; B keeps its place.
+    register_provider_session("claude", &h, "p2b-yield-elsewhere");
+    retry_deferred_claude_adoptions();
+    assert_eq!(deferred_adoption_count(), 1, "B stays queued");
+    lane.touch(&b);
+    retry_deferred_claude_adoptions();
+    let records = records_strict(channel).unwrap().unwrap();
+    let last = &records.last().unwrap().new;
+    assert!(
+        matches!(last, BindingTarget::Resolved { source, .. } if source.session_id == b),
+        "B resolved: {last:?}"
+    );
+    assert_eq!(bound_session(tmux), Some(b));
+}
+
+#[test]
+fn a_restored_pending_dropped_while_its_alias_was_away_is_seeded_again() {
+    let lane = Lane::new();
+    let (channel, tmux) = (7_520, "p2b-alias-trip");
+    stamp(tmux);
+    let (a, b) = launch_then_clear(&lane, channel, tmux, true);
+    restart(channel);
+    let seeded = restore(channel, tmux, &a, &lane.path(&a));
+    assert_eq!(seeded, PendingRestore::Seeded { pending_seq: 2 });
+    assert_eq!(deferred_adoption_count(), 1);
+
+    register_provider_session("claude", &a, "p2b-alias-trip-elsewhere");
+    retry_deferred_claude_adoptions();
+    assert_eq!(
+        deferred_adoption_count(),
+        0,
+        "the seed whose alias left is dropped"
+    );
+    register_provider_session("claude", &a, tmux);
+    let launch = LaunchTranscript {
+        session_id: a.clone(),
+        transcript: lane.path(&a),
+    };
+    let bind = |session: &str, path: &Path| claude(path, session);
+    let again = restore_claude_pane(tmux, channel, Some(launch), bind);
+    assert_eq!(again, Some(seeded), "the next pass judges the log again");
+    assert_eq!(deferred_adoption_count(), 1, "and seeds the Pending again");
+    lane.touch(&b);
+    retry_deferred_claude_adoptions();
+    assert_eq!(bound_session(tmux), Some(b));
+}
+
 /// Continuation adoption follows the payload's own transcript once the Claude source check passes.
 /// Transcripts live under `<home>/projects/<project>/<session>.jsonl`, as Claude writes them.
 mod verified_adoption {
