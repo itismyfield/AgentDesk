@@ -230,6 +230,9 @@ pub struct DiscordHealthSnapshot {
     /// `routes::health_api::public_health_json`. How to read it — count the
     /// entries, never test emptiness — is in `relay_probe`'s module doc.
     expired_relay_ledgers: Vec<String>,
+    /// Providers whose latest restart-marking pass left rows unmarked; beside `degraded_reasons`,
+    /// never inside it, because marking runs during every deploy.
+    restart_marking_short_passes: Vec<discord::inflight::ShortPass>,
     providers: Vec<ProviderHealthSnapshot>,
     mailboxes: Vec<MailboxHealthSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1092,6 +1095,7 @@ pub(super) async fn build_health_snapshot_with_options(
         bot_token_reload_scopes: bot_token_reload_scopes(),
         degraded_reasons,
         expired_relay_ledgers,
+        restart_marking_short_passes: discord::inflight::short_passes(),
         providers: provider_entries,
         mailboxes: mailbox_entries,
         transcript_turns,

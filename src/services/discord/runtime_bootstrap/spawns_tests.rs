@@ -163,6 +163,76 @@ async fn c2b_deferred_poller_marks_rows_and_proceeds_past_an_incomplete_scan() {
     );
 }
 
+/// With no protected channel, the actual poller marks the readable row and consumes its slot past
+/// an unreadable one; the health snapshot shows that short pass without a degraded reason.
+#[tokio::test(start_paused = true)]
+async fn c2b_deferred_poller_shows_an_incomplete_pass_on_the_health_snapshot() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        temp.path(),
+    );
+    let provider = ProviderKind::Codex;
+    let (plain, unreadable) = (6_325_970, 6_325_971);
+    let plain_path = deferred_row(&provider, plain);
+    std::fs::write(
+        plain_path.with_file_name(format!("{unreadable}.json")),
+        [0xff, 0xfe],
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("restart_pending"),
+        "nonce=c2b-unprotected\n",
+    )
+    .unwrap();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    shared.restart.shutdown_remaining.store(2, Ordering::SeqCst);
+    let registry = health::HealthRegistry::new();
+    registry
+        .register(provider.as_str().to_string(), shared.clone())
+        .await;
+
+    run_bot_spawn_deferred_restart_poller(&shared, &provider);
+    wait_for_deferred(|| {
+        shared
+            .restart
+            .shutdown_slot_consumed
+            .load(Ordering::Acquire)
+    })
+    .await;
+
+    assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
+    assert!(
+        deferred_row_marked(&plain_path),
+        "the readable row left unmarked"
+    );
+    let snapshot = serde_json::to_value(health::build_health_snapshot(&registry).await)
+        .expect("serialize health");
+    let pass = snapshot["restart_marking_short_passes"]
+        .as_array()
+        .expect("short passes on the snapshot")
+        .iter()
+        .find(|pass| pass["provider"] == "codex")
+        .cloned();
+    assert_eq!(
+        pass,
+        Some(serde_json::json!({
+            "provider": "codex",
+            "marked": 1,
+            "failed": [],
+            "incomplete": true,
+        })),
+        "{snapshot}"
+    );
+    assert!(
+        !snapshot["degraded_reasons"]
+            .to_string()
+            .contains("restart_mark"),
+        "a short pass must not degrade health: {snapshot}"
+    );
+}
+
 /// A row whose marker cannot be written retains the runtime: the actual poller marks the rest,
 /// rolls the cycle back and leaves its shutdown slot unconsumed.
 #[tokio::test(start_paused = true)]

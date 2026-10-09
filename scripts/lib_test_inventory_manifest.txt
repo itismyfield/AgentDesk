@@ -4095,6 +4095,7 @@ services::discord::inflight::removal::nondestructive_loader_tests::loader_backfi
 services::discord::inflight::removal::nondestructive_loader_tests::production_readers_hide_but_never_unlink_retirable_rows
 services::discord::inflight::removal::nondestructive_loader_tests::restart_marking_leaves_hidden_rows_to_the_next_boot_reaper
 services::discord::inflight::restart_mark::tests::c2b_async_marking_marks_protected_open_rows_and_reports_failed_and_unseen_rows
+services::discord::inflight::restart_mark::tests::c2b_failed_protected_marker_write_records_gate_health_until_a_complete_pass
 services::discord::inflight::restart_mark_fence_tests::c2_loop_rechecks_protection_installed_after_loading
 services::discord::inflight::restart_mark_fence_tests::c2_restart_marking_skips_a_held_row_and_marks_the_rest
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_guarded_save_does_not_resurrect_a_deleted_row
@@ -6222,6 +6223,7 @@ services::discord::runtime_bootstrap::spawns::tests::an_unsafe_nonce_publishes_n
 services::discord::runtime_bootstrap::spawns::tests::c2_deferred_marking_skips_old_format_held_rows_before_backfill
 services::discord::runtime_bootstrap::spawns::tests::c2b_deferred_poller_marks_rows_and_proceeds_past_an_incomplete_scan
 services::discord::runtime_bootstrap::spawns::tests::c2b_deferred_poller_retains_the_runtime_when_a_row_marker_fails
+services::discord::runtime_bootstrap::spawns::tests::c2b_deferred_poller_shows_an_incomplete_pass_on_the_health_snapshot
 services::discord::runtime_bootstrap::spawns::tests::cancellation_before_any_staging_publishes_nothing_and_rolls_back
 services::discord::runtime_bootstrap::spawns::tests::cancellation_before_durable_commit_rolls_back_but_after_commit_stays_committed
 services::discord::runtime_bootstrap::spawns::tests::cancellation_during_prepare_drain_drops_guard_and_restores_admission

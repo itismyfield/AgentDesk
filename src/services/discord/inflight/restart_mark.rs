@@ -6,10 +6,12 @@ use super::{
 };
 use crate::services::discord::input_runtime::fence;
 use crate::services::provider::ProviderKind;
+use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 /// One marking pass: rows marked, rows whose marker could not be written, and whether the scan
 /// could not see every row.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 pub(in crate::services::discord) struct RestartMarkReport {
     pub(in crate::services::discord) marked: usize,
     pub(in crate::services::discord) failed: Vec<u64>,
@@ -63,9 +65,11 @@ pub(in crate::services::discord) async fn mark_restart_mode_blocking(
     for channel in &report.failed {
         fence::record_failure(&provider, *channel, &[], fence::Failure::Persistence);
     }
+    let short = report.incomplete || !report.failed.is_empty();
+    publish_short_pass(&provider, short.then(|| report.clone()));
     // A row left unmarked is retired by the next boot, so a short pass is an error event even
     // when the caller goes on with its exit.
-    if report.incomplete || !report.failed.is_empty() {
+    if short {
         let root = inflight_runtime_root().map(|root| root.display().to_string());
         crate::services::observability::record_invariant_check(
             false,
@@ -92,6 +96,75 @@ pub(in crate::services::discord) async fn mark_restart_mode_blocking(
 
 /// Invariant name of the event a short restart-marking pass emits.
 const RESTART_MARK_INVARIANT: &str = "restart_marking_reaches_every_row";
+
+/// Latest short pass per provider, read by the health snapshot; a complete pass clears it.
+static SHORT_PASSES: Mutex<BTreeMap<String, RestartMarkReport>> = Mutex::new(BTreeMap::new());
+
+/// A provider whose latest restart-marking pass left rows unmarked.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(in crate::services::discord) struct ShortPass {
+    provider: String,
+    #[serde(flatten)]
+    report: RestartMarkReport,
+}
+
+fn publish_short_pass(provider: &ProviderKind, pass: Option<RestartMarkReport>) {
+    let mut passes = SHORT_PASSES.lock().unwrap_or_else(|e| e.into_inner());
+    match pass {
+        Some(report) => passes.insert(provider.as_str().to_string(), report),
+        None => passes.remove(provider.as_str()),
+    };
+}
+
+/// Every provider's latest short pass, for diagnostics only: neither a degraded reason nor a
+/// restart condition, since marking runs during every deploy.
+pub(in crate::services::discord) fn short_passes() -> Vec<ShortPass> {
+    let passes = SHORT_PASSES.lock().unwrap_or_else(|e| e.into_inner());
+    passes
+        .iter()
+        .map(|(provider, report)| ShortPass {
+            provider: provider.clone(),
+            report: report.clone(),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+static WRITE_FAULTS: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
+
+/// Fails one row's marker write after its lock is held, until dropped.
+#[cfg(test)]
+pub(in crate::services::discord) struct WriteFaultForTest(std::path::PathBuf);
+
+#[cfg(test)]
+impl WriteFaultForTest {
+    pub(in crate::services::discord) fn new(path: std::path::PathBuf) -> Self {
+        WRITE_FAULTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(path.clone());
+        Self(path)
+    }
+}
+
+#[cfg(test)]
+impl Drop for WriteFaultForTest {
+    fn drop(&mut self) {
+        WRITE_FAULTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|path| path != &self.0);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn write_fault_for_test(path: &std::path::Path) -> bool {
+    WRITE_FAULTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|fault| fault == path)
+}
 
 /// Details of the latest short-pass event for this inflight root, if any.
 #[cfg(test)]

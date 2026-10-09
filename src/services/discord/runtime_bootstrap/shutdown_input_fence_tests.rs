@@ -127,6 +127,7 @@ async fn c2_sigterm_handler_dispatch_persists_and_consumes_shutdown_slot() {
 }
 
 const SIGTERM_ISOLATION_CHILD_ENV: &str = "AGENTDESK_TEST_SIGTERM_ISOLATION_CHILD";
+const SIGTERM_ISOLATION_PROOF: &str = "c2b-sigterm-isolation.proof";
 
 /// An injected signal never installs the process-wide SIGTERM handler, and only a delivered one
 /// persists and takes its slot; runs in a child process because the disposition is global.
@@ -147,6 +148,13 @@ fn c2b_injected_sigterm_never_installs_the_os_handler() {
         .status()
         .expect("spawn isolated sigterm child");
     assert!(status.success(), "isolated sigterm child failed");
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join(SIGTERM_ISOLATION_PROOF))
+            .ok()
+            .as_deref(),
+        Some("cancelled\ndelivered\n"),
+        "the isolated child did not finish both cases"
+    );
 }
 
 #[cfg(unix)]
@@ -223,6 +231,15 @@ fn c2b_sigterm_isolation_child() {
             delivered,
             "delivered={delivered}: persisted state mismatch"
         );
+        // A case is recorded for the parent only once all of its assertions held.
+        let root = std::path::PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
+        let mut proof = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(root.join(SIGTERM_ISOLATION_PROOF))
+            .unwrap();
+        let case = if delivered { "delivered" } else { "cancelled" };
+        std::io::Write::write_all(&mut proof, format!("{case}\n").as_bytes()).unwrap();
     }
 }
 

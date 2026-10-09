@@ -116,7 +116,9 @@ use self::removal::{
     load_inflight_states_from_root_excluding,
 };
 pub(super) use self::removal::{log_inflight_remove, log_inflight_remove_for_path};
-pub(in crate::services::discord) use self::restart_mark::mark_restart_mode_blocking;
+pub(in crate::services::discord) use self::restart_mark::{
+    ShortPass, mark_restart_mode_blocking, short_passes,
+};
 #[cfg(test)]
 pub(in crate::services::discord) use self::restart_mark::short_pass_event_for_test;
 
@@ -533,6 +535,10 @@ fn set_inflight_restart_mode_under_lock(path: &Path, restart_mode: InflightResta
     let Ok(_lock) = lock_inflight_state_path(path) else {
         return false;
     };
+    #[cfg(test)]
+    if restart_mark::write_fault_for_test(path) {
+        return false;
+    }
     let Some(mut state) = read_inflight_state_content(path) else {
         return false;
     };
