@@ -2,8 +2,7 @@
 //! read until it provably stops; a resumed or forked source skips what its parent already holds.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use chrono::{TimeDelta, Utc};
 use tokio::sync::watch;
@@ -38,6 +37,8 @@ const PENDING_BIND_ALARM_SECS: i64 = 60;
 
 #[path = "fork_lineage.rs"]
 mod fork_lineage;
+#[cfg(test)]
+pub(crate) mod provenance;
 use fork_lineage::{Class, Lineage, RowIds};
 
 /// How a record names a native key: as the unit itself or as an announcement of it.

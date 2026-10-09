@@ -246,6 +246,160 @@ class CfgTestNestingTests(unittest.TestCase):
                 self.assertFalse(lines["test_only_call();"])
                 self.assertTrue(lines["production_call();"])
 
+    def assert_say_visible(
+        self, body: str, test_line: str | None = None,
+        production_line: str = "ctx.say(PRODUCTION_RESPONSE).await;",
+    ):
+        lines = self.classify(body)
+        if test_line is not None:
+            self.assertFalse(lines[test_line])
+        self.assertTrue(lines[production_line])
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "fixture.rs"
+            path.write_text(body, encoding="utf-8")
+            production = guard._production_text(path)
+        self.assertEqual(len(re.findall(r"\.\s*say\s*\(", production)), 1)
+        self.assertNotIn("TEST_RESPONSE", production)
+
+    def test_comma_in_enclosing_group_keeps_next_element_writer_production(self):
+        cases = {
+            "match_arm": (
+                "    outer(async {\n"
+                "        match state {\n"
+                "            #[cfg(test)]\n"
+                "            Test => test_sink.say(TEST_RESPONSE).await,\n"
+                "            Live => {\n"
+                "                ctx.say(PRODUCTION_RESPONSE).await;\n"
+                "            }\n"
+                "        }\n"
+                "    });\n",
+                "Test => test_sink.say(TEST_RESPONSE).await,",
+            ),
+            "struct_literal_field": (
+                "    Some(S {\n"
+                "        #[cfg(test)]\n"
+                "        test_field: test_sink.say(TEST_RESPONSE).await,\n"
+                "        live_field: {\n"
+                "            ctx.say(PRODUCTION_RESPONSE).await;\n"
+                "            value\n"
+                "        },\n"
+                "    });\n",
+                "test_field: test_sink.say(TEST_RESPONSE).await,",
+            ),
+            "function_pointer_struct_field": (
+                "    Some(S {\n"
+                "        #[cfg(test)]\n"
+                "        callback: Option::<fn(u8, u8)>::None,\n"
+                "        live_field: {\n"
+                "            ctx.say(PRODUCTION_RESPONSE).await;\n"
+                "            value\n"
+                "        },\n"
+                "    });\n",
+                "callback: Option::<fn(u8, u8)>::None,",
+            ),
+            "array_element": (
+                "    outer([\n"
+                "        #[cfg(test)]\n"
+                "        test_sink.say(TEST_RESPONSE).await,\n"
+                "        {\n"
+                "            ctx.say(PRODUCTION_RESPONSE).await;\n"
+                "            value\n"
+                "        },\n"
+                "    ]);\n",
+                "test_sink.say(TEST_RESPONSE).await,",
+            ),
+        }
+        for shape, (body, test_line) in cases.items():
+            with self.subTest(shape=shape):
+                self.assert_say_visible("async fn command() {\n" + body + "}\n", test_line)
+
+    def test_last_cfg_closure_parameter_keeps_body_writer_production(self):
+        for declaration in (True, False):
+            for trailing_comma in (True, False):
+                with self.subTest(declaration=declaration, trailing_comma=trailing_comma):
+                    parameter = "x: ()" + ("," if trailing_comma else "")
+                    body = (
+                        "async fn command() {\n"
+                        + ("    let f = |\n" if declaration else "    register(\n        |\n")
+                        + "        #[cfg(test)]\n"
+                        + f"        {parameter}\n"
+                        + "    | {\n"
+                        + "        ctx.say(PRODUCTION_RESPONSE).await;\n"
+                        + ("    };\n" if declaration else "    });\n")
+                        + "}\n"
+                    )
+                    self.assert_say_visible(body, parameter)
+
+    def test_inline_cfg_closure_parameter_keeps_body_writer_in_production_text(self):
+        body = (
+            "async fn command() {\n"
+            "    let f = |#[cfg(test)] x: ()| { ctx.say(PRODUCTION_RESPONSE).await; };\n"
+            "}\n"
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "fixture.rs"
+            path.write_text(body, encoding="utf-8")
+            production = guard._production_text(path)
+        self.assertEqual(len(re.findall(r"\.\s*say\s*\(", production)), 1)
+        self.assertIn("PRODUCTION_RESPONSE", production)
+        self.assertNotIn("x: ()", production)
+
+    def test_whole_cfg_closure_still_excludes_its_body(self):
+        self.assert_say_visible(
+            "async fn command() {\n"
+            "    #[cfg(test)]\n"
+            "    let f = |p| {\n"
+            "        test_sink.say(TEST_RESPONSE).await;\n"
+            "    };\n"
+            "    ctx.say(PRODUCTION_RESPONSE).await;\n"
+            "}\n",
+            "test_sink.say(TEST_RESPONSE).await;",
+        )
+
+    def test_unrecognized_closure_prefix_exposes_body_writer(self):
+        for braced in (True, False):
+            with self.subTest(braced=braced):
+                production_line = "ctx.say(PRODUCTION_RESPONSE).await" + (";" if braced else "")
+                body = (
+                    "async fn command() {\n"
+                    "    let f = loop {\n"
+                    "        break |\n"
+                    "            #[cfg(test)]\n"
+                    "            probe: ()\n"
+                    + ("        | {\n" if braced else "        |\n")
+                    + f"            {production_line}\n"
+                    + ("        };\n" if braced else "        ;\n")
+                    + "    };\n"
+                    "}\n"
+                )
+                self.assert_say_visible(body, production_line=production_line)
+
+    def test_array_tail_close_keeps_first_following_writer_production(self):
+        self.assert_say_visible(
+            "async fn command() {\n"
+            "    outer([\n"
+            "        #[cfg(test)]\n"
+            "        test_sink.say(TEST_RESPONSE).await\n"
+            "    ], {\n"
+            "        ctx.say(PRODUCTION_RESPONSE).await;\n"
+            "    });\n"
+            "}\n",
+            "test_sink.say(TEST_RESPONSE).await",
+        )
+
+    def test_block_tail_close_keeps_first_following_writer_production(self):
+        self.assert_say_visible(
+            "async fn command() {\n"
+            "    {\n"
+            "        #[cfg(test)]\n"
+            "        test_sink.say(TEST_RESPONSE).await\n"
+            "    }\n"
+            "    ctx.say(PRODUCTION_RESPONSE).await;\n"
+            "    production_call();\n"
+            "}\n",
+            "test_sink.say(TEST_RESPONSE).await",
+        )
+
 
 class DiscriminationTests(unittest.TestCase):
     """Every assertion here is a mutation that was applied and then reverted."""

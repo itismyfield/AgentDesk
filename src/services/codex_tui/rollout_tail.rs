@@ -21,6 +21,8 @@ use super::rollout_index::rollout_files_under;
 
 mod legacy_selection;
 mod parser;
+#[cfg(test)]
+pub(crate) mod provenance;
 pub use legacy_selection::{
     latest_rollout_for_cwd_since, latest_unclaimed_rollout_for_cwd_since,
     rollout_candidates_for_cwd_since,

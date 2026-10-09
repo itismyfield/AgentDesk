@@ -180,6 +180,8 @@ src/
 │   │   ├── outbox.rs
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
+│   ├── session_observability/
+│   │   └── background_ordering_pg_tests.rs
 │   ├── agent_read.rs
 │   ├── agents.rs
 │   ├── automation_candidate_card_program.rs
@@ -763,7 +765,9 @@ src/
 │   │   │   │   └── herdr_terminal_tests.rs
 │   │   │   ├── child_binding_tests.rs
 │   │   │   ├── legacy_selection.rs
-│   │   │   └── parser.rs
+│   │   │   ├── parser.rs
+│   │   │   ├── provenance.rs
+│   │   │   └── provenance_tests.rs
 │   │   ├── session/
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
@@ -1095,6 +1099,8 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── o_writer_io.rs
 │   │   │   ├── o_writer_legacy.rs
+│   │   │   ├── o_writer_repost_io.rs
+│   │   │   ├── o_writer_repost_io_tests.rs
 │   │   │   ├── policy.rs
 │   │   │   ├── reaction_control.rs
 │   │   │   ├── receipt_index.rs
@@ -1618,6 +1624,7 @@ src/
 │   │   │   │   │   │   ├── loss_tests.rs
 │   │   │   │   │   │   └── native_turn_tests.rs
 │   │   │   │   │   └── boundary_tests.rs
+│   │   │   │   ├── background_child_close_pg_tests.rs
 │   │   │   │   ├── codex_direct_owner_tests.rs
 │   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
@@ -1627,6 +1634,7 @@ src/
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
 │   │   │   │   └── synthetic_terminal_ordering_tests.rs
 │   │   │   ├── anchor_completion.rs
+│   │   │   ├── background_child_completion.rs
 │   │   │   ├── bridge_completion.rs
 │   │   │   ├── bridge_gateway.rs
 │   │   │   ├── claude_idle_bridge.rs
@@ -1718,6 +1726,7 @@ src/
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/
 │   │   │   │   │   ├── rowless_receipt_tests/
+│   │   │   │   │   │   ├── background_child_ordering_tests.rs
 │   │   │   │   │   │   ├── o_after_done_chain_tests.rs
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
@@ -2050,6 +2059,7 @@ src/
 │   │   └── auth_profiles.rs
 │   ├── dispatched_sessions/
 │   │   ├── canonical_identity.rs
+│   │   ├── hook.rs
 │   │   ├── output.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
@@ -2346,6 +2356,10 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── channel_gate.rs
 │   │   │   └── intake_route.rs
+│   │   ├── repost/
+│   │   │   ├── config.rs
+│   │   │   ├── mod.rs
+│   │   │   └── send.rs
 │   │   ├── shadow/
 │   │   │   ├── binding_reader.rs
 │   │   │   ├── capture.rs
@@ -2360,6 +2374,9 @@ src/
 │   │   │   ├── tap.rs
 │   │   │   └── unit_plan.rs
 │   │   ├── store/
+│   │   │   ├── rotation/
+│   │   │   │   ├── provenance.rs
+│   │   │   │   └── provenance_tests.rs
 │   │   │   ├── durable.rs
 │   │   │   ├── ledger.rs
 │   │   │   ├── ledger_lock_tests.rs
@@ -2372,6 +2389,8 @@ src/
 │   │   │   │   ├── reactions.rs
 │   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── rotation/
+│   │   │   │   └── provenance.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
@@ -2431,6 +2450,13 @@ src/
 │   │   │   ├── lane_tests.rs
 │   │   │   └── log_record.rs
 │   │   ├── runtime_binding/
+│   │   │   ├── codex_policy/
+│   │   │   │   └── provenance_tests.rs
+│   │   │   ├── codex_verified/
+│   │   │   │   ├── provenance/
+│   │   │   │   │   ├── dormant.rs
+│   │   │   │   │   └── dormant_tests.rs
+│   │   │   │   └── provenance.rs
 │   │   │   ├── adopt_skip.rs
 │   │   │   ├── binding_access.rs
 │   │   │   ├── claude_source.rs

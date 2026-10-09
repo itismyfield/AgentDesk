@@ -171,7 +171,7 @@ pub(super) const CLAUDE_IDLE_TICK_PHASES: [ClaudeIdleTickPhase; 2] = [
 #[cfg(unix)]
 pub(super) async fn relay_idle_claude_bindings(shared: &Arc<SharedData>) {
     for (tmux_session_name, binding) in
-        crate::services::tui_prompt_dedupe::runtime_bindings_for_kind(RuntimeHandoffKind::ClaudeTui)
+        super::background_child_completion::claude_bindings_after_child_completions(shared).await
     {
         let Some(channel_id) = owner_channel_for_tmux_session(
             &shared,

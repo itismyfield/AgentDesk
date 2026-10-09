@@ -44,6 +44,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs",
         "src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs",
         "src/services/dispatches/outbox_queue_replay_tests.rs",
+        "src/db/session_observability/background_ordering_pg_tests.rs",
         "src/services/cluster/home_supervisor_tests.rs",
         "src/services/tui_o/writer/host_managed_tests.rs",
         "src/services/tui_o/writer/host_io_tests.rs",
@@ -282,6 +283,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/outbound/manual_delivery/production_nonce_tests.rs",
         "src/services/discord/outbound/turn_output_controller/fresh_send_tests.rs",
         "src/services/discord/outbound/source_registry_scan_tests.rs",
+        "src/services/discord/outbound/o_writer_repost_io_tests.rs",
         "src/services/discord/placeholder_controller/queued_card_gate/tests.rs",
         "src/services/discord/placeholder_live_events/probe_fixtures_tests.rs",
         "src/services/discord/placeholder_live_events/tests.rs",
@@ -359,6 +361,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_direct_pending_start/tests/retire_tests.rs",
         "src/services/discord/tui_prompt_relay/rehydration/idempotency_tests.rs",
         "src/services/discord/tui_prompt_relay/tests.rs",
+        "src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/loss_tests.rs",
@@ -384,6 +387,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/stream_tick/o_adoption_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests.rs",
+        "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/background_child_ordering_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/o_after_done_chain_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/preloop_cleanup_tests.rs",
@@ -486,6 +490,10 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/rotation_unsettled_resume_tests.rs",
         "src/services/codex_tui/rollout_tail/parser/herdr_terminal_tests.rs",
         "src/services/claude/herdr_turn/provider_terminal_tests.rs",
+        "src/services/codex_tui/rollout_tail/provenance_tests.rs",
+        "src/services/tui_o/store/rotation/provenance_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/provenance_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant_tests.rs",
     }
 )
 
@@ -493,6 +501,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
+        "src/services/codex_tui/rollout_tail/provenance.rs",
+        "src/services/tui_o/writer/rotation/provenance.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant.rs",
         "src/services/discord/relay_recovery/tests/retirement.rs",
         "src/services/discord/recovery_engine/o_cut_recorder.rs",
         "src/services/tui_o/channel_policy/adoption/body_check.rs",
