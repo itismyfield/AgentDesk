@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::cluster::node_registry::GatewayWaiterGuard;
+use crate::services::cluster::{home_availability, node_registry::GatewayWaiterGuard};
 
 #[cfg(test)]
 mod channel_homes_tests;
@@ -522,7 +522,6 @@ fn install_home_availability(
     settings: &HomeSettings,
     has_pool: bool,
 ) -> Option<crate::services::cluster::home_availability::Registration> {
-    use crate::services::cluster::home_availability;
     home_availability::install_enabled(
         provider.as_str(),
         settings.switch,

@@ -92,6 +92,7 @@ async fn a_stopped_writer_frees_its_channel_for_exactly_one_new_writer() {
 #[tokio::test(start_paused = true)]
 async fn a_cancelled_stop_frees_the_channel_only_after_its_post_in_flight_settled() {
     let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
+    let _hosts = crate::config::session_hosts::force_for_test(Some("book"), &[(CHANNEL, "book")]);
     let (harness, path, io, ready, writer) = hosting().await;
     harness.port.lazy.store(true, Ordering::SeqCst);
     let returned_before = harness.lease.released.load(Ordering::SeqCst);
@@ -101,8 +102,8 @@ async fn a_cancelled_stop_frees_the_channel_only_after_its_post_in_flight_settle
     polls(2).await;
     assert_eq!(*harness.port.started.lock().unwrap(), ["http"]);
     assert_eq!(
-        crate::services::tui_o::writer::deliver::in_flight(CHANNEL),
-        1
+        crate::services::tui_o::writer::deliver::posts_in_flight(CHANNEL),
+        Some(1)
     );
 
     let waited = tokio::time::timeout(POLL_INTERVAL, writer.stop_and_join()).await;
@@ -123,8 +124,8 @@ async fn a_cancelled_stop_frees_the_channel_only_after_its_post_in_flight_settle
     polls(2).await;
     assert!(!ready.is_hosted(CHANNEL), "freed once its actor ended");
     assert_eq!(
-        crate::services::tui_o::writer::deliver::in_flight(CHANNEL),
-        0
+        crate::services::tui_o::writer::deliver::posts_in_flight(CHANNEL),
+        Some(0)
     );
     assert_eq!(
         harness.lease.released.load(Ordering::SeqCst),
