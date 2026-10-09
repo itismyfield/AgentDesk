@@ -1,6 +1,9 @@
 server:
   port: 8791
   host: "0.0.0.0"
+  # Peers outside loopback, Tailscale (100.64.0.0/10) and private LAN ranges:
+  # off = no filter, log = warn only (default), enforce = 403.
+  # peer_filter: log
 
 cluster:
   # Roles: hub = Hub, runner = Runner, auto = Automatic.

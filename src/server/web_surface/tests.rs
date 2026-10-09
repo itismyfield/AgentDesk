@@ -1,15 +1,21 @@
 use super::*;
+use crate::config::PeerFilterMode;
 use axum::{
     body::{Body, to_bytes},
     extract::ConnectInfo,
     http::{Method, Request, StatusCode},
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
 fn app(dashboard_enabled: bool, root: &Path) -> Router {
+    app_with_peer_filter(dashboard_enabled, root, PeerFilterMode::default())
+}
+
+fn app_with_peer_filter(dashboard_enabled: bool, root: &Path, mode: PeerFilterMode) -> Router {
     let mut config = crate::config::Config::default();
     config.server.auth_token = Some("web-entry-test-token".into());
+    config.server.peer_filter = mode;
     config.cluster.runtime_profile = if dashboard_enabled {
         crate::config::RuntimeProfile::Full
     } else {
@@ -146,4 +152,166 @@ async fn full_profile_keeps_public_spa_entry_and_protected_api() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// Protected in every profile, so a peer that passes the filter gets the auth 401.
+const PEER_PROBE_PATH: &str = "/api/sessions/example/force-kill";
+
+async fn peer_probe(app: &Router, peer: &str) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(request(Method::POST, PEER_PROBE_PATH, peer))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 8192).await.unwrap();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+#[derive(Clone, Default)]
+struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+    type Writer = LogBuffer;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn capture_warnings() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
+    let buffer = LogBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(buffer.clone())
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    (buffer, tracing::subscriber::set_default(subscriber))
+}
+
+fn peer_filter_warnings(buffer: &LogBuffer) -> Vec<String> {
+    String::from_utf8_lossy(&buffer.0.lock().unwrap())
+        .lines()
+        .filter(|line| line.contains("peer filter:"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[tokio::test]
+async fn enforce_rejects_only_peers_outside_loopback_tailscale_and_private_lan() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app_with_peer_filter(false, root.path(), PeerFilterMode::Enforce);
+    for peer in [
+        "127.0.0.1",
+        "127.255.0.9",
+        "[::1]",
+        "100.64.0.0",
+        "100.127.255.255",
+        "[fd7a:115c:a1e0::1]",
+        "10.0.0.5",
+        "172.16.0.1",
+        "172.31.255.255",
+        "192.168.1.10",
+        "169.254.1.1",
+        "[fc00::1]",
+        "[fdff::1]",
+        "[fe80::1]",
+        "[::ffff:127.0.0.1]",
+        "[::ffff:100.71.1.1]",
+        "[::ffff:192.168.1.10]",
+    ] {
+        let (status, body) = peer_probe(&app, &format!("{peer}:50000")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{peer} must reach auth");
+        assert!(!body.contains("peer_not_allowed"), "{peer}: {body}");
+    }
+    for peer in [
+        "192.0.2.2",
+        "8.8.8.8",
+        "11.0.0.1",
+        "100.63.255.255",
+        "100.128.0.0",
+        "172.15.255.255",
+        "172.32.0.1",
+        "[2001:db8::1]",
+        "[2606:4700::1111]",
+        "[fec0::1]",
+        "[::ffff:8.8.8.8]",
+    ] {
+        let (status, body) = peer_probe(&app, &format!("{peer}:50000")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{peer} must be rejected");
+        assert!(body.contains("peer_not_allowed"), "{peer}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn log_mode_serves_outside_peers_unchanged_and_warns_once_per_peer() {
+    let root = tempfile::tempdir().unwrap();
+    let off = app_with_peer_filter(false, root.path(), PeerFilterMode::Off);
+    let log = app_with_peer_filter(false, root.path(), PeerFilterMode::Log);
+    let unfiltered = peer_probe(&off, "8.8.8.8:50000").await;
+    assert_eq!(unfiltered.0, StatusCode::UNAUTHORIZED);
+
+    let (buffer, _guard) = capture_warnings();
+    for peer in [
+        "8.8.8.8:50000",
+        "8.8.8.8:50001",
+        "[2606:4700::1111]:50000",
+        "192.168.1.10:50000",
+    ] {
+        assert_eq!(peer_probe(&log, peer).await, unfiltered, "{peer}");
+    }
+    let warnings = peer_filter_warnings(&buffer);
+    assert_eq!(warnings.len(), 2, "{warnings:#?}");
+    assert!(warnings[0].contains("peer_ip=8.8.8.8"), "{warnings:#?}");
+    assert!(
+        warnings[1].contains("peer_ip=2606:4700::1111"),
+        "{warnings:#?}"
+    );
+    assert!(warnings.iter().all(|line| line.contains("WARN")));
+}
+
+#[tokio::test]
+async fn off_mode_keeps_unfiltered_behavior_without_warnings() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app_with_peer_filter(false, root.path(), PeerFilterMode::Off);
+    let (buffer, _guard) = capture_warnings();
+    let (status, body) = peer_probe(&app, "8.8.8.8:50000").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(!body.contains("peer_not_allowed"), "{body}");
+    assert!(peer_filter_warnings(&buffer).is_empty());
+}
+
+#[tokio::test]
+async fn enforce_covers_dashboard_static_entry_and_websocket_route() {
+    let root = tempfile::tempdir().unwrap();
+    let dashboard = root.path().join("dashboard");
+    std::fs::create_dir(&dashboard).unwrap();
+    std::fs::write(dashboard.join("index.html"), "<html>dashboard</html>").unwrap();
+    let app = app_with_peer_filter(true, root.path(), PeerFilterMode::Enforce);
+    for path in ["/", "/ws", "/missing"] {
+        let response = app
+            .clone()
+            .oneshot(request(Method::GET, path, "8.8.8.8:50000"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    let response = app
+        .oneshot(request(Method::GET, "/", "192.168.1.10:50000"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }

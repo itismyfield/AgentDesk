@@ -93,6 +93,7 @@ src/
 │   ├── agent_channels.rs
 │   ├── cluster_role.rs
 │   ├── disk_write.rs
+│   ├── peer_filter.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_settings.rs
 │   ├── session_hosts.rs
@@ -447,6 +448,7 @@ src/
 │   │   ├── voice_conductor.rs
 │   │   └── voice_config.rs
 │   ├── web_surface/
+│   │   ├── peer_filter.rs
 │   │   └── tests.rs
 │   ├── worker_registry/
 │   │   ├── registry.rs
