@@ -14,6 +14,9 @@ use std::future::Future;
 use std::io::Write;
 use std::pin::Pin;
 
+#[path = "receipt_entry_tests.rs"]
+mod receipt_entry;
+
 /// A named binding state a test plants before the drive's first pass.
 type Fixture = (&'static str, fn(&Rig));
 
@@ -32,6 +35,7 @@ const REAL: u64 = 1_300_000_000_000_000_000;
 #[derive(Default)]
 struct Screen {
     busy: AtomicBool,
+    draft: AtomicBool,
     refuse: AtomicBool,
     panic: AtomicBool,
     unreachable: AtomicUsize,
@@ -61,9 +65,12 @@ impl Pane for TestPane {
         if fence::require_worker().is_err() {
             self.0.off_worker.fetch_add(1, Ordering::SeqCst);
         }
-        Ok(match self.0.busy.load(Ordering::SeqCst) {
-            true => "loading".into(),
-            false => READY.into(),
+        Ok(if self.0.busy.load(Ordering::SeqCst) {
+            "loading".into()
+        } else if self.0.draft.load(Ordering::SeqCst) {
+            READY.replace("❯\u{00a0}", "❯\u{00a0}human draft")
+        } else {
+            READY.into()
         })
     }
     fn submit(&mut self, text: &str) -> SendOutcome {

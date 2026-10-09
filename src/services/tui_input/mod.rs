@@ -7,6 +7,7 @@ pub mod bounded_tmux;
 mod durable;
 pub mod handover;
 pub mod ledger;
+pub mod receipt_identity;
 pub mod rows;
 pub mod transition;
 

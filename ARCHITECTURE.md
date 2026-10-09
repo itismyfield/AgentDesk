@@ -1015,9 +1015,12 @@ src/
 │   │   │   ├── supervisor/
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_entry_tests.rs
-│   │   │   │   └── drive_tests.rs
+│   │   │   │   ├── drive_tests.rs
+│   │   │   │   └── receipt_entry_tests.rs
+│   │   │   ├── admission.rs
 │   │   │   ├── clear.rs
 │   │   │   ├── clear_tests.rs
+│   │   │   ├── command.rs
 │   │   │   ├── effect.rs
 │   │   │   ├── effect_tests.rs
 │   │   │   ├── effects.rs
@@ -1025,7 +1028,12 @@ src/
 │   │   │   ├── fence.rs
 │   │   │   ├── fence_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── ordering.rs
+│   │   │   ├── ordering_tests.rs
+│   │   │   ├── receipt.rs
+│   │   │   ├── receipt_tests.rs
 │   │   │   ├── reconcile.rs
+│   │   │   ├── source.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
 │   │   ├── live_bridge/
@@ -2302,6 +2310,7 @@ src/
 │   │   ├── handover.rs
 │   │   ├── ledger.rs
 │   │   ├── mod.rs
+│   │   ├── receipt_identity.rs
 │   │   ├── rows.rs
 │   │   ├── rows_tests.rs
 │   │   ├── transition.rs

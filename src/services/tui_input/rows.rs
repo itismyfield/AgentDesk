@@ -13,6 +13,7 @@ use super::attempt::{
 use super::blob::BlobPin;
 use super::durable::invalid;
 use super::ledger::{Ledger, Record, Snapshot};
+use super::receipt_identity::{ReceiptIdentity, Responsibility};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -141,6 +142,8 @@ pub struct Row {
     // The source WAL sequence survives compaction; old snapshots lack ordering evidence.
     #[serde(default)]
     pub received_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_identity: Option<ReceiptIdentity>,
     pub state: RowState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<AttemptEvidence>,
@@ -416,6 +419,7 @@ impl Rows {
                     }
                 },
                 state,
+                receipt_identity: ReceiptIdentity::from_input(key, &input),
                 attempt: serde_json::from_value(input["move_attempt"].clone()).ok(),
                 input,
                 attempts: Vec::new(),
@@ -440,6 +444,14 @@ impl Rows {
 
     pub fn row(&self, key: u64) -> Option<&Row> {
         self.rows.get(&key)
+    }
+
+    pub fn responsibility(&self, source: &ReceiptIdentity) -> Responsibility {
+        super::receipt_identity::lookup(
+            self.rows.iter().map(|(key, row)| (*key, row)),
+            &self.unbound,
+            source,
+        )
     }
 
     /// Every tracked attempt with its row key and whether that row is still open.

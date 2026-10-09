@@ -921,6 +921,59 @@ mod tracked {
         (row.attempts.len(), row.witnesses.len())
     }
 
+    #[test]
+    fn receipt_identity_survives_terminal_compact_reopen_and_attempt_collection() {
+        use super::super::receipt_identity::{ReceiptIdentity, Responsibility};
+
+        let root = sandbox();
+        let mut ledger = open(root.path());
+        let identity = ReceiptIdentity::new(1, vec![1, 11], 7, 8, CHANNEL).unwrap();
+        let input = json!({"text":"input 1","receipt_identity":identity});
+        ledger
+            .append_entry(&Entry::Received { key: 1, input }, &[])
+            .unwrap();
+        let first = meta(1, "n1", 0);
+        attempt(&mut ledger, 1, &first).unwrap();
+        set(&mut ledger, 1, RowState::AwaitTurn);
+        ledger
+            .append_witness(1, witness(&first, WitnessKind::User, 10))
+            .unwrap();
+        set(&mut ledger, 1, RowState::Done(DoneReason::Completed));
+        let facts = Facts {
+            now: Some(1_000 * DAY_MS),
+            retired: true,
+            obligated: false,
+        };
+        ledger.checkpoint_rows_with(&facts).unwrap();
+        drop(ledger);
+
+        let mut ledger = open(root.path());
+        assert_eq!(row(&ledger, 1).input, json!(null));
+        assert_eq!(row(&ledger, 1).receipt_identity.as_ref(), Some(&identity));
+        let later = Facts {
+            now: Some(facts.now.unwrap() + TOMBSTONE_HORIZON_MS),
+            ..facts
+        };
+        ledger.checkpoint_rows_with(&later).unwrap();
+        ledger.checkpoint_rows_with(&later).unwrap();
+        assert_eq!(detail(&ledger), (0, 0), "attempt GC actually occurred");
+        drop(ledger);
+
+        let restored = open(root.path()).rows().unwrap();
+        assert_eq!(
+            restored.row(1).unwrap().receipt_identity.as_ref(),
+            Some(&identity)
+        );
+        let alias = ReceiptIdentity::new(11, vec![11], 7, 8, CHANNEL).unwrap();
+        assert_eq!(
+            restored.responsibility(&alias),
+            Responsibility::Known {
+                key: 1,
+                received_seq: 1
+            }
+        );
+    }
+
     // Detail goes only after thirty days, retirement, no obligation and a second checkpoint agree.
     #[test]
     fn a_tombstone_is_collected_only_after_every_condition_holds_at_two_checkpoints() {

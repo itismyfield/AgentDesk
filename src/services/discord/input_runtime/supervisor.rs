@@ -11,7 +11,10 @@ use std::time::Duration;
 use tokio::sync::{OwnedMutexGuard, watch};
 
 use super::clear::{self, ClearHost, Step, Unresolved};
+use super::command::{ScanCommit, SupervisorCmd};
 use super::fence::{self, Closing, Failure, Gate, Mode};
+use super::ordering::AdmissionOrder;
+use super::receipt::{self, Deferred, Receipt};
 use super::reconcile::{self, HoldCause};
 use crate::services::provider::ProviderKind;
 use crate::services::tui_input::ledger::{Ledger, LedgerLease, LedgerSlot, Presence};
@@ -331,6 +334,8 @@ pub(crate) struct Supervisor<P: Ports> {
     movement: Option<Move>,
     sent: BTreeSet<(Option<u64>, &'static str)>,
     admitted: bool,
+    order: AdmissionOrder,
+    admission_epoch: u64,
     #[cfg(test)]
     pub(crate) handbacks: usize,
 }
@@ -348,6 +353,7 @@ impl<P: Ports> Supervisor<P> {
     ) -> Result<Self, Refused> {
         let mut registration = registry.register(&config.provider, config.channel, &config.root)?;
         let slot = registration.slot().ok_or(Refused::Duplicate)?;
+        let order = AdmissionOrder::new(config.provider.clone(), config.channel, 1, 0);
         Ok(Self {
             config,
             ports,
@@ -359,6 +365,8 @@ impl<P: Ports> Supervisor<P> {
             movement: None,
             sent: BTreeSet::new(),
             admitted: false,
+            order,
+            admission_epoch: 1,
             #[cfg(test)]
             handbacks: 0,
         })
@@ -385,11 +393,111 @@ impl<P: Ports> Supervisor<P> {
     pub(crate) async fn boot(&mut self) -> Landing {
         // Each boot must pass every stage again, so an earlier admission never outlives it.
         self.admitted = false;
+        self.invalidate_order();
         match self.stages().await {
             Ok(landing) => landing,
             Err(cause) => {
                 self.registration.report(&cause, true);
                 Landing::Held(cause)
+            }
+        }
+    }
+
+    fn invalidate_order(&mut self) {
+        match self.admission_epoch.checked_add(1) {
+            Some(epoch) => {
+                self.admission_epoch = epoch;
+                self.order.invalidate(epoch);
+            }
+            None => self.admitted = false,
+        }
+    }
+
+    /// All receipt work borrows the existing slot; readiness for Enter is a separate decision.
+    async fn input_command(&mut self, command: SupervisorCmd, receipt_open: bool) {
+        use crate::services::tui_input::receipt_identity::Responsibility;
+        match command {
+            SupervisorCmd::Clear => {}
+            SupervisorCmd::PendingSource { sources, reply } => {
+                let _ = reply.send(self.order.pending(&sources));
+            }
+            SupervisorCmd::LookupResponsibility { identity, reply } => {
+                let result = if identity.execution_channel_id != self.config.channel {
+                    Responsibility::Conflict
+                } else {
+                    loan(&mut self.slot, move |lease| {
+                        lease
+                            .get()
+                            .and_then(|ledger| ledger.rows())
+                            .map(|rows| rows.responsibility(&identity))
+                            .unwrap_or(Responsibility::Unknown)
+                    })
+                    .await
+                    .unwrap_or(Responsibility::Unknown)
+                };
+                let _ = reply.send(result);
+            }
+            SupervisorCmd::BeginScan {
+                sources,
+                horizon,
+                complete_fetch,
+                reply,
+            } => {
+                let result =
+                    self.order
+                        .begin_scan(self.admission_epoch, sources, horizon, complete_fetch);
+                let _ = reply.send(result);
+            }
+            SupervisorCmd::CommitFromScan {
+                source,
+                mut capability,
+                reply,
+            } => {
+                let key = source.key();
+                let result = if !receipt_open || !self.admission_open() {
+                    Receipt::Deferred(Deferred::Closed)
+                } else if source.identity().execution_channel_id != self.config.channel
+                    || self
+                        .order
+                        .permits(&capability, self.admission_epoch, key)
+                        .is_err()
+                {
+                    Receipt::Deferred(Deferred::Order)
+                } else {
+                    loan(&mut self.slot, move |lease| receipt::commit(lease, *source))
+                        .await
+                        .unwrap_or(Receipt::Deferred(Deferred::SupervisorLost))
+                };
+                match &result {
+                    Receipt::Accepted(_) | Receipt::DuplicateQueued(_) => {
+                        let _ = self
+                            .order
+                            .settle(&mut capability, self.admission_epoch, key);
+                    }
+                    Receipt::Deferred(_) => {
+                        let _ = self.order.defer(&capability, self.admission_epoch, key);
+                    }
+                }
+                let _ = reply.send(ScanCommit {
+                    receipt: result,
+                    capability,
+                });
+            }
+            SupervisorCmd::SettleFromScan {
+                source,
+                disposition: _,
+                mut capability,
+                reply,
+            } => {
+                let result = self
+                    .order
+                    .settle(&mut capability, self.admission_epoch, source)
+                    .map(|()| capability);
+                let _ = reply.send(result);
+            }
+            SupervisorCmd::CompleteScan { capability, reply } => {
+                let result = self.order.complete(capability, self.admission_epoch);
+                let _ = reply.send(result);
             }
         }
     }
