@@ -671,7 +671,7 @@ pub(crate) fn run_legacy(
 }
 
 /// Submits only a prompt plan; the caller holds the existing composer mutex throughout.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn run_prompt_submission_legacy(
     session_name: &str,
     actions: &[TuiInputAction],
@@ -740,7 +740,7 @@ pub(crate) fn run_prompt_submission_legacy(
 }
 
 /// Observes a guarded submit once, leaving every stranded draft untouched.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn confirm_prompt_submission_passively(session_name: &str) -> Result<(), String> {
     let capture = with_transport_using(
         &mut crate::services::tui_input::submission_tmux::SubmissionTmux,
