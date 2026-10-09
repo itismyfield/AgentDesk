@@ -103,6 +103,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -148,9 +150,7 @@ jobs:
           set -o pipefail
           mkdir -p target/clippy-observation
           cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
-          if ! python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json; then
-            echo '::warning::Clippy observation invalid; no warning baseline can be derived'
-          fi
+          python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1
 
       - name: Upload Clippy observation
         uses: actions/upload-artifact@v4

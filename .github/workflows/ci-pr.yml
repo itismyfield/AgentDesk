@@ -1762,6 +1762,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -1794,7 +1796,14 @@ jobs:
         uses: ./.github/actions/ensure-swap
 
       - name: just lint
-        run: just lint
+        shell: bash
+        env:
+          CLIPPY_BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -o pipefail
+          mkdir -p target/clippy-observation
+          cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
+          python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref "$CLIPPY_BASE_REF"
 
       - name: sccache stats
         if: always()
@@ -2137,7 +2146,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=2fa2a6eafb40adc53c8ec888ab1e118864e974dca0b7ad2131cea0c7e5916dbe
+          expected=0e8c43697c07fe11c2c08b0a0c4401cac6c6cd0b0e8f07f5ef20a7c13ecfec59
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2370,7 +2379,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=2fa2a6eafb40adc53c8ec888ab1e118864e974dca0b7ad2131cea0c7e5916dbe
+          expected=0e8c43697c07fe11c2c08b0a0c4401cac6c6cd0b0e8f07f5ef20a7c13ecfec59
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

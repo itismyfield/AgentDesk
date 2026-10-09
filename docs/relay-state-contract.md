@@ -170,8 +170,8 @@ Repair, in priority order:
    section's own thesis forbids shape rules: a reviewer applying the count
    literally and one running the judgment diverge, exactly as they did on the
    static form above. The manifest cost is real and small:
-   `docs/pr-cap-check.md` sets the cap at 20 changed files and +800 added lines,
-   so one id spends 0.125% of the addition budget. Spend it when the name buys a
+   `docs/pr-cap-check.md` sets the cap at 30 production files and net +800 code
+   lines; test and manifest paths follow its exclusion policy. Spend an id when the name buys a
    claim; do not spend it to restate one an existing test's name already makes.
    `intake_delivery_sweep::tests` has the pattern to copy in
    `spawn_wiring_claims_process_latch_before_observed_task`. Copy the half that
