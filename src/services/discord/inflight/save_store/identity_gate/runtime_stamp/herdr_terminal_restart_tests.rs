@@ -150,7 +150,14 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
             if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
                 "restart_in_process",
             ) {
-                busy_turn(&shared, channel, &name).await;
+                shared
+                    .mailbox(channel)
+                    .restore_active_turn(
+                        std::sync::Arc::new(crate::services::provider::CancelToken::new()),
+                        serenity::all::UserId::new(7),
+                        serenity::all::MessageId::new(channel.get() + 1),
+                    )
+                    .await;
                 assert!(
                     shared.mailbox_peek(channel).is_none(),
                     "an in-process restart retains its mailbox"
