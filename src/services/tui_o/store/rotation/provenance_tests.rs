@@ -180,7 +180,10 @@ fn a_failed_span_replace_never_publishes_a_closed_range() {
         published.is_err(),
         "closed range escaped a failed durable write"
     );
-    assert_eq!(channel.rotation().unwrap().codex_spans, [open.clone()]);
+    assert_eq!(
+        channel.rotation().unwrap().codex_spans,
+        std::slice::from_ref(&open)
+    );
     assert_eq!(
         origin(&channel.rotation().unwrap(), &source, &records[0]),
         None

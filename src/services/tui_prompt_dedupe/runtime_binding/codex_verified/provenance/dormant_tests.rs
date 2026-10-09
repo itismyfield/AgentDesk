@@ -221,7 +221,7 @@ fn t0bc_boot_completes_missing_span_from_unique_opener_and_named_terminal() {
         assert_eq!(span.execution, fixture.proof);
         assert_eq!(
             fixture.store.rotation().unwrap().codex_spans,
-            [span.clone()]
+            std::slice::from_ref(&span)
         );
         use crate::services::tui_o::writer::{
             pieces::{Derived, UnitDeriver},
