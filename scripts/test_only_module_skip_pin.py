@@ -461,6 +461,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/router/intake_gate/stale_turn_host_tests.rs",
         "src/cli/herdr_tests.rs",
         "src/services/discord/recovery_engine/herdr_reader_tests.rs",
+        "src/services/discord/recovery_engine/herdr_admitted_restart_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs",
         "src/services/session_host/herdr_clear_adapter_tests.rs",
         "src/services/tui_o/writer/rotation_unsettled_tests.rs",
