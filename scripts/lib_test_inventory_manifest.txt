@@ -9833,6 +9833,7 @@ services::provider::cancel_token_claude_interrupt::tests::a_live_herdr_turn_is_f
 services::provider::cancel_token_claude_interrupt::tests::a_nonce_two_live_herdr_turns_share_names_neither
 services::provider::cancel_token_claude_interrupt::tests::a_stop_and_a_herdr_prepare_are_ordered_by_the_slot
 services::provider::cancel_token_claude_interrupt::tests::p2b_decide_holds_slot_lock_until_publish
+services::provider::cancel_token_claude_interrupt::tests::p2b_decide_publishes_before_releasing_the_slot
 services::provider::cancel_token_claude_interrupt::tests::session_generation_advance_blocks_stale_stop_operation
 services::provider::cancel_token_claude_interrupt::tests::stale_pending_stop_is_rejected_after_next_generation_publishes
 services::provider::cancel_token_claude_interrupt::tests::stale_rebind_cannot_replace_a_newer_session_generation

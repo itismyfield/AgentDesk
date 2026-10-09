@@ -532,7 +532,16 @@ impl StopCancel {
         };
         #[cfg(test)]
         run_decide_hook();
+        #[cfg(test)]
+        let slot = if herdr_interrupt_mutant("p2b_unlock_after_hook") {
+            drop(slot);
+            None
+        } else {
+            slot
+        };
         token.publish_cancel(reason);
+        #[cfg(test)]
+        run_publish_hook();
         drop(slot);
         Self::Published(token)
     }
@@ -543,6 +552,17 @@ impl StopCancel {
 #[cfg(test)]
 fn run_decide_hook() {
     DECIDE_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook();
+        }
+    });
+}
+
+/// Test seam between a stop's publish and its slot release: the hook observes the published
+/// cancel while the slot is still held.
+#[cfg(test)]
+fn run_publish_hook() {
+    PUBLISH_HOOK.with(|hook| {
         if let Some(hook) = hook.borrow().as_ref() {
             hook();
         }
@@ -595,6 +615,7 @@ thread_local! {
     #[cfg(unix)]
     pub(crate) static HERDR_SETTLEMENT_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
     static DECIDE_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+    static PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
 pub(crate) struct ClaudeInterruptDeliveryGuard<'a> {
@@ -1214,5 +1235,54 @@ mod tests {
         );
         assert!(matches!(decided, StopCancel::Published(_)));
         assert!(unsettled.cancelled.load(Ordering::SeqCst));
+    }
+
+    /// With settlement the stop still holds the slot after its publish: the published cancel and
+    /// the held slot are seen together, with no racing thread.
+    #[cfg(unix)]
+    #[test]
+    fn p2b_decide_publishes_before_releasing_the_slot() {
+        struct HookReset;
+        impl Drop for HookReset {
+            fn drop(&mut self) {
+                PUBLISH_HOOK.with(|hook| hook.borrow_mut().take());
+                HERDR_SETTLEMENT_OVERRIDE.set(true);
+            }
+        }
+        let _reset = HookReset;
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        let token = Arc::new(CancelToken::new());
+        let hook_runs = Arc::new(AtomicUsize::new(0));
+        {
+            let token = token.clone();
+            let hook_runs = hook_runs.clone();
+            PUBLISH_HOOK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    hook_runs.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        token.cancelled.load(Ordering::SeqCst),
+                        "the cancel is published"
+                    );
+                    assert!(
+                        token.herdr_interrupt.try_lock().is_err(),
+                        "the stop holds the slot through its publish"
+                    );
+                }));
+            });
+        }
+        let decided = StopCancel::decide(
+            Some(token.clone()),
+            "mailbox_cancel_active_turn".to_string(),
+        );
+        assert_eq!(
+            hook_runs.load(Ordering::SeqCst),
+            1,
+            "the publish was observed"
+        );
+        assert!(matches!(decided, StopCancel::Published(_)));
+        assert!(
+            token.herdr_interrupt.try_lock().is_ok(),
+            "the slot is released"
+        );
     }
 }
