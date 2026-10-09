@@ -469,6 +469,8 @@ ITEM_START_RE = re.compile(
     r'(?:extern\s+(?:"[^"]*"\s+)?)?'
     r"(?:fn|impl|mod|trait|macro_rules)\b"
 )
+# Other pipe prefixes stay uncertain and expose a following body conservatively.
+CLOSURE_START_RE = re.compile(r"(?:[=([{,;]|=>|\b(?:move|async|return))\s*$")
 
 # Cross-line string/comment stripper imported from scripts/rust_lex.py.
 # Blanked output keeps `{` / `}` / `;` / `,` counts honest for the cfg(test)
@@ -489,9 +491,15 @@ def production_lines(path: Path):
     armed_start_depth = 0
     skip_start_depth = 0
     saw_body_keyword = False
+    closure_parameter_depth: int | None = None
+    closure_parameters_known = False
+    armed_parameter = False
+    armed_parameter_known = False
+    previous_code = ""
     for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         code = strip_line(raw, state)
         countable = mode == "normal"
+        parameter_mask_start = 0 if mode == "armed" and armed_parameter else None
         arm_at = None
         if mode == "normal":
             match = _cfg_test_only_match(code)
@@ -513,9 +521,22 @@ def production_lines(path: Path):
             elif char in ")]":
                 group_depth -= 1
             elif char == "{":
+                # An uncertain parameter header cannot make its body test-only.
+                if armed_parameter and (
+                    not armed_parameter_known or closure_parameter_depth is not None
+                ):
+                    mode = "normal"
+                    countable = True
+                    if parameter_mask_start is not None:
+                        code = (
+                            code[:parameter_mask_start]
+                            + " " * (index - parameter_mask_start) + code[index:]
+                        )
                 if mode == "armed":
                     mode = "skip"
                     skip_start_depth = brace_depth
+                closure_parameter_depth = None
+                armed_parameter = False
                 brace_depth += 1
             elif char == "}":
                 brace_depth -= 1
@@ -530,7 +551,7 @@ def production_lines(path: Path):
             elif (
                 char == ","
                 and mode == "armed"
-                and group_depth <= 0
+                and brace_depth + group_depth == armed_start_depth
                 and not saw_body_keyword
             ):
                 mode = "normal"  # `#[cfg(test)] field: T,` / enum variant
@@ -540,10 +561,44 @@ def production_lines(path: Path):
                 and brace_depth + group_depth < armed_start_depth
             ):
                 mode = "normal"
+            if (
+                char == "|" and mode != "skip"
+                and (index == 0 or code[index - 1] != "|")
+                and (index + 1 == len(code) or code[index + 1] != "|")
+            ):
+                depth = brace_depth + group_depth
+                if closure_parameter_depth == depth:
+                    closure_parameter_depth = None
+                    if armed_parameter:
+                        mode = "normal"
+                        countable = True
+                        if parameter_mask_start is not None:
+                            end = index + 1
+                            code = (
+                                code[:parameter_mask_start]
+                                + " " * (end - parameter_mask_start) + code[end:]
+                            )
+                        armed_parameter = False
+                elif closure_parameter_depth is None:
+                    closure_parameter_depth = depth
+                    prefix = code[:index].rstrip() or previous_code
+                    closure_parameters_known = bool(CLOSURE_START_RE.search(prefix))
+            if closure_parameter_depth is not None and (
+                (char == ";" and brace_depth + group_depth <= closure_parameter_depth)
+                or (char in ")]}" and brace_depth + group_depth < closure_parameter_depth)
+            ):
+                closure_parameter_depth = None
+                armed_parameter_known = False
             if arm_at is not None and index == arm_at:
                 mode = "armed"
                 armed_start_depth = brace_depth + group_depth
                 saw_body_keyword = False
+                armed_parameter = closure_parameter_depth is not None
+                armed_parameter_known = closure_parameters_known
+                if armed_parameter:
+                    parameter_mask_start = match.start()
+        if code.strip():
+            previous_code = code.rstrip()
         yield lineno, code, countable
 
 
