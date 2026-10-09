@@ -187,6 +187,13 @@ pub(crate) fn admit_command(
         return Ok(Some(permit));
     }
     #[cfg(test)]
+    if command_mutant("rest_fence_omitted") && provider == "cancel_turn"
+        || command_mutant("text_fence_omitted") && channel == "9200000000000107"
+        || command_mutant("restart_fence_omitted") && channel == "9200000000000108"
+    {
+        return Ok(None);
+    }
+    #[cfg(test)]
     if command_mutant("off_runs_home_lookup") {
         COMMAND_LOOKUPS.with(|calls| calls.set(calls.get() + 1));
     }

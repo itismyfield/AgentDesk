@@ -351,11 +351,11 @@ async fn command_agent_and_dispatch_refusal_leave_session_and_dispatch_working_p
         .await
         .unwrap();
     assert_eq!(status, "dispatched");
+    assert!(!token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
     assert!(
-        crate::services::discord::host_teardown_gate::test_support::turn_kept(
+        crate::services::discord::host_teardown_gate::test_support::mailbox_turn_active(
             &shared,
-            poise::serenity_prelude::ChannelId::new(channel),
-            &token
+            poise::serenity_prelude::ChannelId::new(channel)
         )
         .await
     );

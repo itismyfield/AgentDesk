@@ -3122,9 +3122,11 @@ services::discord::commands::recovery_ops::tests::validate_rejects_too_long
 services::discord::commands::response_wording_tests::bare_shell_command_error_uses_shared_folded_korean_rendering
 services::discord::commands::response_wording_tests::owner_error_detail_is_folded_and_markdown_safe
 services::discord::commands::response_wording_tests::shared_command_states_use_korean_responses
+services::discord::commands::restart::home_command_tests::command_restart_refuses_before_warn_or_mailbox_cancel
 services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_and_process_of_a_refused_session_pg
 services::discord::commands::text_commands::command_dispatch_contract_tests::production_selection_drives_the_same_exhaustive_dispatch_id
 services::discord::commands::text_commands::command_dispatch_contract_tests::skill_alias_branches_match_intake_and_preserve_canonical_actions
+services::discord::commands::text_commands::home_command_tests::command_text_and_alias_dispatch_refuse_before_stop_publication
 services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
 services::discord::commands::tui_passthrough::tests::local_only_whitelist_matches_passthrough_command_set
 services::discord::commands::tui_passthrough::tests::model_command_is_observation_only_local

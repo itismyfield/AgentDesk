@@ -34,7 +34,7 @@ pub(in crate::services::discord) fn admit(
 /// Refuses the command when the channel's home is registered here but not held with intake open;
 /// a channel with no registered home passes unread.
 pub(super) fn check(channel_id: ChannelId) -> Result<(), CommandRefused> {
-    channel_home::refusal(channel_id.get()).map_or(Ok(()), |refusal| Err(CommandRefused(refusal)))
+    admit(channel_id, "preflight").map(drop)
 }
 
 /// [`check`] for a slash command: a refusal is answered and the command ends there.

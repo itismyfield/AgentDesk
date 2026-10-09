@@ -417,3 +417,44 @@ mod host_guard_tests {
         db.drop().await;
     }
 }
+
+#[cfg(test)]
+mod home_command_tests {
+    use super::*;
+    use crate::db::o_channel_homes::HomeState;
+    use crate::services::cluster::channel_home;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_restart_refuses_before_warn_or_mailbox_cancel() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = serenity::ChannelId::new(9200000000000108);
+        let token = crate::services::discord::host_teardown_gate::test_support::nameless_turn(
+            &shared, channel,
+        )
+        .await;
+        let home = channel_home::register_for_test(channel.get(), Some(HomeState::Releasing));
+        let http = Arc::new(serenity::Http::new(""));
+        let result = restart_managed_session(
+            &http,
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+            "/restart",
+            || async {
+                panic!("home refusal must precede the warning");
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.unwrap_err().contains("home_draining"));
+        assert!(!token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            crate::services::discord::host_teardown_gate::test_support::mailbox_turn_active(
+                &shared, channel
+            )
+            .await
+        );
+        assert_eq!(home.commands_in_flight(), 0);
+        channel_home::unregister(home.channel_id());
+    }
+}
