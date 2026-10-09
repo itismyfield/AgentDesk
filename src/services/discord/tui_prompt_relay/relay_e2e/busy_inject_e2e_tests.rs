@@ -1,6 +1,7 @@
 //! Admitted Discord text offered to a busy Claude TUI pane through production intake: what each
 //! injection result leaves, and what a taken message, the gate and commands keep from the pane.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use crate::services::discord::health::{
 };
 use crate::services::discord::inject_disposition::{self as disposition, InjectionOutcome};
 use crate::services::discord::router::busy_inject_support as hook;
+use crate::services::provider::CancelToken;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::ActiveTurnKind;
 
@@ -329,7 +331,7 @@ async fn parked_at_capture(busy: &Busy, message: u64) -> tokio::task::JoinHandle
 }
 
 /// A vetoed paste hands the message back ahead of input queued meanwhile, also past a failed
-/// first write: marked queued, never 📥, the checkpoint left to the queue.
+/// first write: marked queued, never 📥, the checkpoint past it as a queue commit moves it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_vetoed_paste_hands_the_message_back_ahead_of_input_sent_meanwhile_pg() {
     let busy = busy().await;
@@ -355,7 +357,59 @@ async fn a_vetoed_paste_hands_the_message_back_ahead_of_input_sent_meanwhile_pg(
     rt.finish().await;
     assert_eq!(
         observed,
-        (queue, vec!["📬".to_string()], None, vec![], None)
+        (queue, vec!["📬".to_string()], Some(message), vec![], None)
+    );
+}
+
+/// A handed-back message the queue then ran is not replayed by the next catch-up sweep, though
+/// no completed-turn record names it, as a tui_o turn leaves none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
+    let busy = busy().await;
+    let rt = &busy.rt;
+    rt.hold_mailbox().await;
+    busy.pane.draft();
+    let channel = ChannelId::new(CHANNEL_ID);
+    // The turn already running started live on an earlier message, which moved the checkpoint.
+    let (earlier, answer) = (fresh_id(), fresh_id());
+    let advance = crate::services::discord::advance_last_message_checkpoint;
+    advance(
+        &rt.h.shared,
+        &ProviderKind::Claude,
+        channel,
+        MessageId::new(earlier),
+    );
+    let message = fresh_id();
+    rt.h.deliver_user_message(message, "status?").await.unwrap();
+    let handed = rt.queue().await;
+    // Once the earlier turn ended the queue ran the message as its own turn, which ended too.
+    let mailbox = rt.h.shared.mailbox(channel);
+    let context = crate::services::discord::queue_persistence_context;
+    let persistence = || context(&rt.h.shared, &ProviderKind::Claude, channel);
+    let taken = mailbox.take_next_soft(persistence()).await;
+    let ran = taken
+        .intervention
+        .as_ref()
+        .map(|entry| entry.message_id.get());
+    mailbox.finish_turn(persistence()).await;
+    let (token, user) = (Arc::new(CancelToken::new()), serenity::UserId::new(USER_ID));
+    let start = crate::services::discord::mailbox_try_start_turn;
+    let started = start(&rt.h.shared, channel, token, user, MessageId::new(message)).await;
+    drop(taken);
+    mailbox.finish_turn(persistence()).await;
+    // Another turn holds the channel, so a sweep that recovers the message can only queue it.
+    rt.hold_mailbox().await;
+    rt.h.seed_channel_history(&[
+        (earlier, "earlier", false),
+        (answer, "answer", true),
+        (message, "status?", false),
+    ]);
+    rt.h.run_catch_up().await;
+    let observed = (handed, ran, started, rt.queue().await);
+    rt.finish().await;
+    assert_eq!(
+        observed,
+        (vec!["status?".to_string()], Some(message), true, vec![])
     );
 }
 

@@ -700,6 +700,21 @@ redeploy leaves the old values live in the plist.
   before merging.
 
 ### Audited touches
+- 2026-10-09 — #5817 cluster schema order in `scripts/deploy-release.sh`: the
+  shared Postgres schema is cluster-wide, and a binary refuses to boot on a
+  migration it does not embed. Every `--all-nodes` peer is pinned to the source
+  this node built, schema change or not, so a newer origin/main never reaches it;
+  an external artifact cannot be pinned and is refused. A deploy that advances the
+  schema (manifest floor before the build, candidate `doctor` pending versions
+  before migrating) also deploys its single peer before this node migrates or
+  restarts; without `--all-nodes` or with two or more peers it is refused. A
+  failed peer leg is judged by comparing the same staged binary's schema
+  snapshot before and after: unchanged aborts this
+  node untouched, moved finishes this node forward and still fails the run, and
+  unknown keeps the staged binary without installing it.
+  `AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=1` restores the previous unpinned order.
+  This is deploy tooling only: no lease, leader check, or runtime authority is
+  added, and two operators deploying from both nodes at once remain unserialized.
 - 2026-07-30 — #5014 / PR #5020 destructive cancel commit: the inflight
   sidecar flock, watcher cancel `AtomicBool`, and registry identity CAS remain
   **worker-local** authority. The primitive adds no PostgreSQL lease, distributed

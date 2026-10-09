@@ -277,6 +277,26 @@ fn observe_prompt_candidates_by_tmux_inner(
     if provider.is_empty() || tmux_session_name.is_empty() || candidates.is_empty() {
         return PromptObservation::Ignored;
     }
+    // An injected input is settled once, by the first observation that names its native turn.
+    match claim_injected_steer(&provider, tmux_session_name, &candidates, native_turn) {
+        Some(Claim::Deferred) => return PromptObservation::InjectedDeferred,
+        Some(Claim::Joined { first }) => {
+            // Every observer's entry id is kept, so a rescan after the ledger expires stays quiet.
+            if let Some(entry_id) = entry_id {
+                record_relayed_entry_id(&provider, tmux_session_name, entry_id);
+            }
+            if first {
+                let _ = take_or_record_recent_observed_prompt(
+                    &provider,
+                    tmux_session_name,
+                    &candidates[0],
+                );
+            }
+            return PromptObservation::InjectedSteer;
+        }
+        Some(Claim::HandedBefore) => return PromptObservation::SuppressedRecentDuplicate,
+        Some(Claim::Handed) | None => {}
+    }
     // #4567: structured task lifecycle records are status events, not positive
     // user-input provenance. Publish them for the task-card/status observer, but
     // deliberately bypass entry-id, pending, recent, lease, and SSH markers.
