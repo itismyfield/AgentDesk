@@ -227,6 +227,20 @@ impl QueueService {
                 let active_turn = self
                     .load_cancel_dispatch_turn_session(pool, dispatch_id)
                     .await?;
+                let permit = match active_turn.as_ref() {
+                    None => None,
+                    Some(turn) => {
+                        let admission = match turn.channel_id.as_deref() {
+                            Some(channel) => crate::services::cluster::channel_home::admit_command(
+                                channel,
+                                turn.provider_name.as_deref().unwrap_or("cancel_dispatch"),
+                            ),
+                            None => crate::services::cluster::channel_home::admit_unattributed(),
+                        };
+                        admission.map_err(|reason| ServiceError::conflict(reason.to_string()))?
+                    }
+                };
+                crate::services::cluster::channel_home::command_scope(permit, async {
                 let mut turn_cancelled = false;
                 let mut turn_session_key = None;
                 let mut turn_tmux_name = None;
@@ -379,6 +393,7 @@ impl QueueService {
                     "turn_inflight_cleared": turn_inflight_cleared,
                     "turn_queued_remaining": turn_queued_remaining,
                 }))
+                }).await
             }
         }
     }
@@ -473,6 +488,13 @@ impl QueueService {
         headers: &HeaderMap,
         forward_context: &crate::services::session_forwarding::ForwardCallerContext,
     ) -> ServiceResult<Value> {
+        let permit =
+            crate::services::cluster::channel_home::admit_command(channel_id, "cancel_turn")
+                .map_err(|reason| {
+                    ServiceError::conflict(reason.to_string())
+                        .with_context("channel_id", channel_id)
+                })?;
+        crate::services::cluster::channel_home::command_scope(permit, async {
         if let Some(response) =
             crate::services::session_forwarding::forward_remote_cancel_if_needed(
                 forward_context,
@@ -783,6 +805,7 @@ impl QueueService {
             "turn_status": finalizer.status,
             "turn_completed_at": finalizer.completed_at.to_rfc3339(),
         }))
+        }).await
     }
 
     async fn resolve_cancel_turn_channel_target(
@@ -1016,5 +1039,55 @@ mod tests {
                 "force-purged hydrated message must not dispatch later"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod home_command_tests {
+    use super::*;
+    use crate::db::o_channel_homes::HomeState;
+    use crate::services::cluster::channel_home;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_rest_home_refusal_precedes_forward_and_session_mutation() {
+        let channel = 9200000000000104;
+        let home = channel_home::register_for_test(channel, Some(HomeState::Releasing));
+        let service = QueueService::new(None);
+        let context = crate::services::session_forwarding::ForwardCallerContext {
+            pg_pool: None,
+            config: Arc::new(crate::config::Config::default()),
+            cluster_instance_id: None,
+        };
+        for force in [false, true] {
+            let error = service
+                .cancel_turn(
+                    None,
+                    &channel.to_string(),
+                    force,
+                    &HeaderMap::new(),
+                    &context,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.status(), axum::http::StatusCode::CONFLICT);
+            assert!(error.to_string().contains("home_draining"), "{error}");
+            assert_eq!(home.commands_in_flight(), 0);
+        }
+        channel_home::unregister(home.channel_id());
+        let error = service
+            .cancel_turn(
+                None,
+                &channel.to_string(),
+                false,
+                &HeaderMap::new(),
+                &context,
+            )
+            .await
+            .unwrap_err();
+        assert_ne!(
+            error.status(),
+            axum::http::StatusCode::CONFLICT,
+            "Legacy still reaches its existing pool error"
+        );
     }
 }
