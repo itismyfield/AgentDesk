@@ -196,16 +196,29 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
     ) in pending
     {
         check_dispatch_outbox_retry_count_in_bounds(id, &dispatch_id, retry_count);
-        if action == "notify" {
-            let suppress_delivery = dispatch_notify_delivery_suppressed_pg(pool, &dispatch_id)
-                .await
-                .unwrap_or(false);
-            if suppress_delivery {
-                let delivery_result = generic_outbox_delivery_result(
-                    &dispatch_id,
-                    "notify",
-                    "suppressed because dispatch is already terminal",
-                );
+        if matches!(action.as_str(), "notify" | "followup") {
+            let suppressed = match dispatch_notify_delivery_suppressed_pg(pool, &dispatch_id, &action).await
+            {
+                Ok(suppressed) => suppressed,
+                // An unreadable gate never delivers: retry later without spending the budget.
+                Err(error) => {
+                    let error = format!("notify suppression lookup failed: {error}");
+                    tracing::warn!(outbox_id = id, dispatch_id = %dispatch_id, %error, "[dispatch-outbox] notify gate unreadable");
+                    let _ = schedule_outbox_retry_pg(
+                        pool,
+                        id,
+                        &error,
+                        retry_count,
+                        SLOT_BUSY_RETRY_SECS,
+                        &claim_owner,
+                        claimed_at,
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            if let Some(detail) = suppressed {
+                let delivery_result = generic_outbox_delivery_result(&dispatch_id, &action, detail);
                 let delivery_result_json = dispatch_delivery_result_json(&delivery_result);
                 let _ = mark_outbox_done_pg(
                     pool,
@@ -463,3 +476,7 @@ pub(crate) async fn dispatch_outbox_loop(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "outbox_queue_replay_tests.rs"]
+mod replay_hold_tests;

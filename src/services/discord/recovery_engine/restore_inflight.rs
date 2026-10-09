@@ -70,6 +70,38 @@ fn observe_restore_inflight_snapshot(
     }
 }
 
+/// Project a blocking durable disposition of the turn's receipt onto the restored row, so the
+/// session-died recovery never reruns a started request. An unreadable receipt blocks too.
+pub(super) async fn hydrate_replay_hold(
+    pool: Option<&sqlx::PgPool>,
+    state: &mut inflight::InflightTurnState,
+) {
+    let Some(receipt_id) = state.replay_receipt_id else {
+        return;
+    };
+    let reason = match pool {
+        None => Some(format!("receipt {receipt_id} unreadable without postgres")),
+        Some(pool) => match crate::db::replay_disposition::receipt_disposition(pool, receipt_id)
+            .await
+        {
+            Ok(disposition)
+                if crate::db::replay_disposition::stored_disposition_blocks_rerun(
+                    disposition.as_deref(),
+                ) =>
+            {
+                Some(format!("receipt {receipt_id} {}", disposition.unwrap_or_default()))
+            }
+            Ok(_) => None,
+            Err(error) => Some(format!("receipt {receipt_id} unreadable: {error}")),
+        },
+    };
+    if let Some(reason) = reason
+        && !state.replay_hold_reasons.contains(&reason)
+    {
+        state.replay_hold_reasons.push(reason);
+    }
+}
+
 pub(in crate::services::discord) async fn restore_inflight_turns(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -2246,6 +2278,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             lookup_turn_finished_dispatch_kind(recovery_dispatch_id.as_deref()).await;
         // Backfill session_key/dispatch_id on inflight state for long-turn detection ([L]).
         let mut state = state;
+        hydrate_replay_hold(shared.pg_pool.as_ref(), &mut state).await;
         state.session_key = state.session_key.or_else(|| adk_session_key.clone());
         state.dispatch_id = state.dispatch_id.or_else(|| recovery_dispatch_id.clone());
         // #3166: read the real configured thresholds (e.g.
@@ -2717,3 +2750,6 @@ mod kickoff_identity_tests;
 #[cfg(test)]
 #[path = "restore_inflight/ready_without_output_tests.rs"]
 mod ready_without_output_tests;
+#[cfg(all(test, unix))]
+#[path = "restore_inflight/replay_hold_tests.rs"]
+mod replay_hold_tests;

@@ -166,6 +166,10 @@ src/
 │   │   ├── retention.rs
 │   │   ├── storage_stats.rs
 │   │   └── tests.rs
+│   ├── replay_disposition_tests/
+│   │   ├── compatibility_tests.rs
+│   │   ├── concurrency_tests.rs
+│   │   └── consumer_tests.rs
 │   ├── scheduled_messages/
 │   │   ├── agent.rs
 │   │   ├── api_json.rs
@@ -202,6 +206,8 @@ src/
 │   ├── o_channel_homes_tests.rs
 │   ├── postgres.rs
 │   ├── relay_dead_letter.rs
+│   ├── replay_disposition.rs
+│   ├── replay_disposition_tests.rs
 │   ├── scheduled_messages.rs
 │   ├── session_agent_resolution.rs
 │   ├── session_evidence.rs
@@ -667,6 +673,7 @@ src/
 │   │   │   ├── home_route_tests.rs
 │   │   │   ├── input_effect_tests.rs
 │   │   │   ├── o_route_tests.rs
+│   │   │   ├── replay_hold_tests.rs
 │   │   │   └── test_executor.rs
 │   │   ├── machine_resources/
 │   │   │   ├── gpu/
@@ -1002,6 +1009,7 @@ src/
 │   │   │   ├── ownership_ops.rs
 │   │   │   ├── rebind_reap.rs
 │   │   │   ├── removal.rs
+│   │   │   ├── replay_projection_tests.rs
 │   │   │   ├── restart_mark_fence_tests.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
@@ -1169,7 +1177,8 @@ src/
 │   │   │   │   ├── kickoff_identity.rs
 │   │   │   │   ├── kickoff_identity_tests.rs
 │   │   │   │   ├── output_paths.rs
-│   │   │   │   └── ready_without_output_tests.rs
+│   │   │   │   ├── ready_without_output_tests.rs
+│   │   │   │   └── replay_hold_tests.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
@@ -1236,6 +1245,8 @@ src/
 │   │   │       └── values.rs
 │   │   ├── router/
 │   │   │   ├── intake_dispatch/
+│   │   │   │   ├── tests/
+│   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── home_order_tests.rs
 │   │   │   │   ├── notice.rs
@@ -1634,6 +1645,7 @@ src/
 │   │   │   ├── completion_guard/
 │   │   │   │   ├── completion_context.rs
 │   │   │   │   ├── completion_postgres.rs
+│   │   │   │   ├── replay_hold_tests.rs
 │   │   │   │   └── span_tests.rs
 │   │   │   ├── completion_postlude/
 │   │   │   │   ├── channel_episode_scope.rs
@@ -2032,6 +2044,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── outbox_claiming.rs
 │   │   ├── outbox_queue.rs
+│   │   ├── outbox_queue_replay_tests.rs
 │   │   ├── outbox_route.rs
 │   │   ├── result_header.rs
 │   │   ├── routing_constraint.rs

@@ -94,6 +94,9 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_matches_ide
     // is merged; anchor/runtime/session/owner/tool evidence stays durable.
     let generation_matches = on_disk.save_generation == state.save_generation;
     let mut updated = on_disk;
+    if !updated.merge_replay_projection(&state) {
+        return GuardedSaveOutcome::AuthorityPinned;
+    }
     if generation_matches {
         updated.full_response.clone_from(&state.full_response);
         updated.response_sent_offset =

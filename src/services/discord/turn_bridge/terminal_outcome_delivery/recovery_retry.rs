@@ -38,6 +38,16 @@ pub(super) async fn handle_recovery_retry(
     ctx: RecoveryRetryContext<'_>,
     state: RecoveryRetryState<'_>,
 ) -> RecoveryRetryOutcome {
+    // A started request whose replay is held is never reset or rerun: its body, session and
+    // delivery stay with the existing owner.
+    if state.inflight_state.replay_rerun_blocked() {
+        tracing::warn!(
+            channel_id = %ctx.channel_id,
+            reasons = ?state.inflight_state.replay_hold_reasons,
+            "session died during recovery of a held request; not retried"
+        );
+        return RecoveryRetryOutcome::Continue;
+    }
     let shared_owned = Arc::clone(ctx.shared_owned);
     let gateway = Arc::clone(ctx.gateway);
     let cancel_token = Arc::clone(ctx.cancel_token);

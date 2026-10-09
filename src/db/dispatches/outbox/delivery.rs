@@ -16,19 +16,26 @@ pub(crate) enum DispatchOutboxLeaseUpdateError {
     },
 }
 
+/// Execution actions stop on a replay hold; terminal status suppresses only the original notify.
 pub(crate) async fn dispatch_notify_delivery_suppressed_pg(
     pool: &PgPool,
     dispatch_id: &str,
-) -> Result<bool, sqlx::Error> {
-    let status =
-        sqlx::query_scalar::<_, Option<String>>("SELECT status FROM task_dispatches WHERE id = $1")
-            .bind(dispatch_id)
-            .fetch_optional(pool)
-            .await?;
-    Ok(matches!(
-        status.flatten().as_deref(),
-        Some("completed") | Some("failed") | Some("cancelled")
-    ))
+    action: &str,
+) -> Result<Option<&'static str>, sqlx::Error> {
+    let row = sqlx::query_as::<_, (Option<String>, bool)>(
+        "SELECT status, replay_disposition_blocks_rerun(replay_disposition)
+           FROM task_dispatches WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(match row {
+        Some((_, true)) => Some("suppressed because the dispatch already started and is held"),
+        Some((Some(status), false)) if action == "notify" && matches!(status.as_str(), "completed" | "failed" | "cancelled") => {
+            Some("suppressed because dispatch is already terminal")
+        }
+        _ => None,
+    })
 }
 
 pub(crate) async fn mark_dispatch_dispatched_pg(

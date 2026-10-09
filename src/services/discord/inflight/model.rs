@@ -585,6 +585,12 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// rows / turns that never rolled over.
     #[serde(default)]
     pub streaming_rollover_frozen_msg_ids: Vec<u64>,
+    /// Projection of this turn's durable replay receipt (`intake_outbox.id`); fixed once set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_receipt_id: Option<i64>,
+    /// Why this episode's replay is held; any reason forbids an automatic rerun of the turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replay_hold_reasons: Vec<String>,
 }
 
 #[cfg(test)]
@@ -1148,7 +1154,35 @@ impl InflightTurnState {
             followup_voice_announcement: None,
             followup_preserve_on_cancel: false,
             streaming_rollover_frozen_msg_ids: Vec::new(),
+            replay_receipt_id: None,
+            replay_hold_reasons: Vec::new(),
         }
+    }
+
+    pub(in crate::services::discord) fn replay_rerun_blocked(&self) -> bool {
+        !self.replay_hold_reasons.is_empty()
+    }
+
+    /// Keep the receipt and every hold reason of the same episode; refuse a different episode
+    /// or a conflicting receipt before the guarded writer can persist anything.
+    pub(in crate::services::discord) fn merge_replay_projection(&mut self, other: &Self) -> bool {
+        if self.turn_nonce != other.turn_nonce
+            || self
+                .replay_receipt_id
+                .zip(other.replay_receipt_id)
+                .is_some_and(|(a, b)| a != b)
+        {
+            return false;
+        }
+        if self.replay_receipt_id.is_none() {
+            self.replay_receipt_id = other.replay_receipt_id;
+        }
+        for reason in &other.replay_hold_reasons {
+            if !self.replay_hold_reasons.contains(reason) {
+                self.replay_hold_reasons.push(reason.clone());
+            }
+        }
+        true
     }
 
     /// Adopt the intake outbox identity at the sole production construction
@@ -1406,3 +1440,7 @@ impl InflightTurnState {
         self.followup_preserve_on_cancel = preserve_on_cancel;
     }
 }
+
+#[cfg(test)]
+#[path = "replay_projection_tests.rs"]
+mod replay_projection_tests;

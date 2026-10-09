@@ -112,7 +112,8 @@ async fn kickoff_admitted_queue_channel(
     {
         router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
         router::QueuedAdmissionDisposition::Deferred
-        | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment => {
+        | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment
+        | router::QueuedAdmissionDisposition::ConsumedToHold => {
             drop(dispatch_lease);
             return IdleQueueKickoffChannelOutcome::default();
         }
