@@ -7714,6 +7714,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_busy_pane_tak
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_channel_outside_the_gate_reaches_no_injection_step_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_handback_that_never_lands_ends_the_message_with_a_notice_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_handback_with_an_unknown_answer_is_neither_resent_nor_queued_again_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_message_the_mailbox_already_runs_is_not_pasted_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_redelivered_injected_message_ends_at_the_lookup_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_taken_message_ends_before_a_pending_dm_reply_consumes_it_pg
