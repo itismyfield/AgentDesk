@@ -472,6 +472,45 @@ async fn gateway_epoch_unknown_and_loss_refuse_previously_approved_requests() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_different_registered_home_cannot_use_an_old_gate_with_the_same_epoch() {
+    let fixture = Fixture::new();
+    // Model a replaced home before withdrawal has closed its old inner gate.
+    let old_home = Arc::new(HomeGate::new(
+        &fixture.identity.channel.to_string(),
+        "b1-old",
+    ));
+    old_home
+        .confirm(
+            &HeldHome::for_test(
+                &fixture.identity.channel.to_string(),
+                "b1-old",
+                7,
+                HomeState::Worker,
+            ),
+            tokio::time::Instant::now(),
+        )
+        .unwrap();
+    fixture
+        .incarnation
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+        .unwrap()
+        .owner = Owner::Home(old_home, 1);
+    let old = fixture.approval().await;
+    assert!(
+        old.start(
+            42,
+            fixture.identity.channel,
+            || -> std::future::Ready<()> { panic!("foreign registered home") }
+        )
+        .await
+        .is_none()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn an_external_wake_target_requires_fresh_receiver_authority() {
     let fixture = Fixture::new();
     let (bot, actual_channel, _message_id) = (42, fixture.identity.channel, 123_u64);

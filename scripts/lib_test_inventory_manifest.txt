@@ -8976,6 +8976,7 @@ services::discord::turn_presence::activity::tests::presence_host_read_overtaken_
 services::discord::turn_presence::activity::tests::presence_keeps_codex_parent_busy_until_its_own_closer
 services::discord::turn_presence::activity::tests::presence_requires_live_host_without_changing_existing_open_or_closed_judgments
 services::discord::turn_presence::activity::tests::the_boot_kickoff_loop_arms_only_turn_mode_channels_it_could_not_start
+services::discord::turn_presence::admission::tests::a_different_registered_home_cannot_use_an_old_gate_with_the_same_epoch
 services::discord::turn_presence::admission::tests::actual_bot_and_channel_are_checked_again_before_request_creation
 services::discord::turn_presence::admission::tests::an_external_wake_target_requires_fresh_receiver_authority
 services::discord::turn_presence::admission::tests::an_unpolled_attempt_is_rechecked_after_confirmation_is_removed

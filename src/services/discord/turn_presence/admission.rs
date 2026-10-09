@@ -143,7 +143,7 @@ impl Approval {
                     let request = request.take()?;
                     self.reading
                         .with_busy(&current.identity, || {
-                            current.owner.admit(actual_channel, || {
+                            current.owner.admit(current.identity.channel, || {
                                 let mut future = Box::pin(request());
                                 match future.as_mut().poll(cx) {
                                     Poll::Ready(output) => Started::Ready(output),
