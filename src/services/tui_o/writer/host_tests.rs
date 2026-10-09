@@ -1168,3 +1168,7 @@ mod rotation_unsettled;
 
 #[path = "host_home_tests.rs"]
 mod home;
+
+#[cfg(unix)]
+#[path = "host_renumber_tests.rs"]
+mod renumber;

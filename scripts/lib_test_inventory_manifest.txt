@@ -4374,6 +4374,7 @@ services::discord::input_runtime::fence::tests::queue_primitives_share_canonical
 services::discord::input_runtime::fence::tests::released_registration_and_stale_closing_cannot_issue_capabilities
 services::discord::input_runtime::fence::tests::stale_epoch_is_not_mode_or_duplicate
 services::discord::input_runtime::supervisor::drive::tests::a_record_inside_a_wake_ends_the_instance_and_only_its_successors_idle_submits
+services::discord::input_runtime::supervisor::drive::tests::input_keeps_the_latest_dev_a_renumbered_resume_logged
 services::discord::input_runtime::supervisor::drive::tests::input_view_reaches_each_boundary_value_under_every_wake_split
 services::discord::input_runtime::supervisor::tests::a_cause_leaves_health_once_rechecked_while_an_unsettled_clear_stays
 services::discord::input_runtime::supervisor::tests::abandoned_clear_loan_pins_the_slot_poisons_the_channel_and_keeps_the_worker_write
@@ -10812,6 +10813,7 @@ services::tui_o::store::spool::tests::a_first_batch_may_skip_only_the_torn_first
 services::tui_o::store::spool::tests::a_gc_entry_outside_the_logged_chain_deletes_nothing_and_halts
 services::tui_o::store::spool::tests::a_header_only_segment_is_collected_without_a_gc_entry
 services::tui_o::store::spool::tests::a_lost_spool_segment_halts_with_a_gap_instead_of_resuming
+services::tui_o::store::spool::tests::a_renumbered_source_settles_its_spool_tail_unless_its_bytes_changed
 services::tui_o::store::spool::tests::a_spool_read_error_stops_writes_until_the_channel_is_reopened
 services::tui_o::store::spool::tests::a_spool_tail_the_source_no_longer_holds_halts_the_channel
 services::tui_o::store::spool::tests::a_v2_spool_recovers_and_the_next_append_rolls_to_a_current_segment
@@ -10833,6 +10835,7 @@ services::tui_o::turn_mode::tests::n1a_output_adoption_and_readiness_do_not_conf
 services::tui_o::writer::adoption::tests::a_length_change_under_the_lock_alone_releases_the_channel
 services::tui_o::writer::adoption::tests::a_past_source_starts_at_its_length_when_the_channel_is_adopted
 services::tui_o::writer::adoption::tests::a_prompt_past_legacys_frontier_is_reported_undelivered
+services::tui_o::writer::adoption::tests::a_renumbered_pin_reads_unchanged_until_its_file_moves
 services::tui_o::writer::adoption::tests::a_running_legacy_tail_releases_the_channel
 services::tui_o::writer::adoption::tests::a_turn_legacys_reader_has_not_ended_is_reported_undelivered
 services::tui_o::writer::adoption::tests::an_open_turn_before_legacys_cursor_is_not_adopted
@@ -10854,6 +10857,7 @@ services::tui_o::writer::input_facts::tests::g0_discovery_install_and_o_binding_
 services::tui_o::writer::input_facts::tests::ordered_events_keep_abort_start_and_input_in_record_order
 services::tui_o::writer::input_facts::tests::reactions_converge_on_replay_and_propagate_partial_failure
 services::tui_o::writer::input_facts::tests::strict_codex_parent_header_rejects_absence_mismatch_child_and_poll_changes
+services::tui_o::writer::renumbered::tests::two_stored_variants_of_one_file_refuse_every_dev_including_their_own
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
 services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_from_history_rather_than_trusted
 services::tui_o::writer::tests::a_gateway_return_ends_the_pause_in_process_health
@@ -10931,6 +10935,9 @@ services::tui_o::writer::tests::actor::host_start::reclaim::a_launch_session_pro
 services::tui_o::writer::tests::actor::host_start::reclaim::an_adopted_resume_holds_its_rows_until_an_operator_resolves
 services::tui_o::writer::tests::actor::host_start::reclaim::o_keeps_waiting_on_a_pending_another_pane_did_not_overwrite
 services::tui_o::writer::tests::actor::host_start::reclaim::o_passes_a_pending_its_successor_overwrote_and_binds_the_resolved_one
+services::tui_o::writer::tests::actor::host_start::renumber::a_file_logged_before_and_after_a_renumber_is_adopted_as_one_source
+services::tui_o::writer::tests::actor::host_start::renumber::a_new_empty_channel_whose_transcript_was_renumbered_is_activated
+services::tui_o::writer::tests::actor::host_start::renumber::a_renumbered_source_legacy_stays_behind_is_given_up_only_after_the_stall
 services::tui_o::writer::tests::actor::host_start::resume::a_permanent_stop_is_never_resumed
 services::tui_o::writer::tests::actor::host_start::resume::a_recovery_that_fails_again_keeps_the_wait_growing
 services::tui_o::writer::tests::actor::host_start::resume::a_resume_that_halts_again_waits_longer_up_to_the_cap_until_a_steady_run_starts_over
@@ -10982,6 +10989,13 @@ services::tui_o::writer::tests::actor::rotation::recovery_tests::h6_failed_rotat
 services::tui_o::writer::tests::actor::rotation::recovery_tests::p2_1_successful_retirement_clears_reader_health_in_the_same_tend
 services::tui_o::writer::tests::actor::rotation::recovery_tests::p2_3_regrowth_reactivates_reader_health_after_successful_recovery
 services::tui_o::writer::tests::actor::rotation::recovery_tests::p2_4_failed_tend_keeps_prior_health_evidence_until_a_successful_pass
+services::tui_o::writer::tests::actor::rotation::renumber_tests::a_codex_proof_read_after_a_renumber_still_allows_the_stored_cursor
+services::tui_o::writer::tests::actor::rotation::renumber_tests::a_renumbered_source_replaced_shrunk_or_rewritten_still_halts_the_restart
+services::tui_o::writer::tests::actor::rotation::renumber_tests::a_renumbered_source_replaced_while_it_is_read_halts_on_the_next_poll
+services::tui_o::writer::tests::actor::rotation::renumber_tests::a_retired_renumbered_source_whose_bytes_changed_still_halts
+services::tui_o::writer::tests::actor::rotation::renumber_tests::a_store_holding_two_dev_variants_of_one_file_halts_before_reading_either
+services::tui_o::writer::tests::actor::rotation::renumber_tests::a_writer_restarted_after_the_volume_renumbered_continues_from_its_cursor
+services::tui_o::writer::tests::actor::rotation::renumber_tests::dev_variants_of_a_file_first_bound_in_one_batch_share_one_cursor
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_b_c_hops_with_both_old_tails_unread_post_every_row_once_in_order_across_a_restart
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_legacy_hop_is_proven_only_by_evidence_from_the_pane_the_log_names
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_restart_holds_the_successor_only_to_the_old_length_its_rotation_measured

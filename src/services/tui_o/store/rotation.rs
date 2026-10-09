@@ -13,7 +13,7 @@ use super::ledger::{self, LedgerEntry};
 use super::spool::source_key;
 use super::{ChannelStore, LEDGER_FILE, OStore, StoreError, damage, durable};
 use crate::services::tui_o::shadow::SourceId;
-use crate::services::tui_o::shadow::capture::file_identity;
+use crate::services::tui_o::shadow::capture::{FileMatch, file_identity, file_match};
 
 pub const CHECKPOINT_FILE: &str = "binding_checkpoint";
 pub const BOUNDARY_FILE: &str = "boundary";
@@ -254,7 +254,7 @@ impl OStore {
 /// The byte offset `from` names in the source file, which must be the start of a record.
 fn record_start(source: &SourceId, from: &ResolveFrom) -> Result<u64, StoreError> {
     let file = File::open(&source.path)?;
-    if file_identity(&file.metadata()?) != (source.dev, source.ino) {
+    if file_match(source, file_identity(&file.metadata()?)) == FileMatch::Other {
         return Err(rejected("the source file was replaced".into()));
     }
     let (mut reader, mut line) = (BufReader::new(file), Vec::new());

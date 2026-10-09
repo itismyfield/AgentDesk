@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
 use super::{LINEAGE_SCAN_CAP_BYTES, Seen, record_keys};
-use crate::services::tui_o::shadow::capture::file_identity;
+use crate::services::tui_o::shadow::capture::{FileMatch, file_identity, file_match};
 use crate::services::tui_o::shadow::identity::row_key;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId, UnitKind};
 
@@ -120,7 +120,8 @@ pub(super) fn sync(
 ) -> Option<Lineage> {
     let readable = |file: &File| {
         let meta = file.metadata().ok()?;
-        let ok = file_identity(&meta) == (parent.dev, parent.ino)
+        // A renumbered parent was proven by its own reopen.
+        let ok = file_match(parent, file_identity(&meta)) != FileMatch::Other
             && meta.len() >= through
             && through <= LINEAGE_SCAN_CAP_BYTES;
         ok.then_some(())

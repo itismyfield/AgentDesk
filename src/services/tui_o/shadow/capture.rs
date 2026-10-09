@@ -16,7 +16,10 @@ pub const MAX_PARTIAL_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(unix)]
 pub fn file_identity(meta: &Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
-    (meta.dev(), meta.ino())
+    let (dev, ino) = (meta.dev(), meta.ino());
+    #[cfg(test)]
+    let dev = renumber::dev(dev, ino);
+    (dev, ino)
 }
 
 /// Without dev/ino the identity is zero, so replacement is not detectable there.
@@ -25,9 +28,69 @@ pub fn file_identity(_meta: &Metadata) -> (u64, u64) {
     (0, 0)
 }
 
+/// How a live file compares with a stored source: a reboot may renumber the volume's dev while
+/// the inode stays, so `Renumbered` is the same file only once its bytes prove it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileMatch {
+    Exact,
+    Renumbered,
+    Other,
+}
+
+pub fn file_match(source: &SourceId, (dev, ino): (u64, u64)) -> FileMatch {
+    match (ino == source.ino, dev == source.dev) {
+        (true, true) => FileMatch::Exact,
+        (true, false) => FileMatch::Renumbered,
+        (false, _) => FileMatch::Other,
+    }
+}
+
+/// Whether two sources name one file, the volume's dev aside.
+pub fn same_file(a: &SourceId, b: &SourceId) -> bool {
+    (&a.session_id, &a.path, a.ino) == (&b.session_id, &b.path, b.ino)
+}
+
+/// Renumbers chosen files' dev as a reboot would, keyed by their real (dev, ino).
+#[cfg(all(test, unix))]
+pub(crate) mod renumber {
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::{LazyLock, Mutex};
+
+    static SHIFTED: LazyLock<Mutex<HashMap<(u64, u64), u64>>> = LazyLock::new(Default::default);
+
+    pub(crate) fn dev(dev: u64, ino: u64) -> u64 {
+        let shifted = SHIFTED.lock().unwrap_or_else(|e| e.into_inner());
+        shifted.get(&(dev, ino)).map_or(dev, |shift| dev ^ shift)
+    }
+
+    /// Live stats of `path`'s inode report a dev XORed with `shift` until the guard drops. Keep
+    /// the inode alive meanwhile, so no other test's new file reuses it.
+    pub(crate) fn shift(path: &Path, shift: u64) -> Guard {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).unwrap();
+        let key = (meta.dev(), meta.ino());
+        SHIFTED.lock().unwrap().insert(key, shift);
+        Guard(key)
+    }
+
+    pub(crate) struct Guard((u64, u64));
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            SHIFTED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.0);
+        }
+    }
+}
+
 pub struct SourceCapture {
     source: SourceId,
     file: File,
+    /// The open file's own identity; a renumbered source keeps its stored dev, this the live one.
+    opened: (u64, u64),
     captured_through: u64,
     prefix: Sha256,
     /// Bytes after `captured_through` still waiting for their newline.
@@ -64,12 +127,47 @@ impl SourceCapture {
         if file_identity(&meta) != (source.dev, source.ino) || start_offset > meta.len() {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let (prefix, guard) = hash_prefix(&file, start_offset)?;
+        Self::opened(source, file, &meta, start_offset)
+    }
+
+    /// Reopens a stored source at its cursor. A renumbered dev is accepted like an exact one, as
+    /// the bytes before `through` must hash to `prefix_hash` either way (`InvalidData` if not).
+    pub fn reopen(source: SourceId, through: u64, prefix_hash: &str) -> io::Result<Self> {
+        let invalid = |detail: String| io::Error::new(io::ErrorKind::InvalidInput, detail);
+        let file = File::open(&source.path)?;
+        let meta = file.metadata()?;
+        let (dev, ino) = file_identity(&meta);
+        if file_match(&source, (dev, ino)) == FileMatch::Other {
+            let detail = format!("source replaced: inode {ino}, cursor names {}", source.ino);
+            return Err(invalid(detail));
+        }
+        if through > meta.len() {
+            let detail = format!("source holds {} bytes, cursor at {through}", meta.len());
+            return Err(invalid(detail));
+        }
+        let renumbered = dev != source.dev;
+        let opened = Self::opened(source, file, &meta, through)?;
+        if opened.prefix_hash() != prefix_hash {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "source bytes before the cursor changed",
+            ));
+        }
+        if renumbered {
+            let (path, old_dev) = (opened.source.path.display(), opened.source.dev);
+            tracing::info!(%path, old_dev, new_dev = dev, "[tui_o] source volume renumbered");
+        }
+        Ok(opened)
+    }
+
+    fn opened(source: SourceId, file: File, meta: &Metadata, start: u64) -> io::Result<Self> {
+        let (prefix, guard) = hash_prefix(&file, start)?;
         Ok(Self {
             skip_torn_line: guard.last().is_some_and(|byte| *byte != b'\n'),
             source,
             file,
-            captured_through: start_offset,
+            opened: file_identity(meta),
+            captured_through: start,
             prefix,
             partial: Vec::new(),
             guard,
@@ -106,7 +204,7 @@ impl SourceCapture {
         let io_err = |error: io::Error| (Kind::Unreadable, error.to_string());
         let len = self.file.metadata().map_err(io_err)?.len();
         let path_identity = std::fs::metadata(&self.source.path).map(|meta| file_identity(&meta));
-        if path_identity.ok() != Some((self.source.dev, self.source.ino)) {
+        if path_identity.ok() != Some(self.opened) {
             return Err((Kind::Replaced, "path no longer names the open file".into()));
         }
         let cursor = self.captured_through + self.partial.len() as u64;

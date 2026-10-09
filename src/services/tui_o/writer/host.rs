@@ -382,6 +382,8 @@ async fn host_channel<I: HostIo>(
                     }
                     let events = log.binding_events_since(channel, 0);
                     let events = events.map_err(|error| format!("binding log: {error}"));
+                    // O's own copy names each file once; the shared log keeps every dev it read.
+                    let events = events.map(super::renumbered::first_named);
                     let seq = events.as_ref().map_or(0, |e| e.last().map_or(0, |e| e.seq));
                     let current = events.as_deref().ok().and_then(adoption::current);
                     let first = deferred::first(&*io, channel, provider, &legacy, events).await;
