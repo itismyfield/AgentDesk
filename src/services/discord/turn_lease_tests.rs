@@ -994,3 +994,38 @@ async fn operator_release_follow_up_never_latches_a_successor_recovery() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn act7_operator_release_reports_manual_settlement_and_preserves_herdr_input() {
+    use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
+    use crate::services::provider::cancel_token_claude_interrupt::{
+        HERDR_SETTLEMENT_OVERRIDE, HerdrSubmission,
+    };
+    with_isolated_runtime_root(|| async {
+        HERDR_SETTLEMENT_OVERRIDE.set(false);
+        assert!(!crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available());
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(53407011);
+        let request = seed(&shared, channel).await;
+        let token = shared.mailbox(channel).snapshot().await.cancel_token.unwrap();
+        let owner = HostedOwner { provider: PROVIDER.as_str().into(), channel_id: channel.to_string(),
+            discord_token_hash: shared.token_hash.clone(), logical_key: "herdr-held-operator".into(),
+            owner_node: "test".into(), runtime_root: "test".into() };
+        let state = token.prepare_herdr_interrupt(PROVIDER, &owner);
+        *state.submission.lock().unwrap() = HerdrSubmission::Unknown;
+        state.user_stop.store(true, Ordering::Release);
+        let hold = crate::services::claude::herdr_turn::hold(&request.expected.turn_nonce).unwrap();
+        let before = std::fs::read(&hold).unwrap();
+        let reply = release_on(&shared, &PROVIDER, channel, request.clone()).await.unwrap();
+        assert_eq!(reply["released"], true);
+        assert_eq!(reply["settlement"], "operator_released");
+        assert_eq!(reply["provider_preserved"], true);
+        assert_eq!(reply["provider_terminal_confirmed"], false);
+        assert_eq!(std::fs::read(&hold).unwrap(), before);
+        assert!(!token.cancelled.load(Ordering::Acquire));
+        assert_eq!(shared.restart.global_active.load(Ordering::Acquire), 0);
+        assert_eq!(release_on(&shared, &PROVIDER, channel, request).await.unwrap()["status"], "already_released");
+        assert_eq!(std::fs::read(&hold).unwrap(), before);
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+    }).await;
+}

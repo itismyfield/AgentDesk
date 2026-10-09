@@ -34,6 +34,7 @@ mod restart;
 mod session;
 mod sidecar;
 mod skill;
+pub(in crate::services::discord) mod stop;
 mod text_commands;
 mod tmux_recreate;
 mod tui_passthrough;

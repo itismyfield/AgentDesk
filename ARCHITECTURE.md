@@ -835,6 +835,7 @@ src/
 │   │   │   ├── session.rs
 │   │   │   ├── sidecar.rs
 │   │   │   ├── skill.rs
+│   │   │   ├── stop.rs
 │   │   │   ├── text_commands.rs
 │   │   │   ├── tmux_recreate.rs
 │   │   │   ├── tui_passthrough.rs
