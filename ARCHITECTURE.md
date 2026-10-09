@@ -176,6 +176,8 @@ src/
 │   │   ├── outbox.rs
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
+│   ├── session_observability/
+│   │   └── background_ordering_pg_tests.rs
 │   ├── agent_read.rs
 │   ├── agents.rs
 │   ├── automation_candidate_card_program.rs
@@ -1605,6 +1607,7 @@ src/
 │   │   │   │   │   │   ├── loss_tests.rs
 │   │   │   │   │   │   └── native_turn_tests.rs
 │   │   │   │   │   └── boundary_tests.rs
+│   │   │   │   ├── background_child_close_pg_tests.rs
 │   │   │   │   ├── codex_direct_owner_tests.rs
 │   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
@@ -1614,6 +1617,7 @@ src/
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
 │   │   │   │   └── synthetic_terminal_ordering_tests.rs
 │   │   │   ├── anchor_completion.rs
+│   │   │   ├── background_child_completion.rs
 │   │   │   ├── bridge_completion.rs
 │   │   │   ├── bridge_gateway.rs
 │   │   │   ├── claude_idle_bridge.rs
@@ -1704,6 +1708,7 @@ src/
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/
 │   │   │   │   │   ├── rowless_receipt_tests/
+│   │   │   │   │   │   ├── background_child_ordering_tests.rs
 │   │   │   │   │   │   ├── o_after_done_chain_tests.rs
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
@@ -2036,6 +2041,7 @@ src/
 │   │   └── auth_profiles.rs
 │   ├── dispatched_sessions/
 │   │   ├── canonical_identity.rs
+│   │   ├── hook.rs
 │   │   ├── output.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
