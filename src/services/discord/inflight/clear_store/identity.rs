@@ -253,9 +253,8 @@ pub(in crate::services::discord) fn clear_inflight_state_for_captured_episode(
     }
 }
 
-/// Clears a restart-settled admitted Herdr row only while the fresh row under the canonical lock is
-/// still that exact delivered episode: the same non-empty nonce, a prior generation, the same
-/// admitted kind, its durable delivery, and the snapshot's anchor and save generation.
+/// Clears a restart-settled admitted Herdr row only while the locked fresh row is still that
+/// delivered episode: its nonce, a prior generation, its kind, ack, anchor and save generation.
 #[cfg(unix)]
 pub(in crate::services::discord) fn clear_admitted_restart_terminal(
     provider: &ProviderKind,

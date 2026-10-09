@@ -1,10 +1,5 @@
-//! A Herdr turn's admitted provider terminal settles at restart from its persisted kind; the
-//! transcript never reclassifies it, and the row is cleared only after its own delivery is durable.
-//!
-//! Settlement is two steps. The delivery ack commits `terminal_delivery_committed` on the row the
-//! delivery changed, through the channel actor; cleanup then removes only that exact episode.
-//! Rows this slice cannot settle exactly (planned restart, an O-owned destination, a completion
-//! with no stored body, a live actor) are kept, never routed to transcript recovery.
+//! Restart settles a prior process's admitted Herdr terminal by its persisted kind, acks it on
+//! the row its delivery changed, then clears only that episode; a row it cannot settle stays.
 
 use super::*;
 use crate::services::agent_protocol::NativeTerminalKind;
