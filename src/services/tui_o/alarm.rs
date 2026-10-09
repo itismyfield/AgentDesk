@@ -51,7 +51,7 @@ pub(crate) struct NotificationAttempt {
 }
 
 impl NotificationAttempt {
-    fn claim(health: Arc<AlarmHealth>, reason: String) -> Option<Self> {
+    fn begin(health: Arc<AlarmHealth>, reason: String) -> Option<Self> {
         let mut notifications = locked(&health.notifications);
         if notifications.contains_key(&reason) {
             return None;
@@ -245,7 +245,7 @@ impl AlarmRouter {
             );
             return;
         }
-        let Some(attempt) = NotificationAttempt::claim(self.health.clone(), reason) else {
+        let Some(attempt) = NotificationAttempt::begin(self.health.clone(), reason) else {
             return;
         };
         notifier.notify(
