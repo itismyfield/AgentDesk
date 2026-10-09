@@ -91,6 +91,7 @@ impl Fixture {
 
     async fn approval(&self) -> Approval {
         let reading = self.read().await;
+        assert!(reading.identity(0).is_none());
         assert_eq!(reading.identity(42), Some(self.identity.clone()));
         self.incarnation.approve(reading).expect("fresh live Busy")
     }
