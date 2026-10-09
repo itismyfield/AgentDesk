@@ -7858,7 +7858,9 @@ services::discord::tui_prompt_relay::tests::claude_rehydrate_start_offset_return
 services::discord::tui_prompt_relay::tests::claude_rehydrate_start_offset_uses_current_eof
 services::discord::tui_prompt_relay::tests::claude_rehydrate_thread_session_rejects_non_numeric_suffix
 services::discord::tui_prompt_relay::tests::claude_rehydrate_thread_session_resolves_thread_channel_id
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_answer_ends_at_its_own_abort_after_an_early_stop_hook
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_answer_ends_at_its_own_interrupted_turn
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_answer_ends_at_the_next_turn_after_an_early_stop_hook
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_answer_ignores_a_late_completion_of_an_aborted_turn
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_answer_keeps_its_boundary_behind_a_burst_of_later_inputs
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_answer_keeps_its_boundary_when_a_discord_prompt_lands_first
@@ -7874,9 +7876,11 @@ services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_t
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_same_prompt_deferred_behind_an_empty_turn_keeps_its_own_boundary
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_same_prompt_published_twice_before_its_records_keeps_input_order
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_same_prompt_twice_keeps_each_answer_on_its_own_input
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_direct_answer_is_held_while_a_stop_hook_has_no_terminal
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_direct_answer_survives_a_stop_hook_ahead_of_task_complete
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_steer_into_a_discord_turn_only_echoes
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_turn_queued_behind_a_shell_turn_answers_on_its_anchor
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_typed_input_shaped_like_a_shell_record_answers_on_its_anchor
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_answer_on_a_rollout_without_turn_ids_keeps_the_text_search
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_answer_skips_another_turn_with_the_same_prompt
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_answer_waits_for_its_turn_through_a_torn_opening
@@ -11119,6 +11123,7 @@ services::tui_prompt_dedupe::prompt_identity::tests::a_repeated_hook_for_the_sam
 services::tui_prompt_dedupe::prompt_identity::tests::a_row_read_before_the_announcement_result_still_makes_its_prompt_id_ambiguous
 services::tui_prompt_dedupe::prompt_identity::tests::a_scanner_row_first_then_a_late_hook_is_not_suppressed_by_prompt_id
 services::tui_prompt_dedupe::prompt_identity::tests::an_unannounced_prompt_id_leaves_the_row_to_the_content_window
+services::tui_prompt_dedupe::prompt_identity::tests::claude_input_quoting_a_codex_shell_record_is_observed
 services::tui_prompt_dedupe::prompt_identity::tests::fork_rewritten_prompt_ids_never_hide_the_new_input
 services::tui_prompt_dedupe::prompt_identity::tests::hook_prompt_id_suppresses_a_scanner_replay_after_the_recent_window
 services::tui_prompt_dedupe::prompt_identity::tests::hooks_sharing_a_running_prompt_id_are_each_announced_and_the_opening_row_is_not

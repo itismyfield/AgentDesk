@@ -9,6 +9,35 @@ fn event_line(payload: serde_json::Value) -> String {
     rollout_line(serde_json::json!({"type": "event_msg", "payload": payload}))
 }
 
+/// A user record of `turn` as codex-cli 0.160 writes it, its items all of `kind`.
+fn user_line_of_kind(text: &str, turn: &str, kind: &str) -> String {
+    rollout_line(serde_json::json!({"type": "response_item", "payload": {
+        "type": "message", "role": "user", "content": [{"type": "input_text", "text": text}],
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": turn, "content_item_kinds": [kind]}}}))
+}
+
+/// A direct input's turn with its prompt, the tail reading at the rollout end, its anchor.
+async fn claimed_turn(fx: &mut Fixture, t1: &str) -> u64 {
+    let first = fx.hook(PROMPT, t1).await;
+    fx.append(&(opening(t1, PROMPT) + &item_completed_line_for(t1)));
+    super::super::super::super::relay_observed_prompt(&fx.shared, first).await;
+    let anchor = fx.codex.row().expect("claim").user_msg_id;
+    fx.append(&rollout_line(
+        serde_json::json!({"type": "response_item", "payload": {
+        "type": "message", "role": "assistant",
+        "content": [{"type": "output_text", "text": RESPONSE}]}}),
+    ));
+    assert!(
+        wait_for(Duration::from_secs(10), || tail_starts(fx.codex.channel)
+            == 1)
+        .await,
+        "no tail"
+    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    anchor
+}
+
 /// The Stop hook lands before its turn's `task_complete` record: the answer still reaches its
 /// anchor once the record is read, and the turn ends cleanly.
 #[test]
@@ -19,30 +48,11 @@ fn codex_direct_answer_survives_a_stop_hook_ahead_of_task_complete() {
             let tmux = "AgentDesk-codex-6708-early-stop";
             let mut fx = Fixture::start(&root, 5_706_810, tmux).await;
             let t1 = turn(1);
-            let first = fx.hook(PROMPT, &t1).await;
-            fx.append(&(opening(&t1, PROMPT) + &item_completed_line_for(&t1)));
-            super::super::super::super::relay_observed_prompt(&fx.shared, first).await;
-            let anchor = fx.codex.row().expect("claim").user_msg_id;
-            let answer = answer_for(&t1, RESPONSE);
-            let (body, terminal) = answer.split_at(answer.find('\n').unwrap() + 1);
-            fx.append(body);
-            assert!(
-                wait_for(Duration::from_secs(10), || tail_starts(fx.codex.channel)
-                    == 1)
-                .await,
-                "no tail"
-            );
+            let anchor = claimed_turn(&mut fx, &t1).await;
+            publish_stop(tmux, &t1);
             tokio::time::sleep(Duration::from_secs(1)).await;
-            crate::services::claude_tui::hook_server::publish_hook_event_for_tests(HookEvent {
-                provider: "codex".to_string(),
-                session_id: tmux.to_string(),
-                kind: HookEventKind::Stop,
-                received_at: chrono::Utc::now(),
-                payload: serde_json::json!({"hook_event_name": "Stop", "turn_id": t1}),
-                fanout: None,
-            });
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            fx.append(terminal);
+            fx.append(&event_line(serde_json::json!({"type": "task_complete",
+                "turn_id": t1, "last_agent_message": RESPONSE})));
             assert!(
                 fx.delivered(RESPONSE).await,
                 "answer never reached Discord: {:?}",
@@ -58,8 +68,35 @@ fn codex_direct_answer_survives_a_stop_hook_ahead_of_task_complete() {
     });
 }
 
-/// A `!cmd` shell turn ends and Codex starts the input queued behind it: the shell record is no
-/// input, and the queued turn's answer reaches its own anchor through one tail.
+/// A Stop hook with no terminal, abort or next turn after it leaves the turn held: no
+/// completion and the row stays, however long past the drain; the record then settles it.
+#[test]
+fn codex_direct_answer_is_held_while_a_stop_hook_has_no_terminal() {
+    run(|root| {
+        Box::pin(async move {
+            let _live_pane = live_pane_tmux(&root);
+            let tmux = "AgentDesk-codex-6708-held";
+            let mut fx = Fixture::start(&root, 5_706_840, tmux).await;
+            let t1 = turn(1);
+            let anchor = claimed_turn(&mut fx, &t1).await;
+            publish_stop(tmux, &t1);
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            assert_eq!(fx.completed_turns(), 0, "no completion without a terminal");
+            assert_eq!(
+                fx.codex.row().map(|row| row.user_msg_id),
+                Some(anchor),
+                "the turn's row is held"
+            );
+            fx.append(&event_line(serde_json::json!({"type": "task_complete",
+                "turn_id": t1, "last_agent_message": RESPONSE})));
+            fx.assert_answers_in_order(&[RESPONSE], Some(1)).await;
+            fx.finish();
+        })
+    });
+}
+
+/// A `!cmd` shell turn ends and Codex starts the input queued behind it: the shell's own record
+/// is no input, and the queued turn's answer reaches its own anchor through one tail.
 #[test]
 fn codex_turn_queued_behind_a_shell_turn_answers_on_its_anchor() {
     run(|root| {
@@ -71,7 +108,7 @@ fn codex_turn_queued_behind_a_shell_turn_answers_on_its_anchor() {
             fx.append(
                 &(event_line(serde_json::json!({"type": "task_started", "turn_id": shell}))
                     + &item_completed_line_for(&shell)
-                    + &user_line_for(SHELL)
+                    + &user_line_of_kind(SHELL, &shell, "shell.user_command")
                     + &event_line(serde_json::json!({"type": "task_complete",
                         "turn_id": shell, "last_agent_message": null}))
                     + &opening(&queued, PROMPT)
@@ -87,6 +124,32 @@ fn codex_turn_queued_behind_a_shell_turn_answers_on_its_anchor() {
                     "shell record observed"
                 );
             }
+            fx.finish();
+        })
+    });
+}
+
+/// A person who types text shaped like a shell record submits an input: it is observed and its
+/// answer reaches its own anchor.
+#[test]
+fn codex_typed_input_shaped_like_a_shell_record_answers_on_its_anchor() {
+    run(|root| {
+        Box::pin(async move {
+            let _live_pane = live_pane_tmux(&root);
+            let mut fx = Fixture::start(&root, 5_706_850, "AgentDesk-codex-6708-typed").await;
+            let t1 = turn(1);
+            let event = fx.hook(SHELL, &t1).await;
+            fx.append(
+                &(event_line(serde_json::json!({"type": "task_started", "turn_id": t1}))
+                    + &rollout_line(
+                        serde_json::json!({"type": "turn_context", "payload": {"turn_id": t1}}),
+                    )
+                    + &user_line_of_kind(SHELL, &t1, "user.text")
+                    + &item_completed_line_for(&t1)),
+            );
+            super::super::super::super::relay_observed_prompt(&fx.shared, event).await;
+            fx.append(&answer_for(&t1, RESPONSE));
+            fx.assert_answers_in_order(&[RESPONSE], Some(1)).await;
             fx.finish();
         })
     });

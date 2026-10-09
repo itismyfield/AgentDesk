@@ -560,3 +560,24 @@ fn suppressed_hook_observations_do_not_record_their_prompt_id() {
         ]
     );
 }
+
+/// A Claude input quoting a Codex `!cmd` record is a person's input: its transcript row yields
+/// the prompt and its hook publishes it.
+#[test]
+fn claude_input_quoting_a_codex_shell_record_is_observed() {
+    const QUOTED: &str = "<user_shell_command>\n<command>\nls\n</command>\n<result>\nok\n</result>\n</user_shell_command>";
+    let row = serde_json::json!({"type": "user", "uuid": "U", "message": {
+        "role": "user", "content": [{"type": "text", "text": QUOTED}]}});
+    assert_eq!(
+        crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(
+            &row
+        ),
+        Some((QUOTED.to_string(), Some("U".to_string())))
+    );
+    let mut pane = Pane::new("quoted-shell");
+    assert_eq!(
+        pane.hook(None, QUOTED),
+        PromptObservation::PublishedSshDirect
+    );
+    assert_eq!(pane.published(), vec![hook_event(QUOTED)]);
+}
