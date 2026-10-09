@@ -7,12 +7,15 @@ use axum::{Router, http::header, response::Html, routing::get};
 
 use super::{dashboard_auth::DashboardAccess, dashboard_provision, routes, ws};
 
+mod peer_filter;
+
 pub(super) fn router(
     state: routes::AppState,
     dashboard_dir: &Path,
     include_hook_receiver: bool,
 ) -> Router {
     let dashboard_enabled = state.config.cluster.runtime_profile.modules().dashboard;
+    let peer_filter = peer_filter::PeerFilter::new(state.config.server.peer_filter);
     let access = DashboardAccess::new(&state.config);
     let mut app = Router::new();
     if dashboard_enabled {
@@ -39,11 +42,14 @@ pub(super) fn router(
             axum::middleware::from_fn_with_state(state, routes::auth::auth_middleware),
         ),
     );
-    if dashboard_enabled {
-        return dashboard_provision::serve_dashboard(app, dashboard_dir, true);
-    }
-    app.route("/", get(runner_entry))
-        .route("/settings", get(runner_entry))
+    let app = if dashboard_enabled {
+        dashboard_provision::serve_dashboard(app, dashboard_dir, true)
+    } else {
+        app.route("/", get(runner_entry))
+            .route("/settings", get(runner_entry))
+    };
+    // Outermost, so static files, fallbacks, /ws and hook routes are filtered too.
+    peer_filter.wrap(app)
 }
 
 async fn runner_entry() -> impl axum::response::IntoResponse {
