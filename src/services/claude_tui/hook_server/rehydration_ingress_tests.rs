@@ -657,7 +657,7 @@ fn stale_snapshot_keeps_the_adoption(launch: bool) {
         AdoptionHttp, DurableKind, adopt_from_hook,
     };
     let (root, _env) = crate::services::tui_prompt_dedupe::binding_context::tests::fixture();
-    let ingress = Ingress::new();
+    let _ingress = Ingress::new();
     let _reset = Reset;
     let race = RegistrationRace::new(root.path(), if launch { 7_497 } else { 7_498 });
     let (tmux, channel, b) = (race.tmux.clone(), race.channel, race.b.clone());
