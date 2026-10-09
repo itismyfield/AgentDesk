@@ -249,11 +249,22 @@ fn observe_prompt_candidates_by_tmux_inner(
         // re-observation (after the discord-originated ledger entry was consumed)
         // never publishes a spurious SSH-direct turn. Treated like other synthetic
         // prompts → candidates stay empty → `PromptObservation::Ignored`.
-        if prompt.is_empty()
-            || is_synthetic_tui_user_prompt_for_provider(&provider, prompt)
-            || (is_discord_relayed_user_prompt(prompt)
-                && !is_user_prefixed_subagent_notification_machine_event(prompt))
+        if prompt.is_empty() || is_synthetic_tui_user_prompt_for_provider(&provider, prompt) {
+            continue;
+        }
+        if is_discord_relayed_user_prompt(prompt)
+            && !is_user_prefixed_subagent_notification_machine_event(prompt)
         {
+            // The Discord turn owns the native turn its injected prompt opened, so a steer joins it.
+            if let Some(turn) = native_turn
+                && take_matching_pending_prompt(&provider, tmux_session_name, prompt)
+            {
+                let owner = (
+                    SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+                    NativeTurnOwner::Answer,
+                );
+                open_native_turn(&provider, tmux_session_name, turn, owner);
+            }
             continue;
         }
         if !candidates

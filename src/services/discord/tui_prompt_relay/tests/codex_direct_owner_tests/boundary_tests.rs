@@ -49,6 +49,18 @@ fn token_count_line() -> String {
     rollout_line(serde_json::json!({"type": "event_msg", "payload": {"type": "token_count"}}))
 }
 
+/// Codex's Stop hook for `turn` on the live hook broadcast the rollout tail reads.
+fn publish_stop(tmux: &str, turn: &str) {
+    crate::services::claude_tui::hook_server::publish_hook_event_for_tests(HookEvent {
+        provider: "codex".to_string(),
+        session_id: tmux.to_string(),
+        kind: HookEventKind::Stop,
+        received_at: chrono::Utc::now(),
+        payload: serde_json::json!({"hook_event_name": "Stop", "turn_id": turn}),
+        fanout: None,
+    });
+}
+
 /// One Codex channel under the real idle rollout loop and observer, Discord recorded.
 struct Fixture {
     shared: Arc<SharedData>,
@@ -625,6 +637,10 @@ enum NextInputWrite {
     Unclosed,
     /// As `Interrupted`, then a late completion of the aborted turn inside the next one.
     LateForeignComplete,
+    /// The answer, then the Stop hook, then `Interrupted`'s abort records with no completion.
+    StopThenAborted,
+    /// The answer, then the Stop hook, then the next turn opens with no terminal in between.
+    StopThenNextTurn,
 }
 
 /// The tail stops before the next turn's records, however its bytes arrive.
@@ -652,13 +668,29 @@ async fn next_input_after_tail_start(
     );
     // The reader now waits at the rollout end.
     tokio::time::sleep(Duration::from_secs(1)).await;
+    let assistant = rollout_line(serde_json::json!({"type": "response_item", "payload": {
+        "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": RESPONSE}]}}));
+    if matches!(
+        write,
+        NextInputWrite::StopThenAborted | NextInputWrite::StopThenNextTurn
+    ) {
+        read_from = fx.append(&assistant);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        publish_stop(&fx.codex.tmux, &t1);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     let first_turn = match write {
+        NextInputWrite::StopThenNextTurn => String::new(),
         // Measured interrupt: a developer notice and `turn_aborted` close the first turn.
-        NextInputWrite::Interrupted | NextInputWrite::LateForeignComplete => {
-            rollout_line(serde_json::json!({"type": "response_item", "payload": {
-                "type": "message", "role": "assistant",
-                "content": [{"type": "output_text", "text": RESPONSE}]}}))
-                + &token_count_line()
+        NextInputWrite::Interrupted
+        | NextInputWrite::LateForeignComplete
+        | NextInputWrite::StopThenAborted => {
+            let body = if matches!(write, NextInputWrite::StopThenAborted) {
+                String::new()
+            } else {
+                assistant.clone()
+            };
+            body + &token_count_line()
                 + &rollout_line(serde_json::json!({"type": "response_item", "payload": {
                     "type": "message", "role": "developer",
                     "content": [{"type": "input_text", "text": "<turn_aborted>\ninterrupted\n</turn_aborted>"}]}}))
@@ -667,9 +699,7 @@ async fn next_input_after_tail_start(
                 + &rollout_line(serde_json::json!({"type": "event_msg", "payload": {
                     "type": "thread_settings_applied"}}))
         }
-        NextInputWrite::Unclosed => rollout_line(serde_json::json!({"type": "response_item",
-            "payload": {"type": "message", "role": "assistant",
-                "content": [{"type": "output_text", "text": RESPONSE}]}})),
+        NextInputWrite::Unclosed => assistant.clone(),
         _ => answer_for(&t1, RESPONSE),
     };
     let second_prompt = opening(&t2, PROMPT2);
@@ -688,7 +718,9 @@ async fn next_input_after_tail_start(
         NextInputWrite::Whole
         | NextInputWrite::Interrupted
         | NextInputWrite::Unclosed
-        | NextInputWrite::LateForeignComplete => {
+        | NextInputWrite::LateForeignComplete
+        | NextInputWrite::StopThenAborted
+        | NextInputWrite::StopThenNextTurn => {
             fx.append(&(first_turn.clone() + &second_prompt + &second_turn));
         }
         NextInputWrite::ReadBoundary => {
@@ -784,6 +816,30 @@ fn codex_direct_answer_ends_at_its_own_interrupted_turn() {
             5_704_933,
             "AgentDesk-codex-5704-interrupted",
             NextInputWrite::Interrupted,
+        ))
+    });
+}
+
+#[test]
+fn codex_direct_answer_ends_at_its_own_abort_after_an_early_stop_hook() {
+    run(|root| {
+        Box::pin(next_input_after_tail_start(
+            root,
+            5_704_936,
+            "AgentDesk-codex-6708-stop-abort",
+            NextInputWrite::StopThenAborted,
+        ))
+    });
+}
+
+#[test]
+fn codex_direct_answer_ends_at_the_next_turn_after_an_early_stop_hook() {
+    run(|root| {
+        Box::pin(next_input_after_tail_start(
+            root,
+            5_704_937,
+            "AgentDesk-codex-6708-stop-next",
+            NextInputWrite::StopThenNextTurn,
         ))
     });
 }
@@ -1109,5 +1165,7 @@ fn codex_direct_deferred_input_restored_under_a_later_lease_keeps_its_boundary()
     });
 }
 
+/// Answers ending around a Stop hook, a queued shell turn, or a Discord turn's steer.
+mod loss_tests;
 /// Native turn identity: fallback, steering joins, durable deferral.
 mod native_turn_tests;
