@@ -7,10 +7,18 @@ use turn_bridge::CommandStop;
 
 pub(in crate::services::discord) struct StopReply {
     stop: CommandStop,
+    refusal: Option<crate::services::cluster::channel_home::HomeRefusal>,
+    permit: Option<crate::services::cluster::channel_home::CommandPermit>,
 }
 
 impl StopReply {
     pub(in crate::services::discord) fn text(&self) -> &'static str {
+        if let Some(reason) = self.refusal {
+            return match reason {
+                crate::services::cluster::channel_home::HomeRefusal::Draining => "home_draining",
+                crate::services::cluster::channel_home::HomeRefusal::NotHeld => "home_not_held",
+            };
+        }
         match &self.stop {
             CommandStop::Session(_) | CommandStop::Stop(_) => super::STOPPING_RESPONSE,
             #[cfg(unix)]
@@ -28,7 +36,8 @@ impl StopReply {
         provider: &ProviderKind,
         channel: ChannelId,
     ) {
-        match self.stop {
+        crate::services::cluster::channel_home::command_scope(self.permit, async {
+            match self.stop {
             CommandStop::Session(stop) => {
                 stop.interrupt("/stop").await;
             }
@@ -64,6 +73,8 @@ impl StopReply {
             CommandStop::AlreadyStopping | CommandStop::HostRefused | CommandStop::NoActiveTurn => {
             }
         }
+        })
+        .await;
     }
 }
 
@@ -72,15 +83,42 @@ pub(in crate::services::discord) async fn run_slash_stop(
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> StopReply {
+    let permit = match super::control::home_fence::admit(channel, provider.as_str()) {
+        Ok(permit) => permit,
+        Err(reason) => {
+            return StopReply {
+                stop: CommandStop::HostRefused,
+                refusal: Some(reason.0),
+                permit: None,
+            };
+        }
+    };
     #[cfg(test)]
-    if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
-        "slash_stop_uses_unnamed_begin",
-    ) {
-        return StopReply {
-            stop: turn_bridge::begin_command_stop(shared, provider, channel, false).await,
-        };
-    }
-    StopReply {
-        stop: turn_bridge::begin_user_stop(shared, provider, channel, false, "/stop").await,
-    }
+    let permit = if super::control::home_fence::mutant("stop_permit_removed") {
+        drop(permit);
+        None
+    } else {
+        permit
+    };
+    crate::services::cluster::channel_home::command_scope(permit.clone(), async {
+        #[cfg(test)]
+        if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
+            "slash_stop_uses_unnamed_begin",
+        ) {
+            return StopReply {
+                refusal: None,
+                stop: {
+                    eprintln!("D2B_UNNAMED_BEGIN_CALLED");
+                    turn_bridge::begin_command_stop(shared, provider, channel, false).await
+                },
+                permit,
+            };
+        }
+        StopReply {
+            refusal: None,
+            permit,
+            stop: turn_bridge::begin_user_stop(shared, provider, channel, false, "/stop").await,
+        }
+    })
+    .await
 }

@@ -3103,6 +3103,11 @@ services::discord::commands::control::codex_verified_clear_tests::codex_verified
 services::discord::commands::control::codex_verified_clear_tests::codex_verified_managed_reset_refuses_history_reset_and_recreation
 services::discord::commands::control::codex_verified_clear_tests::legacy_codex_and_claude_clear_admission_remains_open
 services::discord::commands::control::home_fence::tests::a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open_pg
+services::discord::commands::control::home_fence::tests::d2b_clear_and_reset_keep_admission_across_effect_await
+services::discord::commands::control::home_fence::tests::d2b_clear_reply_stays_counted_after_clear_body_finishes
+services::discord::commands::control::home_fence::tests::d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor
+services::discord::commands::control::home_fence::tests::d2b_reset_sink_refuses_claimed_turn_and_drain_reset_remains_allowed
+services::discord::commands::control::home_fence::tests::d2b_slash_stop_reply_keeps_permit_until_finish_and_dormant_is_unchanged
 services::discord::commands::control::input_clear::tests::a_fenced_channel_clears_without_a_legacy_population_write_pg
 services::discord::commands::control::input_clear::tests::a_lost_commit_reply_is_read_back_from_postgres_pg
 services::discord::commands::control::input_clear::tests::a_resume_host_admits_no_reset_until_its_ticket_needs_one_pg
@@ -5887,6 +5892,7 @@ services::discord::router::message_handler::foreign_row::tests::intake_judges_it
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::goal_fresh_intake_and_headless_paths_record_durable_boundary_before_clear
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::lifecycle_subcommands_are_classified_precisely
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::lifecycle_subcommands_have_consumed_notices
+services::discord::router::message_handler::goal_lifecycle::d2b_tests::d2b_goal_clear_holds_home_through_stale_cleanup
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests::goal_clear_reports_a_refusal_before_any_session_clear_pg
 services::discord::router::message_handler::headless_turn::entrypoints::input_effect_tests::c1b_headless_actual_start_holds_provider_and_bridge_effect_until_cleanup
 services::discord::router::message_handler::headless_turn::entrypoints::input_effect_tests::c1b_headless_off_and_preclose_empty_prompt_keep_original_error_and_drain
@@ -8997,6 +9003,7 @@ services::discord::turn_lease::registry::tests::turn_lease_registry_selects_owne
 services::discord::turn_lease::tests::act7_operator_release_reports_manual_settlement_and_preserves_herdr_input
 services::discord::turn_lease::tests::claim_refuses_unbound_message_id_without_panic
 services::discord::turn_lease::tests::committed_a_recovery_after_operator_release_cannot_cancel_claimed_b_r3
+services::discord::turn_lease::tests::d2b_operator_event_keeps_recovery_after_caller_abort_until_actor_ack
 services::discord::turn_lease::tests::inspect_row_read_leaves_the_sidecar_bytes_unchanged
 services::discord::turn_lease::tests::late_projection_sweep_clears_only_this_episodes_row
 services::discord::turn_lease::tests::operator_release_cas_then_successor_keeps_new_turn_and_row
