@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "329de83e5b6c62ecd6fea0c3a9c84e61fac18430",
+  "measured_at_sha": "4f26b04b3de024d42e409fbc54535f48f6809ad0",
   "records": [
     {
       "root": "migrations/postgres",
@@ -12852,7 +12852,16 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:167f2b854fec240992bb0b66d35756d10b8a63acf018c25db56683348b647542"
+      "fingerprint": "sha256:bb12d7219813b20aa3d53aecf08704ccf35bccfbe605d31b1cdecce6947d334d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_observability.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ef33220187d358eda4b7acd02663d32d5626a72cc6aa59f88d0e42d34c3542c7"
     },
     {
       "root": "src",
@@ -29701,6 +29710,42 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:9e95f467eae5d52d3b59e945b25b3cdaf371cd5d91fbfd92a68fd4a37f38707d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:036deea7f7d8f4c0854763dfe11bccb072f2f7d725e133629538ba2e6700c11a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1cea62fb63eadd0aad8518a94971488fddac7df5d82a7d6a528b8408d19beb37"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:be3401d322676da73d65fa01702aa4dec6c6e807c54107923ff2f77bc32babc4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:14d0b55216102758929ab81fd27131fdee229601a972dab2f4378ec3608a6153"
     },
     {
       "root": "src",

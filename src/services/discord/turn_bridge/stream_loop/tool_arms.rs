@@ -227,6 +227,7 @@ pub(super) async fn handle_stream_tool_message(
                         provider: Some(provider.as_str().to_string()),
                         tool_name: name.clone(),
                         tool_input: input.clone(),
+                        tool_use_id: tool_use_id.clone(),
                     };
                     match insert_background_child_pg(pg_pool, &spawn).await {
                         Ok(Some(child_session_id)) => {

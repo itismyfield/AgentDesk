@@ -79,6 +79,7 @@ async fn exact_receipt_rowless_terminal_cancellation_settles_work_before_postlud
             provider: Some("codex".into()),
             tool_name: "Task".into(),
             tool_input: "{}".into(),
+            tool_use_id: None,
         },
     )
     .await
@@ -202,6 +203,7 @@ async fn exact_receipt_custody_retains_failed_child_ids_until_pg_close_5521() {
                     provider: Some("codex".into()),
                     tool_name: "Task".into(),
                     tool_input: "{}".into(),
+                    tool_use_id: None,
                 },
             )
             .await

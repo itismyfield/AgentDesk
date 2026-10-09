@@ -10,6 +10,9 @@ pub struct BackgroundChildSpawn {
     pub provider: Option<String>,
     pub tool_name: String,
     pub tool_input: String,
+    /// Launching tool call id; keys the child row so a later turn's completion
+    /// notification can close exactly this child.
+    pub tool_use_id: Option<String>,
 }
 
 pub async fn mark_session_tool_use_pg(
@@ -66,18 +69,26 @@ pub async fn insert_background_child_pg(
     let agent_id: Option<String> = parent.try_get("agent_id").ok();
     let cwd: Option<String> = parent.try_get("cwd").ok();
     let thread_channel_id: Option<String> = parent.try_get("thread_channel_id").ok();
-    let child_session_key = format!(
-        "{}:child:{}",
-        parent_session_key,
-        uuid::Uuid::new_v4().simple()
-    );
+    let child_session_key = match spawn
+        .tool_use_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(tool_use_id) => background_child_session_key(parent_session_key, tool_use_id),
+        None => background_child_session_key(
+            parent_session_key,
+            &uuid::Uuid::new_v4().simple().to_string(),
+        ),
+    };
     let purpose = background_child_purpose(&spawn.tool_name, &spawn.tool_input);
     let provider = spawn
         .provider
         .as_deref()
         .filter(|value| !value.trim().is_empty());
 
-    let child_id: i64 = sqlx::query_scalar(
+    // A replayed ToolUse finds its row already present; it must not count twice.
+    let child_id: Option<i64> = sqlx::query_scalar(
         "INSERT INTO sessions (
             session_key,
             agent_id,
@@ -90,6 +101,7 @@ pub async fn insert_background_child_pg(
             purpose,
             created_at
          ) VALUES ($1, $2, COALESCE($3, 'claude'), $8, $4, $5, $6, NOW(), $7, NOW())
+         ON CONFLICT (session_key) DO NOTHING
          RETURNING id",
     )
     .bind(child_session_key)
@@ -100,8 +112,12 @@ pub async fn insert_background_child_pg(
     .bind(parent_id)
     .bind(purpose)
     .bind(TURN_ACTIVE)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+    let Some(child_id) = child_id else {
+        tx.commit().await?;
+        return Ok(None);
+    };
 
     sqlx::query("UPDATE sessions SET active_children = active_children + 1 WHERE id = $1")
         .bind(parent_id)
@@ -166,6 +182,40 @@ pub async fn close_background_child_pg(
 
     tx.commit().await?;
     Ok(true)
+}
+
+fn background_child_session_key(parent_session_key: &str, child_id: &str) -> String {
+    format!("{parent_session_key}:child:{child_id}")
+}
+
+/// Closes the open child launched by `tool_use_id`, whichever turn observes its
+/// completion. An id that matches no open child closes nothing.
+pub async fn close_background_child_for_tool_use_pg(
+    pool: &PgPool,
+    tool_use_id: &str,
+    status: &str,
+) -> Result<Option<i64>, sqlx::Error> {
+    let tool_use_id = tool_use_id.trim();
+    if tool_use_id.is_empty() {
+        return Ok(None);
+    }
+    let child_session_id: Option<i64> = sqlx::query_scalar(
+        "SELECT child.id
+           FROM sessions child
+           JOIN sessions parent ON parent.id = child.parent_session_id
+          WHERE child.closed_at IS NULL
+            AND child.session_key = parent.session_key || ':child:' || $1
+          LIMIT 1",
+    )
+    .bind(tool_use_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(child_session_id) = child_session_id else {
+        return Ok(None);
+    };
+    Ok(close_background_child_pg(pool, child_session_id, status)
+        .await?
+        .then_some(child_session_id))
 }
 
 pub fn background_child_purpose(tool_name: &str, tool_input: &str) -> String {

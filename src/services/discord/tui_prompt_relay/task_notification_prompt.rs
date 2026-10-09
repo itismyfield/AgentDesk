@@ -62,6 +62,58 @@ pub(super) fn observe(
     }
 }
 
+/// A terminal `<task-notification>` closes the background child its launching
+/// tool call opened, even when that call ran in an earlier turn or process.
+pub(super) async fn close_finished_background_child(
+    shared: &Arc<SharedData>,
+    prompt: &ObservedTuiPrompt,
+    injected_class: InjectedPromptClass,
+) {
+    if !matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
+        return;
+    }
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return;
+    };
+    let notification = super::super::tui_task_card::parse_task_notification(&prompt.prompt);
+    let (Some(tool_use_id), Some(status)) = (
+        notification.tool_use_id.as_deref(),
+        notification.status.as_deref(),
+    ) else {
+        return;
+    };
+    if !super::super::placeholder_live_events::notification_is_terminal(status) {
+        return;
+    }
+    let close_status = if super::super::placeholder_live_events::notification_is_error(status) {
+        "aborted"
+    } else {
+        "completed"
+    };
+    match crate::db::session_observability::close_background_child_for_tool_use_pg(
+        pool,
+        tool_use_id,
+        close_status,
+    )
+    .await
+    {
+        Ok(Some(child_session_id)) => tracing::info!(
+            tmux_session_name = %prompt.tmux_session_name,
+            tool_use_id,
+            child_session_id,
+            close_status,
+            "closed background child on its task notification"
+        ),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(
+            tmux_session_name = %prompt.tmux_session_name,
+            tool_use_id,
+            %error,
+            "background child close on task notification failed; child stays open"
+        ),
+    }
+}
+
 pub(super) async fn resolve_gate(
     shared: &Arc<SharedData>,
     prompt: &ObservedTuiPrompt,

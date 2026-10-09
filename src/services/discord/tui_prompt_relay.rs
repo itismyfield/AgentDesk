@@ -302,6 +302,13 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // never needs to repair pre-publish lease/SSH state. A missing or lagged
     // receiver therefore cannot strand a local `/compact` relay lease.
     let relay_prompt_decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
+    // Child bookkeeping needs no Discord channel, so it runs before relay routing.
+    task_notification_prompt::close_finished_background_child(
+        shared,
+        &prompt,
+        relay_prompt_decision.injected_class,
+    )
+    .await;
     let Some(channel_id) = owner_channel_for_prompt(shared, &prompt) else {
         tracing::debug!(
             provider = %prompt.provider,

@@ -7816,6 +7816,7 @@ services::discord::tui_prompt_relay::synthetic_start::tests::synthetic_finish_se
 services::discord::tui_prompt_relay::synthetic_start::tests::witnessless_reclaim_records_the_i20_violation_and_a_witnessed_one_does_not
 services::discord::tui_prompt_relay::synthetic_start::tests::young_rowless_synthetic_owner_is_not_reclaimed
 services::discord::tui_prompt_relay::tests::abort_cleanup_records_marker_and_keeps_hourglass
+services::discord::tui_prompt_relay::tests::background_child_close_pg_tests::later_turn_task_notification_closes_only_its_own_background_child_pg
 services::discord::tui_prompt_relay::tests::bridge_adapter_inflight_marks_external_input_as_bridge_owned
 services::discord::tui_prompt_relay::tests::bridge_adapter_tail_guard_clears_only_current_external_lease
 services::discord::tui_prompt_relay::tests::bridge_adapter_tails_only_bridge_owned_external_turns
