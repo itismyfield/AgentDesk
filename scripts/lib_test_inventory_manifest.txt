@@ -2792,8 +2792,10 @@ services::codex_tui::session::tests::warm_lookup_picks_up_newer_rollout_after_fi
 services::codex_tui::verified_tail::diagnostic_tests::verified_tail_hold_diagnostic_is_bounded_to_one_warning_per_minute
 services::codex_tui::warm_followup::tests::eligibility_requires_all_reuse_axes
 services::codex_tui::warm_followup::tests::fallback_reason_codes_are_stable_and_complete
+services::codex_tui::warm_followup::tests::fingerprint_without_matching_snapshot_still_decides_by_fingerprint_alone
 services::codex_tui::warm_followup::tests::kill_switch_defaults_on_and_zero_disables
 services::codex_tui::warm_followup::tests::launch_fingerprint_ignores_per_turn_fields_but_detects_material_change
+services::codex_tui::warm_followup::tests::launch_options_mismatch_names_missing_and_each_changed_field
 services::codex_tui::warm_followup::tests::rollout_binding_requires_same_canonical_path_and_session
 services::codex_tui::warm_followup::tests::submit_fallback_requires_persisted_draft_and_zero_rollout_advance
 services::codex_tui::warm_followup::tests::warm_followup_kills_and_relaunches_only_a_confirmed_tmux_session
@@ -7864,7 +7866,9 @@ services::discord::tui_prompt_relay::tests::claude_rehydrate_start_offset_return
 services::discord::tui_prompt_relay::tests::claude_rehydrate_start_offset_uses_current_eof
 services::discord::tui_prompt_relay::tests::claude_rehydrate_thread_session_rejects_non_numeric_suffix
 services::discord::tui_prompt_relay::tests::claude_rehydrate_thread_session_resolves_thread_channel_id
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_answer_ends_at_its_own_abort_after_an_early_stop_hook
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_answer_ends_at_its_own_interrupted_turn
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_answer_ends_at_the_next_turn_after_an_early_stop_hook
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_answer_ignores_a_late_completion_of_an_aborted_turn
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_answer_keeps_its_boundary_behind_a_burst_of_later_inputs
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_answer_keeps_its_boundary_when_a_discord_prompt_lands_first
@@ -7880,6 +7884,11 @@ services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_t
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_same_prompt_deferred_behind_an_empty_turn_keeps_its_own_boundary
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_same_prompt_published_twice_before_its_records_keeps_input_order
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_same_prompt_twice_keeps_each_answer_on_its_own_input
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_direct_answer_is_held_while_a_stop_hook_has_no_terminal
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_direct_answer_survives_a_stop_hook_ahead_of_task_complete
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_steer_into_a_discord_turn_only_echoes
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_turn_queued_behind_a_shell_turn_answers_on_its_anchor
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_typed_input_shaped_like_a_shell_record_answers_on_its_anchor
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_answer_on_a_rollout_without_turn_ids_keeps_the_text_search
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_answer_skips_another_turn_with_the_same_prompt
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_answer_waits_for_its_turn_through_a_torn_opening
@@ -8898,7 +8907,10 @@ services::discord::turn_finalizer::tests::watcher_pending_true_for_live_watcher_
 services::discord::turn_finalizer::tests::watcher_register_start_backstop_defers_paused_live_turn
 services::discord::turn_finalizer::tests::watcher_register_start_backstop_finalizes_unterminated_turn
 services::discord::turn_finalizer::tests::watcher_then_bridge_handoff_double_terminal_exactly_once
+services::discord::turn_finalizer::watcher_backstop::tests::a_held_abort_advances_only_its_own_ledger_turn
 services::discord::turn_finalizer::watcher_backstop::tests::a_held_herdr_turn_ends_only_on_its_own_abort
+services::discord::turn_finalizer::watcher_backstop::tests::a_held_turn_ends_only_on_the_turn_its_reader_saw
+services::discord::turn_finalizer::watcher_backstop::tests::a_held_turns_unfinished_or_changed_transcript_is_no_abort
 services::discord::turn_finalizer::watcher_backstop::tests::a_long_held_herdr_turn_ends_on_its_own_abort
 services::discord::turn_finalizer::watcher_backstop::tests::done_with_zero_inflight_offset_defers_strict_finalize
 services::discord::turn_finalizer::watcher_backstop::tests::done_without_inflight_or_lease_defers_strict_finalize
@@ -9707,6 +9719,8 @@ services::process::simple_cancel_watcher_tests::watcher_kills_sleeping_child_whe
 services::process::simple_cancel_watcher_tests::watcher_reaps_grandchild_when_child_uses_process_group
 services::process::stream_child::stream_queue::tests::concurrent_seal_includes_a_racing_send_if_and_only_if_publication_succeeds
 services::process::stream_child::stream_queue::tests::seal_preserves_published_terminal_and_rejects_every_sender_clone
+services::provider::cancel_token_claude_interrupt::tests::a_live_herdr_turn_is_found_by_its_own_nonce_beside_other_turns
+services::provider::cancel_token_claude_interrupt::tests::a_nonce_two_live_herdr_turns_share_names_neither
 services::provider::cancel_token_claude_interrupt::tests::session_generation_advance_blocks_stale_stop_operation
 services::provider::cancel_token_claude_interrupt::tests::stale_pending_stop_is_rejected_after_next_generation_publishes
 services::provider::cancel_token_claude_interrupt::tests::stale_rebind_cannot_replace_a_newer_session_generation
@@ -11122,6 +11136,7 @@ services::tui_prompt_dedupe::prompt_identity::tests::a_repeated_hook_for_the_sam
 services::tui_prompt_dedupe::prompt_identity::tests::a_row_read_before_the_announcement_result_still_makes_its_prompt_id_ambiguous
 services::tui_prompt_dedupe::prompt_identity::tests::a_scanner_row_first_then_a_late_hook_is_not_suppressed_by_prompt_id
 services::tui_prompt_dedupe::prompt_identity::tests::an_unannounced_prompt_id_leaves_the_row_to_the_content_window
+services::tui_prompt_dedupe::prompt_identity::tests::claude_input_quoting_a_codex_shell_record_is_observed
 services::tui_prompt_dedupe::prompt_identity::tests::fork_rewritten_prompt_ids_never_hide_the_new_input
 services::tui_prompt_dedupe::prompt_identity::tests::hook_prompt_id_suppresses_a_scanner_replay_after_the_recent_window
 services::tui_prompt_dedupe::prompt_identity::tests::hooks_sharing_a_running_prompt_id_are_each_announced_and_the_opening_row_is_not

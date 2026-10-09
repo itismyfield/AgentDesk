@@ -224,6 +224,12 @@ pub fn subscribe_hook_events() -> broadcast::Receiver<HookEvent> {
     HOOK_SERVER_STATE.subscribe()
 }
 
+/// Publishes `event` to the live hook subscribers as the receiver would.
+#[cfg(test)]
+pub(crate) fn publish_hook_event_for_tests(event: HookEvent) {
+    let _ = HOOK_SERVER_STATE.event_tx.send(event);
+}
+
 pub fn hook_receiver_router() -> Router {
     observation_ingress::note_receiver_start();
     hook_receiver_router_with_state(HOOK_SERVER_STATE.clone())

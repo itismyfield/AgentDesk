@@ -1374,7 +1374,12 @@ fn explicit_finalize_path(
         return None;
     }
 
-    if state.hook_completion_seen && state.saw_assistant_text {
+    // The Stop hook can beat the turn's `task_complete` record; a writer that emits event records
+    // ends only after reading it, so the reader's range covers the decoded terminal.
+    if state.hook_completion_seen
+        && state.saw_assistant_text
+        && (state.turn_complete_seen || !state.seen_any_event_msg)
+    {
         return Some(RolloutFinalizePath::Hook);
     }
 
