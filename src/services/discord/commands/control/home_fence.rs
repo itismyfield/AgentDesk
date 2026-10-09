@@ -51,3 +51,30 @@ pub(super) async fn refused(ctx: &Context<'_>) -> Result<bool, Error> {
 #[cfg(test)]
 #[path = "home_fence_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::services::discord) fn mutant(name: &str) -> bool {
+    crate::services::cluster::channel_home::command_mutant(name)
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(in crate::services::discord) static PAUSE: std::cell::RefCell<Option<(&'static str, ArcPause)>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(in crate::services::discord) type ArcPause =
+    std::sync::Arc<(tokio::sync::Notify, tokio::sync::Notify)>;
+
+#[cfg(test)]
+pub(in crate::services::discord) async fn pause(label: &str) {
+    let barrier = PAUSE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .filter(|(name, _)| *name == label)
+            .map(|(_, barrier)| barrier.clone())
+    });
+    if let Some(barrier) = barrier {
+        barrier.0.notify_one();
+        barrier.1.notified().await;
+    }
+}

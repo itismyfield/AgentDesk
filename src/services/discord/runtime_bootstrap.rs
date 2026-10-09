@@ -577,7 +577,7 @@ fn legacy_reset(
             let http = shared.serenity_http_or_token_fallback();
             let http =
                 http.ok_or_else(|| ResetRefused::Refused("no Discord REST client".into()))?;
-            let reset = super::commands::reset_channel_provider_state(
+            let reset = super::commands::control::reset_channel_provider_state_for_home_drain(
                 &http,
                 &shared,
                 &provider,

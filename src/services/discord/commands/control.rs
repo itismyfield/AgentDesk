@@ -13,7 +13,7 @@ use super::super::queue_io::mailbox_cancel_queued_primary_message;
 use super::super::settings::save_bot_settings;
 use super::super::turn_bridge::stop_active_turn;
 use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_global_active};
-mod home_fence;
+pub(in crate::services::discord) mod home_fence;
 mod managed_reset;
 #[cfg(all(test, unix))]
 use managed_reset::VERIFIED_CODEX_RESET_REFUSAL;
@@ -194,71 +194,10 @@ fn build_fallback_session_key_for_clear(
 mod codex_verified_clear_tests;
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::services::discord) async fn reset_channel_provider_state(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-    reset_source: &str,
-    reset_provider_state: bool,
-    clear_history: bool,
-    recreate_tmux: bool,
-) -> ManagedReset {
-    if let Some(reason) = verified_codex_reset_refusal(shared, provider, channel_id).await {
-        return ManagedReset::Refused(reason.to_owned());
-    }
-    let refusal = super::super::admin_host_guard::managed_reset_refusal;
-    let (reset, recreate) = (reset_provider_state, recreate_tmux);
-    if let Some(reason) = refusal(shared, provider, channel_id, reset, recreate, None).await {
-        return ManagedReset::Refused(reason);
-    }
-    let tmux_name = {
-        let mut data = shared.core.lock().await;
-        data.sessions.get_mut(&channel_id).and_then(|session| {
-            if reset_provider_state {
-                session.session_id = None;
-                session.clear_provider_session();
-            }
-            if clear_history {
-                session.history.clear();
-            }
-            session
-                .channel_name
-                .as_ref()
-                .map(|channel_name| provider.build_tmux_session_name(channel_name))
-        })
-    };
-
-    if reset_provider_state
-        && let Some(session_key) =
-            resolve_session_key_for_clear(http, shared, channel_id, provider).await
-    {
-        super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
-    }
-
-    if let Some(name) = tmux_name.as_deref() {
-        if reset_provider_state {
-            match managed_session_reset_behavior(provider) {
-                ManagedSessionResetBehavior::ResetManagedProcess => {
-                    reset_managed_process_session(name);
-                }
-                ManagedSessionResetBehavior::Noop => {}
-            }
-        }
-        if recreate_tmux {
-            super::tmux_recreate::recreate_channel_tmux(
-                shared,
-                provider,
-                channel_id,
-                name,
-                reset_source,
-            )
-            .await;
-        }
-    }
-
-    ManagedReset::Applied(tmux_name)
-}
+mod provider_reset;
+pub(in crate::services::discord) use provider_reset::{
+    reset_channel_provider_state, reset_channel_provider_state_for_home_drain,
+};
 
 /// The reset a pending flag asked for, if any. A refused one keeps its flags and is reported;
 /// the caller's turn runs on the session as it is, as with any turn the host guard admits.
@@ -412,11 +351,43 @@ async fn clear_channel_session_state_fenced(
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<()> {
+    let permit = home_fence::admit(channel_id, provider.as_str())?;
+    #[cfg(test)]
+    let permit = if home_fence::mutant("control_permit_removed") {
+        None
+    } else {
+        permit
+    };
+    crate::services::cluster::channel_home::command_scope(
+        permit,
+        clear_channel_session_state_body(
+            http,
+            shared,
+            provider,
+            channel_id,
+            clear_source,
+            notify_mode,
+            explicit_session_key,
+        ),
+    )
+    .await
+}
+
+async fn clear_channel_session_state_body(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    clear_source: &str,
+    notify_mode: SoftClearNotifyMode,
+    explicit_session_key: Option<&str>,
+) -> anyhow::Result<()> {
     let refusal = managed_reset::refusal_for_session_key;
     if let Some(reason) = refusal(shared, provider, channel_id, explicit_session_key).await {
         anyhow::bail!(reason);
     }
-    home_fence::check(channel_id)?;
+    #[cfg(test)]
+    home_fence::pause("clear").await;
     // Judged before the clear changes anything: main's tmux reset, a host's own clear or a refusal.
     let hosted = native::target(http, shared, provider, channel_id, explicit_session_key).await?;
     let boundary = match shared.pg_pool.as_ref() {
@@ -657,24 +628,28 @@ pub(in crate::services::discord) async fn cmd_cancel_queued(
         return Ok(());
     }
 
-    let removed = mailbox_cancel_queued_primary_message(
-        &ctx.data().shared,
-        &ctx.data().provider,
-        ctx.channel_id(),
-        message_id,
-    )
-    .await;
-    if removed.is_some() {
-        ctx.say(format!("큐 메시지 `{}`를 취소했어요.", message_id.get()))
+    let permit = home_fence::admit(ctx.channel_id(), ctx.data().provider.as_str())?;
+    crate::services::cluster::channel_home::command_scope(permit, async {
+        let removed = mailbox_cancel_queued_primary_message(
+            &ctx.data().shared,
+            &ctx.data().provider,
+            ctx.channel_id(),
+            message_id,
+        )
+        .await;
+        if removed.is_some() {
+            ctx.say(format!("큐 메시지 `{}`를 취소했어요.", message_id.get()))
+                .await?;
+        } else {
+            ctx.say(format!(
+                "큐 메시지 `{}`는 이미 처리됐거나 현재 채널의 대기열에 없어요.",
+                message_id.get()
+            ))
             .await?;
-    } else {
-        ctx.say(format!(
-            "큐 메시지 `{}`는 이미 처리됐거나 현재 채널의 대기열에 없어요.",
-            message_id.get()
-        ))
-        .await?;
-    }
-    Ok(())
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// /clear — Clear AI conversation history
