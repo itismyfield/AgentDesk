@@ -1,5 +1,6 @@
 //! Busy-turn injection for human input: the kill switch, the vetoes read before any pane call,
-//! the mailbox order reservation, and the hand-off of one input to `claude_tui::busy_inject`.
+//! the mailbox order reservation, and the hand-off of one input to `claude_tui::busy_inject` or,
+//! once enabled, `codex_tui::busy_inject`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,6 +10,7 @@ use poise::serenity_prelude::{ChannelId, MessageId};
 use super::HumanInputRequest;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::busy_inject::{self, Outcome, Unconfirmed, Veto};
+use crate::services::codex_tui::busy_inject as codex_inject;
 use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{InflightTurnState, TurnSource};
 use crate::services::discord::inject_disposition::{self, InjectionOutcome, SourceGuard};
@@ -99,6 +101,21 @@ pub(super) fn mode(channel_id: u64) -> InjectMode {
     }
 }
 
+/// Codex TUI sessions take busy-turn input only once this is on, whichever mode the env sets.
+#[cfg(not(test))]
+const CODEX_BUSY_INJECT_ENABLED: bool = false;
+
+/// Tests never read the constant; a Codex channel injects only when a test enables it.
+fn codex_enabled(channel_id: u64) -> bool {
+    #[cfg(test)]
+    return test_hook::codex_enabled(channel_id);
+    #[cfg(not(test))]
+    {
+        let _ = channel_id;
+        CODEX_BUSY_INJECT_ENABLED
+    }
+}
+
 /// Who holds the channel at one read: the mailbox claim and the durable row.
 pub(super) struct Holder {
     claim: ExpectedClaim,
@@ -159,6 +176,8 @@ pub(super) fn backlog(snapshot: &ChannelMailboxSnapshot) -> Result<(), &'static 
 struct Target {
     session: String,
     transcript: PathBuf,
+    /// The Codex model turn the rollout read as open; None for Claude.
+    native_turn: Option<String>,
     turn_id: Option<String>,
     /// The mailbox claim the holder check judged; the reservation requires it unchanged.
     claim: ExpectedClaim,
@@ -187,16 +206,17 @@ async fn channel_name(shared: &SharedData, channel: ChannelId) -> Option<String>
     session.and_then(|session| session.channel_name.clone())
 }
 
-/// The channel's Claude TUI pane and transcript. A row stamped with another runtime, or a first
-/// bound candidate (watcher, row, channel name) of another runtime, means the session is not TUI.
+/// The channel's `runtime` pane and transcript. A row stamped with another runtime, or a first
+/// bound candidate (watcher, row, channel name) of another runtime, means the session is not it.
 pub(super) fn tui_session(
     provider: &ProviderKind,
+    runtime: RuntimeHandoffKind,
     row: Option<&InflightTurnState>,
     watcher: Option<String>,
     named: Option<String>,
 ) -> Option<(String, PathBuf)> {
     let kind = row.and_then(|row| row.runtime_kind);
-    if kind.is_some_and(|kind| kind != RuntimeHandoffKind::ClaudeTui) {
+    if kind.is_some_and(|kind| kind != runtime) {
         return None;
     }
     let candidates = [
@@ -209,19 +229,41 @@ pub(super) fn tui_session(
         .into_iter()
         .flatten()
         .find_map(|session| binding(&session).map(|binding| (session, binding)))?;
-    (binding.runtime_kind == RuntimeHandoffKind::ClaudeTui)
-        .then(|| (session, PathBuf::from(binding.relay_output_path())))
+    (binding.runtime_kind == runtime).then(|| (session, PathBuf::from(binding.relay_output_path())))
 }
 
 fn live_tui_session(
     shared: &SharedData,
     request: &HumanInputRequest,
+    runtime: RuntimeHandoffKind,
     row: Option<&InflightTurnState>,
     named: Option<String>,
 ) -> Option<(String, PathBuf)> {
     let watcher = shared.tmux_watchers.channel_binding(&request.channel_id);
     let watcher = watcher.map(|binding| binding.tmux_session_name);
-    tui_session(&request.provider, row, watcher, named)
+    tui_session(&request.provider, runtime, row, watcher, named)
+}
+
+/// Whether the transcript shows a turn the input can join: a live Claude turn, or the open Codex
+/// model turn, which the paste is then aimed at.
+fn busy_turn(
+    runtime: RuntimeHandoffKind,
+    transcript: &std::path::Path,
+) -> Result<Option<String>, &'static str> {
+    if runtime == RuntimeHandoffKind::ClaudeTui {
+        let turn = crate::services::tui_turn_state::observe_claude_jsonl_turn_state(transcript);
+        return if turn.is_busy() {
+            Ok(None)
+        } else {
+            Err(NOT_BUSY)
+        };
+    }
+    match codex_inject::read_turn(transcript) {
+        Some(codex_inject::TurnVerdict::KnownModelTurn(turn)) => Ok(Some(turn)),
+        Some(codex_inject::TurnVerdict::NotBusy) => Err(NOT_BUSY),
+        Some(codex_inject::TurnVerdict::NonSteerable(_)) => Err("not_steerable"),
+        Some(codex_inject::TurnVerdict::Unknown) | None => Err("turn_unknown"),
+    }
 }
 
 /// Every veto that needs no pane call, in the documented order.
@@ -230,19 +272,22 @@ async fn resolve(
     request: &HumanInputRequest,
 ) -> Result<Target, &'static str> {
     let channel = request.channel_id.get();
-    if request.provider != ProviderKind::Claude {
-        return Err("provider_unsupported");
-    }
-    // A session that resolves to no Claude TUI pane stops here, before acquiring the
+    let runtime = match request.provider {
+        ProviderKind::Claude => RuntimeHandoffKind::ClaudeTui,
+        ProviderKind::Codex if codex_enabled(channel) => RuntimeHandoffKind::CodexTui,
+        _ => return Err("provider_unsupported"),
+    };
+    // A session that resolves to no TUI pane of that runtime stops here, before acquiring the
     // session-transition guard or issuing pane I/O.
     let read = crate::services::discord::inflight::load_inflight_state_read_only;
     let row = read(&request.provider, channel);
     let named = channel_name(shared, request.channel_id).await;
-    let pane = live_tui_session(shared, request, row.as_ref(), named).ok_or(SESSION_UNRESOLVED)?;
+    let live = |row: Option<&InflightTurnState>, named| {
+        live_tui_session(shared, request, runtime, row, named)
+    };
+    let pane = live(row.as_ref(), named).ok_or(SESSION_UNRESOLVED)?;
     // An idle transcript keeps the caller's own start; a reservation is only for a live turn.
-    if !crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&pane.1).is_busy() {
-        return Err(NOT_BUSY);
-    }
+    let native_turn = busy_turn(runtime, &pane.1)?;
     let input = match fence::lookup(&request.provider, channel) {
         Some(gate) => Some(gate.admit().map_err(|_| INPUT_RUNTIME_OWNED)?),
         None => None,
@@ -266,7 +311,7 @@ async fn resolve(
     test_hook::final_name_lookup(channel);
     let named = channel_name(shared, request.channel_id).await;
     let row = read(&request.provider, channel);
-    if live_tui_session(shared, request, row.as_ref(), named).as_ref() != Some(&pane) {
+    if live(row.as_ref(), named).as_ref() != Some(&pane) {
         return Err(SESSION_UNRESOLVED);
     }
     if row.as_ref().map(row_key) != first.row {
@@ -276,6 +321,7 @@ async fn resolve(
     Ok(Target {
         session,
         transcript,
+        native_turn,
         turn_id: first.turn_id,
         claim: first.claim,
         transition,
@@ -355,6 +401,7 @@ impl Owner {
         let Target {
             session,
             transcript,
+            native_turn,
             turn_id,
             claim,
             transition,
@@ -381,7 +428,13 @@ impl Owner {
         let pane = pane(input.channel, &session);
         let effect = tokio::task::spawn_blocking({
             let (input, session, turn_id) = (input.clone(), session.clone(), turn_id.clone());
-            move || run(&pane, &session, &transcript, turn_id, &input)
+            move || match native_turn {
+                None => run(&pane, &session, &transcript, turn_id, &input),
+                Some(native) => {
+                    let target = (session.as_str(), transcript.as_path(), native.as_str());
+                    run_codex(&pane, target, turn_id, message, &input)
+                }
+            }
         });
         let attempt = match effect.await {
             Ok(attempt) => attempt,
@@ -509,6 +562,115 @@ fn run(
     result
 }
 
+/// Tells the dedupe observers the nonce is this Discord message, aimed at the target turn.
+struct CodexLedger<'a> {
+    session: &'a str,
+    nonce: &'a str,
+    target_turn: &'a str,
+    message: Option<MessageId>,
+}
+
+impl codex_inject::Ledger for CodexLedger<'_> {
+    fn register(&self) -> bool {
+        let message = self.message.map(MessageId::get);
+        let register = crate::services::tui_prompt_dedupe::register_injected_steer;
+        register("codex", self.session, self.nonce, self.target_turn, message)
+    }
+
+    fn withdraw(&self) {
+        let withdraw = crate::services::tui_prompt_dedupe::withdraw_injected_steer;
+        withdraw("codex", self.session, self.nonce);
+    }
+}
+
+/// The Codex pane effect: `target` is the session, its rollout and the model turn read as open.
+fn run_codex(
+    pane: &busy_inject::Pane,
+    (session, rollout, target_turn): (&str, &std::path::Path, &str),
+    turn_id: Option<String>,
+    message: Option<MessageId>,
+    input: &Input,
+) -> InjectAttempt {
+    #[cfg(test)]
+    test_hook::crash(input.channel);
+    let nonce = &input.nonce;
+    let request = codex_inject::Request {
+        session,
+        rollout,
+        source: &input.source,
+        author: &input.author,
+        nonce,
+        text: &input.text,
+        target_turn,
+    };
+    let ledger = CodexLedger {
+        session,
+        nonce,
+        target_turn,
+        message,
+    };
+    let inject = || codex_inject::inject(pane, &request, &ledger, &codex_inject::TIMING);
+    // A panic may come after the paste, so it is reported like any later failure.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));
+    let alert = |detail| unconfirmed(input, session, turn_id.clone(), detail);
+    match outcome {
+        Ok(codex_inject::Outcome::NotSent(veto)) => InjectAttempt::NotSent(codex_veto_name(veto)),
+        Ok(codex_inject::Outcome::Injected {
+            observed_turn,
+            joined,
+        }) => {
+            // A turn other than the target means it ended before the Enter; the ledger settles it.
+            tracing::info!(
+                channel_id = input.channel,
+                tmux_session = %session,
+                nonce = %nonce,
+                target_turn,
+                observed_turn = observed_turn.as_deref().unwrap_or(""),
+                joined,
+                "busy Codex turn took the human input"
+            );
+            InjectAttempt::Injected { turn_id }
+        }
+        Ok(codex_inject::Outcome::Unconfirmed(detail)) => alert(codex_unconfirmed_name(detail)),
+        Err(_) => alert("executor_failed"),
+    }
+}
+
+fn codex_veto_name(veto: codex_inject::Veto) -> &'static str {
+    use codex_inject::Veto;
+    match veto {
+        Veto::InvalidInput => "invalid_input",
+        Veto::LockContended => "lock_contended",
+        Veto::HumanAttached => "human_attached",
+        Veto::AttachUnknown => "attach_unknown",
+        Veto::PaneUnavailable => "pane_unavailable",
+        Veto::Modal => "modal",
+        Veto::NoComposer => "no_composer",
+        Veto::Draft => "draft",
+        Veto::QueueShown => "queue_shown",
+        Veto::NotSteerable => "not_steerable",
+        Veto::NotBusy => NOT_BUSY,
+        Veto::TurnUnknown => "turn_unknown",
+        Veto::TurnChanged => "turn_changed",
+        Veto::TranscriptUnavailable => "transcript_unavailable",
+        Veto::LoadFailed => "load_failed",
+        Veto::UnpredictableRender => "unpredictable_render",
+        Veto::LedgerFull => "ledger_full",
+    }
+}
+
+fn codex_unconfirmed_name(detail: codex_inject::Unconfirmed) -> &'static str {
+    use codex_inject::Unconfirmed;
+    match detail {
+        Unconfirmed::PasteFailed => "paste_failed",
+        Unconfirmed::AttachedAfterPaste => "attached_after_paste",
+        Unconfirmed::CaptureFailed => "capture_failed",
+        Unconfirmed::DraftNotOwned => "draft_not_owned",
+        Unconfirmed::EnterFailed => "enter_failed",
+        Unconfirmed::NotObserved => "not_observed",
+    }
+}
+
 fn unconfirmed(
     input: &Input,
     session: &str,
@@ -588,6 +750,7 @@ pub(crate) mod test_hook {
     use super::InjectMode;
 
     static FORCED: Mutex<Option<HashMap<u64, (InjectMode, PathBuf)>>> = Mutex::new(None);
+    static CODEX_ENABLED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
     static CRASHING: Mutex<Vec<u64>> = Mutex::new(Vec::new());
     static FINAL_LOOKUP: Mutex<Option<HashMap<u64, Arc<Notify>>>> = Mutex::new(None);
     type Park = (Arc<Notify>, Arc<Notify>);
@@ -722,7 +885,20 @@ pub(crate) mod test_hook {
             .insert(channel_id, (mode, program));
     }
 
+    /// Opens Codex injection on the channel, as turning the constant on would.
+    pub(crate) fn enable_codex(channel_id: u64) {
+        let mut enabled = CODEX_ENABLED.lock().unwrap_or_else(|e| e.into_inner());
+        enabled.push(channel_id);
+    }
+
+    pub(super) fn codex_enabled(channel_id: u64) -> bool {
+        let enabled = CODEX_ENABLED.lock().unwrap_or_else(|e| e.into_inner());
+        enabled.contains(&channel_id)
+    }
+
     pub(crate) fn clear(channel_id: u64) {
+        let mut enabled = CODEX_ENABLED.lock().unwrap_or_else(|e| e.into_inner());
+        enabled.retain(|channel| *channel != channel_id);
         let mut forced = FORCED.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(map) = forced.as_mut() {
             map.remove(&channel_id);

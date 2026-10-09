@@ -3715,6 +3715,9 @@ services::discord::health::transcript_turn::tests::retired_residue_degrades_publ
 services::discord::health::transcript_turn::tests::row_observation_tells_a_missing_row_from_a_failed_stat
 services::discord::health::transcript_turn::tests::store_presence_tells_a_missing_store_from_an_unreadable_one
 services::discord::health::transcript_turn::tests::view_goes_stale_after_120_seconds_without_a_push
+services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_refuses_unsteerable_turns_before_the_lock
+services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_steers_the_open_turn_quietly_pg
+services::discord::health::turn_deliver::inject_codex_tests::codex_input_is_refused_as_before_until_codex_is_enabled
 services::discord::health::turn_deliver::inject_tests::a_busy_pane_takes_the_input_whoever_holds_the_channel_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_caller_leaves_the_handback_and_its_kick_to_the_owner_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg
