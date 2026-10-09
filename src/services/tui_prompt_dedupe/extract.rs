@@ -264,6 +264,10 @@ pub enum PromptObservation {
     /// Identity match with an already-relayed prompt: its row uuid (30min) or a
     /// hook-recorded `prompt_id` with the same text (4h). Never tails a response.
     SuppressedReplayedEntry,
+    /// An input AgentDesk injected joined a turn whose owner answers it; nothing is published.
+    InjectedSteer,
+    /// An injected input seen without its native turn; an observer naming the turn settles it.
+    InjectedDeferred,
     Ignored,
 }
 

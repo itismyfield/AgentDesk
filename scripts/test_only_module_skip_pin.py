@@ -403,6 +403,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_direct_pending_start/tests/headless_row_tests.rs",
         "src/services/claude_tui/hook_relay/ordered_queue/tests/tq_tests.rs",
         "src/services/claude_tui/hook_relay/ordered_queue/tests/session_start_retry_tests.rs",
+        "src/services/tui_prompt_dedupe/injected_steer_tests.rs",
         "src/services/tui_prompt_dedupe/tests.rs",
         "src/services/turn_orchestrator/input_handback_tests.rs",
         "src/services/turn_orchestrator/mailbox_unreachable_tests.rs",

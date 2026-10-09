@@ -2403,6 +2403,8 @@ src/
 │   │   ├── binding_context.rs
 │   │   ├── binding_events.rs
 │   │   ├── extract.rs
+│   │   ├── injected_steer.rs
+│   │   ├── injected_steer_tests.rs
 │   │   ├── native_clear.rs
 │   │   ├── observation.rs
 │   │   ├── pending.rs
