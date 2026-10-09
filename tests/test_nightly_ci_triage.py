@@ -90,6 +90,9 @@ else:
     elif kind == "comment":
         assert a[5] == "--body-file" and len(a) == 7, a
         issue["comments"].append({"body": pathlib.Path(a[6]).read_text()})
+    elif kind == "edit":
+        assert a[5] == "--body-file" and len(a) == 7, a
+        issue["body"] = pathlib.Path(a[6]).read_text()
     else: raise AssertionError(a)
 write(kind)
 '''
@@ -326,11 +329,47 @@ class NightlyTriage(unittest.TestCase):
         self.payload = event(); self.payload["workflow_run"]["id"] = 201
         self.assertEqual(self.run_entry(), ["reopen", "comment"])
 
-    def test_a_pass_without_an_open_issue_writes_nothing(self):
+    def test_a_pass_without_a_canonical_issue_creates_nothing(self):
         self.passing()
         self.assertEqual(self.run_entry(sync=True), [])
-        self.seed(state="closed", comments=[{"body": marker(199)}])
-        self.assertEqual(self.run_entry(sync=True), [])
+        self.assertEqual(self.load()["issues"], [])
+
+    def test_a_new_pass_on_a_closed_issue_keeps_one_body_marker_without_a_comment(self):
+        self.seed(state="closed", body=NS + "\n" + marker(198) + "\n" + green(198),
+            comments=[{"body": marker(199)}, {"body": green(199)}])
+        self.passing()
+        self.assertEqual(self.run_entry(sync=True), ["edit"])
+        self.passing(201)
+        self.assertEqual(self.run_entry(sync=True), ["edit"])
+        issue = self.load()["issues"][0]
+        self.assertEqual(issue["body"].splitlines(), [NS, marker(198), green(201)])
+        self.assertEqual((issue["state"], len(issue["comments"])), ("closed", 2))
+        for older in ((201, 1), (200, 1), (199, 2)):  # A replay or an older pass never rewinds it.
+            self.passing(*older)
+            self.assertEqual(self.run_entry(sync=True), [])
+        self.seed(state="closed", comments=[{"body": marker(202)}])
+        self.passing(201)
+        self.assertEqual(self.run_entry(), [])  # Nor does a pass older than a recorded failure.
+
+    def test_handled_passes_on_a_closed_issue_stop_an_older_failure_reopening_it(self):
+        sequences = [[(200, 1, "success"), (201, 1, "success"), (200, 2, "failure")],
+            [(201, 1, "success"), (200, 1, "failure")],
+            [(200, 2, "success"), (200, 1, "failure")]]
+        for events in sequences:
+            with self.subTest(events=events):
+                self.save({"issues": [], "calls": [], "writes": []})
+                self.seed(state="closed", comments=[{"body": green(199)}])
+                writes = []
+                for run, attempt, conclusion in events:
+                    self.payload = event()
+                    self.payload["workflow_run"].update(id=run, run_attempt=attempt,
+                        conclusion=conclusion)
+                    writes += self.run_entry()
+                self.assertNotIn("reopen", writes)
+                self.assertEqual(writes[-1], "comment")
+                issue = self.load()["issues"][0]
+                self.assertEqual(issue["state"], "closed")
+                self.assertIn(marker(*events[-1][:2]), issue["comments"][-1]["body"].splitlines())
 
     def test_out_of_order_outcomes_keep_the_newest_one(self):
         # A pass handled after a newer recorded failure leaves the issue open.
@@ -377,7 +416,15 @@ class NightlyTriage(unittest.TestCase):
                 ({"runs": history}, "3"),
                 ({"runs": history[:5]}, "at least 3 (no earlier success in the last 100 runs)"),
                 ({"runs": history, "fail_read": "runs"}, "unavailable"),
-                ({"runs": [{"id": 199, "event": "schedule"}]}, "unavailable")]:
+                ({"runs": [{"id": 199, "event": "schedule"}]}, "unavailable"),
+                ({"runs": [{"id": 199, "event": "schedule", "conclusion": "bogus"}, *history[:1]]},
+                    "unavailable"),
+                ({"runs": [{"id": 199, "event": "schedule", "conclusion": ""}, *history[:1]]},
+                    "unavailable"),
+                ({"runs": [{"id": 199, "event": "schedule", "conclusion": "timed_out"},
+                    {"id": 198, "event": "schedule", "conclusion": "startup_failure"},
+                    {"id": 197, "event": "schedule", "conclusion": "success"},
+                    {"id": 196, "event": "schedule", "conclusion": "bogus"}]}, "3")]:
             with self.subTest(expected=expected):
                 self.assertEqual(streak_line(),
                     [f"- Consecutive failed nightly runs on main: {expected}"])

@@ -606,10 +606,16 @@ nightly_streak() {
         all(.workflow_runs[]; (.id | type) == "number" and (.event | type) == "string" and
           (.conclusion | type) == "string") then .workflow_runs
       else error("invalid run page") end |
-      map(select(.id < $id and (.event == "schedule" or .event == "workflow_dispatch") and
-        (.conclusion | IN("cancelled", "skipped", "neutral") | not))) | sort_by(-.id) |
-      (map(.conclusion == "success") | index(true)) as $green |
-      if $green == null then "at least \(length + 1) (no earlier success in the last 100 runs)"
+      map(select(.id < $id and (.event == "schedule" or .event == "workflow_dispatch"))) |
+      sort_by(-.id) | map(.conclusion |
+        if . == "success" then "pass"
+        elif IN("cancelled", "skipped", "neutral") then "skip"
+        elif IN("failure", "timed_out", "startup_failure") then "fail"
+        else "unknown" end) | map(select(. != "skip")) |
+      (map(. == "pass") | index(true)) as $green |
+      if any((if $green == null then . else .[:$green] end)[]; . == "unknown") then
+        error("unsupported run conclusion")
+      elif $green == null then "at least \(length + 1) (no earlier success in the last 100 runs)"
       else "\($green + 1)" end
     ' <<<"$runs")"; then
     printf '%s\n' "- Consecutive failed nightly runs on main: $line"
@@ -642,6 +648,27 @@ nightly_recover() {
   fi
   gh issue close "$number" --repo "$repo" >/dev/null
   NIGHTLY_SYNC=1 sync_issue_card_now "$repo"
+}
+
+# A pass on a closed canonical issue rewrites one body marker for the newest pass, so an older
+# failure handled later cannot reopen it. A body edit adds no comment and sends no notification.
+nightly_note_pass() {
+  local repo="$1" event_path="$2" number="$3" body="$4" docs="$5" run_id attempt kind latest run att
+  run_id="$(jq -r '.workflow_run.id' "$event_path")"
+  attempt="$(jq -r '.workflow_run.run_attempt' "$event_path")"
+  for kind in fail green; do
+    latest="$(nightly_latest_marker "$repo" "$kind" "$docs")"
+    read -r run att <<<"$latest"
+    if [[ -n "$latest" ]] && ! nightly_is_newer "$run_id" "$attempt" "$run" "$att"; then
+      echo "nightly pass $run_id/$attempt is not newer than the recorded $kind $latest; no write"
+      return 0
+    fi
+  done
+  jq -nr --arg body "$body" --arg prefix '<!-- agentdesk:ci-nightly:main:green:' \
+    --arg green "<!-- agentdesk:ci-nightly:main:green:${repo}:${run_id}:${attempt} -->" '
+    [$body | split("\n")[] | select(startswith($prefix) | not)] + [$green] | join("\n")
+  ' >"$TMP_DIR/nightly-closed-body.md"
+  gh issue edit "$number" --repo "$repo" --body-file "$TMP_DIR/nightly-closed-body.md" >/dev/null
 }
 
 nightly_triage() {
@@ -694,6 +721,8 @@ nightly_triage() {
   if [[ "$conclusion" == success ]]; then
     if (( count == 1 )) && [[ "$state" == open ]]; then
       nightly_recover "$repo" "$event_path" "$number" "$docs"
+    elif (( count == 1 )); then
+      nightly_note_pass "$repo" "$event_path" "$number" "$body" "$docs"
     fi
     return 0
   fi

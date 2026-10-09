@@ -8,13 +8,17 @@ fetching logs. This happens after the whole workflow completes, not immediately
 when its first job fails. Cancellation makes no writes.
 
 A failure comment also counts the consecutive failed nightly runs on main back to
-the last pass, from one page of run history (cancelled/skipped runs neither count
-nor break the streak). A failed or malformed history read prints `unavailable`,
-never a number. A completed pass closes the open canonical issue with a green
+the last pass, from one page of run history (cancelled/skipped/neutral runs
+neither count nor break the streak; failure/timed_out/startup_failure count). A
+failed or malformed history read, or any other conclusion before the last pass,
+prints `unavailable`, never a number. A completed pass closes the open canonical issue with a green
 marker comment, so an open issue always means "nightly is red now" and the next
 failure is a reopen, not one more comment under a standing red. A pass handled
 after a newer recorded failure leaves the issue open; a failure older than a
 recorded pass is commented without reopening. Run ID, then attempt, orders them.
+A newer pass on a closed issue rewrites a single green marker line in the issue
+body instead of commenting, so a later rerun of an older run (same ID, higher
+attempt) that fails cannot reopen it and closed issues gain no daily comment.
 
 Nightly owns `[ci-red] CI Nightly 실패(main)` with the exact body marker
 `<!-- agentdesk:ci-nightly:main -->`. It does not use main's identifier/recovery
