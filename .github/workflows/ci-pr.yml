@@ -747,6 +747,8 @@ jobs:
               - 'src/services/discord/turn_bridge/**'
               - 'src/services/discord/turn_finalizer.rs'
               - 'src/services/discord/turn_finalizer/**'
+              - 'src/services/discord/turn_lease.rs'
+              - 'src/services/discord/turn_lease_tests.rs'
               - 'src/services/discord/turn_presence/**'
               - 'src/services/discord/voice_barge_in/**'
               - 'src/services/git/**'
