@@ -34,10 +34,6 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
-        "src/services/codex_tui/rollout_tail/provenance_tests.rs",
-        "src/services/tui_o/store/rotation/provenance_tests.rs",
-        "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/provenance_tests.rs",
-        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant_tests.rs",
         "src/services/cluster/home_supervisor_tests.rs",
         "src/services/tui_o/writer/host_managed_tests.rs",
         "src/services/tui_o/writer/host_io_tests.rs",
@@ -479,6 +475,10 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/rotation_unsettled_resume_tests.rs",
         "src/services/codex_tui/rollout_tail/parser/herdr_terminal_tests.rs",
         "src/services/claude/herdr_turn/provider_terminal_tests.rs",
+        "src/services/codex_tui/rollout_tail/provenance_tests.rs",
+        "src/services/tui_o/store/rotation/provenance_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/provenance_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant_tests.rs",
     }
 )
 
