@@ -66,6 +66,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
         if extra:
             write(root, "src/services/discord/rogue.rs", extra)
         subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        write(root, "src/services/tui_o/exact_pg.rs", "fn evidence() { discord::append_exact_metadata(); }\n")
         return root
 
     # #5071 T1 S6. Before S6 the sixth family carried no facade marker, so the
@@ -89,8 +90,19 @@ class RawWriterAllowlistTests(unittest.TestCase):
         )
         return path
 
+    def test_exact_metadata_facade_registration_is_required(self):
+        root = self.fixture()
+        previous = guard.EXACT_METADATA_FACADES
+        try:
+            guard.EXACT_METADATA_FACADES = {}
+            self.assertIn("registry drift", guard.exact_facade_error(root))
+        finally:
+            guard.EXACT_METADATA_FACADES = previous
+
     def test_exact_allowlist_passes(self):
-        ok, message = guard.check(self.fixture())
+        root = self.fixture()
+        write(root, "src/services/tui_o/exact_pg.rs", "fn evidence() { discord::append_exact_metadata(); }\n")
+        ok, message = guard.check(root)
         self.assertTrue(ok, message)
 
     def test_raw_store_external_call_fails_its_own_assert(self):

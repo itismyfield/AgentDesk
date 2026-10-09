@@ -56,6 +56,7 @@ cli::client::health_compare_tests::render_machine_compare_table_synthesises_offl
 cli::client::health_compare_tests::validate_status_payload_rejects_missing_arrays
 cli::client::runtime_config::tests::api_get_payload_preserves_explicit_keys_for_cli_set
 cli::client::runtime_config::tests::plain_cli_set_stays_metadata_less_for_server_authority
+cli::dcserver::tests::lock_pid_write_removes_stale_suffix
 cli::dcserver_pg_bootstrap::tests::a_schema_ahead_failure_stops_at_once_only_while_the_hold_is_on
 cli::dcserver_pg_bootstrap::tests::backoff_delay_follows_exponential_schedule
 cli::dcserver_pg_bootstrap::tests::backoff_delay_saturates_at_cap
@@ -6424,6 +6425,7 @@ services::discord::session_relay_sink::journal::controller::controller_terminal_
 services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests::c3_only_a_real_range_under_a_known_generation_is_an_obligation
 services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests::c4_settle_selects_the_terminal_event_and_is_single_use
 services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests::c5_controller_family_never_classifies_as_delivered
+services::discord::session_relay_sink::journal::pg_store::mixed_tests::mixed_strict_rows_leave_legacy_fold_frontier_and_shadow_bytes_unchanged
 services::discord::session_relay_sink::journal::pg_store::tests::stored_journal_event_mapping_is_closed_and_fail_closed
 services::discord::session_relay_sink::journal::recovery::recovery_terminal_semantics_tests::r1_recovery_obligation_identity_covers_every_coordinate
 services::discord::session_relay_sink::journal::recovery::recovery_terminal_semantics_tests::r2_recovery_and_controller_obligations_never_coincide
@@ -10902,6 +10904,22 @@ services::tui_o::cutover::channel_gate::tests::a_claimed_legacy_send_stays_count
 services::tui_o::cutover::channel_gate::tests::an_empty_list_leaves_even_an_unknown_destination_to_legacy_while_no_snapshot_holds
 services::tui_o::cutover::channel_gate::tests::claim_then_send_releases_a_pending_adoption_only_for_the_send_it_runs
 services::tui_o::cutover::test_override::without_a_delegated_home_owned_channels_match_boot_ownership
+services::tui_o::exact_episode::tests::exact_body_requires_full_child_attempt_receipt_and_whole_frontier
+services::tui_o::exact_episode::tests::exact_conflicting_settlements_never_union_effects
+services::tui_o::exact_episode::tests::exact_empty_and_parent_transport_never_grant_body
+services::tui_o::exact_episode::tests::exact_repeated_settlement_is_monotone
+services::tui_o::exact_episode::tests::exact_source_resolution_extra_proof_and_missing_piece_fail_closed
+services::tui_o::exact_episode::tests::exact_submission_closure_and_settlement_do_not_manufacture_body
+services::tui_o::exact_episode::tests::exact_versioned_reader_is_closed_without_mode_fallback
+services::tui_o::exact_pg::tests::exact_ack_pg_waits_for_commit_barrier
+services::tui_o::exact_pg::tests::exact_child_ack_precedes_terminal_seal_pg
+services::tui_o::exact_pg::tests::exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt
+services::tui_o::exact_pg::tests::exact_metadata_pg_restore_and_terminal_port_stub
+services::tui_o::exact_pg::tests::exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged
+services::tui_o::exact_pg::tests::exact_off_pg_statement_trace_and_files_zero
+services::tui_o::exact_pg::tests::exact_pg_process_reader_uses_only_metadata
+services::tui_o::exact_pg::tests::exact_settled_ack_names_normalized_pg_payload
+services::tui_o::exact_pg::tests::exact_snapshot_sibling_construction_is_compile_rejected
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
 services::tui_o::ownership::tests::release_records_lost_before_the_release_runs
 services::tui_o::ownership::tests::transitions_close_admission_and_epochs_grow_per_acquisition
@@ -10984,6 +11002,7 @@ services::tui_o::store::ledger::lock_tests::a_recovery_lock_ends_with_the_recove
 services::tui_o::store::ledger::lock_tests::operator_child
 services::tui_o::store::ledger::lock_tests::recovery_excludes_an_operator_in_a_separate_process
 services::tui_o::store::ledger::lock_tests::successful_operator_append_survives_recovery_tail_truncation
+services::tui_o::store::ledger::tests::exact_evidence_ledger_replays_without_changing_legacy_frontier
 services::tui_o::store::ledger::tests::recovery_withdraws_only_a_whole_last_prepared_its_evidence_names
 services::tui_o::store::ledger::tests::replay_flags_the_ownership_invariant_breaks_that_pause_a_channel
 services::tui_o::store::rotation::provenance::tests::a_failed_span_replace_never_publishes_a_closed_range
