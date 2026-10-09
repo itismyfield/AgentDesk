@@ -334,24 +334,30 @@ async fn replaced_and_restarted_incarnations_reject_previous_busy_approvals() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn later_idle_backlog_or_host_failure_revokes_an_earlier_busy_stamp() {
-    for which in 0..3 {
+    for which in 0..5 {
         let fixture = Fixture::new();
         let old = fixture.approval().await;
         let _dead;
         match which {
             0 => fixture.append("{\"type\":\"system\",\"subtype\":\"turn_duration\"}"),
             1 => fixture.append(&serde_json::json!({"type":"summary", "summary":"x".repeat(4 * 1024 * 1024 + 1024)}).to_string()),
-            _ => { _dead = InjectedLivenessGuard::set(HostSessionRef::tmux(&fixture.identity.session), HostLiveness::ProbeError); }
+            2 => { _dead = InjectedLivenessGuard::set(HostSessionRef::tmux(&fixture.identity.session), HostLiveness::ProbeError); }
+            3 => { fixture.shared.tmux_watchers.remove(&poise::serenity_prelude::ChannelId::new(fixture.identity.channel)).unwrap(); }
+            _ => {}
         }
         let later = activity::presence_reading_now(
             &fixture.shared,
-            &ProviderKind::Claude,
+            if which == 4 {
+                &ProviderKind::Gemini
+            } else {
+                &ProviderKind::Claude
+            },
             poise::serenity_prelude::ChannelId::new(fixture.identity.channel),
         )
         .await;
         assert_eq!(
             later.observed.activity,
-            if which == 0 {
+            if which == 0 || which == 3 {
                 Activity::Idle
             } else {
                 Activity::Unknown

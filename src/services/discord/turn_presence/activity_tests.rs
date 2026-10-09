@@ -488,7 +488,7 @@ fn presence_keeps_codex_parent_busy_until_its_own_closer() {
 #[test]
 fn presence_host_read_overtaken_by_a_poll_or_rebind_answers_unknown() {
     let root = tempfile::tempdir().unwrap();
-    for case in ["closed", "rebound", "backlog"] {
+    for case in ["closed", "rebound", "backlog", "unreadable"] {
         let (probe, path) = claude(&root.path().join(case), &[prompt("A")]);
         assert_eq!(probe.settle(), (Activity::Busy, "open"));
         let (started, entered) = mpsc::channel();
@@ -518,6 +518,10 @@ fn presence_host_read_overtaken_by_a_poll_or_rebind_answers_unknown() {
                         ],
                     );
                     (Activity::Unknown, "catching_up")
+                }
+                "unreadable" => {
+                    *lock(&probe.fake.seq) = Err("unreadable binding".into());
+                    (Activity::Unknown, "binding_unreadable")
                 }
                 _ => unreachable!(),
             };
