@@ -1,8 +1,8 @@
-//! A channel's delegated home runs one generation at a time. Each start or stop is reserved under
-//! a short lock and carried out by a task the supervisor owns, so a cancelled caller never leaves a
-//! transition half done and a stale generation's cleanup never touches the current one.
+//! A channel's delegated home runs one generation at a time: each start or stop is reserved under a
+//! short lock and carried out by a task the supervisor owns, whoever stops waiting for it.
 
-#![cfg_attr(not(test), allow(dead_code))]
+// Dormant interface: later slices of the rollout construct the rest of it.
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::future::Future;

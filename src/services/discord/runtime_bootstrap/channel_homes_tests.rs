@@ -305,12 +305,12 @@ async fn the_legacy_reset_runs_the_existing_reset_and_keeps_a_local_pane_pg() {
     db.drop().await;
 }
 
-/// With the switch on, a missing PG pool or instance id is recorded before anything else: every
-/// selected Herdr channel takes no turn and gets no writer, while a plain channel keeps the old
-/// path. Off or unset, nothing is recorded and every channel keeps the old path.
+/// Switched on without a PG pool or instance id, every selected Herdr channel takes no turn and gets
+/// no writer while a plain one keeps the old path; off or unset, every channel keeps it.
 #[tokio::test]
 async fn a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels() {
     use crate::services::cluster::home_availability::{self, Availability, Unavailable};
+    use crate::services::tui_o::shadow::ShadowProvider;
     use crate::services::tui_o::writer::host::{self, HostParts, test_io::TestHost};
     use crate::services::turn_host::{HerdrRefusal, refusal_before_turn};
     const HERDR: u64 = 9_300_000_000_000_011;

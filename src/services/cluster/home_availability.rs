@@ -1,8 +1,8 @@
-//! Whether delegation can run for a provider, recorded only with
-//! `runtime.channel_home_delegation_enabled` on and before any effect on a delegated channel. A
-//! channel it refuses gets no turn and no POST instead of falling back to the gateway rules.
+//! Whether delegation can run for a provider, recorded only with the switch on and before any
+//! effect on a delegated channel; a channel it refuses gets no turn and no POST, never the gateway's.
 
-#![cfg_attr(not(test), allow(dead_code))]
+// Dormant interface: later slices of the rollout construct the rest of it.
+#![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, PoisonError};

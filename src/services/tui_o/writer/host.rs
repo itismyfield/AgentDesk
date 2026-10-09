@@ -324,9 +324,8 @@ impl ManagedWriterHandle {
         self.host
     }
 
-    /// Stops the writer and waits for its host, which joins its actor and any admitted POST. The
-    /// wait runs in its own task, so cancelling the caller neither skips nor hurries the release;
-    /// a host that panicked keeps its claim, so the channel hosts nothing new.
+    /// Stops the writer and waits for its host, which joins its actor and admitted POST. The release
+    /// runs in its own task, so a cancelled caller skips none of it; a panicked host keeps its claim.
     pub async fn stop_and_join(self) -> Result<WriterStopped, String> {
         let Self {
             channel,
@@ -477,7 +476,7 @@ async fn host_channel<I: HostIo>(
     runtime_root: PathBuf,
     gate: Arc<OwnershipGate>,
     readiness: Arc<Readiness>,
-    stop: watch::Receiver<bool>,
+    stopping: watch::Receiver<bool>,
 ) {
     let alarms = io.alarms();
     let mut bindings = None;
@@ -506,7 +505,10 @@ async fn host_channel<I: HostIo>(
                 );
             }
             let facts = loop {
-                if unless_stopped(&stop, until_owned(&gate)).await.is_none() {
+                if unless_stopped(&stopping, until_owned(&gate))
+                    .await
+                    .is_none()
+                {
                     return;
                 }
                 let facts = io.activation_facts(channel, provider).await;
@@ -554,7 +556,7 @@ async fn host_channel<I: HostIo>(
                                 bound: (source, seq),
                             };
                             let retried = deferred::retry(waiting, refused, seq);
-                            if unless_stopped(&stop, retried).await != Some(true) {
+                            if unless_stopped(&stopping, retried).await != Some(true) {
                                 return;
                             }
                             break 'held Ok(());
@@ -590,7 +592,7 @@ async fn host_channel<I: HostIo>(
     };
     // Seeded before the port wait, so a recovered panel tick already knows O's newest post.
     super::deliver::seed_last_posted(channel, store.ledger());
-    let Some(port) = unless_stopped(&stop, io.port()).await else {
+    let Some(port) = unless_stopped(&stopping, io.port()).await else {
         return;
     };
     let bindings = bindings.unwrap_or_else(|| io.bindings(channel, provider));
@@ -604,7 +606,7 @@ async fn host_channel<I: HostIo>(
         port,
         bindings,
         alarms,
-        stop,
+        stopping,
     };
     hosted.serve(store).await;
 }
@@ -620,7 +622,7 @@ struct Hosted<'a, I: HostIo> {
     port: Arc<I::Port>,
     bindings: Arc<I::Bindings>,
     alarms: I::Alarms,
-    stop: watch::Receiver<bool>,
+    stopping: watch::Receiver<bool>,
 }
 
 impl<I: HostIo> Hosted<'_, I> {
@@ -694,7 +696,7 @@ impl<I: HostIo> Hosted<'_, I> {
                 );
             }
         };
-        let watched = (gate.subscribe(), resumed, self.stop.clone());
+        let watched = (gate.subscribe(), resumed, self.stopping.clone());
         let ended = publish(
             channel,
             self.readiness,
@@ -731,7 +733,7 @@ impl<I: HostIo> Hosted<'_, I> {
                 unsent_serial,
                 "[tui_o] writer halted on a transient store error; resuming after a wait"
             );
-            if unless_stopped(&self.stop, tokio::time::sleep(wait))
+            if unless_stopped(&self.stopping, tokio::time::sleep(wait))
                 .await
                 .is_none()
             {
