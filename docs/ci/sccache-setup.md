@@ -29,8 +29,11 @@ sccache --show-stats   # should report a fresh cache (zero hits / zero misses)
 On macOS the Homebrew binary lives at `/opt/homebrew/bin/sccache`. The helper
 `setup_sccache_env` in `scripts/_defaults.sh` prepends that directory to `PATH`
 when the binary is present but the directory is not already on `PATH`.
-`apply_sccache_env` in `scripts/build_token.py` (§2.4) applies the same prepend
-under the same condition, to the child environment it builds.
+`apply_sccache_env` in `scripts/build_token.py` (§2.4) uses that same discovery
+condition after checking caller wrappers and the opt-out switch. It commits the
+candidate `PATH` to the child only after resolving sccache and creating the cache
+directory. The shell helper exports the prepend immediately and keeps it even
+if later lookup or directory creation fails.
 
 ---
 
@@ -88,6 +91,7 @@ multi-GB `target/debug/incremental` per-worktree hit is pure waste.
 | `SCCACHE_CACHE_SIZE` | `40G` | Adjustable local disk-cache ceiling |
 | `SCCACHE_IDLE_TIMEOUT` | `0` | Disable idle daemon exit; retain counters between builds |
 | `RUSTC_WRAPPER` | resolved `sccache` binary | Signals Cargo to wrap rustc |
+| `PATH` | inherited path, with `/opt/homebrew/bin` conditionally prepended (§1) | Exported when that discovery branch runs, before later success/failure |
 
 Callers:
 
@@ -112,7 +116,7 @@ quiet build window is needed to apply changed settings to that daemon; merging
 this change alone does not restart it. Bare Cargo with a manually set wrapper
 uses inherited settings or sccache's own defaults (10G and 600s), not this helper.
 
-If sccache is not installed, both release scripts **print a warning and continue** with
+If sccache is not installed, both release scripts continue with
 `RUSTC_WRAPPER=""` + `CARGO_BUILD_RUSTC_WRAPPER=""` explicitly cleared (so the
 `.cargo/config.toml` value does not leak through and cause a hard-fail).
 
@@ -151,8 +155,10 @@ unasked, so an existing caller decision stands. If either `RUSTC_WRAPPER` or
 `CARGO_BUILD_RUSTC_WRAPPER` is present — **empty string included**, that being Cargo's
 own spelling of "no wrapper" and the pair §2.2 has the release scripts clear — it
 changes nothing: it does not fill missing size or idle settings for an existing
-wrapper, even `RUSTC_WRAPPER=sccache`. That also makes it a no-op on CI lanes whose workflows set
-`RUSTC_WRAPPER` at the `env:` level (§2.3).
+wrapper, even `RUSTC_WRAPPER=sccache`. This guard depends on key presence, including
+values exported through `$GITHUB_ENV`, rather than where a workflow sets them.
+Checked-in CI workflows do not invoke `build_token.py`; their sccache activation
+and clearing are handled by the workflow steps (§2.3).
 
 | Variable | Effect |
 |----------|--------|

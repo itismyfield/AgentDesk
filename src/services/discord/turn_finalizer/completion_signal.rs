@@ -53,12 +53,12 @@ pub(in crate::services::discord) fn completion_signal_from_transcript(
 }
 
 /// The backstop's signal for a turn it holds as Herdr's: under settlement the held turn's own Codex
-/// abort, read from that turn's own `start` in this transcript, ends it; else the existing signal.
+/// abort, read from that turn's own start in this transcript, ends it; else the existing signal.
 pub(super) fn herdr_completion_signal_from_transcript(
     provider: &ProviderKind,
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
     transcript_path: &std::path::Path,
-    start: Option<&crate::services::provider::cancel_token_claude_interrupt::HerdrTurnStart>,
+    held: Option<&crate::services::provider::cancel_token_claude_interrupt::HerdrInterruptState>,
 ) -> CompletionSignal {
     use crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available;
     let signal = completion_signal_from_transcript(provider, runtime_kind, transcript_path);
@@ -70,10 +70,17 @@ pub(super) fn herdr_completion_signal_from_transcript(
                 transcript_path,
             );
         }
-        start.is_some_and(|start| {
-            start.source == transcript_path
-                && start.codex_own_turn(true).is_ok_and(|turn| turn.aborted)
-        })
+        let Some(held) = held else {
+            return false;
+        };
+        // A turn the reader already saw at this start must be the one read there now.
+        let seen = held.seen_turn_id();
+        #[cfg(test)]
+        let seen = seen.filter(|_| {
+            !super::watcher_backstop::backstop_mutant("backstop_seen_native_id_ignored")
+        });
+        held.read_own_codex_turn(transcript_path, seen.as_deref())
+            .is_some_and(|turn| turn.aborted)
     };
     match signal {
         CompletionSignal::PausedLive

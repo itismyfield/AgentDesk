@@ -322,6 +322,7 @@ jobs:
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'
               - 'src/services/discord/health/recovery/stall_alert.rs'
+              - 'src/services/discord/health/turn_deliver/inject_codex_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_tests.rs'
               - 'src/services/discord/host_defer_gate_tests.rs'
               - 'src/services/discord/host_key_derivation_tests.rs'
@@ -640,6 +641,7 @@ jobs:
               - 'src/*'
               - 'src/cli/**'
               - 'src/compat/**'
+              - 'src/config/**'
               - 'src/db/**'
               - 'src/dispatch/**'
               - 'src/engine/**'
@@ -664,6 +666,8 @@ jobs:
               - 'src/services/claude_tui/**'
               - 'src/services/cluster/**'
               - 'src/services/codex_tui/**'
+              - 'src/services/codex/**'
+              - 'src/services/dispatched_sessions/**'
               - 'src/services/dispatches/**'
               # qwen/ (like claude/ above) carries cfg(unix) shims, and
               # session_host/'s TmuxHost has a not(unix) stub Windows compiles.
@@ -696,6 +700,8 @@ jobs:
               - 'src/services/discord/idle_relay_drift.rs'
               - 'src/services/discord/inflight.rs'
               - 'src/services/discord/inflight/**'
+              - 'src/services/discord/inject_disposition_test_support.rs'
+              - 'src/services/discord/inject_disposition_tests.rs'
               - 'src/services/discord/input_runtime/**'
               - 'src/services/discord/input_transition_tests.rs'
               - 'src/services/discord/jsonl_watcher.rs'
@@ -741,17 +747,29 @@ jobs:
               - 'src/services/discord/turn_bridge/**'
               - 'src/services/discord/turn_finalizer.rs'
               - 'src/services/discord/turn_finalizer/**'
-              - 'src/services/discord/turn_presence/activity.rs'
+              - 'src/services/discord/turn_presence/**'
               - 'src/services/discord/voice_barge_in/**'
               - 'src/services/git/**'
+              # Cover Windows-compiled cfg consumers outside the relay tree;
+              # the source-wide derivation test rejects newly uncovered owners.
+              - 'src/services/kakao/**'
               - 'src/services/maintenance/**'
               - 'src/services/memory/**'
               - 'src/services/observability/**'
               - 'src/services/onboarding/**'
               - 'src/services/platform/**'
+              - 'src/services/process/**'
+              - 'src/services/provider/**'
               - 'src/services/provider_cli/**'
+              - 'src/services/review_decision/**'
               - 'src/services/routines/**'
+              - 'src/services/session_backend/**'
               - 'src/services/slo/**'
+              - 'src/services/stream_json_cli/**'
+              - 'src/services/tui_input/**'
+              - 'src/services/tui_o/**'
+              - 'src/services/tui_prompt_dedupe/**'
+              - 'src/services/tui_turn_state/**'
               - 'src/services/turn_orchestrator/**'
               - 'tests/*'
               - 'tests/fixtures/**'
@@ -765,7 +783,7 @@ jobs:
               - '.github/workflows/ci-pr.yml'
               - 'defaults.json'
               - 'routines/**'
-            win32_build_token: ['scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']
+            win32_build_token: ['scripts/build_token.py', 'scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']
 
       # A failed step, or comment_only left unset, reads as the full run in the outputs above.
       - name: Comment-only gate

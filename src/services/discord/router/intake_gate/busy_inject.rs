@@ -224,12 +224,15 @@ async fn settle(
         }
         InjectAttempt::Injected { .. } => INJECTED_REACTION,
         InjectAttempt::Unconfirmed { .. } => UNCONFIRMED_REACTION,
-        // The message waits at the queue front, marked as queued input is; its catch-up is the queue's.
+        // The message waits at the queue front, marked as queued input is, and the checkpoint moves
+        // past it as a queue commit's does, so catch-up never replays it once the queue ran it.
         InjectAttempt::HandedBack { .. } => {
             let queued =
                 crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION;
             let mark = super::queue_effects::add_queue_pending_reaction_self_healing;
             mark(ctx, data, channel, message, queued).await;
+            let advance = crate::services::discord::advance_last_message_checkpoint;
+            advance(shared, &data.provider, channel, message);
             if super::super::queue_status_presentation::queue_status_card_enabled() {
                 let ack = super::queue_effects::render_visible_queued_ack;
                 ack(ctx, data, channel, message, live.text, false).await;

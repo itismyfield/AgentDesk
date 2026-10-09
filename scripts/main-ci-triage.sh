@@ -577,12 +577,108 @@ nightly_failed_jobs() {
   fi
 }
 
+# The newest recorded `fail` or `green` nightly marker as "run attempt", or nothing.
+nightly_latest_marker() {
+  local repo="$1" kind="$2" docs="$3"
+  jq -r --arg prefix "<!-- agentdesk:ci-nightly:main:" --arg repo "$repo:" --arg kind "$kind" '
+    [.[] | split("\n")[] | select(startswith($prefix) and endswith(" -->")) |
+      ltrimstr($prefix) | rtrimstr(" -->") |
+      if startswith("green:") then {kind: "green", rest: ltrimstr("green:")}
+      else {kind: "fail", rest: .} end |
+      select(.kind == $kind and (.rest | startswith($repo))) |
+      .rest | ltrimstr($repo) | split(":") |
+      select(length == 2 and all(.[]; test("^[0-9]+$"))) | map(tonumber)] |
+    max // empty | "\(.[0]) \(.[1])"
+  ' <<<"$docs"
+}
+
+# True when run/attempt $1/$2 is newer than $3/$4; run ids grow with creation time.
+nightly_is_newer() {
+  (( $1 > $3 || ($1 == $3 && $2 > $4) ))
+}
+
+# Counts this failure and the failed nightly runs on main before it, back to the last success.
+nightly_streak() {
+  local repo="$1" workflow_id="$2" run_id="$3" runs line
+  if runs="$(gh api "/repos/$repo/actions/workflows/$workflow_id/runs?branch=main&status=completed&per_page=100")" &&
+    line="$(jq -re --argjson id "$run_id" '
+      if (.workflow_runs | type) == "array" and
+        all(.workflow_runs[]; (.id | type) == "number" and (.event | type) == "string" and
+          (.conclusion | type) == "string") then .workflow_runs
+      else error("invalid run page") end |
+      map(select(.id < $id and (.event == "schedule" or .event == "workflow_dispatch"))) |
+      sort_by(-.id) | map(.conclusion |
+        if . == "success" then "pass"
+        elif IN("cancelled", "skipped", "neutral") then "skip"
+        elif IN("failure", "timed_out", "startup_failure") then "fail"
+        else "unknown" end) | map(select(. != "skip")) |
+      (map(. == "pass") | index(true)) as $green |
+      if any((if $green == null then . else .[:$green] end)[]; . == "unknown") then
+        error("unsupported run conclusion")
+      elif $green == null then "at least \(length + 1) (no earlier success in the last 100 runs)"
+      else "\($green + 1)" end
+    ' <<<"$runs")"; then
+    printf '%s\n' "- Consecutive failed nightly runs on main: $line"
+  else
+    printf '%s\n' '- Consecutive failed nightly runs on main: unavailable'
+  fi
+}
+
+# A passing nightly closes the open canonical issue unless a newer failure is already recorded.
+nightly_recover() {
+  local repo="$1" event_path="$2" number="$3" docs="$4" run_id attempt green latest fail_run fail_attempt
+  run_id="$(jq -r '.workflow_run.id' "$event_path")"
+  attempt="$(jq -r '.workflow_run.run_attempt' "$event_path")"
+  green="<!-- agentdesk:ci-nightly:main:green:${repo}:${run_id}:${attempt} -->"
+  latest="$(nightly_latest_marker "$repo" fail "$docs")"
+  read -r fail_run fail_attempt <<<"$latest"
+  if [[ -n "$latest" ]] && nightly_is_newer "$fail_run" "$fail_attempt" "$run_id" "$attempt"; then
+    echo "nightly pass $run_id/$attempt predates the recorded failure $latest; issue left open"
+    return 0
+  fi
+  # A replay after the comment landed but the close failed only closes.
+  if ! jq -e --arg marker "$green" 'any(.[]; split("\n") | index($marker) != null)' <<<"$docs" >/dev/null; then
+    {
+      printf '%s\n\n' "$green"
+      printf 'CI Nightly passed on main; closing until the next nightly failure reopens this issue.\n\n'
+      printf '%s\n' "- Run: https://github.com/$repo/actions/runs/$run_id/attempts/$attempt"
+      printf '%s\n' "- Head: $(jq -r '.workflow_run.head_sha' "$event_path")"
+    } >"$TMP_DIR/nightly-green.md"
+    gh issue comment "$number" --repo "$repo" --body-file "$TMP_DIR/nightly-green.md" >/dev/null
+  fi
+  gh issue close "$number" --repo "$repo" >/dev/null
+  NIGHTLY_SYNC=1 sync_issue_card_now "$repo"
+}
+
+# A pass on a closed canonical issue rewrites one body marker for the newest pass, so an older
+# failure handled later cannot reopen it. A body edit adds no comment and sends no notification.
+nightly_note_pass() {
+  local repo="$1" event_path="$2" number="$3" body="$4" docs="$5" run_id attempt kind latest run att
+  run_id="$(jq -r '.workflow_run.id' "$event_path")"
+  attempt="$(jq -r '.workflow_run.run_attempt' "$event_path")"
+  for kind in fail green; do
+    latest="$(nightly_latest_marker "$repo" "$kind" "$docs")"
+    read -r run att <<<"$latest"
+    if [[ -n "$latest" ]] && ! nightly_is_newer "$run_id" "$attempt" "$run" "$att"; then
+      echo "nightly pass $run_id/$attempt is not newer than the recorded $kind $latest; no write"
+      return 0
+    fi
+  done
+  jq -nr --arg body "$body" --arg prefix '<!-- agentdesk:ci-nightly:main:green:' \
+    --arg green "<!-- agentdesk:ci-nightly:main:green:${repo}:${run_id}:${attempt} -->" '
+    [$body | split("\n")[] | select(startswith($prefix) | not)] + [$green] | join("\n")
+  ' >"$TMP_DIR/nightly-closed-body.md"
+  gh issue edit "$number" --repo "$repo" --body-file "$TMP_DIR/nightly-closed-body.md" >/dev/null
+}
+
 nightly_triage() {
   local repo="$1" event_path="$2" issues candidates count number state body comments marker run_id attempt
+  local conclusion docs='[]' newer_green=0 green green_run green_attempt
   local namespace='<!-- agentdesk:ci-nightly:main -->'
   local title='[ci-red] CI Nightly 실패(main)'
   run_id="$(jq -r '.workflow_run.id' "$event_path")"
   attempt="$(jq -r '.workflow_run.run_attempt' "$event_path")"
+  conclusion="$(jq -r '.workflow_run.conclusion' "$event_path")"
   marker="<!-- agentdesk:ci-nightly:main:${repo}:${run_id}:${attempt} -->"
   # Capture every page before inspecting it: a partial/failed read must not create an issue.
   issues="$(gh api "/repos/$repo/issues?state=all&per_page=100" --paginate)"
@@ -620,12 +716,25 @@ nightly_triage() {
     comments="$(jq -sce 'if length > 0 and all(.[]; type == "array") then add
       else error("invalid comment pages") end |
       if all(.[]; .body | type == "string") then . else error("invalid comment") end' <<<"$comments")"
-    if jq -e --arg body "$body" --arg marker "$marker" '
-      [$body, .[].body] | any(.[]; split("\n") | index($marker) != null)
-    ' <<<"$comments" >/dev/null; then
-      echo "nightly failure already recorded: $run_id/$attempt"
-      return 0
+    docs="$(jq -c --arg body "$body" '[$body, .[].body]' <<<"$comments")"
+  fi
+  if [[ "$conclusion" == success ]]; then
+    if (( count == 1 )) && [[ "$state" == open ]]; then
+      nightly_recover "$repo" "$event_path" "$number" "$docs"
+    elif (( count == 1 )); then
+      nightly_note_pass "$repo" "$event_path" "$number" "$body" "$docs"
     fi
+    return 0
+  fi
+  if jq -e --arg marker "$marker" 'any(.[]; split("\n") | index($marker) != null)' <<<"$docs" >/dev/null; then
+    echo "nightly failure already recorded: $run_id/$attempt"
+    return 0
+  fi
+  # A late failure older than a recorded pass is kept on the record but does not reopen.
+  green="$(nightly_latest_marker "$repo" green "$docs")"
+  read -r green_run green_attempt <<<"$green"
+  if [[ -n "$green" ]] && nightly_is_newer "$green_run" "$green_attempt" "$run_id" "$attempt"; then
+    newer_green=1
   fi
   {
     printf '%s\n%s\n\n' "$namespace" "$marker"
@@ -633,7 +742,11 @@ nightly_triage() {
     printf '%s\n' "- Run: https://github.com/$repo/actions/runs/$run_id/attempts/$attempt"
     printf '%s\n' "- Event: $(jq -r '.workflow_run.event' "$event_path")"
     printf '%s\n' "- Head: $(jq -r '.workflow_run.head_sha' "$event_path")"
+    nightly_streak "$repo" "$(jq -r '.workflow_run.workflow_id' "$event_path")" "$run_id"
     nightly_failed_jobs "$repo" "$run_id" "$attempt"
+    if (( newer_green )); then
+      printf '%s\n' '- A newer nightly run already passed, so this record does not reopen the issue.'
+    fi
     printf '\nGitHub records the failure; AgentDesk immediate sync is best-effort.\n'
   } >"$TMP_DIR/nightly-body.md"
   if (( count == 0 )); then
@@ -643,7 +756,7 @@ nightly_triage() {
     gh issue create --repo "$repo" --title "$title" --body-file "$TMP_DIR/nightly-body.md" \
       --label ci-red --label agent:project-agentdesk >/dev/null
   else
-    if [[ "$state" == closed ]]; then
+    if [[ "$state" == closed ]] && (( ! newer_green )); then
       gh issue reopen "$number" --repo "$repo" >/dev/null
     fi
     gh issue comment "$number" --repo "$repo" --body-file "$TMP_DIR/nightly-body.md" >/dev/null
@@ -683,9 +796,9 @@ run_triage() {
     return 0
   fi
   if [[ "$(jq -r '.workflow_run.name' "$event_path")" == 'CI Nightly' ]]; then
-    if [[ "$(jq -r '.workflow_run.conclusion' "$event_path")" == failure ]]; then
-      nightly_triage "$repo" "$event_path"
-    fi
+    case "$(jq -r '.workflow_run.conclusion' "$event_path")" in
+      failure | success) nightly_triage "$repo" "$event_path" ;;
+    esac
     return 0
   fi
 

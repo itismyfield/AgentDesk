@@ -21,6 +21,8 @@ pub(crate) struct HerdrInterruptState {
     pub(crate) turn_start: std::sync::OnceLock<HerdrTurnStart>,
     /// Whether this turn's reader has seen its own start, and a stop that met the turn unbound.
     pub(crate) own_start: Mutex<OwnStart>,
+    /// The backstop's read of this turn from its own start, resumed poll to poll.
+    pub(crate) own_turn: Mutex<OwnTurnCursor>,
 }
 
 /// A stop's one late delivery attempt; it holds the token only weakly.
@@ -146,12 +148,8 @@ impl HerdrTurnStart {
     }
 
     /// The Codex turn that began at this input: the first record there of any turn must start a
-    /// named turn. `through_terminal` reads on until that turn's own end or another turn's start.
-    pub(crate) fn codex_own_turn(
-        &self,
-        through_terminal: bool,
-    ) -> Result<CodexOwnTurn, OwnTurnRead> {
-        use crate::services::agent_protocol::{codex_payload_turn_id, same_codex_turn};
+    /// named turn.
+    pub(crate) fn codex_own_turn(&self) -> Result<CodexOwnTurn, OwnTurnRead> {
         use std::io::{BufRead, Seek};
         let mut file = std::fs::File::open(&self.source).map_err(|_| OwnTurnRead::Unreadable)?;
         let opened = file.metadata().ok();
@@ -161,65 +159,189 @@ impl HerdrTurnStart {
         file.seek(std::io::SeekFrom::Start(self.offset))
             .map_err(|_| OwnTurnRead::Unreadable)?;
         let mut reader = std::io::BufReader::new(file);
-        let (mut line, mut offset, mut own) = (String::new(), self.offset, None::<CodexOwnTurn>);
+        let (mut line, mut offset, mut own) = (Vec::new(), self.offset, None);
         loop {
             line.clear();
-            let position = offset;
             let read = reader
-                .read_line(&mut line)
+                .read_until(b'\n', &mut line)
                 .map_err(|_| OwnTurnRead::Unreadable)?;
-            if read == 0 || !line.ends_with('\n') {
-                return match (own, read) {
-                    (Some(turn), _) => Ok(turn),
-                    (None, 0) => Err(OwnTurnRead::NotYet),
-                    (None, _) => Err(OwnTurnRead::Unreadable),
-                };
+            if read == 0 {
+                return Err(OwnTurnRead::NotYet);
+            }
+            if !line.ends_with(b"\n") {
+                return Err(OwnTurnRead::Unreadable);
+            }
+            own_turn_step(&mut own, &line, offset)?;
+            if let Some(turn) = own.take() {
+                return Ok(turn);
             }
             offset += read as u64;
-            let record: serde_json::Value =
-                serde_json::from_str(&line).map_err(|_| OwnTurnRead::Unreadable)?;
-            let payload = &record["payload"];
-            let kind = payload["type"].as_str().unwrap_or("");
-            let named = codex_payload_turn_id(payload);
-            let Some(turn) = own.as_mut() else {
-                match record["type"].as_str() {
-                    Some("event_msg") if kind == "task_started" => {
-                        let turn_id = named.ok_or(OwnTurnRead::Foreign)?.to_owned();
-                        let turn = CodexOwnTurn {
-                            started_at: position,
-                            turn_id,
-                            aborted: false,
-                        };
-                        if !through_terminal {
-                            return Ok(turn);
-                        }
-                        own = Some(turn);
-                    }
-                    Some("event_msg") if matches!(kind, "task_complete" | "turn_aborted") => {
-                        return Err(OwnTurnRead::Foreign);
-                    }
-                    Some("response_item") if codex_turn_content(payload) => {
-                        return Err(OwnTurnRead::Foreign);
-                    }
-                    _ => {}
-                }
-                continue;
-            };
-            let mine = same_codex_turn(Some(&turn.turn_id), named);
-            match kind {
-                "turn_aborted" if mine => turn.aborted = true,
-                "task_complete" if mine => {}
-                "task_started" if !mine => {}
-                _ => continue,
-            }
-            break;
         }
-        own.ok_or(OwnTurnRead::NotYet)
+    }
+}
+
+/// Steps one complete rollout record at `position` of the turn read from its input: `Ok(true)`
+/// once that turn ended or another began; any turn's record before its start is `Foreign`.
+fn own_turn_step(
+    own: &mut Option<CodexOwnTurn>,
+    line: &[u8],
+    position: u64,
+) -> Result<bool, OwnTurnRead> {
+    use crate::services::agent_protocol::{codex_payload_turn_id, same_codex_turn};
+    let record: serde_json::Value =
+        serde_json::from_slice(line).map_err(|_| OwnTurnRead::Unreadable)?;
+    let payload = &record["payload"];
+    let kind = payload["type"].as_str().unwrap_or("");
+    let named = codex_payload_turn_id(payload);
+    let Some(turn) = own.as_mut() else {
+        match record["type"].as_str() {
+            Some("event_msg") if kind == "task_started" => {
+                let turn_id = named.ok_or(OwnTurnRead::Foreign)?.to_owned();
+                *own = Some(CodexOwnTurn {
+                    started_at: position,
+                    turn_id,
+                    aborted: false,
+                });
+            }
+            Some("event_msg") if matches!(kind, "task_complete" | "turn_aborted") => {
+                return Err(OwnTurnRead::Foreign);
+            }
+            Some("response_item") if codex_turn_content(payload) => {
+                return Err(OwnTurnRead::Foreign);
+            }
+            _ => {}
+        }
+        return Ok(false);
+    };
+    let mine = same_codex_turn(Some(&turn.turn_id), named);
+    Ok(match kind {
+        "turn_aborted" if mine => {
+            turn.aborted = true;
+            true
+        }
+        "task_complete" if mine => true,
+        "task_started" => !mine,
+        _ => false,
+    })
+}
+
+/// Bytes one backstop poll reads of a held turn; a longer turn is read on at later polls.
+pub(crate) const OWN_TURN_POLL_BUDGET: u64 = 256 * 1024;
+
+/// The backstop's read of a held turn from its own input start.
+#[derive(Default)]
+pub(crate) struct OwnTurnCursor {
+    /// The identity of the file read and the end of its records consumed; `None` before a read.
+    at: Option<(Option<(u64, u64)>, u64)>,
+    /// An incomplete last line, kept until its newline is written.
+    partial: Vec<u8>,
+    own: Option<CodexOwnTurn>,
+    /// The read is over: the turn ended or another began, or what followed the input was not it.
+    over: bool,
+    /// Bytes the last poll read.
+    #[cfg(test)]
+    pub(crate) polled: u64,
+}
+
+impl OwnTurnCursor {
+    /// Reads at most the poll budget past `consumed` and steps each complete record read.
+    fn read_on(&mut self, file: std::fs::File, consumed: u64) -> std::io::Result<()> {
+        use std::io::{Read, Seek};
+        let budget = OWN_TURN_POLL_BUDGET;
+        #[cfg(test)]
+        let budget = match herdr_interrupt_mutant("backstop_budget_ignored") {
+            true => u64::MAX,
+            false => budget,
+        };
+        let mut file = file;
+        let kept = self.partial.len();
+        file.seek(std::io::SeekFrom::Start(consumed + kept as u64))?;
+        file.take(budget).read_to_end(&mut self.partial)?;
+        #[cfg(test)]
+        {
+            self.polled = (self.partial.len() - kept) as u64;
+        }
+        let mut used = 0;
+        while !self.over
+            && let Some(end) = self.partial[used..].iter().position(|byte| *byte == b'\n')
+        {
+            let line = &self.partial[used..=used + end];
+            match own_turn_step(&mut self.own, line, consumed + used as u64) {
+                Ok(over) => self.over = over,
+                Err(_) => (self.own, self.over) = (None, true),
+            }
+            used += end + 1;
+        }
+        self.partial.drain(..used);
+        self.at = self.at.map(|(file, _)| (file, consumed + used as u64));
+        Ok(())
+    }
+}
+
+impl HerdrInterruptState {
+    /// This turn read from its start in `source`, `OWN_TURN_POLL_BUDGET` bytes a call, once its end
+    /// is read; a partial line, a changed file or a turn the reader did not see proves nothing.
+    pub(crate) fn read_own_codex_turn(
+        &self,
+        source: &std::path::Path,
+        expected: Option<&str>,
+    ) -> Option<CodexOwnTurn> {
+        let start = self.turn_start.get()?;
+        #[cfg(test)]
+        let start = &identity_mutant(start, source);
+        if source != start.source {
+            return None;
+        }
+        let file = std::fs::File::open(source).ok()?;
+        let meta = file.metadata().ok()?;
+        let identity = file_identity(&meta);
+        if start.file.is_some() && identity != start.file {
+            return None;
+        }
+        let mut cursor = self.own_turn.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        if herdr_interrupt_mutant("backstop_cursor_restarts") {
+            *cursor = OwnTurnCursor::default();
+        }
+        let (read, consumed) = *cursor.at.get_or_insert((identity, start.offset));
+        if read != identity || meta.len() < consumed + cursor.partial.len() as u64 {
+            // Another file, or this one cut short: the next poll reads again from the start.
+            *cursor = OwnTurnCursor::default();
+            return None;
+        }
+        if !cursor.over {
+            cursor.read_on(file, consumed).ok()?;
+        }
+        let other = cursor.own.as_ref().zip(expected);
+        if other.is_some_and(|(own, expected)| own.turn_id != expected) {
+            // Not the turn the reader saw here: never cached, the next poll reads the start again.
+            #[cfg(test)]
+            if herdr_interrupt_mutant("backstop_mismatch_cursor_retained") {
+                return None;
+            }
+            *cursor = OwnTurnCursor::default();
+            return None;
+        }
+        cursor.over.then(|| cursor.own.clone()).flatten()
+    }
+}
+
+/// Test-only: any turn in the read transcript, from its first record.
+#[cfg(test)]
+fn identity_mutant(start: &HerdrTurnStart, source: &std::path::Path) -> HerdrTurnStart {
+    match herdr_interrupt_mutant("backstop_identity_skipped") {
+        true => HerdrTurnStart {
+            source: source.to_owned(),
+            file: None,
+            offset: 0,
+            ..start.clone()
+        },
+        false => start.clone(),
     }
 }
 
 /// The Codex turn a Herdr input began, as its rollout shows it from that input.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CodexOwnTurn {
     pub(crate) started_at: u64,
     pub(crate) turn_id: String,
@@ -246,21 +368,26 @@ fn codex_turn_content(payload: &serde_json::Value) -> bool {
     }
 }
 
-/// Live Herdr turns by logical session, held weakly, so a synchronous reader finds a held turn's
-/// own start; a later turn on the session replaces its entry.
+/// Live Herdr turns by logical session and turn nonce, held weakly, so a synchronous reader finds
+/// a held turn's own state; a nonce two live turns share names neither.
 static HERDR_TURNS: std::sync::LazyLock<Mutex<HerdrTurns>> =
     std::sync::LazyLock::new(Default::default);
 
-/// Logical session → (turn nonce, that turn's interrupt state).
-type HerdrTurns = std::collections::HashMap<String, (String, std::sync::Weak<HerdrInterruptState>)>;
+type HerdrTurns =
+    std::collections::HashMap<(String, String), Vec<std::sync::Weak<HerdrInterruptState>>>;
 
-/// The own input start of Herdr turn `turn_nonce` on `logical`, while that turn's token lives.
-pub(crate) fn herdr_turn_start(logical: &str, turn_nonce: &str) -> Option<HerdrTurnStart> {
+/// The interrupt state of Herdr turn `turn_nonce` on `logical`, while that one turn's token lives.
+pub(crate) fn herdr_turn(logical: &str, turn_nonce: &str) -> Option<Arc<HerdrInterruptState>> {
     let turns = HERDR_TURNS.lock().unwrap_or_else(|e| e.into_inner());
-    let (nonce, state) = turns.get(logical)?;
-    let state = (nonce == turn_nonce).then(|| state.upgrade()).flatten()?;
+    let key = (logical.to_owned(), turn_nonce.to_owned());
+    let live: Vec<_> = turns
+        .get(&key)?
+        .iter()
+        .filter_map(|turn| turn.upgrade())
+        .collect();
     drop(turns);
-    state.turn_start.get().cloned()
+    let [state] = <[_; 1]>::try_from(live).ok()?;
+    Some(state)
 }
 
 /// The (dev, ino) of the descriptor a reader opened; `(0, 0)` names none.
@@ -312,13 +439,21 @@ impl CancelToken {
             user_stop: AtomicBool::new(false),
             turn_start: std::sync::OnceLock::new(),
             own_start: Mutex::new(OwnStart::Unseen(None)),
+            own_turn: Mutex::new(OwnTurnCursor::default()),
         });
         self.bind_interrupt_session(provider, &owner.logical_key);
         if let Some(nonce) = self.turn_nonce() {
             let mut turns = HERDR_TURNS.lock().unwrap_or_else(|e| e.into_inner());
-            turns.retain(|_, (_, turn)| turn.strong_count() > 0);
-            let entry = (nonce.to_owned(), Arc::downgrade(&state));
-            turns.insert(owner.logical_key.clone(), entry);
+            turns.retain(|_, live| {
+                live.retain(|turn| turn.strong_count() > 0);
+                !live.is_empty()
+            });
+            #[cfg(test)]
+            if herdr_interrupt_mutant("index_single_slot") {
+                turns.retain(|(logical, _), _| *logical != owner.logical_key);
+            }
+            let key = (owner.logical_key.clone(), nonce.to_owned());
+            turns.entry(key).or_default().push(Arc::downgrade(&state));
         }
         *slot = Some(state.clone());
         state
@@ -754,5 +889,72 @@ mod tests {
 
         assert!(!token.claim_claude_interrupt());
         assert!(!token.release_claude_interrupt_claim());
+    }
+
+    fn herdr_owner(
+        channel: &str,
+        logical: &str,
+    ) -> crate::db::dispatched_sessions::hosted_execution::HostedOwner {
+        crate::db::dispatched_sessions::hosted_execution::HostedOwner {
+            provider: "codex".into(),
+            discord_token_hash: "hash".into(),
+            channel_id: channel.into(),
+            logical_key: logical.into(),
+            owner_node: "node".into(),
+            runtime_root: "/tmp".into(),
+        }
+    }
+
+    /// A live Herdr turn stays found by its own nonce whichever other turns, of this or another
+    /// channel, its session registers or drops.
+    #[test]
+    fn a_live_herdr_turn_is_found_by_its_own_nonce_beside_other_turns() {
+        let logical = format!("AgentDesk-codex-turn-index-{}", std::process::id());
+        let older = CancelToken::new();
+        let a = older.prepare_herdr_interrupt(ProviderKind::Codex, &herdr_owner("1", &logical));
+        let newer = CancelToken::new();
+        let b = newer.prepare_herdr_interrupt(ProviderKind::Codex, &herdr_owner("2", &logical));
+        let (a_nonce, b_nonce) = (older.turn_nonce().unwrap(), newer.turn_nonce().unwrap());
+        let found = |nonce: &str, state: &Arc<HerdrInterruptState>| {
+            herdr_turn(&logical, nonce).is_some_and(|found| Arc::ptr_eq(&found, state))
+        };
+        assert!(
+            found(a_nonce, &a),
+            "a newer turn never evicts a live older one"
+        );
+        assert!(found(b_nonce, &b));
+        assert!(herdr_turn("AgentDesk-codex-turn-index-other", a_nonce).is_none());
+        let b_nonce = b_nonce.to_owned();
+        drop((b, newer));
+        assert!(
+            herdr_turn(&logical, &b_nonce).is_none(),
+            "a dropped turn is gone"
+        );
+        assert!(
+            found(a_nonce, &a),
+            "dropping the newer turn keeps the older one"
+        );
+        let a_nonce = a_nonce.to_owned();
+        drop((a, older));
+        assert!(herdr_turn(&logical, &a_nonce).is_none());
+    }
+
+    /// A nonce two live turns share names neither; the survivor is found once the other drops.
+    #[test]
+    fn a_nonce_two_live_herdr_turns_share_names_neither() {
+        let logical = format!("AgentDesk-codex-turn-collision-{}", std::process::id());
+        let nonce = format!("collision-{}", std::process::id());
+        let owner = herdr_owner("1", &logical);
+        let first = CancelToken::from_persisted_turn_nonce(Some(nonce.clone()));
+        let a = first.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+        let second = CancelToken::from_persisted_turn_nonce(Some(nonce.clone()));
+        let b = second.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+        assert!(
+            herdr_turn(&logical, &nonce).is_none(),
+            "a shared nonce is unknown"
+        );
+        drop((b, second));
+        let survivor = herdr_turn(&logical, &nonce);
+        assert!(survivor.is_some_and(|found| Arc::ptr_eq(&found, &a)));
     }
 }

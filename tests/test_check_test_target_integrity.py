@@ -606,8 +606,10 @@ class EmptyTargetRule(unittest.TestCase):
         )
         self.assertEqual([v.kind for v in violations], ["empty-target"])
 
-    def test_unfiltered_empty_bin_is_not_flagged(self) -> None:
-        self.assertEqual(run_fixture("cargo test --bin agentdesk"), [])
+    def test_unfiltered_selection_still_needs_a_test(self) -> None:
+        self.assertEqual([v.kind for v in run_fixture("cargo test --bin agentdesk")],
+                         ["empty-target"])
+        self.assertEqual(run_fixture("cargo test --lib"), [])
 
     def test_mismatch_takes_precedence_over_empty_target(self) -> None:
         violations = run_fixture(BAD_COMMAND)
@@ -958,8 +960,8 @@ class TestIdOracleContract(unittest.TestCase):
             with self.subTest(selector=selector, typo=False):
                 self.assertEqual(self.kinds(
                     f"cargo test {selector} high_risk_recovery::"), [])
-        self.assertEqual(self.kinds("cargo test --benches high_risk_recovery::"),
-                         ["target-mismatch"])
+        # `--benches` takes every `bench = true` target, the lib by default.
+        self.assertEqual(self.kinds("cargo test --benches high_risk_recovery::"), [])
         # A module typo is not a platform-empty lane, whatever the selection.
         command = "cargo test --lib high_risk_recovry::"
         self.assertEqual([v.kind for v in run_fixture(
@@ -995,6 +997,91 @@ class TestIdOracleContract(unittest.TestCase):
                 [v.kind for v in integrity.check_workflows(root, [workflow], set(), False)],
                 ["target-mismatch"])
 
+    def judge(self, root: Path, command: str,
+              diagnostics: list[str] | None = None) -> list[str]:
+        workflow = root / ".github/workflows/ci-fixture.yml"
+        workflow.write_text(f'jobs:\n  lane:\n    steps:\n      - run: "{command}"\n',
+                            encoding="utf-8")
+        return [v.kind for v in integrity.check_workflows(
+            root, [workflow], set(), False, diagnostics=diagnostics)
+            if v.workflow.endswith("ci-fixture.yml")]
+
+    def test_class_flags_follow_cargo_target_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_fixture_repo(root, GOOD_COMMAND)
+            for rel, module in (("examples/owned/main.rs", "example_owned"),
+                                ("tests/disabled.rs", "disabled_only")):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(f"mod {module} {{ #[test] fn case() {{}} }}\n",
+                                        encoding="utf-8")
+            with (root / "Cargo.toml").open("a") as manifest:
+                manifest.write('\n[[example]]\nname = "owned"\nbench = true\n'
+                               '\n[[test]]\nname = "disabled"\ntest = false\n'
+                               'bench = false\n')
+            for command, kinds in (
+                    ("cargo test --benches example_owned::", []),
+                    ("cargo test --all-targets disabled_only::", ["target-mismatch"]),
+                    ("cargo test --tests disabled_only::", ["target-mismatch"]),
+                    ("cargo test --test disabled disabled_only::", [])):
+                with self.subTest(command=command):
+                    self.assertEqual(self.judge(root, command), kinds)
+            cargo = root / "Cargo.toml"
+            cargo.write_text(cargo.read_text().replace(
+                'path = "src/lib.rs"\n', 'path = "src/lib.rs"\nbench = false\n', 1))
+            self.assertEqual(self.judge(root, "cargo test --benches high_risk_recovery::"),
+                             ["target-mismatch"])
+
+    def test_bare_filters_form_a_union_before_any_mismatch(self) -> None:
+        for command, kinds in (
+                ("cargo test --lib recovery_case -- integration_only_case", []),
+                ("cargo test --lib integration_only_case", ["target-mismatch"]),
+                ("cargo test --lib recovery_case -- integration_only_case "
+                 "--skip recovery_case", ["target-mismatch"]),
+                ("cargo test --lib --bin agentdesk integration_only_case",
+                 ["target-mismatch"])):
+            with self.subTest(command=command):
+                self.assertEqual(self.kinds(command, integration_test=True), kinds)
+
+    def test_a_provable_empty_selection_is_judged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_fixture_repo(root, GOOD_COMMAND)
+            for command, kinds in (
+                    ("cargo test --lib -- --ignored high_risk_recovry::",
+                     ["unknown-module"]),
+                    ("cargo test --manifest-path $PWD/Cargo.toml --lib "
+                     "high_risk_recovry::", ["unknown-module"]),
+                    ("cargo test --manifest-path ./Cargo.toml --lib "
+                     "high_risk_recovery::renamed_case", ["zero-match"])):
+                with self.subTest(command=command):
+                    self.assertEqual(self.judge(root, command), kinds)
+            diagnostics: list[str] = []
+            command = "cargo test high_risk_recovery::typo"
+            self.assertEqual(self.judge(root, command, diagnostics), [])
+            self.assertIn("runs doctests", " ".join(diagnostics))
+            cargo = root / "Cargo.toml"
+            cargo.write_text(cargo.read_text().replace(
+                'path = "src/lib.rs"\n', 'path = "src/lib.rs"\ndoctest = false\n', 1))
+            self.assertEqual(self.judge(root, command), ["zero-match"])
+            (root / integrity.LIB_INVENTORY_MANIFEST_REL).write_text(
+                integrity.render_lib_inventory_manifest(set()), encoding="utf-8")
+            self.assertEqual(self.judge(root, "cargo test --lib"), ["empty-target"])
+
+    def test_sweep_exemption_needs_a_live_test_elsewhere(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_fixture_repo(root, GOOD_COMMAND)
+            with (root / "src/lib.rs").open("a") as lib:
+                lib.write("mod ghost {}\n")
+            for command, kinds in (
+                    ("cargo test --bins ghost", ["empty-target"]),
+                    ("cargo test --bins high_risk_recovery", []),
+                    ("cargo test --bins high_risk_recovery -- --skip high_risk_recovery",
+                     ["empty-target"])):
+                with self.subTest(command=command):
+                    self.assertEqual(self.judge(root, command), kinds)
+
     def test_default_selection_follows_cargo_test_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1011,7 +1098,7 @@ class TestIdOracleContract(unittest.TestCase):
         for command in ("cargo test --manifest-path tools/x/Cargo.toml other_mod::",
                         "cargo test -p other other_mod::",
                         "cargo test --doc other_mod::",
-                        "cargo test --lib -- --ignored high_risk_recovry::"):
+                        "cargo test --lib -- --ignored high_risk_recovery::"):
             with self.subTest(command=command):
                 diagnostics: list[str] = []
                 with tempfile.TemporaryDirectory() as tmp:

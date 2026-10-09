@@ -116,6 +116,7 @@ src/services/discord/commands/tui_passthrough.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/live_agent_recovery.rs
 src/services/discord/health/recovery/stall_alert.rs
+src/services/discord/health/turn_deliver/inject_codex_tests.rs
 src/services/discord/health/turn_deliver/inject_tests.rs
 src/services/discord/host_defer_gate_tests.rs
 src/services/discord/host_key_derivation_tests.rs
@@ -346,6 +347,7 @@ services::discord::commands::tui_passthrough::host_guard_tests
 services::discord::health::recovery::live_agent_recovery::host_guard_tests
 services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
+services::discord::health::turn_deliver::inject_codex_tests
 services::discord::health::turn_deliver::inject_tests
 services::discord::host_defer_gate::tests
 services::discord::host_key_derivation::tests
@@ -1186,6 +1188,7 @@ services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_ale
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::long_active_turn_preserves_authority_without_paging_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_capture_advance_has_defense_in_depth_suppression_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_flat_capture_pages_genuine_stall_pg
+services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_steers_the_open_turn_quietly_pg
 services::discord::health::turn_deliver::inject_tests::a_busy_pane_takes_the_input_whoever_holds_the_channel_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_caller_leaves_the_handback_and_its_kick_to_the_owner_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg
@@ -1437,6 +1440,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_busy_pane_tak
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_channel_outside_the_gate_reaches_no_injection_step_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_handback_that_never_lands_ends_the_message_with_a_notice_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_handback_with_an_unknown_answer_is_neither_resent_nor_queued_again_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_message_the_mailbox_already_runs_is_not_pasted_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_redelivered_injected_message_ends_at_the_lookup_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_taken_message_ends_before_a_pending_dm_reply_consumes_it_pg

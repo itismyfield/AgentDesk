@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use super::WriterAlarm;
 use super::binding::{BindingEvent, BindingEvents, BindingRecord, BindingTarget};
-use crate::services::tui_o::shadow::capture::file_identity;
+use crate::services::tui_o::shadow::capture::{FileMatch, file_identity, file_match};
 use crate::services::tui_o::shadow::identity::{RecordFact, classify};
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::InitSource;
@@ -272,6 +272,8 @@ pub fn holds_output<B: BindingEvents>(bindings: &B, channel: u64) -> bool {
 #[derive(Clone, Debug)]
 struct Pinned {
     source: SourceId,
+    /// The file's identity as this read opened it; `source` may keep a dev a reboot renumbered.
+    live: (u64, u64),
     len: u64,
     modified: Option<SystemTime>,
     hash: String,
@@ -283,7 +285,7 @@ impl Pinned {
         let path = self.source.path.display();
         let meta = std::fs::metadata(&self.source.path);
         let meta = meta.map_err(|error| format!("source {path}: {error}"))?;
-        if file_identity(&meta) != (self.source.dev, self.source.ino) {
+        if file_identity(&meta) != self.live {
             return Err(format!("source {path} was replaced"));
         }
         if meta.len() != self.len {
@@ -298,7 +300,7 @@ impl Pinned {
     fn version(&self) -> ReadVersion {
         ReadVersion {
             path: self.source.path.clone(),
-            identity: (self.source.dev, self.source.ino),
+            identity: self.live,
             len: self.len,
             modified: self.modified,
         }
@@ -395,7 +397,8 @@ fn read(source: &SourceId, len: u64, turns: Option<&mut Turns>) -> Result<Pinned
     let io = |error: std::io::Error| Unread::Other(format!("source {path}: {error}"));
     let file = File::open(&source.path).map_err(io)?;
     let meta = file.metadata().map_err(io)?;
-    if file_identity(&meta) != (source.dev, source.ino) {
+    let live = file_identity(&meta);
+    if file_match(source, live) == FileMatch::Other {
         return Err(Unread::Other(format!("source {path} was replaced")));
     }
     if meta.len() != len {
@@ -431,6 +434,7 @@ fn read(source: &SourceId, len: u64, turns: Option<&mut Turns>) -> Result<Pinned
     }
     Ok(Pinned {
         source: source.clone(),
+        live,
         len,
         modified: meta.modified().ok(),
         hash: hex::encode(hasher.finalize()),

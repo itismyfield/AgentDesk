@@ -36,9 +36,26 @@ pub fn extract_codex_rollout_user_prompt_with_entry_id(
     {
         return None;
     }
+    if is_codex_shell_command_record(payload) {
+        return None;
+    }
     let prompt = reject_synthetic_tui_user_prompt(extract_message_content_text(payload)?)?;
     let entry_id = extract_codex_rollout_entry_id(json, payload);
     Some((prompt, entry_id))
+}
+
+/// Codex records a `!cmd` run as a user message whose every item is the shell's; typed text
+/// with the same body names `user.text` (or nothing, on older writers) and stays an input.
+fn is_codex_shell_command_record(payload: &Value) -> bool {
+    payload
+        .pointer("/internal_chat_message_metadata_passthrough/content_item_kinds")
+        .and_then(Value::as_array)
+        .is_some_and(|kinds| {
+            !kinds.is_empty()
+                && kinds
+                    .iter()
+                    .all(|kind| kind.as_str() == Some("shell.user_command"))
+        })
 }
 
 fn extract_codex_rollout_entry_id(json: &Value, payload: &Value) -> Option<String> {
@@ -264,6 +281,10 @@ pub enum PromptObservation {
     /// Identity match with an already-relayed prompt: its row uuid (30min) or a
     /// hook-recorded `prompt_id` with the same text (4h). Never tails a response.
     SuppressedReplayedEntry,
+    /// An input AgentDesk injected joined a turn whose owner answers it; nothing is published.
+    InjectedSteer,
+    /// An injected input seen without its native turn; an observer naming the turn settles it.
+    InjectedDeferred,
     Ignored,
 }
 

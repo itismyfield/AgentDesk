@@ -369,3 +369,28 @@ fn a_record_inside_a_wake_ends_the_instance_and_only_its_successors_idle_submits
         assert_eq!(submitted, [4], "{wakes:?}");
     }
 }
+
+/// O names a renumbered file by its first logged source, but input keeps the log's latest one,
+/// which its strict opener still reads after the reboot.
+#[cfg(unix)]
+#[test]
+fn input_keeps_the_latest_dev_a_renumbered_resume_logged() {
+    use crate::services::tui_o::shadow::binding_reader::source_id_for;
+    use crate::services::tui_o::shadow::capture::{SourceCapture, renumber};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    std::fs::write(&path, b"{}\n").unwrap();
+    let logged = source_id_for("s", &path).unwrap();
+    let _reboot = renumber::shift(&path, 1 << 40);
+    let resumed = source_id_for("s", &path).unwrap();
+    assert_ne!(logged.dev, resumed.dev);
+    let startup = bound(BindingTarget::Source(logged.clone()), None, HOOK, false);
+    let mut resume = bound(BindingTarget::Source(resumed.clone()), None, HOOK, false);
+    if let BindingRecord::Bound { old, .. } = &mut resume {
+        *old = Some(logged);
+    }
+    let events = [event(1, "t1", "n1", startup), event(2, "t1", "n2", resume)];
+    let key = InputBindingView::of(&events).key().unwrap();
+    assert_eq!(key.source, resumed);
+    assert!(SourceCapture::open(key.source, 0).is_ok());
+}
