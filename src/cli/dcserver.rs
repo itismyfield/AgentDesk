@@ -854,6 +854,10 @@ pub fn handle_dcserver(token: Option<String>) {
     // via launchd, tmux, or directly).
     raise_fd_soft_limit(16_384);
 
+    // The schema-ahead hold ends when this install path holds a new file, so
+    // record what it held at startup.
+    let exe_watch = crate::cli::dcserver_pg_bootstrap::BinaryWatch::capture_current_exe();
+
     // Ensure directory structure exists first (needed for lock file)
     if let Some(root) = agentdesk_runtime_root() {
         for subdir in ["config", "credential", "runtime", "logs", "scripts"] {
@@ -1141,7 +1145,8 @@ pub fn handle_dcserver(token: Option<String>) {
         // silently dead. We now retry (1 + MAX_RETRIES attempts, 1→2→4→8→16s).
         // Both startup initialization and runtime pool activation remain inside
         // that envelope before any exit. #5993: exhaustion is reported by the
-        // stderr exit line below (the Discord DB-down alert is retired).
+        // stderr exit line below (the Discord DB-down alert is retired). A
+        // schema-ahead database instead holds until the binary is replaced.
         let discord_pg_pool = {
             let connect_cfg = ad_config.clone();
             let bootstrap = crate::cli::dcserver_pg_bootstrap::connect_with_backoff(
@@ -1169,6 +1174,10 @@ pub fn handle_dcserver(token: Option<String>) {
                     }
                 },
                 |delay| tokio::time::sleep(delay),
+                || {
+                    exe_watch.is_some()
+                        && crate::cli::dcserver_pg_bootstrap::schema_ahead_hold_enabled()
+                },
                 "cli::dcserver::postgres_startup_and_runtime",
             )
             .await;
@@ -1178,6 +1187,15 @@ pub fn handle_dcserver(token: Option<String>) {
                     pool
                 }
                 Err(failure) => {
+                    if let (true, Some(watch)) = (failure.schema_ahead, exe_watch.as_ref()) {
+                        crate::cli::dcserver_pg_bootstrap::hold_while_schema_ahead(
+                            watch,
+                            &failure.last_error,
+                            crate::cli::dcserver_pg_bootstrap::BinaryIdentity::of,
+                            tokio::time::sleep,
+                        )
+                        .await;
+                    }
                     eprintln!("  ✖ {}", failure.exhaustion_line());
                     std::process::exit(1);
                 }

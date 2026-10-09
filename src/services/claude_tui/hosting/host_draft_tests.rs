@@ -14,9 +14,10 @@ use crate::services::claude_tui::input::{
 };
 use crate::services::session_host::HostKind;
 
-const DRAFT: &str = "\u{276f} 남은 초안 한글";
-const BAKED_DRAFT: &str = "\u{273b} Baked for 3m 2s\n\u{276f} 남은 초안 한글";
-const EMPTY: &str = "Claude Code v2.1.141\n\n\u{276f} \nstatus";
+/// A Discord prompt AgentDesk typed whose Enter never landed, in the measured idle layout.
+const DRAFT: &str = "\n\n────────────────────\n\u{276f} [User: ann (ID: 7)] 남은 초안 한글\n────────────────────\n  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";
+const BAKED_DRAFT: &str = "\u{273b} Baked for 3m 2s\n\n────────────────────\n\u{276f} [User: ann (ID: 7)] 남은 초안 한글\n────────────────────\n  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";
+const EMPTY: &str = "Claude Code v2.1.141\n\n────────────────────\n\u{276f} \n────────────────────\n  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";
 const PROMPT: &str = "다음 입력";
 const SESSION_ID: &str = "0b7c4f0e-5d0b-4e57-9d55-3f3a3c1f7a10";
 
@@ -128,6 +129,11 @@ fn read() -> Vec<String> {
     vec!["capture".to_string(), "alive".to_string()]
 }
 
+/// The attributed read that proves the stranded draft is AgentDesk's before any clear key.
+fn owned() -> Vec<String> {
+    vec!["capture:draft".to_string()]
+}
+
 /// Keys and reads of one legacy clear attempt on a draft that stays.
 fn attempt(clear: DraftClear) -> Vec<String> {
     let tail = prompt_readiness_snapshot_from_capture(Some(DRAFT), true).pane_tail;
@@ -183,10 +189,10 @@ fn tf2_hosts_without_input_stop_before_any_host_call() {
 
 #[test]
 fn tf2_legacy_tmux_clear_then_submits_once() {
-    let mut scenario = Scenario::tmux(true, vec![DRAFT, DRAFT, EMPTY, EMPTY, EMPTY, EMPTY]);
+    let mut scenario = Scenario::tmux(true, vec![DRAFT, DRAFT, DRAFT, EMPTY, EMPTY, EMPTY, EMPTY]);
     scenario.cancel_on = Some(("literal:", 1));
     let (ended, calls, streamed) = follow_up("p6a2-cleared", scenario);
-    let cleared = [read(), read(), keys(&["C-e+C-u"]), read()].concat();
+    let cleared = [read(), owned(), read(), keys(&["C-e+C-u"]), read()].concat();
     let (clear, submit) = calls.split_at(cleared.len().min(calls.len()));
     assert_eq!(clear, &cleared[..], "{calls:?}");
     let literal = format!("literal:{PROMPT}");
@@ -209,10 +215,11 @@ fn tf2_legacy_tmux_recreates_only_after_retiring_the_session() {
     let retire = |code: &str, reason: &str| vec![format!("retire:{code}:{reason}")];
     let persisted = "stranded claude tui prompt draft persisted after clear attempts";
 
-    let strong = Scenario::tmux(true, vec![DRAFT; 10]);
+    let strong = Scenario::tmux(true, vec![DRAFT; 11]);
     let (ended, calls, _) = follow_up("p6a2-strong", strong);
     let expected = [
         read(),
+        owned(),
         read(),
         attempt(DraftClear::Strong),
         attempt(DraftClear::Strong),
@@ -223,10 +230,11 @@ fn tf2_legacy_tmux_recreates_only_after_retiring_the_session() {
     assert_eq!(calls, expected);
 
     // An unknown transcript recreates only when the pane shows a finished turn.
-    let gentle = Scenario::tmux(false, vec![BAKED_DRAFT; 6]);
+    let gentle = Scenario::tmux(false, vec![BAKED_DRAFT; 7]);
     let (ended, calls, _) = follow_up("p6a2-gentle", gentle);
     let expected = [
         read(),
+        owned(),
         read(),
         attempt(DraftClear::Gentle),
         attempt(DraftClear::Gentle),
@@ -241,6 +249,7 @@ fn tf2_legacy_tmux_recreates_only_after_retiring_the_session() {
     let (ended, calls, _) = follow_up("p6a2-ack-lost", ack_lost);
     let expected = [
         read(),
+        owned(),
         read(),
         keys(&["C-e+C-u"]),
         retire(
@@ -261,7 +270,10 @@ fn tf2_swap_stop_or_lingering_draft_never_recreates() {
     let (ended, calls, streamed) = follow_up("p6a2-swap", swapped);
     let stopped = HostInputOutcome::Indeterminate { confirmed: 1 };
     assert_eq!(ended, Ended::Terminal(Err(stopped_error(&stopped))));
-    assert_eq!(calls, [read(), read(), keys(&["C-e+C-u"]), read()].concat());
+    assert_eq!(
+        calls,
+        [read(), owned(), read(), keys(&["C-e+C-u"]), read()].concat()
+    );
     stopped_without_side_effects("swap", &ended, &calls, streamed);
 
     // The host is swapped before the first clear key.
@@ -270,7 +282,7 @@ fn tf2_swap_stop_or_lingering_draft_never_recreates() {
     let (ended, calls, streamed) = follow_up("p6a2-refused-first", refused_first);
     let refused = HostInputOutcome::Refused(InputRefusal::IdentityMismatch);
     assert_eq!(ended, Ended::Terminal(Err(stopped_error(&refused))));
-    assert_eq!(calls, [read(), read()].concat());
+    assert_eq!(calls, [read(), owned(), read()].concat());
     stopped_without_side_effects("refused first", &ended, &calls, streamed);
 
     // ACK lost, then the host is swapped before the retire: no kill, no fresh ID.
@@ -279,7 +291,10 @@ fn tf2_swap_stop_or_lingering_draft_never_recreates() {
     retire_refused.refuse = &[1];
     let (ended, calls, streamed) = follow_up("p6a2-retire-refused", retire_refused);
     assert_eq!(ended, Ended::Terminal(Err(stopped_error(&refused))));
-    assert_eq!(calls, [read(), read(), keys(&["C-e+C-u"])].concat());
+    assert_eq!(
+        calls,
+        [read(), owned(), read(), keys(&["C-e+C-u"])].concat()
+    );
     stopped_without_side_effects("retire refused", &ended, &calls, streamed);
 
     // A stop lands during the clear.
@@ -287,15 +302,19 @@ fn tf2_swap_stop_or_lingering_draft_never_recreates() {
     stopped.cancel_on = Some(("keys:", 1));
     let (ended, calls, streamed) = follow_up("p6a2-stop", stopped);
     assert_eq!(ended, Ended::Terminal(Ok(())));
-    assert_eq!(calls, [read(), read(), keys(&["C-e+C-u"])].concat());
+    assert_eq!(
+        calls,
+        [read(), owned(), read(), keys(&["C-e+C-u"])].concat()
+    );
     stopped_without_side_effects("stop", &ended, &calls, streamed);
 
     // An unknown transcript keeps the draft and defers to the busy wait; a stop ends it.
     let mut lingering = Scenario::tmux(false, vec![DRAFT; 10]);
-    lingering.cancel_on = Some(("capture", 7));
+    lingering.cancel_on = Some(("capture", 8));
     let (ended, calls, streamed) = follow_up("p6a2-lingering", lingering);
     let expected = [
         read(),
+        owned(),
         read(),
         attempt(DraftClear::Gentle),
         attempt(DraftClear::Gentle),

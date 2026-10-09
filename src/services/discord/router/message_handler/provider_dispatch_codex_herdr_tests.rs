@@ -1397,3 +1397,50 @@ fn a_late_stop_refused_before_any_send_runs_at_the_next_complete_record_pg() {
     );
     assert_eq!(repeated, "AlreadyRequested");
 }
+
+// A stop that landed before the turn took its stop state leaves the turn to write nothing: it
+// launches nothing, sends nothing to the pane and takes no stop state.
+#[test]
+fn a_turn_cancelled_before_its_stop_state_writes_nothing_pg() {
+    let fx = Fixture::admitted("cancelled-first");
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let token = Arc::new(CancelToken::new());
+    token.publish_cancel("mailbox_cancel_active_turn");
+    let endpoint = HerdrLaunchEndpoint {
+        execution_node: NODE.into(),
+        config_key: KEY.into(),
+        socket_addr: fx.rig.socket().display().to_string(),
+        herdr_session: SESSION.into(),
+    };
+    let _runtime = fx.rt.enter();
+    let _registry = fx.rig.registry_on_this_thread();
+    let _admission = open_admission();
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    let turn = CodexHerdrTurn {
+        pool: &fx.pool,
+        owner: fx.owner.clone(),
+        channel_id: CHANNEL,
+        endpoint,
+        row: Some(&HostedRecord::Legacy),
+        prompt: "질문",
+        working_dir: fx.cwd.to_str().unwrap(),
+        system_prompt: None,
+        allowed_tools: &[],
+        model: None,
+        fast_mode: None,
+        goals: None,
+        compact_token_limit: None,
+        cancel: Some(token.clone()),
+    };
+    let result = herdr_turn::execute(turn, &ports, sender);
+    let cancelled = crate::services::codex_tui::input::PROMPT_READY_CANCELLED_ERROR;
+    assert_eq!(result, Err(cancelled.to_string()));
+    assert!(
+        launcher.nonces.lock().unwrap().is_empty(),
+        "nothing launched"
+    );
+    assert!(fx.rig.sends().is_empty(), "nothing sent to the pane");
+    assert!(token.herdr_interrupt_state().is_none());
+    assert!(token.tmux_session_name().is_none());
+}

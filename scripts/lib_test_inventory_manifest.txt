@@ -56,14 +56,19 @@ cli::client::health_compare_tests::render_machine_compare_table_synthesises_offl
 cli::client::health_compare_tests::validate_status_payload_rejects_missing_arrays
 cli::client::runtime_config::tests::api_get_payload_preserves_explicit_keys_for_cli_set
 cli::client::runtime_config::tests::plain_cli_set_stays_metadata_less_for_server_authority
+cli::dcserver_pg_bootstrap::tests::a_schema_ahead_failure_stops_at_once_only_while_the_hold_is_on
 cli::dcserver_pg_bootstrap::tests::backoff_delay_follows_exponential_schedule
 cli::dcserver_pg_bootstrap::tests::backoff_delay_saturates_at_cap
 cli::dcserver_pg_bootstrap::tests::connect_exhausts_budget_and_reports_last_error
 cli::dcserver_pg_bootstrap::tests::connect_retries_then_succeeds_recording_backoff
 cli::dcserver_pg_bootstrap::tests::connect_returns_immediately_on_first_success
 cli::dcserver_pg_bootstrap::tests::exhausted_ok_none_reports_required_message
+cli::dcserver_pg_bootstrap::tests::hold_ends_for_a_binary_replaced_before_it_started
+cli::dcserver_pg_bootstrap::tests::hold_ends_only_when_the_install_path_holds_a_new_file
 cli::dcserver_pg_bootstrap::tests::pool_timeout_diagnostic_includes_timestamp_source_and_attempt
+cli::dcserver_pg_bootstrap::tests::schema_ahead_needs_every_unknown_version_past_the_latest
 cli::dcserver_pg_bootstrap::tests::slow_startup_timeout_exhausts_retries_and_reports_the_exit_line
+cli::dcserver_pg_bootstrap::tests::startup_initialization_reports_a_database_ahead_of_the_binary_pg
 cli::dcserver_restart_marker::tests::quick_restart_marker_contains_nonce_and_shell_protocol_fields
 cli::dcserver_restart_marker::tests::quick_restart_marker_create_new_preserves_existing_owner
 cli::dcserver_restart_marker::tests::staging_publish_eexist_preserves_existing_owner
@@ -1734,6 +1739,7 @@ services::claude_tui::busy_inject::stash_tests::hold_tests::a_restored_draft_is_
 services::claude_tui::busy_inject::stash_tests::hold_tests::a_startup_dialog_is_dismissed_only_where_no_draft_is_protected
 services::claude_tui::busy_inject::stash_tests::hold_tests::only_an_allowlisted_channel_takes_the_stash_path
 services::claude_tui::busy_inject::stash_tests::hold_tests::the_tui_send_endpoint_keeps_off_a_pane_in_recovery
+services::claude_tui::busy_inject::stash_tests::hold_tests::the_tui_send_endpoint_never_submits_a_new_message_over_an_unseen_draft
 services::claude_tui::busy_inject::stash_tests::only_the_measured_placeholder_shape_reads_as_an_empty_composer
 services::claude_tui::busy_inject::stash_tests::the_stash_is_read_from_the_status_row_above_the_active_box_only
 services::claude_tui::busy_inject_tests::a_held_composer_lock_is_tried_three_times_without_any_tmux_call
@@ -2029,7 +2035,7 @@ services::claude_tui::input::tests::pre_enter_modal_guard_blocks_dialogs_but_all
 services::claude_tui::input::tests::prompt_draft_cleanup_actions_are_cancel_agnostic
 services::claude_tui::input::tests::prompt_marker_does_not_confirm_readiness_when_draft_is_present
 services::claude_tui::input::tests::prompt_ready_debug_tail_keeps_recent_lines_and_utf8_boundaries
-services::claude_tui::input::tests::prompt_ready_timeout_clears_only_retryable_followup_drafts
+services::claude_tui::input::tests::prompt_ready_timeout_clear_candidates_are_only_retryable_followup_drafts
 services::claude_tui::input::tests::prompt_ready_timeout_error_is_classified
 services::claude_tui::input::tests::prompt_ready_timeout_reason_reflects_snapshot
 services::claude_tui::input::tests::prompt_ready_timeouts_are_split_for_fresh_and_followup_turns
@@ -2061,6 +2067,7 @@ services::claude_tui::input::tests::wait_for_prompt_ready_is_public_and_returns_
 services::claude_tui::input::tests::wait_for_prompt_ready_returns_cancelled_for_pre_cancelled_token
 services::claude_tui::input::tests::warm_followup_lock_revalidation_keeps_idle_transcript_fallback
 services::claude_tui::input::tests::whitespace_only_prompt_is_rejected_after_normalization
+services::claude_tui::input::timeout_draft_tests::a_follow_up_timing_out_on_a_person_draft_keeps_every_key
 services::claude_tui::memento_feedback::tests::completed_tombstones_allow_unrelated_searches_and_expire_for_new_identity_lifetimes
 services::claude_tui::memento_feedback::tests::different_unknown_search_payloads_without_tool_use_id_stay_distinct
 services::claude_tui::memento_feedback::tests::distinct_unknown_search_tool_uses_keep_independent_retry_budgets
@@ -5961,6 +5968,7 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_pending_pane_whose_own_start_was_logged_takes_no_second_first_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_release_is_not_durable_only_after_its_unlink_and_kept_only_without_it_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_stop_before_the_attach_sends_one_escape_at_the_turns_own_start_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_turn_cancelled_before_its_stop_state_writes_nothing_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::an_unclear_first_write_keeps_the_hold_and_the_next_prompt_writes_nothing_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::cold_start_prompts_once_then_its_own_session_start_binds_it_and_ends_the_hold_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_pg
@@ -8273,6 +8281,8 @@ services::discord::turn_bridge::followup_requeue::tests::already_queued_refusal_
 services::discord::turn_bridge::followup_requeue::tests::c1b_timeout_consumer_uses_preclose_bridge_effect_for_binding_and_all_sources
 services::discord::turn_bridge::followup_requeue::tests::non_watcher_strict_plan_waits_for_capped_retry_veto_after_projection_4893
 services::discord::turn_bridge::followup_requeue::tests::persistence_failure_is_not_reported_as_requeued
+services::discord::turn_bridge::followup_requeue::tests::person_draft_tests::a_queued_follow_up_waits_behind_a_person_draft_and_is_sent_once_after_it
+services::discord::turn_bridge::followup_requeue::tests::person_draft_tests::an_unread_composer_holds_the_follow_up_without_protecting_the_pane
 services::discord::turn_bridge::followup_requeue::tests::pre_submit_retry_adds_queue_reaction_immediately_through_reconciler
 services::discord::turn_bridge::followup_requeue::tests::pre_submit_retry_reaction_failure_emits_exactly_one_referenced_fallback
 services::discord::turn_bridge::followup_requeue::tests::retry_cap_preserves_entry_and_stops_auto_kickoff_4888
@@ -8710,6 +8720,7 @@ services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_host_owned_s
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_judged_cancel_leaves_a_turn_that_replaced_the_judged_one
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_name_only_preserve_stop_keeps_a_turn_on_another_host
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_preserve_stop_keeps_a_turn_on_another_host_before_any_write
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_judged_before_its_herdr_turn_prepared_never_cancels_it
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_keeps_a_turn_it_could_not_read
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_on_another_host_leaves_a_real_tmux_session_as_it_was
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::an_idle_skip_reads_the_judged_session_not_a_later_binding
@@ -9748,8 +9759,10 @@ services::process::simple_cancel_watcher_tests::watcher_kills_sleeping_child_whe
 services::process::simple_cancel_watcher_tests::watcher_reaps_grandchild_when_child_uses_process_group
 services::process::stream_child::stream_queue::tests::concurrent_seal_includes_a_racing_send_if_and_only_if_publication_succeeds
 services::process::stream_child::stream_queue::tests::seal_preserves_published_terminal_and_rejects_every_sender_clone
+services::provider::cancel_token_claude_interrupt::tests::a_herdr_stop_state_is_prepared_again_only_by_its_owner
 services::provider::cancel_token_claude_interrupt::tests::a_live_herdr_turn_is_found_by_its_own_nonce_beside_other_turns
 services::provider::cancel_token_claude_interrupt::tests::a_nonce_two_live_herdr_turns_share_names_neither
+services::provider::cancel_token_claude_interrupt::tests::a_stop_and_a_herdr_prepare_are_ordered_by_the_slot
 services::provider::cancel_token_claude_interrupt::tests::session_generation_advance_blocks_stale_stop_operation
 services::provider::cancel_token_claude_interrupt::tests::stale_pending_stop_is_rejected_after_next_generation_publishes
 services::provider::cancel_token_claude_interrupt::tests::stale_rebind_cannot_replace_a_newer_session_generation

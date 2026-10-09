@@ -416,12 +416,24 @@ fn file_identity(_: &std::fs::Metadata) -> Option<(u64, u64)> {
 }
 
 impl CancelToken {
-    /// Install observation before input; only Herdr executors use this slot.
+    /// [`Self::try_prepare_herdr_interrupt`] for a test turn that must take its state.
+    #[cfg(test)]
     pub(crate) fn prepare_herdr_interrupt(
         &self,
         provider: ProviderKind,
         owner: &crate::db::dispatched_sessions::hosted_execution::HostedOwner,
     ) -> Arc<HerdrInterruptState> {
+        let state = self.try_prepare_herdr_interrupt(provider, owner);
+        state.expect("a test turn takes its Herdr stop state")
+    }
+
+    /// Install observation before input; only Herdr executors use this slot. `None`, installing
+    /// nothing, once a cancel landed first or when the slot holds another owner's turn.
+    pub(crate) fn try_prepare_herdr_interrupt(
+        &self,
+        provider: ProviderKind,
+        owner: &crate::db::dispatched_sessions::hosted_execution::HostedOwner,
+    ) -> Option<Arc<HerdrInterruptState>> {
         let mut slot = self
             .herdr_interrupt
             .lock()
@@ -431,7 +443,14 @@ impl CancelToken {
             if herdr_interrupt_mutant("prepare_reset") {
                 self.claude_interrupt_claim.store(0, Ordering::Release);
             }
-            return state.clone();
+            return (state.owner == *owner).then(|| state.clone());
+        }
+        // A stop decided under this slot before it held a state cancelled a turn that wrote nothing.
+        let cancelled = self.cancelled.load(Ordering::Acquire);
+        #[cfg(test)]
+        let cancelled = cancelled && !herdr_interrupt_mutant("prepare_ignores_cancel");
+        if cancelled {
+            return None;
         }
         let state = Arc::new(HerdrInterruptState {
             owner: owner.clone(),
@@ -456,7 +475,7 @@ impl CancelToken {
             turns.entry(key).or_default().push(Arc::downgrade(&state));
         }
         *slot = Some(state.clone());
-        state
+        Some(state)
     }
 
     pub(crate) fn herdr_interrupt_state(&self) -> Option<Arc<HerdrInterruptState>> {
@@ -464,6 +483,49 @@ impl CancelToken {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+}
+
+/// A guarded channel stop's cancel, decided once under the token's Herdr slot and handed back as
+/// is: a later change to the token never turns one outcome into another.
+#[derive(Clone)]
+pub(crate) enum StopCancel {
+    /// The token was not the channel's turn: nothing was published.
+    NotCurrent,
+    /// The token was already cancelling: nothing was published.
+    AlreadyStopping(Arc<CancelToken>),
+    /// This stop published the cancel.
+    Published(Arc<CancelToken>),
+    /// The turn's Herdr state was installed first: nothing was published, the stop takes the
+    /// turn's intent path.
+    Herdr(Arc<CancelToken>),
+}
+
+impl StopCancel {
+    /// The mailbox's cancel of its current `token`, under the slot lock a Herdr prepare takes;
+    /// without settlement it is the existing guarded cancel and takes no slot.
+    pub(crate) fn decide(token: Option<Arc<CancelToken>>, reason: String) -> Self {
+        let Some(token) = token else {
+            return Self::NotCurrent;
+        };
+        let settled = herdr_stop_settlement_available();
+        #[cfg(test)]
+        let settled = settled || herdr_interrupt_mutant("p2b_settlement_unchecked");
+        let slot = settled.then(|| {
+            token
+                .herdr_interrupt
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        });
+        if token.cancelled.load(Ordering::Relaxed) {
+            return Self::AlreadyStopping(token.clone());
+        }
+        if slot.as_ref().is_some_and(|slot| slot.is_some()) {
+            return Self::Herdr(token.clone());
+        }
+        token.publish_cancel(reason);
+        drop(slot);
+        Self::Published(token)
     }
 }
 
@@ -956,5 +1018,76 @@ mod tests {
         drop((b, second));
         let survivor = herdr_turn(&logical, &nonce);
         assert!(survivor.is_some_and(|found| Arc::ptr_eq(&found, &a)));
+    }
+
+    /// A token's Herdr state is taken once, by its own owner: another owner's prepare gets none
+    /// and changes nothing.
+    #[test]
+    fn a_herdr_stop_state_is_prepared_again_only_by_its_owner() {
+        let logical = format!("AgentDesk-codex-prepare-owner-{}", std::process::id());
+        let token = CancelToken::new();
+        let state =
+            token.try_prepare_herdr_interrupt(ProviderKind::Codex, &herdr_owner("1", &logical));
+        let state = state.expect("a fresh token takes its state");
+        let again =
+            token.try_prepare_herdr_interrupt(ProviderKind::Codex, &herdr_owner("1", &logical));
+        assert!(again.is_some_and(|again| Arc::ptr_eq(&again, &state)));
+        let other = herdr_owner("2", "AgentDesk-codex-prepare-owner-other");
+        assert!(
+            token
+                .try_prepare_herdr_interrupt(ProviderKind::Codex, &other)
+                .is_none()
+        );
+        assert_eq!(token.tmux_session_name().as_deref(), Some(logical.as_str()));
+    }
+
+    /// Under the Herdr slot a stop before a prepare publishes and the prepare takes nothing; after
+    /// one it leaves the token to its intent path; without settlement it is the existing cancel.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_and_a_herdr_prepare_are_ordered_by_the_slot() {
+        let owner = herdr_owner("1", "AgentDesk-codex-stop-order");
+        let reason = || "mailbox_cancel_active_turn".to_string();
+        let first = Arc::new(CancelToken::new());
+        let decided = StopCancel::decide(Some(first.clone()), reason());
+        assert!(matches!(decided, StopCancel::Published(_)));
+        assert!(first.cancelled.load(Ordering::SeqCst));
+        assert!(
+            first
+                .try_prepare_herdr_interrupt(ProviderKind::Codex, &owner)
+                .is_none()
+        );
+        assert!(first.herdr_interrupt_state().is_none());
+        assert!(
+            first.tmux_session_name().is_none(),
+            "a refused prepare binds nothing"
+        );
+
+        let prepared = Arc::new(CancelToken::new());
+        prepared.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+        let decided = StopCancel::decide(Some(prepared.clone()), reason());
+        assert!(matches!(decided, StopCancel::Herdr(_)));
+        assert!(!prepared.cancelled.load(Ordering::SeqCst));
+        assert!(prepared.cancel_source().is_none());
+
+        prepared.publish_cancel("earlier");
+        let decided = StopCancel::decide(Some(prepared.clone()), reason());
+        assert!(matches!(decided, StopCancel::AlreadyStopping(_)));
+        assert_eq!(prepared.cancel_source().as_deref(), Some("earlier"));
+        assert!(matches!(
+            StopCancel::decide(None, reason()),
+            StopCancel::NotCurrent
+        ));
+
+        let unsettled = Arc::new(CancelToken::new());
+        unsettled.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+        HERDR_SETTLEMENT_OVERRIDE.set(false);
+        let decided = StopCancel::decide(Some(unsettled.clone()), reason());
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        assert!(
+            matches!(decided, StopCancel::Published(_)),
+            "without settlement it cancels"
+        );
+        assert!(unsettled.cancelled.load(Ordering::SeqCst));
     }
 }
