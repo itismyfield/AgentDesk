@@ -223,6 +223,7 @@ src/services/settings.rs
 src/services/stale_turn_reconciler.rs
 src/services/tmux_turn_liveness/tests_pg.rs
 src/services/tui_o/alarm.rs
+src/services/tui_o/exact_pg_tests.rs
 src/services/turn_host_tests.rs
 src/services/turn_lifecycle.rs
 src/voice/announce_meta.rs
@@ -464,6 +465,7 @@ services::settings::tests
 services::stale_turn_reconciler::tests
 services::tmux_turn_liveness::tests_pg
 services::tui_o::alarm::postgres_tests
+services::tui_o::exact_pg::tests
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
 voice::announce_meta::tests
@@ -1747,6 +1749,12 @@ services::tui_o::alarm::postgres_tests::distinct_channels_and_kinds_enqueue_once
 services::tui_o::alarm::postgres_tests::suppression_settles_existing_rows_and_errors_retry_pg
 services::tui_o::alarm::postgres_tests::waiting_incidents_repeat_once_recur_and_replay_independently_pg
 services::tui_o::alarm::postgres_tests::writer_alarm_retries_after_insert_failure_without_another_raise_pg
+services::tui_o::exact_pg::tests::exact_ack_pg_waits_for_commit_barrier
+services::tui_o::exact_pg::tests::exact_child_ack_precedes_terminal_seal_pg
+services::tui_o::exact_pg::tests::exact_metadata_pg_restore_and_terminal_port_stub
+services::tui_o::exact_pg::tests::exact_off_pg_statement_trace_and_files_zero
+services::tui_o::exact_pg::tests::exact_pg_process_reader_uses_only_metadata
+services::tui_o::exact_pg::tests::exact_settled_ack_names_normalized_pg_payload
 services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg
 services::turn_lifecycle::host_guard_tests::force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg
