@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use super::{CancelActiveTurnResult, ChannelMailboxHandle, ChannelMailboxMsg};
+use super::{CancelActiveTurnResult, ChannelMailboxHandle, ChannelMailboxMsg, StopCancel};
 use crate::services::provider::CancelToken;
 use crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available;
 
@@ -29,6 +29,24 @@ impl ChannelMailboxHandle {
             token: None,
             already_stopping: false,
         })
+    }
+
+    /// A user stop's guarded cancel, decided once under the token's Herdr slot and returned as
+    /// decided, so a turn whose Herdr state came first keeps its token for the intent path.
+    pub(crate) async fn cancel_active_turn_if_current_unless_herdr(
+        &self,
+        expected_token: Arc<CancelToken>,
+        reason: String,
+    ) -> StopCancel {
+        self.request(
+            |reply| ChannelMailboxMsg::CancelActiveTurnIfCurrentUnlessHerdr {
+                expected_token,
+                reason,
+                reply,
+            },
+        )
+        .await
+        .unwrap_or(StopCancel::NotCurrent)
     }
 }
 

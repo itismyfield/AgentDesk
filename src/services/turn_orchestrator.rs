@@ -563,24 +563,6 @@ impl ChannelMailboxHandle {
         })
     }
 
-    /// A user stop's guarded cancel, decided once under the token's Herdr slot and returned as
-    /// decided, so a turn whose Herdr state came first keeps its token for the intent path.
-    pub(crate) async fn cancel_active_turn_if_current_unless_herdr(
-        &self,
-        expected_token: Arc<CancelToken>,
-        reason: String,
-    ) -> StopCancel {
-        self.request(
-            |reply| ChannelMailboxMsg::CancelActiveTurnIfCurrentUnlessHerdr {
-                expected_token,
-                reason,
-                reply,
-            },
-        )
-        .await
-        .unwrap_or(StopCancel::NotCurrent)
-    }
-
     /// #2374 Codex round-1 fix (HIGH-1) — actor-owned guarded cancel
     /// keyed by `user_message_id`. The handoff cancel-tombstone retry
     /// path must only cancel the target-channel turn that was actually
