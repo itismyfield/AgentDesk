@@ -44,7 +44,7 @@ jobs:
         run: ./scripts/main-ci-triage.sh
 
   nightly:
-    name: Record the first completed nightly failure
+    name: Record nightly failure or recovery
     if: >-
       github.repository == 'itismyfield/AgentDesk' &&
       github.event.repository.full_name == github.repository &&
@@ -54,7 +54,7 @@ jobs:
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.name == 'CI Nightly' &&
       (github.event.workflow_run.event == 'schedule' || github.event.workflow_run.event == 'workflow_dispatch') &&
-      github.event.workflow_run.conclusion == 'failure'
+      (github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'success')
     concurrency:
       group: agentdesk-nightly-failure-triage
       cancel-in-progress: false
@@ -67,7 +67,7 @@ jobs:
           repository: itismyfield/AgentDesk
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Record nightly failure
+      - name: Record nightly failure or recovery
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AGENTDESK_API_URL: ${{ vars.AGENTDESK_API_URL }}

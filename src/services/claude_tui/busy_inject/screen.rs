@@ -386,6 +386,22 @@ fn measured_width(c: char) -> Option<usize> {
     }
 }
 
+/// Whether the bottom-most `❯` row, and the rows under it down to a full border, hold text not
+/// drawn faint; `None` without a `❯` row or its closing border. It needs no measured layout.
+pub(super) fn typed(capture: &str) -> Option<bool> {
+    let rows: Vec<Row> = capture.lines().map(row).collect();
+    let prompt_row = |row: &Row| row.plain.trim_start().starts_with('❯');
+    let prompt = rows.iter().rposition(prompt_row)?;
+    let border = |row: &Row| {
+        let text = row.plain.trim();
+        text.chars().count() >= MIN_BORDER && text.chars().all(|c| c == '─')
+    };
+    let end = prompt + 1 + rows[prompt + 1..].iter().position(border)?;
+    let solid = rows[prompt..end].iter().map(|row| row.solid.as_str());
+    let text = solid.collect::<String>().replacen('❯', "", 1);
+    Some(text.chars().any(|c| !c.is_whitespace()))
+}
+
 /// The composer shows exactly the frame, row for row, with the draft still stashed.
 pub(super) fn owns(capture: &str, frame: &str) -> bool {
     let screen = read(capture);

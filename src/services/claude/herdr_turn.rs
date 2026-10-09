@@ -121,11 +121,22 @@ pub(crate) fn execute(
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
     let runtime = Handle::try_current().map_err(|error| format!("herdr turn: {error}"))?;
-    // The turn takes its stop state before launch, so a stop is recorded whatever the switch says.
+    // The turn takes its stop state before launch, so a stop is recorded whatever the switch says;
+    // a stop that cancelled it first, or another turn's state, leaves it to write nothing.
     if herdr_stop_settlement_available()
         && let Some(token) = turn.cancel.as_deref()
+        && token
+            .try_prepare_herdr_interrupt(ProviderKind::Claude, &turn.owner)
+            .is_none()
     {
-        token.prepare_herdr_interrupt(ProviderKind::Claude, &turn.owner);
+        return Err(
+            match token.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                true => {
+                    crate::services::claude_tui::input::PROMPT_READY_CANCELLED_ERROR.to_string()
+                }
+                false => "herdr turn: the token holds another turn's stop state".to_string(),
+            },
+        );
     }
     let attached = match turn.row {
         Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {

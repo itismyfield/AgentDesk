@@ -93,6 +93,7 @@ src/
 │   ├── agent_channels.rs
 │   ├── cluster_role.rs
 │   ├── disk_write.rs
+│   ├── peer_filter.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_settings.rs
 │   ├── session_hosts.rs
@@ -154,6 +155,8 @@ src/
 │   │   ├── mod.rs
 │   │   └── transitions.rs
 │   ├── postgres/
+│   │   ├── advisory_lock.rs
+│   │   ├── advisory_lock_tests.rs
 │   │   ├── shared_config.rs
 │   │   └── test_db_reclaim.rs
 │   ├── prompt_manifests/
@@ -447,6 +450,7 @@ src/
 │   │   ├── voice_conductor.rs
 │   │   └── voice_config.rs
 │   ├── web_surface/
+│   │   ├── peer_filter.rs
 │   │   └── tests.rs
 │   ├── worker_registry/
 │   │   ├── registry.rs
@@ -608,7 +612,8 @@ src/
 │   │   │   └── warm_followup.rs
 │   │   ├── input/
 │   │   │   ├── draft_hold.rs
-│   │   │   └── final_ready_tests.rs
+│   │   │   ├── final_ready_tests.rs
+│   │   │   └── timeout_draft_tests.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
 │   │   ├── busy_inject.rs
@@ -1336,6 +1341,7 @@ src/
 │   │   │   ├── gateway_handback_integration_tests.rs
 │   │   │   ├── gateway_handback_mock.rs
 │   │   │   ├── gateway_lease.rs
+│   │   │   ├── gateway_lease_expiry.rs
 │   │   │   ├── gateway_lease_recovery.rs
 │   │   │   ├── gateway_lease_recovery_tests.rs
 │   │   │   ├── gateway_lease_tests.rs
@@ -1640,6 +1646,9 @@ src/
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── o_panel_below.rs
 │   │   │   │   └── o_panel_below_tests.rs
+│   │   │   ├── followup_requeue/
+│   │   │   │   └── tests/
+│   │   │   │       └── person_draft_tests.rs
 │   │   │   ├── headless_delivery/
 │   │   │   │   ├── durable_outbox.rs
 │   │   │   │   ├── intake_outbox_argument.rs
@@ -2362,12 +2371,15 @@ src/
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_home_tests.rs
+│   │   │   ├── host_renumber_tests.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── input_facts.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── pieces.rs
 │   │   │   ├── reclaim_tests.rs
 │   │   │   ├── recovery_tests.rs
+│   │   │   ├── renumber_tests.rs
+│   │   │   ├── renumbered.rs
 │   │   │   ├── resume.rs
 │   │   │   ├── resume_tests.rs
 │   │   │   ├── retire_tests.rs

@@ -138,6 +138,7 @@ pub(super) fn gate_closed_arm(
         M::CancelActiveTurnWithReason { .. }
         | M::CancelActiveTurnIfCurrent { .. }
         | M::CancelActiveTurnIfCurrentWithReason { .. }
+        | M::CancelActiveTurnIfCurrentUnlessHerdr { .. }
         | M::CancelActiveTurnIfUserMessageWithReason { .. } => "CancelActiveTurn",
         M::CancelActiveBackgroundTurnIfCurrent { .. } => "CancelActiveBackgroundTurnIfCurrent",
         M::HasPendingSoftQueue { .. } => "HasPendingSoftQueue",

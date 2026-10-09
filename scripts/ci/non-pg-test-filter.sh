@@ -16,6 +16,7 @@ NON_PG_SKIP_ARGS=(
   --skip pg_
   --skip postgres
   --skip cli::channel_home::tests
+  --skip cli::dcserver_pg_bootstrap::tests
   --skip cli::herdr::tests
   --skip db::auto_queue::entries::dispatch_failure::tests
   --skip db::auto_queue::entries::tests
@@ -41,6 +42,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::intake_outbox_dispatched_audit::postgres_tests
   --skip db::o_channel_activation::postgres_tests
   --skip db::o_channel_homes::tests
+  --skip db::postgres::advisory_lock::tests
   --skip db::postgres::test_db_reclaim::tests
   --skip db::postgres::tests
   --skip db::prompt_manifests::tests
@@ -251,13 +253,17 @@ NON_PG_SKIP_ARGS=(
   --skip voice::turn_link::tests
 )
 NON_PG_FILTER_REPLAY=(
+  cli::dcserver_pg_bootstrap::tests::a_schema_ahead_failure_stops_at_once_only_while_the_hold_is_on
   cli::dcserver_pg_bootstrap::tests::backoff_delay_follows_exponential_schedule
   cli::dcserver_pg_bootstrap::tests::backoff_delay_saturates_at_cap
   cli::dcserver_pg_bootstrap::tests::connect_exhausts_budget_and_reports_last_error
   cli::dcserver_pg_bootstrap::tests::connect_retries_then_succeeds_recording_backoff
   cli::dcserver_pg_bootstrap::tests::connect_returns_immediately_on_first_success
   cli::dcserver_pg_bootstrap::tests::exhausted_ok_none_reports_required_message
+  cli::dcserver_pg_bootstrap::tests::hold_ends_for_a_binary_replaced_before_it_started
+  cli::dcserver_pg_bootstrap::tests::hold_ends_only_when_the_install_path_holds_a_new_file
   cli::dcserver_pg_bootstrap::tests::pool_timeout_diagnostic_includes_timestamp_source_and_attempt
+  cli::dcserver_pg_bootstrap::tests::schema_ahead_needs_every_unknown_version_past_the_latest
   cli::dcserver_pg_bootstrap::tests::slow_startup_timeout_exhausts_retries_and_reports_the_exit_line
   cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
   db::auto_queue::entries::tests::pinned_dispatch_identity_is_declared_before_the_stale_retry_loop
@@ -768,6 +774,7 @@ PG_INCLUDE_ARGS_SHARD_0=(
 PG_INCLUDE_ARGS_SHARD_1=(
   _pg
   cli::channel_home::tests
+  cli::dcserver_pg_bootstrap::tests
   cli::herdr::tests
   db::auto_queue::entries::dispatch_failure::tests
   db::auto_queue::entries::tests
@@ -793,6 +800,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::intake_outbox_dispatched_audit::postgres_tests
   db::o_channel_activation::postgres_tests
   db::o_channel_homes::tests
+  db::postgres::advisory_lock::tests
   db::postgres::test_db_reclaim::tests
   db::postgres::tests
   db::prompt_manifests::tests

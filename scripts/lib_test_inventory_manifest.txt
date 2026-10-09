@@ -56,14 +56,19 @@ cli::client::health_compare_tests::render_machine_compare_table_synthesises_offl
 cli::client::health_compare_tests::validate_status_payload_rejects_missing_arrays
 cli::client::runtime_config::tests::api_get_payload_preserves_explicit_keys_for_cli_set
 cli::client::runtime_config::tests::plain_cli_set_stays_metadata_less_for_server_authority
+cli::dcserver_pg_bootstrap::tests::a_schema_ahead_failure_stops_at_once_only_while_the_hold_is_on
 cli::dcserver_pg_bootstrap::tests::backoff_delay_follows_exponential_schedule
 cli::dcserver_pg_bootstrap::tests::backoff_delay_saturates_at_cap
 cli::dcserver_pg_bootstrap::tests::connect_exhausts_budget_and_reports_last_error
 cli::dcserver_pg_bootstrap::tests::connect_retries_then_succeeds_recording_backoff
 cli::dcserver_pg_bootstrap::tests::connect_returns_immediately_on_first_success
 cli::dcserver_pg_bootstrap::tests::exhausted_ok_none_reports_required_message
+cli::dcserver_pg_bootstrap::tests::hold_ends_for_a_binary_replaced_before_it_started
+cli::dcserver_pg_bootstrap::tests::hold_ends_only_when_the_install_path_holds_a_new_file
 cli::dcserver_pg_bootstrap::tests::pool_timeout_diagnostic_includes_timestamp_source_and_attempt
+cli::dcserver_pg_bootstrap::tests::schema_ahead_needs_every_unknown_version_past_the_latest
 cli::dcserver_pg_bootstrap::tests::slow_startup_timeout_exhausts_retries_and_reports_the_exit_line
+cli::dcserver_pg_bootstrap::tests::startup_initialization_reports_a_database_ahead_of_the_binary_pg
 cli::dcserver_restart_marker::tests::quick_restart_marker_contains_nonce_and_shell_protocol_fields
 cli::dcserver_restart_marker::tests::quick_restart_marker_create_new_preserves_existing_owner
 cli::dcserver_restart_marker::tests::staging_publish_eexist_preserves_existing_owner
@@ -197,6 +202,7 @@ config::cluster_semaphore_config_tests::cluster_semaphores_parse_kebab_scope_and
 config::disk_write::tests::round_trip_gate_refuses_a_render_that_drops_secrets_without_echoing_them
 config::disk_write::tests::save_refuses_a_config_that_lost_a_secret_the_file_holds
 config::disk_write::tests::save_refuses_to_drop_channel_settings_the_yaml_form_omits
+config::peer_filter::tests::saved_config_omits_the_default_mode_and_keeps_an_explicit_one
 config::remote_settings_tests::settings_load_exposes_no_remote_profiles
 config::routine_config_unit_tests::database_foreground_reserve_default_is_consistent_across_paths
 config::routine_config_unit_tests::database_foreground_reserve_deserializes_when_provided
@@ -580,6 +586,9 @@ db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_w
 db::o_channel_homes::tests::every_home_transition_applies_only_under_its_exact_condition_pg
 db::o_channel_homes::tests::force_never_runs_inside_f_and_leaves_an_orphan_nobody_adopts_pg
 db::o_channel_homes::tests::force_orphans_only_a_holder_silent_past_the_window_and_adopts_nothing_pg
+db::postgres::advisory_lock::tests::expiry_is_in_force_before_the_lock_is_granted_pg
+db::postgres::advisory_lock::tests::idle_expiry_ends_only_the_expiring_lease_session_pg
+db::postgres::advisory_lock::tests::keepalive_holds_an_expiring_lease_and_silence_releases_it_pg
 db::postgres::test_db_reclaim::tests::pg_reclaim_create_boundaries_protect_live_owner
 db::postgres::test_db_reclaim::tests::pg_reclaim_dead_owner_young_database_is_reclaimed_immediately
 db::postgres::test_db_reclaim::tests::pg_reclaim_dry_run
@@ -1367,7 +1376,11 @@ server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_waits_when_pe
 server::test_phase_runs::tests::default_idempotency_key_is_phase_and_head_sha
 server::test_phase_runs::tests::status_validation_allows_only_phase_run_states
 server::test_phase_runs::tests::terminal_statuses_close_phase_runs
+server::web_surface::tests::enforce_covers_dashboard_static_entry_and_websocket_route
+server::web_surface::tests::enforce_rejects_only_peers_outside_loopback_tailscale_and_private_lan
 server::web_surface::tests::full_profile_keeps_public_spa_entry_and_protected_api
+server::web_surface::tests::log_mode_serves_outside_peers_unchanged_and_warns_once_per_peer
+server::web_surface::tests::off_mode_keeps_unfiltered_behavior_without_warnings
 server::web_surface::tests::runner_browser_entry_explains_profile_without_token_or_dashboard_assets
 server::web_surface::tests::runner_entry_keeps_execution_routes_protected_and_absent_routes_not_found
 server::worker_recovery::tests::backoff_doubles_and_caps
@@ -1729,6 +1742,7 @@ services::claude_tui::busy_inject::stash_tests::hold_tests::a_restored_draft_is_
 services::claude_tui::busy_inject::stash_tests::hold_tests::a_startup_dialog_is_dismissed_only_where_no_draft_is_protected
 services::claude_tui::busy_inject::stash_tests::hold_tests::only_an_allowlisted_channel_takes_the_stash_path
 services::claude_tui::busy_inject::stash_tests::hold_tests::the_tui_send_endpoint_keeps_off_a_pane_in_recovery
+services::claude_tui::busy_inject::stash_tests::hold_tests::the_tui_send_endpoint_never_submits_a_new_message_over_an_unseen_draft
 services::claude_tui::busy_inject::stash_tests::only_the_measured_placeholder_shape_reads_as_an_empty_composer
 services::claude_tui::busy_inject::stash_tests::the_stash_is_read_from_the_status_row_above_the_active_box_only
 services::claude_tui::busy_inject_tests::a_held_composer_lock_is_tried_three_times_without_any_tmux_call
@@ -2026,7 +2040,7 @@ services::claude_tui::input::tests::pre_enter_modal_guard_blocks_dialogs_but_all
 services::claude_tui::input::tests::prompt_draft_cleanup_actions_are_cancel_agnostic
 services::claude_tui::input::tests::prompt_marker_does_not_confirm_readiness_when_draft_is_present
 services::claude_tui::input::tests::prompt_ready_debug_tail_keeps_recent_lines_and_utf8_boundaries
-services::claude_tui::input::tests::prompt_ready_timeout_clears_only_retryable_followup_drafts
+services::claude_tui::input::tests::prompt_ready_timeout_clear_candidates_are_only_retryable_followup_drafts
 services::claude_tui::input::tests::prompt_ready_timeout_error_is_classified
 services::claude_tui::input::tests::prompt_ready_timeout_reason_reflects_snapshot
 services::claude_tui::input::tests::prompt_ready_timeouts_are_split_for_fresh_and_followup_turns
@@ -2058,6 +2072,7 @@ services::claude_tui::input::tests::wait_for_prompt_ready_is_public_and_returns_
 services::claude_tui::input::tests::wait_for_prompt_ready_returns_cancelled_for_pre_cancelled_token
 services::claude_tui::input::tests::warm_followup_lock_revalidation_keeps_idle_transcript_fallback
 services::claude_tui::input::tests::whitespace_only_prompt_is_rejected_after_normalization
+services::claude_tui::input::timeout_draft_tests::a_follow_up_timing_out_on_a_person_draft_keeps_every_key
 services::claude_tui::memento_feedback::tests::completed_tombstones_allow_unrelated_searches_and_expire_for_new_identity_lifetimes
 services::claude_tui::memento_feedback::tests::different_unknown_search_payloads_without_tool_use_id_stay_distinct
 services::claude_tui::memento_feedback::tests::distinct_unknown_search_tool_uses_keep_independent_retry_budgets
@@ -4375,6 +4390,7 @@ services::discord::input_runtime::fence::tests::queue_primitives_share_canonical
 services::discord::input_runtime::fence::tests::released_registration_and_stale_closing_cannot_issue_capabilities
 services::discord::input_runtime::fence::tests::stale_epoch_is_not_mode_or_duplicate
 services::discord::input_runtime::supervisor::drive::tests::a_record_inside_a_wake_ends_the_instance_and_only_its_successors_idle_submits
+services::discord::input_runtime::supervisor::drive::tests::input_keeps_the_latest_dev_a_renumbered_resume_logged
 services::discord::input_runtime::supervisor::drive::tests::input_view_reaches_each_boundary_value_under_every_wake_split
 services::discord::input_runtime::supervisor::tests::a_cause_leaves_health_once_rechecked_while_an_unsettled_clear_stays
 services::discord::input_runtime::supervisor::tests::abandoned_clear_loan_pins_the_slot_poisons_the_channel_and_keeps_the_worker_write
@@ -5955,6 +5971,7 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_pending_pane_whose_own_start_was_logged_takes_no_second_first_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_release_is_not_durable_only_after_its_unlink_and_kept_only_without_it_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_stop_before_the_attach_sends_one_escape_at_the_turns_own_start_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_turn_cancelled_before_its_stop_state_writes_nothing_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::an_unclear_first_write_keeps_the_hold_and_the_next_prompt_writes_nothing_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::cold_start_prompts_once_then_its_own_session_start_binds_it_and_ends_the_hold_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_pg
@@ -6115,8 +6132,11 @@ services::discord::runtime_bootstrap::gateway_handback_breaker::tests::pending_c
 services::discord::runtime_bootstrap::gateway_handback_breaker::tests::pending_survives_disable_errors_and_restarts_and_is_settled_only_once
 services::discord::runtime_bootstrap::gateway_handback_breaker::tests::sparse_daily_budget_and_second_dense_activation_survive_restart_until_deleted
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::backend_exit_removes_home_waiter_until_live_home_takes_handback_pg
+services::discord::runtime_bootstrap::gateway_handback_integration_tests::configured_idle_expiry_reaches_the_lease_session_and_zero_disables_it_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self_fences_pg
+services::discord::runtime_bootstrap::gateway_handback_integration_tests::idle_expired_holder_loses_the_lease_to_a_peer_and_self_fences_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::observed_acquisition_settles_each_pending_handback_pg
+services::discord::runtime_bootstrap::gateway_handback_integration_tests::preferred_node_takes_the_lease_once_a_silent_holder_session_expires_pg
 services::discord::runtime_bootstrap::gateway_lease::tests::configured_self_id_is_trimmed
 services::discord::runtime_bootstrap::gateway_lease::tests::every_gateway_lease_release_path_closes_o_admission_first
 services::discord::runtime_bootstrap::gateway_lease::tests::failed_lease_does_not_authorize_worker_or_poller_startup
@@ -8266,6 +8286,8 @@ services::discord::turn_bridge::followup_requeue::tests::already_queued_refusal_
 services::discord::turn_bridge::followup_requeue::tests::c1b_timeout_consumer_uses_preclose_bridge_effect_for_binding_and_all_sources
 services::discord::turn_bridge::followup_requeue::tests::non_watcher_strict_plan_waits_for_capped_retry_veto_after_projection_4893
 services::discord::turn_bridge::followup_requeue::tests::persistence_failure_is_not_reported_as_requeued
+services::discord::turn_bridge::followup_requeue::tests::person_draft_tests::a_queued_follow_up_waits_behind_a_person_draft_and_is_sent_once_after_it
+services::discord::turn_bridge::followup_requeue::tests::person_draft_tests::an_unread_composer_holds_the_follow_up_without_protecting_the_pane
 services::discord::turn_bridge::followup_requeue::tests::pre_submit_retry_adds_queue_reaction_immediately_through_reconciler
 services::discord::turn_bridge::followup_requeue::tests::pre_submit_retry_reaction_failure_emits_exactly_one_referenced_fallback
 services::discord::turn_bridge::followup_requeue::tests::retry_cap_preserves_entry_and_stops_auto_kickoff_4888
@@ -8703,6 +8725,7 @@ services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_host_owned_s
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_judged_cancel_leaves_a_turn_that_replaced_the_judged_one
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_name_only_preserve_stop_keeps_a_turn_on_another_host
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_preserve_stop_keeps_a_turn_on_another_host_before_any_write
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_judged_before_its_herdr_turn_prepared_never_cancels_it
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_keeps_a_turn_it_could_not_read
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_on_another_host_leaves_a_real_tmux_session_as_it_was
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::an_idle_skip_reads_the_judged_session_not_a_later_binding
@@ -9741,8 +9764,10 @@ services::process::simple_cancel_watcher_tests::watcher_kills_sleeping_child_whe
 services::process::simple_cancel_watcher_tests::watcher_reaps_grandchild_when_child_uses_process_group
 services::process::stream_child::stream_queue::tests::concurrent_seal_includes_a_racing_send_if_and_only_if_publication_succeeds
 services::process::stream_child::stream_queue::tests::seal_preserves_published_terminal_and_rejects_every_sender_clone
+services::provider::cancel_token_claude_interrupt::tests::a_herdr_stop_state_is_prepared_again_only_by_its_owner
 services::provider::cancel_token_claude_interrupt::tests::a_live_herdr_turn_is_found_by_its_own_nonce_beside_other_turns
 services::provider::cancel_token_claude_interrupt::tests::a_nonce_two_live_herdr_turns_share_names_neither
+services::provider::cancel_token_claude_interrupt::tests::a_stop_and_a_herdr_prepare_are_ordered_by_the_slot
 services::provider::cancel_token_claude_interrupt::tests::session_generation_advance_blocks_stale_stop_operation
 services::provider::cancel_token_claude_interrupt::tests::stale_pending_stop_is_rejected_after_next_generation_publishes
 services::provider::cancel_token_claude_interrupt::tests::stale_rebind_cannot_replace_a_newer_session_generation
@@ -10820,6 +10845,7 @@ services::tui_o::store::spool::tests::a_first_batch_may_skip_only_the_torn_first
 services::tui_o::store::spool::tests::a_gc_entry_outside_the_logged_chain_deletes_nothing_and_halts
 services::tui_o::store::spool::tests::a_header_only_segment_is_collected_without_a_gc_entry
 services::tui_o::store::spool::tests::a_lost_spool_segment_halts_with_a_gap_instead_of_resuming
+services::tui_o::store::spool::tests::a_renumbered_source_settles_its_spool_tail_unless_its_bytes_changed
 services::tui_o::store::spool::tests::a_spool_read_error_stops_writes_until_the_channel_is_reopened
 services::tui_o::store::spool::tests::a_spool_tail_the_source_no_longer_holds_halts_the_channel
 services::tui_o::store::spool::tests::a_v2_spool_recovers_and_the_next_append_rolls_to_a_current_segment
@@ -10841,6 +10867,7 @@ services::tui_o::turn_mode::tests::n1a_output_adoption_and_readiness_do_not_conf
 services::tui_o::writer::adoption::tests::a_length_change_under_the_lock_alone_releases_the_channel
 services::tui_o::writer::adoption::tests::a_past_source_starts_at_its_length_when_the_channel_is_adopted
 services::tui_o::writer::adoption::tests::a_prompt_past_legacys_frontier_is_reported_undelivered
+services::tui_o::writer::adoption::tests::a_renumbered_pin_reads_unchanged_until_its_file_moves
 services::tui_o::writer::adoption::tests::a_running_legacy_tail_releases_the_channel
 services::tui_o::writer::adoption::tests::a_turn_legacys_reader_has_not_ended_is_reported_undelivered
 services::tui_o::writer::adoption::tests::an_open_turn_before_legacys_cursor_is_not_adopted
@@ -10862,6 +10889,7 @@ services::tui_o::writer::input_facts::tests::g0_discovery_install_and_o_binding_
 services::tui_o::writer::input_facts::tests::ordered_events_keep_abort_start_and_input_in_record_order
 services::tui_o::writer::input_facts::tests::reactions_converge_on_replay_and_propagate_partial_failure
 services::tui_o::writer::input_facts::tests::strict_codex_parent_header_rejects_absence_mismatch_child_and_poll_changes
+services::tui_o::writer::renumbered::tests::two_stored_variants_of_one_file_refuse_every_dev_including_their_own
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
 services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_from_history_rather_than_trusted
 services::tui_o::writer::tests::a_gateway_return_ends_the_pause_in_process_health
@@ -10939,6 +10967,9 @@ services::tui_o::writer::tests::actor::host_start::reclaim::a_launch_session_pro
 services::tui_o::writer::tests::actor::host_start::reclaim::an_adopted_resume_holds_its_rows_until_an_operator_resolves
 services::tui_o::writer::tests::actor::host_start::reclaim::o_keeps_waiting_on_a_pending_another_pane_did_not_overwrite
 services::tui_o::writer::tests::actor::host_start::reclaim::o_passes_a_pending_its_successor_overwrote_and_binds_the_resolved_one
+services::tui_o::writer::tests::actor::host_start::renumber::a_file_logged_before_and_after_a_renumber_is_adopted_as_one_source
+services::tui_o::writer::tests::actor::host_start::renumber::a_new_empty_channel_whose_transcript_was_renumbered_is_activated
+services::tui_o::writer::tests::actor::host_start::renumber::a_renumbered_source_legacy_stays_behind_is_given_up_only_after_the_stall
 services::tui_o::writer::tests::actor::host_start::resume::a_permanent_stop_is_never_resumed
 services::tui_o::writer::tests::actor::host_start::resume::a_recovery_that_fails_again_keeps_the_wait_growing
 services::tui_o::writer::tests::actor::host_start::resume::a_resume_that_halts_again_waits_longer_up_to_the_cap_until_a_steady_run_starts_over
@@ -10990,6 +11021,13 @@ services::tui_o::writer::tests::actor::rotation::recovery_tests::h6_failed_rotat
 services::tui_o::writer::tests::actor::rotation::recovery_tests::p2_1_successful_retirement_clears_reader_health_in_the_same_tend
 services::tui_o::writer::tests::actor::rotation::recovery_tests::p2_3_regrowth_reactivates_reader_health_after_successful_recovery
 services::tui_o::writer::tests::actor::rotation::recovery_tests::p2_4_failed_tend_keeps_prior_health_evidence_until_a_successful_pass
+services::tui_o::writer::tests::actor::rotation::renumber_tests::a_codex_proof_read_after_a_renumber_still_allows_the_stored_cursor
+services::tui_o::writer::tests::actor::rotation::renumber_tests::a_renumbered_source_replaced_shrunk_or_rewritten_still_halts_the_restart
+services::tui_o::writer::tests::actor::rotation::renumber_tests::a_renumbered_source_replaced_while_it_is_read_halts_on_the_next_poll
+services::tui_o::writer::tests::actor::rotation::renumber_tests::a_retired_renumbered_source_whose_bytes_changed_still_halts
+services::tui_o::writer::tests::actor::rotation::renumber_tests::a_store_holding_two_dev_variants_of_one_file_halts_before_reading_either
+services::tui_o::writer::tests::actor::rotation::renumber_tests::a_writer_restarted_after_the_volume_renumbered_continues_from_its_cursor
+services::tui_o::writer::tests::actor::rotation::renumber_tests::dev_variants_of_a_file_first_bound_in_one_batch_share_one_cursor
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_b_c_hops_with_both_old_tails_unread_post_every_row_once_in_order_across_a_restart
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_legacy_hop_is_proven_only_by_evidence_from_the_pane_the_log_names
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_restart_holds_the_successor_only_to_the_old_length_its_rotation_measured

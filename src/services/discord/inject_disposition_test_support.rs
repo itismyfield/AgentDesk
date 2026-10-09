@@ -69,6 +69,7 @@ pub(crate) fn age(provider: &ProviderKind, message: u64, by: Duration) {
 
 /// Parks the next write to `path` after its read, under the flock, until the returned sender
 /// fires; the receiver says the writer reached that point.
+#[cfg(unix)]
 pub(crate) fn park_before_write(
     path: &Path,
 ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
@@ -94,6 +95,7 @@ pub(super) fn pause_before_write(path: &Path) {
 }
 
 /// Signals the next writer to `path` as it is about to take the flock.
+#[cfg(unix)]
 pub(crate) fn watch_lock(path: &Path) -> std::sync::mpsc::Receiver<()> {
     let (tx, rx) = std::sync::mpsc::channel();
     LOCK_WATCH.lock().unwrap().push((path.to_path_buf(), tx));

@@ -108,13 +108,25 @@ fn recover_claude_tui_stranded_prompt_draft(
             ClaudeTuiStrandedPromptDraftState::IdleTranscript => DraftClear::Strong,
             ClaudeTuiStrandedPromptDraftState::UnknownTranscript => DraftClear::Gentle,
         };
-        // The composer lock `/compact` steering holds, taken once here (the submit
-        // lock comes later); the clear re-reads the pane inside it and never re-locks.
+        // The composer lock `/compact` steering holds, taken once here; inside it only a prompt
+        // AgentDesk typed is cleared, and any other text refuses before the first key.
         let cleared = crate::services::claude_tui::input::with_composer_cleanup_lock(
             tmux_session_name,
-            || clear_draft(host, tmux_session_name, clear, cancel_token.as_deref()),
+            || -> Result<Option<_>, String> {
+                let ours = crate::services::claude_tui::input::stranded_draft_is_ours(
+                    tmux_session_name,
+                    crate::services::claude_tui::input::PromptReadinessKind::ProvenWarmFollowup,
+                )?;
+                Ok(ours
+                    .then(|| clear_draft(host, tmux_session_name, clear, cancel_token.as_deref())))
+            },
         );
-        // A pane held for draft recovery keeps its draft; the submit below holds or requeues.
+        let cleared = match cleared {
+            Some(Err(held)) => return ClaudeTuiDraftRecoveryOutcome::Terminal(Err(held)),
+            Some(Ok(cleared)) => cleared,
+            None => None,
+        };
+        // A held pane or an empty composer keeps its text; the submit below holds or requeues.
         let Some(cleared) = cleared else {
             return ClaudeTuiDraftRecoveryOutcome::Proceed {
                 state: ClaudeTuiRecreateState {
