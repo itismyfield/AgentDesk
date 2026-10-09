@@ -5254,6 +5254,9 @@ services::discord::queue_park_ledger::tests::drain_registers_sources_before_firs
 services::discord::queue_park_ledger::tests::explicit_queue_cancel_is_explicitly_removed_not_resumed
 services::discord::queue_park_ledger::tests::live_uncancelled_turn_never_escalates
 services::discord::queue_park_ledger::tests::merged_carrier_tracks_more_than_queue_capacity_and_keeps_original_age
+services::discord::queue_park_ledger::tests::observation_failure_keeps_unknown_projection_but_errors_once_at_600s
+services::discord::queue_park_ledger::tests::observation_keeps_abandoned_synthetic_presence_and_bytes
+services::discord::queue_park_ledger::tests::observation_keeps_legacy_inflight_bytes_unchanged
 services::discord::queue_park_ledger::tests::periodic_discovery_records_cancelled_anchor_origin_without_drain
 services::discord::queue_park_ledger::tests::provider_evaluator_visits_all_registered_runtimes
 services::discord::queue_park_ledger::tests::selective_dequeue_of_later_item_keeps_head_waiting

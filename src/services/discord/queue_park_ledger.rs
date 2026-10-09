@@ -29,15 +29,23 @@ pub(super) struct QueueParkLedger {
     evaluations: std::sync::atomic::AtomicUsize,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub(super) struct ParkProjection {
+    #[serde(rename = "queue_park_reason")]
     pub(super) reason: Option<String>,
+    #[serde(rename = "queue_park_owner")]
     pub(super) owner: Option<&'static str>,
+    #[serde(rename = "queue_park_oldest_tracked_secs")]
     pub(super) oldest_tracked_secs: Option<u64>,
+    #[serde(rename = "queue_park_tracked_source_ids")]
     pub(super) tracked_source_ids: Vec<u64>,
+    #[serde(rename = "queue_park_tracked_source_count")]
     pub(super) tracked_source_count: usize,
+    #[serde(rename = "queue_park_ids_truncated")]
     pub(super) ids_truncated: bool,
+    #[serde(rename = "queue_park_inflight_row_kind")]
     pub(super) inflight_row_kind: Option<&'static str>,
+    #[serde(rename = "queue_park_recovery_state")]
     pub(super) recovery_state: Option<&'static str>,
 }
 
@@ -124,7 +132,19 @@ fn classify(
         )
     } else if snapshot.recovery_started_at.is_some() {
         ("recovery_started".to_string(), "none")
-    } else if super::cleanup_retry_inflight_blocks_idle_kickoff(shared, provider, channel) {
+    } else if row
+        .as_ref()
+        .ok()
+        .and_then(|row| row.as_ref())
+        .is_some_and(|row| {
+            super::inflight::opt_message_id(row.current_msg_id).is_some_and(|message| {
+                shared
+                    .ui
+                    .placeholder_cleanup
+                    .terminal_cleanup_retry_pending_read_only(provider, channel, message)
+            })
+        })
+    {
         (
             "cleanup_retry_inflight".to_string(),
             "turn_finalizer_reconcile",
@@ -134,7 +154,7 @@ fn classify(
         super::AutomaticQueueProgression::BlockedByCappedRetries
     ) {
         ("capped_retries".to_string(), "none")
-    } else if super::tui_direct_pending_start::pending_synthetic_start_blocks_idle_kickoff(
+    } else if super::tui_direct_pending_start::pending_synthetic_start_present(
         provider.as_str(),
         channel.get(),
     ) {
@@ -265,7 +285,7 @@ impl QueueParkLedger {
                 tracing::info!(target: "agentdesk::discord::queue_park", provider = provider.as_str(), channel_id = channel.get(), source_id = id, ?source.origin, age_secs, "tracked source left the queue without an observed claim: unknown");
                 return false;
             }
-            if age_secs >= QUEUE_PARK_ERROR_SECS && projection.reason.is_some() && projection.reason.as_deref() != Some("live_turn_active") && !source.escalated {
+            if age_secs >= QUEUE_PARK_ERROR_SECS && projection.reason.as_deref() != Some("live_turn_active") && !source.escalated {
                 tracing::error!(target: "agentdesk::discord::queue_park", provider = provider.as_str(), channel_id = channel.get(), source_id = id, ?source.origin, age_secs, park_reason = projection.reason.as_deref(), recovery_owner = projection.owner, inflight_row_kind = projection.inflight_row_kind, recovery_state = projection.recovery_state, "cancel-preserved source remains parked");
                 source.escalated = true;
             }

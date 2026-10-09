@@ -999,30 +999,17 @@ pub(super) async fn build_health_snapshot_with_options(
                 let reachability = RelayVerdictReport::of(&relay_verdict, verdict_governs);
                 let relay_stall_state = RelayStallClassifier::classify(&relay_health);
                 trace_relay_health_classification(&relay_health, relay_stall_state);
-                let park = provider_kind
-                    .as_ref()
-                    .map(|provider| {
-                        entry.shared.queue_park_ledger.project(
-                            &entry.shared,
-                            provider,
-                            channel,
-                            &snapshot,
-                        )
-                    })
-                    .unwrap_or_default();
                 mailbox_entries.push(MailboxHealthSnapshot {
                     provider: entry.name.clone(),
                     channel_id: channel.get(),
                     has_cancel_token: mailbox_has_cancel_token,
                     queue_depth,
-                    queue_park_reason: park.reason,
-                    queue_park_owner: park.owner,
-                    queue_park_oldest_tracked_secs: park.oldest_tracked_secs,
-                    queue_park_tracked_source_ids: park.tracked_source_ids,
-                    queue_park_tracked_source_count: park.tracked_source_count,
-                    queue_park_ids_truncated: park.ids_truncated,
-                    queue_park_inflight_row_kind: park.inflight_row_kind,
-                    queue_park_recovery_state: park.recovery_state,
+                    queue_park: super::mailbox::queue_park_projection(
+                        &entry.shared,
+                        provider_kind.as_ref(),
+                        channel,
+                        &snapshot,
+                    ),
                     recovery_started: snapshot.recovery_started_at.is_some(),
                     active_request_owner: snapshot.active_request_owner.map(|id| id.get()),
                     active_user_message_id: mailbox_active_user_msg_id,

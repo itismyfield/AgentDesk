@@ -25,14 +25,8 @@ pub(super) struct MailboxHealthSnapshot {
     pub(super) channel_id: u64,
     pub(super) has_cancel_token: bool,
     pub(super) queue_depth: usize,
-    pub(super) queue_park_reason: Option<String>,
-    pub(super) queue_park_owner: Option<&'static str>,
-    pub(super) queue_park_oldest_tracked_secs: Option<u64>,
-    pub(super) queue_park_tracked_source_ids: Vec<u64>,
-    pub(super) queue_park_tracked_source_count: usize,
-    pub(super) queue_park_ids_truncated: bool,
-    pub(super) queue_park_inflight_row_kind: Option<&'static str>,
-    pub(super) queue_park_recovery_state: Option<&'static str>,
+    #[serde(flatten)]
+    pub(super) queue_park: super::super::queue_park_ledger::ParkProjection,
     pub(super) recovery_started: bool,
     pub(super) active_request_owner: Option<u64>,
     pub(super) active_user_message_id: Option<u64>,
@@ -57,6 +51,21 @@ pub(super) struct MailboxHealthSnapshot {
     pub(super) frontier_provenance: FrontierProvenanceReport,
     pub(super) relay_stall_state: RelayStallState,
     pub(super) relay_health: RelayHealthSnapshot,
+}
+
+pub(super) fn queue_park_projection(
+    shared: &SharedData,
+    provider: Option<&ProviderKind>,
+    channel: ChannelId,
+    snapshot: &ChannelMailboxSnapshot,
+) -> super::super::queue_park_ledger::ParkProjection {
+    provider
+        .map(|provider| {
+            shared
+                .queue_park_ledger
+                .project(shared, provider, channel, snapshot)
+        })
+        .unwrap_or_default()
 }
 
 /// How a guarded-finish residue is sitting on this channel's mailbox, as the

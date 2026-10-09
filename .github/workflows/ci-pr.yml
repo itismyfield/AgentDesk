@@ -1408,11 +1408,11 @@ jobs:
           env -u AGENTDESK_ROOT_DIR cargo test --lib quiet_native_turn_resumes_after_virtual_day -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::provider::cancel_watchdog::tests -- --test-threads=1
 
-      # #5003: this production-path E2E previously ran only in main's broad
-      # non-PG lane, so test-only fixes could merge without executing it on PRs.
       - name: Cancel-preserved queue observation regression
         run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::queue_park_ledger::tests -- --test-threads=1
 
+      # #5003: this production-path E2E previously ran only in main's broad
+      # non-PG lane, so test-only fixes could merge without executing it on PRs.
       - name: Local model durable queue wake regression
         run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
 
@@ -2150,7 +2150,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=0e8c43697c07fe11c2c08b0a0c4401cac6c6cd0b0e8f07f5ef20a7c13ecfec59
+          expected=c976035f6d9a03a91fb23cd8c898e5cc147517a986f9de838e66577baf4d0031
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2383,7 +2383,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=0e8c43697c07fe11c2c08b0a0c4401cac6c6cd0b0e8f07f5ef20a7c13ecfec59
+          expected=c976035f6d9a03a91fb23cd8c898e5cc147517a986f9de838e66577baf4d0031
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

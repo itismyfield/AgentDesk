@@ -232,6 +232,106 @@ async fn cancel_preserved_source_parked_errors_once_at_600s() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn observation_failure_keeps_unknown_projection_but_errors_once_at_600s() {
+    let _root = isolated_agentdesk_root();
+    let capture = LogCapture::default();
+    let _capture = capture.install();
+    let channel = ChannelId::new(6_016_291);
+    let (registry, shared) = held_fixture(channel).await;
+    enqueue(&shared, channel, 6_016_292, false).await;
+    let drain = recovery::schedule_pending_queue_drain_after_cancel(
+        &registry,
+        "claude",
+        channel,
+        "queue-park-observation-failure-test",
+    )
+    .await;
+    assert!(
+        drain.scheduled,
+        "the actual drain owns a deferred reservation"
+    );
+    assert_eq!(drain.queue_depth_after, Some(1));
+    let before = snapshot(&shared, channel).await;
+    let held_token = before.cancel_token.clone().expect("held cancelled anchor");
+    assert_eq!(
+        shared.queue_park_ledger.channels.lock().unwrap()[&channel].len(),
+        1,
+        "the actual post-cancel drain registers before the read fails",
+    );
+    assert!(
+        shared.restart.deferred_hook_channels.contains_key(&channel),
+        "post-cancel scheduling preserves its existing deferred kickoff reservation",
+    );
+    let row_path = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Claude,
+        channel.get(),
+    );
+    let corrupt = b"{invalid-inflight-json";
+    std::fs::write(&row_path, corrupt).expect("corrupt only the isolated inflight row");
+    tokio::time::advance(Duration::from_secs(600)).await;
+    let waiting = snapshot(&shared, channel).await;
+    let projection =
+        shared
+            .queue_park_ledger
+            .project(&shared, &ProviderKind::Claude, channel, &waiting);
+    assert_eq!(projection.reason, None);
+    assert_eq!(projection.recovery_state, Some("unknown"));
+    assert_eq!(projection.oldest_tracked_secs, Some(600));
+    assert_eq!(projection.tracked_source_count, 1);
+    assert_eq!(projection.tracked_source_ids, vec![6_016_292]);
+    shared
+        .queue_park_ledger
+        .evaluate(&shared, &ProviderKind::Claude, channel, &waiting);
+    assert_eq!(
+        capture.errors(),
+        1,
+        "a failed classification does not suppress the positive 600-second park event",
+    );
+    assert_eq!(capture.outcome("resumed"), 0);
+    assert_eq!(capture.outcome("tracked source left the queue"), 0);
+    tokio::time::advance(Duration::from_secs(600)).await;
+    evaluate(&shared, channel).await;
+    assert_eq!(
+        capture.errors(),
+        1,
+        "the unreadable row cannot re-escalate the source"
+    );
+    let after = snapshot(&shared, channel).await;
+    assert!(Arc::ptr_eq(
+        after
+            .cancel_token
+            .as_ref()
+            .expect("read failure keeps the anchor"),
+        &held_token,
+    ));
+    assert!(held_token.cancelled.load(Ordering::Relaxed));
+    assert_eq!(after.active_user_message_id, before.active_user_message_id);
+    assert_eq!(after.pending_user_dispatch, before.pending_user_dispatch);
+    assert_eq!(
+        after.intervention_queue.len(),
+        before.intervention_queue.len()
+    );
+    assert_eq!(
+        after.intervention_queue[0].message_id,
+        before.intervention_queue[0].message_id
+    );
+    assert_eq!(
+        after.intervention_queue[0].source_message_ids,
+        before.intervention_queue[0].source_message_ids
+    );
+    assert_eq!(
+        after.intervention_queue[0].text,
+        before.intervention_queue[0].text
+    );
+    assert_eq!(
+        std::fs::read(row_path).unwrap(),
+        corrupt,
+        "observation does not repair or replace corrupt row bytes"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn stall_watchdog_task_evaluates_parks_without_backstop_or_health_calls() {
     let _root = isolated_agentdesk_root();
     let capture = LogCapture::default();
@@ -275,13 +375,20 @@ async fn stall_watchdog_task_evaluates_parks_without_backstop_or_health_calls() 
 }
 
 async fn wait_for_evaluation(shared: &SharedData, previous: usize) {
-    for _ in 0..1_000 {
+    // Health snapshot I/O uses blocking workers; its deadline must not advance the parked source clock.
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
         if shared.queue_park_ledger.evaluations.load(Ordering::SeqCst) > previous {
             return;
         }
         tokio::task::yield_now().await;
+        std::thread::yield_now();
     }
-    panic!("watchdog did not complete the queue park evaluation");
+    panic!(
+        "watchdog did not complete the queue park evaluation in {:?}: previous={previous}, completed={}",
+        started.elapsed(),
+        shared.queue_park_ledger.evaluations.load(Ordering::SeqCst),
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -549,38 +656,142 @@ async fn selective_dequeue_of_later_item_keeps_head_waiting() {
     );
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
 async fn dequeued_then_represerved_source_remains_waiting() {
-    let _root = isolated_agentdesk_root();
+    let name = concat!(
+        module_path!(),
+        "::dequeued_then_represerved_source_remains_waiting"
+    );
+    // The exact-test child owns the process-global endpoint and runtime binding tables.
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(name) {
+        return;
+    }
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    let root = isolated_agentdesk_root();
+    let config = root.1.path().join("park-fixture.yml");
+    std::fs::write(
+        &config,
+        "server: {}\ndata: {dir: data}\nmemory: {backend: file}\n",
+    )
+    .expect("isolated intake config");
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _config = set("AGENTDESK_CONFIG", &config);
+    let _routing = set("ADK_INTAKE_ROUTING_MODE", std::path::Path::new("disabled"));
+    let tmux = root.1.path().join("tmux");
+    std::fs::write(
+        &tmux,
+        "#!/bin/sh\n[ \"$1\" = -u ] && shift\ncase \"$1\" in\n-V) echo 'tmux 3.5';;\nhas-session) exit 0;;\nlist-panes) echo 0;;\ncapture-pane) echo 'Thinking...';;\n*) exit 1;;\nesac\n",
+    )
+    .expect("busy hosted tmux stand-in");
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut paths = vec![root.1.path().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(paths).unwrap();
+    let _path = set("PATH", std::path::Path::new(&path));
+    let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+        "http://127.0.0.1:1/park-fixture".into(),
+    );
     let capture = LogCapture::default();
     let _capture = capture.install();
     let shared = discord::make_shared_data_for_tests();
     let channel = ChannelId::new(6_016_251);
+    let channel_name = "cancel-park-claude";
+    let tmux_name = ProviderKind::Claude.build_tmux_session_name(channel_name);
+    let session = "60160000-0000-0000-0000-000000000251";
+    discord::rebind_channel_session(
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+        root.1.path().to_str().unwrap(),
+        session,
+    )
+    .await;
+    shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .get_mut(&channel)
+        .unwrap()
+        .channel_name = Some(channel_name.into());
+    let output = root.1.path().join("busy.jsonl");
+    std::fs::write(
+        &output,
+        "{\"type\":\"user\",\"message\":{\"content\":\"prior turn still running\"}}\n",
+    )
+    .unwrap();
+    crate::services::tui_prompt_dedupe::register_launched_tmux_runtime_binding(
+        &tmux_name,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: output.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(session.into()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    let api = discord::health::legacy_supervision::test_support::MockDiscord::start_with(
+        Arc::new(move |method, path| {
+            if method == axum::http::Method::GET && path.ends_with(&format!("/channels/{}", channel.get())) {
+                Some((200, serde_json::json!({
+                    "id": channel.get().to_string(), "type": 0, "guild_id": "6016250",
+                    "name": channel_name, "position": 0, "permission_overwrites": [],
+                    "nsfw": false, "rate_limit_per_user": 0
+                })))
+            } else if method == axum::http::Method::GET && path.ends_with("/users/42") {
+                Some((200, serde_json::json!({"id":"42", "username":"park-owner", "discriminator":"0001", "avatar":null})))
+            } else {
+                None
+            }
+        }),
+    )
+    .await;
+    shared.settings.write().await.allow_all_users = true;
     enqueue(&shared, channel, 6_016_252, false).await;
     let before = snapshot(&shared, channel).await;
     shared
         .queue_park_ledger
         .register(channel, &before, Origin::PostCancelPreserved);
-    let taken = shared
-        .mailbox(channel)
-        .take_next_soft(discord::queue_persistence_context(
-            &shared,
-            &ProviderKind::Claude,
-            channel,
-        ))
-        .await;
-    let restored = discord::mailbox_restore_dequeued_head(
-        &shared,
-        &ProviderKind::Claude,
-        channel,
-        taken.intervention.expect("dequeued source"),
-        taken.dispatch_lease.expect("authorized restore lease"),
+    // Only the pre-dequeue probe is bypassed: the real post-claim diagnostic owns the defer.
+    let _promote = discord::router::set_hosted_tui_promote_busy_for_tests(false);
+    let deps = discord::router::IntakeDeps {
+        http: &api.http,
+        cache: None,
+        ctx_for_chained_dispatch: None,
+        shared: &shared,
+        token: "test-token",
+    };
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(15),
+        discord::kickoff_idle_queue_channel(&deps, &ProviderKind::Claude, channel),
     )
-    .await;
-    assert!(restored.enqueued);
+    .await
+    .expect("actual hosted-TUI kickoff finishes its pre-submit defer");
+    assert!(
+        outcome.started,
+        "the production kickoff reports Ok/started after deferral"
+    );
     let preserved = snapshot(&shared, channel).await;
+    assert_eq!(preserved.intervention_queue.len(), 1);
     assert_eq!(preserved.intervention_queue[0].message_id.get(), 6_016_252);
+    assert!(preserved.cancel_token.is_none());
     assert!(preserved.active_user_message_id.is_none());
+    assert!(preserved.pending_user_dispatch.is_none());
+    assert!(
+        capture
+            .text()
+            .contains("Claude TUI busy follow-up queued before prompt submission"),
+        "the actual post-claim busy branch must run: {}",
+        capture.text()
+    );
     shared
         .queue_park_ledger
         .evaluate(&shared, &ProviderKind::Claude, channel, &preserved);
@@ -590,6 +801,135 @@ async fn dequeued_then_represerved_source_remains_waiting() {
         shared.queue_park_ledger.channels.lock().unwrap()[&channel].len(),
         1
     );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn observation_keeps_legacy_inflight_bytes_unchanged() {
+    let _root = isolated_agentdesk_root();
+    let shared = discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(6_016_271);
+    discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(enqueue(
+        &shared, channel, 6_016_272, false,
+    ))
+    .await;
+    let row = inflight::InflightTurnState::new(
+        ProviderKind::Claude,
+        channel.get(),
+        None,
+        42,
+        0,
+        0,
+        "legacy row".into(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    inflight::save_inflight_state(&row).unwrap();
+    let path = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Claude,
+        channel.get(),
+    );
+    let mut raw = serde_json::to_value(row).unwrap();
+    raw.as_object_mut().unwrap().remove("finalizer_turn_id");
+    let before = serde_json::to_vec_pretty(&raw).unwrap();
+    std::fs::write(&path, &before).unwrap();
+    let queued = snapshot(&shared, channel).await;
+    shared
+        .queue_park_ledger
+        .register(channel, &queued, Origin::PostCancelPreserved);
+    let projection =
+        shared
+            .queue_park_ledger
+            .project(&shared, &ProviderKind::Claude, channel, &queued);
+    shared
+        .queue_park_ledger
+        .evaluate(&shared, &ProviderKind::Claude, channel, &queued);
+    assert_eq!(projection.reason.as_deref(), Some("idle_no_start"));
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        before,
+        "observation cannot backfill legacy row bytes"
+    );
+    let after = snapshot(&shared, channel).await;
+    assert!(after.cancel_token.is_none());
+    assert_eq!(after.intervention_queue[0].message_id.get(), 6_016_272);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn observation_keeps_abandoned_synthetic_presence_and_bytes() {
+    let _root = isolated_agentdesk_root();
+    let shared = discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(6_016_281);
+    discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(enqueue(
+        &shared, channel, 6_016_282, false,
+    ))
+    .await;
+    let record = discord::tui_direct_pending_start::TuiDirectPendingStart {
+        provider: "claude".into(),
+        channel_id: channel.get(),
+        tmux_session_name: "cancel-park-abandoned".into(),
+        prompt_text: "/loop tick".into(),
+        anchor_message_id: 6_016_283,
+        lease_relay_owner: "bridge_adapter".into(),
+        lease_runtime_kind: Some("claude_tui".into()),
+        lease_turn_id: None,
+        lease_session_key: None,
+        generation: 0,
+        created_at_ms: 0,
+        observed_at_ms: 0,
+        state: discord::tui_direct_pending_start::PendingStartState::Waiting,
+        attempt_count: discord::tui_direct_pending_start::PENDING_START_MAX_CLAIM_ATTEMPTS,
+        captured_source: None,
+        native_turn_id: None,
+    };
+    discord::tui_direct_pending_start::persist(&record).unwrap();
+    let path = discord::runtime_store::tui_direct_pending_start_root()
+        .unwrap()
+        .join(format!(
+            "claude_{}_{}.json",
+            channel.get(),
+            record.anchor_message_id
+        ));
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        discord::tui_direct_pending_start::pending_synthetic_start_abandoned(
+            "claude",
+            channel.get()
+        )
+    );
+    let queued = snapshot(&shared, channel).await;
+    shared
+        .queue_park_ledger
+        .register(channel, &queued, Origin::PostCancelPreserved);
+    let projection =
+        shared
+            .queue_park_ledger
+            .project(&shared, &ProviderKind::Claude, channel, &queued);
+    shared
+        .queue_park_ledger
+        .evaluate(&shared, &ProviderKind::Claude, channel, &queued);
+    assert_eq!(
+        projection.reason.as_deref(),
+        Some("pending_synthetic_start")
+    );
+    assert!(
+        discord::tui_direct_pending_start::pending_synthetic_start_present("claude", channel.get())
+    );
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        before,
+        "observation retains the durable retry record"
+    );
+    assert_eq!(
+        snapshot(&shared, channel).await.intervention_queue[0]
+            .message_id
+            .get(),
+        6_016_282
+    );
+    discord::tui_direct_pending_start::delete(&record);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
