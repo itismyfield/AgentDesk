@@ -204,6 +204,52 @@ pub(crate) fn codex_verified_event_allowed(event: &binding_events::BindingEvent)
     })
 }
 
+#[cfg(test)]
+pub(crate) fn historical_execution(
+    context: &BindingContext,
+    event: &binding_events::BindingEvent,
+) -> Result<super::codex_verified::provenance::ExecutionProofRef, &'static str> {
+    if event.provider != context.provider
+        || event.provider != "codex"
+        || event.execution_nonce.as_deref() != Some(&context.execution_nonce)
+        || Some(event.channel_id) != context.channel_id
+        || event.tmux_session != context.tmux_session
+    {
+        return Err("historical_execution_mismatch");
+    }
+    let (source, pending_seq) = match &event.new {
+        binding_events::BindingTarget::Source(source) => (source, None),
+        binding_events::BindingTarget::Resolved {
+            source,
+            pending_seq,
+        } => (source, Some(*pending_seq)),
+        _ => return Err("historical_source_unavailable"),
+    };
+    // Historical ownership is tied to the saved envelope, never current pane permission.
+    let proof = binding_events::codex::proof_at_seq(context, event.seq)
+        .map_err(|_| "historical_proof_unreadable")?
+        .ok_or("historical_proof_unavailable")?;
+    if proof.seq != event.seq
+        || proof.ownership.seq != event.seq
+        || proof.ownership.context != *context
+        || proof.ownership.pending_seq != pending_seq
+        || proof.source != *source
+    {
+        return Err("historical_proof_mismatch");
+    }
+    Ok(super::codex_verified::provenance::ExecutionProofRef {
+        owner_runtime_root: context.owner_runtime_root.clone(),
+        tmux_session: context.tmux_session.clone(),
+        execution_nonce: context.execution_nonce.clone(),
+        proof_seq: event.seq,
+        source: source.clone(),
+    })
+}
+
+#[cfg(test)]
+#[path = "codex_policy/provenance_tests.rs"]
+mod provenance_tests;
+
 pub(crate) fn codex_verified_o_source_allowed(
     channel: u64,
     source: &binding_events::SourceId,

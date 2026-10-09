@@ -757,7 +757,9 @@ src/
 │   │   │   │   └── herdr_terminal_tests.rs
 │   │   │   ├── child_binding_tests.rs
 │   │   │   ├── legacy_selection.rs
-│   │   │   └── parser.rs
+│   │   │   ├── parser.rs
+│   │   │   ├── provenance.rs
+│   │   │   └── provenance_tests.rs
 │   │   ├── session/
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
@@ -2351,6 +2353,9 @@ src/
 │   │   │   ├── tap.rs
 │   │   │   └── unit_plan.rs
 │   │   ├── store/
+│   │   │   ├── rotation/
+│   │   │   │   ├── provenance.rs
+│   │   │   │   └── provenance_tests.rs
 │   │   │   ├── durable.rs
 │   │   │   ├── ledger.rs
 │   │   │   ├── ledger_lock_tests.rs
@@ -2363,6 +2368,8 @@ src/
 │   │   │   │   ├── reactions.rs
 │   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── rotation/
+│   │   │   │   └── provenance.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
@@ -2422,6 +2429,13 @@ src/
 │   │   │   ├── lane_tests.rs
 │   │   │   └── log_record.rs
 │   │   ├── runtime_binding/
+│   │   │   ├── codex_policy/
+│   │   │   │   └── provenance_tests.rs
+│   │   │   ├── codex_verified/
+│   │   │   │   ├── provenance/
+│   │   │   │   │   ├── dormant.rs
+│   │   │   │   │   └── dormant_tests.rs
+│   │   │   │   └── provenance.rs
 │   │   │   ├── adopt_skip.rs
 │   │   │   ├── binding_access.rs
 │   │   │   ├── claude_source.rs
