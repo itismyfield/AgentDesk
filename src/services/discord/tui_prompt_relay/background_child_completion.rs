@@ -1,0 +1,215 @@
+//! Closes background children from the native completion records in a Claude
+//! transcript, whether or not a turn was running when each record was written.
+
+use std::io::{BufRead, Seek, SeekFrom};
+
+use serde_json::Value;
+
+use super::*;
+use crate::db::session_observability::{
+    close_background_child_for_tool_use_pg, has_open_background_children_pg,
+};
+
+/// Read position per tmux session, separate from the prompt cursor so records a
+/// running turn already consumed are still read here.
+static COMPLETION_CURSORS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (PathBuf, u64)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[derive(Debug, PartialEq, Eq)]
+struct ChildCompletion {
+    line_start: u64,
+    tool_use_id: String,
+    status: String,
+}
+
+/// Applies each Claude TUI binding's new transcript completions before the idle
+/// tick's per-binding skips (inflight, no channel), then returns the bindings.
+pub(super) async fn claude_bindings_after_child_completions(
+    shared: &Arc<SharedData>,
+) -> Vec<(
+    String,
+    crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+)> {
+    let bindings = crate::services::tui_prompt_dedupe::runtime_bindings_for_kind(
+        RuntimeHandoffKind::ClaudeTui,
+    );
+    for (tmux_session_name, binding) in &bindings {
+        close_children_finished_in_transcript(
+            shared,
+            tmux_session_name,
+            Path::new(&binding.output_path),
+        )
+        .await;
+    }
+    bindings
+}
+
+/// Applies every terminal `<task-notification>` written to `transcript_path`
+/// since the last read to the child its tool call opened under this session.
+async fn close_children_finished_in_transcript(
+    shared: &Arc<SharedData>,
+    tmux_session_name: &str,
+    transcript_path: &Path,
+) {
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return;
+    };
+    let Ok(len) = std::fs::metadata(transcript_path).map(|metadata| metadata.len()) else {
+        return;
+    };
+    let parent = super::super::adk_session::build_namespaced_session_key(
+        &shared.token_hash,
+        &ProviderKind::Claude,
+        tmux_session_name,
+    );
+    let known = completion_cursors()
+        .get(tmux_session_name)
+        .filter(|(path, offset)| path == transcript_path && *offset <= len)
+        .map(|(_, offset)| *offset);
+    let start = match known {
+        Some(offset) => offset,
+        // Unread history can hold a completion only if a child is still open.
+        None => match has_open_background_children_pg(pool, &parent).await {
+            Ok(true) => 0,
+            Ok(false) => len,
+            Err(error) => {
+                tracing::warn!(tmux_session_name, %error,
+                    "background child completion scan deferred; open-child lookup failed");
+                return;
+            }
+        },
+    };
+    let mut cursor = start;
+    if start < len {
+        let path = transcript_path.to_path_buf();
+        let Ok(Ok((completions, end))) =
+            tokio::task::spawn_blocking(move || read_child_completions(&path, start)).await
+        else {
+            return;
+        };
+        cursor = end;
+        for completion in completions {
+            let close_status =
+                if super::super::placeholder_live_events::notification_is_error(&completion.status)
+                {
+                    "aborted"
+                } else {
+                    "completed"
+                };
+            match close_background_child_for_tool_use_pg(
+                pool,
+                &parent,
+                &completion.tool_use_id,
+                close_status,
+            )
+            .await
+            {
+                Ok(Some(child_session_id)) => tracing::info!(
+                    tmux_session_name,
+                    tool_use_id = %completion.tool_use_id,
+                    child_session_id,
+                    close_status,
+                    "closed background child from its transcript completion"
+                ),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(tmux_session_name, tool_use_id = %completion.tool_use_id,
+                        %error, "background child close failed; retrying from this record");
+                    cursor = completion.line_start;
+                    break;
+                }
+            }
+        }
+    }
+    completion_cursors().insert(
+        tmux_session_name.to_string(),
+        (transcript_path.to_path_buf(), cursor),
+    );
+}
+
+fn completion_cursors()
+-> std::sync::MutexGuard<'static, std::collections::HashMap<String, (PathBuf, u64)>> {
+    COMPLETION_CURSORS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Process restart: every read position is forgotten.
+#[cfg(test)]
+pub(super) fn forget_completion_cursors_for_tests() {
+    completion_cursors().clear();
+}
+
+/// Reads complete JSONL records from `start` and returns their terminal child
+/// completions plus the offset just past the last complete record.
+fn read_child_completions(path: &Path, start: u64) -> std::io::Result<(Vec<ChildCompletion>, u64)> {
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut offset = start.saturating_sub(1);
+    reader.seek(SeekFrom::Start(offset))?;
+    let mut line = Vec::new();
+    if start > 0 {
+        // Unless the byte before `start` ends a record, `start` is mid-record
+        // (an EOF taken mid-write) and that partial record is skipped.
+        let read = reader.read_until(b'\n', &mut line)?;
+        if line.last() != Some(&b'\n') {
+            return Ok((Vec::new(), start));
+        }
+        offset += read as u64;
+    }
+    let mut completions = Vec::new();
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        if let Some((tool_use_id, status)) = std::str::from_utf8(&line)
+            .ok()
+            .and_then(child_completion_from_record)
+        {
+            completions.push(ChildCompletion {
+                line_start: offset,
+                tool_use_id,
+                status,
+            });
+        }
+        offset += read as u64;
+    }
+    Ok((completions, offset))
+}
+
+/// A terminal `<task-notification>` naming its launching tool call, delivered
+/// as a user record (idle, including `isMeta`) or a queued mid-turn attachment.
+fn child_completion_from_record(line: &str) -> Option<(String, String)> {
+    if !line.contains("task-notification") {
+        return None;
+    }
+    let record: Value = serde_json::from_str(line).ok()?;
+    let text = match record.get("type")?.as_str()? {
+        "user" => match record.get("message")?.get("content")? {
+            Value::String(text) => text.as_str(),
+            Value::Array(items) => items.iter().find_map(|item| {
+                (item.get("type")?.as_str()? == "text").then(|| item.get("text")?.as_str())?
+            })?,
+            _ => return None,
+        },
+        "attachment" => {
+            let attachment = record.get("attachment")?;
+            if attachment.get("type")?.as_str()? != "queued_command" {
+                return None;
+            }
+            attachment.get("prompt")?.as_str()?
+        }
+        _ => return None,
+    };
+    if !injected_prompt_policy::is_start_anchored_task_notification(text) {
+        return None;
+    }
+    let notification = super::super::tui_task_card::parse_task_notification(text);
+    let status = notification.status?;
+    if !super::super::placeholder_live_events::notification_is_terminal(&status) {
+        return None;
+    }
+    Some((notification.tool_use_id?, status))
+}

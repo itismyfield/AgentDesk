@@ -380,6 +380,7 @@ jobs:
               - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs'
+              - 'src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs'
               - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs'
               - 'src/services/discord/turn_bridge/completion_guard/completion_postgres.rs'
               - 'src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs'

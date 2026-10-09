@@ -1,8 +1,6 @@
 use sqlx::{PgPool, Row};
 
-use crate::db::session_status::{
-    ABORTED, AWAITING_BG, AWAITING_USER, DISCONNECTED, IDLE, TURN_ACTIVE,
-};
+use crate::db::session_status::{ABORTED, AWAITING_BG, DISCONNECTED, IDLE, TURN_ACTIVE};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackgroundChildSpawn {
@@ -163,19 +161,28 @@ pub async fn close_background_child_pg(
         .execute(&mut *tx)
         .await?;
 
+    // A parent whose turn ended waiting only on background work is idle once
+    // its last open child closes.
     if let Some(parent_session_id) = parent_session_id {
         sqlx::query(
             "UPDATE sessions
                 SET active_children = GREATEST(active_children - 1, 0),
                     status = CASE
-                        WHEN GREATEST(active_children - 1, 0) = 0 AND status = $2 THEN $3
+                        WHEN GREATEST(active_children - 1, 0) = 0
+                         AND status = $2
+                         AND NOT EXISTS (
+                             SELECT 1 FROM sessions child
+                              WHERE child.parent_session_id = sessions.id
+                                AND child.closed_at IS NULL
+                         )
+                        THEN $3
                         ELSE status
                     END
               WHERE id = $1",
         )
         .bind(parent_session_id)
         .bind(AWAITING_BG)
-        .bind(AWAITING_USER)
+        .bind(IDLE)
         .execute(&mut *tx)
         .await?;
     }
@@ -188,25 +195,47 @@ fn background_child_session_key(parent_session_key: &str, child_id: &str) -> Str
     format!("{parent_session_key}:child:{child_id}")
 }
 
-/// Closes the open child launched by `tool_use_id`, whichever turn observes its
-/// completion. An id that matches no open child closes nothing.
+/// Whether the parent still has an open background child of any key format.
+pub async fn has_open_background_children_pg(
+    pool: &PgPool,
+    parent_session_key: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM sessions parent
+               JOIN sessions child ON child.parent_session_id = parent.id
+              WHERE parent.session_key = $1
+                AND child.closed_at IS NULL
+         )",
+    )
+    .bind(parent_session_key)
+    .fetch_one(pool)
+    .await
+}
+
+/// Closes `parent_session_key`'s open child launched by `tool_use_id`, whichever
+/// turn observes its completion. Without both identities nothing closes.
 pub async fn close_background_child_for_tool_use_pg(
     pool: &PgPool,
+    parent_session_key: &str,
     tool_use_id: &str,
     status: &str,
 ) -> Result<Option<i64>, sqlx::Error> {
+    let parent_session_key = parent_session_key.trim();
     let tool_use_id = tool_use_id.trim();
-    if tool_use_id.is_empty() {
+    if parent_session_key.is_empty() || tool_use_id.is_empty() {
         return Ok(None);
     }
     let child_session_id: Option<i64> = sqlx::query_scalar(
         "SELECT child.id
-           FROM sessions child
-           JOIN sessions parent ON parent.id = child.parent_session_id
-          WHERE child.closed_at IS NULL
-            AND child.session_key = parent.session_key || ':child:' || $1
-          LIMIT 1",
+           FROM sessions parent
+           JOIN sessions child ON child.parent_session_id = parent.id
+          WHERE parent.session_key = $1
+            AND child.session_key = $1 || ':child:' || $2
+            AND child.closed_at IS NULL",
     )
+    .bind(parent_session_key)
     .bind(tool_use_id)
     .fetch_optional(pool)
     .await?;

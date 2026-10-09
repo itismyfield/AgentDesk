@@ -202,6 +202,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
+  --skip services::discord::tui_prompt_relay::tests::background_child_close_pg_tests
   --skip services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
   --skip services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
@@ -951,6 +952,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
+  services::discord::tui_prompt_relay::tests::background_child_close_pg_tests
   services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
   services::discord::turn_bridge::headless_delivery::production_seam_tests

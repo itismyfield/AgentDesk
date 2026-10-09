@@ -6393,6 +6393,7 @@ mod scenario_census_e2e;
 #[cfg(all(test, unix))]
 mod synthetic_bridge_handoff_pg_tests;
 
+#[cfg(unix)]
 mod background_child_close_pg_tests;
 
 #[cfg(unix)]

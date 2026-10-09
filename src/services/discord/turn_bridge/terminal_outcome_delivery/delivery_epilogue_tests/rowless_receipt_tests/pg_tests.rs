@@ -275,3 +275,139 @@ async fn exact_receipt_custody_retains_failed_child_ids_until_pg_close_5521() {
     pool.close().await;
     db.drop().await;
 }
+
+/// The real Claude tool arm opens a background child under the turn's session,
+/// keyed so a later completion of the launching call closes it.
+#[tokio::test]
+async fn bridge_background_tool_child_closes_by_its_launching_tool_use_id_pg() {
+    use crate::services::discord::turn_bridge::{TurnBridgeContext, spawn_turn_bridge};
+    const PARENT: &str = "claude/bgchild/host:AgentDesk-claude-bgchild-arm-6691";
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "bg_child_arm",
+        "tool arm background child",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    Arc::get_mut(&mut driver.shared).unwrap().pg_pool = Some(pool.clone());
+    sqlx::query(
+        "INSERT INTO sessions (session_key, provider, status) VALUES ($1, 'claude', 'turn_active')",
+    )
+    .bind(PARENT)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let channel_id = ChannelId::new(DRIVER_CHANNEL_ID);
+    driver.inflight.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+    inflight::save_inflight_state(&driver.inflight).unwrap();
+    let _gateway =
+        crate::services::discord::turn_bridge::runtime_handoff_loop::test_gateway::connect();
+    let _rest = crate::services::discord::shared_state::test_rest::recording_mock(
+        4_700_000,
+        DRIVER_CHANNEL_ID,
+    )
+    .await;
+    let cancel = Arc::new(CancelToken::new());
+    let user_msg = MessageId::new(DRIVER_USER_MSG_ID);
+    assert!(
+        crate::services::discord::mailbox_try_start_turn(
+            &driver.shared,
+            channel_id,
+            cancel.clone(),
+            UserId::new(1),
+            user_msg,
+        )
+        .await
+    );
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let bridge = TurnBridgeContext {
+        provider: ProviderKind::Claude,
+        gateway: driver.gateway.clone(),
+        channel_id,
+        user_msg_id: Some(user_msg),
+        user_text_owned: "start the job".to_string(),
+        request_owner_name: String::new(),
+        role_binding: None,
+        adk_session_key: Some(PARENT.to_string()),
+        adk_session_name: None,
+        adk_session_info: None,
+        adk_cwd: None,
+        dispatch_id: None,
+        dispatch_kind: None,
+        memory_recall_usage: TokenUsage::default(),
+        context_window_tokens: 0,
+        context_compact_percent: 0,
+        current_msg_id: Some(MessageId::new(DRIVER_CURRENT_MSG_ID)),
+        response_sent_offset: 0,
+        full_response: String::new(),
+        tmux_last_offset: None,
+        new_session_id: None,
+        defer_watcher_resume: false,
+        reuse_status_panel_message: false,
+        completion_tx: Some(completion_tx),
+        is_external_input_tui_direct: false,
+        inflight_state: driver.inflight.clone(),
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    for message in [
+        StreamMessage::ToolUse {
+            name: "Bash".to_string(),
+            input: r#"{"command":"sleep 600","run_in_background":true}"#.to_string(),
+            tool_use_id: Some("toolu_arm_job".to_string()),
+        },
+        StreamMessage::ToolResult {
+            content: "Command running in background with ID: arm".to_string(),
+            is_error: false,
+            tool_use_id: Some("toolu_arm_job".to_string()),
+        },
+        StreamMessage::Text {
+            content: "job started".to_string(),
+        },
+        StreamMessage::Done {
+            result: String::new(),
+            session_id: None,
+        },
+    ] {
+        tx.send(message).unwrap();
+    }
+    spawn_turn_bridge(driver.shared.clone(), cancel, rx, bridge);
+    // The provider stream stays open past Done, as a live TUI session's does.
+    tokio::time::timeout(std::time::Duration::from_secs(10), completion_rx)
+        .await
+        .expect("the bridge ends")
+        .expect("completion signal");
+    drop(tx);
+
+    let active: i32 =
+        sqlx::query_scalar("SELECT active_children FROM sessions WHERE session_key = $1")
+            .bind(PARENT)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        active, 1,
+        "turn N ends with its background job still running"
+    );
+    let child = crate::db::session_observability::close_background_child_for_tool_use_pg(
+        &pool,
+        PARENT,
+        "toolu_arm_job",
+        "completed",
+    )
+    .await
+    .unwrap();
+    assert!(
+        child.is_some(),
+        "the launching call's completion names the child"
+    );
+    let active: i32 =
+        sqlx::query_scalar("SELECT active_children FROM sessions WHERE session_key = $1")
+            .bind(PARENT)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(active, 0);
+    pool.close().await;
+    db.drop().await;
+}

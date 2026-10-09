@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "eb177b0c1a18e00f06299ab54155cfc496fe447c",
+  "measured_at_sha": "6032a8cb5a6f676ef03e95e67b3d7292a43fec97",
   "records": [
     {
       "root": "migrations/postgres",
@@ -12825,7 +12825,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:a5e0691a7cc8fec64ad3841233838c08cc5260b0ccd76de0d9cae62974f88331"
+      "fingerprint": "sha256:925851634f2b4480f8ad7422f5204be3f5025372891b2ac9d54e39e8e6522bb9"
     },
     {
       "root": "src",
@@ -12834,7 +12834,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:f41808880b44a297252110e7fe18d47adaaefeebce941d1a9917313d954c3999"
+      "fingerprint": "sha256:a5e0691a7cc8fec64ad3841233838c08cc5260b0ccd76de0d9cae62974f88331"
     },
     {
       "root": "src",
@@ -12852,7 +12852,7 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:bb12d7219813b20aa3d53aecf08704ccf35bccfbe605d31b1cdecce6947d334d"
+      "fingerprint": "sha256:178221433c1ddff23fd15815e61780d3699e0d386ce5e008e835c999da6df589"
     },
     {
       "root": "src",
@@ -12862,6 +12862,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:ef33220187d358eda4b7acd02663d32d5626a72cc6aa59f88d0e42d34c3542c7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_observability.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f7d6cd2054afc39ff31ea40d7ea015783e956db42290b4ab093d1e946b903a67"
     },
     {
       "root": "src",
@@ -29718,7 +29727,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:036deea7f7d8f4c0854763dfe11bccb072f2f7d725e133629538ba2e6700c11a"
+      "fingerprint": "sha256:1cea62fb63eadd0aad8518a94971488fddac7df5d82a7d6a528b8408d19beb37"
     },
     {
       "root": "src",
@@ -29727,7 +29736,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:1cea62fb63eadd0aad8518a94971488fddac7df5d82a7d6a528b8408d19beb37"
+      "fingerprint": "sha256:d7203031affca6c2de44006b7f77fd2477e8e783e1e239f2af7df17141ccc298"
     },
     {
       "root": "src",
@@ -29736,7 +29745,7 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:be3401d322676da73d65fa01702aa4dec6c6e807c54107923ff2f77bc32babc4"
+      "fingerprint": "sha256:45df556b5ccbab27d3eac9a3b074f4afd43246fb98d9311b1e46a085fd07b883"
     },
     {
       "root": "src",
@@ -29745,7 +29754,7 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:14d0b55216102758929ab81fd27131fdee229601a972dab2f4378ec3608a6153"
+      "fingerprint": "sha256:29c103e31e7df8019f258eb0ef5d7361d405e329a49851822592fabd6d449a59"
     },
     {
       "root": "src",
@@ -30303,6 +30312,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:3f21e2f2f4ce8a6171dcf347057035df2ae3552bf6ed1cb01016bcb03e221846"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:4c98f1fbf620788d77c2789f70e340fe624daba857070b2183d52cff8209b183"
     },
     {
@@ -30357,6 +30375,15 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
+      "fingerprint": "sha256:2e0205c288902ae83cdfe6d7017d7c236d8e891856f1f57438ed723a64234188"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
       "fingerprint": "sha256:6d3546d9f319769fcc99944f04308998afe79764700544af94395d77640a9538"
     },
     {
@@ -30385,6 +30412,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:bf3ac507cb3aaedfd834ea0a12df1a6f1385666e3a04601762bea35e223c86f9"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e346bc63c94bc184c52ea2c4e58e13986a9456530c58c1fde70f7445c24b19bf"
     },
     {
       "root": "src",
