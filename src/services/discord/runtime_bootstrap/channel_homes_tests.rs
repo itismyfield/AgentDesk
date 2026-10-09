@@ -315,8 +315,17 @@ async fn a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels() {
     use crate::services::turn_host::{HerdrRefusal, refusal_before_turn};
     const HERDR: u64 = 9_300_000_000_000_011;
     const PLAIN: u64 = 9_300_000_000_000_012;
-    let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(HERDR, "gw")]);
-    let _selected = test_override::force_candidates(&[(HERDR, ClaudeTui), (PLAIN, ClaudeTui)]);
+    const CODEX: u64 = 9_300_000_000_000_013;
+    let _hosts =
+        crate::config::session_hosts::force_for_test(Some("mini"), &[(HERDR, "gw"), (CODEX, "gw")]);
+    let _selected = test_override::force_candidates(&[
+        (HERDR, ClaudeTui),
+        (PLAIN, ClaudeTui),
+        (
+            CODEX,
+            crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+        ),
+    ]);
     let turn =
         |channel| refusal_before_turn(None, &ProviderKind::Claude, channel, || async { None });
     let unavailable = |refusal: Option<HerdrRefusal>| {
@@ -366,6 +375,15 @@ async fn a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels() {
         );
         let refused = HerdrRefusal::DelegationUnavailable { reason };
         assert_eq!(turn(HERDR).await, Some(refused));
+        assert_eq!(
+            home_availability::refusal(CODEX),
+            None,
+            "the other provider is unaffected"
+        );
+        assert!(matches!(
+            crate::services::tui_o::cutover::intake_route::route_for_placement("claude", HERDR),
+            crate::services::tui_o::cutover::intake_route::IntakeRoute::Hold(_)
+        ));
         assert_eq!(
             turn(PLAIN).await,
             None,

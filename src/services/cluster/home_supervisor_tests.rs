@@ -4,7 +4,7 @@
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
-use tokio::sync::oneshot;
+use tokio::sync::{Barrier, mpsc, oneshot};
 
 use super::*;
 
@@ -121,6 +121,152 @@ async fn an_unconfirmed_end_blocks_the_channel() {
 
 fn panicking() -> Result<Bundle, String> {
     panic!("build panicked")
+}
+
+#[derive(Default)]
+struct TaskCounts {
+    active: [AtomicUsize; 3],
+    started: [AtomicUsize; 3],
+    joined: [AtomicUsize; 3],
+}
+
+struct TaskBundle {
+    stop: watch::Sender<bool>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    counts: Arc<TaskCounts>,
+}
+
+impl TaskBundle {
+    async fn build(counts: Arc<TaskCounts>) -> Self {
+        let (stop, stopping) = watch::channel(false);
+        let (ready, mut started) = mpsc::unbounded_channel();
+        let mut tasks = Vec::new();
+        for role in 0..3 {
+            let (counts, ready) = (Arc::clone(&counts), ready.clone());
+            let mut stopping = stopping.clone();
+            tasks.push(tokio::spawn(async move {
+                counts.active[role].fetch_add(1, Ordering::SeqCst);
+                counts.started[role].fetch_add(1, Ordering::SeqCst);
+                ready.send(()).unwrap();
+                stopping.wait_for(|stop| *stop).await.unwrap();
+                counts.active[role].fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for _ in 0..3 {
+            started.recv().await.unwrap();
+        }
+        Self {
+            stop,
+            tasks,
+            counts,
+        }
+    }
+}
+
+impl HomeBundle for TaskBundle {
+    async fn stop_and_join(self, _: StopReason) -> Settled {
+        self.stop.send_replace(true);
+        for (role, task) in self.tasks.into_iter().enumerate() {
+            task.await.unwrap();
+            self.counts.joined[role].fetch_add(1, Ordering::SeqCst);
+        }
+        Settled::Joined
+    }
+}
+
+fn task_counts(counts: &[AtomicUsize; 3]) -> [usize; 3] {
+    std::array::from_fn(|role| counts[role].load(Ordering::SeqCst))
+}
+
+// The roles model watch, lease and writer tasks: only the reserved build can start them, and
+// replacement cannot build its tasks until every old role has joined.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_starts_reserve_one_bundle_and_replacement_joins_every_task() {
+    let supervisor = Arc::new(Supervisor::default());
+    let begin = Arc::new(Barrier::new(3));
+    let release_build = Arc::new(Barrier::new(2));
+    let builds = Arc::new(AtomicUsize::new(0));
+    let counts = Arc::new(TaskCounts::default());
+    let (completed, mut outcomes) = mpsc::unbounded_channel();
+    let mut callers = Vec::new();
+    for _ in 0..2 {
+        let (supervisor, begin, release_build) = (
+            Arc::clone(&supervisor),
+            Arc::clone(&begin),
+            Arc::clone(&release_build),
+        );
+        let (builds, counts, completed) =
+            (Arc::clone(&builds), Arc::clone(&counts), completed.clone());
+        callers.push(tokio::spawn(async move {
+            begin.wait().await;
+            let result = supervisor
+                .start(7, move |_| async move {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    release_build.wait().await;
+                    Ok(TaskBundle::build(counts).await)
+                })
+                .await;
+            completed.send(result).unwrap();
+        }));
+    }
+    begin.wait().await;
+    assert_eq!(
+        outcomes.recv().await,
+        Some(Err(Refused::Busy(Phase::Starting(1))))
+    );
+    assert_eq!(task_counts(&counts.active), [0; 3]);
+    release_build.wait().await;
+    assert_eq!(outcomes.recv().await, Some(Ok(1)));
+    for caller in callers {
+        caller.await.unwrap();
+    }
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+    assert_eq!(task_counts(&counts.active), [1; 3]);
+    assert_eq!(task_counts(&counts.started), [1; 3]);
+
+    let replacement_counts = Arc::clone(&counts);
+    let replaced = supervisor
+        .start(7, move |_| async move {
+            assert_eq!(task_counts(&replacement_counts.active), [0; 3]);
+            assert_eq!(task_counts(&replacement_counts.joined), [1; 3]);
+            Ok(TaskBundle::build(replacement_counts).await)
+        })
+        .await;
+    assert_eq!(replaced, Ok(2));
+    assert_eq!(task_counts(&counts.active), [1; 3]);
+    assert_eq!(task_counts(&counts.started), [2; 3]);
+    assert_eq!(supervisor.stop(7, Some(2), StopReason::Sigterm).await, None);
+    assert_eq!(task_counts(&counts.active), [0; 3]);
+    assert_eq!(task_counts(&counts.joined), [2; 3]);
+}
+
+#[tokio::test]
+async fn stale_cleanup_and_stale_stop_leave_the_current_generation_running() {
+    let supervisor = Arc::new(Supervisor::default());
+    let stops = Arc::new(AtomicUsize::new(0));
+    let first = bundle(&stops);
+    assert_eq!(supervisor.start(7, |_| async { Ok(first) }).await, Ok(1));
+    let second = bundle(&stops);
+    assert_eq!(supervisor.start(7, |_| async { Ok(second) }).await, Ok(2));
+    assert_eq!(stops.load(Ordering::SeqCst), 1);
+
+    let (done, completed) = watch::channel(false);
+    let mut stale = Finish {
+        supervisor: Arc::clone(&supervisor),
+        channel: 7,
+        generation: 1,
+        done: Some(done),
+    };
+    stale.apply(None);
+    assert!(*completed.borrow());
+    assert_eq!(supervisor.phase(7), Some(Phase::Running(2)));
+    assert_eq!(
+        supervisor.stop(7, Some(1), StopReason::RowGone).await,
+        Some(Phase::Running(2))
+    );
+    assert_eq!(stops.load(Ordering::SeqCst), 1);
+    assert_eq!(supervisor.stop(7, Some(2), StopReason::Sigterm).await, None);
+    assert_eq!(stops.load(Ordering::SeqCst), 2);
 }
 
 struct Recorded {

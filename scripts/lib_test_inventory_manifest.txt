@@ -2226,6 +2226,12 @@ services::cluster::channel_home_port::tests::the_turn_comes_from_the_mailbox_and
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
 services::cluster::execution_requirements::tests::execution_requirements_are_strict_and_share_dispatch_matching
+services::cluster::home_supervisor::tests::a_cancelled_caller_leaves_the_transition_to_the_supervisor
+services::cluster::home_supervisor::tests::a_stop_during_a_start_stops_the_new_bundle_instead_of_running_it
+services::cluster::home_supervisor::tests::an_unconfirmed_end_blocks_the_channel
+services::cluster::home_supervisor::tests::concurrent_starts_reserve_one_bundle_and_replacement_joins_every_task
+services::cluster::home_supervisor::tests::stale_cleanup_and_stale_stop_leave_the_current_generation_running
+services::cluster::home_supervisor::tests::the_exit_waits_for_every_providers_homes
 services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence
 services::cluster::intake_preflight::tests::each_required_failure_is_independently_fail_closed
 services::cluster::intake_preflight::tests::evaluation_does_not_mutate_production_handoff_state_pg
@@ -6103,6 +6109,7 @@ services::discord::runtime_bootstrap::bootstrap_tests::voice_auto_join_provider_
 services::discord::runtime_bootstrap::bootstrap_tests::wait_for_local_http_bind_returns_quickly_when_port_is_bound
 services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_standby_writers_port_posts_over_the_bot_tokens_rest_client
+services::discord::runtime_bootstrap::channel_homes_tests::a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels
 services::discord::runtime_bootstrap::channel_homes_tests::the_entry_reads_nothing_off_and_starts_nothing_without_a_row_pg
 services::discord::runtime_bootstrap::channel_homes_tests::the_legacy_reset_runs_the_existing_reset_and_keeps_a_local_pane_pg
 services::discord::runtime_bootstrap::channel_homes_tests::turns_count_as_restored_only_where_the_role_restored_them
@@ -10925,6 +10932,14 @@ services::tui_o::writer::tests::actor::host_start::herdr_resume::a_released_boot
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_restarted_host_takes_a_herdr_launch_back_from_its_store_and_posts_each_result_once
 services::tui_o::writer::tests::actor::host_start::home::a_delegated_channel_waits_on_and_is_ready_by_its_home_gate
 services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
+services::tui_o::writer::tests::actor::host_start::managed::a_cancelled_stop_frees_the_channel_only_after_its_post_in_flight_settled
+services::tui_o::writer::tests::actor::host_start::managed::a_normal_host_early_return_releases_its_unused_claim
+services::tui_o::writer::tests::actor::host_start::managed::a_panicked_actor_never_reports_writer_stopped_or_releases_its_claim
+services::tui_o::writer::tests::actor::host_start::managed::a_stop_during_port_wait_releases_the_claim_without_starting_an_actor
+services::tui_o::writer::tests::actor::host_start::managed::a_stopped_writer_frees_its_channel_for_exactly_one_new_writer
+services::tui_o::writer::tests::actor::host_start::managed::a_supervised_channel_runs_one_writer_generation_at_a_time
+services::tui_o::writer::tests::actor::host_start::managed::an_unpolled_stop_waiter_still_stops_and_releases_its_writer
+services::tui_o::writer::tests::actor::host_start::managed::failed_preparation_does_not_reserve_a_channel_without_a_host
 services::tui_o::writer::tests::actor::host_start::missing_or_damaged_store_state_holds_instead_of_a_first_init
 services::tui_o::writer::tests::actor::host_start::nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel
 services::tui_o::writer::tests::actor::host_start::o_recovers_past_a_superseded_pending_when_a_later_source_is_bound
@@ -11019,6 +11034,7 @@ services::tui_o::writer::tests::actor::verified_permission_hold_preserves_an_att
 services::tui_o::writer::tests::actor::without_ownership_the_actor_keeps_spooling_and_posts_once_ownership_returns
 services::tui_o::writer::tests::an_unclear_post_is_settled_from_history_and_never_posted_again
 services::tui_o::writer::tests::an_unclear_post_sharing_an_earlier_unsettled_payload_stays_ambiguous
+services::tui_o::writer::tests::deliver_home::a_channel_held_by_unavailable_delegation_posts_nothing
 services::tui_o::writer::tests::deliver_home::a_delegated_channel_posts_under_its_home_through_the_drain_and_none_after_close
 services::tui_o::writer::tests::deliver_home::the_final_close_waits_for_an_admission_in_progress
 services::tui_o::writer::tests::derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest

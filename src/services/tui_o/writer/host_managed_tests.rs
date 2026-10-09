@@ -114,6 +114,133 @@ async fn a_cancelled_stop_frees_the_channel_only_after_its_post_in_flight_settle
     }
 }
 
+async fn scheduled_until(mut completed: impl FnMut() -> bool) {
+    for _ in 0..100 {
+        if completed() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(completed(), "the scheduled transition did not finish");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unpolled_stop_waiter_still_stops_and_releases_its_writer() {
+    let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
+    let (harness, path, io, ready, writer) = hosting().await;
+    drop(writer.stop_and_join());
+    scheduled_until(|| !ready.is_hosted(CHANNEL)).await;
+    assert!(!ready.accepts(CHANNEL));
+    append(&path, &row("m2", "after the stop"));
+    tokio::time::advance(POLL_INTERVAL * 2).await;
+    assert_eq!(harness.port.posts(), ["first"]);
+    let again = managed(&harness, &io, &ready);
+    assert_eq!(again.len(), 1);
+    for writer in again {
+        writer.stop_and_join().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_preparation_does_not_reserve_a_channel_without_a_host() {
+    let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
+    let (harness, _) = fresh(startup);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let failed = start_managed(
+        ShadowProvider::Claude,
+        true,
+        cutover::boot_ownership(),
+        || HostParts {
+            io: Arc::clone(&io),
+            runtime_root: None,
+            gate: Arc::clone(&harness.gate),
+            readiness: Arc::clone(&ready),
+        },
+    );
+    assert!(failed.is_empty());
+    assert_eq!(io.alarms.halted().len(), 1);
+    assert!(!ready.is_hosted(CHANNEL), "no host exists to release it");
+    let retried = managed(&harness, &io, &ready);
+    assert_eq!(retried.len(), 1, "a corrected preparation can retry");
+    for writer in retried {
+        writer.stop_and_join().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_normal_host_early_return_releases_its_unused_claim() {
+    let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
+    let (harness, _) = fresh(startup);
+    let era = harness._runtime.path().join("o_store/o_era");
+    std::fs::write(&era, b"invalid era\n").unwrap();
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let ended = managed(&harness, &io, &ready);
+    assert_eq!(ended.len(), 1);
+    scheduled_until(|| !io.alarms.halted().is_empty()).await;
+    scheduled_until(|| !ready.is_hosted(CHANNEL)).await;
+    assert!(!ready.accepts(CHANNEL));
+    assert!(io.calls().is_empty(), "no actor or port was prepared");
+    std::fs::remove_file(era).unwrap();
+    let retried = managed(&harness, &io, &ready);
+    assert_eq!(retried.len(), 1);
+    for writer in ended {
+        writer.stop_and_join().await.unwrap();
+    }
+    assert!(
+        ready.is_hosted(CHANNEL),
+        "old cleanup leaves the retry hosted"
+    );
+    for writer in retried {
+        writer.stop_and_join().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_panicked_actor_never_reports_writer_stopped_or_releases_its_claim() {
+    let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
+    let (harness, path, io, ready, writer) = hosting().await;
+    let (panicked, witnessed) = tokio::sync::oneshot::channel();
+    let panicked = Mutex::new(Some(panicked));
+    *harness.port.on_post.lock().unwrap() = Some(Box::new(move || {
+        panicked.lock().unwrap().take().unwrap().send(()).unwrap();
+        panic!("actor POST hook panicked");
+    }));
+    append(&path, &row("m2", "panic"));
+    tokio::time::advance(POLL_INTERVAL * 2).await;
+    witnessed.await.unwrap();
+    let stopped = writer.stop_and_join().await;
+    assert!(
+        stopped.is_err(),
+        "an abnormal actor end is not WriterStopped"
+    );
+    assert!(ready.is_hosted(CHANNEL), "its unconfirmed end stays fenced");
+    assert!(!ready.accepts(CHANNEL));
+    assert!(managed(&harness, &io, &ready).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stop_during_port_wait_releases_the_claim_without_starting_an_actor() {
+    let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
+    let (harness, _) = fresh(startup);
+    harness.gate.acquired();
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    io.port_down.store(true, Ordering::SeqCst);
+    let mut writers = managed(&harness, &io, &ready);
+    assert_eq!(writers.len(), 1);
+    scheduled_until(|| io.calls().contains(&("port", 0))).await;
+    drop(writers.pop().unwrap().stop_and_join());
+    scheduled_until(|| !ready.is_hosted(CHANNEL)).await;
+    assert!(!ready.accepts(CHANNEL));
+    assert!(!io.calls().contains(&("lease", 0)), "no actor was started");
+    assert!(harness.port.posts().is_empty());
+    io.port_down.store(false, Ordering::SeqCst);
+    let again = managed(&harness, &io, &ready);
+    assert_eq!(again.len(), 1);
+    for writer in again {
+        writer.stop_and_join().await.unwrap();
+    }
+}
+
 struct Writers(Vec<ManagedWriterHandle>);
 
 impl HomeBundle for Writers {
