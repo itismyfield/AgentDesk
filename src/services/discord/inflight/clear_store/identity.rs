@@ -286,7 +286,8 @@ pub(in crate::services::discord) fn clear_admitted_restart_terminal(
         fresh.tui_terminal_kind.is_none() || fresh.tui_terminal_kind != snapshot.tui_terminal_kind;
     if nonce.is_empty()
         || fresh.turn_nonce.as_deref() != Some(nonce)
-        || super::reconcile_gate::row_is_current_generation(&fresh, current_generation)
+        || (super::reconcile_gate::row_is_current_generation(&fresh, current_generation)
+            && checked("restart_clear_current_generation_unchecked"))
         || (other_kind && checked("restart_clear_kind_unchecked"))
         || !fresh.terminal_delivery_committed
         || (fresh.save_generation != snapshot.save_generation

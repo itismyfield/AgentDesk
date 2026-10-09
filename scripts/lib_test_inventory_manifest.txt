@@ -5332,6 +5332,7 @@ services::discord::recovery_engine::herdr_admitted_restart::tests::a_send_new_te
 services::discord::recovery_engine::herdr_admitted_restart::tests::an_actor_registered_before_cleanup_is_left_alone
 services::discord::recovery_engine::herdr_admitted_restart::tests::an_o_owned_destination_keeps_the_row
 services::discord::recovery_engine::herdr_admitted_restart::tests::an_undelivered_terminal_stays_until_a_later_boot_delivers_it
+services::discord::recovery_engine::herdr_admitted_restart::tests::cleanup_keeps_a_current_generation_row_that_matches_its_snapshot
 services::discord::recovery_engine::herdr_admitted_restart::tests::cleanup_keeps_a_row_that_is_no_longer_the_delivered_episode
 services::discord::recovery_engine::herdr_admitted_restart::tests::each_kind_shows_only_its_own_terminal
 services::discord::recovery_engine::herdr_admitted_restart::tests::only_a_prior_process_admitted_herdr_row_is_a_restart_terminal
