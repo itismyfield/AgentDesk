@@ -104,12 +104,17 @@ pub(super) fn watcher_backstop_turn_is_terminal(
     let transcript = std::path::Path::new(&output_path);
     let signal = match herdr {
         true => {
-            // Only the held turn's own start, in the hold's transcript, can prove its abort.
+            // Only the held turn's own start, in the hold's transcript, can prove its abort, and
+            // only to a ledger key of this process generation.
+            let current = ledger.filter(|key| key.generation == shared.restart.current_generation);
+            #[cfg(test)]
+            let current =
+                current.or(ledger.filter(|_| backstop_mutant("backstop_generation_skipped")));
             let held = held_turn(
                 inflight_state.as_ref(),
                 herdr_hold.as_ref(),
                 &output_path,
-                ledger.as_ref(),
+                current.as_ref(),
             );
             super::completion_signal::herdr_completion_signal_from_transcript(
                 provider,
@@ -568,7 +573,8 @@ mod tests {
             );
             state.turn_nonce = token.turn_nonce().map(str::to_owned);
             state.ensure_finalizer_turn_id();
-            let key = TurnKey::new(channel, state.finalizer_turn_id, 0)
+            let generation = shared.restart.current_generation;
+            let key = TurnKey::new(channel, state.finalizer_turn_id, generation)
                 .with_episode_nonce(token.turn_nonce());
             crate::services::discord::inflight::save_inflight_state(&state).unwrap();
             shared.tmux_watchers.insert(
@@ -766,8 +772,8 @@ mod tests {
         .await;
     }
 
-    /// Once the reader saw the held turn's start as `a`, only `a`'s abort ends it, even after the
-    /// transcript is rewritten in place with another turn at that start.
+    /// Once the reader saw the held turn's start as `a`, only `a`'s abort ends it: a rewrite in
+    /// place with another turn there is no abort, and is not kept once `a` is back at that start.
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn a_held_turn_ends_only_on_the_turn_its_reader_saw() {
@@ -775,15 +781,16 @@ mod tests {
         super::super::tests::with_isolated_runtime_root(|| async move {
             let dir = tempfile::tempdir().unwrap();
             let seen_start = codex("task_started", "a");
-            for (name, rewrite, ends) in [("other", "b", false), ("own", "a", true)] {
-                let path = dir.path().join(format!("{name}.jsonl"));
-                std::fs::write(&path, &seen_start).unwrap();
-                let held = HeldTurn::new(&path, 0, &path);
-                held.herdr.own_start_observed(seen_start.len() as u64, "a");
-                let inode = std::fs::metadata(&path).unwrap().ino();
-                let body = codex("task_started", rewrite) + &codex("turn_aborted", rewrite);
-                std::fs::write(&path, body).unwrap();
-                assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+            let turn = |id: &str| codex("task_started", id) + &codex("turn_aborted", id);
+            let path = dir.path().join("rewritten.jsonl");
+            std::fs::write(&path, &seen_start).unwrap();
+            let held = HeldTurn::new(&path, 0, &path);
+            held.herdr.own_start_observed(seen_start.len() as u64, "a");
+            let inode = std::fs::metadata(&path).unwrap().ino();
+            for (rewrite, ends) in [("b", false), ("a", true)] {
+                std::fs::write(&path, turn(rewrite)).unwrap();
+                let meta = std::fs::metadata(&path).unwrap();
+                assert_eq!((meta.ino(), meta.len()), (inode, turn("a").len() as u64));
                 assert_eq!(held.terminal(), ends, "seen a, rewritten {rewrite}");
             }
         })
@@ -791,7 +798,7 @@ mod tests {
     }
 
     /// The reconciler ends a ledger turn on a held Herdr abort only when its key is the row's own
-    /// turn: another episode, turn or an uncaptured episode keeps its entry and B's mailbox.
+    /// turn of this generation: any other key keeps its entry and B's mailbox.
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn a_held_abort_advances_only_its_own_ledger_turn() {
@@ -830,34 +837,42 @@ mod tests {
                 finalized_at: None,
             };
             let (now, far) = (Instant::now(), Instant::now() + WATCHER_REGISTER_BACKSTOP);
+            let (channel, generation) = (held.channel, own.generation);
+            assert_eq!(generation, shared.restart.current_generation);
             let others = [
-                TurnKey::new(held.channel, own.user_msg_id, 0).with_episode_nonce(Some("a")),
+                TurnKey::new(channel, own.user_msg_id, generation).with_episode_nonce(Some("a")),
                 TurnKey {
                     user_msg_id: own.user_msg_id + 1,
                     ..own
                 },
-                TurnKey::new(held.channel, own.user_msg_id, 0),
+                TurnKey::new(channel, own.user_msg_id, generation),
+                TurnKey {
+                    generation: generation + 1,
+                    ..own
+                },
             ];
-            let mut ledger = HashMap::new();
-            for (n, key) in (1u64..).zip(others) {
-                for (generation, deadline) in [(2 * n, now), (2 * n + 1, far)] {
-                    let key = TurnKey { generation, ..key };
-                    ledger.insert(key.exact_key(), entry(key, deadline));
+            // The natural deadline, then the fast-path probe beside the own key's control.
+            for (deadline, control) in [(now, false), (far, true)] {
+                let mut ledger: HashMap<_, _> = others
+                    .iter()
+                    .map(|key| (key.exact_key(), entry(*key, deadline)))
+                    .collect();
+                if control {
+                    ledger.insert(own.exact_key(), entry(own, far));
+                }
+                reconcile::reconcile(&mut ledger, &mut HashMap::new(), &shared).await;
+                for key in others {
+                    let entry = &ledger[&key.exact_key()];
+                    assert!(
+                        entry.phase == Phase::Pending,
+                        "{key:?} advanced on B's abort"
+                    );
+                    assert_eq!(entry.watcher_backstop_terminal_streak, 0, "{key:?}");
+                }
+                if control {
+                    assert_eq!(ledger[&own.exact_key()].watcher_backstop_terminal_streak, 1);
                 }
             }
-            ledger.insert(own.exact_key(), entry(own, far));
-
-            reconcile::reconcile(&mut ledger, &mut HashMap::new(), &shared).await;
-            let theirs = |entry: &&LedgerEntry| entry.turn_key.exact_key() != own.exact_key();
-            for entry in ledger.values().filter(theirs) {
-                let key = entry.turn_key;
-                assert!(
-                    entry.phase == Phase::Pending,
-                    "{key:?} advanced on B's abort"
-                );
-                assert_eq!(entry.watcher_backstop_terminal_streak, 0, "{key:?}");
-            }
-            assert_eq!(ledger[&own.exact_key()].watcher_backstop_terminal_streak, 1);
             assert!(
                 mailbox.has_active_turn().await.unwrap(),
                 "B's mailbox is kept"

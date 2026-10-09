@@ -79,8 +79,8 @@ pub(super) fn herdr_completion_signal_from_transcript(
         let seen = seen.filter(|_| {
             !super::watcher_backstop::backstop_mutant("backstop_seen_native_id_ignored")
         });
-        held.read_own_codex_turn(transcript_path)
-            .is_some_and(|turn| turn.aborted && seen.is_none_or(|seen| seen == turn.turn_id))
+        held.read_own_codex_turn(transcript_path, seen.as_deref())
+            .is_some_and(|turn| turn.aborted)
     };
     match signal {
         CompletionSignal::PausedLive
