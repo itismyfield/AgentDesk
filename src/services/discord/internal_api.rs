@@ -154,6 +154,23 @@ pub(super) async fn hook_session(
     request_body(Method::POST, "/api/dispatched-sessions/webhook", &body).await
 }
 
+pub(super) async fn hook_session_terminal(
+    body: crate::services::dispatched_sessions::HookSessionBody,
+    expected_turn_nonce: &str,
+) -> Result<Value, String> {
+    let ctx = load_context()?;
+    let response = client()
+        .post(api_url(&ctx, "/api/dispatched-sessions/webhook"))
+        .query(&[("expected_turn_nonce", expected_turn_nonce)])
+        .json(&body)
+        .header(reqwest::header::ORIGIN, api_origin(&ctx))
+        .header(reqwest::header::REFERER, api_origin(&ctx))
+        .send()
+        .await
+        .map_err(|error| format!("terminal session hook: {error}"))?;
+    read_response(response).await
+}
+
 pub(super) async fn mark_session_idle_if_not_newer_live(
     session_key: &str,
     provider: &str,

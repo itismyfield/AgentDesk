@@ -6401,6 +6401,9 @@ mod scenario_census_e2e;
 mod synthetic_bridge_handoff_pg_tests;
 
 #[cfg(unix)]
+mod background_child_close_pg_tests;
+
+#[cfg(unix)]
 #[path = "tests/o_tool_first_panel_tests.rs"]
 mod o_tool_first_panel_tests;
 #[cfg(unix)]

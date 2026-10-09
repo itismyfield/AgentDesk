@@ -1,8 +1,6 @@
 use sqlx::{PgPool, Row};
 
-use crate::db::session_status::{
-    ABORTED, AWAITING_BG, AWAITING_USER, DISCONNECTED, IDLE, TURN_ACTIVE,
-};
+use crate::db::session_status::{ABORTED, AWAITING_BG, DISCONNECTED, IDLE, TURN_ACTIVE};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackgroundChildSpawn {
@@ -10,6 +8,9 @@ pub struct BackgroundChildSpawn {
     pub provider: Option<String>,
     pub tool_name: String,
     pub tool_input: String,
+    /// Launching tool call id; keys the child row so a later turn's completion
+    /// notification can close exactly this child.
+    pub tool_use_id: Option<String>,
 }
 
 pub async fn mark_session_tool_use_pg(
@@ -66,18 +67,26 @@ pub async fn insert_background_child_pg(
     let agent_id: Option<String> = parent.try_get("agent_id").ok();
     let cwd: Option<String> = parent.try_get("cwd").ok();
     let thread_channel_id: Option<String> = parent.try_get("thread_channel_id").ok();
-    let child_session_key = format!(
-        "{}:child:{}",
-        parent_session_key,
-        uuid::Uuid::new_v4().simple()
-    );
+    let child_session_key = match spawn
+        .tool_use_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(tool_use_id) => background_child_session_key(parent_session_key, tool_use_id),
+        None => background_child_session_key(
+            parent_session_key,
+            &uuid::Uuid::new_v4().simple().to_string(),
+        ),
+    };
     let purpose = background_child_purpose(&spawn.tool_name, &spawn.tool_input);
     let provider = spawn
         .provider
         .as_deref()
         .filter(|value| !value.trim().is_empty());
 
-    let child_id: i64 = sqlx::query_scalar(
+    // A replayed ToolUse finds its row already present; it must not count twice.
+    let child_id: Option<i64> = sqlx::query_scalar(
         "INSERT INTO sessions (
             session_key,
             agent_id,
@@ -90,6 +99,7 @@ pub async fn insert_background_child_pg(
             purpose,
             created_at
          ) VALUES ($1, $2, COALESCE($3, 'claude'), $8, $4, $5, $6, NOW(), $7, NOW())
+         ON CONFLICT (session_key) DO NOTHING
          RETURNING id",
     )
     .bind(child_session_key)
@@ -100,8 +110,12 @@ pub async fn insert_background_child_pg(
     .bind(parent_id)
     .bind(purpose)
     .bind(TURN_ACTIVE)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+    let Some(child_id) = child_id else {
+        tx.commit().await?;
+        return Ok(None);
+    };
 
     sqlx::query("UPDATE sessions SET active_children = active_children + 1 WHERE id = $1")
         .bind(parent_id)
@@ -147,25 +161,96 @@ pub async fn close_background_child_pg(
         .execute(&mut *tx)
         .await?;
 
+    // A parent whose turn ended waiting only on background work is idle once
+    // its last open child closes.
     if let Some(parent_session_id) = parent_session_id {
+        // Lock first so the open-child check runs on a snapshot taken after any
+        // sibling close that held the parent commits.
+        sqlx::query("SELECT 1 FROM sessions WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(parent_session_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             "UPDATE sessions
                 SET active_children = GREATEST(active_children - 1, 0),
                     status = CASE
-                        WHEN GREATEST(active_children - 1, 0) = 0 AND status = $2 THEN $3
+                        WHEN GREATEST(active_children - 1, 0) = 0
+                         AND status = $2
+                         AND NOT EXISTS (
+                             SELECT 1 FROM sessions child
+                              WHERE child.parent_session_id = sessions.id
+                                AND child.closed_at IS NULL
+                         )
+                        THEN $3
                         ELSE status
                     END
               WHERE id = $1",
         )
         .bind(parent_session_id)
         .bind(AWAITING_BG)
-        .bind(AWAITING_USER)
+        .bind(IDLE)
         .execute(&mut *tx)
         .await?;
     }
 
     tx.commit().await?;
     Ok(true)
+}
+
+fn background_child_session_key(parent_session_key: &str, child_id: &str) -> String {
+    format!("{parent_session_key}:child:{child_id}")
+}
+
+/// Whether the parent still has an open background child of any key format.
+pub async fn has_open_background_children_pg(
+    pool: &PgPool,
+    parent_session_key: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM sessions parent
+               JOIN sessions child ON child.parent_session_id = parent.id
+              WHERE parent.session_key = $1
+                AND child.closed_at IS NULL
+         )",
+    )
+    .bind(parent_session_key)
+    .fetch_one(pool)
+    .await
+}
+
+/// Closes `parent_session_key`'s open child launched by `tool_use_id`, whichever
+/// turn observes its completion. Without both identities nothing closes.
+pub async fn close_background_child_for_tool_use_pg(
+    pool: &PgPool,
+    parent_session_key: &str,
+    tool_use_id: &str,
+    status: &str,
+) -> Result<Option<i64>, sqlx::Error> {
+    let parent_session_key = parent_session_key.trim();
+    let tool_use_id = tool_use_id.trim();
+    if parent_session_key.is_empty() || tool_use_id.is_empty() {
+        return Ok(None);
+    }
+    let child_session_id: Option<i64> = sqlx::query_scalar(
+        "SELECT child.id
+           FROM sessions parent
+           JOIN sessions child ON child.parent_session_id = parent.id
+          WHERE parent.session_key = $1
+            AND child.session_key = $1 || ':child:' || $2
+            AND child.closed_at IS NULL",
+    )
+    .bind(parent_session_key)
+    .bind(tool_use_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(child_session_id) = child_session_id else {
+        return Ok(None);
+    };
+    Ok(close_background_child_pg(pool, child_session_id, status)
+        .await?
+        .then_some(child_session_id))
 }
 
 pub fn background_child_purpose(tool_name: &str, tool_input: &str) -> String {
@@ -214,3 +299,7 @@ fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
     }
     value[..end].to_string()
 }
+
+#[cfg(test)]
+#[path = "session_observability/background_ordering_pg_tests.rs"]
+mod tests_pg;
