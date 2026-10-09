@@ -1,6 +1,33 @@
 use super::exact_episode::*;
 use uuid::Uuid;
 
+pub(crate) struct ConsistentEpisodeSnapshot {
+    records: Vec<EpisodeMetadata>,
+}
+impl ConsistentEpisodeSnapshot {
+    fn decode(payloads: Vec<serde_json::Value>) -> Self {
+        Self {
+            records: payloads
+                .into_iter()
+                .map(serde_json::from_value)
+                .collect::<Result<_, _>>()
+                .unwrap_or_default(),
+        }
+    }
+    pub(super) fn records(&self) -> &[EpisodeMetadata] {
+        &self.records
+    }
+    #[cfg(test)]
+    pub(super) fn fixture(records: Vec<EpisodeMetadata>) -> Self {
+        Self::decode(
+            records
+                .into_iter()
+                .map(|r| serde_json::to_value(r).unwrap())
+                .collect(),
+        )
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct DurableEvidenceAck {
     pub record: Uuid,
@@ -51,13 +78,8 @@ pub(crate) async fn resolve_in_tx(
     .bind(episode.to_string())
     .fetch_all(&mut *connection)
     .await?;
-    let records = payloads
-        .into_iter()
-        .map(|(payload,)| serde_json::from_value(payload))
-        .collect::<Result<Vec<EpisodeMetadata>, _>>();
-    let snapshot = ConsistentEpisodeSnapshot {
-        records: records.unwrap_or_default(),
-    };
+    let snapshot =
+        ConsistentEpisodeSnapshot::decode(payloads.into_iter().map(|(payload,)| payload).collect());
     Ok(resolve_strict(episode, &snapshot))
 }
 

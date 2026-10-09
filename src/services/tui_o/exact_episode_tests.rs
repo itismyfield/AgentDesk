@@ -90,7 +90,10 @@ pub(crate) fn fixture() -> Vec<EpisodeMetadata> {
     .collect()
 }
 fn resolve(records: Vec<EpisodeMetadata>) -> StrictResolution {
-    resolve_strict(Uuid::from_u128(1), &ConsistentEpisodeSnapshot { records })
+    resolve_strict(
+        Uuid::from_u128(1),
+        &ConsistentEpisodeSnapshot::fixture(records),
+    )
 }
 #[test]
 fn exact_body_requires_full_child_attempt_receipt_and_whole_frontier() {
@@ -270,4 +273,19 @@ fn exact_source_resolution_extra_proof_and_missing_piece_fail_closed() {
         }
     }
     assert_eq!(resolve(partial).authority(), Authority::Pending);
+}
+
+#[test]
+fn exact_repeated_settlement_is_monotone() {
+    let mut records = fixture();
+    for id in [501, 502] {
+        records.push(EpisodeMetadata::new(
+            Uuid::from_u128(1),
+            Uuid::from_u128(id),
+            EpisodeEvidence::Settled {
+                effects: vec!["intake".into()],
+            },
+        ));
+        assert_eq!(resolve(records.clone()).settlement(), Settlement::Settled);
+    }
 }

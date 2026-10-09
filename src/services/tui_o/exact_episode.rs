@@ -184,16 +184,13 @@ impl StrictResolution {
     }
 }
 
-// Only the PG reader constructs this snapshot; callers cannot supply proof vectors.
-pub(crate) struct ConsistentEpisodeSnapshot {
-    pub(super) records: Vec<EpisodeMetadata>,
-}
+use super::exact_pg::ConsistentEpisodeSnapshot;
 
 pub(crate) fn resolve_strict(
     episode: Uuid,
     snapshot: &ConsistentEpisodeSnapshot,
 ) -> StrictResolution {
-    let records = &snapshot.records;
+    let records = snapshot.records();
     let pending = || StrictResolution {
         authority: Authority::Pending,
         settlement: Settlement::Outstanding,
@@ -425,7 +422,14 @@ pub(crate) fn resolve_strict(
             }
         })
         .collect();
-    let settled = matches!(settlements.as_slice(), [effects] if effects.len() == pin.context.required_effects.len() && pin.context.required_effects.iter().all(|e| effects.iter().filter(|x| *x == e).count() == 1));
+    let settled = settlements.iter().any(|effects| {
+        effects.len() == pin.context.required_effects.len()
+            && pin
+                .context
+                .required_effects
+                .iter()
+                .all(|e| effects.iter().filter(|x| *x == e).count() == 1)
+    });
     StrictResolution {
         authority,
         settlement: if settled {
@@ -500,4 +504,4 @@ pub(crate) enum TerminalDisposition {
 
 #[cfg(test)]
 #[path = "exact_episode_tests.rs"]
-pub(super) mod tests;
+pub(crate) mod tests;

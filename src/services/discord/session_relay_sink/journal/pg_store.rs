@@ -261,14 +261,30 @@ pub(crate) mod exact_tests {
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let obligation = Uuid::new_v4();
-        let event = super::super::event(
+        let attempt = Uuid::new_v4();
+        let mut legacy = super::super::admission_events(
             obligation,
-            None,
-            "O",
-            0,
+            attempt,
             serde_json::json!({"intake_outbox_id":9}),
+            (10, 20),
         );
-        append_batch(&pool, &[event]).await.unwrap();
+        legacy.push(super::super::transport_event(
+            obligation,
+            attempt,
+            DiscordTransportReceipt {
+                requested_channel_id: "10".into(),
+                returned_channel_id: "10".into(),
+                message_id: "100".into(),
+            },
+        ));
+        legacy.push(super::super::event(
+            obligation,
+            Some(attempt),
+            "C",
+            3,
+            serde_json::json!({"frontier_start":10,"frontier_end":20}),
+        ));
+        append_batch(&pool, &legacy).await.unwrap();
         let mut connection = pool.acquire().await.unwrap();
         let before = load_obligation_window(&mut connection, obligation)
             .await
@@ -336,5 +352,64 @@ pub(crate) mod exact_tests {
         let judgment = super::super::judge_loaded_obligation_window(loaded);
         assert_eq!(judgment.delivered_outbox_id, None);
         assert!(!judgment.malformed);
+    }
+}
+
+#[cfg(test)]
+mod mixed_tests {
+    use super::*;
+    #[test]
+    fn mixed_strict_rows_leave_legacy_fold_frontier_and_shadow_bytes_unchanged() {
+        let id = Uuid::from_u128(900);
+        let attempt = Uuid::from_u128(901);
+        let mut legacy = super::super::admission_events(
+            id,
+            attempt,
+            serde_json::json!({"intake_outbox_id":9}),
+            (10, 20),
+        );
+        legacy.push(super::super::transport_event(
+            id,
+            attempt,
+            DiscordTransportReceipt {
+                requested_channel_id: "10".into(),
+                returned_channel_id: "10".into(),
+                message_id: "100".into(),
+            },
+        ));
+        legacy.push(super::super::event(
+            id,
+            Some(attempt),
+            "C",
+            3,
+            serde_json::json!({"frontier_start":10,"frontier_end":20}),
+        ));
+        let view = |events: &[JournalEvent]| {
+            let fold = super::super::exact_delivery_predicate(events);
+            let shadow = format!(
+                "{:?}",
+                super::super::classify_shadow_observation(events, false)
+            );
+            let frontier = super::super::legacy_events(events)
+                .iter()
+                .filter_map(super::super::event_frontier)
+                .collect::<Vec<_>>();
+            serde_json::to_vec(&(fold, shadow, frontier)).unwrap()
+        };
+        for count in [2, 3, 4] {
+            let original = &legacy[..count];
+            let expected = view(original);
+            let mut mixed = original.to_vec();
+            for metadata in crate::services::tui_o::exact_episode::tests::fixture() {
+                mixed.push(super::super::event(
+                    Uuid::new_v4(),
+                    None,
+                    "O",
+                    0,
+                    serde_json::to_value(metadata).unwrap(),
+                ));
+            }
+            assert_eq!(view(&mixed), expected);
+        }
     }
 }

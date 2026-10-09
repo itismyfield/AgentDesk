@@ -539,6 +539,8 @@ fn malformed_judgment() -> ObligationWindowJudgment {
 }
 
 fn exact_delivery_predicate(events: &[JournalEvent]) -> (bool, Option<i64>, bool) {
+    let events = legacy_events(events);
+    let events = events.as_slice();
     let Some(first) = events.first() else {
         return (false, None, false);
     };
@@ -648,6 +650,8 @@ fn receipt_is_exact(event: &JournalEvent) -> bool {
 /// Q3 classification for one obligation's shadow observation window.
 #[rustfmt::skip]
 pub(super) fn classify_shadow_observation(events: &[JournalEvent], grace_elapsed: bool) -> ShadowClassification {
+    let events = legacy_events(events);
+    let events = events.as_slice();
     let Some(first) = events.first() else { return ShadowClassification::ObservationGap };
     if events.iter().any(|event| event.obligation_id != first.obligation_id) { return ShadowClassification::Unknown; }
     let find = |kind: &'static str| events.iter().find(|event| event.kind == kind);
@@ -1131,10 +1135,29 @@ pub(crate) async fn append_exact_metadata(
     if !metadata.supported() {
         return Err("unsupported strict metadata".into());
     }
-    let payload = serde_json::to_value(metadata).map_err(|e| e.to_string())?;
+    let mut metadata = metadata.clone();
+    if matches!(
+        metadata.evidence,
+        crate::services::tui_o::exact_episode::EpisodeEvidence::Settled { .. }
+    ) {
+        metadata.record = Uuid::new_v5(&metadata.episode, b"settled");
+    }
+    let payload = serde_json::to_value(&metadata).map_err(|e| e.to_string())?;
     let obligation = Uuid::new_v5(
         &JOURNAL_NAMESPACE,
-        format!("strict:{}:{}", metadata.episode, metadata.record).as_bytes(),
+        format!(
+            "strict:{}:{}",
+            metadata.episode,
+            if matches!(
+                metadata.evidence,
+                crate::services::tui_o::exact_episode::EpisodeEvidence::Settled { .. }
+            ) {
+                "settled".to_string()
+            } else {
+                metadata.record.to_string()
+            }
+        )
+        .as_bytes(),
     );
     let envelope = event(obligation, None, "O", 0, payload);
     let (ack, receiver) = tokio::sync::oneshot::channel();
@@ -1159,3 +1182,17 @@ pub(crate) use pg_store::exact_tests::{
     exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt,
     exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged,
 };
+
+fn legacy_events(events: &[JournalEvent]) -> Vec<JournalEvent> {
+    events
+        .iter()
+        .filter(|event| {
+            event
+                .canonical_payload
+                .get("namespace")
+                .and_then(Value::as_str)
+                != Some(crate::services::tui_o::exact_episode::STRICT_NAMESPACE)
+        })
+        .cloned()
+        .collect()
+}

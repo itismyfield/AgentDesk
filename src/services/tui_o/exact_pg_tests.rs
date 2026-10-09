@@ -2,36 +2,12 @@ use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 
 #[tokio::test]
-async fn exact_metadata_pg_ack_restore_off_zero_and_db_port() {
+async fn exact_metadata_pg_restore_and_terminal_port_stub() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let records = super::super::exact_episode::tests::fixture();
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM public.delivery_journal_events")
         .fetch_one(&pool)
-        .await
-        .unwrap();
-    sqlx::query("SET application_name='c1_off_statement_counter'")
-        .execute(&pool)
-        .await
-        .unwrap();
-    // A lazy, unreachable pool proves OFF does not even acquire a PG connection.
-    let unreachable = sqlx::postgres::PgPoolOptions::new()
-        .connect_lazy("postgresql://localhost:1/disabled")
-        .unwrap();
-    assert_eq!(
-        record_episode_evidence(false, &unreachable, &records[0])
-            .await
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        record_episode_evidence(false, &pool, &records[0])
-            .await
-            .unwrap(),
-        None
-    );
-    sqlx::query("SET application_name='c1_off_counter_end'")
-        .execute(&pool)
         .await
         .unwrap();
     let after: i64 = sqlx::query_scalar("SELECT count(*) FROM public.delivery_journal_events")
@@ -63,17 +39,6 @@ async fn exact_metadata_pg_ack_restore_off_zero_and_db_port() {
         .await
         .unwrap();
     assert_eq!(result.authority(), Authority::Body);
-    // Both reads use PG only: neither runtime root contains an O ledger.
-    let root_a = tempfile::tempdir().unwrap();
-    let root_b = tempfile::tempdir().unwrap();
-    assert_eq!(std::fs::read_dir(root_a.path()).unwrap().count(), 0);
-    assert_eq!(std::fs::read_dir(root_b.path()).unwrap().count(), 0);
-    assert_eq!(
-        result,
-        resolve_in_tx(&mut connection, records[0].episode)
-            .await
-            .unwrap()
-    );
     let target = DbTarget {
         id: 9,
         birth: 1,
@@ -115,4 +80,231 @@ async fn exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt() {
 async fn exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged() {
     crate::services::discord::exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged()
         .await;
+}
+
+#[derive(Clone)]
+struct StatementTrace(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StatementTrace {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() == "sqlx::query" {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.metadata().name().to_string());
+        }
+    }
+}
+
+#[tokio::test]
+async fn exact_off_pg_statement_trace_and_files_zero() {
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+    let db = TestPostgresDb::create().await;
+    let pool = crate::db::postgres::connect_test_pool_with_max_connections(
+        &db.database_url,
+        "exact off trace",
+        1,
+    )
+    .await
+    .unwrap();
+    crate::db::postgres::migrate(&pool).await.unwrap();
+    let trace = StatementTrace(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::registry().with(trace.clone());
+    let records = super::super::exact_episode::tests::fixture();
+    let runtime = tempfile::tempdir().unwrap();
+    let before = std::fs::read_dir(runtime.path()).unwrap().count();
+    async {
+        let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !trace
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "trace must see SQL control"
+        );
+        trace
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        let base_trace = trace
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            record_episode_evidence(false, &pool, &records[0])
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            *trace
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            base_trace,
+            "OFF issued SQL"
+        );
+        let after_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(backend, after_backend, "single backend trace");
+    }
+    .with_subscriber(subscriber)
+    .await;
+    assert_eq!(
+        std::fs::read_dir(runtime.path()).unwrap().count(),
+        before,
+        "OFF wrote files"
+    );
+}
+
+#[tokio::test]
+async fn exact_ack_pg_waits_for_commit_barrier() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE public.delivery_journal_events IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let record = super::super::exact_episode::tests::fixture().remove(0);
+    let p = pool.clone();
+    let copy = record.clone();
+    let mut task = tokio::spawn(async move { record_episode_evidence(true, &p, &copy).await });
+    for _ in 0..100 {
+        let waiting:i64=sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE relation='public.delivery_journal_events'::regclass AND NOT granted").fetch_one(&pool).await.unwrap();
+        if waiting > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut task)
+            .await
+            .is_err(),
+        "ACK before commit"
+    );
+    blocker.commit().await.unwrap();
+    assert!(task.await.unwrap().unwrap().is_some());
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM public.delivery_journal_events")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[tokio::test]
+async fn exact_pg_process_reader_uses_only_metadata() {
+    if let Ok(url) = std::env::var("C1_READER_DATABASE") {
+        let pool = crate::db::postgres::connect_test_pool(&url, "exact child")
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        let result = resolve_in_tx(&mut connection, Uuid::from_u128(1))
+            .await
+            .unwrap();
+        assert_eq!(result.authority(), Authority::Body);
+        assert_eq!(result.settlement(), Settlement::Settled);
+        println!("C1_PROCESS_RESULT {:?}", result);
+        return;
+    }
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for record in super::super::exact_episode::tests::fixture() {
+        record_episode_evidence(true, &pool, &record).await.unwrap();
+    }
+    for id in [701, 702] {
+        let record = EpisodeMetadata::new(
+            Uuid::from_u128(1),
+            Uuid::from_u128(id),
+            EpisodeEvidence::Settled {
+                effects: vec!["intake".into()],
+            },
+        );
+        record_episode_evidence(true, &pool, &record).await.unwrap();
+    }
+    let with = tempfile::tempdir().unwrap();
+    let without = tempfile::tempdir().unwrap();
+    std::fs::create_dir(with.path().join("o")).unwrap();
+    std::fs::write(with.path().join("o/ledger.jsonl"), b"local producer only").unwrap();
+    let run = |root: &std::path::Path| {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "services::tui_o::exact_pg::tests::exact_pg_process_reader_uses_only_metadata",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("C1_READER_DATABASE", &db.database_url)
+            .env("AGENTDESK_ROOT_DIR", root)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "child failed {} {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .find(|s| s.starts_with("C1_PROCESS_RESULT"))
+            .unwrap()
+            .to_string()
+    };
+    let first = run(with.path());
+    assert_eq!(first, run(without.path()));
+    std::fs::remove_file(with.path().join("o/ledger.jsonl")).unwrap();
+    assert_eq!(first, run(with.path()));
+}
+
+#[test]
+fn exact_snapshot_sibling_construction_is_compile_rejected() {
+    let source = include_str!("exact_pg.rs");
+    let start = source
+        .find("pub(crate) struct ConsistentEpisodeSnapshot")
+        .unwrap();
+    let end = source[start..].find("\n}").unwrap() + start + 2;
+    let declaration = &source[start..end];
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("privacy.rs");
+    let prelude = format!("mod exact_pg {{ type EpisodeMetadata=(); {declaration} }}");
+    std::fs::write(
+        &path,
+        format!(
+            "{prelude} fn main() {{ let _: Option<exact_pg::ConsistentEpisodeSnapshot>=None; }}"
+        ),
+    )
+    .unwrap();
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let positive = std::process::Command::new(&rustc)
+        .arg(&path)
+        .arg("--out-dir")
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        positive.status.success(),
+        "positive compile {}",
+        String::from_utf8_lossy(&positive.stderr)
+    );
+    std::fs::write(&path,format!("{prelude} mod sibling {{ pub fn forge() {{ let _=super::exact_pg::ConsistentEpisodeSnapshot {{ records:Vec::new() }}; }} }} fn main() {{}} ")).unwrap();
+    let negative = std::process::Command::new(rustc)
+        .arg(&path)
+        .arg("--out-dir")
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(!negative.status.success());
+    assert!(
+        String::from_utf8_lossy(&negative.stderr)
+            .contains("field `records` of struct `ConsistentEpisodeSnapshot` is private")
+    );
 }
