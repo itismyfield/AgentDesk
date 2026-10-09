@@ -193,10 +193,9 @@ impl<B: HomeBundle> Supervisor<B> {
                 Some(Slot::Running { .. }) | None => {}
             }
             let generation = self.next.fetch_add(1, Ordering::SeqCst) + 1;
-            let stop = None;
             let starting = Slot::Starting {
                 generation,
-                stop,
+                stop: None,
                 done: waiting,
             };
             let old = match slots.insert(channel, starting) {
@@ -286,46 +285,33 @@ impl<B: HomeBundle> Supervisor<B> {
             Stop(Generation, B, watch::Sender<bool>),
         }
         let next = self.with_slots(|slots| {
-            let current = slots.get(&channel).map(Slot::generation);
-            if current.is_none() || only.is_some_and(|only| current != Some(only)) {
+            let Some(slot) = slots.get_mut(&channel) else {
+                return Next::Nothing;
+            };
+            if only.is_some_and(|only| slot.generation() != only) {
                 return Next::Nothing;
             }
-            match slots.remove(&channel) {
-                Some(Slot::Running { generation, bundle }) => {
-                    let (done, waiting) = watch::channel(false);
-                    let stopping = Slot::Stopping {
-                        generation,
-                        done: waiting,
-                    };
-                    slots.insert(channel, stopping);
-                    Next::Stop(generation, bundle, done)
+            match slot {
+                Slot::Starting { stop, done, .. } => {
+                    stop.get_or_insert(reason);
+                    Next::Wait(done.clone())
                 }
-                Some(Slot::Starting {
-                    generation,
-                    stop,
-                    done,
-                }) => {
-                    let waiting = done.clone();
-                    let stop = stop.or(Some(reason));
+                Slot::Stopping { done, .. } => Next::Wait(done.clone()),
+                Slot::Blocked { .. } => Next::Nothing,
+                Slot::Running { .. } => {
+                    let Some(Slot::Running { generation, bundle }) = slots.remove(&channel) else {
+                        return Next::Nothing;
+                    };
+                    let (done, waiting) = watch::channel(false);
                     slots.insert(
                         channel,
-                        Slot::Starting {
+                        Slot::Stopping {
                             generation,
-                            stop,
-                            done,
+                            done: waiting,
                         },
                     );
-                    Next::Wait(waiting)
+                    Next::Stop(generation, bundle, done)
                 }
-                Some(slot) => {
-                    let waiting = match &slot {
-                        Slot::Stopping { done, .. } => Some(done.clone()),
-                        _ => None,
-                    };
-                    slots.insert(channel, slot);
-                    waiting.map_or(Next::Nothing, Next::Wait)
-                }
-                None => Next::Nothing,
             }
         });
         let this = Arc::clone(self);

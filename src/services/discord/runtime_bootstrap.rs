@@ -532,19 +532,14 @@ fn install_home_availability(
 
 /// The selected channels with a Herdr endpoint on any node: those a delegation may name.
 fn selected_herdr_channels(provider: &ProviderKind) -> std::collections::BTreeSet<u64> {
+    use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
     use crate::services::tui_o::channel_policy::BootChannels;
     let read = |boot: Option<&BootChannels>| {
         let configured = |channel: &u64| {
             let kind = boot.and_then(|boot| boot.kind(*channel));
             let ours = matches!(
                 (provider, kind),
-                (
-                    ProviderKind::Claude,
-                    Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
-                ) | (
-                    ProviderKind::Codex,
-                    Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
-                )
+                (ProviderKind::Claude, Some(ClaudeTui)) | (ProviderKind::Codex, Some(CodexTui))
             );
             ours && crate::config::session_hosts::herdr_endpoint(*channel).is_some()
         };

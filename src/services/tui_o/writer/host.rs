@@ -390,11 +390,7 @@ impl ManagedWriterHandle {
                 generation,
             })
         });
-        async move {
-            settle
-                .await
-                .unwrap_or_else(|error| Err(format!("writer settle ended abnormally: {error}")))
-        }
+        async move { settle.await.map_err(|error| error.to_string())? }
     }
 }
 
@@ -426,11 +422,7 @@ pub fn start_managed<I: HostIo>(
     let mut tasks = Vec::new();
     for (channel, candidate) in channels {
         if let Some(reason) = home_availability::refusal(channel) {
-            hold(
-                &io.alarms(),
-                channel,
-                &format!("delegation unavailable: {reason}"),
-            );
+            hold(&io.alarms(), channel, reason.as_str());
             continue;
         }
         let Some(claim) = readiness.claim(channel) else {
