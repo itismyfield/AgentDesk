@@ -8,6 +8,7 @@ use sqlx::PgPool;
 use crate::app_state::AppState;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
+pub(crate) mod home_stop;
 pub(crate) mod probe;
 mod trusted_target;
 
