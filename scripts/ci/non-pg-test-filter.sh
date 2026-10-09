@@ -392,6 +392,12 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retires_the_last_epoch
   services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
   services::cluster::channel_home::tests::a_replaced_or_unregistered_gate_closes_for_good_and_its_lease_ends
+  services::cluster::channel_home::tests::command_admission_expires_at_the_renewal_deadline
+  services::cluster::channel_home::tests::command_dormant_admission_does_not_lookup_or_start_a_task
+  services::cluster::channel_home::tests::command_permit_drop_panic_and_blocking_abort_are_not_unknown
+  services::cluster::channel_home::tests::command_permit_linearizes_close_and_preserves_children
+  services::cluster::channel_home::tests::command_registry_unregister_is_immediate_and_reuses_pending_count
+  services::cluster::channel_home::tests::command_replacement_and_resume_keep_counter_and_intake_closed
   services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
   services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
   services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake

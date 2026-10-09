@@ -129,7 +129,7 @@ fn pg_required_error() -> AppError {
     )
 }
 
-pub(super) fn pg_required_response() -> (StatusCode, Json<serde_json::Value>) {
+fn pg_required_response() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({"error": "postgres pool unavailable"})),
@@ -917,7 +917,9 @@ fn metadata_with_parent_channel_id(
     }
 }
 
-pub use super::agents_stop::stop_agent_turn;
+#[path = "agents_stop.rs"]
+mod stop;
+pub use stop::stop_agent_turn;
 
 /// GET /api/agents/:id/timeline?limit=30
 pub async fn agent_timeline(

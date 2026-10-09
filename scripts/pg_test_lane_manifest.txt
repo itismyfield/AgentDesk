@@ -852,6 +852,7 @@ server::multinode_regression::multinode_regression_pg_tests::multinode_single_le
 server::multinode_regression::multinode_regression_pg_tests::multinode_unreal_resource_lock_is_exclusive
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
+server::routes::agents::host_guard_tests::command_agent_and_dispatch_refusal_leave_session_and_dispatch_working_pg
 server::routes::agents::host_guard_tests::diagnostics_routes_never_probe_a_non_legacy_session_pg
 server::routes::agents::host_guard_tests::stop_routes_keep_a_runtime_turn_on_another_host_pg
 server::routes::agents_turn_deliver::pg_tests::a_turn_mode_direct_turn_queues_deliver_and_refuses_start_pg
@@ -1041,6 +1042,8 @@ services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_
 services::cluster::channel_home_drain::tests::a_replaced_gates_cleanup_never_unregisters_the_gate_that_replaced_it_pg
 services::cluster::channel_home_drain::tests::an_unreadable_projection_or_a_dropped_hold_keeps_the_drain_waiting_pg
 services::cluster::channel_home_drain::tests::an_unreadable_row_or_intake_or_a_failed_leave_keeps_the_row_pg
+services::cluster::channel_home_drain::tests::command_drain_rechecks_recovery_admitted_during_reset_pg
+services::cluster::channel_home_drain::tests::command_drain_waits_before_reset_and_after_final_close_pg
 services::cluster::channel_home_drain::tests::the_drain_loop_shows_its_blocker_in_health_until_it_leaves_pg
 services::cluster::channel_home_drain::tests::two_nodes_never_hold_or_post_at_once_across_hand_over_and_restarts_pg
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg

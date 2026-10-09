@@ -1,7 +1,6 @@
 pub mod agents;
 mod agents_crud;
 mod agents_setup;
-mod agents_stop;
 mod agents_turn_deliver;
 mod agents_turn_target;
 pub mod analytics;
