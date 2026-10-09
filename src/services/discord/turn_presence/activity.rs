@@ -150,6 +150,24 @@ pub(in crate::services::discord) struct Reading {
 }
 
 impl Reading {
+    /// Supplies the receiver's binding identity; the bot id comes from its verified HTTP client.
+    pub(super) fn identity(&self, bot_id: u64) -> Option<super::admission::Identity> {
+        if bot_id == 0 {
+            return None;
+        }
+        let stamp = self.stamp.as_ref()?;
+        let identity = super::admission::Identity {
+            provider: stamp.key.provider,
+            channel: stamp.key.channel,
+            session: stamp.key.session.clone(),
+            source: stamp.source_id.as_ref()?.clone(),
+            binding_seq: stamp.key.seq,
+            bot_id,
+        };
+        self.with_busy(&identity, || ())?;
+        Some(identity)
+    }
+
     /// Unlike observation publication, effect admission requires a live, stamped Busy source.
     pub(super) fn with_busy<R>(
         &self,

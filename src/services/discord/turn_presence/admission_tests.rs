@@ -90,9 +90,9 @@ impl Fixture {
     }
 
     async fn approval(&self) -> Approval {
-        self.incarnation
-            .approve(self.read().await)
-            .expect("fresh live Busy")
+        let reading = self.read().await;
+        assert_eq!(reading.identity(42), Some(self.identity.clone()));
+        self.incarnation.approve(reading).expect("fresh live Busy")
     }
 
     fn append(&self, row: &str) {
@@ -143,6 +143,7 @@ async fn fresh_busy_admits_one_first_poll_and_response_waits_outside_locks() {
 #[tokio::test(flavor = "current_thread")]
 async fn unstamped_or_legacy_busy_cannot_authorize_a_typing_effect() {
     let fixture = Fixture::new();
+    assert_eq!(fixture.read().await.observed.activity, Activity::Busy);
     let busy = Observed {
         activity: Activity::Busy,
         reason: "open",
