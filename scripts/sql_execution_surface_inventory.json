@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "240f4c0d962a1e9ab9a283ee2324ed939bc6898d",
+  "measured_at_sha": "3bf387b573800d826a56e055cd928810e8262e87",
   "records": [
     {
       "root": "migrations/postgres",
@@ -27271,6 +27271,15 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:f224c5ae664d6b21218d586322d353a450fa431dbaca9105620155eae1864b26"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/replay_hold_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3410890517ff7b3258e72603ee14ce41cc081ac0303913d085d996faa775269f"
     },
     {
       "root": "src",
