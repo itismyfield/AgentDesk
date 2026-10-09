@@ -276,15 +276,23 @@ pub(in crate::services::discord) fn clear_admitted_restart_terminal(
     let Ok(fresh) = serde_json::from_str::<InflightTurnState>(&data) else {
         return GuardedClearOutcome::Missing;
     };
+    #[cfg(test)]
+    let checked = |name: &str| {
+        !crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(name)
+    };
+    #[cfg(not(test))]
+    let checked = |_: &str| true;
     let pin = crate::services::discord::inflight::InflightEpisodePin::from_state(snapshot);
+    let other_kind =
+        fresh.tui_terminal_kind.is_none() || fresh.tui_terminal_kind != snapshot.tui_terminal_kind;
     if nonce.is_empty()
         || fresh.turn_nonce.as_deref() != Some(nonce)
         || super::reconcile_gate::row_is_current_generation(&fresh, current_generation)
-        || fresh.tui_terminal_kind.is_none()
-        || fresh.tui_terminal_kind != snapshot.tui_terminal_kind
+        || (other_kind && checked("restart_clear_kind_unchecked"))
         || !fresh.terminal_delivery_committed
-        || fresh.save_generation != snapshot.save_generation
-        || !pin.matches_state(&fresh)
+        || (fresh.save_generation != snapshot.save_generation
+            && checked("restart_clear_generation_unchecked"))
+        || (!pin.matches_state(&fresh) && checked("restart_clear_pin_unchecked"))
     {
         return GuardedClearOutcome::UserMsgMismatch;
     }

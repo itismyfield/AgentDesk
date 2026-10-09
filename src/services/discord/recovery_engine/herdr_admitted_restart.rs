@@ -91,6 +91,12 @@ impl AdmittedRestartTerminal {
         if state.restart_mode.is_some() && !mutant("restart_admitted_restart_mode_settled") {
             return kept(state, "planned restart owns the row");
         }
+        // O owns this destination's body whether or not a delivery was recorded; neither a send
+        // nor a cleanup is this path's to make there.
+        let undelivered_only = mutant("restart_admitted_o_guard_undelivered_only");
+        if (!undelivered_only || !self.delivered) && o_owns(state) {
+            return kept(state, "O owns the destination body");
+        }
         // A prior process's turn has no actor here; one present now is another turn's.
         if !mutant("restart_admitted_mailbox_channel_scoped")
             && super::mailbox_snapshot(shared, channel_id)
@@ -102,9 +108,6 @@ impl AdmittedRestartTerminal {
         }
         let mut row = state.clone();
         if !self.delivered && !mutant("restart_admitted_row_dropped") {
-            if o_owns(&row) {
-                return kept(state, "O owns the destination body");
-            }
             let Some(text) = self.delivery(provider, &row) else {
                 return kept(state, "a completion with no stored body");
             };

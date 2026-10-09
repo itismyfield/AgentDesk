@@ -244,25 +244,34 @@ async fn a_send_new_terminal_acks_and_clears_in_one_run() {
     assert!(posted, "{:?}", discord.calls());
 }
 
-/// O's marker is not this terminal: on an O-owned destination nothing is sent or acked.
+/// O's marker is not this terminal: on an O-owned destination nothing is sent, acked or cleared,
+/// whether or not a delivery was already recorded.
 #[tokio::test(flavor = "current_thread")]
 async fn an_o_owned_destination_keeps_the_row() {
-    let fixture = Fixture::new("o-owned");
-    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
-        CHANNEL,
-        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
-    )]);
-    let row = fixture.persist(&fixture.row);
-    let shared = crate::services::discord::make_shared_data_for_tests();
-    let discord = super::o_cut_recorder::start(CHANNEL).await;
-    let outcome = fixture
-        .terminal(&row)
-        .settle(&discord.http, &shared, &row)
-        .await;
-    assert_eq!(outcome, AdmittedRestart::Retained);
-    let kept = fixture.durable().expect("the row stays");
-    assert!(!kept.terminal_delivery_committed);
-    assert!(discord.calls().is_empty(), "{:?}", discord.calls());
+    for committed in [false, true] {
+        let fixture = Fixture::new("o-owned");
+        let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+            CHANNEL,
+            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        )]);
+        let mut row = fixture.row.clone();
+        row.terminal_delivery_committed = committed;
+        let row = fixture.persist(&row);
+        let before = std::fs::read(fixture.path()).unwrap();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let discord = super::o_cut_recorder::start(CHANNEL).await;
+        let outcome = fixture
+            .terminal(&row)
+            .settle(&discord.http, &shared, &row)
+            .await;
+        assert_eq!(outcome, AdmittedRestart::Retained, "committed={committed}");
+        assert_eq!(
+            std::fs::read(fixture.path()).ok(),
+            Some(before),
+            "committed={committed}"
+        );
+        assert!(discord.calls().is_empty(), "{:?}", discord.calls());
+    }
 }
 
 /// A planned restart owns its row; restart keeps it untouched and sends nothing.
@@ -289,23 +298,40 @@ async fn a_planned_restart_row_is_kept_untouched() {
 #[tokio::test(flavor = "current_thread")]
 async fn cleanup_keeps_a_row_that_is_no_longer_the_delivered_episode() {
     let fixture = Fixture::new("strict");
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let mut committed = fixture.row.clone();
     committed.terminal_delivery_committed = true;
     let committed = fixture.persist(&committed);
     let provider = &fixture.provider;
-    let changes: [(&str, Edit); 4] = [
+    let changes: [(&str, Edit); 9] = [
         ("no nonce", |row| row.turn_nonce = None),
         ("empty nonce", |row| row.turn_nonce = Some(String::new())),
         ("other nonce", |row| row.turn_nonce = Some("other".into())),
         ("current generation", |row| row.born_generation = 9),
+        ("no kind", |row| row.tui_terminal_kind = None),
+        ("other kind", |row| {
+            row.tui_terminal_kind = Some(NativeTerminalKind::Completed)
+        }),
+        ("save generation", |row| row.save_generation += 1),
+        ("anchor", |row| row.current_msg_id += 1),
+        ("unacknowledged", |row| {
+            row.terminal_delivery_committed = false
+        }),
     ];
     for (case, change) in changes {
         let mut fresh = committed.clone();
         change(&mut fresh);
         fixture.overwrite(&fresh);
-        let outcome = inflight::clear_admitted_restart_terminal(provider, &committed, NONCE, 9);
+        // Unacknowledged on both sides: neither the snapshot nor the row recorded a delivery.
+        let mut snapshot = committed.clone();
+        snapshot.terminal_delivery_committed = fresh.terminal_delivery_committed;
+        let outcome = inflight::clear_admitted_restart_terminal(provider, &snapshot, NONCE, 9);
         assert_ne!(outcome, inflight::GuardedClearOutcome::Cleared, "{case}");
-        assert!(fixture.durable().is_some(), "{case}");
+        assert_eq!(
+            std::fs::read(fixture.path()).ok(),
+            Some(serde_json::to_vec(&fresh).unwrap()),
+            "{case}"
+        );
     }
     // The settle path, too: a nonce dropped after the snapshot keeps the row.
     fixture.overwrite(&committed);
@@ -334,6 +360,7 @@ async fn cleanup_keeps_a_row_that_is_no_longer_the_delivered_episode() {
 #[tokio::test(flavor = "current_thread")]
 async fn an_actor_registered_before_cleanup_is_left_alone() {
     let fixture = Fixture::new("barrier");
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let mut committed = fixture.row.clone();
     committed.terminal_delivery_committed = true;
     let committed = fixture.persist(&committed);
