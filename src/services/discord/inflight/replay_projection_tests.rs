@@ -165,6 +165,67 @@ fn guarded_projection_merge_preserves_hold_body_and_frozen_debt_in_both_writer_o
 }
 
 #[test]
+fn held_current_generation_completion_preserves_original_body_and_frozen_debt() {
+    for reduced_body in ["", "보존할 "] {
+        let dormant = Fixture::new();
+        let dormant_expected = InflightTurnIdentity::from_state(&dormant.baseline);
+        let mut ordinary_completion = dormant.baseline.clone();
+        ordinary_completion.full_response = reduced_body.into();
+        ordinary_completion.response_sent_offset = 0;
+        ordinary_completion
+            .streaming_rollover_frozen_msg_ids
+            .clear();
+        assert_eq!(
+            ordinary_completion.save_generation,
+            dormant.load().save_generation
+        );
+        assert_eq!(
+            Writer::Completion.save(
+                dormant.root.path(),
+                &mut ordinary_completion,
+                &dormant_expected
+            ),
+            GuardedSaveOutcome::Saved,
+        );
+        let ordinary_durable = dormant.load();
+        assert_eq!(ordinary_durable.full_response, reduced_body);
+        assert_eq!(ordinary_durable.replay_receipt_id, None);
+        assert!(!ordinary_durable.replay_rerun_blocked());
+
+        let fixture = Fixture::new();
+        let expected = InflightTurnIdentity::from_state(&fixture.baseline);
+        let mut held = fixture.baseline.clone();
+        held.replay_receipt_id = Some(6_008);
+        held.replay_hold_reasons = vec!["output observed".into()];
+        assert_eq!(
+            Writer::Completion.save(fixture.root.path(), &mut held, &expected),
+            GuardedSaveOutcome::Saved,
+        );
+        let original_body = held.full_response.clone();
+        let original_frozen = held.streaming_rollover_frozen_msg_ids.clone();
+        let mut completion = held.clone();
+        completion.replay_receipt_id = None;
+        completion.replay_hold_reasons.clear();
+        completion.full_response = reduced_body.into();
+        completion.response_sent_offset = 0;
+        completion.streaming_rollover_frozen_msg_ids.clear();
+        assert_eq!(completion.save_generation, fixture.load().save_generation);
+        assert_eq!(
+            Writer::Completion.save(fixture.root.path(), &mut completion, &expected),
+            GuardedSaveOutcome::Saved,
+        );
+        let durable = fixture.load();
+        assert_eq!(durable.replay_receipt_id, Some(6_008));
+        assert_eq!(durable.replay_hold_reasons, vec!["output observed"]);
+        assert_eq!(durable.streaming_rollover_frozen_msg_ids, original_frozen);
+        assert_eq!(
+            durable.full_response, original_body,
+            "reduced_body={reduced_body:?}"
+        );
+    }
+}
+
+#[test]
 fn guarded_projection_conflicting_receipt_is_denied_without_changing_durable_bytes() {
     for writer in Writer::ALL {
         let fixture = Fixture::new();
@@ -196,6 +257,22 @@ fn guarded_projection_conflicting_receipt_is_denied_without_changing_durable_byt
 
 #[test]
 fn guarded_projection_other_nonce_is_denied_without_changing_durable_bytes() {
+    let dormant = Fixture::new();
+    let dormant_expected = InflightTurnIdentity::from_state(&dormant.baseline);
+    let mut ordinary_stamp = dormant.baseline.clone();
+    ordinary_stamp.turn_nonce = Some("unprojected-local-nonce".into());
+    ordinary_stamp.full_response.push_str("normal progress");
+    assert_eq!(
+        Writer::RuntimeStamp.save(dormant.root.path(), &mut ordinary_stamp, &dormant_expected),
+        GuardedSaveOutcome::Saved,
+        "a stamp without replay projection keeps main's nonce policy",
+    );
+    let ordinary_durable = dormant.load();
+    assert_eq!(ordinary_durable.replay_receipt_id, None);
+    assert!(!ordinary_durable.replay_rerun_blocked());
+    assert_eq!(ordinary_durable.turn_nonce, dormant.baseline.turn_nonce);
+    assert_eq!(ordinary_durable.full_response, ordinary_stamp.full_response);
+
     for writer in Writer::ALL {
         let fixture = Fixture::new();
         let expected = InflightTurnIdentity::from_state(&fixture.baseline);

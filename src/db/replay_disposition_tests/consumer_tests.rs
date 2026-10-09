@@ -263,3 +263,163 @@ async fn legacy_null_link_cannot_requeue_via_held_history_pg() {
         .execute(&pool).await, "history cannot attach a new retry dispatch");
     finish(fixture, pool).await;
 }
+
+#[tokio::test]
+async fn held_dispatch_nonnull_result_rewrite_is_fenced_pg() {
+    let (fixture, pool) = setup().await;
+    let receipt = receipt_on(&pool, "result-rewrite", "claude", &["source"], "withheld")
+        .await
+        .unwrap();
+    dispatch(&pool, "result-rewrite-dispatch", receipt, None).await;
+    assert_fenced(
+        sqlx::query("UPDATE task_dispatches SET result='replacement nonnull result' WHERE id='result-rewrite-dispatch'")
+            .execute(&pool)
+            .await,
+        "a same-status old writer cannot replace an existing held result with another nonnull value",
+    );
+    let retained: String =
+        sqlx::query_scalar("SELECT result FROM task_dispatches WHERE id='result-rewrite-dispatch'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(retained, "preserved output");
+    finish(fixture, pool).await;
+}
+
+#[tokio::test]
+async fn held_session_canonical_identity_rewrites_are_fenced_pg() {
+    let (fixture, pool) = setup().await;
+    let receipt = receipt_on(&pool, "identity-rewrite", "claude", &["source"], "withheld")
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (session_key,channel_id,provider,status,current_replay_receipt_id,
+            claude_session_id,raw_provider_session_id,identity_kind,discord_token_hash)
+         VALUES ('identity-rewrite-session','identity-rewrite','claude','awaiting_user',$1,
+            'preserved-selector','preserved-selector','discord_channel','discord_0123456789abcdef')",
+    )
+    .bind(receipt)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for sql in [
+        "UPDATE sessions SET provider='codex' WHERE session_key='identity-rewrite-session'",
+        "UPDATE sessions SET channel_id='other-channel' WHERE session_key='identity-rewrite-session'",
+        "UPDATE sessions SET identity_kind='scheduled_snapshot' WHERE session_key='identity-rewrite-session'",
+        "UPDATE sessions SET discord_token_hash='discord_fedcba9876543210' WHERE session_key='identity-rewrite-session'",
+    ] {
+        assert_fenced(sqlx::query(sql).execute(&pool).await, sql);
+    }
+    let retained: (String, String, String, String) = sqlx::query_as(
+        "SELECT provider,channel_id,identity_kind,discord_token_hash FROM sessions
+         WHERE session_key='identity-rewrite-session'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        retained,
+        (
+            "claude".into(),
+            "identity-rewrite".into(),
+            "discord_channel".into(),
+            "discord_0123456789abcdef".into(),
+        )
+    );
+    finish(fixture, pool).await;
+}
+
+async fn normal_retry_parent(pool: &PgPool, channel: &str) -> (i64, i64) {
+    let authority = receipt_on(
+        pool,
+        channel,
+        "claude",
+        &["earlier"],
+        "registered_not_started",
+    )
+    .await
+    .unwrap();
+    let parent = intake_outbox::insert_pending(pool, &payload(channel, "last"), 1, None)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE intake_outbox SET status='failed_pre_accept',admission_kind='local',
+            replay_disposition='registered_not_started',
+            replay_source_message_ids=ARRAY['earlier','last'] WHERE id=$1",
+    )
+    .bind(parent)
+    .execute(pool)
+    .await
+    .unwrap();
+    (parent, authority)
+}
+
+#[tokio::test]
+async fn normal_retry_parent_absorbed_sources_survive_sweep_and_old_writer_child_pg() {
+    let (fixture, pool) = setup().await;
+    sqlx::query("INSERT INTO worker_nodes (instance_id,status,labels,capabilities,last_heartbeat_at)
+                 VALUES ('worker-a','online','[]','{\"intake_worker\":{\"enabled\":true,\"providers\":[\"claude\"]}}',NOW())")
+        .execute(&pool).await.unwrap();
+
+    // A normal parent was registered before an earlier absorbed source became held elsewhere.
+    let (parent, authority) = normal_retry_parent(&pool, "parent-already-held").await;
+    sqlx::query("UPDATE intake_outbox SET replay_disposition='withheld' WHERE id=$1")
+        .bind(authority)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let outcome = intake_outbox::sweep_failed_pre_accept_once(&pool, "leader", 3, 60, None)
+        .await
+        .unwrap();
+    assert!(
+        !matches!(outcome, FailedPreAcceptSweepOutcome::Retried { .. }),
+        "sweep cannot retry a normal parent whose nonrepresentative absorbed source is held: {outcome:?}",
+    );
+    assert_fenced(
+        sqlx::query_scalar::<_, i64>(
+            "INSERT INTO intake_outbox (target_instance_id,forwarded_by_instance_id,
+                channel_id,user_msg_id,request_owner_id,user_text,turn_kind,agent_id,
+                provider,status,attempt_no,parent_outbox_id)
+             SELECT target_instance_id,forwarded_by_instance_id,channel_id,user_msg_id,
+                request_owner_id,user_text,turn_kind,agent_id,provider,'pending',2,id
+             FROM intake_outbox WHERE id=$1 RETURNING id",
+        )
+        .bind(parent)
+        .fetch_one(&pool)
+        .await,
+        "an old writer's child INSERT must consume the normal parent's complete source family",
+    );
+
+    // A legitimate child prepared before the hold must keep the earlier source identity too.
+    let (parent, authority) = normal_retry_parent(&pool, "child-before-hold").await;
+    let outcome = intake_outbox::sweep_failed_pre_accept_once(&pool, "leader", 3, 60, None)
+        .await
+        .unwrap();
+    let FailedPreAcceptSweepOutcome::Retried {
+        source_id, new_id, ..
+    } = outcome
+    else {
+        panic!("unstarted normal parent remains retryable before the hold: {outcome:?}");
+    };
+    assert_eq!(source_id, parent);
+    let sources: Option<Vec<String>> =
+        sqlx::query_scalar("SELECT replay_source_message_ids FROM intake_outbox WHERE id=$1")
+            .bind(new_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(sources, Some(vec!["earlier".into(), "last".into()]));
+    sqlx::query("UPDATE intake_outbox SET replay_disposition='withheld' WHERE id=$1")
+        .bind(authority)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        intake_outbox::claim_pending_for_target(&pool, "worker-a", "claude", "replacement-node")
+            .await
+            .unwrap()
+            .is_none(),
+        "the already-created child cannot shed its earlier held source on another worker",
+    );
+    finish(fixture, pool).await;
+}
