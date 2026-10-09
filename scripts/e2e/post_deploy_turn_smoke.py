@@ -31,6 +31,9 @@ KILL_REQUEST = re.compile(r"tmux kill requested: session=(\S+) reason=(.*)$")
 COMPOSER_NOT_DETECTED = "reason=composer_not_detected"
 # codex_tui/warm_followup.rs log_fallback message.
 COLD_RESUME_FALLBACK = "warm follow-up falling back to one cold resume launch"
+# The same WARN names a launch-options mismatch kind and, when known, the changed fields.
+LAUNCH_OPTIONS_MISMATCH = re.compile(r'launch_options_mismatch="(\w+)"')
+CHANGED_FIELDS = re.compile(r'changed_fields="([^"]*)"')
 # Warm follow-up kill reasons: codex CodexWarmFallbackReason::reason_text and
 # claude host retire "claude tui follow-up failed, recreating".
 FOLLOWUP_KILL_REASON = "follow-up"
@@ -38,8 +41,17 @@ AFTER_CLEAR_LABEL = "AFTER_CLEAR"
 LOG_COUNTERS = ("composer_not_detected", "warm_followup_kill", "cold_resume")
 
 
-def scan_log(lines: Iterable[str], *, session: str, channel_id: str) -> dict[str, int]:
-    """Count warm follow-up failure evidence that names this cell's session or channel."""
+def scan_log(
+    lines: Iterable[str],
+    *,
+    session: str,
+    channel_id: str,
+    launch_options: list[str] | None = None,
+) -> dict[str, int]:
+    """Count warm follow-up failure evidence that names this cell's session or channel.
+
+    Each launch-options fallback is appended to ``launch_options`` as ``kind`` or ``kind(fields)``.
+    """
 
     # The cell session or one of its thread sessions, never a longer sibling name.
     own_session = re.compile(rf"(?<![\w-]){re.escape(session)}(?:-t\d+)?(?![\w-])")
@@ -60,6 +72,12 @@ def scan_log(lines: Iterable[str], *, session: str, channel_id: str) -> dict[str
             counts["composer_not_detected"] += 1
         if COLD_RESUME_FALLBACK in line:
             counts["cold_resume"] += 1
+            mismatch = LAUNCH_OPTIONS_MISMATCH.search(line)
+            if mismatch and launch_options is not None:
+                fields = CHANGED_FIELDS.search(line)
+                fields_text = fields.group(1) if fields else ""
+                kind = mismatch.group(1)
+                launch_options.append(f"{kind}({fields_text})" if fields_text else kind)
     return counts
 
 
@@ -85,6 +103,7 @@ def judge(
     markers: list[str],
     log_counts: dict[str, int] | None,
     driver_rc: int,
+    launch_options: Iterable[str] = (),
 ) -> tuple[bool, str]:
     """Return (passed, detail) for one scenario run; every missing input fails closed."""
 
@@ -123,6 +142,9 @@ def judge(
         findings.append("dcserver log excerpt unavailable")
     else:
         log_part = " ".join(f"{key}={log_counts.get(key, 0)}" for key in LOG_COUNTERS)
+        launch_option_parts = list(launch_options)
+        if launch_option_parts:
+            log_part += " launch_options=" + ";".join(launch_option_parts)
         if any(log_counts.get(key, 0) for key in LOG_COUNTERS):
             findings.append("warm follow-up readiness timeout/kill/cold resume in dcserver log")
         # Every turn logs its channel; none means the excerpt is not this server's run.
@@ -214,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     run_id = str((report or {}).get("run_id") or "")
     markers = expected_markers(Path(args.scenarios), args.scenario, run_id) if run_id else []
     log_counts = None
+    launch_options: list[str] = []
     if args.log_excerpt:
         try:
             with open(args.log_excerpt, encoding="utf-8", errors="replace") as handle:
@@ -221,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
                     handle,
                     session=cell_driver.cell_session_name(args.cell),
                     channel_id=str(args.channel_id),
+                    launch_options=launch_options,
                 )
         except OSError:
             log_counts = None
@@ -230,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         markers=markers,
         log_counts=log_counts,
         driver_rc=args.driver_rc,
+        launch_options=launch_options,
     )
     print(f"relay {args.scenario} cell={args.cell} result={'pass' if passed else 'FAIL'} {detail}")
     return 0 if passed else 1
