@@ -630,13 +630,13 @@ pub(in crate::services::discord) async fn cmd_cancel_queued(
 
     let permit = home_fence::admit(ctx.channel_id(), ctx.data().provider.as_str())?;
     crate::services::cluster::channel_home::command_scope(permit, async {
-        let removed = mailbox_cancel_queued_primary_message(
+        let removed = cancel_queued_with_home_permit(
             &ctx.data().shared,
             &ctx.data().provider,
             ctx.channel_id(),
             message_id,
         )
-        .await;
+        .await?;
         if removed.is_some() {
             ctx.say(format!("큐 메시지 `{}`를 취소했어요.", message_id.get()))
                 .await?;
@@ -648,6 +648,21 @@ pub(in crate::services::discord) async fn cmd_cancel_queued(
             .await?;
         }
         Ok(())
+    })
+    .await
+}
+
+async fn cancel_queued_with_home_permit(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: serenity::ChannelId,
+    message: MessageId,
+) -> Result<Option<crate::services::turn_orchestrator::Intervention>, home_fence::CommandRefused> {
+    let permit = home_fence::admit(channel, provider.as_str())?;
+    crate::services::cluster::channel_home::command_scope(permit, async {
+        #[cfg(test)]
+        home_fence::pause("queued").await;
+        Ok(mailbox_cancel_queued_primary_message(shared, provider, channel, message).await)
     })
     .await
 }

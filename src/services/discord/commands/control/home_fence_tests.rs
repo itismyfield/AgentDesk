@@ -245,3 +245,65 @@ async fn d2b_slash_stop_reply_keeps_permit_until_finish_and_dormant_is_unchanged
         crate::services::discord::commands::stop::run_slash_stop(&shared, &provider, channel).await;
     assert_eq!(refused.text(), "home_draining");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor() {
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+    let provider = ProviderKind::Gemini;
+    let channel = ChannelId::new(CHANNEL + 15);
+    seed_backlog(&shared, &provider, channel).await;
+    let token = Arc::new(crate::services::provider::CancelToken::new());
+    shared
+        .mailbox(channel)
+        .restore_active_turn(
+            token.clone(),
+            serenity::UserId::new(7),
+            serenity::MessageId::new(123),
+        )
+        .await;
+    let home = channel_home::register_for_test(channel.get(), Some(HomeState::Worker));
+    let barrier = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+    PAUSE.with(|slot| *slot.borrow_mut() = Some(("queued", barrier.clone())));
+    let owner = shared.clone();
+    let work = tokio::spawn(async move {
+        super::super::cancel_queued_with_home_permit(
+            &owner,
+            &ProviderKind::Gemini,
+            channel,
+            MessageId::new(channel.get() + 1),
+        )
+        .await
+        .unwrap()
+    });
+    barrier.0.notified().await;
+    home.close_intake();
+    assert_eq!(home.commands_in_flight(), 1);
+    assert_eq!(queue_len(&shared, channel).await, 1);
+    barrier.1.notify_one();
+    assert!(work.await.unwrap().is_some());
+    assert_eq!(queue_len(&shared, channel).await, 0);
+    assert_eq!(home.commands_in_flight(), 0);
+    assert!(Arc::ptr_eq(
+        &shared
+            .mailbox(channel)
+            .snapshot()
+            .await
+            .cancel_token
+            .unwrap(),
+        &token
+    ));
+    PAUSE.with(|slot| *slot.borrow_mut() = None);
+    assert!(
+        super::super::cancel_queued_with_home_permit(
+            &shared,
+            &provider,
+            channel,
+            MessageId::new(123)
+        )
+        .await
+        .is_err()
+    );
+    assert!(!token.cancelled.load(std::sync::atomic::Ordering::Acquire));
+}

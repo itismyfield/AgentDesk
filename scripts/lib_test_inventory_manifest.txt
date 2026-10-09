@@ -3090,6 +3090,7 @@ services::discord::commands::control::codex_verified_clear_tests::codex_verified
 services::discord::commands::control::codex_verified_clear_tests::legacy_codex_and_claude_clear_admission_remains_open
 services::discord::commands::control::home_fence::tests::a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open_pg
 services::discord::commands::control::home_fence::tests::d2b_clear_and_reset_keep_admission_across_effect_await
+services::discord::commands::control::home_fence::tests::d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor
 services::discord::commands::control::home_fence::tests::d2b_reset_sink_refuses_claimed_turn_and_drain_reset_remains_allowed
 services::discord::commands::control::home_fence::tests::d2b_slash_stop_reply_keeps_permit_until_finish_and_dormant_is_unchanged
 services::discord::commands::control::input_clear::tests::a_fenced_channel_clears_without_a_legacy_population_write_pg

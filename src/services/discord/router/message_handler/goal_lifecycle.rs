@@ -458,8 +458,19 @@ mod host_guard_tests {
 #[cfg(test)]
 mod d2b_tests {
     use super::*;
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn d2b_goal_clear_holds_home_through_stale_cleanup() {
+        use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
+        if !api_child(
+            "services::discord::router::message_handler::goal_lifecycle::d2b_tests::d2b_goal_clear_holds_home_through_stale_cleanup",
+        ) {
+            return;
+        }
+        let api = Recorder::start().await;
+        crate::services::discord::internal_api::init(api.port, None);
+        let http = api.http.clone();
+
         let root = tempfile::tempdir().unwrap();
         let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
         use crate::services::cluster::channel_home;
@@ -474,19 +485,13 @@ mod d2b_tests {
         PAUSE.with(|slot| *slot.borrow_mut() = Some(("goal_stale", barrier.clone())));
         let owner = shared.clone();
         let work = tokio::spawn(async move {
-            let http = Arc::new(
-                serenity::HttpBuilder::new("test-token")
-                    .proxy("http://127.0.0.1:1")
-                    .ratelimiter_disabled(true)
-                    .build(),
-            );
             consume_codex_goal_lifecycle_command(
                 &http,
                 &owner,
                 &ProviderKind::Gemini,
                 channel,
                 GoalLifecycleCommand::Clear,
-                None,
+                Some("d2b-stale".into()),
             )
             .await;
         });
@@ -500,6 +505,12 @@ mod d2b_tests {
         barrier.1.notify_one();
         work.await.unwrap();
         assert_eq!(home.commands_in_flight(), 0);
+        assert!(
+            api.take()
+                .iter()
+                .any(|call| call.contains("clear-stale-session-id") && call.contains("d2b-stale")),
+            "stale DB route actually reached"
+        );
         PAUSE.with(|slot| *slot.borrow_mut() = None);
     }
 }
