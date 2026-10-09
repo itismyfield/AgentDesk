@@ -46,6 +46,14 @@ pub trait HostIo: Send + Sync + 'static {
         channel: u64,
         provider: ShadowProvider,
     ) -> impl Future<Output = Result<ActivationFacts, String>> + Send;
+    /// Fresh intake facts held through deferred activation; hosts without a fence refuse it.
+    fn intake_fence(
+        &self,
+        _channel: u64,
+        _provider: ShadowProvider,
+    ) -> impl Future<Output = Result<FencedFacts, String>> + Send {
+        std::future::ready(Err("this host has no intake fence".into()))
+    }
     /// What local Legacy inflight, custody or a pending start holds of the channel. Read under its
     /// adoption lock right before the first `init`, so it must not judge TUI output itself.
     fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<Custody, String>;
@@ -57,6 +65,13 @@ pub trait HostIo: Send + Sync + 'static {
     fn relaying(&self, channel: u64) -> bool;
     /// Called once a first activation committed the channel, before it is ready for intake.
     fn adopted(&self, _channel: u64, _provider: ShadowProvider) {}
+}
+
+/// The facts and queued Legacy bodies read while intake writes are fenced.
+pub struct FencedFacts {
+    pub hold: crate::db::o_channel_activation::IntakeFence,
+    pub facts: ActivationFacts,
+    pub queued_bodies: i64,
 }
 
 /// Legacy's local hold on a channel as the gateway reads it.

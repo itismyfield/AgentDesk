@@ -40,6 +40,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::intake_outbox_delivery_proof::tests
   --skip db::intake_outbox_dispatch_stamp::tests
   --skip db::intake_outbox_dispatched_audit::postgres_tests
+  --skip db::o_channel_activation::fence_tests
   --skip db::o_channel_activation::postgres_tests
   --skip db::o_channel_homes::tests
   --skip db::postgres::advisory_lock::tests
@@ -187,6 +188,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+  --skip services::discord::runtime_bootstrap::o_writer_host::fence_tests
   --skip services::discord::session_idle_cleanup::tests
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   --skip services::discord::task_notification_delivery::tests
@@ -602,6 +604,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_cutoffs_do_not_panic_for_extreme_values
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_spawns_exactly_once_per_process
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_task_can_restart_after_task_death
+  services::discord::runtime_bootstrap::o_writer_host::fence_tests::a_host_without_an_intake_fence_refuses_deferred_activation_facts
   services::discord::session_relay_sink::journal::pg_store::tests::stored_journal_event_mapping_is_closed_and_fail_closed
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reconcile_noop_when_db_matches_tmux
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reconcile_prefers_live_tmux_over_divergent_db_cwd
@@ -817,6 +820,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::intake_outbox_delivery_proof::tests
   db::intake_outbox_dispatch_stamp::tests
   db::intake_outbox_dispatched_audit::postgres_tests
+  db::o_channel_activation::fence_tests
   db::o_channel_activation::postgres_tests
   db::o_channel_homes::tests
   db::postgres::advisory_lock::tests
@@ -964,6 +968,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
   services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+  services::discord::runtime_bootstrap::o_writer_host::fence_tests
   services::discord::session_idle_cleanup::tests
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   services::discord::task_notification_delivery::tests

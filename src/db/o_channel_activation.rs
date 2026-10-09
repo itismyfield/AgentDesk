@@ -2,7 +2,23 @@
 //! sessions owned by another node.
 
 use super::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+
+/// Keeps intake writers behind the facts until the channel's init has been published.
+pub struct IntakeFence {
+    _transaction: Option<Transaction<'static, Postgres>>,
+}
+
+// Explicit release is exercised by tests until deferred activation starts using the fence.
+#[cfg(test)]
+impl IntakeFence {
+    pub async fn release(mut self) -> Result<(), sqlx::Error> {
+        if let Some(transaction) = self._transaction.take() {
+            transaction.rollback().await?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ActivationRows {
@@ -40,6 +56,69 @@ pub(crate) async fn activation_rows(
         foreign_sessions,
     })
 }
+
+async fn read_activation_rows(
+    connection: &mut PgConnection,
+    channel_id: &str,
+    local_instance: &str,
+) -> Result<ActivationRows, sqlx::Error> {
+    let open_intake: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM intake_outbox
+          WHERE channel_id = $1 AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})"
+    ))
+    .bind(channel_id)
+    .fetch_one(&mut *connection)
+    .await?;
+    let foreign_sessions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sessions
+          WHERE channel_id = $1
+            AND COALESCE(LOWER(BTRIM(status)), '') NOT IN ('disconnected', 'aborted')
+            AND NULLIF(BTRIM(instance_id), '') IS NOT NULL
+            AND BTRIM(instance_id) <> $2",
+    )
+    .bind(channel_id)
+    .bind(local_instance)
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(ActivationRows {
+        open_intake,
+        foreign_sessions,
+    })
+}
+
+/// SHARE conflicts with every intake DML path, including writes made by another node.
+pub(crate) async fn fenced_activation_rows(
+    pool: &PgPool,
+    channel_id: &str,
+    local_instance: &str,
+) -> Result<(IntakeFence, ActivationRows, i64), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '2s'")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("LOCK TABLE intake_outbox IN SHARE MODE")
+        .execute(&mut *transaction)
+        .await?;
+    let rows = read_activation_rows(&mut transaction, channel_id, local_instance).await?;
+    let queued_bodies = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM message_outbox
+         WHERE target = $1 AND source = 'headless_turn' AND status IN ('pending', 'processing')",
+    )
+    .bind(format!("channel:{channel_id}"))
+    .fetch_one(&mut *transaction)
+    .await?;
+    Ok((
+        IntakeFence {
+            _transaction: Some(transaction),
+        },
+        rows,
+        queued_bodies,
+    ))
+}
+
+#[cfg(test)]
+#[path = "o_channel_activation_fence_tests.rs"]
+mod fence_tests;
 
 #[cfg(test)]
 mod postgres_tests {

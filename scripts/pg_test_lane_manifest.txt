@@ -23,6 +23,7 @@ src/db/intake_outbox_dispatch_stamp/tests.rs
 src/db/intake_outbox_dispatched_audit.rs
 src/db/intake_outbox_home_tests.rs
 src/db/o_channel_activation.rs
+src/db/o_channel_activation_fence_tests.rs
 src/db/o_channel_homes_tests.rs
 src/db/postgres.rs
 src/db/postgres/advisory_lock_tests.rs
@@ -162,6 +163,7 @@ src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
+src/services/discord/runtime_bootstrap/o_writer_host.rs
 src/services/discord/session_idle_cleanup_tests.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
@@ -253,6 +255,7 @@ db::intake_outbox::postgres_tests
 db::intake_outbox_delivery_proof::tests
 db::intake_outbox_dispatch_stamp::tests
 db::intake_outbox_dispatched_audit::postgres_tests
+db::o_channel_activation::fence_tests
 db::o_channel_activation::postgres_tests
 db::o_channel_homes::tests
 db::postgres::advisory_lock::tests
@@ -400,6 +403,7 @@ services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+services::discord::runtime_bootstrap::o_writer_host::fence_tests
 services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
@@ -708,6 +712,11 @@ db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_includ
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_marks_empty_provider_false_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_empty_when_no_rows_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_only_dispatched_rows_pg
+db::o_channel_activation::fence_tests::fence_blocks_actual_sweep_backend_until_release_or_drop_pg
+db::o_channel_activation::fence_tests::fenced_rows_count_pending_and_processing_headless_bodies_only_pg
+db::o_channel_activation::fence_tests::fenced_rows_preserve_all_open_status_and_legacy_session_predicates_pg
+db::o_channel_activation::fence_tests::intake_fence_uses_app_role_update_privilege_and_rejects_select_only_pg
+db::o_channel_activation::fence_tests::sweep_committed_before_fence_is_visible_in_fresh_facts_pg
 db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
 db::o_channel_homes::tests::a_delegate_naming_an_unknown_provider_writes_nothing_pg
 db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_win_pg
@@ -1384,6 +1393,7 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settle
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settles_stale_spawned_as_unknown_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_live_interactive_turn_without_dispatch_binding_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::exact_owned_row_with_null_cwd_is_channel_scoped_empty_path

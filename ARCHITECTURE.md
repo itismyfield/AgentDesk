@@ -202,6 +202,7 @@ src/
 │   ├── meetings.rs
 │   ├── mod.rs
 │   ├── o_channel_activation.rs
+│   ├── o_channel_activation_fence_tests.rs
 │   ├── o_channel_homes.rs
 │   ├── o_channel_homes_tests.rs
 │   ├── postgres.rs
