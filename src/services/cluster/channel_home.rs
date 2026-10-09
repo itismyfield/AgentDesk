@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -63,8 +64,131 @@ struct Held {
 }
 
 #[derive(Default)]
+struct CommandCount {
+    count: AtomicUsize,
+    ended: tokio::sync::Notify,
+}
+
+struct CommandEffect(Arc<CommandCount>);
+impl Drop for CommandEffect {
+    fn drop(&mut self) {
+        if self.0.count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.ended.notify_waiters();
+        }
+    }
+}
+
+/// Clones keep one admitted command alive; only the last drop ends it.
+#[derive(Clone)]
+pub(crate) struct CommandPermit {
+    _effect: Arc<CommandEffect>,
+    channel: String,
+    provider: String,
+}
+
+impl CommandPermit {
+    fn new(count: &Arc<CommandCount>, channel: &str, provider: &str) -> Self {
+        count.count.fetch_add(1, Ordering::AcqRel);
+        Self {
+            _effect: Arc::new(CommandEffect(Arc::clone(count))),
+            channel: channel.into(),
+            provider: provider.into(),
+        }
+    }
+
+    fn names(&self, channel: &str, provider: &str) -> bool {
+        self.channel == channel && self.provider == provider
+    }
+}
+
+tokio::task_local! { static COMMAND: Option<CommandPermit>; }
+thread_local! {
+    static COMMAND_WORKER: std::cell::RefCell<Option<Option<CommandPermit>>> = const { std::cell::RefCell::new(None) };
+    #[cfg(test)]
+    static COMMAND_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn current_command(channel: &str, provider: &str) -> Option<CommandPermit> {
+    COMMAND_WORKER
+        .with(|held| held.borrow().clone())
+        .unwrap_or_else(|| COMMAND.try_with(Clone::clone).ok().flatten())
+        .filter(|permit| permit.names(channel, provider))
+}
+
+pub(crate) struct CommandWorkerScope(Option<Option<CommandPermit>>);
+impl Drop for CommandWorkerScope {
+    fn drop(&mut self) {
+        COMMAND_WORKER.with(|held| *held.borrow_mut() = self.0.take());
+    }
+}
+
+pub(crate) fn command_worker_scope(permit: Option<CommandPermit>) -> CommandWorkerScope {
+    CommandWorkerScope(COMMAND_WORKER.with(|held| held.replace(Some(permit))))
+}
+
+pub(crate) fn command_scope<F: Future>(
+    permit: Option<CommandPermit>,
+    work: F,
+) -> impl Future<Output = F::Output> {
+    if permit.is_some() {
+        futures::future::Either::Right(COMMAND.scope(
+            permit.clone(),
+            CommandFuture {
+                future: Some(Box::pin(work)),
+                permit,
+            },
+        ))
+    } else {
+        futures::future::Either::Left(work)
+    }
+}
+
+struct CommandFuture<F: Future> {
+    future: Option<std::pin::Pin<Box<F>>>,
+    permit: Option<CommandPermit>,
+}
+impl<F: Future> Future for CommandFuture<F> {
+    type Output = F::Output;
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        let _scope = command_worker_scope(self.permit.clone());
+        self.future.as_mut().unwrap().as_mut().poll(cx)
+    }
+}
+impl<F: Future> Drop for CommandFuture<F> {
+    fn drop(&mut self) {
+        let _scope = command_worker_scope(self.permit.clone());
+        drop(self.future.take());
+    }
+}
+
+/// Legacy channels do not allocate a permit; a registered home's refusal never becomes Legacy.
+pub(crate) fn admit_command(
+    channel: &str,
+    provider: &str,
+) -> Result<Option<CommandPermit>, HomeRefusal> {
+    if let Some(permit) = current_command(channel, provider) {
+        return Ok(Some(permit));
+    }
+    if !with_homes(|homes| homes.get().is_some()) {
+        return Ok(None);
+    }
+    #[cfg(test)]
+    COMMAND_LOOKUPS.with(|calls| calls.set(calls.get() + 1));
+    let Some(home) = registered(channel) else {
+        return Ok(None);
+    };
+    home.admit_command(provider)
+        .map(Some)
+        .ok_or_else(|| home.refusal().unwrap_or(HomeRefusal::NotHeld))
+}
+
+#[derive(Default)]
 struct HomeLocal {
     held: Option<Held>,
+    commands: Arc<CommandCount>,
     /// The last epoch this gate held, kept after a lapse so a final `close` still retires it.
     last_epoch: Option<i64>,
     /// Intake stays closed for this epoch once a drain closes it or the row says drain.
@@ -352,6 +476,35 @@ impl HomeGate {
             .flatten()
     }
 
+    pub(crate) fn admit_command(&self, provider: &str) -> Option<CommandPermit> {
+        let mut local = self.locked();
+        self.expire(&mut local, Instant::now());
+        matches!(
+            self.read(&local),
+            HomeOwnership::Owned {
+                intake: HomeIntake::Open,
+                ..
+            }
+        )
+        .then(|| CommandPermit::new(&local.commands, &self.channel_id, provider))
+    }
+
+    pub(crate) fn admit_recovery(&self, provider: &str) -> Option<CommandPermit> {
+        let mut local = self.locked();
+        self.expire(&mut local, Instant::now());
+        let held = local.held.as_ref()?;
+        self.gate
+            .admit(|epoch| {
+                (epoch == held.gate_epoch)
+                    .then(|| CommandPermit::new(&local.commands, &self.channel_id, provider))
+            })
+            .flatten()
+    }
+
+    pub(crate) fn commands_in_flight(&self) -> usize {
+        self.locked().commands.count.load(Ordering::Acquire)
+    }
+
     /// Why a turn or command may not run here now; `None` while held with intake open.
     pub(crate) fn refusal(&self) -> Option<HomeRefusal> {
         match self.ownership() {
@@ -386,8 +539,20 @@ impl std::fmt::Display for HomeRefusal {
 impl std::error::Error for HomeRefusal {}
 
 type Homes = BTreeMap<String, Arc<HomeGate>>;
+#[derive(Default)]
+struct HomeRegistry {
+    gates: Homes,
+    commands: BTreeMap<String, Arc<CommandCount>>,
+}
+impl HomeRegistry {
+    fn prune(&mut self) {
+        self.commands.retain(|channel, count| {
+            self.gates.contains_key(channel) || count.count.load(Ordering::Acquire) != 0
+        });
+    }
+}
 
-type Registry = OnceLock<Mutex<Homes>>;
+type Registry = OnceLock<Mutex<HomeRegistry>>;
 
 /// The gates of the channels this process takes part in as holder or target; a channel without
 /// one follows the gateway rules. Test builds keep the same store once per thread.
@@ -405,51 +570,76 @@ fn with_homes<R>(use_homes: impl FnOnce(&Registry) -> R) -> R {
     HOMES.with(use_homes)
 }
 
-fn lock_homes(homes: &Mutex<Homes>) -> MutexGuard<'_, Homes> {
+fn lock_homes(homes: &Mutex<HomeRegistry>) -> MutexGuard<'_, HomeRegistry> {
     homes.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Reads the registered gates; while none was ever registered nothing is locked.
 fn read_homes<R>(read: impl FnOnce(&Homes) -> R) -> Option<R> {
-    with_homes(|homes| Some(read(&lock_homes(homes.get()?))))
+    with_homes(|homes| {
+        let mut registry = lock_homes(homes.get()?);
+        registry.prune();
+        Some(read(&registry.gates))
+    })
 }
 
 /// Makes `home` its channel's gate in this process; intake for the channel then follows it.
 /// A gate it replaces is withdrawn after the swap, so its lease ends and it never reopens.
 pub(crate) fn register(home: Arc<HomeGate>) {
-    let channel_id = home.channel_id.clone();
-    let replaced = with_homes(|homes| {
-        lock_homes(homes.get_or_init(Mutex::default)).insert(channel_id, Arc::clone(&home))
-    });
-    if let Some(old) = replaced.filter(|old| !Arc::ptr_eq(old, &home)) {
-        old.withdraw();
-    }
-}
-
-/// Returns the channel to the gateway rules here: its gate leaves the registry, then is withdrawn.
-pub(crate) fn unregister(channel_id: &str) -> Option<Arc<HomeGate>> {
-    let removed = with_homes(|homes| lock_homes(homes.get()?).remove(channel_id));
-    if let Some(home) = &removed {
-        home.withdraw();
-    }
-    removed
-}
-
-/// [`unregister`] only while `home` is still its channel's gate, decided under the registry
-/// lock, so the cleanup of a replaced gate never removes the gate that replaced it.
-pub(crate) fn unregister_if_same(home: &HomeGate) -> bool {
-    let removed = with_homes(|homes| {
-        let mut homes = lock_homes(homes.get()?);
-        let current = homes.get(&home.channel_id)?;
-        if !std::ptr::eq(Arc::as_ptr(current), home) {
-            return None;
+    with_homes(|homes| {
+        let mut registry = lock_homes(homes.get_or_init(Mutex::default));
+        if registry
+            .gates
+            .get(&home.channel_id)
+            .is_some_and(|old| Arc::ptr_eq(old, &home))
+        {
+            return;
         }
-        homes.remove(&home.channel_id)
+        registry.prune();
+        if let Some(old) = registry.gates.get(&home.channel_id) {
+            old.withdraw();
+        }
+        let mut local = home.locked();
+        let count = registry
+            .commands
+            .entry(home.channel_id.clone())
+            .or_insert_with(|| Arc::clone(&local.commands));
+        local.commands = Arc::clone(count);
+        drop(local);
+        registry.gates.insert(home.channel_id.clone(), home);
     });
-    if let Some(removed) = &removed {
+}
+
+/// Removes the gate immediately; outstanding permits remain visible to a replacement.
+pub(crate) fn unregister(channel_id: &str) -> Option<Arc<HomeGate>> {
+    with_homes(|homes| {
+        let mut registry = lock_homes(homes.get()?);
+        let removed = registry.gates.remove(channel_id)?;
         removed.withdraw();
-    }
-    removed.is_some()
+        registry.prune();
+        Some(removed)
+    })
+}
+
+/// A replaced watch may not remove the replacement's gate.
+pub(crate) fn unregister_if_same(home: &HomeGate) -> bool {
+    with_homes(|homes| {
+        let Some(homes) = homes.get() else {
+            return false;
+        };
+        let mut registry = lock_homes(homes);
+        if !registry
+            .gates
+            .get(&home.channel_id)
+            .is_some_and(|current| std::ptr::eq(Arc::as_ptr(current), home))
+        {
+            return false;
+        }
+        registry.gates.remove(&home.channel_id);
+        home.withdraw();
+        registry.prune();
+        true
+    })
 }
 
 /// The gate of a channel this process takes part in; none means the gateway rules apply.

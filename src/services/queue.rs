@@ -227,6 +227,20 @@ impl QueueService {
                 let active_turn = self
                     .load_cancel_dispatch_turn_session(pool, dispatch_id)
                     .await?;
+                let permit = match active_turn.as_ref() {
+                    None => None,
+                    Some(turn) => {
+                        let channel = turn.channel_id.as_deref().ok_or_else(|| {
+                            ServiceError::conflict("active turn channel unobserved")
+                        })?;
+                        crate::services::cluster::channel_home::admit_command(
+                            channel,
+                            turn.provider_name.as_deref().unwrap_or("cancel_dispatch"),
+                        )
+                        .map_err(|reason| ServiceError::conflict(reason.to_string()))?
+                    }
+                };
+                crate::services::cluster::channel_home::command_scope(permit, async {
                 let mut turn_cancelled = false;
                 let mut turn_session_key = None;
                 let mut turn_tmux_name = None;
@@ -379,6 +393,7 @@ impl QueueService {
                     "turn_inflight_cleared": turn_inflight_cleared,
                     "turn_queued_remaining": turn_queued_remaining,
                 }))
+                }).await
             }
         }
     }
@@ -473,6 +488,13 @@ impl QueueService {
         headers: &HeaderMap,
         forward_context: &crate::services::session_forwarding::ForwardCallerContext,
     ) -> ServiceResult<Value> {
+        let permit =
+            crate::services::cluster::channel_home::admit_command(channel_id, "cancel_turn")
+                .map_err(|reason| {
+                    ServiceError::conflict(reason.to_string())
+                        .with_context("channel_id", channel_id)
+                })?;
+        crate::services::cluster::channel_home::command_scope(permit, async {
         if let Some(response) =
             crate::services::session_forwarding::forward_remote_cancel_if_needed(
                 forward_context,
@@ -783,6 +805,7 @@ impl QueueService {
             "turn_status": finalizer.status,
             "turn_completed_at": finalizer.completed_at.to_rfc3339(),
         }))
+        }).await
     }
 
     async fn resolve_cancel_turn_channel_target(

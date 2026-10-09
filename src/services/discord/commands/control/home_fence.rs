@@ -4,7 +4,7 @@
 use poise::serenity_prelude::ChannelId;
 
 use super::super::super::{Context, Error};
-use crate::services::cluster::channel_home::{self, HomeRefusal};
+use crate::services::cluster::channel_home::{self, CommandPermit, HomeRefusal};
 
 /// A delegated channel's command refused on this node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +23,13 @@ impl std::fmt::Display for CommandRefused {
 }
 
 impl std::error::Error for CommandRefused {}
+
+pub(in crate::services::discord) fn admit(
+    channel_id: ChannelId,
+    provider: &str,
+) -> Result<Option<CommandPermit>, CommandRefused> {
+    channel_home::admit_command(&channel_id.get().to_string(), provider).map_err(CommandRefused)
+}
 
 /// Refuses the command when the channel's home is registered here but not held with intake open;
 /// a channel with no registered home passes unread.

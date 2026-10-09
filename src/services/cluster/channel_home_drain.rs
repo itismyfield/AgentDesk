@@ -60,6 +60,7 @@ pub(crate) enum Blocker {
     OpenIntake(i64),
     IntakeUnreadable,
     SourceReset,
+    CommandsInFlight(usize),
     PostsInFlight(usize),
     PostsUnreadable,
     LeaveFailed,
@@ -77,6 +78,7 @@ impl Blocker {
             Self::OpenIntake(_) => "open_intake",
             Self::IntakeUnreadable => "intake_unreadable",
             Self::SourceReset => "source_reset",
+            Self::CommandsInFlight(_) => "commands_in_flight",
             Self::PostsInFlight(_) => "posts_in_flight",
             Self::PostsUnreadable => "posts_unreadable",
             Self::LeaveFailed => "leave_failed",
@@ -118,6 +120,11 @@ async fn resume(pool: &PgPool, home: &HomeGate, epoch: i64) {
     }
 }
 
+fn commands_blocker(home: &HomeGate) -> Option<Blocker> {
+    let count = home.commands_in_flight();
+    (count != 0).then_some(Blocker::CommandsInFlight(count))
+}
+
 /// One pass of the drain for the row as read now; the caller repeats it until it ends.
 pub(crate) async fn drain_round<P: DrainPort>(
     pool: &PgPool,
@@ -144,6 +151,9 @@ pub(crate) async fn drain_round<P: DrainPort>(
             HomeOwnership::Owned { home_epoch, .. } if home_epoch == epoch => home.close_intake(),
             _ => return DrainStep::Waiting(Blocker::NotHeld),
         }
+        if let Some(blocker) = commands_blocker(home) {
+            return DrainStep::Waiting(blocker);
+        }
         match port.turn_running().await {
             Some(false) => {}
             Some(true) => return DrainStep::Waiting(Blocker::TurnRunning),
@@ -157,6 +167,9 @@ pub(crate) async fn drain_round<P: DrainPort>(
         }
         // Takes the admission lock, so an admission in progress finishes first and none follows.
         home.close();
+    }
+    if let Some(blocker) = commands_blocker(home) {
+        return DrainStep::Waiting(blocker);
     }
     match port.posts_in_flight().await {
         Some(0) => {}

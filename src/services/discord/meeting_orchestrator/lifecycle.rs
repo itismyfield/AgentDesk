@@ -396,6 +396,11 @@ pub(in crate::services::discord) async fn cancel_meeting(
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
 ) -> Result<(), Error> {
+    let permit = crate::services::cluster::channel_home::admit_command(
+        &channel_id.get().to_string(),
+        "meeting",
+    )?;
+    crate::services::cluster::channel_home::command_scope(permit, async {
     let meeting_info = {
         let mut core = shared.core.lock().await;
         if let Some(m) = core.active_meetings.get_mut(&channel_id) {
@@ -430,6 +435,7 @@ pub(in crate::services::discord) async fn cancel_meeting(
         let _ = send_meeting_message(http, channel_id, shared, "진행 중인 회의가 없어.").await;
         Ok(())
     }
+}).await
 }
 
 fn meeting_cancel_event_key(channel_id: ChannelId, meeting_id: &str) -> String {

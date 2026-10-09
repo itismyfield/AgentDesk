@@ -34,34 +34,41 @@ fn schedule_text_stop_pending_queue_drain(
 ) {
     let shared = shared.clone();
     let provider = provider.clone();
-    tokio::spawn(async move {
-        if let Some(registry) = shared.health_registry() {
-            let _ = super::super::health::schedule_pending_queue_drain_after_cancel(
-                registry.as_ref(),
-                provider.as_str(),
+    let permit = crate::services::cluster::channel_home::current_command(
+        &channel_id.get().to_string(),
+        provider.as_str(),
+    );
+    tokio::spawn(crate::services::cluster::channel_home::command_scope(
+        permit,
+        async move {
+            if let Some(registry) = shared.health_registry() {
+                let _ = super::super::health::schedule_pending_queue_drain_after_cancel(
+                    registry.as_ref(),
+                    provider.as_str(),
+                    channel_id,
+                    stop_source,
+                )
+                .await;
+                return;
+            }
+
+            let snapshot = shared
+                .mailbox(channel_id)
+                .snapshot()
+                .await
+                .intervention_queue
+                .len();
+            if snapshot == 0 {
+                return;
+            }
+            super::super::schedule_deferred_idle_queue_kickoff(
+                shared,
+                provider,
                 channel_id,
                 stop_source,
-            )
-            .await;
-            return;
-        }
-
-        let snapshot = shared
-            .mailbox(channel_id)
-            .snapshot()
-            .await
-            .intervention_queue
-            .len();
-        if snapshot == 0 {
-            return;
-        }
-        super::super::schedule_deferred_idle_queue_kickoff(
-            shared,
-            provider,
-            channel_id,
-            stop_source,
-        );
-    });
+            );
+        },
+    ));
 }
 
 async fn fetch_escalation_settings_via_api()
@@ -379,6 +386,11 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
         }
 
         TextCommandId::Stop => {
+            let permit = crate::services::cluster::channel_home::admit_command(
+                &channel_id.get().to_string(),
+                data.provider.as_str(),
+            )?;
+            return crate::services::cluster::channel_home::command_scope(permit, async {
             let stop_lookup =
                 cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id, "!stop")
                     .await;
@@ -430,7 +442,8 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                     let _ = msg.reply(&ctx.http, stop.reply()).await;
                 }
             }
-            return Ok(true);
+            Ok(true)
+            }).await;
         }
 
         TextCommandId::Clear => {
@@ -1284,6 +1297,11 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         let _ = msg.reply(&ctx.http, reply).await;
                         return Ok(true);
                     }
+                    let permit = crate::services::cluster::channel_home::admit_command(
+                        &channel_id.get().to_string(),
+                        data.provider.as_str(),
+                    )?;
+                    return crate::services::cluster::channel_home::command_scope(permit, async {
                     let stop_lookup = cancel_text_stop_token_mailbox(
                         &data.shared,
                         &data.provider,
@@ -1337,7 +1355,8 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                             let _ = msg.reply(&ctx.http, stop.reply()).await;
                         }
                     }
-                    return Ok(true);
+                    Ok(true)
+                    }).await;
                 }
                 "pwd" => {
                     return Box::pin(handle_text_command(ctx, msg, data, channel_id, "!pwd")).await;

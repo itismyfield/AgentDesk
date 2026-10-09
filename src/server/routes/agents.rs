@@ -979,49 +979,71 @@ pub async fn stop_agent_turn(
         );
     }
 
-    let session_key = session.session_key.clone();
-    let tmux_name = extract_tmux_name(&session_key).unwrap_or_else(|| session_key.clone());
-    let lifecycle = stop_turn_preserving_queue(
-        state.health_registry.as_deref(),
-        &TurnLifecycleTarget {
-            provider: session.provider.as_deref().and_then(ProviderKind::from_str),
-            channel_id: session
-                .runtime_channel_id
-                .as_deref()
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(poise::serenity_prelude::ChannelId::new),
-            tmux_name: tmux_name.clone(),
-        },
-        &format!("사용자가 {id} 에이전트 턴 수동 중단 (POST /api/agents/{id}/turn/stop)"),
-    )
-    .await;
-    // A turn the host guard kept is running on: its session is not marked disconnected.
-    if lifecycle.host_guard_kept() {
-        let (error, unsupported) = ("session host is not legacy tmux", "session_host_not_tmux");
-        let body = json!({"error": error, "unsupported": unsupported, "session_key": session_key});
-        return (StatusCode::CONFLICT, Json(body));
-    }
+    let Some(channel) = session.runtime_channel_id.as_deref() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "active turn channel unobserved"})),
+        );
+    };
+    let permit = match crate::services::cluster::channel_home::admit_command(
+        channel,
+        session.provider.as_deref().unwrap_or("agent_stop"),
+    ) {
+        Ok(permit) => permit,
+        Err(reason) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": reason.to_string()})),
+            );
+        }
+    };
+    crate::services::cluster::channel_home::command_scope(permit, async {
+        let session_key = session.session_key.clone();
+        let tmux_name = extract_tmux_name(&session_key).unwrap_or_else(|| session_key.clone());
+        let lifecycle = stop_turn_preserving_queue(
+            state.health_registry.as_deref(),
+            &TurnLifecycleTarget {
+                provider: session.provider.as_deref().and_then(ProviderKind::from_str),
+                channel_id: session
+                    .runtime_channel_id
+                    .as_deref()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(poise::serenity_prelude::ChannelId::new),
+                tmux_name: tmux_name.clone(),
+            },
+            &format!("사용자가 {id} 에이전트 턴 수동 중단 (POST /api/agents/{id}/turn/stop)"),
+        )
+        .await;
+        // A turn the host guard kept is running on: its session is not marked disconnected.
+        if lifecycle.host_guard_kept() {
+            let (error, unsupported) = ("session host is not legacy tmux", "session_host_not_tmux");
+            let body =
+                json!({"error": error, "unsupported": unsupported, "session_key": session_key});
+            return (StatusCode::CONFLICT, Json(body));
+        }
 
-    mark_session_disconnected_pg(pool, &session_key).await;
+        mark_session_disconnected_pg(pool, &session_key).await;
 
-    let status = StatusCode::OK;
-    let Json(mut body) = Json(json!({
-        "ok": true,
-        "session_key": session_key,
-        "tmux_session": tmux_name,
-        "tmux_killed": lifecycle.tmux_killed,
-        "lifecycle_path": lifecycle.lifecycle_path,
-        "queued_remaining": lifecycle.queue_depth,
-        "queue_preserved": lifecycle.queue_preserved,
-    }));
-    body["agent_id"] = json!(id);
-    body["session_key"] = json!(session_key);
-    body["status"] = json!(if status == StatusCode::OK {
-        "stopped"
-    } else {
-        "error"
-    });
-    (status, Json(body))
+        let status = StatusCode::OK;
+        let Json(mut body) = Json(json!({
+            "ok": true,
+            "session_key": session_key,
+            "tmux_session": tmux_name,
+            "tmux_killed": lifecycle.tmux_killed,
+            "lifecycle_path": lifecycle.lifecycle_path,
+            "queued_remaining": lifecycle.queue_depth,
+            "queue_preserved": lifecycle.queue_preserved,
+        }));
+        body["agent_id"] = json!(id);
+        body["session_key"] = json!(session_key);
+        body["status"] = json!(if status == StatusCode::OK {
+            "stopped"
+        } else {
+            "error"
+        });
+        (status, Json(body))
+    })
+    .await
 }
 
 /// GET /api/agents/:id/timeline?limit=30
