@@ -162,6 +162,32 @@ class TurnSmokeFromCollectedEvidence(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("composer_not_detected=2 warm_followup_kill=2 cold_resume=2", detail)
 
+    def test_codex_launch_options_fallback_names_changed_fields_in_fail_reason(self):
+        result = run_live_shaped("E-51", "codex-tui")
+        session = driver.cell_session_name("codex-tui")
+        line = (
+            "2026-10-08T22:20:54.929740Z  WARN agentdesk::services::codex_tui::warm_followup: "
+            "Codex TUI warm follow-up falling back to one cold resume launch "
+            f'tmux_session_name="{session}" fallback_reason="launch_options_changed" '
+            'detail="eligibility gate rejected reuse" launch_options_mismatch="changed" '
+            'changed_fields="compact_token_limit" '
+            'launch_options_detail="compact_token_limit: 272000 -> 217600"\n'
+        )
+        launch_options: list[str] = []
+        log_counts = turn_smoke.scan_log(
+            [line], session=session, channel_id=CHANNELS["codex-tui"], launch_options=launch_options
+        )
+        passed, detail = turn_smoke.judge(
+            report={"run_id": RUN_ID, "scenarios": [result]},
+            scenario_id="E-51",
+            markers=turn_smoke.expected_markers(SCENARIOS, "E-51", RUN_ID),
+            log_counts=log_counts,
+            driver_rc=0,
+            launch_options=launch_options,
+        )
+        self.assertFalse(passed)
+        self.assertIn("cold_resume=1 launch_options=changed(compact_token_limit)", detail)
+
     def test_missing_evidence_never_passes(self):
         result = run_live_shaped("E-51", "codex-tui")
         passed, detail = verdict(result, "E-51", "codex-tui", None)

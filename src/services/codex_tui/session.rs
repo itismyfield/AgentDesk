@@ -8,6 +8,7 @@ use super::rollout_index::cached_indexed_rollouts;
 use super::rollout_tail::default_codex_sessions_dir;
 
 const CODEX_TUI_LAUNCH_OPTIONS_FINGERPRINT_TEMP_EXT: &str = "codex-tui-launch-options.sha256";
+const CODEX_TUI_LAUNCH_OPTIONS_SNAPSHOT_TEMP_EXT: &str = "codex-tui-launch-options.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexTuiSessionFiles {
@@ -15,6 +16,8 @@ pub struct CodexTuiSessionFiles {
     pub legacy_codex_home_path: PathBuf,
     pub launch_options_fingerprint_path: PathBuf,
     pub legacy_launch_options_fingerprint_path: PathBuf,
+    pub launch_options_snapshot_path: PathBuf,
+    pub legacy_launch_options_snapshot_path: PathBuf,
 }
 
 impl CodexTuiSessionFiles {
@@ -42,6 +45,18 @@ impl CodexTuiSessionFiles {
                     CODEX_TUI_LAUNCH_OPTIONS_FINGERPRINT_TEMP_EXT,
                 ),
             ),
+            launch_options_snapshot_path: PathBuf::from(
+                crate::services::tmux_common::session_temp_path(
+                    tmux_session_name,
+                    CODEX_TUI_LAUNCH_OPTIONS_SNAPSHOT_TEMP_EXT,
+                ),
+            ),
+            legacy_launch_options_snapshot_path: PathBuf::from(
+                crate::services::tmux_common::legacy_tmp_session_path(
+                    tmux_session_name,
+                    CODEX_TUI_LAUNCH_OPTIONS_SNAPSHOT_TEMP_EXT,
+                ),
+            ),
         }
     }
 
@@ -50,6 +65,8 @@ impl CodexTuiSessionFiles {
         let _ = std::fs::remove_dir_all(&self.legacy_codex_home_path);
         let _ = std::fs::remove_file(&self.launch_options_fingerprint_path);
         let _ = std::fs::remove_file(&self.legacy_launch_options_fingerprint_path);
+        let _ = std::fs::remove_file(&self.launch_options_snapshot_path);
+        let _ = std::fs::remove_file(&self.legacy_launch_options_snapshot_path);
     }
 }
 
@@ -71,6 +88,55 @@ pub fn read_codex_tui_launch_options_fingerprint(tmux_session_name: &str) -> Opt
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// One launch-evidence file as read back: absent, present but unusable, or its trimmed text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LaunchEvidenceFile {
+    Missing,
+    Unreadable(String),
+    Present(String),
+}
+
+fn read_launch_evidence_file(tmux_session_name: &str, ext: &str) -> LaunchEvidenceFile {
+    let Some(path) =
+        crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, ext)
+    else {
+        return LaunchEvidenceFile::Missing;
+    };
+    match std::fs::read_to_string(path) {
+        Ok(value) if value.trim().is_empty() => LaunchEvidenceFile::Unreadable("empty".to_string()),
+        Ok(value) => LaunchEvidenceFile::Present(value.trim().to_string()),
+        Err(error) => LaunchEvidenceFile::Unreadable(error.to_string()),
+    }
+}
+
+pub(crate) fn read_codex_tui_launch_options_fingerprint_file(
+    tmux_session_name: &str,
+) -> LaunchEvidenceFile {
+    read_launch_evidence_file(
+        tmux_session_name,
+        CODEX_TUI_LAUNCH_OPTIONS_FINGERPRINT_TEMP_EXT,
+    )
+}
+
+/// Per-field values behind the fingerprint, kept only to name what changed on a mismatch.
+pub(crate) fn write_codex_tui_launch_options_snapshot(
+    tmux_session_name: &str,
+    snapshot: &str,
+) -> Result<(), String> {
+    let files = CodexTuiSessionFiles::for_tmux_session(tmux_session_name);
+    std::fs::write(&files.launch_options_snapshot_path, snapshot)
+        .map_err(|error| format!("failed to write Codex TUI launch-options snapshot: {error}"))
+}
+
+pub(crate) fn read_codex_tui_launch_options_snapshot_file(
+    tmux_session_name: &str,
+) -> LaunchEvidenceFile {
+    read_launch_evidence_file(
+        tmux_session_name,
+        CODEX_TUI_LAUNCH_OPTIONS_SNAPSHOT_TEMP_EXT,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
