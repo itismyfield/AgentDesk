@@ -36410,6 +36410,69 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/tui_o/alarm.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:35caf2c2224ad4d4e1e0957cab6a0ff66e2ef49ce15c15b48aa5d8e1a2c7a4b3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/alarm.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6b39b6649cbdeb10de3723f7d2cce88be40abf7397c2ad9b70b1577617c8b89e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/alarm.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7f1b3d81f6f9564a97d6ed083b523314f66a1cf42641565b5122bea492414f6c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/alarm.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ad5bf39612589c749fd7c88600473e36fbd0ce33aac35913b9f793313a16653d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/alarm.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:fdf6b2657cfa405dbe3637dacd57a2d81b9b8fd26ee0ed8de4bd200f96cdd224"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/alarm.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:01b9c20286d7f9e6a085f75c2acc812f85f6125326882d6fa12a5e780f6715b3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/alarm.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5809c30ece631bf9bc121e50bdf7d7ab2aa85cd716958637de2ca41cbdd0f8b3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/turn_host_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",

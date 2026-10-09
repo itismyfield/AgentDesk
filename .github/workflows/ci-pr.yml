@@ -428,6 +428,7 @@ jobs:
               - 'src/services/settings.rs'
               - 'src/services/stale_turn_reconciler.rs'
               - 'src/services/tmux_turn_liveness/tests_pg.rs'
+              - 'src/services/tui_o/alarm.rs'
               - 'src/services/turn_host_tests.rs'
               - 'src/services/turn_lifecycle.rs'
               - 'src/voice/announce_meta.rs'
