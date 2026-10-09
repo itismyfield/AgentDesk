@@ -447,23 +447,42 @@ pub(crate) fn draft_sighting(capture: &str) -> DraftSighting {
     }
 }
 
-/// The composer before an automatic submit types: empty or faint is `Settled`, typed text whose
-/// removal a later capture can see is `PersonDraft`, anything else `Unsettled`.
-pub(crate) fn submit_sighting(capture: &str) -> DraftSighting {
+/// Whose text the composer holds before an automatic key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ComposerOwner {
+    /// Nothing typed: an empty `❯` or a faint placeholder.
+    Empty,
+    /// A Discord prompt AgentDesk typed (`[User: …]`) that never left the composer.
+    AgentDesk,
+    /// Typed text in the measured layout whose removal a later capture can see.
+    Person,
+    Unread,
+}
+
+pub(crate) fn composer_owner(capture: &str) -> ComposerOwner {
     match screen::typed(capture) {
-        Some(false) => DraftSighting::Settled,
+        Some(false) => ComposerOwner::Empty,
         Some(true) => {
             let screen = screen::read(capture);
-            if screen.stash == screen::Stash::AbsentInRecognizedLayout
-                && screen.composer != screen::Composer::Empty
-            {
-                DraftSighting::PersonDraft
-            } else {
-                DraftSighting::Unsettled
+            if screen.stash != screen::Stash::AbsentInRecognizedLayout {
+                return ComposerOwner::Unread;
+            }
+            match screen.composer {
+                screen::Composer::Text(rows) if agentdesk_prompt(&rows) => ComposerOwner::AgentDesk,
+                screen::Composer::Empty => ComposerOwner::Unread,
+                _ => ComposerOwner::Person,
             }
         }
-        None => DraftSighting::Unsettled,
+        None => ComposerOwner::Unread,
     }
+}
+
+/// AgentDesk frames every Discord prompt it types as `[User: …]`.
+fn agentdesk_prompt(rows: &[String]) -> bool {
+    let first = rows.first().map(|row| row.trim_start()).unwrap_or_default();
+    first
+        .get(..6)
+        .is_some_and(|head| head.eq_ignore_ascii_case("[User:"))
 }
 
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.

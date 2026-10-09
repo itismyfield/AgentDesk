@@ -5,9 +5,9 @@ use super::{
     CancelToken, PROMPT_READY_TIMEOUT_ERROR_PREFIX, PromptReadinessKind, TuiInputAction,
     host_input, prompt_readiness_snapshot, run_actions,
 };
-use crate::services::claude_tui::busy_inject::submit_sighting;
+use crate::services::claude_tui::busy_inject::{ComposerOwner, composer_owner};
 use crate::services::claude_tui::composer_lock::{
-    DraftGuard, DraftSighting, admit_composer_write, guard_draft, with_composer_mutation_lock,
+    DraftGuard, admit_composer_write, guard_draft, with_composer_mutation_lock,
 };
 use crate::services::claude_tui::startup_dialog::{
     ClaudeStartupDialog, detect_claude_startup_dialog,
@@ -31,30 +31,58 @@ fn held_error(readiness: PromptReadinessKind, reason: &str) -> String {
     )
 }
 
-/// Reads the composer with attributes just before a follow-up types: a person's draft protects the
-/// pane until it is gone, an unreadable composer holds only this input; the turn bridge requeues both.
-pub(super) fn refuse_composer_draft(
-    session_name: &str,
-    readiness: PromptReadinessKind,
-) -> Result<(), String> {
-    let capture = host_input::observe_draft(session_name);
-    let sighting = capture.as_deref().map(submit_sighting);
-    let reason = match sighting {
-        Some(DraftSighting::Settled) => return Ok(()),
-        Some(DraftSighting::PersonDraft) => {
+/// Why an automatic write must not type into the composer `capture` shows, if it must not; a
+/// person's draft also protects the pane until a later capture sees it gone.
+pub(crate) fn composer_refusal(session_name: &str, capture: Option<&str>) -> Option<&'static str> {
+    match capture.map(composer_owner) {
+        Some(ComposerOwner::Empty) => None,
+        Some(ComposerOwner::Person) => {
             guard_draft(session_name, DraftGuard::DraftRestored);
-            "draft_recovery_hold"
+            Some("draft_recovery_hold")
         }
-        _ => "composer_unread",
-    };
+        Some(ComposerOwner::AgentDesk) => Some("agentdesk_prompt_in_composer"),
+        Some(ComposerOwner::Unread) | None => Some("composer_unread"),
+    }
+}
+
+/// The requeued refusal for the composer `capture` shows, logged.
+fn held(session_name: &str, readiness: PromptReadinessKind, capture: Option<&str>) -> String {
+    let reason = composer_refusal(session_name, capture).unwrap_or("composer_unread");
     tracing::info!(
         tmux_session_name = session_name,
         readiness = readiness.label(),
         reason,
         capture_available = capture.is_some(),
-        "claude_tui follow-up held: the composer shows a person's draft or could not be read"
+        "claude_tui follow-up held: the composer is not empty or could not be read"
     );
-    Err(held_error(readiness, reason))
+    held_error(readiness, reason)
+}
+
+/// Reads the composer with attributes just before a follow-up types; anything but an empty composer
+/// refuses with an error the turn bridge requeues.
+pub(super) fn refuse_composer_draft(
+    session_name: &str,
+    readiness: PromptReadinessKind,
+) -> Result<(), String> {
+    let capture = host_input::observe_draft(session_name);
+    if capture.as_deref().map(composer_owner) == Some(ComposerOwner::Empty) {
+        return Ok(());
+    }
+    Err(held(session_name, readiness, capture.as_deref()))
+}
+
+/// Before clearing a draft the pane text called stranded: only a prompt AgentDesk typed may be
+/// cleared (`Ok(true)`), an empty composer needs nothing, anything else refuses as a submit would.
+pub(crate) fn stranded_draft_is_ours(
+    session_name: &str,
+    readiness: PromptReadinessKind,
+) -> Result<bool, String> {
+    let capture = host_input::observe_draft(session_name);
+    match capture.as_deref().map(composer_owner) {
+        Some(ComposerOwner::Empty) => Ok(false),
+        Some(ComposerOwner::AgentDesk) => Ok(true),
+        _ => Err(held(session_name, readiness, capture.as_deref())),
+    }
 }
 
 /// One Enter under the composer lock, only while the same dialog shows and the pane takes

@@ -1728,6 +1728,7 @@ services::claude_tui::busy_inject::stash_tests::hold_tests::a_restored_draft_is_
 services::claude_tui::busy_inject::stash_tests::hold_tests::a_startup_dialog_is_dismissed_only_where_no_draft_is_protected
 services::claude_tui::busy_inject::stash_tests::hold_tests::only_an_allowlisted_channel_takes_the_stash_path
 services::claude_tui::busy_inject::stash_tests::hold_tests::the_tui_send_endpoint_keeps_off_a_pane_in_recovery
+services::claude_tui::busy_inject::stash_tests::hold_tests::the_tui_send_endpoint_never_submits_a_new_message_over_an_unseen_draft
 services::claude_tui::busy_inject::stash_tests::only_the_measured_placeholder_shape_reads_as_an_empty_composer
 services::claude_tui::busy_inject::stash_tests::the_stash_is_read_from_the_status_row_above_the_active_box_only
 services::claude_tui::busy_inject_tests::a_held_composer_lock_is_tried_three_times_without_any_tmux_call
@@ -8229,12 +8230,12 @@ services::discord::turn_bridge::finalize_epilogue::tests::stale_queue_flag_skips
 services::discord::turn_bridge::followup_requeue::tests::a_failed_release_keeps_the_watch_until_a_clean_pass
 services::discord::turn_bridge::followup_requeue::tests::a_follow_up_held_by_a_draft_resumes_once_the_draft_is_recovered
 services::discord::turn_bridge::followup_requeue::tests::a_held_input_capped_while_queued_is_sent_once_after_the_watch_sees_the_draft_gone
-services::discord::turn_bridge::followup_requeue::tests::a_queued_follow_up_waits_behind_a_person_draft_and_is_sent_once_after_it
 services::discord::turn_bridge::followup_requeue::tests::already_queued_refusal_preserves_existing_merged_marker
-services::discord::turn_bridge::followup_requeue::tests::an_unread_composer_holds_the_follow_up_without_protecting_the_pane
 services::discord::turn_bridge::followup_requeue::tests::c1b_timeout_consumer_uses_preclose_bridge_effect_for_binding_and_all_sources
 services::discord::turn_bridge::followup_requeue::tests::non_watcher_strict_plan_waits_for_capped_retry_veto_after_projection_4893
 services::discord::turn_bridge::followup_requeue::tests::persistence_failure_is_not_reported_as_requeued
+services::discord::turn_bridge::followup_requeue::tests::person_draft_tests::a_queued_follow_up_waits_behind_a_person_draft_and_is_sent_once_after_it
+services::discord::turn_bridge::followup_requeue::tests::person_draft_tests::an_unread_composer_holds_the_follow_up_without_protecting_the_pane
 services::discord::turn_bridge::followup_requeue::tests::pre_submit_retry_adds_queue_reaction_immediately_through_reconciler
 services::discord::turn_bridge::followup_requeue::tests::pre_submit_retry_reaction_failure_emits_exactly_one_referenced_fallback
 services::discord::turn_bridge::followup_requeue::tests::retry_cap_preserves_entry_and_stops_auto_kickoff_4888

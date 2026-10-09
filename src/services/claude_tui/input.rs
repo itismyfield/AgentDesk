@@ -9,6 +9,7 @@ use super::host_input;
 
 mod draft_hold;
 use draft_hold::{admit_automatic_write, dismiss_startup_dialog, refuse_composer_draft};
+pub(crate) use draft_hold::{composer_refusal, stranded_draft_is_ours};
 #[cfg(test)]
 mod final_ready_tests;
 
