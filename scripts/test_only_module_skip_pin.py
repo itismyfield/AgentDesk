@@ -34,6 +34,16 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/db/replay_disposition_tests.rs",
+        "src/db/replay_disposition_tests/compatibility_tests.rs",
+        "src/db/replay_disposition_tests/concurrency_tests.rs",
+        "src/db/replay_disposition_tests/consumer_tests.rs",
+        "src/server/task_dispatch_claims_replay_tests.rs",
+        "src/services/cluster/intake_worker/replay_hold_tests.rs",
+        "src/services/discord/inflight/replay_projection_tests.rs",
+        "src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs",
+        "src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs",
+        "src/services/dispatches/outbox_queue_replay_tests.rs",
         "src/services/discord/health/recovery/retirement_await_tests.rs",
         "src/services/discord/placeholder_sweeper/retirement_tests.rs",
         "src/services/discord/tmux_reaper/retirement_await_tests.rs",
@@ -474,6 +484,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
         "src/services/discord/relay_recovery/tests/retirement.rs",
         "src/services/discord/recovery_engine/o_cut_recorder.rs",
         "src/services/tui_o/channel_policy/adoption/body_check.rs",
