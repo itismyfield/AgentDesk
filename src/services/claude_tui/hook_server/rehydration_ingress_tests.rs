@@ -30,18 +30,11 @@ fn view<T>(read: impl Fn(&View) -> T) -> Option<T> {
     readers.push(std::thread::current().id());
     Some(seen)
 }
-thread_local! { static BEFORE_STAT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) }; }
-/// Runs once where the pass is about to register a binding it judged earlier.
-pub(super) fn before_stat_registration() {
-    if let Some(seam) = BEFORE_STAT.with_borrow_mut(Option::take) {
-        seam();
-    }
-}
 struct Reset;
 impl Drop for Reset {
     fn drop(&mut self) {
         VIEW.with_borrow_mut(|v| *v = None);
-        BEFORE_STAT.with_borrow_mut(|v| *v = None);
+        dedupe::pane_registration::BEFORE_JUDGED.with_borrow_mut(|v| *v = None);
         dedupe::pane_registration::BLOCK_ALIAS.set(false);
         dedupe::pane_registration::BEFORE_COMPLETE.with_borrow_mut(|v| *v = None);
     }
@@ -697,7 +690,7 @@ fn stale_snapshot_keeps_the_adoption(launch: bool) {
         events(channel).iter().filter(|e| names(e)).count()
     };
     let (seam_stale, seam_b, payload) = (stale.clone(), b.clone(), race.payload.clone());
-    BEFORE_STAT.with_borrow_mut(|v| {
+    dedupe::pane_registration::BEFORE_JUDGED.with_borrow_mut(|v| {
         *v = Some(Box::new(move || {
             let hook = HookSignal::from_payload("session_start", &payload);
             let adopted = adopt_from_hook(&seam_stale, &seam_b, &hook);
@@ -707,7 +700,7 @@ fn stale_snapshot_keeps_the_adoption(launch: bool) {
     let shared = crate::services::discord::make_shared_data_for_tests();
     rehydrate_existing_claude_tui_bindings(&shared);
     assert!(
-        BEFORE_STAT.with_borrow(Option::is_none),
+        dedupe::pane_registration::BEFORE_JUDGED.with_borrow(Option::is_none),
         "the pass reached its registration"
     );
     let bound = || dedupe::runtime_binding_for_tmux_session(&tmux).and_then(|b| b.session_id);

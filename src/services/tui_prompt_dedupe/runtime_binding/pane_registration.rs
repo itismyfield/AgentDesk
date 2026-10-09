@@ -15,6 +15,8 @@ static FAILED_PANES: LazyLock<Mutex<HashMap<Pane, UnreadyPane>>> = LazyLock::new
 #[cfg(test)]
 thread_local! { pub(crate) static BLOCK_ALIAS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 #[cfg(test)]
+thread_local! { pub(crate) static BEFORE_JUDGED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(test)]
 thread_local! { pub(crate) static BEFORE_COMPLETE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
 
 pub(crate) fn register_claude_pane(tmux: &str, channel: u64, binding: TuiRuntimeBinding) {
@@ -30,6 +32,10 @@ pub(crate) fn register_judged_claude_pane(
     context_path: Option<&std::path::Path>,
     judged: Option<&TuiRuntimeBinding>,
 ) -> bool {
+    #[cfg(test)]
+    if let Some(seam) = BEFORE_JUDGED.with_borrow_mut(Option::take) {
+        seam();
+    }
     // Offsets move under a live relay; only the source a pass judged from is compared.
     let source =
         |b: &TuiRuntimeBinding| (b.runtime_kind, b.session_id.clone(), b.output_path.clone());
@@ -70,6 +76,16 @@ pub(crate) fn register_claude_pane_with(
     record: Record,
 ) -> Option<Persisted> {
     register_claude_pane_with_cause(tmux, channel, binding, record, None)
+}
+
+/// `register_judged_claude_pane` of the pane's own binding, given up if a hook moved it since.
+pub(crate) fn register_unmoved_claude_pane(
+    tmux: &str,
+    channel: u64,
+    binding: TuiRuntimeBinding,
+) -> bool {
+    let judged = binding.clone();
+    register_judged_claude_pane(tmux, channel, binding, None, Some(&judged))
 }
 
 fn register_claude_pane_with_cause(

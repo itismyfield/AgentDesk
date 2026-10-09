@@ -19,7 +19,9 @@ use super::launch_script::{
     claude_launch_observation, claude_launch_transcript, claude_tui_rehydrated_binding,
 };
 use super::*;
-use crate::services::tui_prompt_dedupe::pane_registration::register_judged_claude_pane;
+use crate::services::tui_prompt_dedupe::pane_registration::{
+    register_judged_claude_pane, register_unmoved_claude_pane,
+};
 use std::collections::HashMap;
 
 #[cfg(unix)]
@@ -394,8 +396,6 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
             None => true,
         };
         if should_refresh {
-            #[cfg(test)]
-            claude_pass_tests::before_stat_registration();
             if !register_judged_claude_pane(
                 tmux_session_name,
                 channel_id,
@@ -420,16 +420,7 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
             return;
         }
         if Path::new(&binding.output_path).exists() {
-            #[cfg(test)]
-            claude_pass_tests::before_stat_registration();
-            let judged = Some(&binding);
-            if !register_judged_claude_pane(
-                tmux_session_name,
-                channel_id,
-                binding.clone(),
-                None,
-                judged,
-            ) {
+            if !register_unmoved_claude_pane(tmux_session_name, channel_id, binding.clone()) {
                 return;
             }
             tracing::info!(
