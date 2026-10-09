@@ -95,6 +95,7 @@ pub(in crate::services::discord) async fn run_slash_stop(
     };
     #[cfg(test)]
     let permit = if super::control::home_fence::mutant("stop_permit_removed") {
+        drop(permit);
         None
     } else {
         permit

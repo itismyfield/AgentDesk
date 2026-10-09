@@ -179,6 +179,7 @@ pub(super) async fn consume_codex_goal_lifecycle_command(
     };
     #[cfg(test)]
     let permit = if crate::services::cluster::channel_home::command_mutant("goal_permit_removed") {
+        drop(permit);
         None
     } else {
         permit
@@ -495,7 +496,9 @@ mod d2b_tests {
             )
             .await;
         });
-        barrier.0.notified().await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.0.notified())
+            .await
+            .expect("effect boundary reached");
         home.close_intake();
         assert_eq!(
             home.commands_in_flight(),

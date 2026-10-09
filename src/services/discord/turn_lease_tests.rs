@@ -1051,7 +1051,9 @@ async fn d2b_operator_event_keeps_recovery_after_caller_abort_until_actor_ack() 
         let owner = shared.clone();
         let caller =
             tokio::spawn(async move { release_on(&owner, &PROVIDER, channel, request).await });
-        barrier.0.notified().await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.0.notified())
+            .await
+            .expect("effect boundary reached");
         assert_eq!(home.commands_in_flight(), 1, "claim reached actual actor");
         assert!(
             shared

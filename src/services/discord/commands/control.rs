@@ -354,6 +354,7 @@ async fn clear_channel_session_state_fenced(
     let permit = home_fence::admit(channel_id, provider.as_str())?;
     #[cfg(test)]
     let permit = if home_fence::mutant("control_permit_removed") {
+        drop(permit);
         None
     } else {
         permit

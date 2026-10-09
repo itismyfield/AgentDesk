@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use poise::serenity_prelude::{self as serenity, ChannelId};
+use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 
 use super::super::clear_persist_failure_tests::{
     SESSION_ID, boundary_rows, queue_len, seed_backlog, seed_session, session_state,
@@ -176,13 +176,14 @@ async fn d2b_clear_and_reset_keep_admission_across_effect_await() {
         );
         let work = tokio::spawn(async move {
             if label == "clear" {
-                clear_channel_session_state(
+                super::super::clear_channel_session_state_fenced(
                     &http,
                     &shared,
                     &ProviderKind::Gemini,
                     channel,
                     "!clear",
                     SoftClearNotifyMode::Suppress,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -204,7 +205,9 @@ async fn d2b_clear_and_reset_keep_admission_across_effect_await() {
             }
             assert_eq!(session_state(&shared, channel).await.0, None);
         });
-        barrier.0.notified().await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.0.notified())
+            .await
+            .expect("effect boundary reached");
         home.close_intake();
         assert_eq!(
             home.commands_in_flight(),
@@ -277,7 +280,9 @@ async fn d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor() {
         .await
         .unwrap()
     });
-    barrier.0.notified().await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), barrier.0.notified())
+        .await
+        .expect("effect boundary reached");
     home.close_intake();
     assert_eq!(home.commands_in_flight(), 1);
     assert_eq!(queue_len(&shared, channel).await, 1);
