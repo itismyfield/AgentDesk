@@ -122,6 +122,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+// An unstamped fresh result still supersedes earlier Busy effect approvals.
+fn supersede_unstamped(watch: &Mutex<Watch>) {
+    lock(watch).revision += 1;
+}
+
 /// Judged fresh for an effect point; callers ask only for confirmed turn-mode channels.
 pub(in crate::services::discord) async fn activity_now(
     shared: &Arc<SharedData>,
@@ -321,11 +326,19 @@ async fn read_now(
     channel: ChannelId,
     host_checked: bool,
 ) -> Reading {
-    let unstamped = |observed| Reading {
-        observed,
-        stamp: None,
-        watch: None,
-        host_checked,
+    let unstamped = |observed| {
+        if host_checked {
+            let watch = lock(&WATCHES).get(&channel.get()).cloned();
+            if let Some(watch) = watch {
+                supersede_unstamped(&watch);
+            }
+        }
+        Reading {
+            observed,
+            stamp: None,
+            watch: None,
+            host_checked,
+        }
     };
     let shadow = match provider {
         ProviderKind::Claude => ShadowProvider::Claude,
@@ -486,6 +499,7 @@ fn judge_presence(
 ) -> Answer {
     let (answer, stamp) = judge(watch, ports, provider, channel, target);
     let Some(stamp) = stamp else {
+        supersede_unstamped(watch);
         return (answer, None);
     };
     if answer.activity == Activity::Unknown {

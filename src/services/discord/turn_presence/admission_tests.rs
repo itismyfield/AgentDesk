@@ -368,7 +368,7 @@ async fn later_idle_backlog_or_host_failure_revokes_an_earlier_busy_stamp() {
             old.start(
                 42,
                 fixture.identity.channel,
-                || -> std::future::Ready<()> { panic!("superseded Busy stamp") }
+                || -> std::future::Ready<()> { panic!("superseded Busy stamp ({which})") }
             )
             .await
             .is_none()
