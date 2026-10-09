@@ -36,6 +36,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/services/tui_o/exact_episode_tests.rs",
         "src/services/tui_o/exact_pg_tests.rs",
+        "src/services/discord/health/recovery/legacy_send_tests.rs",
         "src/db/session_observability/background_ordering_pg_tests.rs",
         "src/services/cluster/home_supervisor_tests.rs",
         "src/services/tui_o/writer/host_managed_tests.rs",
@@ -323,6 +324,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_placeholder_suppression/unicode_units_tests.rs",
         "src/services/discord/tmux_watcher/cancel_handoff/interrupted_adoption_tests.rs",
         "src/services/discord/tmux_watcher/completion_gate_tests.rs",
+        "src/services/discord/tmux_watcher/terminal_direct_fallback_send_tests.rs",
         "src/services/discord/tmux_watcher/jsonl_rotation/backstop_tests.rs",
         "src/services/discord/tmux_watcher/loop_poll_prologue/post_terminal_disposal_tests.rs",
         "src/services/discord/tmux_watcher/o_delegated_watcher_tests.rs",

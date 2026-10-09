@@ -3532,6 +3532,7 @@ services::discord::health::recovery::hard_stop_completion_event_tests::unresolve
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_clears_inflight_so_queue_can_drain
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_clears_zero_id_owned_inflight
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_preserves_a_newer_turns_inflight
+services::discord::health::recovery::legacy_send_tests::a_stale_leak_resend_stays_counted_through_its_edit_and_continuations
 services::discord::health::recovery::live_agent_recovery::host_guard_tests::recovery_fence_stops_only_a_found_legacy_row_and_keeps_the_intent_pg
 services::discord::health::recovery::live_agent_recovery::judged_finish_fence_tests::a_fence_does_not_hold_over_a_successor_or_an_unanswered_finish
 services::discord::health::recovery::live_agent_recovery::tests::recovery_metadata_is_a_role_bound_persistent_routine_when_requested
@@ -5348,6 +5349,7 @@ services::discord::recovery_engine::herdr_admitted_restart::tests::a_send_new_te
 services::discord::recovery_engine::herdr_admitted_restart::tests::an_actor_registered_before_cleanup_is_left_alone
 services::discord::recovery_engine::herdr_admitted_restart::tests::an_o_owned_destination_keeps_the_row
 services::discord::recovery_engine::herdr_admitted_restart::tests::an_undelivered_terminal_stays_until_a_later_boot_delivers_it
+services::discord::recovery_engine::herdr_admitted_restart::tests::cleanup_keeps_a_current_generation_row_that_matches_its_snapshot
 services::discord::recovery_engine::herdr_admitted_restart::tests::cleanup_keeps_a_row_that_is_no_longer_the_delivered_episode
 services::discord::recovery_engine::herdr_admitted_restart::tests::each_kind_shows_only_its_own_terminal
 services::discord::recovery_engine::herdr_admitted_restart::tests::only_a_prior_process_admitted_herdr_row_is_a_restart_terminal
@@ -6742,6 +6744,7 @@ services::discord::synthetic_headless_message_id::tests::predicate_preserves_flo
 services::discord::task_notification_delivery::gateway::tests::authoritative_card_post_4xx_maps_to_permanent_transport_failure
 services::discord::task_notification_delivery::response_chunks::claim_at_post_tests::a_task_response_claims_its_channel_only_at_a_chunk_post
 services::discord::task_notification_delivery::response_chunks::claim_at_post_tests::a_task_response_posts_nothing_on_a_channel_o_committed
+services::discord::task_notification_delivery::response_chunks::claim_at_post_tests::a_task_response_stays_counted_across_its_chunks_until_the_transport_drops
 services::discord::task_notification_delivery::response_chunks::tests::discord_history_status_policy_keeps_auth_permanent_and_retryable_statuses_transient
 services::discord::task_notification_delivery::response_chunks::tests::nonce_retry_ttl_is_strict_at_boundary
 services::discord::task_notification_delivery::store::response_identity::tests::head_rotation_drops_the_stale_start_and_keeps_the_rebased_end
@@ -7178,6 +7181,7 @@ services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailb
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailbox_release_tests::refused_guarded_clear_releases_nothing
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailbox_release_tests::synthetic_row_born_after_preflight_releases_its_mailbox_on_terminal_commit
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailbox_release_tests::synthetic_row_pinned_by_preflight_still_releases_its_mailbox
+services::discord::tmux::tmux_watcher::terminal_direct_fallback::send_tests::a_failed_edit_keeps_the_claimed_send_counted_through_its_fallback_post
 services::discord::tmux::tmux_watcher::terminal_readiness::rewind_attempt_key_tests::reset_rewind_attempts_keys_offset_with_turn_identity_4115
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::bridge_suppressed_turn_discards_pending_buffer_before_direct_input
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::claude_watcher_ready_keeps_busy_when_partial_user_follows_terminator
@@ -9852,6 +9856,8 @@ services::provider::cancel_token_claude_interrupt::tests::a_herdr_stop_state_is_
 services::provider::cancel_token_claude_interrupt::tests::a_live_herdr_turn_is_found_by_its_own_nonce_beside_other_turns
 services::provider::cancel_token_claude_interrupt::tests::a_nonce_two_live_herdr_turns_share_names_neither
 services::provider::cancel_token_claude_interrupt::tests::a_stop_and_a_herdr_prepare_are_ordered_by_the_slot
+services::provider::cancel_token_claude_interrupt::tests::p2b_decide_holds_slot_lock_until_publish
+services::provider::cancel_token_claude_interrupt::tests::p2b_decide_publishes_before_releasing_the_slot
 services::provider::cancel_token_claude_interrupt::tests::session_generation_advance_blocks_stale_stop_operation
 services::provider::cancel_token_claude_interrupt::tests::stale_pending_stop_is_rejected_after_next_generation_publishes
 services::provider::cancel_token_claude_interrupt::tests::stale_rebind_cannot_replace_a_newer_session_generation
@@ -10833,6 +10839,7 @@ services::tui_o::channel_policy::tests::a_body_releases_a_pending_adoption_while
 services::tui_o::channel_policy::tests::a_channel_both_nodes_dropped_stays_o_on_the_home_and_turns_legacy_on_the_standby
 services::tui_o::channel_policy::tests::a_committed_channel_left_out_of_the_selection_stays_o_on_the_home
 services::tui_o::channel_policy::tests::a_deferred_adoption_survives_legacy_bodies_and_placements_until_its_host_releases_it
+services::tui_o::channel_policy::tests::a_placement_ends_or_leaves_an_adoption_without_counting_a_legacy_send
 services::tui_o::channel_policy::tests::a_placement_is_held_off_the_home_and_ends_a_pending_adoption_on_it
 services::tui_o::channel_policy::tests::a_placement_never_waits_on_another_channels_adoption_in_progress
 services::tui_o::channel_policy::tests::a_selected_channel_starts_committed_only_over_a_readable_init
@@ -10840,6 +10847,7 @@ services::tui_o::channel_policy::tests::boot_membership_survives_reload_until_re
 services::tui_o::channel_policy::tests::only_an_enabled_home_with_a_list_reads_the_store_and_adopts
 services::tui_o::channel_policy::tests::ownership_uses_flag_membership_and_tui_kind_together
 services::tui_o::channel_policy::tests::the_body_check_fails_a_bodiless_claim_and_a_body_before_its_claim
+services::tui_o::cutover::channel_gate::tests::a_claimed_legacy_send_stays_counted_until_its_transport_is_done
 services::tui_o::cutover::channel_gate::tests::an_empty_list_leaves_even_an_unknown_destination_to_legacy_while_no_snapshot_holds
 services::tui_o::cutover::channel_gate::tests::claim_then_send_releases_a_pending_adoption_only_for_the_send_it_runs
 services::tui_o::cutover::test_override::without_a_delegated_home_owned_channels_match_boot_ownership
