@@ -1739,6 +1739,7 @@ services::claude_tui::busy_inject::stash_tests::hold_tests::a_restored_draft_is_
 services::claude_tui::busy_inject::stash_tests::hold_tests::a_startup_dialog_is_dismissed_only_where_no_draft_is_protected
 services::claude_tui::busy_inject::stash_tests::hold_tests::only_an_allowlisted_channel_takes_the_stash_path
 services::claude_tui::busy_inject::stash_tests::hold_tests::the_tui_send_endpoint_keeps_off_a_pane_in_recovery
+services::claude_tui::busy_inject::stash_tests::hold_tests::the_tui_send_endpoint_never_submits_a_new_message_over_an_unseen_draft
 services::claude_tui::busy_inject::stash_tests::only_the_measured_placeholder_shape_reads_as_an_empty_composer
 services::claude_tui::busy_inject::stash_tests::the_stash_is_read_from_the_status_row_above_the_active_box_only
 services::claude_tui::busy_inject_tests::a_held_composer_lock_is_tried_three_times_without_any_tmux_call
@@ -2034,7 +2035,7 @@ services::claude_tui::input::tests::pre_enter_modal_guard_blocks_dialogs_but_all
 services::claude_tui::input::tests::prompt_draft_cleanup_actions_are_cancel_agnostic
 services::claude_tui::input::tests::prompt_marker_does_not_confirm_readiness_when_draft_is_present
 services::claude_tui::input::tests::prompt_ready_debug_tail_keeps_recent_lines_and_utf8_boundaries
-services::claude_tui::input::tests::prompt_ready_timeout_clears_only_retryable_followup_drafts
+services::claude_tui::input::tests::prompt_ready_timeout_clear_candidates_are_only_retryable_followup_drafts
 services::claude_tui::input::tests::prompt_ready_timeout_error_is_classified
 services::claude_tui::input::tests::prompt_ready_timeout_reason_reflects_snapshot
 services::claude_tui::input::tests::prompt_ready_timeouts_are_split_for_fresh_and_followup_turns
@@ -2066,6 +2067,7 @@ services::claude_tui::input::tests::wait_for_prompt_ready_is_public_and_returns_
 services::claude_tui::input::tests::wait_for_prompt_ready_returns_cancelled_for_pre_cancelled_token
 services::claude_tui::input::tests::warm_followup_lock_revalidation_keeps_idle_transcript_fallback
 services::claude_tui::input::tests::whitespace_only_prompt_is_rejected_after_normalization
+services::claude_tui::input::timeout_draft_tests::a_follow_up_timing_out_on_a_person_draft_keeps_every_key
 services::claude_tui::memento_feedback::tests::completed_tombstones_allow_unrelated_searches_and_expire_for_new_identity_lifetimes
 services::claude_tui::memento_feedback::tests::different_unknown_search_payloads_without_tool_use_id_stay_distinct
 services::claude_tui::memento_feedback::tests::distinct_unknown_search_tool_uses_keep_independent_retry_budgets
@@ -8285,6 +8287,8 @@ services::discord::turn_bridge::followup_requeue::tests::already_queued_refusal_
 services::discord::turn_bridge::followup_requeue::tests::c1b_timeout_consumer_uses_preclose_bridge_effect_for_binding_and_all_sources
 services::discord::turn_bridge::followup_requeue::tests::non_watcher_strict_plan_waits_for_capped_retry_veto_after_projection_4893
 services::discord::turn_bridge::followup_requeue::tests::persistence_failure_is_not_reported_as_requeued
+services::discord::turn_bridge::followup_requeue::tests::person_draft_tests::a_queued_follow_up_waits_behind_a_person_draft_and_is_sent_once_after_it
+services::discord::turn_bridge::followup_requeue::tests::person_draft_tests::an_unread_composer_holds_the_follow_up_without_protecting_the_pane
 services::discord::turn_bridge::followup_requeue::tests::pre_submit_retry_adds_queue_reaction_immediately_through_reconciler
 services::discord::turn_bridge::followup_requeue::tests::pre_submit_retry_reaction_failure_emits_exactly_one_referenced_fallback
 services::discord::turn_bridge::followup_requeue::tests::retry_cap_preserves_entry_and_stops_auto_kickoff_4888
