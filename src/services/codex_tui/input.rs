@@ -997,6 +997,7 @@ fn snapshot_allows_guarded_submission(snapshot: &PromptReadinessSnapshot) -> boo
         && !snapshot.prompt_draft_detected
 }
 
+#[cfg(test)]
 fn snapshot_allows_warm_followup_submit(snapshot: &PromptReadinessSnapshot) -> bool {
     snapshot.tmux_pane_alive
         && snapshot.capture_available
