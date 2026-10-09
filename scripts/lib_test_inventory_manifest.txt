@@ -8701,6 +8701,9 @@ services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::wrapp
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_codex_stop_never_takes_a_later_native_turn_for_its_own
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_rollout_rewritten_in_place_never_retargets_a_late_stop
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_cold_start_accepts_intent_without_marker_then_sends_once
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_each_stop_reason_preserves_delivery_and_settlement_axes
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_generation_only_stale_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_generation_only_stale_sends_no_escape
@@ -8973,6 +8976,7 @@ services::discord::turn_finalizer::watcher_backstop::tests::non_jsonl_signal_nev
 services::discord::turn_finalizer::watcher_backstop::tests::o_delegated_done_turn_needs_no_legacy_delivery_confirmation
 services::discord::turn_lease::registry::tests::turn_lease_registry_inspect_returns_rowless_lease_identity
 services::discord::turn_lease::registry::tests::turn_lease_registry_selects_owner_and_refuses_ambiguity
+services::discord::turn_lease::tests::act7_operator_release_reports_manual_settlement_and_preserves_herdr_input
 services::discord::turn_lease::tests::claim_refuses_unbound_message_id_without_panic
 services::discord::turn_lease::tests::committed_a_recovery_after_operator_release_cannot_cancel_claimed_b_r3
 services::discord::turn_lease::tests::inspect_row_read_leaves_the_sidecar_bytes_unchanged
