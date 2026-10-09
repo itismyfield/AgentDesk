@@ -89,6 +89,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/input_facts/tests.rs",
         "src/services/tui_o/writer/input_facts/resume_tests.rs",
         "src/services/discord/turn_presence/activity_tests.rs",
+        "src/services/discord/turn_presence/admission_tests.rs",
         "src/services/discord/turn_presence/supervisor_tests.rs",
         "src/services/claude_tui/input/final_ready_tests.rs",
         "src/services/claude_tui/hook_server/codex_ingress_tests.rs",
@@ -532,6 +533,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/session_host/test_support.rs",
         "src/services/discord/host_teardown_gate/test_support.rs",
         "src/services/discord/health/legacy_supervision/test_support.rs",
+        "src/services/discord/turn_presence/admission.rs",
         "src/services/tmux_turn_liveness/tests_pg.rs",
         "src/test_env_panic_probe.rs",
     }
