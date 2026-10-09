@@ -435,14 +435,15 @@ pub(crate) fn resolve_strict(
             }
         })
         .collect();
-    let settled = settlements.iter().any(|effects| {
-        effects.len() == pin.context.required_effects.len()
-            && pin
-                .context
-                .required_effects
-                .iter()
-                .all(|e| effects.iter().filter(|x| *x == e).count() == 1)
-    });
+    let settled = !settlements.is_empty()
+        && settlements.iter().all(|effects| {
+            effects.len() == pin.context.required_effects.len()
+                && pin
+                    .context
+                    .required_effects
+                    .iter()
+                    .all(|e| effects.iter().filter(|x| *x == e).count() == 1)
+        });
     StrictResolution {
         authority,
         settlement: if settled {

@@ -295,3 +295,42 @@ fn exact_repeated_settlement_is_monotone() {
         assert_eq!(resolve(records.clone()).settlement(), Settlement::Settled);
     }
 }
+
+#[test]
+fn exact_conflicting_settlements_never_union_effects() {
+    for bad in [
+        vec![],
+        vec!["other".to_string()],
+        vec!["intake".to_string(), "intake".to_string()],
+    ] {
+        for reverse in [false, true] {
+            let mut records = fixture();
+            let mut effects = vec![vec!["intake".to_string()], bad.clone()];
+            if reverse {
+                effects.reverse();
+            }
+            for (i, effects) in effects.into_iter().enumerate() {
+                records.push(EpisodeMetadata::new(
+                    Uuid::from_u128(1),
+                    Uuid::from_u128(801 + i as u128),
+                    EpisodeEvidence::Settled { effects },
+                ));
+            }
+            assert_eq!(resolve(records).settlement(), Settlement::Outstanding);
+        }
+    }
+    let mut records = fixture();
+    if let EpisodeEvidence::Pin(p) = &mut records[0].evidence {
+        p.context.required_effects = vec!["intake".into(), "mailbox".into()];
+    }
+    for (i, effect) in ["intake", "mailbox"].into_iter().enumerate() {
+        records.push(EpisodeMetadata::new(
+            Uuid::from_u128(1),
+            Uuid::from_u128(901 + i as u128),
+            EpisodeEvidence::Settled {
+                effects: vec![effect.into()],
+            },
+        ));
+    }
+    assert_eq!(resolve(records).settlement(), Settlement::Outstanding);
+}

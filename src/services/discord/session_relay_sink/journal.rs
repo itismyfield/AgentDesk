@@ -1135,14 +1135,7 @@ pub(crate) async fn append_exact_metadata(
     if !metadata.supported() {
         return Err("unsupported strict metadata".into());
     }
-    let mut metadata = metadata.clone();
-    if matches!(
-        metadata.evidence,
-        crate::services::tui_o::exact_episode::EpisodeEvidence::Settled { .. }
-    ) {
-        metadata.record = Uuid::new_v5(&metadata.episode, b"settled");
-    }
-    let payload = serde_json::to_value(&metadata).map_err(|e| e.to_string())?;
+    let payload = serde_json::to_value(metadata).map_err(|e| e.to_string())?;
     let obligation = Uuid::new_v5(
         &JOURNAL_NAMESPACE,
         format!(

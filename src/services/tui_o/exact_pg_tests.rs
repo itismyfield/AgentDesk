@@ -379,3 +379,40 @@ async fn exact_child_ack_precedes_terminal_seal_pg() {
         Authority::Pending
     );
 }
+
+#[tokio::test]
+async fn exact_settled_ack_names_normalized_pg_payload() {
+    use sha2::{Digest, Sha256};
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let mut previous = None;
+    for id in [1001, 1002] {
+        let record = EpisodeMetadata::new(
+            Uuid::from_u128(1),
+            Uuid::from_u128(id),
+            EpisodeEvidence::Settled {
+                effects: vec!["intake".into()],
+            },
+        );
+        let ack = record_episode_evidence(true, &pool, &record)
+            .await
+            .unwrap()
+            .unwrap();
+        let payload: serde_json::Value =
+            sqlx::query_scalar("SELECT canonical_payload FROM public.delivery_journal_events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let stored: EpisodeMetadata = serde_json::from_value(payload).unwrap();
+        assert_eq!(ack.record, stored.record);
+        assert_eq!(ack.version, stored.version);
+        assert_eq!(
+            ack.digest,
+            format!("{:x}", Sha256::digest(serde_json::to_vec(&stored).unwrap()))
+        );
+        if let Some(prev) = previous {
+            assert_eq!(ack, prev);
+        }
+        previous = Some(ack);
+    }
+}

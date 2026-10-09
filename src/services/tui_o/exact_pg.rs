@@ -47,6 +47,10 @@ pub(crate) async fn record_episode_evidence(
     if !metadata.supported() {
         return Err("unsupported strict envelope".into());
     }
+    let mut metadata = metadata.clone();
+    if matches!(metadata.evidence, EpisodeEvidence::Settled { .. }) {
+        metadata.record = Uuid::new_v5(&metadata.episode, b"settled");
+    }
     #[cfg(not(unix))]
     {
         let _ = pool;
@@ -54,9 +58,9 @@ pub(crate) async fn record_episode_evidence(
     }
     #[cfg(unix)]
     {
-        crate::services::discord::append_exact_metadata(pool.clone(), metadata).await?;
+        crate::services::discord::append_exact_metadata(pool.clone(), &metadata).await?;
         use sha2::{Digest, Sha256};
-        let bytes = serde_json::to_vec(metadata).map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec(&metadata).map_err(|e| e.to_string())?;
         Ok(Some(DurableEvidenceAck {
             record: metadata.record,
             version: metadata.version,

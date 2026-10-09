@@ -10820,6 +10820,7 @@ services::tui_o::cutover::channel_gate::tests::an_empty_list_leaves_even_an_unkn
 services::tui_o::cutover::channel_gate::tests::claim_then_send_releases_a_pending_adoption_only_for_the_send_it_runs
 services::tui_o::cutover::test_override::without_a_delegated_home_owned_channels_match_boot_ownership
 services::tui_o::exact_episode::tests::exact_body_requires_full_child_attempt_receipt_and_whole_frontier
+services::tui_o::exact_episode::tests::exact_conflicting_settlements_never_union_effects
 services::tui_o::exact_episode::tests::exact_empty_and_parent_transport_never_grant_body
 services::tui_o::exact_episode::tests::exact_repeated_settlement_is_monotone
 services::tui_o::exact_episode::tests::exact_source_resolution_extra_proof_and_missing_piece_fail_closed
@@ -10832,6 +10833,7 @@ services::tui_o::exact_pg::tests::exact_metadata_pg_restore_and_terminal_port_st
 services::tui_o::exact_pg::tests::exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged
 services::tui_o::exact_pg::tests::exact_off_pg_statement_trace_and_files_zero
 services::tui_o::exact_pg::tests::exact_pg_process_reader_uses_only_metadata
+services::tui_o::exact_pg::tests::exact_settled_ack_names_normalized_pg_payload
 services::tui_o::exact_pg::tests::exact_snapshot_sibling_construction_is_compile_rejected
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
 services::tui_o::ownership::tests::release_records_lost_before_the_release_runs
