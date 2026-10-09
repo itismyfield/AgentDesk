@@ -10720,7 +10720,8 @@ services::tui_input::transition_fixture_tests::uncertain_commit_whole_and_cut_re
 services::tui_input::transition_tests::supported::staged_order_survives_checkpoint_handback
 services::tui_input::transition_tests::supported::staged_order_survives_commit_and_checkpoint
 services::tui_o::alarm::postgres_tests::distinct_channels_and_kinds_enqueue_once_pg
-services::tui_o::alarm::postgres_tests::suppressed_failed_and_runtime_missing_enqueues_retry_pg
+services::tui_o::alarm::postgres_tests::suppression_settles_existing_rows_and_errors_retry_pg
+services::tui_o::alarm::postgres_tests::writer_alarm_retries_after_insert_failure_without_another_raise_pg
 services::tui_o::alarm::tests::a_pause_ends_on_gateway_return_while_blocked_and_history_stay
 services::tui_o::alarm::tests::a_pending_resume_shows_until_settled_and_a_cleared_halt_leaves_every_other_reason
 services::tui_o::alarm::tests::a_released_channel_has_its_own_reason_apart_from_halted
@@ -10729,6 +10730,7 @@ services::tui_o::alarm::tests::first_event_raises_health_and_one_operator_messag
 services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
 services::tui_o::alarm::tests::not_found_frequency_clears_when_its_window_passes_without_new_events
 services::tui_o::alarm::tests::p2_2_reader_recovery_preserves_history_other_reasons_and_first_notification_latch
+services::tui_o::alarm::tests::retry_backoff_caps_without_ending_and_attempt_timeout_has_an_exact_boundary
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
 services::tui_o::channel_policy::tests::a_body_releases_a_pending_adoption_while_a_peek_or_another_channel_leaves_it
 services::tui_o::channel_policy::tests::a_channel_both_nodes_dropped_stays_o_on_the_home_and_turns_legacy_on_the_standby

@@ -35946,6 +35946,24 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:35caf2c2224ad4d4e1e0957cab6a0ff66e2ef49ce15c15b48aa5d8e1a2c7a4b3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/alarm.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6b39b6649cbdeb10de3723f7d2cce88be40abf7397c2ad9b70b1577617c8b89e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/alarm.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:7f1b3d81f6f9564a97d6ed083b523314f66a1cf42641565b5122bea492414f6c"
     },
     {
