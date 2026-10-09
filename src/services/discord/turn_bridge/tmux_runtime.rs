@@ -36,8 +36,10 @@ pub(in crate::services::discord) use session_stop::SessionStop;
 
 #[cfg(unix)]
 pub(in crate::services::discord) use codex_stop_delivery::herdr_marked;
+#[cfg(test)]
+pub(in crate::services::discord) use judged_stop::begin_command_stop;
 pub(in crate::services::discord) use judged_stop::{
-    ChannelJudgement, ChannelStop, CommandStop, begin_command_stop, begin_user_stop, keeps_turn,
+    ChannelJudgement, ChannelStop, CommandStop, begin_user_stop, keeps_turn,
 };
 
 // #3169: `mod.rs`'s cancel epilogue records this sentinel via the
