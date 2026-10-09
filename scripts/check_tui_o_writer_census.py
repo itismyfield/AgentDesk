@@ -200,7 +200,8 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "tmux_watcher/streaming_status_tick/existing_panel_update.rs": {"edit_channel_message*": 1},
     "tmux_watcher/task_response_authority.rs": {"send_task_response_chunks_with_card_repair": 1},
     "tmux_watcher/terminal_abort_exits.rs": {"edit_channel_message*": 1, "send_channel_message*": 1},
-    "tmux_watcher/terminal_direct_fallback.rs": {"replace_long_message*": 1, "send_long_message*": 2},
+    "tmux_watcher/terminal_direct_fallback.rs": {"send_long_message*": 1},
+    "tmux_watcher/terminal_direct_fallback_edit.rs": {"replace_long_message*": 1, "send_long_message*": 1},
     "tmux_watcher/terminal_long_chunks.rs": {"deliver_turn_output*": 1, "send_long_message*": 1},
     "tmux_watcher/terminal_send.rs": {"deliver_turn_output*": 1},
     "tmux_watcher/two_message_panel.rs": {"send_channel_message*": 1},
@@ -318,6 +319,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "tmux_watcher/task_response_authority.rs": ("W01g", "CUT_D"),
     "tmux_watcher/terminal_abort_exits.rs": ("1-A-notice", "KEEP_NONBODY"),
     "tmux_watcher/terminal_direct_fallback.rs": ("W01a-c", "COV:W01"),
+    "tmux_watcher/terminal_direct_fallback_edit.rs": ("W01a-c", "COV:W01"),
     "tmux_watcher/terminal_long_chunks.rs": ("W01e-f", "COV:W01"),
     "tmux_watcher/terminal_send.rs": ("W01d", "COV:W01"),
     "tmux_watcher/two_message_panel.rs": ("1-A-panel", "KEEP_NONBODY"),
@@ -423,6 +425,8 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/discord/tmux_watcher/terminal_direct_fallback.rs": (
         "apply_watcher_direct_fallback_send:claim",
+    ),
+    "src/services/discord/tmux_watcher/terminal_direct_fallback_edit.rs": (
         "replace_or_post_after_edit_failure:claim",
     ),
     "src/services/discord/tmux_watcher/terminal_long_chunks.rs": (
