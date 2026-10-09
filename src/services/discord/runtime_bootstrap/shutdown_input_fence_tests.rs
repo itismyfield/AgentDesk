@@ -2,6 +2,8 @@ use super::*;
 use crate::services::discord::input_runtime::{self, fence::Gate};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode, QueuePersistenceContext};
 
+/// The actual handler marks every row it can from async code (a protected open row included),
+/// still runs the final save after a row fails, and consumes its slot only after both saves.
 #[cfg(unix)]
 #[tokio::test]
 async fn c2_sigterm_handler_dispatch_persists_and_consumes_shutdown_slot() {
@@ -14,6 +16,34 @@ async fn c2_sigterm_handler_dispatch_persists_and_consumes_shutdown_slot() {
     let shared = crate::services::discord::make_shared_data_for_tests();
     let provider = ProviderKind::Codex;
     let channel = ChannelId::new(6_325_607);
+    let (open, failed) = (6_325_946, 6_325_947);
+    let root = inflight::inflight_runtime_root().unwrap();
+    for row_channel in [channel.get(), open, failed] {
+        let row = InflightTurnState::new(
+            provider.clone(),
+            row_channel,
+            Some("shutdown-test".into()),
+            7,
+            row_channel + 10,
+            row_channel + 20,
+            "input".into(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        inflight::save_inflight_state_create_new(&row).unwrap();
+    }
+    let row_path = |row_channel| inflight::inflight_state_path(&root, &provider, row_channel);
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(row_path(open)).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("finalizer_turn_id");
+    std::fs::write(row_path(open), serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+    // A directory where the row lock file belongs makes this row's marker write fail.
+    std::fs::create_dir_all(row_path(failed).with_extension("json.lock")).unwrap();
+    let gate = Gate::protect(provider.clone(), open).unwrap();
+    let _health = input_runtime::fence::test_health::Clear::new(&gate);
     shared.last_message_ids.insert(channel, 99);
     // One remaining slot keeps this real handler path away from process::exit.
     shared
@@ -21,7 +51,29 @@ async fn c2_sigterm_handler_dispatch_persists_and_consumes_shutdown_slot() {
         .shutdown_remaining
         .store(2, std::sync::atomic::Ordering::SeqCst);
     let (send, receive) = tokio::sync::oneshot::channel();
-    SIGTERM_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(receive));
+    let shared_at_final = shared.clone();
+    SIGTERM_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(SigtermForTest {
+            signal: receive,
+            after_initial: Box::new(|| {}),
+            before_final: Box::new(move || {
+                let restart = &shared_at_final.restart;
+                assert!(
+                    !restart
+                        .shutdown_counted
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                );
+                assert_eq!(
+                    restart
+                        .shutdown_remaining
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    2,
+                    "slot consumed before the final save"
+                );
+                shared_at_final.last_message_ids.insert(channel, 100);
+            }),
+        })
+    });
     let handler = run_bot_spawn_sigterm_handler(&shared, provider.clone());
     send.send(()).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), handler)
@@ -36,8 +88,23 @@ async fn c2_sigterm_handler_dispatch_persists_and_consumes_shutdown_slot() {
         std::fs::read_to_string(&checkpoint)
             .ok()
             .map(|value| value.trim().to_owned()),
-        Some("99".into()),
-        "actual handler omitted persistence"
+        Some("100".into()),
+        "the final save did not run after the marking pass"
+    );
+    for row_channel in [channel.get(), open] {
+        let row: InflightTurnState =
+            serde_json::from_slice(&std::fs::read(row_path(row_channel)).unwrap()).unwrap();
+        assert_eq!(
+            row.restart_mode,
+            Some(InflightRestartMode::DrainRestart),
+            "channel {row_channel} left unmarked"
+        );
+    }
+    assert!(
+        !input_runtime::health_reasons()
+            .iter()
+            .any(|reason| reason.contains(&format!("channel={open}"))),
+        "the protected open row saw a refused writer"
     );
     assert!(
         shared
@@ -52,6 +119,88 @@ async fn c2_sigterm_handler_dispatch_persists_and_consumes_shutdown_slot() {
             .load(std::sync::atomic::Ordering::SeqCst),
         1
     );
+}
+
+const SIGTERM_ISOLATION_CHILD_ENV: &str = "AGENTDESK_TEST_SIGTERM_ISOLATION_CHILD";
+
+/// An injected signal never installs the process-wide SIGTERM handler, and a source that ends
+/// without a signal persists nothing. Run alone in a child process, since the disposition is global.
+#[cfg(unix)]
+#[test]
+fn c2b_injected_sigterm_never_installs_the_os_handler() {
+    let test_name = concat!(
+        "services::discord::runtime_bootstrap::shutdown::input_fence_tests::",
+        "c2b_sigterm_isolation_child"
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(SIGTERM_ISOLATION_CHILD_ENV, "1")
+        .env("AGENTDESK_ROOT_DIR", temp.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("spawn isolated sigterm child");
+    assert!(status.success(), "isolated sigterm child failed");
+}
+
+#[cfg(unix)]
+#[test]
+fn c2b_sigterm_isolation_child() {
+    if std::env::var(SIGTERM_ISOLATION_CHILD_ENV).is_err() {
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(6_325_948);
+    shared.last_message_ids.insert(channel, 99);
+    shared
+        .restart
+        .shutdown_remaining
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    let (send, receive) = tokio::sync::oneshot::channel::<()>();
+    SIGTERM_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(SigtermForTest {
+            signal: receive,
+            after_initial: Box::new(|| {}),
+            before_final: Box::new(|| {}),
+        })
+    });
+    runtime.block_on(async {
+        let handler = run_bot_spawn_sigterm_handler(&shared, ProviderKind::Codex);
+        drop(send);
+        handler.await.expect("handler join");
+    });
+    let disposition = unsafe {
+        let mut current: libc::sigaction = std::mem::zeroed();
+        assert_eq!(
+            libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut current),
+            0
+        );
+        current.sa_sigaction
+    };
+    assert_eq!(disposition, libc::SIG_DFL, "the OS handler was installed");
+    assert!(
+        !shared
+            .restart
+            .shutdown_counted
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(
+        shared
+            .restart
+            .shutdown_remaining
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    let checkpoint = runtime_store::last_message_root()
+        .unwrap()
+        .join("codex")
+        .join(format!("{}.txt", channel.get()));
+    assert!(!checkpoint.exists(), "a cancelled source persisted state");
 }
 
 fn item(id: u64) -> Intervention {

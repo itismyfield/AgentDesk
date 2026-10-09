@@ -2,7 +2,7 @@
 //! on restart-marked rows.
 //!
 //! The #3293 carrier row is re-marked `DrainRestart` by
-//! `mark_all_inflight_states_restart_mode` on EVERY shutdown, so at recovery
+//! `mark_restart_mode_blocking` on EVERY shutdown, so at recovery
 //! time its on-disk form always has `restart_mode = Some(..)`. The generic
 //! [`super::save_inflight_state_if_matches_identity`] guard refuses any write
 //! to such a row (and to `user_msg_id == 0` TUI-direct rows), which made the

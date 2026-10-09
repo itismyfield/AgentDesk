@@ -1,0 +1,71 @@
+//! Restart marking: every live row gets the restart marker so the next process re-attaches it.
+
+use super::{
+    InflightRestartMode, inflight_runtime_root, inflight_state_path,
+    load_inflight_probe_from_root_excluding, set_inflight_restart_mode_under_lock,
+};
+use crate::services::discord::input_runtime::fence;
+use crate::services::provider::ProviderKind;
+
+/// One marking pass: rows marked, rows whose marker could not be written, and whether the scan
+/// could not see every row.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct RestartMarkReport {
+    pub(in crate::services::discord) marked: usize,
+    pub(in crate::services::discord) failed: Vec<u64>,
+    pub(in crate::services::discord) incomplete: bool,
+}
+
+/// Marks every readable row and reports the rest; one bad row never leaves later rows unmarked.
+pub(super) fn mark_restart_mode_report(
+    provider: &ProviderKind,
+    restart_mode: InflightRestartMode,
+) -> RestartMarkReport {
+    let held = |channel| crate::services::turn_orchestrator::input_fence::held(provider, channel);
+    let Some(root) = inflight_runtime_root() else {
+        return RestartMarkReport {
+            incomplete: true,
+            ..RestartMarkReport::default()
+        };
+    };
+    // The scan only discovers rows; each marker re-reads its row under the lock and changes only
+    // the restart fields, so a frontier a draining watcher advanced meanwhile is kept.
+    let load = load_inflight_probe_from_root_excluding(&root, provider, held);
+    let mut report = RestartMarkReport {
+        incomplete: !load.complete,
+        ..RestartMarkReport::default()
+    };
+    for state in load.states {
+        // A held input channel's row stays as its transition left it.
+        if held(state.channel_id) {
+            continue;
+        }
+        let path = inflight_state_path(&root, provider, state.channel_id);
+        if set_inflight_restart_mode_under_lock(&path, restart_mode) {
+            report.marked += 1;
+        } else {
+            report.failed.push(state.channel_id);
+        }
+    }
+    report
+}
+
+/// Runs the marking pass on a blocking worker, where a protected channel's row writer is allowed.
+pub(in crate::services::discord) async fn mark_restart_mode_blocking(
+    provider: ProviderKind,
+    restart_mode: InflightRestartMode,
+) -> RestartMarkReport {
+    let report = fence::effect::io({
+        let provider = provider.clone();
+        move || mark_restart_mode_report(&provider, restart_mode)
+    })
+    .await;
+    for channel in &report.failed {
+        fence::record_failure(&provider, *channel, &[], fence::Failure::Persistence);
+    }
+    report
+}
+
+#[cfg(test)]
+#[path = "restart_mark_tests.rs"]
+mod tests;

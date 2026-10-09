@@ -6,8 +6,8 @@
 
 use super::*;
 
-#[test]
-fn c2_deferred_prescan_skips_old_format_held_rows_before_backfill() {
+#[tokio::test]
+async fn c2_deferred_marking_skips_old_format_held_rows_before_backfill() {
     use crate::services::discord::input_runtime::{self, fence};
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let temp = tempfile::tempdir().unwrap();
@@ -44,21 +44,159 @@ fn c2_deferred_prescan_skips_old_format_held_rows_before_backfill() {
     let gate = fence::Gate::protect(provider.clone(), held).unwrap();
     let _health = fence::test_health::Clear::new(&gate);
     let _closing = gate.close().unwrap();
-    let states = deferred_restart_inflight_snapshot(&provider);
+    assert!(deferred_restart_marked(&provider).await);
+    let legacy_row = inflight::load_inflight_state(&provider, legacy).unwrap();
     assert_eq!(
-        states
-            .iter()
-            .map(|state| state.channel_id)
-            .collect::<Vec<_>>(),
-        vec![legacy]
+        legacy_row.restart_mode,
+        Some(crate::services::discord::InflightRestartMode::DrainRestart)
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert!(
         !input_runtime::health_reasons()
             .iter()
             .any(|reason| reason.contains(&format!("channel={held}"))),
-        "deferred pre-scan must not attempt a compatibility writer"
+        "deferred marking must not attempt a compatibility writer"
     );
+}
+
+fn deferred_row(provider: &ProviderKind, channel: u64) -> std::path::PathBuf {
+    let state = InflightTurnState::new(
+        provider.clone(),
+        channel,
+        None,
+        7,
+        channel + 1,
+        channel + 2,
+        "deferred".into(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    inflight::save_inflight_state_create_new(&state).unwrap();
+    inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        provider,
+        channel,
+    )
+}
+
+fn deferred_row_marked(path: &std::path::Path) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<InflightTurnState>(&bytes).ok())
+        .is_some_and(|row| {
+            row.restart_mode == Some(crate::services::discord::InflightRestartMode::DrainRestart)
+        })
+}
+
+/// Drives paused time while the poller's blocking marking pass runs in real time.
+async fn wait_for_deferred(mut done: impl FnMut() -> bool) {
+    for _ in 0..3_000 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("deferred restart poller never reached the expected state");
+}
+
+/// The actual poller marks a protected open row from async code and still consumes its slot
+/// when the scan could not read every row, as a short scan always did.
+#[tokio::test(start_paused = true)]
+async fn c2b_deferred_poller_marks_rows_and_proceeds_past_an_incomplete_scan() {
+    use crate::services::discord::input_runtime::{self, fence};
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        temp.path(),
+    );
+    let provider = ProviderKind::Codex;
+    let (plain, open, unreadable) = (6_325_950, 6_325_951, 6_325_952);
+    let plain_path = deferred_row(&provider, plain);
+    let open_path = deferred_row(&provider, open);
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&open_path).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("finalizer_turn_id");
+    std::fs::write(&open_path, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+    std::fs::write(
+        open_path.with_file_name(format!("{unreadable}.json")),
+        [0xff, 0xfe],
+    )
+    .unwrap();
+    let gate = fence::Gate::protect(provider.clone(), open).unwrap();
+    let _health = fence::test_health::Clear::new(&gate);
+    std::fs::write(
+        temp.path().join("restart_pending"),
+        "nonce=c2b-incomplete\n",
+    )
+    .unwrap();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    shared.restart.shutdown_remaining.store(2, Ordering::SeqCst);
+
+    run_bot_spawn_deferred_restart_poller(&shared, &provider);
+    wait_for_deferred(|| {
+        shared
+            .restart
+            .shutdown_slot_consumed
+            .load(Ordering::Acquire)
+    })
+    .await;
+
+    assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
+    assert!(deferred_row_marked(&plain_path));
+    assert!(
+        deferred_row_marked(&open_path),
+        "protected open row left unmarked"
+    );
+    assert!(
+        !input_runtime::health_reasons()
+            .iter()
+            .any(|reason| reason.contains(&format!("channel={open}"))),
+        "the protected open row saw a refused writer"
+    );
+}
+
+/// A row whose marker cannot be written retains the runtime: the actual poller marks the rest,
+/// rolls the cycle back and leaves its shutdown slot unconsumed.
+#[tokio::test(start_paused = true)]
+async fn c2b_deferred_poller_retains_the_runtime_when_a_row_marker_fails() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        temp.path(),
+    );
+    let provider = ProviderKind::Codex;
+    let plain_path = deferred_row(&provider, 6_325_953);
+    let failed_path = deferred_row(&provider, 6_325_954);
+    std::fs::create_dir_all(failed_path.with_extension("json.lock")).unwrap();
+    std::fs::write(temp.path().join("restart_pending"), "nonce=c2b-failed\n").unwrap();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    shared.restart.shutdown_remaining.store(2, Ordering::SeqCst);
+
+    run_bot_spawn_deferred_restart_poller(&shared, &provider);
+    wait_for_deferred(|| {
+        deferred_row_marked(&plain_path)
+            && (!shared.restart.restart_pending.load(Ordering::Acquire)
+                || shared
+                    .restart
+                    .shutdown_slot_consumed
+                    .load(Ordering::Acquire))
+    })
+    .await;
+
+    assert!(
+        !shared
+            .restart
+            .shutdown_slot_consumed
+            .load(Ordering::Acquire),
+        "a failed row marker must retain the runtime"
+    );
+    assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 2);
 }
 
 #[tokio::test]
