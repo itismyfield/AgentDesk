@@ -235,6 +235,9 @@ pub(super) async fn record_turn_start_origin(
 }
 
 pub(super) use super::session_status_hook::post_legacy as post_adk_session_status;
+pub(super) use super::session_status_hook::{
+    TurnTerminalStatus, post_turn_terminal as post_adk_turn_terminal_status,
+};
 
 /// Delete a session row from the DB by session_key.
 /// Used to clean up thread sessions after dispatch completion.

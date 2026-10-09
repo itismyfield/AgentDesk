@@ -97,10 +97,19 @@ fn c2_closed_input_gate_refuses_rebind_before_any_write() {
     };
 
     let open_shared = make_shared_data_for_tests();
-    let rebound =
-        rebind(open_shared.clone(), open, &open_tmux, false).expect("an unprotected pane rebinds");
-    assert!(rebound.watcher_spawned);
-    assert_eq!(open_shared.tmux_watchers.len(), 1);
+    let rebound = rebind(open_shared.clone(), open, &open_tmux, false);
+    // Off Unix every pane reads absent, so the unfenced rebind passes the gate and stops there.
+    #[cfg(not(unix))]
+    assert!(
+        matches!(rebound, Err(RebindError::TmuxNotAlive { .. })),
+        "{rebound:?}"
+    );
+    #[cfg(unix)]
+    {
+        let rebound = rebound.expect("an unprotected pane rebinds");
+        assert!(rebound.watcher_spawned);
+        assert_eq!(open_shared.tmux_watchers.len(), 1);
+    }
 
     // Both rebind entries refuse before their first effect.
     for from_offset in [false, true] {

@@ -25,27 +25,43 @@ The trailing group level overrides the five group-member denies to warnings;
 only `dbg_macro`, `todo` and `unimplemented` remain denied. Configured deny
 entries must not be mistaken for effective hard gates under this argv.
 
-Main CI observes this same invocation once, adding only Cargo's JSON output
+Main and PR lint run this same invocation once, adding only Cargo's JSON output
 format. `check_clippy_warning_count.py` counts compiler warning diagnostics
 (including Rust warnings), requires successful `build-finished`, and records
-SHA, runner, pinned toolchain, source and argv in the uploaded observation.
-Compilation still fails the step through pipefail. Invalid observations emit an
-explicit warning, never a valid zero. The count is compiler-emitted diagnostics,
-not source occurrences or a deduplicated cross-target debt estimate.
+SHA, runner, actual rustc/Clippy versions, host, source and the protected argv.
+Compilation still fails the step through pipefail. Invalid observations fail
+the gate, never producing a valid zero. Main uploads the observation. The count
+is compiler-emitted diagnostics, not source occurrences or a deduplicated
+cross-target debt estimate.
 
-Warning-total ratcheting (B2) remains deferred until a valid main Ubuntu/pinned
-Rust observation establishes a reproducible baseline. No historical or local
-Mac count is admitted as that baseline. Existing suppression-occurrence
-ratchets do not enforce warning totals. B3 (`lint-strict` required CI) remains
+The warning-total gate uses `scripts/clippy_warning_baseline.json`: **952**
+diagnostics, measured by Ubuntu main CI at
+`1e9603a630ff9ec6d654ad69945a4229d4ae9ee0` and reproduced in the two preceding
+main observations. The file records the run URL, artifact ID and diagnostics
+digest. The environment is Rust 1.94.1, x86_64 Linux and the staged argv above;
+local Mac totals cannot substitute for it. Both workflows reject warning growth
+and invalid or mismatched observations. The existing required `Lint` mirror
+owns PR enforcement; no required context is added.
+
+Lower the baseline with a valid observation when warning debt decreases.
+Admission compares the committed PR base (main uses its first parent) and
+rejects baseline increases or environment changes. A toolchain/environment
+upgrade requires a separately reviewed rollout. Existing suppression-occurrence
+ratchets remain separate from warning totals. B3 (`lint-strict` required CI) remains
 deferred until warning debt is zero under the authoritative environment.
 
 The dead-code suppression ratchet freezes the observed per-file counts in
 `src/**/*.rs`, including tests: 389 suppression bodies across 179 files.
 It catches `allow`/`expect`, conditional attributes and broader `unused`/
 `warnings` groups using the existing Rust lexical scanner. New paths and
-per-file increases fail; decreases pass. This is not permission to add more
-suppression or proof that dead code was removed. Relocations require a reviewed
-allowance transfer that removes the old allocation. No automatic baseline
+per-file increases fail. Inner attributes have a separately measured 34-body
+baseline, so replacing an outer suppression with an inner one cannot broaden
+its scope under an unchanged total. Decreases require lowering the matching
+allocation; admission rejects baseline increases against the committed base.
+This is not permission to add more suppression or proof that dead code was
+removed. Relocations to a new path require a separately reviewed admission
+change that removes the old allocation; the default gate rejects new allocations.
+No automatic baseline
 rewrite is exposed. The baseline is suppression debt, not B2 warning debt.
 
 `unwrap`, `expect`, and `panic` lint gates are intentionally deferred. The

@@ -8,6 +8,7 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 use tokio::sync::{Notify, mpsc, oneshot};
 
+use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
 use crate::services::provider::{CancelToken, ProviderKind};
 
 // #3293: non-creating registry lookup + operator-gated idle-entry purge.
@@ -1292,6 +1293,12 @@ enum ChannelMailboxMsg {
         herdr_user_stop: bool,
         reply: oneshot::Sender<CancelActiveTurnResult>,
     },
+    /// A user stop's cancel while `expected_token` is current, decided under its Herdr slot.
+    CancelActiveTurnIfCurrentUnlessHerdr {
+        expected_token: Arc<CancelToken>,
+        reason: String,
+        reply: oneshot::Sender<StopCancel>,
+    },
     /// #2374 Codex round-1 fix (HIGH-1) — identity-guarded cancel by
     /// active `user_message_id`. See
     /// `ChannelMailboxHandle::cancel_active_turn_if_user_message_with_reason`.
@@ -1902,6 +1909,14 @@ fn input_mailbox_step(
                 token,
                 already_stopping,
             });
+        }
+        ChannelMailboxMsg::CancelActiveTurnIfCurrentUnlessHerdr {
+            expected_token,
+            reason,
+            reply,
+        } => {
+            let token = matching_cancel_token(&state, &expected_token);
+            let _ = reply.send(StopCancel::decide(token, reason));
         }
         ChannelMailboxMsg::CancelActiveTurnIfUserMessageWithReason {
             expected_user_message_id,

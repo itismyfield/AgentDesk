@@ -10,6 +10,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::cluster::channel_home::{self, HomeRefusal};
+use crate::services::cluster::home_availability::{self, Unavailable};
 use crate::services::herdr_admission::{self, StopCause};
 use crate::services::herdr_launch::{HerdrLaunchEndpoint, o_writer_ready};
 use crate::services::provider::ProviderKind;
@@ -55,6 +56,10 @@ pub(crate) enum HerdrRefusal {
     HomeNotHeld,
     /// This node holds the delegated channel's home while a drain keeps its intake closed.
     HomeDraining,
+    /// Delegation is switched on but cannot run, so the channel is held instead of falling back.
+    DelegationUnavailable {
+        reason: Unavailable,
+    },
 }
 
 impl std::fmt::Display for HerdrRefusal {
@@ -74,6 +79,7 @@ impl std::fmt::Display for HerdrRefusal {
             Self::ExecutorNotWired => f.write_str("executor_not_wired"),
             Self::HomeNotHeld => f.write_str("home_not_held"),
             Self::HomeDraining => f.write_str("home_draining"),
+            Self::DelegationUnavailable { reason } => write!(f, "delegation_unavailable({reason})"),
         }
     }
 }
@@ -108,8 +114,11 @@ async fn read_row(pool: Option<&PgPool>, session_key: Option<&str>) -> RowRead {
 }
 
 /// A delegated channel's turn runs only where its home is held with intake open; a channel with
-/// no registered home reads nothing more.
+/// no registered home reads nothing more. A channel held by unavailable delegation runs none.
 fn home_refusal(channel_id: u64) -> Option<HerdrRefusal> {
+    if let Some(reason) = home_availability::refusal(channel_id) {
+        return Some(HerdrRefusal::DelegationUnavailable { reason });
+    }
     Some(match channel_home::refusal(channel_id)? {
         HomeRefusal::NotHeld => HerdrRefusal::HomeNotHeld,
         HomeRefusal::Draining => HerdrRefusal::HomeDraining,

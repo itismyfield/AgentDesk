@@ -352,6 +352,8 @@ async fn draft_lifted(session: &str) -> bool {
 mod tests {
     use super::*;
 
+    mod person_draft_tests;
+
     struct ScopedRuntimeRoot {
         _lock: std::sync::MutexGuard<'static, ()>,
         _temp: tempfile::TempDir,

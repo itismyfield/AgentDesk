@@ -154,6 +154,8 @@ use self::synthetic_start::{
 };
 
 #[cfg(unix)]
+pub(in crate::services::discord) mod background_child_completion;
+#[cfg(unix)]
 mod claude_idle_bridge;
 #[cfg(unix)]
 mod claude_idle_runtime;
@@ -393,6 +395,19 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             tmux_session_name = %prompt.tmux_session_name,
             slash_command_kind = %kind,
             "deduped near-simultaneous machine slash-command control half (within 2s window); dropped BEFORE recording any external-input lease so the first active turn's lease is preserved"
+        );
+        return;
+    }
+    // A scanner row queued behind its hook's open announcement is that announcement once it landed.
+    if crate::services::tui_prompt_dedupe::withdraw_row_announced_by_its_hook(
+        &prompt,
+        channel_id.get(),
+    ) {
+        tracing::info!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            "scanner row already announced by its hook; not announced again"
         );
         return;
     }

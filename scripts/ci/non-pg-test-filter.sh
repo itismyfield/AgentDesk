@@ -16,6 +16,7 @@ NON_PG_SKIP_ARGS=(
   --skip pg_
   --skip postgres
   --skip cli::channel_home::tests
+  --skip cli::dcserver_pg_bootstrap::tests
   --skip cli::herdr::tests
   --skip db::auto_queue::entries::dispatch_failure::tests
   --skip db::auto_queue::entries::tests
@@ -41,11 +42,13 @@ NON_PG_SKIP_ARGS=(
   --skip db::intake_outbox_dispatched_audit::postgres_tests
   --skip db::o_channel_activation::postgres_tests
   --skip db::o_channel_homes::tests
+  --skip db::postgres::advisory_lock::tests
   --skip db::postgres::test_db_reclaim::tests
   --skip db::postgres::tests
   --skip db::prompt_manifests::tests
   --skip db::relay_dead_letter::tests
   --skip db::scheduled_messages::postgres_tests
+  --skip db::session_observability::tests_pg
   --skip db::session_transcripts::clear_fence_pg_tests
   --skip db::session_transcripts::native_clear_pg_tests
   --skip dispatch::dispatch_cancel::pg_observability_tests
@@ -203,6 +206,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
+  --skip services::discord::tui_prompt_relay::tests::background_child_close_pg_tests
   --skip services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
   --skip services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
@@ -211,6 +215,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::resume_pin_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
+  --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests
   --skip services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
   --skip services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   --skip services::discord::turn_bridge::tmux_runtime::stop_host::tests
@@ -251,13 +256,17 @@ NON_PG_SKIP_ARGS=(
   --skip voice::turn_link::tests
 )
 NON_PG_FILTER_REPLAY=(
+  cli::dcserver_pg_bootstrap::tests::a_schema_ahead_failure_stops_at_once_only_while_the_hold_is_on
   cli::dcserver_pg_bootstrap::tests::backoff_delay_follows_exponential_schedule
   cli::dcserver_pg_bootstrap::tests::backoff_delay_saturates_at_cap
   cli::dcserver_pg_bootstrap::tests::connect_exhausts_budget_and_reports_last_error
   cli::dcserver_pg_bootstrap::tests::connect_retries_then_succeeds_recording_backoff
   cli::dcserver_pg_bootstrap::tests::connect_returns_immediately_on_first_success
   cli::dcserver_pg_bootstrap::tests::exhausted_ok_none_reports_required_message
+  cli::dcserver_pg_bootstrap::tests::hold_ends_for_a_binary_replaced_before_it_started
+  cli::dcserver_pg_bootstrap::tests::hold_ends_only_when_the_install_path_holds_a_new_file
   cli::dcserver_pg_bootstrap::tests::pool_timeout_diagnostic_includes_timestamp_source_and_attempt
+  cli::dcserver_pg_bootstrap::tests::schema_ahead_needs_every_unknown_version_past_the_latest
   cli::dcserver_pg_bootstrap::tests::slow_startup_timeout_exhausts_retries_and_reports_the_exit_line
   cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
   db::auto_queue::entries::tests::pinned_dispatch_identity_is_declared_before_the_stale_retry_loop
@@ -393,6 +402,13 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retires_the_last_epoch
   services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
   services::cluster::channel_home::tests::a_replaced_or_unregistered_gate_closes_for_good_and_its_lease_ends
+  services::cluster::channel_home::tests::command_admission_expires_at_the_renewal_deadline
+  services::cluster::channel_home::tests::command_dormant_admission_does_not_lookup_or_start_a_task
+  services::cluster::channel_home::tests::command_permit_drop_panic_and_blocking_abort_are_not_unknown
+  services::cluster::channel_home::tests::command_permit_linearizes_close_and_preserves_children
+  services::cluster::channel_home::tests::command_registration_never_discards_a_preexisting_local_execution
+  services::cluster::channel_home::tests::command_registry_unregister_is_immediate_and_reuses_pending_count
+  services::cluster::channel_home::tests::command_replacement_and_resume_keep_counter_and_intake_closed
   services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
   services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
   services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
@@ -404,6 +420,7 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::intake_preflight::tests::missing_source_expectations_fail_closed
   services::cluster::intake_preflight::tests::ready_target_requires_no_execution_callback
   services::cluster::intake_preflight::tests::unsupported_provider_fails_closed
+  services::cluster::intake_router_hook::o_route_tests::unavailable_delegation_blocks_before_a_home_read_or_local_fallback
   services::cluster::intake_router_hook::owner_record::tests::advisory_lock_key_is_stable
   services::cluster::intake_router_hook::owner_record::tests::idempotency_key_is_composed_and_normalized
   services::cluster::machine_resources::store::tests::recorder_queue_is_bounded_without_waiting_for_the_database
@@ -412,6 +429,11 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::clear_persist_failure_tests::failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
+  services::discord::commands::control::home_fence::tests::d2b_clear_and_reset_keep_admission_across_effect_await
+  services::discord::commands::control::home_fence::tests::d2b_clear_reply_stays_counted_after_clear_body_finishes
+  services::discord::commands::control::home_fence::tests::d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor
+  services::discord::commands::control::home_fence::tests::d2b_reset_sink_refuses_claimed_turn_and_drain_reset_remains_allowed
+  services::discord::commands::control::home_fence::tests::d2b_slash_stop_reply_keeps_permit_until_finish_and_dormant_is_unchanged
   services::discord::commands::control::input_clear::tests::without_postgres_the_adapter_refuses_with_the_retry_notice
   services::discord::health::recovery::stall_alert::tests::owner_zero_and_tui_sentinel_never_render_mentions
   services::discord::health::recovery::stall_alert::tests::producer_liveness_suppresses_stall_page
@@ -556,6 +578,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_response_bypasses_normal_turn
   services::discord::router::message_handler::watchdog::host_tests::a_scheduled_paused_attach_rereads_the_host_before_each_attempt
   services::discord::runtime_bootstrap::channel_homes_tests::a_standby_writers_port_posts_over_the_bot_tokens_rest_client
+  services::discord::runtime_bootstrap::channel_homes_tests::a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels
   services::discord::runtime_bootstrap::channel_homes_tests::turns_count_as_restored_only_where_the_role_restored_them
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests::existing_marker_cancel_restores_promotion_fence_for_retry
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests::foreign_nonce_terminal_artifact_does_not_mask_our_cancellation
@@ -657,6 +680,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::resume_pin_tests::c1_same_synthetic_and_handoff_pin_resume_without_clearing_marker
   services::discord::turn_bridge::resume_pin_tests::c1_synthetic_and_handoff_stale_pins_leave_replacement_untouched
   services::discord::turn_bridge::resume_pin_tests::sa2_capture_hands_off_owned_provider_receiver
+  services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_each_stop_reason_preserves_delivery_and_settlement_axes
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_sends_one_escape_and_spends_the_claim_only_once_sent
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_writes_nothing_unless_every_fence_passes
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_stop_for_another_provider_is_refused_before_any_io
@@ -768,6 +792,7 @@ PG_INCLUDE_ARGS_SHARD_0=(
 PG_INCLUDE_ARGS_SHARD_1=(
   _pg
   cli::channel_home::tests
+  cli::dcserver_pg_bootstrap::tests
   cli::herdr::tests
   db::auto_queue::entries::dispatch_failure::tests
   db::auto_queue::entries::tests
@@ -793,11 +818,13 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::intake_outbox_dispatched_audit::postgres_tests
   db::o_channel_activation::postgres_tests
   db::o_channel_homes::tests
+  db::postgres::advisory_lock::tests
   db::postgres::test_db_reclaim::tests
   db::postgres::tests
   db::prompt_manifests::tests
   db::relay_dead_letter::tests
   db::scheduled_messages::postgres_tests
+  db::session_observability::tests_pg
   db::session_transcripts::clear_fence_pg_tests
   db::session_transcripts::native_clear_pg_tests
   dispatch::dispatch_cancel::pg_observability_tests
@@ -955,6 +982,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
+  services::discord::tui_prompt_relay::tests::background_child_close_pg_tests
   services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
   services::discord::turn_bridge::headless_delivery::production_seam_tests
@@ -963,6 +991,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::turn_bridge::resume_pin_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
+  services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
   services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   services::discord::turn_bridge::tmux_runtime::stop_host::tests

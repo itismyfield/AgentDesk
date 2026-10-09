@@ -119,6 +119,7 @@
         "src/services/discord/inflight_heartbeat_sweeper.rs": 1,
         "src/services/discord/mod.rs": 4,
         "src/services/discord/placeholder_sweeper/abandon_guard.rs": 1,
+        "src/services/discord/recovery_engine/herdr_admitted_restart.rs": 1,
         "src/services/discord/recovery_engine/manual_rebind/mod.rs": 2,
         "src/services/discord/recovery_engine/restore_inflight.rs": 10,
         "src/services/discord/recovery_engine/runtime.rs": 1,

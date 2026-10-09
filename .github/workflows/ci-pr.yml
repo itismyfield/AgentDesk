@@ -207,6 +207,7 @@ jobs:
               # which scripts/ci-script-checks.sh reruns, demanding an empty diff. paths-
               # filter ORs patterns, so a '!' excludes nothing (#5232): refused anywhere.
               - 'src/cli/channel_home_tests.rs'
+              - 'src/cli/dcserver_pg_bootstrap.rs'
               - 'src/cli/herdr_tests.rs'
               - 'src/db/auto_queue/entries.rs'
               - 'src/db/auto_queue/entries/dispatch_failure.rs'
@@ -230,10 +231,12 @@ jobs:
               - 'src/db/o_channel_activation.rs'
               - 'src/db/o_channel_homes_tests.rs'
               - 'src/db/postgres.rs'
+              - 'src/db/postgres/advisory_lock_tests.rs'
               - 'src/db/postgres/test_db_reclaim.rs'
               - 'src/db/prompt_manifests/tests.rs'
               - 'src/db/relay_dead_letter.rs'
               - 'src/db/scheduled_messages/postgres_tests.rs'
+              - 'src/db/session_observability/background_ordering_pg_tests.rs'
               - 'src/db/session_transcripts.rs'
               - 'src/db/session_transcripts_native_clear_tests.rs'
               - 'src/dispatch/dispatch_cancel.rs'
@@ -381,6 +384,7 @@ jobs:
               - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs'
+              - 'src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs'
               - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs'
               - 'src/services/discord/turn_bridge/completion_guard/completion_postgres.rs'
               - 'src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs'
@@ -388,6 +392,7 @@ jobs:
               - 'src/services/discord/turn_bridge/recovery_text.rs'
               - 'src/services/discord/turn_bridge/resume_pin_tests.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs'
+              - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/background_child_ordering_tests.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs'
@@ -641,6 +646,7 @@ jobs:
               - 'src/*'
               - 'src/cli/**'
               - 'src/compat/**'
+              - 'src/config/**'
               - 'src/db/**'
               - 'src/dispatch/**'
               - 'src/engine/**'
@@ -665,6 +671,8 @@ jobs:
               - 'src/services/claude_tui/**'
               - 'src/services/cluster/**'
               - 'src/services/codex_tui/**'
+              - 'src/services/codex/**'
+              - 'src/services/dispatched_sessions/**'
               - 'src/services/dispatches/**'
               # qwen/ (like claude/ above) carries cfg(unix) shims, and
               # session_host/'s TmuxHost has a not(unix) stub Windows compiles.
@@ -697,6 +705,8 @@ jobs:
               - 'src/services/discord/idle_relay_drift.rs'
               - 'src/services/discord/inflight.rs'
               - 'src/services/discord/inflight/**'
+              - 'src/services/discord/inject_disposition_test_support.rs'
+              - 'src/services/discord/inject_disposition_tests.rs'
               - 'src/services/discord/input_runtime/**'
               - 'src/services/discord/input_transition_tests.rs'
               - 'src/services/discord/jsonl_watcher.rs'
@@ -742,17 +752,32 @@ jobs:
               - 'src/services/discord/turn_bridge/**'
               - 'src/services/discord/turn_finalizer.rs'
               - 'src/services/discord/turn_finalizer/**'
-              - 'src/services/discord/turn_presence/activity.rs'
+              - 'src/services/discord/turn_lease.rs'
+              - 'src/services/discord/turn_lease_tests.rs'
+              - 'src/services/discord/turn_presence/**'
               - 'src/services/discord/voice_barge_in/**'
+              - 'src/services/discord/zombie_foreground_release.rs'
               - 'src/services/git/**'
+              # Cover Windows-compiled cfg consumers outside the relay tree;
+              # the source-wide derivation test rejects newly uncovered owners.
+              - 'src/services/kakao/**'
               - 'src/services/maintenance/**'
               - 'src/services/memory/**'
               - 'src/services/observability/**'
               - 'src/services/onboarding/**'
               - 'src/services/platform/**'
+              - 'src/services/process/**'
+              - 'src/services/provider/**'
               - 'src/services/provider_cli/**'
+              - 'src/services/review_decision/**'
               - 'src/services/routines/**'
+              - 'src/services/session_backend/**'
               - 'src/services/slo/**'
+              - 'src/services/stream_json_cli/**'
+              - 'src/services/tui_input/**'
+              - 'src/services/tui_o/**'
+              - 'src/services/tui_prompt_dedupe/**'
+              - 'src/services/tui_turn_state/**'
               - 'src/services/turn_orchestrator/**'
               - 'tests/*'
               - 'tests/fixtures/**'
@@ -766,7 +791,7 @@ jobs:
               - '.github/workflows/ci-pr.yml'
               - 'defaults.json'
               - 'routines/**'
-            win32_build_token: ['scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']
+            win32_build_token: ['scripts/build_token.py', 'scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']
 
       # A failed step, or comment_only left unset, reads as the full run in the outputs above.
       - name: Comment-only gate
@@ -1745,6 +1770,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -1777,7 +1804,14 @@ jobs:
         uses: ./.github/actions/ensure-swap
 
       - name: just lint
-        run: just lint
+        shell: bash
+        env:
+          CLIPPY_BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -o pipefail
+          mkdir -p target/clippy-observation
+          cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
+          python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref "$CLIPPY_BASE_REF"
 
       - name: sccache stats
         if: always()
@@ -2120,7 +2154,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=2fa2a6eafb40adc53c8ec888ab1e118864e974dca0b7ad2131cea0c7e5916dbe
+          expected=0e8c43697c07fe11c2c08b0a0c4401cac6c6cd0b0e8f07f5ef20a7c13ecfec59
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2353,7 +2387,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=2fa2a6eafb40adc53c8ec888ab1e118864e974dca0b7ad2131cea0c7e5916dbe
+          expected=0e8c43697c07fe11c2c08b0a0c4401cac6c6cd0b0e8f07f5ef20a7c13ecfec59
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

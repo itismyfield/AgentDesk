@@ -210,6 +210,10 @@ pub struct ClusterConfig {
     /// online and advertising gateway intent.
     #[serde(default = "default_gateway_yield_grace_secs")]
     pub gateway_yield_grace_secs: u64,
+    /// Seconds a gateway lease session may sit idle before PostgreSQL ends it and
+    /// frees the lock; `0` disables the expiry. Keep it well above the 15s keepalive.
+    #[serde(default = "default_gateway_lease_idle_expiry_secs")]
+    pub gateway_lease_idle_expiry_secs: u64,
     pub gateway_handback_breaker: GatewayHandbackBreakerConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
@@ -247,6 +251,10 @@ pub struct ClusterConfig {
     pub session_bound_relay_enabled: bool,
 }
 
+fn default_gateway_lease_idle_expiry_secs() -> u64 {
+    300
+}
+
 impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
@@ -260,6 +268,7 @@ impl Default for ClusterConfig {
             api_base_url: None,
             gateway_preferred_instance_id: None,
             gateway_yield_grace_secs: default_gateway_yield_grace_secs(),
+            gateway_lease_idle_expiry_secs: default_gateway_lease_idle_expiry_secs(),
             gateway_handback_breaker: GatewayHandbackBreakerConfig::default(),
             labels: Vec::new(),
             capabilities: serde_json::Map::new(),

@@ -2170,7 +2170,12 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
         (
             "reset_managed_process_session",
             &[
-                ("src/services/discord/commands/control.rs", 2, MISSING),
+                ("src/services/discord/commands/control.rs", 1, MISSING),
+                (
+                    "src/services/discord/commands/control/provider_reset.rs",
+                    1,
+                    MISSING,
+                ),
                 ("src/services/discord/commands/control/native.rs", 1, NATIVE),
                 (
                     "src/services/discord/commands/control/input_clear.rs",
