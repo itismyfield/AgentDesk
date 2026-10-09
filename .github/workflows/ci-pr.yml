@@ -766,7 +766,7 @@ jobs:
               - '.github/workflows/ci-pr.yml'
               - 'defaults.json'
               - 'routines/**'
-            win32_build_token: ['scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']
+            win32_build_token: ['scripts/build_token.py', 'scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']
 
       # A failed step, or comment_only left unset, reads as the full run in the outputs above.
       - name: Comment-only gate
