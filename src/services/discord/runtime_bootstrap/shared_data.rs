@@ -101,6 +101,7 @@ pub(super) fn run_bot_build_shared_data(
             active_meetings: HashMap::new(),
         }),
         mailboxes: ChannelMailboxRegistry::default(),
+        queue_park_ledger: Default::default(),
         session_transition_locks: dashmap::DashMap::new(),
         settings: tokio::sync::RwLock::new(bot_settings),
         api_timestamps: dashmap::DashMap::new(),
