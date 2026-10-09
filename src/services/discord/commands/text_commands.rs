@@ -1431,7 +1431,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             };
 
             rate_limit_wait(&data.shared, channel_id).await;
-            let confirm = channel_id
+            let confirmation = channel_id
                 .send_message(
                     &ctx.http,
                     CreateMessage::new().content(format!("Running skill: `/{skill}`")),
@@ -1449,7 +1449,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                 &deps,
                 data.provider.clone(),
                 channel_id,
-                confirm.id,
+                confirmation.id,
                 msg.author.id,
                 msg.author.name.clone(),
                 skill_prompt,
