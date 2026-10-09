@@ -29,7 +29,7 @@ mod tmux_cleanup;
 use tmux_cleanup::kill_tmux_session_impl;
 
 mod hook;
-pub use hook::{HookSessionQuery, hook_session, hook_session_with_query};
+pub use hook::{HookSessionQuery, hook_session_with_query};
 
 fn spawn_auto_queue_activate_for_agent(state: AppState, agent_id: String) {
     tokio::spawn(async move {

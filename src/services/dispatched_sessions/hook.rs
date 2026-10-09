@@ -218,18 +218,6 @@ async fn hook_session_pg(
     }
 }
 
-/// POST /api/dispatched-sessions/webhook — upsert session from dcserver
-pub async fn hook_session(
-    State(state): State<AppState>,
-    Json(body): Json<HookSessionBody>,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    if let Some(pool) = state.pg_pool_ref() {
-        return hook_session_pg(&state, pool, body, None).await;
-    }
-
-    Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database))
-}
-
 #[derive(Debug, Default, Deserialize)]
 pub struct HookSessionQuery {
     pub expected_turn_nonce: Option<String>,
