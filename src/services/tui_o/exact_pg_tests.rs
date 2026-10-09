@@ -308,3 +308,74 @@ fn exact_snapshot_sibling_construction_is_compile_rejected() {
             .contains("field `records` of struct `ConsistentEpisodeSnapshot` is private")
     );
 }
+
+#[tokio::test]
+async fn exact_child_ack_precedes_terminal_seal_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let mut records = super::super::exact_episode::tests::fixture();
+    let mut manifest = if let EpisodeEvidence::Manifest(m) = records[1].evidence.clone() {
+        m
+    } else {
+        panic!("manifest")
+    };
+    manifest.seal = None;
+    for index in [0, 2, 3] {
+        record_episode_evidence(true, &pool, &records[index])
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let mut connection = pool.acquire().await.unwrap();
+    assert_eq!(
+        resolve_in_tx(&mut connection, Uuid::from_u128(1))
+            .await
+            .unwrap()
+            .authority(),
+        Authority::Pending
+    );
+    let source = manifest.source.clone();
+    manifest.seal = Some(TerminalSeal {
+        source,
+        terminal_identity: "own-terminal".into(),
+        terminal_end: 20,
+        capture_witness: Uuid::from_u128(6),
+        derive_witness: Uuid::from_u128(7),
+    });
+    records[1].evidence = EpisodeEvidence::Manifest(manifest.clone());
+    if let EpisodeEvidence::WholeFrontier { manifest: m, .. } = &mut records[6].evidence {
+        *m = manifest;
+    }
+    for index in [4, 5, 1, 6] {
+        record_episode_evidence(true, &pool, &records[index])
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert_eq!(
+        resolve_in_tx(&mut connection, Uuid::from_u128(1))
+            .await
+            .unwrap()
+            .authority(),
+        Authority::Body
+    );
+    sqlx::query("UPDATE public.delivery_journal_events SET canonical_payload=jsonb_set(canonical_payload,'{evidence,seal}','null') WHERE canonical_payload->'evidence'->>'type'='Manifest'").execute(&mut *connection).await.unwrap();
+    assert_eq!(
+        resolve_in_tx(&mut connection, Uuid::from_u128(1))
+            .await
+            .unwrap()
+            .authority(),
+        Authority::Pending
+    );
+    if let EpisodeEvidence::Manifest(m) = &mut records[1].evidence {
+        m.seal.as_mut().unwrap().source.incarnation = Uuid::new_v4();
+    }
+    sqlx::query("UPDATE public.delivery_journal_events SET canonical_payload=$1 WHERE canonical_payload->'evidence'->>'type'='Manifest'").bind(serde_json::to_value(&records[1]).unwrap()).execute(&mut *connection).await.unwrap();
+    assert_eq!(
+        resolve_in_tx(&mut connection, Uuid::from_u128(1))
+            .await
+            .unwrap()
+            .authority(),
+        Authority::Pending
+    );
+}

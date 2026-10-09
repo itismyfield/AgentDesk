@@ -10826,6 +10826,7 @@ services::tui_o::exact_episode::tests::exact_source_resolution_extra_proof_and_m
 services::tui_o::exact_episode::tests::exact_submission_closure_and_settlement_do_not_manufacture_body
 services::tui_o::exact_episode::tests::exact_versioned_reader_is_closed_without_mode_fallback
 services::tui_o::exact_pg::tests::exact_ack_pg_waits_for_commit_barrier
+services::tui_o::exact_pg::tests::exact_child_ack_precedes_terminal_seal_pg
 services::tui_o::exact_pg::tests::exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt
 services::tui_o::exact_pg::tests::exact_metadata_pg_restore_and_terminal_port_stub
 services::tui_o::exact_pg::tests::exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged

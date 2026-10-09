@@ -2,10 +2,9 @@ use super::*;
 
 pub(crate) fn fixture() -> Vec<EpisodeMetadata> {
     let episode = Uuid::from_u128(1);
-    let source = ExactSourceStamp {
+    let source = SourceIdentity {
         incarnation: Uuid::from_u128(2),
         opener: 10,
-        terminal_end: 20,
         digest: "native".into(),
     };
     let piece = ExactPieceRef {
@@ -30,6 +29,13 @@ pub(crate) fn fixture() -> Vec<EpisodeMetadata> {
     };
     let manifest = ExactTerminalManifest {
         source: source.clone(),
+        seal: Some(TerminalSeal {
+            source: source.clone(),
+            terminal_identity: "own-terminal".into(),
+            terminal_end: 20,
+            capture_witness: Uuid::from_u128(6),
+            derive_witness: Uuid::from_u128(7),
+        }),
         captured_through: 20,
         derived_through: 20,
         membership_digest: "membership".into(),

@@ -15,17 +15,26 @@ pub(crate) struct ExactEpisodePin {
     pub born_generation: u64,
     pub channel_id: String,
     pub expected_author: String,
-    pub source: Option<ExactSourceStamp>,
+    pub source: Option<SourceIdentity>,
     pub context: FrozenSettlementContext,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ExactSourceStamp {
+pub(crate) struct SourceIdentity {
     pub incarnation: Uuid,
     pub opener: u64,
-    pub terminal_end: u64,
     pub digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TerminalSeal {
+    pub source: SourceIdentity,
+    pub terminal_identity: String,
+    pub terminal_end: u64,
+    pub capture_witness: Uuid,
+    pub derive_witness: Uuid,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +51,7 @@ pub(crate) struct FrozenSettlementContext {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExactPieceRef {
     pub episode: Uuid,
-    pub source: ExactSourceStamp,
+    pub source: SourceIdentity,
     pub native_unit: String,
     pub kind: String,
     pub range: (u64, u64),
@@ -58,7 +67,8 @@ pub(crate) struct ExactPieceRef {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExactTerminalManifest {
-    pub source: ExactSourceStamp,
+    pub source: SourceIdentity,
+    pub seal: Option<TerminalSeal>,
     pub captured_through: u64,
     pub derived_through: u64,
     pub membership_digest: String,
@@ -80,7 +90,7 @@ pub(crate) struct DirectReceipt {
 #[serde(deny_unknown_fields)]
 pub(crate) struct FrontierWitness {
     pub id: Uuid,
-    pub source: ExactSourceStamp,
+    pub source: SourceIdentity,
     pub range: (u64, u64),
     pub digest: String,
 }
@@ -90,7 +100,7 @@ pub(crate) struct FrontierWitness {
 pub(crate) enum EpisodeEvidence {
     Pin(ExactEpisodePin),
     Manifest(ExactTerminalManifest),
-    SourceResolved(ExactSourceStamp),
+    SourceResolved(SourceIdentity),
     Obligation {
         piece: ExactPieceRef,
     },
@@ -280,12 +290,15 @@ pub(crate) fn resolve_strict(
         .collect();
     let valid_manifest = |m: &ExactTerminalManifest| {
         source.is_some_and(|source| {
-            m.source == *source
-                && !source.incarnation.is_nil()
-                && source.opener < source.terminal_end
-                && !source.digest.is_empty()
-                && m.captured_through == source.terminal_end
-                && m.derived_through == source.terminal_end
+            m.source == *source && !source.incarnation.is_nil() && !source.digest.is_empty()
+        }) && m.seal.as_ref().is_some_and(|seal| {
+            seal.source == m.source
+                && !seal.terminal_identity.is_empty()
+                && !seal.capture_witness.is_nil()
+                && !seal.derive_witness.is_nil()
+                && m.source.opener < seal.terminal_end
+                && m.captured_through == seal.terminal_end
+                && m.derived_through == seal.terminal_end
         }) && !m.membership_digest.is_empty()
     };
     let no_body_debt = pieces.is_empty()
@@ -376,7 +389,7 @@ pub(crate) fn resolve_strict(
                         && !p.kind.is_empty()
                         && p.range.0 < p.range.1
                         && p.range.0 >= m.source.opener
-                        && p.range.1 <= m.source.terminal_end
+                        && p.range.1 <= m.captured_through
                         && p.plan_version == VERSION
                         && !p.plan_digest.is_empty()
                         && !p.payload_digest.is_empty()
@@ -401,7 +414,7 @@ pub(crate) fn resolve_strict(
                 })
                 .collect();
             membership
-                && matches!(whole.as_slice(), [(manifest, proofs, frontier)] if *manifest == *m && proofs.len() == m.required.len() && m.required.iter().all(|p| proofs.iter().filter(|x| *x == p).count() == 1) && valid_frontier(frontier, &m.source, (m.source.opener, m.source.terminal_end)))
+                && matches!(whole.as_slice(), [(manifest, proofs, frontier)] if *manifest == *m && proofs.len() == m.required.len() && m.required.iter().all(|p| proofs.iter().filter(|x| *x == p).count() == 1) && valid_frontier(frontier, &m.source, (m.source.opener, m.captured_through)))
         }
         _ => false,
     };
@@ -441,7 +454,7 @@ pub(crate) fn resolve_strict(
     }
 }
 
-fn valid_frontier(f: &FrontierWitness, source: &ExactSourceStamp, range: (u64, u64)) -> bool {
+fn valid_frontier(f: &FrontierWitness, source: &SourceIdentity, range: (u64, u64)) -> bool {
     !f.id.is_nil() && &f.source == source && f.range == range && !f.digest.is_empty()
 }
 fn exact_child(p: &ExactPieceRef, pin: &ExactEpisodePin, records: &[EpisodeMetadata]) -> bool {
