@@ -767,6 +767,8 @@ fn a_flat_claude_paste_is_owned_only_as_drawn() {
     assert!(owns(&ansi, frame));
     let row = "\n  응답에 정확히 한 줄로 [E2E:PR1:pb1-c-s5d-pr1-074645] 만 출력해줘.";
     let second = |with: &str| CLAUDE_TWO_ROW_PASTE.replace(row, with);
+    // A complete body differing only in whitespace uses the same wrap ownership proof.
+    assert!(owns(&second(&row.replace("\n  ", "\n   ")), frame));
     let scrollback_only = CLAUDE_TWO_ROW_PASTE
         .replace(
             "❯\u{00a0}[📱 adk-e2e-phase-b · 343742347365974026 · b9bf9a71]",
@@ -785,7 +787,6 @@ fn a_flat_claude_paste_is_owned_only_as_drawn() {
         ("typed after", second(&format!("{row}x"))),
         ("typed row", second(&format!("{row}\n  x"))),
         ("one-column indent", second(&row.replace("\n  ", "\n "))),
-        ("three-column indent", second(&row.replace("\n  ", "\n   "))),
         ("unindented", second(&row.replace("\n  ", "\n"))),
         ("one row", second("")),
         ("scrollback only", scrollback_only),
@@ -826,8 +827,8 @@ fn a_flat_claude_paste_is_owned_only_as_drawn() {
         assert!(owns(&drawn(&rows), &frame), "{frame}");
     }
     let lead = format!("{header}\nthree leading spaces");
-    assert!(!owns(&drawn(&["     three leading spaces"]), &lead));
-    // A line wider than the box wraps onto another indented row; one line is not proven by two.
+    assert!(owns(&drawn(&["     three leading spaces"]), &lead));
+    // Whole-body proof tolerates visual wrap boundaries while rejecting extra nonwhite text.
     for (first, rest, gap) in [
         (
             format!("{}abcdef", "abcdefghij".repeat(7)),
@@ -848,7 +849,9 @@ fn a_flat_claude_paste_is_owned_only_as_drawn() {
     ] {
         let frame = format!("{header}\n{first}{gap}{rest}");
         let rows = [format!("  {first}"), format!("  {rest}")];
-        assert!(!owns(&drawn(&[&rows[0], &rows[1]]), &frame), "{frame}");
+        assert!(owns(&drawn(&[&rows[0], &rows[1]]), &frame), "{frame}");
+        let foreign = format!("{}x", rows[1]);
+        assert!(!owns(&drawn(&[&rows[0], &foreign]), &frame), "{frame}");
     }
 }
 
