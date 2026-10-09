@@ -1,6 +1,5 @@
-//! A Claude hook may fill the session of a source O stored with an empty one, on a renumbered dev:
-//! O reads that name as the stored source, keeps sources it already stored apart, and halts rather
-//! than attach a file whose earlier bytes changed.
+//! A Claude hook may fill the empty session of a stored source on a renumbered dev: O reads it as
+//! that source, keeps sources already stored apart, and halts on changed earlier bytes.
 
 use std::io::{Seek, SeekFrom};
 
