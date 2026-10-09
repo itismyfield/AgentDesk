@@ -110,12 +110,6 @@ impl Phase2Frontier {
         live.map(|checkpoint| clamp_retry_cursor(checkpoint, self.barrier()))
     }
 
-    /// Leaves `message_id` open for the end-of-sweep retry arm, as a skip without evidence does.
-    pub(super) fn leave_open(&mut self, message_id: u64) {
-        let open = self.first_open.map_or(message_id, |o| o.min(message_id));
-        self.first_open = Some(open);
-    }
-
     pub(super) fn recovered(&mut self, message_id: u64) {
         self.max_recovered = advance_phase2_checkpoint(self.max_recovered, message_id);
     }

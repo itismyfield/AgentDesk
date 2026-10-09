@@ -396,6 +396,8 @@ pub(in crate::services::discord) fn advance_last_message_checkpoint(
         .and_modify(|current| *current = (*current).max(message_id))
         .or_insert(message_id);
     runtime_store::save_last_message_id(provider.as_str(), channel_id.get(), checkpoint);
+    // A live path or scan that handled a message catch-up left to it ends that message's hold.
+    catch_up::yield_floor::release(provider, channel_id, [message_id]);
     checkpoint
 }
 

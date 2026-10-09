@@ -11,7 +11,9 @@ use serenity::{ChannelId, MessageId};
 use super::discord_mock::{CHANNEL_ID, USER_ID, user_message};
 use super::{ProviderStub, RelayE2eHarness, wait_until};
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::SharedData;
 use crate::services::discord::bot_role::UtilityBotRole;
+use crate::services::discord::catch_up::yield_floor as floor;
 use crate::services::discord::health::{
     InjectPane, claim_kinded, inject_hook, queue_texts, send_meanwhile,
 };
@@ -71,6 +73,14 @@ async fn runtime() -> Runtime {
     }
 }
 
+async fn clear_mailbox(shared: &Arc<SharedData>) {
+    let channel = ChannelId::new(CHANNEL_ID);
+    crate::services::turn_orchestrator::test_support::queue_save_faults(channel, true);
+    let context = crate::services::discord::queue_persistence_context;
+    let persistence = context(shared, &ProviderKind::Claude, channel);
+    shared.mailbox(channel).clear(persistence).await;
+}
+
 /// A gated channel whose Claude pane is mid-turn on input typed over SSH.
 struct Busy {
     pane: InjectPane,
@@ -93,11 +103,7 @@ impl Runtime {
     /// Empties the channel's mailbox and disarms leftover save faults, so no task this scenario
     /// left writes its queue into the next harness's root, which reuses the channel.
     async fn finish(&self) {
-        let channel = ChannelId::new(CHANNEL_ID);
-        crate::services::turn_orchestrator::test_support::queue_save_faults(channel, true);
-        let context = crate::services::discord::queue_persistence_context;
-        let persistence = context(&self.h.shared, &ProviderKind::Claude, channel);
-        self.h.shared.mailbox(channel).clear(persistence).await;
+        clear_mailbox(&self.h.shared).await;
     }
 
     /// A background turn holds the mailbox, so input the pane does not take is queued.
@@ -385,6 +391,13 @@ async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
         MessageId::new(earlier),
     );
     let message = fresh_id();
+    rt.h.seed_channel_history(&[
+        (earlier, "earlier", false),
+        (answer, "answer", true),
+        (message, "status?", false),
+    ]);
+    // A sweep reads the message before its live arrival and leaves it to that arrival.
+    rt.h.run_catch_up().await;
     rt.h.deliver_user_message(message, "status?").await.unwrap();
     let handed = rt.queue().await;
     // Once the earlier turn ended the queue ran the message as its own turn, which ended too.
@@ -404,11 +417,6 @@ async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
     mailbox.finish_turn(persistence()).await;
     // Another turn holds the channel, so a sweep that recovers the message can only queue it.
     rt.hold_mailbox().await;
-    rt.h.seed_channel_history(&[
-        (earlier, "earlier", false),
-        (answer, "answer", true),
-        (message, "status?", false),
-    ]);
     // The sweep runs after the live yield window, as the operator's did.
     let _later = hook::skew_clock(60);
     rt.h.run_catch_up().await;
@@ -754,8 +762,12 @@ async fn a_vetoed_paste_queues_with_the_sender_s_own_marks_pg() {
 
 /// Source ids the channel's queue holds, oldest first.
 async fn queued_sources(rt: &Runtime) -> Vec<u64> {
+    sources_queued(&rt.h.shared).await
+}
+
+async fn sources_queued(shared: &SharedData) -> Vec<u64> {
     let channel = ChannelId::new(CHANNEL_ID);
-    let snapshot = crate::services::discord::mailbox_snapshot(&rt.h.shared, channel).await;
+    let snapshot = crate::services::discord::mailbox_snapshot(shared, channel).await;
     let queue = snapshot.intervention_queue.iter();
     queue
         .flat_map(|entry| entry.source_message_ids.iter().map(|id| id.get()))
@@ -789,18 +801,21 @@ async fn catch_up_leaves_a_fresh_message_to_its_live_offer_pg() {
     rt.h.run_catch_up().await;
     let swept = (queued_sources(rt).await, rt.h.checkpoint());
     rt.h.deliver_user_message(message, "status?").await.unwrap();
+    // The next sweep comes after the live yield window, so only the taken record stops it.
+    let _later = hook::skew_clock(30);
     rt.h.run_catch_up().await;
     let observed = (
         swept,
         busy.pane.keys(),
         rt.marks(message),
         queued_sources(rt).await,
+        rt.starts(),
     );
     let keys = vec!["paste-buffer".to_string(), "send-keys".to_string()];
     rt.finish().await;
     // The bot's answer settles; the checkpoint stops before the message left to its live arrival.
     let swept = (vec![], Some(answer));
-    assert_eq!(observed, (swept, keys, vec!["📥".to_string()], vec![]));
+    assert_eq!(observed, (swept, keys, vec!["📥".to_string()], vec![], 0));
 }
 
 /// A message whose live arrival never comes is recovered once it is 20 seconds old, behind an
@@ -838,4 +853,125 @@ async fn catch_up_recovers_a_fresh_message_outside_the_gate_at_once_pg() {
     let observed = queued_sources(&rt).await;
     rt.finish().await;
     assert_eq!(observed, vec![message]);
+}
+
+/// A fresh message only the unanswered-message scan reads is held as one the checkpoint scan
+/// reads is: live input that moves the checkpoint past it does not lose it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catch_up_holds_a_fresh_message_only_its_unanswered_scan_reads_pg() {
+    let busy = busy().await;
+    let rt = &busy.rt;
+    rt.hold_mailbox().await;
+    let earlier = id_aged(60);
+    let advance = crate::services::discord::advance_last_message_checkpoint;
+    let channel = ChannelId::new(CHANNEL_ID);
+    advance(
+        &rt.h.shared,
+        &ProviderKind::Claude,
+        channel,
+        MessageId::new(earlier),
+    );
+    // The bot's posts fill the checkpoint scan's one page; only the other scan reaches past them.
+    let posts: Vec<u64> = (0..50).map(|_| id_aged(50)).collect();
+    let message = id_aged(10);
+    let mut history = vec![(earlier, "earlier", false)];
+    history.extend(posts.iter().map(|id| (*id, "answer", true)));
+    history.push((message, "status?", false));
+    rt.h.seed_channel_history(&history);
+    rt.h.run_catch_up().await;
+    let swept = (queued_sources(rt).await, rt.h.checkpoint());
+    let taken = id_aged(8);
+    rt.h.deliver_user_message(taken, "later").await.unwrap();
+    history.push((taken, "later", false));
+    rt.h.seed_channel_history(&history);
+    let _later = hook::skew_clock(30);
+    rt.h.run_catch_up().await;
+    let observed = (swept, queued_sources(rt).await, rt.h.checkpoint());
+    rt.finish().await;
+    let swept = (vec![], posts.last().copied());
+    assert_eq!(observed, (swept, vec![message], Some(taken)));
+}
+
+/// A fresh message whose hold cannot be saved is recovered at once, as outside the gate, and is
+/// not left to a cursor a restart would lose.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_message_that_cannot_be_held_is_recovered_at_once_pg() {
+    let busy = busy().await;
+    let rt = &busy.rt;
+    rt.hold_mailbox().await;
+    floor::block(&ProviderKind::Claude, ChannelId::new(CHANNEL_ID));
+    let (earlier, answer, message) = (id_aged(60), id_aged(59), fresh_id());
+    answered_before(rt, earlier, answer, &[(message, "status?")]);
+    rt.h.run_catch_up().await;
+    let observed = queued_sources(rt).await;
+    rt.finish().await;
+    assert_eq!(observed, vec![message]);
+}
+
+/// The checkpoint the channel's file holds, which a restarted process reads.
+fn disk_checkpoint() -> Option<u64> {
+    let root = crate::services::discord::runtime_store::last_message_root()?;
+    let path = root.join("claude").join(format!("{CHANNEL_ID}.txt"));
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// A runtime as a restarted process builds it on the same root and database, with nothing in
+/// memory; a turn holds the channel so recovered input is queued.
+async fn restart(rt: &Runtime) -> Arc<SharedData> {
+    let pool = rt.h.shared.pg_pool.clone();
+    let restarted = crate::services::discord::make_shared_data_for_tests_with_storage(pool);
+    {
+        let mut settings = restarted.settings.write().await;
+        settings.owner_user_id = Some(USER_ID);
+        settings.allow_all_users = true;
+    }
+    claim_kinded(&restarted, CHANNEL_ID, ActiveTurnKind::Background).await;
+    restarted
+}
+
+/// A message left to a live arrival that never came is recovered once after a restart, though
+/// live input after it moved the checkpoint past it; none of that input is replayed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_yielded_message_is_recovered_once_after_a_restart_past_it_pg() {
+    let busy = busy().await;
+    let rt = &busy.rt;
+    let channel = ChannelId::new(CHANNEL_ID);
+    let (earlier, answer, message) = (id_aged(60), id_aged(59), id_aged(12));
+    answered_before(rt, earlier, answer, &[(message, "status?")]);
+    rt.h.run_catch_up().await;
+    // The pane takes a message; a turn that leaves no record but the checkpoint, as a tui_o turn,
+    // runs another; the bot answers.
+    let (taken, ran, reply) = (id_aged(10), id_aged(8), id_aged(6));
+    rt.h.deliver_user_message(taken, "taken").await.unwrap();
+    let advance = crate::services::discord::advance_last_message_checkpoint;
+    advance(
+        &rt.h.shared,
+        &ProviderKind::Claude,
+        channel,
+        MessageId::new(ran),
+    );
+    rt.h.seed_channel_history(&[
+        (earlier, "earlier", false),
+        (answer, "answer", true),
+        (message, "status?", false),
+        (taken, "taken", false),
+        (ran, "ran", false),
+        (reply, "reply", true),
+    ]);
+    let held = || floor::held(&ProviderKind::Claude, channel);
+    let before = (held(), disk_checkpoint());
+    // The restarted process no longer remembers the pane's take; only its file does.
+    let ttl = disposition::MEMORY_TTL;
+    disposition::test_support::age(&ProviderKind::Claude, taken, ttl);
+    let restarted = restart(rt).await;
+    let at_start = held();
+    let _later = hook::skew_clock(30);
+    let catch_up = crate::services::discord::catch_up::catch_up_missed_messages;
+    catch_up(&rt.h.ctx.http, &restarted, &ProviderKind::Claude).await;
+    catch_up(&rt.h.ctx.http, &restarted, &ProviderKind::Claude).await;
+    let observed = (before, at_start, sources_queued(&restarted).await, held());
+    clear_mailbox(&restarted).await;
+    rt.finish().await;
+    let before = (vec![message], Some(ran));
+    assert_eq!(observed, (before, vec![message], vec![message], vec![]));
 }

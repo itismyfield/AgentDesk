@@ -82,6 +82,7 @@ mod phase2;
 pub(in crate::services::discord) mod retry_state;
 mod settled_frontier;
 mod settled_ledger_consult;
+pub(in crate::services::discord) mod yield_floor;
 
 #[cfg(test)]
 #[path = "catch_up/classification_order_tests.rs"]
@@ -800,6 +801,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let retry_checkpoint = retry_state.map(|state| state.checkpoint);
         let live_checkpoint = shared.last_message_ids.get(&channel_id).map(|entry| *entry);
         let fetch_mode = catch_up_fetch_mode_for_scan(candidate, live_checkpoint, retry_checkpoint);
+        let (fetch_mode, floor_scan) = yield_floor::lower(provider, channel_id, fetch_mode);
         let scan_checkpoint = fetch_mode.checkpoint();
 
         match api.resolve_runtime_channel_binding_status(channel_id).await {
@@ -1009,6 +1011,14 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let remaining_capacity = catch_up_remaining_queue_capacity(queue_initial_len);
 
         for msg in &messages {
+            // Below its checkpoint a scan lowered to a held message reads only held ones.
+            if floor_scan
+                .as_ref()
+                .is_some_and(|scan| scan.passes(msg.id.get()))
+            {
+                frontier.settle(msg.id.get());
+                continue;
+            }
             let text = msg.content.trim().to_string();
             let intervention_text = catch_up_intervention_text(&text, msg.author.bot);
             let msg_ts = msg.id.created_at();
@@ -1080,11 +1090,12 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 }
                 (outcome, _) => outcome,
             };
-            // A fresh message on a gated channel waits for its live arrival; the checkpoint stays.
+            // A fresh message on a gated channel waits for its live arrival, held on disk until
+            // handled; one that cannot be held is recovered now.
             if outcome == CatchUpClassification::Recover
                 && router::catch_up_yields(channel_id, msg.id)
+                && yield_floor::hold(provider, channel_id, mid)
             {
-                frontier.seal(mid);
                 log_catch_up_live_yield("phase1", channel_id, mid);
                 break;
             }
@@ -1270,6 +1281,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let retained = frontier.retained_barrier(scan_checkpoint, retry_exhausted);
         if let Some(newest) = frontier.newest() {
             advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
+            let settled = messages.iter().map(|msg| msg.id.get());
+            yield_floor::release(provider, channel_id, settled.filter(|id| *id <= newest));
             if retry_checkpoint.is_some()
                 && !shared.catch_up_retry_pending.contains_key(&channel_id)
             {
@@ -1501,8 +1514,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     continue;
                 }
             }
-            if router::catch_up_yields(channel_id, msg.id) {
-                frontier.leave_open(mid);
+            if router::catch_up_yields(channel_id, msg.id)
+                && yield_floor::hold(provider, channel_id, mid)
+            {
                 log_catch_up_live_yield("phase2", channel_id, mid);
                 break;
             }
