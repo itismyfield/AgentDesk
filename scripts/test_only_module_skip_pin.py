@@ -268,6 +268,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/outbound/manual_delivery/production_nonce_tests.rs",
         "src/services/discord/outbound/turn_output_controller/fresh_send_tests.rs",
         "src/services/discord/outbound/source_registry_scan_tests.rs",
+        "src/services/discord/outbound/o_writer_repost_io_tests.rs",
         "src/services/discord/placeholder_controller/queued_card_gate/tests.rs",
         "src/services/discord/placeholder_live_events/probe_fixtures_tests.rs",
         "src/services/discord/placeholder_live_events/tests.rs",
