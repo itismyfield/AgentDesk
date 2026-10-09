@@ -902,6 +902,7 @@ src/
 │   │   │   │   ├── stop_judgement/
 │   │   │   │   │   └── judged_finish_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
+│   │   │   │   ├── legacy_send_tests.rs
 │   │   │   │   ├── live_agent_recovery.rs
 │   │   │   │   ├── retirement_await_tests.rs
 │   │   │   │   ├── self_watchdog.rs
@@ -1540,6 +1541,8 @@ src/
 │   │   │   ├── terminal_commit_epilogue.rs
 │   │   │   ├── terminal_delivery_types.rs
 │   │   │   ├── terminal_direct_fallback.rs
+│   │   │   ├── terminal_direct_fallback_edit.rs
+│   │   │   ├── terminal_direct_fallback_send_tests.rs
 │   │   │   ├── terminal_direct_fallback_tests.rs
 │   │   │   ├── terminal_long_chunks.rs
 │   │   │   ├── terminal_preflight.rs
