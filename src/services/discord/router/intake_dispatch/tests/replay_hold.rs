@@ -190,7 +190,19 @@ async fn replay_queued_whole_consumed_and_mixed_original_restored_pg() {
     mixed.text = "held original plus brand new instruction".to_string();
     mixed.reply_context = Some("original reply context".to_string());
 
-    for (item, wholly_held) in [(whole, true), (mixed, false)] {
+    for (mut item, wholly_held) in [(whole, true), (mixed, false)] {
+        // Real merged human inputs carry the existing preservation marker for every absorbed source.
+        item.source_message_queued_generations = item
+            .source_message_ids
+            .iter()
+            .copied()
+            .map(|source| {
+                crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
+                    source,
+                    item.queued_generation,
+                )
+            })
+            .collect();
         shared
             .mailbox(channel)
             .replace_queue(vec![item.clone()], persistence.clone())

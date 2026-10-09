@@ -64,8 +64,10 @@ fn row(channel: u64, name: String) -> inflight::InflightTurnState {
         None,
         321,
     );
-    state.full_response = "already published prefix\nsaved partial result".into();
+    state.full_response =
+        "already published prefix\ncurrent anchor prefix\nsaved partial result".into();
     state.response_sent_offset = "already published prefix\n".len();
+    state.current_msg_len = "current anchor prefix\n".len();
     state.streaming_rollover_frozen_msg_ids = vec![channel + 3, channel + 4];
     state.any_tool_used = true;
     state.born_generation = 0;
@@ -118,6 +120,16 @@ async fn replay_hold_restore_delivers_debt_without_finalizing_or_readopting_pg()
         originals.push((state, id, disposition));
     }
     let discord = o_cut_recorder::start(originals[0].0.channel_id).await;
+    for (original, ..) in &originals {
+        crate::services::discord::http::edit_channel_message(
+            &discord.http,
+            ChannelId::new(original.channel_id),
+            MessageId::new(original.current_msg_id),
+            "current anchor prefix\n",
+        )
+        .await
+        .unwrap();
+    }
 
     restore_inflight_turns(&discord.http, &shared, &provider).await;
 
@@ -181,6 +193,12 @@ async fn replay_hold_restore_delivers_debt_without_finalizing_or_readopting_pg()
             .filter(|body| body.contains("saved partial result"))
             .count(),
         originals.len()
+    );
+    assert!(
+        delivered
+            .iter()
+            .filter(|body| body.contains("saved partial result"))
+            .all(|body| body.contains("current anchor prefix"))
     );
     assert!(
         delivered
@@ -381,6 +399,101 @@ async fn replay_hold_restore_preserves_a_fresh_actor_while_old_debt_waits_pg() {
             .active_user_message_id,
         Some(MessageId::new(channel.get() + 1))
     );
+    assert_eq!(shared.tmux_watchers.len(), 0);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn replay_hold_restore_keeps_already_visible_prefix_at_the_same_anchor_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let (db, pool) = fixture().await;
+    let shared = shared_on(&pool).await;
+    let provider = ProviderKind::Claude;
+    let mut original = row(1_479_671_301_387_176_000, "held-current-anchor".into());
+    original.streaming_rollover_frozen_msg_ids.clear();
+    original.full_response = "current anchor prefix\nsaved partial result".into();
+    original.response_sent_offset = "current anchor prefix\n".len();
+    original.replay_receipt_id = Some(receipt(&pool, &original, "withheld").await);
+    inflight::save_inflight_state_create_new(&original).unwrap();
+    let discord = o_cut_recorder::start(original.channel_id).await;
+    crate::services::discord::http::edit_channel_message(
+        &discord.http,
+        ChannelId::new(original.channel_id),
+        MessageId::new(original.current_msg_id),
+        "current anchor prefix\n",
+    )
+    .await
+    .unwrap();
+
+    restore_inflight_turns(&discord.http, &shared, &provider).await;
+
+    let bodies = discord.contents();
+    let replaced = bodies
+        .last()
+        .expect("the held debt should replace its captured anchor");
+    assert!(
+        replaced.contains("current anchor prefix"),
+        "replacing the current anchor must retain its visible prefix"
+    );
+    assert!(replaced.contains("saved partial result"));
+    let state = inflight::load_inflight_state(&provider, original.channel_id)
+        .expect("held episode must remain");
+    assert_eq!(state.full_response, original.full_response);
+    assert_eq!(state.current_msg_id, original.current_msg_id);
+    assert!(state.terminal_delivery_completed());
+    assert!(state.streaming_rollover_frozen_msg_ids.is_empty());
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn replay_hold_restore_retains_ambiguous_or_invalid_frozen_debt_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let (db, pool) = fixture().await;
+    let shared = shared_on(&pool).await;
+    let provider = ProviderKind::Claude;
+    let mut originals = Vec::new();
+    for n in 0..2 {
+        let channel = 1_479_671_301_387_177_000 + n;
+        let mut original = row(channel, format!("ambiguous-held-{n}"));
+        original.full_response = "한글 prefix\nsaved partial result".into();
+        original.response_sent_offset = 0;
+        original.replay_receipt_id = Some(receipt(&pool, &original, "withheld").await);
+        inflight::save_inflight_state_create_new(&original).unwrap();
+        if n == 1 {
+            let path = inflight::inflight_state_path(
+                &inflight::inflight_runtime_root().unwrap(),
+                &provider,
+                channel,
+            );
+            let mut raw: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            raw["response_sent_offset"] = serde_json::json!(1);
+            std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+            original.response_sent_offset = 1;
+        }
+        originals.push(original);
+    }
+    let discord = o_cut_recorder::start(originals[0].channel_id).await;
+
+    restore_inflight_turns(&discord.http, &shared, &provider).await;
+
+    for original in &originals {
+        let state = inflight::load_inflight_state(&provider, original.channel_id)
+            .expect("unclassified delivery boundary must retain debt");
+        assert_eq!(state.full_response, original.full_response);
+        assert_eq!(state.user_text, original.user_text);
+        assert_eq!(state.response_sent_offset, original.response_sent_offset);
+        assert_eq!(
+            state.streaming_rollover_frozen_msg_ids,
+            original.streaming_rollover_frozen_msg_ids
+        );
+        assert!(!state.terminal_delivery_completed());
+    }
+    assert!(discord.contents().is_empty());
     assert_eq!(shared.tmux_watchers.len(), 0);
     pool.close().await;
     db.drop().await;

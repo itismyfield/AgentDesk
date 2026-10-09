@@ -1,6 +1,5 @@
--- Per-request replay disposition: the durable authority that a request whose provider run already
--- started is never sent to the provider again by restore, claim, AutoQueue retry or outbox
--- redelivery. This migration only adds the schema and its fences; no writer sets a disposition yet.
+-- Durable request authority fences replay after a provider start across restore, claim and retries.
+-- This migration adds schema and fences; no production writer sets a disposition yet.
 ALTER TABLE intake_outbox
     ADD COLUMN IF NOT EXISTS replay_only BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS replay_disposition TEXT,

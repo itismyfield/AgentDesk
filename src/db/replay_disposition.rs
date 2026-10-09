@@ -3,52 +3,9 @@
 
 use sqlx::PgPool;
 
-/// Name every replay fence trigger raises under, so callers can tell a refusal from a DB fault.
-#[cfg(test)]
-pub(crate) const REPLAY_DISPOSITION_FENCE: &str = "replay_disposition_fence";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReplayDisposition {
-    RegisteredNotStarted,
-    StartedUnclassified,
-    StartupFailedNoEffect,
-    ClassifiedNormal,
-    Withheld,
-}
-
-impl ReplayDisposition {
-    pub(crate) fn parse(value: &str) -> Option<Self> {
-        Some(match value {
-            "registered_not_started" => Self::RegisteredNotStarted,
-            "started_unclassified" => Self::StartedUnclassified,
-            "startup_failed_no_effect" => Self::StartupFailedNoEffect,
-            "classified_normal" => Self::ClassifiedNormal,
-            "withheld" => Self::Withheld,
-            _ => return None,
-        })
-    }
-
-    /// Unclassified starts may already have effects; no-effect retries require a live permit.
-    pub(crate) fn blocks_auto_rerun(self) -> bool {
-        match self {
-            Self::StartedUnclassified | Self::StartupFailedNoEffect | Self::Withheld => true,
-            Self::RegisteredNotStarted | Self::ClassifiedNormal => false,
-        }
-    }
-}
-
 /// Whether a stored disposition blocks a rerun; an unrecognised spelling blocks too.
 pub(crate) fn stored_disposition_blocks_rerun(value: Option<&str>) -> bool {
-    value.is_some_and(|value| ReplayDisposition::parse(value).is_none_or(|d| d.blocks_auto_rerun()))
-}
-
-/// Whether the error is a replay fence refusal rather than a database fault.
-#[cfg(test)]
-pub(crate) fn is_replay_fence_refusal(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|error| error.constraint())
-        == Some(REPLAY_DISPOSITION_FENCE)
+    value.is_some_and(|value| !matches!(value, "registered_not_started" | "classified_normal"))
 }
 
 /// The disposition of one receipt; `Ok(None)` when the row or its disposition is absent.

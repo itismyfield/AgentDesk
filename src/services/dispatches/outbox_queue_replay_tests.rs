@@ -138,6 +138,31 @@ async fn classify(pool: &PgPool, receipt: i64, disposition: &str) {
     }
 }
 
+async fn drain_known_outbox(
+    pool: &PgPool,
+    notifier: &RecordingNotifier,
+    owner: &str,
+    expected: usize,
+) {
+    let mut processed_total = 0;
+    for _ in 0..=expected {
+        let processed = process_outbox_batch_with_pg(Some(pool), notifier, Some(owner)).await;
+        processed_total += processed;
+        if processed == 0 {
+            assert_eq!(
+                processed_total, expected,
+                "all seeded obligations must drain"
+            );
+            return;
+        }
+        assert!(
+            processed_total <= expected,
+            "draining seeded obligations created unexpected work"
+        );
+    }
+    panic!("seeded outbox did not drain within its bounded row count");
+}
+
 #[tokio::test]
 async fn replay_hold_old_notify_and_followup_never_call_notifier_but_status_reaction_does_pg() {
     let _runtime = runtime_fixture();
@@ -153,10 +178,7 @@ async fn replay_hold_old_notify_and_followup_never_call_notifier_but_status_reac
         classify(&pool, receipt, disposition).await;
     }
     let notifier = RecordingNotifier::default();
-    assert_eq!(
-        process_outbox_batch_with_pg(Some(&pool), &notifier, Some("replacement-node")).await,
-        9
-    );
+    drain_known_outbox(&pool, &notifier, "replacement-node", 9).await;
     let calls = notifier.0.lock().unwrap().clone();
     assert_eq!(calls.len(), 3);
     assert!(
@@ -191,10 +213,7 @@ async fn replay_hold_dormant_batch_preserves_legacy_notify_and_classified_termin
         .unwrap();
     classify(&pool, receipt, "classified_normal").await;
     let notifier = RecordingNotifier::default();
-    assert_eq!(
-        process_outbox_batch_with_pg(Some(&pool), &notifier, Some("normal-node")).await,
-        6
-    );
+    drain_known_outbox(&pool, &notifier, "normal-node", 6).await;
     let mut calls = notifier.0.lock().unwrap().clone();
     calls.sort();
     let mut expected = vec![

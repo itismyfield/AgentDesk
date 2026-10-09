@@ -54,6 +54,8 @@ pub(in crate::services::discord) use kickoff_identity::finish_recovered_turn_mai
 mod output_paths;
 #[cfg(unix)]
 pub(super) use output_paths::detect_live_tmux_output_path;
+#[path = "restore_inflight/replay_hold.rs"]
+mod replay_hold;
 
 fn observe_restore_inflight_snapshot(
     provider: &ProviderKind,
@@ -67,38 +69,6 @@ fn observe_restore_inflight_snapshot(
         .filter(|state| state.born_generation != 0 && state.born_generation == current_generation)
     {
         tracing::warn!(provider = %provider.as_str(), channel_id = state.channel_id, user_msg_id = state.user_msg_id, born_generation = state.born_generation, current_generation, boot_elapsed_ms = boot_elapsed.as_millis(), "restore_inflight snapshot contains a row authored by the running process");
-    }
-}
-
-/// Project a blocking durable disposition of the turn's receipt onto the restored row, so the
-/// session-died recovery never reruns a started request. An unreadable receipt blocks too.
-pub(super) async fn hydrate_replay_hold(
-    pool: Option<&sqlx::PgPool>,
-    state: &mut inflight::InflightTurnState,
-) {
-    let Some(receipt_id) = state.replay_receipt_id else {
-        return;
-    };
-    let reason = match pool {
-        None => Some(format!("receipt {receipt_id} unreadable without postgres")),
-        Some(pool) => match crate::db::replay_disposition::receipt_disposition(pool, receipt_id)
-            .await
-        {
-            Ok(disposition)
-                if crate::db::replay_disposition::stored_disposition_blocks_rerun(
-                    disposition.as_deref(),
-                ) =>
-            {
-                Some(format!("receipt {receipt_id} {}", disposition.unwrap_or_default()))
-            }
-            Ok(_) => None,
-            Err(error) => Some(format!("receipt {receipt_id} unreadable: {error}")),
-        },
-    };
-    if let Some(reason) = reason
-        && !state.replay_hold_reasons.contains(&reason)
-    {
-        state.replay_hold_reasons.push(reason);
     }
 }
 
@@ -134,6 +104,11 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         if crate::services::discord::input_runtime::fence::lookup(provider, state.channel_id)
             .is_some()
         {
+            continue;
+        }
+        replay_hold::hydrate_replay_hold(shared.pg_pool.as_ref(), &mut state).await;
+        if state.replay_rerun_blocked() {
+            replay_hold::deliver_held_debt(http, shared, provider, &mut state).await;
             continue;
         }
         if matches!(
@@ -2278,7 +2253,6 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             lookup_turn_finished_dispatch_kind(recovery_dispatch_id.as_deref()).await;
         // Backfill session_key/dispatch_id on inflight state for long-turn detection ([L]).
         let mut state = state;
-        hydrate_replay_hold(shared.pg_pool.as_ref(), &mut state).await;
         state.session_key = state.session_key.or_else(|| adk_session_key.clone());
         state.dispatch_id = state.dispatch_id.or_else(|| recovery_dispatch_id.clone());
         // #3166: read the real configured thresholds (e.g.

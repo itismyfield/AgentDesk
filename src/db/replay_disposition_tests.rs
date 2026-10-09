@@ -4,6 +4,13 @@ use crate::db::intake_outbox::{self, FailedPreAcceptSweepOutcome, InsertPendingP
 use sqlx::{Executor, Postgres};
 use std::time::Duration;
 
+fn is_replay_fence_refusal(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|error| error.constraint())
+        == Some("replay_disposition_fence")
+}
+
 async fn setup() -> (TestPostgresDb, PgPool) {
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate_with_max_connections(4).await;

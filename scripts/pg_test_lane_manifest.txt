@@ -68,6 +68,7 @@ src/server/routes/session_evidence_tests.rs
 src/server/routes/stats.rs
 src/server/routes/tests/auto_queue_preflight_harness_tests.rs
 src/server/task_dispatch_claims.rs
+src/server/task_dispatch_claims_replay_tests.rs
 src/services/agent_quality/regression_alerts.rs
 src/services/agent_recovery/durable/postgres_tests.rs
 src/services/auto_queue.rs
@@ -301,6 +302,7 @@ server::routes::queue_api::cancel_queue_preserve_pg_tests
 server::routes::scheduled_messages::postgres_tests
 server::routes::session_evidence::tests
 server::routes::stats::memento_feedback_stats_pg_tests
+server::task_dispatch_claims::replay_tests
 server::task_dispatch_claims::task_dispatch_claims_pg_tests
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests
 services::agent_recovery::durable::postgres_tests
@@ -948,6 +950,8 @@ server::routes::session_evidence::tests::session_evidence_missing_raw_identity_i
 server::routes::session_evidence::tests::session_evidence_provider_channels_ignore_unbound_history_pg
 server::routes::session_evidence::tests::session_evidence_stale_working_pending_is_observation_only_pg
 server::routes::stats::memento_feedback_stats_pg_tests::load_memento_feedback_counts_returns_persisted_writer_values_pg
+server::task_dispatch_claims::replay_tests::replay_hold_prevents_actual_dispatch_claim_and_expired_lease_reclaim_pg
+server::task_dispatch_claims::replay_tests::replay_schema_keeps_actual_dispatch_claim_without_a_hold_pg
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_acquires_first_per_node_semaphore_on_preferred_node
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_does_not_reclaim_active_null_expiry_semaphore_holder
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_falls_back_when_preferred_node_semaphore_is_exhausted
@@ -1271,8 +1275,11 @@ services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ow
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_delivers_debt_without_finalizing_or_readopting_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_dormant_rows_keep_existing_missing_host_disposal_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_failed_delivery_retains_the_original_debt_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_keeps_already_visible_prefix_at_the_same_anchor_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_missing_receipt_keeps_request_and_frozen_state_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_preserves_a_fresh_actor_while_old_debt_waits_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_preserves_unknown_runtime_bytes_before_legacy_clear_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_retains_ambiguous_or_invalid_frozen_debt_pg
 services::discord::recovery_engine::routing_orphan::host_guard_tests::routing_orphan_finalizes_only_a_dead_pane_the_host_guard_admits_pg
 services::discord::relay_recovery::apply::host_deferred_tests::automatic_orphan_apply_keeps_a_turn_on_an_unconfirmed_host_pg
 services::discord::relay_recovery::apply::host_deferred_tests::manual_orphan_recovery_keeps_a_turn_on_an_unconfirmed_host_pg

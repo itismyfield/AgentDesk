@@ -116,7 +116,7 @@ async fn seed_failure(
         r#"INSERT INTO sessions (session_key, provider, status, active_dispatch_id,
             current_replay_receipt_id, replay_episode_nonce, channel_id,
             raw_provider_session_id, session_info)
-         VALUES ($1, 'claude', 'working', $2, $3, 'episode', $4,
+         VALUES ($1, 'claude', 'turn_active', $2, $3, 'episode', $4,
             'provider-session', 'partial output pending delivery')"#,
     )
     .bind(&dispatch)

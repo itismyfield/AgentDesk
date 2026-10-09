@@ -197,7 +197,12 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
     {
         check_dispatch_outbox_retry_count_in_bounds(id, &dispatch_id, retry_count);
         if matches!(action.as_str(), "notify" | "followup") {
-            let suppressed = match dispatch_notify_delivery_suppressed_pg(pool, &dispatch_id, &action).await
+            let suppressed = match dispatch_notify_delivery_suppressed_pg(
+                pool,
+                &dispatch_id,
+                &action,
+            )
+            .await
             {
                 Ok(suppressed) => suppressed,
                 // An unreadable gate never delivers: retry later without spending the budget.

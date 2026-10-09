@@ -478,6 +478,7 @@ src/
 │   ├── startup_preflight.rs
 │   ├── state.rs
 │   ├── task_dispatch_claims.rs
+│   ├── task_dispatch_claims_replay_tests.rs
 │   ├── test_phase_runs.rs
 │   ├── web_surface.rs
 │   ├── worker_recovery.rs
@@ -1178,6 +1179,7 @@ src/
 │   │   │   │   ├── kickoff_identity_tests.rs
 │   │   │   │   ├── output_paths.rs
 │   │   │   │   ├── ready_without_output_tests.rs
+│   │   │   │   ├── replay_hold.rs
 │   │   │   │   └── replay_hold_tests.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs

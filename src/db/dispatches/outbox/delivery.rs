@@ -31,7 +31,10 @@ pub(crate) async fn dispatch_notify_delivery_suppressed_pg(
     .await?;
     Ok(match row {
         Some((_, true)) => Some("suppressed because the dispatch already started and is held"),
-        Some((Some(status), false)) if action == "notify" && matches!(status.as_str(), "completed" | "failed" | "cancelled") => {
+        Some((Some(status), false))
+            if action == "notify"
+                && matches!(status.as_str(), "completed" | "failed" | "cancelled") =>
+        {
             Some("suppressed because dispatch is already terminal")
         }
         _ => None,
