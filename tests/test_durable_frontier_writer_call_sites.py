@@ -144,6 +144,109 @@ class SourceContractTests(unittest.TestCase):
                 self.assertEqual(every, want_all, f"cfg(test)-blind count for {symbol} in {rel}")
 
 
+class CfgTestNestingTests(unittest.TestCase):
+    def classify(self, body: str) -> dict[str, bool]:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "fixture.rs"
+            path.write_text(body, encoding="utf-8")
+            return {
+                code.strip(): production
+                for _line, code, production in guard.production_lines(path)
+                if code.strip()
+            }
+
+    def test_statement_in_command_scope_keeps_next_function_production(self):
+        lines = self.classify(
+            "async fn queued() {\n"
+            "    crate::services::cluster::channel_home::command_scope(permit, async {\n"
+            "        #[cfg(test)]\n"
+            '        home_fence::pause("queued").await;\n'
+            "        Ok(())\n"
+            "    })\n"
+            "    .await\n"
+            "}\n"
+            "async fn cmd_clear() {\n"
+            "    ctx.say(SESSION_CLEARED_RESPONSE).await;\n"
+            "}\n"
+        )
+        self.assertFalse(lines["home_fence::pause(        ).await;"])
+        self.assertTrue(lines["ctx.say(SESSION_CLEARED_RESPONSE).await;"])
+        self.assertTrue(lines["Ok(())"])
+
+    def test_statement_at_zero_group_depth_keeps_following_call(self):
+        lines = self.classify(
+            "fn command() {\n"
+            "    #[cfg(test)]\n"
+            "    test_probe();\n"
+            "    production_call();\n"
+            "}\n"
+        )
+        self.assertFalse(lines["test_probe();"])
+        self.assertTrue(lines["production_call();"])
+
+    def test_nested_tail_expression_disarms_at_enclosing_group_close(self):
+        lines = self.classify(
+            "fn command() {\n"
+            "    outer(async {\n"
+            "        inner(\n"
+            "            #[cfg(test)]\n"
+            "            test_probe()\n"
+            "        );\n"
+            "        production_call();\n"
+            "    });\n"
+            "}\n"
+            "fn next() {\n"
+            "    next_production_call();\n"
+            "}\n"
+        )
+        self.assertFalse(lines["test_probe()"])
+        self.assertTrue(lines["production_call();"])
+        self.assertTrue(lines["next_production_call();"])
+
+    def test_test_blocks_and_items_still_exclude_their_bodies(self):
+        lines = self.classify(
+            "fn command() {\n"
+            "    outer(async {\n"
+            "        #[cfg(test)]\n"
+            "        {\n"
+            "            test_block_call();\n"
+            "        }\n"
+            "        production_call();\n"
+            "    });\n"
+            "}\n"
+            "#[cfg(test)]\n"
+            "fn test_item() {\n"
+            "    test_item_call();\n"
+            "}\n"
+            "fn next() {\n"
+            "    next_production_call();\n"
+            "}\n"
+        )
+        self.assertFalse(lines["test_block_call();"])
+        self.assertFalse(lines["test_item_call();"])
+        self.assertTrue(lines["production_call();"])
+        self.assertTrue(lines["next_production_call();"])
+
+    def test_literal_and_comment_delimiters_do_not_disarm(self):
+        for literal in ['";)"', 'r#";)\n;)"#', "';'", "')'"]:
+            with self.subTest(literal=literal):
+                lines = self.classify(
+                    "fn command() {\n"
+                    "    outer(async {\n"
+                    "        #[cfg(test)]\n"
+                    f"        let _ = {literal}.to_string().len() + /* ; ) */\n"
+                    "            {\n"
+                    "                test_only_call();\n"
+                    "                0\n"
+                    "            };\n"
+                    "        production_call();\n"
+                    "    });\n"
+                    "}\n"
+                )
+                self.assertFalse(lines["test_only_call();"])
+                self.assertTrue(lines["production_call();"])
+
+
 class DiscriminationTests(unittest.TestCase):
     """Every assertion here is a mutation that was applied and then reverted."""
 
