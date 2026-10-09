@@ -275,6 +275,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/outbound/manual_delivery/production_nonce_tests.rs",
         "src/services/discord/outbound/turn_output_controller/fresh_send_tests.rs",
         "src/services/discord/outbound/source_registry_scan_tests.rs",
+        "src/services/discord/outbound/o_writer_repost_io_tests.rs",
         "src/services/discord/placeholder_controller/queued_card_gate/tests.rs",
         "src/services/discord/placeholder_live_events/probe_fixtures_tests.rs",
         "src/services/discord/placeholder_live_events/tests.rs",
@@ -481,12 +482,19 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/rotation_unsettled_resume_tests.rs",
         "src/services/codex_tui/rollout_tail/parser/herdr_terminal_tests.rs",
         "src/services/claude/herdr_turn/provider_terminal_tests.rs",
+        "src/services/codex_tui/rollout_tail/provenance_tests.rs",
+        "src/services/tui_o/store/rotation/provenance_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/provenance_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant_tests.rs",
     }
 )
 
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/codex_tui/rollout_tail/provenance.rs",
+        "src/services/tui_o/writer/rotation/provenance.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant.rs",
         "src/services/discord/relay_recovery/tests/retirement.rs",
         "src/services/discord/recovery_engine/o_cut_recorder.rs",
         "src/services/tui_o/channel_policy/adoption/body_check.rs",
