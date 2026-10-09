@@ -201,6 +201,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/claude_tui/busy_inject/screen_tests.rs",
         "src/services/claude_tui/busy_inject/stash_tests.rs",
         "src/services/claude_tui/busy_inject/stash_tests/hold_tests.rs",
+        "src/services/claude_tui/input/timeout_draft_tests.rs",
         "src/services/discord/health/turn_deliver/inject_tests.rs",
         "src/services/discord/turn_bridge/followup_requeue/tests/person_draft_tests.rs",
         "src/services/discord/health/watcher_respawn/claude_original_tests.rs",
