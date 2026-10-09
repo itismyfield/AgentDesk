@@ -199,6 +199,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     let boot_config = crate::config::load_graceful();
     let homes = HomeSettings::of(&boot_config);
+    // Judged before anything touches a delegated channel, so a misconfigured switch holds them.
+    install_home_availability(&provider, &homes, pg_pool.is_some());
     let modules = boot_config.cluster.runtime_profile.modules();
     let voice_config = boot_config.voice;
     let voice_barge_in = Arc::new(if modules.voice {
@@ -510,6 +512,32 @@ impl HomeSettings {
             instance_id: instance_id.filter(|id| !id.is_empty()).map(str::to_owned),
         }
     }
+}
+
+/// Records whether this provider's delegated homes can run; one that cannot holds every selected
+/// Herdr channel. With the switch off it returns before any read.
+fn install_home_availability(provider: &ProviderKind, settings: &HomeSettings, has_pool: bool) {
+    use crate::services::cluster::home_availability;
+    if settings.switch != Some(true) {
+        return;
+    }
+    let judged = home_availability::preflight(has_pool, settings.instance_id.as_deref());
+    home_availability::install(provider.as_str(), judged, selected_herdr_channels);
+}
+
+/// The selected channels with a Herdr endpoint on any node: those a delegation may name.
+fn selected_herdr_channels() -> std::collections::BTreeSet<u64> {
+    use crate::services::tui_o::channel_policy::BootChannels;
+    let read = |boot: Option<&BootChannels>| {
+        let configured =
+            |channel: &u64| crate::config::session_hosts::herdr_endpoint(*channel).is_some();
+        let selected = boot.map(|boot| boot.selected().iter().copied().filter(configured));
+        selected.map(Iterator::collect).unwrap_or_default()
+    };
+    #[cfg(not(test))]
+    return read(crate::services::tui_o::channel_policy::boot());
+    #[cfg(test)]
+    crate::services::tui_o::cutover::test_override::with_channels(read)
 }
 
 /// Registers the delegated homes this provider runtime takes part in and starts their lease and

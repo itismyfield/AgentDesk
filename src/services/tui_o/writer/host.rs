@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::watch;
@@ -20,6 +21,7 @@ use super::resume::{self, Backoff};
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::cluster::channel_home::{self, HomeOwnership};
+use crate::services::cluster::home_availability;
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::cutover;
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
@@ -67,12 +69,36 @@ pub enum Custody {
     Active,
 }
 
-/// Channels with a hosted actor and those ready to take work.
+/// Channels with a hosted actor, by the claim that hosts each, and those ready to take work.
 #[derive(Default)]
 pub struct Readiness {
-    hosted: Mutex<BTreeSet<u64>>,
+    hosted: Mutex<BTreeMap<u64, u64>>,
     ready: Mutex<BTreeSet<u64>>,
     live: Mutex<BTreeMap<u64, Live>>,
+    claims: AtomicU64,
+}
+
+/// One hosting of a channel. Dropping it keeps the channel hosted; only [`Self::release`] ends
+/// it, and only while no later claim hosts the channel.
+pub struct ReadinessClaim {
+    readiness: Arc<Readiness>,
+    channel: u64,
+    generation: u64,
+}
+
+impl ReadinessClaim {
+    /// Ends this hosting: not ready, no live view, and the channel free to host again. Called
+    /// only once its host and actor ended, so a new actor never runs beside them.
+    fn release(self) {
+        let readiness = &self.readiness;
+        let mut hosted = locked(&readiness.hosted);
+        if hosted.get(&self.channel) != Some(&self.generation) {
+            return;
+        }
+        locked(&readiness.ready).remove(&self.channel);
+        locked(&readiness.live).remove(&self.channel);
+        hosted.remove(&self.channel);
+    }
 }
 
 /// What a hosted channel's readiness is derived from, kept so intake can read it directly.
@@ -109,9 +135,24 @@ impl Readiness {
         }
     }
 
-    /// Only the first claim of a channel hosts it, so a channel never has two actors.
-    fn claim(&self, channel: u64) -> bool {
-        locked(&self.hosted).insert(channel)
+    /// Only the first claim of a channel hosts it until released, so a channel never has two actors.
+    fn claim(self: &Arc<Self>, channel: u64) -> Option<ReadinessClaim> {
+        let mut hosted = locked(&self.hosted);
+        if hosted.contains_key(&channel) {
+            return None;
+        }
+        let generation = self.claims.fetch_add(1, Ordering::SeqCst) + 1;
+        hosted.insert(channel, generation);
+        let readiness = Arc::clone(self);
+        Some(ReadinessClaim {
+            readiness,
+            channel,
+            generation,
+        })
+    }
+
+    pub fn is_hosted(&self, channel: u64) -> bool {
+        locked(&self.hosted).contains_key(&channel)
     }
 
     fn track(&self, channel: u64, gate: Arc<OwnershipGate>, (resumed, unsettled, owed): Watched) {
@@ -162,6 +203,12 @@ impl Readiness {
         );
     }
 }
+
+type Published = (
+    watch::Receiver<GatewayOwnership>,
+    watch::Receiver<bool>,
+    watch::Receiver<bool>,
+);
 
 type Watched = (
     watch::Receiver<bool>,
@@ -231,7 +278,8 @@ pub fn start<I: HostIo>(
     pg_gateway: bool,
     prepare: impl FnOnce() -> HostParts<I>,
 ) -> Vec<JoinHandle<()>> {
-    spawn_hosts(provider, pg_gateway, cutover::boot_ownership(), prepare)
+    let owned = cutover::boot_ownership();
+    detached(start_managed(provider, pg_gateway, owned, prepare))
 }
 
 /// [`start`] off the gateway lease for `delegated`, each a channel with a registered home gate.
@@ -240,15 +288,73 @@ pub fn start_delegated<I: HostIo>(
     delegated: Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)>,
     prepare: impl FnOnce() -> HostParts<I>,
 ) -> Vec<JoinHandle<()>> {
-    spawn_hosts(provider, false, delegated, prepare)
+    detached(start_managed(provider, false, delegated, prepare))
 }
 
-fn spawn_hosts<I: HostIo>(
+fn detached(handles: Vec<ManagedWriterHandle>) -> Vec<JoinHandle<()>> {
+    handles
+        .into_iter()
+        .map(ManagedWriterHandle::into_detached)
+        .collect()
+}
+
+pub type OwnedChannels = Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)>;
+
+/// One hosted channel's writer: its host task, the stop it obeys and the claim that hosts it.
+pub struct ManagedWriterHandle {
+    channel: u64,
+    stop: watch::Sender<bool>,
+    host: JoinHandle<()>,
+    claim: ReadinessClaim,
+}
+
+/// A writer whose host, actor and admitted POST all ended, its claim released.
+#[derive(Debug, PartialEq, Eq)]
+pub struct WriterStopped {
+    pub channel: u64,
+}
+
+impl ManagedWriterHandle {
+    pub fn channel(&self) -> u64 {
+        self.channel
+    }
+
+    /// The bare host task, left running: its stop never fires and its claim stays.
+    pub fn into_detached(self) -> JoinHandle<()> {
+        self.host
+    }
+
+    /// Stops the writer and waits for its host, which joins its actor and any admitted POST. The
+    /// wait runs in its own task, so cancelling the caller neither skips nor hurries the release;
+    /// a host that panicked keeps its claim, so the channel hosts nothing new.
+    pub async fn stop_and_join(self) -> Result<WriterStopped, String> {
+        let Self {
+            channel,
+            stop,
+            host,
+            claim,
+        } = self;
+        stop.send_replace(true);
+        let settle = tokio::spawn(async move {
+            let joined = host.await;
+            drop(stop);
+            joined.map_err(|error| format!("writer host ended abnormally: {error}"))?;
+            claim.release();
+            Ok(WriterStopped { channel })
+        });
+        let settled = settle.await;
+        settled.unwrap_or_else(|error| Err(format!("writer settle ended abnormally: {error}")))
+    }
+}
+
+/// [`start`] over `owned`, returning a handle per hosted channel. A channel whose delegation is
+/// unavailable is held with an alarm and not claimed.
+pub fn start_managed<I: HostIo>(
     provider: ShadowProvider,
     pg_gateway: bool,
-    owned: Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)>,
+    owned: OwnedChannels,
     prepare: impl FnOnce() -> HostParts<I>,
-) -> Vec<JoinHandle<()>> {
+) -> Vec<ManagedWriterHandle> {
     let kind = match provider {
         ShadowProvider::Claude => RuntimeHandoffKind::ClaudeTui,
         ShadowProvider::Codex => RuntimeHandoffKind::CodexTui,
@@ -268,9 +374,17 @@ fn spawn_hosts<I: HostIo>(
     } = prepare();
     let mut tasks = Vec::new();
     for (channel, candidate) in channels {
-        if !readiness.claim(channel) {
+        if let Some(reason) = home_availability::refusal(channel) {
+            hold(
+                &io.alarms(),
+                channel,
+                &format!("delegation unavailable: {reason}"),
+            );
             continue;
         }
+        let Some(claim) = readiness.claim(channel) else {
+            continue;
+        };
         let home = channel_home::registered_channel(channel);
         let root = match (pg_gateway || home.is_some(), &runtime_root) {
             (false, _) => Err("no PG gateway lease"),
@@ -286,6 +400,7 @@ fn spawn_hosts<I: HostIo>(
         };
         let gate = home.map_or_else(|| Arc::clone(&gate), |home| home.gate());
         let readiness = Arc::clone(&readiness);
+        let (stop, stopping) = watch::channel(false);
         let host = host_channel(
             Arc::clone(&io),
             channel,
@@ -294,10 +409,36 @@ fn spawn_hosts<I: HostIo>(
             root,
             gate,
             readiness,
+            stopping,
         );
-        tasks.push(tokio::spawn(host));
+        let host = tokio::spawn(host);
+        tasks.push(ManagedWriterHandle {
+            channel,
+            stop,
+            host,
+            claim,
+        });
     }
     tasks
+}
+
+/// Resolves once the writer is told to stop; a detached writer, whose sender is gone, never is.
+async fn stopped(mut stop: watch::Receiver<bool>) {
+    if stop.wait_for(|stop| *stop).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// `step`'s output, or `None` once the writer was told to stop first.
+async fn unless_stopped<T>(
+    stop: &watch::Receiver<bool>,
+    step: impl Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        () = stopped(stop.clone()) => None,
+        output = step => Some(output),
+    }
 }
 
 fn hold(alarms: &impl AlarmSink, channel: u64, detail: &str) {
@@ -336,6 +477,7 @@ async fn host_channel<I: HostIo>(
     runtime_root: PathBuf,
     gate: Arc<OwnershipGate>,
     readiness: Arc<Readiness>,
+    stop: watch::Receiver<bool>,
 ) {
     let alarms = io.alarms();
     let mut bindings = None;
@@ -364,7 +506,9 @@ async fn host_channel<I: HostIo>(
                 );
             }
             let facts = loop {
-                until_owned(&gate).await;
+                if unless_stopped(&stop, until_owned(&gate)).await.is_none() {
+                    return;
+                }
                 let facts = io.activation_facts(channel, provider).await;
                 // Facts read before a lost gate are not acted on; wait for Owned and read again.
                 if owned_now(channel, &gate) {
@@ -409,7 +553,8 @@ async fn host_channel<I: HostIo>(
                                 legacy,
                                 bound: (source, seq),
                             };
-                            if !deferred::retry(waiting, refused, seq).await {
+                            let retried = deferred::retry(waiting, refused, seq);
+                            if unless_stopped(&stop, retried).await != Some(true) {
                                 return;
                             }
                             break 'held Ok(());
@@ -445,7 +590,9 @@ async fn host_channel<I: HostIo>(
     };
     // Seeded before the port wait, so a recovered panel tick already knows O's newest post.
     super::deliver::seed_last_posted(channel, store.ledger());
-    let port = io.port().await;
+    let Some(port) = unless_stopped(&stop, io.port()).await else {
+        return;
+    };
     let bindings = bindings.unwrap_or_else(|| io.bindings(channel, provider));
     let hosted = Hosted {
         io: &*io,
@@ -457,6 +604,7 @@ async fn host_channel<I: HostIo>(
         port,
         bindings,
         alarms,
+        stop,
     };
     hosted.serve(store).await;
 }
@@ -472,6 +620,7 @@ struct Hosted<'a, I: HostIo> {
     port: Arc<I::Port>,
     bindings: Arc<I::Bindings>,
     alarms: I::Alarms,
+    stop: watch::Receiver<bool>,
 }
 
 impl<I: HostIo> Hosted<'_, I> {
@@ -545,12 +694,12 @@ impl<I: HostIo> Hosted<'_, I> {
                 );
             }
         };
+        let watched = (gate.subscribe(), resumed, self.stop.clone());
         let ended = publish(
             channel,
             self.readiness,
-            gate.subscribe(),
-            resumed,
-            actor,
+            watched,
+            (actor, &stop_tx),
             on_resumed,
         );
         let cause = ended.await;
@@ -582,7 +731,13 @@ impl<I: HostIo> Hosted<'_, I> {
                 unsent_serial,
                 "[tui_o] writer halted on a transient store error; resuming after a wait"
             );
-            tokio::time::sleep(wait).await;
+            if unless_stopped(&self.stop, tokio::time::sleep(wait))
+                .await
+                .is_none()
+            {
+                self.alarms.resume_pending(channel, false);
+                return None;
+            }
             match recover(self.runtime_root, channel, unsent.as_ref()) {
                 Ok(Recovered::Store(store)) => return Some(store),
                 Err(error) if error.transient => {
@@ -689,12 +844,12 @@ fn recover(
 
 /// Ready only while the actor has resumed and the gate is Owned; cleared once the actor ends.
 /// Returns how the actor stopped, read from its finished task; `None` when the gate closed first.
+/// A stop of the writer is passed on to the actor, which is then awaited.
 async fn publish(
     channel: u64,
     readiness: &Readiness,
-    mut gate: watch::Receiver<GatewayOwnership>,
-    mut resumed: watch::Receiver<bool>,
-    mut actor: JoinHandle<Option<StopCause>>,
+    (mut gate, mut resumed, stop): Published,
+    (mut actor, stop_actor): (JoinHandle<Option<StopCause>>, &watch::Sender<bool>),
     on_resumed: impl FnOnce(),
 ) -> Option<StopCause> {
     let mut on_resumed = Some(on_resumed);
@@ -713,6 +868,11 @@ async fn publish(
                 break (&mut actor).await.ok().flatten();
             },
             ended = &mut actor => break ended.ok().flatten(),
+            () = stopped(stop.clone()) => {
+                readiness.set(channel, false);
+                stop_actor.send_replace(true);
+                break (&mut actor).await.ok().flatten();
+            }
         }
     };
     readiness.set(channel, false);

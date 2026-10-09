@@ -83,3 +83,19 @@ async fn the_final_close_waits_for_an_admission_in_progress() {
     assert_eq!(writer.deliver(&piece("m2", "late")).await, Step::NoGateway);
     assert_eq!(harness.port.posts(), ["owed"]);
 }
+
+// A channel held by unavailable delegation posts nothing even under an Owned gateway gate, and
+// posts again once its provider is ready.
+#[tokio::test(start_paused = true)]
+async fn a_channel_held_by_unavailable_delegation_posts_nothing() {
+    use crate::services::cluster::home_availability::{self, Unavailable};
+    let harness = Harness::new();
+    let mut writer = harness.writer();
+    harness.gate.acquired();
+    let held = Err(Unavailable::MissingInstanceId);
+    home_availability::install("claude", held, || [CHANNEL].into());
+    assert_eq!(writer.deliver(&piece("m0", "a")).await, Step::NoGateway);
+    home_availability::install("claude", Ok(()), Default::default);
+    assert_eq!(writer.deliver(&piece("m0", "a")).await, Step::Done);
+    assert_eq!(harness.port.posts(), ["a"]);
+}
