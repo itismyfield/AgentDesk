@@ -2239,6 +2239,7 @@ services::cluster::home_supervisor::tests::a_cancelled_caller_leaves_the_transit
 services::cluster::home_supervisor::tests::a_stop_during_a_start_stops_the_new_bundle_instead_of_running_it
 services::cluster::home_supervisor::tests::an_unconfirmed_end_blocks_the_channel
 services::cluster::home_supervisor::tests::concurrent_starts_reserve_one_bundle_and_replacement_joins_every_task
+services::cluster::home_supervisor::tests::dropping_an_unpolled_exit_waiter_still_joins_every_provider
 services::cluster::home_supervisor::tests::stale_cleanup_and_stale_stop_leave_the_current_generation_running
 services::cluster::home_supervisor::tests::the_exit_waits_for_every_providers_homes
 services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence

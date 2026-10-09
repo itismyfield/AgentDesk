@@ -318,3 +318,28 @@ async fn the_exit_waits_for_every_providers_homes() {
     );
     assert_eq!(*stopped.lock().unwrap(), ["codex", "claude"]);
 }
+
+#[tokio::test(start_paused = true)]
+async fn dropping_an_unpolled_exit_waiter_still_joins_every_provider() {
+    let stopped = Arc::new(Mutex::new(Vec::new()));
+    let providers = [("claude", 50), ("codex", 0)]
+        .into_iter()
+        .map(|(name, delay)| {
+            Arc::new(Recorded {
+                stopped: Arc::clone(&stopped),
+                name,
+                delay: Duration::from_millis(delay),
+            }) as Arc<dyn HomeLifecycle>
+        })
+        .collect();
+    drop(stop_all_and_join(providers, StopReason::Sigterm));
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(50)).await;
+    for _ in 0..200 {
+        if stopped.lock().unwrap().len() == 2 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(*stopped.lock().unwrap(), ["codex", "claude"]);
+}
