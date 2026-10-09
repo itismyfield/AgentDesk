@@ -56,6 +56,7 @@ cli::client::health_compare_tests::render_machine_compare_table_synthesises_offl
 cli::client::health_compare_tests::validate_status_payload_rejects_missing_arrays
 cli::client::runtime_config::tests::api_get_payload_preserves_explicit_keys_for_cli_set
 cli::client::runtime_config::tests::plain_cli_set_stays_metadata_less_for_server_authority
+cli::dcserver::tests::lock_pid_write_removes_stale_suffix
 cli::dcserver_pg_bootstrap::tests::a_schema_ahead_failure_stops_at_once_only_while_the_hold_is_on
 cli::dcserver_pg_bootstrap::tests::backoff_delay_follows_exponential_schedule
 cli::dcserver_pg_bootstrap::tests::backoff_delay_saturates_at_cap
