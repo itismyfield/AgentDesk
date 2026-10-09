@@ -409,6 +409,7 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::intake_preflight::tests::missing_source_expectations_fail_closed
   services::cluster::intake_preflight::tests::ready_target_requires_no_execution_callback
   services::cluster::intake_preflight::tests::unsupported_provider_fails_closed
+  services::cluster::intake_router_hook::o_route_tests::unavailable_delegation_blocks_before_a_home_read_or_local_fallback
   services::cluster::intake_router_hook::owner_record::tests::advisory_lock_key_is_stable
   services::cluster::intake_router_hook::owner_record::tests::idempotency_key_is_composed_and_normalized
   services::cluster::machine_resources::store::tests::recorder_queue_is_bounded_without_waiting_for_the_database
@@ -561,6 +562,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_response_bypasses_normal_turn
   services::discord::router::message_handler::watchdog::host_tests::a_scheduled_paused_attach_rereads_the_host_before_each_attempt
   services::discord::runtime_bootstrap::channel_homes_tests::a_standby_writers_port_posts_over_the_bot_tokens_rest_client
+  services::discord::runtime_bootstrap::channel_homes_tests::a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels
   services::discord::runtime_bootstrap::channel_homes_tests::turns_count_as_restored_only_where_the_role_restored_them
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests::existing_marker_cancel_restores_promotion_fence_for_retry
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests::foreign_nonce_terminal_artifact_does_not_mask_our_cancellation

@@ -59,8 +59,15 @@ async fn a_stopped_writer_frees_its_channel_for_exactly_one_new_writer() {
         "no second writer"
     );
 
+    let generation = writer.generation();
     let stopped = writer.stop_and_join().await;
-    assert_eq!(stopped, Ok(WriterStopped { channel: CHANNEL }));
+    assert_eq!(
+        stopped,
+        Ok(WriterStopped {
+            channel: CHANNEL,
+            generation
+        })
+    );
     assert!(!ready.is_hosted(CHANNEL) && !ready.accepts(CHANNEL));
     append(&path, &row("m2", "second"));
     polls(3).await;
@@ -242,6 +249,29 @@ async fn a_stop_during_port_wait_releases_the_claim_without_starting_an_actor() 
 }
 
 struct Writers(Vec<ManagedWriterHandle>);
+
+#[tokio::test(start_paused = true)]
+async fn dropping_a_managed_handle_stops_its_writer_and_keeps_the_legacy_adapter_detached() {
+    let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
+    let (harness, path, io, ready, writer) = hosting().await;
+    drop(writer);
+    scheduled_until(|| !ready.is_hosted(CHANNEL)).await;
+    append(&path, &row("m2", "later"));
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["first"]);
+    let detached = managed(&harness, &io, &ready)
+        .pop()
+        .unwrap()
+        .into_detached();
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["first", "later"]);
+    assert!(
+        ready.accepts(CHANNEL),
+        "the explicit legacy adapter stays running"
+    );
+    detached.abort();
+    let _ = detached.await;
+}
 
 impl HomeBundle for Writers {
     async fn stop_and_join(self, _: StopReason) -> Settled {

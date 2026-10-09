@@ -2233,6 +2233,8 @@ services::cluster::channel_home_port::tests::the_turn_comes_from_the_mailbox_and
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
 services::cluster::execution_requirements::tests::execution_requirements_are_strict_and_share_dispatch_matching
+services::cluster::home_availability::tests::off_does_not_prepare_or_select_channels
+services::cluster::home_availability::tests::runtime_exit_clears_only_its_own_availability_and_off_can_reenter
 services::cluster::home_supervisor::tests::a_cancelled_caller_leaves_the_transition_to_the_supervisor
 services::cluster::home_supervisor::tests::a_stop_during_a_start_stops_the_new_bundle_instead_of_running_it
 services::cluster::home_supervisor::tests::an_unconfirmed_end_blocks_the_channel
@@ -2260,6 +2262,7 @@ services::cluster::intake_router_hook::execution_requirement_tests::execution_re
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_reject_incompatible_existing_owner_without_reassignment_pg
 services::cluster::intake_router_hook::home_route_tests::a_channel_routes_by_its_home_row_and_as_before_without_one_pg
 services::cluster::intake_router_hook::o_route_tests::an_o_channel_is_placed_only_on_its_ready_gateway_pg
+services::cluster::intake_router_hook::o_route_tests::unavailable_delegation_blocks_before_a_home_read_or_local_fallback
 services::cluster::intake_router_hook::owner_record::tests::acquire_covers_each_generation_rule
 services::cluster::intake_router_hook::owner_record::tests::admission_idempotency_conflict_returns_prior_row
 services::cluster::intake_router_hook::owner_record::tests::admission_insert_stamps_owner_and_returns_id
@@ -10862,6 +10865,7 @@ services::tui_o::writer::adoption::tests::an_open_turn_before_legacys_cursor_is_
 services::tui_o::writer::adoption::tests::assistant_text_past_legacys_frontier_is_reported_undelivered
 services::tui_o::writer::adoption::tests::o_starts_at_legacys_cursor_when_a_unit_lands_after_the_recheck
 services::tui_o::writer::adoption::tests::past_sources_over_the_boot_budget_are_not_adopted
+services::tui_o::writer::host::claim_tests::an_old_claim_drop_leaves_a_replacement_ready_and_hosted
 services::tui_o::writer::input_facts::resume_tests::a_broken_json_record_halts_without_a_resume_point
 services::tui_o::writer::input_facts::resume_tests::a_mixed_user_row_with_an_untyped_tool_result_stays_unknown
 services::tui_o::writer::input_facts::resume_tests::a_repeated_blocked_record_keeps_the_first_carried_turn
@@ -10952,6 +10956,7 @@ services::tui_o::writer::tests::actor::host_start::managed::a_stop_during_port_w
 services::tui_o::writer::tests::actor::host_start::managed::a_stopped_writer_frees_its_channel_for_exactly_one_new_writer
 services::tui_o::writer::tests::actor::host_start::managed::a_supervised_channel_runs_one_writer_generation_at_a_time
 services::tui_o::writer::tests::actor::host_start::managed::an_unpolled_stop_waiter_still_stops_and_releases_its_writer
+services::tui_o::writer::tests::actor::host_start::managed::dropping_a_managed_handle_stops_its_writer_and_keeps_the_legacy_adapter_detached
 services::tui_o::writer::tests::actor::host_start::managed::failed_preparation_does_not_reserve_a_channel_without_a_host
 services::tui_o::writer::tests::actor::host_start::missing_or_damaged_store_state_holds_instead_of_a_first_init
 services::tui_o::writer::tests::actor::host_start::nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel

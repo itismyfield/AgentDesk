@@ -1,15 +1,12 @@
 //! Whether delegation can run for a provider, recorded only with the switch on and before any
 //! effect on a delegated channel; a channel it refuses gets no turn and no POST, never the gateway's.
 
-// Dormant interface: later slices of the rollout construct the rest of it.
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// Why delegated homes cannot run; each holds the channels it names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Unavailable {
+pub enum Unavailable {
     MissingPool,
     MissingInstanceId,
     InstanceIdMismatch,
@@ -24,7 +21,7 @@ pub(crate) enum Unavailable {
 }
 
 impl Unavailable {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::MissingPool => "missing_pool",
             Self::MissingInstanceId => "missing_instance_id",
@@ -47,12 +44,11 @@ impl std::fmt::Display for Unavailable {
     }
 }
 
-/// A provider's delegation as its boot judged it. `Off` is not `Ready`: with the switch off
-/// nothing was checked, so it proves no preparation.
+/// Only boot identity checks, never proof of protection or scoped restore readiness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Availability {
+pub enum Availability {
     Off,
-    Ready,
+    PreflightPassed,
     Unavailable(Unavailable),
 }
 
@@ -69,11 +65,43 @@ pub(crate) fn preflight(has_pool: bool, instance_id: Option<&str>) -> Result<(),
 
 #[derive(Default)]
 struct Provider {
+    identity: Arc<()>,
     unavailable: Option<Unavailable>,
     channels: BTreeSet<u64>,
 }
 
 type Providers = BTreeMap<String, Provider>;
+
+/// This runtime's installation; stale exit cleanup cannot remove a replacement's judgement.
+pub(crate) struct Registration {
+    provider: String,
+    identity: Arc<()>,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        with_providers(|providers| {
+            if providers
+                .get(&self.provider)
+                .is_some_and(|p| Arc::ptr_eq(&p.identity, &self.identity))
+            {
+                providers.remove(&self.provider);
+            }
+        });
+    }
+}
+
+pub(crate) fn install_enabled(
+    provider: &str,
+    switch: Option<bool>,
+    judged: impl FnOnce() -> Result<(), Unavailable>,
+    channels: impl FnOnce() -> BTreeSet<u64>,
+) -> Option<Registration> {
+    if switch != Some(true) {
+        return None;
+    }
+    Some(install(provider, judged(), channels))
+}
 
 #[cfg(not(test))]
 static PROVIDERS: Mutex<Providers> = Mutex::new(BTreeMap::new());
@@ -98,7 +126,7 @@ pub(crate) fn install(
     provider: &str,
     judged: Result<(), Unavailable>,
     channels: impl FnOnce() -> BTreeSet<u64>,
-) {
+) -> Registration {
     let record = match judged {
         Ok(()) => Provider::default(),
         Err(reason) => {
@@ -110,20 +138,33 @@ pub(crate) fn install(
             Provider {
                 unavailable: Some(reason),
                 channels: channels(),
+                ..Provider::default()
             }
         }
     };
-    with_providers(|providers| providers.insert(provider.to_owned(), record));
+    let provider = provider.to_owned();
+    let identity = Arc::clone(&record.identity);
+    with_providers(|providers| providers.insert(provider.clone(), record));
+    Registration { provider, identity }
 }
 
-pub(crate) fn state(provider: &str) -> Availability {
+pub fn state(provider: &str) -> Availability {
     with_providers(|providers| match providers.get(provider) {
         None => Availability::Off,
         Some(Provider {
             unavailable: Some(reason),
             ..
         }) => Availability::Unavailable(*reason),
-        Some(_) => Availability::Ready,
+        Some(_) => Availability::PreflightPassed,
+    })
+}
+
+pub(crate) fn held_channels(provider: &str) -> BTreeSet<u64> {
+    with_providers(|providers| {
+        providers
+            .get(provider)
+            .map(|p| p.channels.clone())
+            .unwrap_or_default()
     })
 }
 
@@ -134,4 +175,46 @@ pub(crate) fn refusal(channel: u64) -> Option<Unavailable> {
         let mut held = providers.values().filter(|p| p.channels.contains(&channel));
         held.find_map(|provider| provider.unavailable)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn off_does_not_prepare_or_select_channels() {
+        for switch in [None, Some(false)] {
+            assert!(
+                install_enabled(
+                    "claude",
+                    switch,
+                    || panic!("off must not preflight"),
+                    || panic!("off must not select channels"),
+                )
+                .is_none()
+            );
+        }
+        assert_eq!(state("claude"), Availability::Off);
+    }
+
+    #[test]
+    fn runtime_exit_clears_only_its_own_availability_and_off_can_reenter() {
+        let old = install("claude", Err(Unavailable::MissingPool), || [7].into());
+        let current = install("claude", Err(Unavailable::MissingInstanceId), || [8].into());
+        drop(old);
+        assert_eq!(refusal(7), None);
+        assert_eq!(refusal(8), Some(Unavailable::MissingInstanceId));
+        drop(current);
+        assert!(
+            install_enabled(
+                "claude",
+                Some(false),
+                || panic!("off must not preflight"),
+                Default::default,
+            )
+            .is_none()
+        );
+        assert_eq!(state("claude"), Availability::Off);
+        assert_eq!(refusal(8), None);
+    }
 }

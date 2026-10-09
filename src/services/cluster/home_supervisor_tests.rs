@@ -280,10 +280,11 @@ impl HomeLifecycle for Recorded {
 
     fn resume_intake(&self, _: &str) {}
 
-    fn stop_and_join(&self, _: StopReason) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+    fn stop_and_join(&self, _: StopReason) -> Pin<Box<dyn Future<Output = Settled> + Send + '_>> {
         Box::pin(async move {
             tokio::time::sleep(self.delay).await;
             self.stopped.lock().unwrap().push(self.name);
+            Settled::Joined
         })
     }
 }
@@ -292,18 +293,28 @@ impl HomeLifecycle for Recorded {
 // on two providers, it returns only after both stopped, the slower one included.
 #[tokio::test(start_paused = true)]
 async fn the_exit_waits_for_every_providers_homes() {
-    stop_all_and_join(StopReason::CommittedRestart).await;
-    lifecycle("claude").stop_and_join(StopReason::Sigterm).await;
+    assert_eq!(
+        stop_all_and_join(Vec::new(), StopReason::CommittedRestart).await,
+        Vec::<Settled>::new()
+    );
+    assert_eq!(
+        NoHomes.stop_and_join(StopReason::Sigterm).await,
+        Settled::Joined
+    );
 
     let stopped = Arc::new(Mutex::new(Vec::new()));
+    let mut providers: Vec<Arc<dyn HomeLifecycle>> = Vec::new();
     for (name, delay) in [("claude", 50), ("codex", 0)] {
         let recorded = Recorded {
             stopped: Arc::clone(&stopped),
             name,
             delay: Duration::from_millis(delay),
         };
-        register_lifecycle(name, Arc::new(recorded));
+        providers.push(Arc::new(recorded));
     }
-    stop_all_and_join(StopReason::CommittedRestart).await;
+    assert_eq!(
+        stop_all_and_join(providers, StopReason::CommittedRestart).await,
+        [Settled::Joined, Settled::Joined]
+    );
     assert_eq!(*stopped.lock().unwrap(), ["codex", "claude"]);
 }

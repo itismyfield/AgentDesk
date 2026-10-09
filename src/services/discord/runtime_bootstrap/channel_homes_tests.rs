@@ -353,7 +353,7 @@ async fn a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels() {
             switch,
             instance_id: None,
         };
-        install_home_availability(&ProviderKind::Claude, &unset, false);
+        let _availability = install_home_availability(&ProviderKind::Claude, &unset, false);
         assert_eq!(home_availability::state("claude"), Availability::Off);
         assert!(!unavailable(turn(HERDR).await), "off: the old judgement");
     }
@@ -368,7 +368,7 @@ async fn a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels() {
             switch: Some(true),
             instance_id: instance_id.map(str::to_owned),
         };
-        install_home_availability(&ProviderKind::Claude, &on, has_pool);
+        let _availability = install_home_availability(&ProviderKind::Claude, &on, has_pool);
         assert_eq!(
             home_availability::state("claude"),
             Availability::Unavailable(reason)
@@ -396,8 +396,12 @@ async fn a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels() {
         );
     }
 
-    install_home_availability(&ProviderKind::Claude, &settings(Some(true)), true);
-    assert_eq!(home_availability::state("claude"), Availability::Ready);
+    let _availability =
+        install_home_availability(&ProviderKind::Claude, &settings(Some(true)), true);
+    assert_eq!(
+        home_availability::state("claude"),
+        Availability::PreflightPassed
+    );
     assert!(!unavailable(turn(HERDR).await));
     assert_eq!(writers(), (2, 0));
 }

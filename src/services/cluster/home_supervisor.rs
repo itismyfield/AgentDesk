@@ -1,9 +1,6 @@
 //! A channel's delegated home runs one generation at a time: each start or stop is reserved under a
 //! short lock and carried out by a task the supervisor owns, whoever stops waiting for it.
 
-// Dormant interface: later slices of the rollout construct the rest of it.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -12,10 +9,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::watch;
 
-pub(crate) type Generation = u64;
+pub type Generation = u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StopReason {
+pub enum StopReason {
     Sigterm,
     BackendExited,
     CommittedRestart,
@@ -25,18 +22,18 @@ pub(crate) enum StopReason {
 
 /// How a bundle's stop ended: every part joined, or a part whose end was not confirmed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Settled {
+pub enum Settled {
     Joined,
     Stuck(String),
 }
 
 /// What one generation runs for a channel; it ends only through the supervisor.
-pub(crate) trait HomeBundle: Send + 'static {
+pub trait HomeBundle: Send + 'static {
     fn stop_and_join(self, reason: StopReason) -> impl Future<Output = Settled> + Send;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Phase {
+pub enum Phase {
     Starting(Generation),
     Running(Generation),
     Stopping(Generation),
@@ -45,7 +42,7 @@ pub(crate) enum Phase {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Refused {
+pub enum Refused {
     /// Another generation is still starting or stopping.
     Busy(Phase),
     Blocked(Generation, String),
@@ -104,7 +101,7 @@ impl<B> Slot<B> {
     }
 }
 
-pub(crate) struct Supervisor<B> {
+pub struct Supervisor<B> {
     slots: Mutex<BTreeMap<u64, Slot<B>>>,
     next: AtomicU64,
 }
@@ -169,13 +166,13 @@ impl<B: HomeBundle> Supervisor<B> {
         use_slots(&mut self.slots.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
-    pub(crate) fn phase(&self, channel: u64) -> Option<Phase> {
+    pub fn phase(&self, channel: u64) -> Option<Phase> {
         self.with_slots(|slots| slots.get(&channel).map(Slot::phase))
     }
 
     /// Reserves the channel's next generation now, before the returned future is polled; a
     /// running one is stopped and joined before `build` runs. Starting or stopping, it is `Busy`.
-    pub(crate) fn start<F, Fut>(
+    pub fn start<F, Fut>(
         self: &Arc<Self>,
         channel: u64,
         build: F,
@@ -277,7 +274,7 @@ impl<B: HomeBundle> Supervisor<B> {
 
     /// Stops the channel's running generation and waits until it settled; with `only`, a
     /// generation other than that one is left alone. Returns the channel's phase afterwards.
-    pub(crate) fn stop(
+    pub fn stop(
         self: &Arc<Self>,
         channel: u64,
         only: Option<Generation>,
@@ -359,7 +356,7 @@ impl<B: HomeBundle> Supervisor<B> {
     }
 
     /// Stops every channel's generation and waits for each.
-    pub(crate) async fn stop_all(self: &Arc<Self>, reason: StopReason) {
+    pub async fn stop_all(self: &Arc<Self>, reason: StopReason) {
         let channels: Vec<u64> = self.with_slots(|slots| slots.keys().copied().collect());
         let stops = channels
             .into_iter()
@@ -369,64 +366,49 @@ impl<B: HomeBundle> Supervisor<B> {
 }
 
 /// What the process's shutdown, backend exit and deferred restart ask of one provider's homes.
-pub(crate) trait HomeLifecycle: Send + Sync + 'static {
+pub trait HomeLifecycle: Send + Sync + 'static {
     /// Holds new intake while a restart may still be cancelled; `resume_intake` undoes it.
     fn pause_intake(&self, nonce: &str);
     fn resume_intake(&self, nonce: &str);
-    fn stop_and_join(&self, reason: StopReason) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    fn stop_and_join(
+        &self,
+        reason: StopReason,
+    ) -> Pin<Box<dyn Future<Output = Settled> + Send + '_>>;
 }
 
 /// A provider with no delegated homes, as with the switch off: every call does nothing.
-pub(crate) struct NoHomes;
+pub struct NoHomes;
 
 impl HomeLifecycle for NoHomes {
     fn pause_intake(&self, _: &str) {}
 
     fn resume_intake(&self, _: &str) {}
 
-    fn stop_and_join(&self, _: StopReason) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(std::future::ready(()))
+    fn stop_and_join(&self, _: StopReason) -> Pin<Box<dyn Future<Output = Settled> + Send + '_>> {
+        Box::pin(std::future::ready(Settled::Joined))
     }
 }
 
-type Lifecycles = BTreeMap<String, Arc<dyn HomeLifecycle>>;
-
-#[cfg(not(test))]
-static LIFECYCLES: Mutex<Lifecycles> = Mutex::new(BTreeMap::new());
-#[cfg(test)]
-thread_local! {
-    static LIFECYCLES: Mutex<Lifecycles> = const { Mutex::new(BTreeMap::new()) };
-}
-
-fn with_lifecycles<R>(use_them: impl FnOnce(&mut Lifecycles) -> R) -> R {
-    let locked = |lifecycles: &Mutex<Lifecycles>| {
-        use_them(&mut lifecycles.lock().unwrap_or_else(PoisonError::into_inner))
-    };
-    #[cfg(not(test))]
-    return locked(&LIFECYCLES);
-    #[cfg(test)]
-    LIFECYCLES.with(locked)
-}
-
-/// Makes `lifecycle` the provider's; registered only with the switch on.
-pub(crate) fn register_lifecycle(provider: &str, lifecycle: Arc<dyn HomeLifecycle>) {
-    with_lifecycles(|lifecycles| lifecycles.insert(provider.to_owned(), lifecycle));
-}
-
-/// The provider's registered lifecycle, else [`NoHomes`].
-pub(crate) fn lifecycle(provider: &str) -> Arc<dyn HomeLifecycle> {
-    let registered = with_lifecycles(|lifecycles| lifecycles.get(provider).cloned());
-    registered.unwrap_or_else(|| Arc::new(NoHomes))
-}
-
-/// Stops every provider's homes and waits for all, so the exit owner never ends the process
-/// before another provider's homes settled.
-pub(crate) async fn stop_all_and_join(reason: StopReason) {
-    let registered: Vec<_> = with_lifecycles(|lifecycles| lifecycles.values().cloned().collect());
-    let stops = registered
-        .iter()
-        .map(|lifecycle| lifecycle.stop_and_join(reason));
-    futures::future::join_all(stops).await;
+/// Owns every provider's cleanup task before returning its wait future.
+pub fn stop_all_and_join(
+    providers: Vec<Arc<dyn HomeLifecycle>>,
+    reason: StopReason,
+) -> impl Future<Output = Vec<Settled>> + Send {
+    let stops: Vec<_> = providers
+        .into_iter()
+        .map(|provider| tokio::spawn(async move { provider.stop_and_join(reason).await }))
+        .collect();
+    async move {
+        futures::future::join_all(stops)
+            .await
+            .into_iter()
+            .map(|stop| {
+                stop.unwrap_or_else(|error| {
+                    Settled::Stuck(format!("home cleanup ended abnormally: {error}"))
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

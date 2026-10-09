@@ -93,9 +93,9 @@ async fn a_channel_held_by_unavailable_delegation_posts_nothing() {
     let mut writer = harness.writer();
     harness.gate.acquired();
     let held = Err(Unavailable::MissingInstanceId);
-    home_availability::install("claude", held, || [CHANNEL].into());
+    let _held = home_availability::install("claude", held, || [CHANNEL].into());
     assert_eq!(writer.deliver(&piece("m0", "a")).await, Step::NoGateway);
-    home_availability::install("claude", Ok(()), Default::default);
+    let _available = home_availability::install("claude", Ok(()), Default::default);
     assert_eq!(writer.deliver(&piece("m0", "a")).await, Step::Done);
     assert_eq!(harness.port.posts(), ["a"]);
 }

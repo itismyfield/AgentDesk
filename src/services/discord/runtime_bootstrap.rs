@@ -200,7 +200,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let boot_config = crate::config::load_graceful();
     let homes = HomeSettings::of(&boot_config);
     // Judged before anything touches a delegated channel, so a misconfigured switch holds them.
-    install_home_availability(&provider, &homes, pg_pool.is_some());
+    let _home_availability = install_home_availability(&provider, &homes, pg_pool.is_some());
     let modules = boot_config.cluster.runtime_profile.modules();
     let voice_config = boot_config.voice;
     let voice_barge_in = Arc::new(if modules.voice {
@@ -516,21 +516,38 @@ impl HomeSettings {
 
 /// Records whether this provider's delegated homes can run; one that cannot holds every selected
 /// Herdr channel. With the switch off it returns before any read.
-fn install_home_availability(provider: &ProviderKind, settings: &HomeSettings, has_pool: bool) {
+fn install_home_availability(
+    provider: &ProviderKind,
+    settings: &HomeSettings,
+    has_pool: bool,
+) -> Option<crate::services::cluster::home_availability::Registration> {
     use crate::services::cluster::home_availability;
-    if settings.switch != Some(true) {
-        return;
-    }
-    let judged = home_availability::preflight(has_pool, settings.instance_id.as_deref());
-    home_availability::install(provider.as_str(), judged, selected_herdr_channels);
+    home_availability::install_enabled(
+        provider.as_str(),
+        settings.switch,
+        || home_availability::preflight(has_pool, settings.instance_id.as_deref()),
+        || selected_herdr_channels(provider),
+    )
 }
 
 /// The selected channels with a Herdr endpoint on any node: those a delegation may name.
-fn selected_herdr_channels() -> std::collections::BTreeSet<u64> {
+fn selected_herdr_channels(provider: &ProviderKind) -> std::collections::BTreeSet<u64> {
     use crate::services::tui_o::channel_policy::BootChannels;
     let read = |boot: Option<&BootChannels>| {
-        let configured =
-            |channel: &u64| crate::config::session_hosts::herdr_endpoint(*channel).is_some();
+        let configured = |channel: &u64| {
+            let kind = boot.and_then(|boot| boot.kind(*channel));
+            let ours = matches!(
+                (provider, kind),
+                (
+                    ProviderKind::Claude,
+                    Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
+                ) | (
+                    ProviderKind::Codex,
+                    Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
+                )
+            );
+            ours && crate::config::session_hosts::herdr_endpoint(*channel).is_some()
+        };
         let selected = boot.map(|boot| boot.selected().iter().copied().filter(configured));
         selected.map(Iterator::collect).unwrap_or_default()
     };
