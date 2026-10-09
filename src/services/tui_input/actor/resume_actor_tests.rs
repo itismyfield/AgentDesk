@@ -169,6 +169,195 @@ async fn fixture(new_source: bool, hook_only: bool) -> ResumeFixture {
     }
 }
 
+async fn queued_pair_fixture() -> ResumeFixture {
+    let mut fixture = fixture(true, false).await;
+    fixture
+        .ledger
+        .append_entry(
+            &Entry::Received {
+                key: 2,
+                input: json!({"text": "resume the second queued input"}),
+            },
+            &[],
+        )
+        .unwrap();
+    let mut old_actor = InputActor::attach(
+        fixture.world.binding.clone(),
+        fixture.old_tmux.pane(),
+        attach_evidence(&fixture.world.binding, "test-nonce"),
+    );
+    let fact = fixture.world.fact(open_turn());
+    assert_eq!(
+        old_actor
+            .step(&mut fixture.ledger, Some(&fact), fixture.now)
+            .await
+            .unwrap(),
+        Step::Moved(2, RowState::AwaitTurn)
+    );
+    let rows = fixture.ledger.rows().unwrap();
+    let frame = &rows
+        .row(2)
+        .unwrap()
+        .attempt
+        .as_ref()
+        .unwrap()
+        .rendered_prompt;
+    fixture
+        .world
+        .append(json!({"type":"queue-operation","operation":"enqueue","content":frame}));
+    assert_eq!(
+        old_actor
+            .step(&mut fixture.ledger, Some(&fact), fixture.now)
+            .await
+            .unwrap(),
+        Step::Blocked(1, RowState::Queued)
+    );
+    let bytes = fs::read(&fixture.world.transcript).unwrap();
+    for read in fixture.evidence.stable_prefixes.as_mut().unwrap() {
+        read.eof = bytes.len() as u64;
+        read.digest = hex::encode(Sha256::digest(&bytes));
+    }
+    fixture.actor = InputActor::attach(
+        fixture.binding.clone(),
+        pane_with_nonce(&fixture.new_tmux, NEW_NONCE),
+        attach_evidence(&fixture.binding, NEW_NONCE),
+    );
+    for key in [1, 2] {
+        assert_eq!(state_of(&fixture.ledger, key), RowState::Queued);
+        let rows = fixture.ledger.rows().unwrap();
+        let attempt = &rows.row(key).unwrap().attempts[0];
+        assert_eq!(attempt.source, fixture.world.binding.source);
+        assert_eq!(attempt.execution_nonce, "test-nonce");
+    }
+    assert_eq!(enter_count(&fixture.old_tmux), 2);
+    assert_eq!(enter_count(&fixture.new_tmux), 0);
+    fixture
+}
+
+async fn assert_queued_pair_recovery(out_of_order: bool) {
+    let mut fixture = queued_pair_fixture().await;
+    let wal = fixture.ledger.dir.join("wal.0.jsonl");
+    if out_of_order {
+        let before = fs::read(&wal).unwrap();
+        let result = fixture
+            .actor
+            .resume_queued(&mut fixture.ledger, 2, &fixture.evidence, fixture.now)
+            .unwrap();
+        assert!(matches!(
+            result,
+            Step::Blocked(2, RowState::Queued) | Step::Wait(_)
+        ));
+        assert_eq!(fs::read(&wal).unwrap(), before);
+        assert_eq!(state_of(&fixture.ledger, 2), RowState::Queued);
+        assert_eq!(enter_count(&fixture.new_tmux), 0);
+    }
+    assert_eq!(
+        fixture
+            .actor
+            .resume_queued(&mut fixture.ledger, 1, &fixture.evidence, fixture.now)
+            .unwrap(),
+        Step::Moved(1, RowState::AwaitTurn)
+    );
+    assert_eq!(enter_count(&fixture.new_tmux), 1);
+    if out_of_order {
+        let before = fs::read(&wal).unwrap();
+        let result = fixture
+            .actor
+            .resume_queued(&mut fixture.ledger, 2, &fixture.evidence, fixture.now)
+            .unwrap();
+        assert!(matches!(
+            result,
+            Step::Blocked(2, RowState::Queued) | Step::Wait(_)
+        ));
+        assert_eq!(fs::read(&wal).unwrap(), before);
+        assert_eq!(enter_count(&fixture.new_tmux), 1);
+    }
+    let rows = fixture.ledger.rows().unwrap();
+    let frame = &rows
+        .row(1)
+        .unwrap()
+        .attempt
+        .as_ref()
+        .unwrap()
+        .rendered_prompt;
+    append_to(
+        &fixture.binding.source.path,
+        &json!({"type":"queue-operation","operation":"enqueue","content":frame}),
+    );
+    let fact = ChannelFact {
+        binding: fixture.binding.clone(),
+        through: fs::metadata(&fixture.binding.source.path).unwrap().len(),
+        state: open_turn(),
+    };
+    let result = fixture
+        .actor
+        .step(&mut fixture.ledger, Some(&fact), fixture.now)
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        Step::Blocked(2, RowState::Queued) | Step::Wait(_)
+    ));
+    assert_eq!(state_of(&fixture.ledger, 1), RowState::Queued);
+    assert_eq!(state_of(&fixture.ledger, 2), RowState::Queued);
+    assert_eq!(enter_count(&fixture.new_tmux), 1);
+    assert_eq!(
+        fixture
+            .actor
+            .resume_queued(&mut fixture.ledger, 2, &fixture.evidence, fixture.now)
+            .unwrap(),
+        Step::Moved(2, RowState::AwaitTurn)
+    );
+    assert_eq!(enter_count(&fixture.new_tmux), 2);
+    let rows = fixture.ledger.rows().unwrap();
+    for key in [1, 2] {
+        let row = rows.row(key).unwrap();
+        assert!(!matches!(row.state, RowState::Held(_)));
+        assert_eq!(row.attempts.len(), 2);
+        assert_eq!(row.attempts[1].generation, 2);
+        assert_eq!(row.attempts[1].execution_nonce, NEW_NONCE);
+        assert_eq!(row.attempts[1].source, fixture.binding.source);
+        assert_eq!(
+            row.attempts
+                .iter()
+                .filter(|attempt| attempt.queue_end.is_some())
+                .count(),
+            1
+        );
+    }
+    drop(fixture.ledger);
+    let mut replay = Ledger::open(&fixture.world.runtime, CHANNEL).unwrap();
+    let mut restarted = InputActor::attach(
+        fixture.binding.clone(),
+        pane_with_nonce(&fixture.new_tmux, NEW_NONCE),
+        attach_evidence(&fixture.binding, NEW_NONCE),
+    );
+    let before = fs::read(&wal).unwrap();
+    for key in [1, 2] {
+        let state = state_of(&replay, key);
+        assert!(!matches!(state, RowState::Held(_)));
+        assert_eq!(
+            restarted
+                .resume_queued(&mut replay, key, &fixture.evidence, fixture.now)
+                .unwrap(),
+            Step::Blocked(key, state)
+        );
+        assert_eq!(replay.rows().unwrap().row(key).unwrap().attempts.len(), 2);
+    }
+    assert_eq!(fs::read(&wal).unwrap(), before);
+    assert_eq!(enter_count(&fixture.new_tmux), 2);
+}
+
+#[tokio::test]
+async fn resume_actor_two_old_queued_rows_survive_current_q_observation_and_replay() {
+    assert_queued_pair_recovery(false).await;
+}
+
+#[tokio::test]
+async fn resume_actor_two_old_queued_rows_wait_out_of_order_without_wal_changes() {
+    assert_queued_pair_recovery(true).await;
+}
+
 #[tokio::test]
 async fn resume_actor_verified_queue_ends_once_at_exact_boundaries_and_wal_replay() {
     for new_source in [false, true] {

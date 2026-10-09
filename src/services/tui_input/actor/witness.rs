@@ -247,10 +247,23 @@ pub(crate) fn scan_tracked(binding: &SourceBinding, rows: &Rows) -> Result<Track
     scan_source(binding, rows, false)
 }
 
-pub(super) fn scan_lineage(binding: &SourceBinding, rows: &Rows) -> Result<Tracked, String> {
+pub(super) enum LineageError {
+    CurrentIdentityChanged,
+    Unavailable,
+}
+
+pub(super) fn identity_changed(source: &SourceId) -> bool {
+    std::fs::metadata(&source.path).is_ok_and(|meta| {
+        crate::services::tui_o::shadow::capture::file_identity(&meta) != (source.dev, source.ino)
+    })
+}
+
+pub(super) fn scan_lineage(binding: &SourceBinding, rows: &Rows) -> Result<Tracked, LineageError> {
     let mut sources = vec![binding.source.clone()];
-    for (_, _, meta) in rows.attempts() {
-        if !sources.contains(&meta.source) {
+    for (_, open, meta) in rows.attempts() {
+        #[cfg(test)]
+        let open = open || super::super::transition::mutant("lineage_terminal_required");
+        if open && !sources.contains(&meta.source) {
             sources.push(meta.source.clone());
         }
     }
@@ -259,14 +272,27 @@ pub(super) fn scan_lineage(binding: &SourceBinding, rows: &Rows) -> Result<Track
         ..Tracked::default()
     };
     for source in sources {
+        let current = source == binding.source;
+        if current && identity_changed(&source) {
+            return Err(LineageError::CurrentIdentityChanged);
+        }
         let seen = scan_source(
             &SourceBinding {
-                source,
+                source: source.clone(),
                 ..binding.clone()
             },
             rows,
             true,
-        )?;
+        )
+        .map_err(|error| {
+            if current
+                && (identity_changed(&source) || error == "path no longer names the open file")
+            {
+                LineageError::CurrentIdentityChanged
+            } else {
+                LineageError::Unavailable
+            }
+        })?;
         all.complete &= seen.complete;
         all.witnesses.extend(seen.witnesses);
         all.closed.extend(seen.closed);

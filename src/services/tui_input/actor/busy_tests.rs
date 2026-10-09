@@ -404,3 +404,328 @@ async fn busy_off_legacy_tracked_retry_keeps_unaccepted() {
     assert_eq!(actor.pane().submitted, [rendered]);
     assert_eq!(ledger.rows().unwrap().row(1).unwrap().attempts.len(), 1);
 }
+
+async fn old_source_attempt(ledger: &mut Ledger, terminal: bool) -> World {
+    let old = World::new(ShadowProvider::Claude);
+    let mut actor = InputActor::attach(
+        old.binding.clone(),
+        FakePane::new(BUSY_EMPTY),
+        attach_proof(&old),
+    );
+    assert_eq!(
+        actor
+            .step(ledger, Some(&old.fact(open_turn())), Instant::now())
+            .await
+            .unwrap(),
+        Step::Moved(1, RowState::AwaitTurn)
+    );
+    if terminal {
+        ledger
+            .append_entry(
+                &Entry::Transition {
+                    key: 1,
+                    state: RowState::Done(DoneReason::Completed),
+                    attempt: None,
+                },
+                &[],
+            )
+            .unwrap();
+    }
+    old
+}
+
+#[tokio::test]
+async fn busy_terminal_source_missing_keeps_current_q_and_next_offer() {
+    let world = World::new(ShadowProvider::Claude);
+    let mut ledger = world.ledger(&[(1, "completed"), (2, "current"), (3, "next")]);
+    let old = old_source_attempt(&mut ledger, true).await;
+    let tmux = folded_tmux();
+    let mut actor = InputActor::attach(world.binding.clone(), tmux.pane(), attach_proof(&world));
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.fact(open_turn())), Instant::now())
+            .await
+            .unwrap(),
+        Step::Moved(2, RowState::AwaitTurn)
+    );
+    enqueue(&world, &sent_frame(&tmux));
+    fs::remove_file(&old.transcript).unwrap();
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.fact(open_turn())), Instant::now())
+            .await
+            .unwrap(),
+        Step::Moved(3, RowState::AwaitTurn)
+    );
+    let rows = ledger.rows().unwrap();
+    assert_eq!(
+        rows.row(1).unwrap().state,
+        RowState::Done(DoneReason::Completed)
+    );
+    assert_eq!(rows.row(1).unwrap().attempts.len(), 1);
+    assert_eq!(rows.row(2).unwrap().state, RowState::Queued);
+    assert!(rows.row(2).unwrap().witnesses.iter().any(|seen| {
+        seen.witness.kind == WitnessKind::Queued
+            && seen
+                .witness
+                .range
+                .as_ref()
+                .is_some_and(|range| range.source == world.binding.source)
+    }));
+    assert_eq!(enter_count(&tmux), 2);
+}
+
+#[tokio::test]
+async fn busy_terminal_source_missing_keeps_exact_watchdog() {
+    let world = World::new(ShadowProvider::Claude);
+    let mut ledger = world.ledger(&[(1, "completed"), (2, "current")]);
+    let old = old_source_attempt(&mut ledger, true).await;
+    let tmux = folded_tmux();
+    let mut actor = InputActor::attach(world.binding.clone(), tmux.pane(), attach_proof(&world));
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.fact(open_turn())), Instant::now())
+            .await
+            .unwrap(),
+        Step::Moved(2, RowState::AwaitTurn)
+    );
+    let entered = actor.entered_at();
+    fs::remove_file(&old.transcript).unwrap();
+    assert_eq!(
+        actor
+            .step(
+                &mut ledger,
+                Some(&world.fact(open_turn())),
+                entered + ACCEPT_WINDOW - Duration::from_nanos(1),
+            )
+            .await
+            .unwrap(),
+        Step::Wait("awaiting_input_witness")
+    );
+    assert_eq!(
+        actor
+            .step(
+                &mut ledger,
+                Some(&world.fact(open_turn())),
+                entered + ACCEPT_WINDOW,
+            )
+            .await
+            .unwrap(),
+        Step::Moved(2, RowState::Held(HeldReason::Ambiguous))
+    );
+    assert_eq!(enter_count(&tmux), 1);
+}
+
+#[tokio::test]
+async fn busy_open_old_source_missing_stays_fail_closed() {
+    let world = World::new(ShadowProvider::Claude);
+    let mut ledger = world.ledger(&[(1, "still open"), (2, "wait")]);
+    let old = old_source_attempt(&mut ledger, false).await;
+    fs::remove_file(&old.transcript).unwrap();
+    let tmux = folded_tmux();
+    let mut actor = InputActor::attach(world.binding.clone(), tmux.pane(), attach_proof(&world));
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.fact(open_turn())), Instant::now())
+            .await
+            .unwrap(),
+        Step::Wait("witness_scan")
+    );
+    assert_eq!(state_of(&ledger, 1), RowState::AwaitTurn);
+    assert_eq!(state_of(&ledger, 2), RowState::Received);
+    assert_eq!(enter_count(&tmux), 0);
+}
+
+fn replace_source(world: &World) -> PathBuf {
+    let saved = world.transcript.with_extension("original");
+    fs::rename(&world.transcript, &saved).unwrap();
+    fs::write(&world.transcript, "{\"type\":\"summary\"}\n").unwrap();
+    assert_ne!(
+        source_id_for("session", &world.transcript).unwrap(),
+        world.binding.source
+    );
+    saved
+}
+
+fn restore_source(world: &World, saved: &Path) {
+    fs::rename(saved, &world.transcript).unwrap();
+    assert_eq!(
+        source_id_for("session", &world.transcript).unwrap(),
+        world.binding.source
+    );
+}
+
+#[tokio::test]
+async fn busy_observed_current_source_drift_is_sticky_off() {
+    let world = World::new(ShadowProvider::Claude);
+    let tmux = folded_tmux();
+    let mut ledger = world.ledger(&[(1, "already entered"), (2, "wait after drift")]);
+    let mut actor = InputActor::attach(world.binding.clone(), tmux.pane(), attach_proof(&world));
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.fact(open_turn())), Instant::now())
+            .await
+            .unwrap(),
+        Step::Moved(1, RowState::AwaitTurn)
+    );
+    let saved = replace_source(&world);
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.fact(open_turn())), Instant::now())
+            .await
+            .unwrap(),
+        Step::Wait("witness_scan")
+    );
+    restore_source(&world, &saved);
+    enqueue(&world, &sent_frame(&tmux));
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.fact(open_turn())), Instant::now())
+            .await
+            .unwrap(),
+        Step::Blocked(1, RowState::Queued)
+    );
+    assert_eq!(state_of(&ledger, 2), RowState::Received);
+    assert_eq!(enter_count(&tmux), 1);
+}
+
+struct ReplacingCapturePane {
+    inner: FakePane,
+    source: PathBuf,
+    saved: PathBuf,
+    replace: bool,
+}
+
+impl Pane for ReplacingCapturePane {
+    fn execution_nonce(&self) -> Option<String> {
+        self.inner.execution_nonce()
+    }
+
+    fn capture(&mut self) -> Result<String, String> {
+        if self.replace {
+            self.replace = false;
+            fs::rename(&self.source, &self.saved).unwrap();
+            fs::write(&self.source, "{\"type\":\"summary\"}\n").unwrap();
+        }
+        self.inner.capture()
+    }
+
+    fn submit(&mut self, text: &str) -> SendOutcome {
+        self.inner.submit(text)
+    }
+}
+
+#[tokio::test]
+async fn busy_offer_current_source_drift_is_sticky_off() {
+    let world = World::new(ShadowProvider::Claude);
+    let saved = world.transcript.with_extension("original");
+    let pane = ReplacingCapturePane {
+        inner: FakePane::new(BUSY_EMPTY),
+        source: world.transcript.clone(),
+        saved: saved.clone(),
+        replace: true,
+    };
+    let mut ledger = world.ledger(&[(1, "wait after capture drift")]);
+    let mut actor = InputActor::attach(world.binding.clone(), pane, attach_proof(&world));
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.fact(open_turn())), Instant::now())
+            .await
+            .unwrap(),
+        Step::Wait("transcript_unavailable")
+    );
+    assert_ne!(
+        source_id_for("session", &world.transcript).unwrap(),
+        world.binding.source
+    );
+    assert_eq!(state_of(&ledger, 1), RowState::Received);
+    assert!(ledger.rows().unwrap().row(1).unwrap().attempts.is_empty());
+    restore_source(&world, &saved);
+    assert_eq!(
+        actor
+            .step(&mut ledger, Some(&world.fact(open_turn())), Instant::now())
+            .await
+            .unwrap(),
+        Step::Wait("turn_not_idle")
+    );
+    assert!(actor.pane().inner.submitted.is_empty());
+}
+
+struct PostIntentNoncePane {
+    inner: FakePane,
+    wal: PathBuf,
+    armed: std::rc::Rc<std::cell::Cell<bool>>,
+    observed: std::rc::Rc<std::cell::Cell<bool>>,
+    failure: Option<String>,
+}
+
+impl Pane for PostIntentNoncePane {
+    fn execution_nonce(&self) -> Option<String> {
+        let intent = fs::read_to_string(&self.wal).unwrap().lines().any(|line| {
+            let record: Value = serde_json::from_str(line).unwrap();
+            record["payload"]["key"] == 1 && record["payload"]["state"]["state"] == "injecting"
+        });
+        if self.armed.get() && intent {
+            self.observed.set(true);
+            self.failure.clone()
+        } else {
+            self.inner.execution_nonce()
+        }
+    }
+
+    fn capture(&mut self) -> Result<String, String> {
+        self.inner.capture()
+    }
+
+    fn submit(&mut self, text: &str) -> SendOutcome {
+        self.inner.submit(text)
+    }
+}
+
+#[tokio::test]
+async fn busy_post_intent_nonce_drift_and_unknown_are_sticky_off() {
+    for failure in [Some("other-nonce".into()), None] {
+        let world = World::new(ShadowProvider::Claude);
+        let mut ledger = world.ledger(&[(1, "intent only"), (2, "wait after nonce drift")]);
+        let armed = std::rc::Rc::new(std::cell::Cell::new(true));
+        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let pane = PostIntentNoncePane {
+            inner: FakePane::new(BUSY_EMPTY),
+            wal: world.runtime.join("input_ledger/77/wal.0.jsonl"),
+            armed: armed.clone(),
+            observed: observed.clone(),
+            failure,
+        };
+        let mut actor = InputActor::attach(world.binding.clone(), pane, attach_proof(&world));
+        assert_eq!(
+            actor
+                .step(&mut ledger, Some(&world.fact(open_turn())), Instant::now())
+                .await
+                .unwrap(),
+            Step::Moved(1, RowState::Held(HeldReason::Ambiguous))
+        );
+        assert!(observed.get());
+        assert_eq!(ledger.rows().unwrap().row(1).unwrap().attempts.len(), 1);
+        assert!(actor.pane().inner.submitted.is_empty());
+        armed.set(false);
+        ledger
+            .append_entry(
+                &Entry::Transition {
+                    key: 1,
+                    state: RowState::Done(DoneReason::Completed),
+                    attempt: None,
+                },
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            actor
+                .step(&mut ledger, Some(&world.fact(open_turn())), Instant::now())
+                .await
+                .unwrap(),
+            Step::Wait("turn_not_idle")
+        );
+        assert_eq!(state_of(&ledger, 2), RowState::Received);
+        assert!(actor.pane().inner.submitted.is_empty());
+    }
+}

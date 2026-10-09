@@ -119,6 +119,20 @@ impl<P: Pane> InputActor<P> {
         if row.received_seq.is_none() {
             return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
         }
+        // An old durable queue waits for explicit restart proofs, never the ordinary offer path.
+        let awaiting_resume = busy
+            && row.state == RowState::Queued
+            && has_current_q(&row)
+            && row.attempts.last().is_some_and(|meta| {
+                meta.source != self.binding.source
+                    || Some(meta.execution_nonce.as_str()) != nonce.as_deref()
+            });
+        #[cfg(test)]
+        let awaiting_resume =
+            awaiting_resume && !super::transition::mutant("resume_old_nonce_held");
+        if awaiting_resume {
+            return Ok(Step::Blocked(key, row.state));
+        }
         if row.attempt.as_ref().is_some_and(|attempt| {
             attempt.binding != self.binding
                 || self.pane.binding_nonce(&self.binding).as_deref()
@@ -158,15 +172,19 @@ impl<P: Pane> InputActor<P> {
 
     /// Records every registered witness and matched close before any decision. Nothing else runs
     /// until the read reached the source's end, and a failed append ends the step.
-    fn observe(&self, ledger: &mut Ledger) -> io::Result<Option<(Rows, bool)>> {
+    fn observe(&mut self, ledger: &mut Ledger) -> io::Result<Option<(Rows, bool)>> {
         let rows = ledger.rows()?;
         if !rows.open_rows().any(|(_, row)| !row.attempts.is_empty()) {
             return Ok(Some((rows, false)));
         }
         let seen = if self.capability.enabled() {
-            witness::scan_lineage(&self.binding, &rows)
+            witness::scan_lineage(&self.binding, &rows).map_err(|error| {
+                if matches!(error, witness::LineageError::CurrentIdentityChanged) {
+                    invalidate(&mut self.capability, "drift_observe_keep");
+                }
+            })
         } else {
-            witness::scan_tracked(&self.binding, &rows)
+            witness::scan_tracked(&self.binding, &rows).map_err(|_| ())
         };
         let Ok(seen) = seen else {
             return Ok(None);
@@ -277,6 +295,9 @@ impl<P: Pane> InputActor<P> {
                 PaneVerdict::Ready => *unready_since = None,
             }
             let Some(execution_nonce) = pane.binding_nonce(&binding) else {
+                if busy {
+                    invalidate(capability, "drift_nonce_keep");
+                }
                 return Ok(Step::Wait("execution_unknown"));
             };
             if busy && !capability.validate(&binding, Some(&execution_nonce)) {
@@ -290,8 +311,14 @@ impl<P: Pane> InputActor<P> {
                     pane::ready(binding.provider, &capture, busy) == PaneVerdict::Ready
                 });
                 let rows = ledger.rows()?;
-                let Ok(seen) = witness::scan_lineage(&binding, &rows) else {
-                    return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+                let seen = match witness::scan_lineage(&binding, &rows) {
+                    Ok(seen) => seen,
+                    Err(error) => {
+                        if matches!(error, witness::LineageError::CurrentIdentityChanged) {
+                            invalidate(capability, "drift_observe_keep");
+                        }
+                        return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+                    }
                 };
                 let complete = seen.complete && seen.altered.is_empty() && seen.foreign == 0;
                 for (key, witness) in seen.witnesses {
@@ -312,7 +339,10 @@ impl<P: Pane> InputActor<P> {
             let Ok(eof) = std::fs::metadata(&source.path).map(|meta| meta.len()) else {
                 return Ok(Step::Wait("transcript_unavailable"));
             };
-            if SourceCapture::open(source, eof).is_err() {
+            if SourceCapture::open(source.clone(), eof).is_err() {
+                if witness::identity_changed(&source) {
+                    invalidate(capability, "drift_offer_keep");
+                }
                 return Ok(Step::Wait("transcript_unavailable"));
             }
             let evidence = AttemptEvidence {
@@ -360,6 +390,7 @@ impl<P: Pane> InputActor<P> {
                 )?;
             }
             if pane.binding_nonce(&binding).as_deref() != Some(&execution_nonce) {
+                invalidate(capability, "drift_nonce_keep");
                 return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
             }
             let state = match pane.submit_for_binding(&text, &binding) {
@@ -456,10 +487,15 @@ impl<P: Pane> InputActor<P> {
             return Ok(Step::Blocked(key, row.state));
         }
         let nonce = self.pane.binding_nonce(&self.binding);
-        if !self.capability.validate(&self.binding, nonce.as_deref())
-            || busy_head(&rows, &self.binding, nonce.as_deref()).map(|r| r.0) != Some(key)
-        {
+        if !self.capability.validate(&self.binding, nonce.as_deref()) {
             return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+        }
+        if busy_head(&rows, &self.binding, nonce.as_deref()).map(|r| r.0) != Some(key) {
+            #[cfg(test)]
+            if super::transition::mutant("resume_not_head_held") {
+                return set(ledger, key, RowState::Held(HeldReason::Ambiguous));
+            }
+            return Ok(Step::Blocked(key, row.state));
         }
         self.offer(
             ledger,
@@ -620,6 +656,14 @@ fn has_current_q(row: &Row) -> bool {
                 && seen.witness.kind == WitnessKind::Queued
         })
     })
+}
+
+fn invalidate(capability: &mut capability::CapabilitySnapshot, _mutant: &str) {
+    #[cfg(test)]
+    if super::transition::mutant(_mutant) {
+        return;
+    }
+    capability.invalidate();
 }
 
 fn set(ledger: &mut Ledger, key: u64, state: RowState) -> io::Result<Step> {

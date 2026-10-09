@@ -10654,8 +10654,14 @@ services::tui_input::actor_tests::busy::busy_actor_canonicalizes_exact_transmitt
 services::tui_input::actor_tests::busy::busy_hook_hint_does_not_offer_younger_row
 services::tui_input::actor_tests::busy::busy_inverted_q_u_rows_keep_queued_and_running_distinct
 services::tui_input::actor_tests::busy::busy_no_token_modal_results_held_at_exact_watchdog_boundary
+services::tui_input::actor_tests::busy::busy_observed_current_source_drift_is_sticky_off
 services::tui_input::actor_tests::busy::busy_off_legacy_tracked_retry_keeps_unaccepted
 services::tui_input::actor_tests::busy::busy_off_preserves_turn_not_idle_without_tmux_calls
+services::tui_input::actor_tests::busy::busy_offer_current_source_drift_is_sticky_off
+services::tui_input::actor_tests::busy::busy_open_old_source_missing_stays_fail_closed
+services::tui_input::actor_tests::busy::busy_post_intent_nonce_drift_and_unknown_are_sticky_off
+services::tui_input::actor_tests::busy::busy_terminal_source_missing_keeps_current_q_and_next_offer
+services::tui_input::actor_tests::busy::busy_terminal_source_missing_keeps_exact_watchdog
 services::tui_input::actor_tests::busy::busy_three_rows_q_only_every_enter_once
 services::tui_input::actor_tests::completion_holds_after_foreign_input_and_closes_on_its_own_named_abort
 services::tui_input::actor_tests::exact_source_frame_and_restart_witness_survive_only_ordered_closer
@@ -10672,6 +10678,8 @@ services::tui_input::actor_tests::resume_actor_tests::resume_actor_hook_only_is_
 services::tui_input::actor_tests::resume_actor_tests::resume_actor_old_q_does_not_mask_new_hook_only_watchdog
 services::tui_input::actor_tests::resume_actor_tests::resume_actor_partial_tail_and_stale_digest_fail_closed
 services::tui_input::actor_tests::resume_actor_tests::resume_actor_refreshes_old_and_new_source_model_witnesses_before_enter
+services::tui_input::actor_tests::resume_actor_tests::resume_actor_two_old_queued_rows_survive_current_q_observation_and_replay
+services::tui_input::actor_tests::resume_actor_tests::resume_actor_two_old_queued_rows_wait_out_of_order_without_wal_changes
 services::tui_input::actor_tests::resume_actor_tests::resume_actor_verified_queue_ends_once_at_exact_boundaries_and_wal_replay
 services::tui_input::actor_tests::slow_success_starts_accept_window_after_enter_not_offer_time
 services::tui_input::actor_tests::tracked::a_failed_append_inside_a_merged_record_resumes_without_another_enter
