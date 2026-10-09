@@ -29,8 +29,11 @@ sccache --show-stats   # should report a fresh cache (zero hits / zero misses)
 On macOS the Homebrew binary lives at `/opt/homebrew/bin/sccache`. The helper
 `setup_sccache_env` in `scripts/_defaults.sh` prepends that directory to `PATH`
 when the binary is present but the directory is not already on `PATH`.
-`apply_sccache_env` in `scripts/build_token.py` (§2.4) applies the same prepend
-under the same condition, to the child environment it builds.
+`apply_sccache_env` in `scripts/build_token.py` (§2.4) uses that same discovery
+condition after checking caller wrappers and the opt-out switch. It commits the
+candidate `PATH` to the child only after resolving sccache and creating the cache
+directory. The shell helper exports the prepend immediately and keeps it even
+if later lookup or directory creation fails.
 
 ---
 
@@ -88,6 +91,7 @@ multi-GB `target/debug/incremental` per-worktree hit is pure waste.
 | `SCCACHE_CACHE_SIZE` | `40G` | Adjustable local disk-cache ceiling |
 | `SCCACHE_IDLE_TIMEOUT` | `0` | Disable idle daemon exit; retain counters between builds |
 | `RUSTC_WRAPPER` | resolved `sccache` binary | Signals Cargo to wrap rustc |
+| `PATH` | inherited path, with `/opt/homebrew/bin` conditionally prepended (§1) | Exported when that discovery branch runs, before later success/failure |
 
 Callers:
 
@@ -112,7 +116,7 @@ quiet build window is needed to apply changed settings to that daemon; merging
 this change alone does not restart it. Bare Cargo with a manually set wrapper
 uses inherited settings or sccache's own defaults (10G and 600s), not this helper.
 
-If sccache is not installed, both release scripts **print a warning and continue** with
+If sccache is not installed, both release scripts continue with
 `RUSTC_WRAPPER=""` + `CARGO_BUILD_RUSTC_WRAPPER=""` explicitly cleared (so the
 `.cargo/config.toml` value does not leak through and cause a hard-fail).
 
@@ -151,8 +155,16 @@ unasked, so an existing caller decision stands. If either `RUSTC_WRAPPER` or
 `CARGO_BUILD_RUSTC_WRAPPER` is present — **empty string included**, that being Cargo's
 own spelling of "no wrapper" and the pair §2.2 has the release scripts clear — it
 changes nothing: it does not fill missing size or idle settings for an existing
-wrapper, even `RUSTC_WRAPPER=sccache`. That also makes it a no-op on CI lanes whose workflows set
-`RUSTC_WRAPPER` at the `env:` level (§2.3).
+wrapper, even `RUSTC_WRAPPER=sccache`. This guard depends on key presence, including
+values exported through `$GITHUB_ENV`, rather than where a workflow sets them.
+No checked-in workflow invokes `build_token.py` directly. The release packaging
+step (`.github/workflows/release.yml:147`) reaches it through
+`scripts/build-release.sh:79`, after the shell sets `RUSTC_WRAPPER` via
+`setup_sccache_env` (`scripts/_defaults.sh:47`) or clears both wrapper keys
+(`scripts/build-release.sh:72-75`, §2.2). POSIX activation there is therefore a
+no-op under the key-presence guard (`scripts/build_token.py:605-607`); Windows
+returns before activation (`scripts/build_token.py:640-650`). The CI workflows
+in §2.3 handle activation and clearing through workflow env and steps.
 
 | Variable | Effect |
 |----------|--------|
@@ -160,6 +172,50 @@ wrapper, even `RUSTC_WRAPPER=sccache`. That also makes it a no-op on CI lanes wh
 
 No sccache on `PATH`, or a cache directory that cannot be created, leaves the child
 environment byte-identical: the cache is dropped, never the build.
+
+### 2.5 Repository setter inventory
+
+To repeat the census, run this from the repository root:
+
+```bash
+git grep -n -E 'RUSTC_WRAPPER|CARGO_BUILD_RUSTC_WRAPPER|rustc-wrapper|SCCACHE_' -- . \
+  ':!agentdesk.yaml' ':!launchd.env' ':!**/agentdesk.yaml' ':!**/launchd.env'
+```
+
+The scope is all tracked repository files, including `.cargo/`, `scripts/`,
+`.github/`, `justfile`, `Cargo.toml`, `src/`, `tests/`, and documentation; local
+runtime settings named `agentdesk.yaml` or `launchd.env` are excluded. Review
+matches for assignments, `$GITHUB_ENV` writes, dictionary updates, and unsets,
+including indirect updates through a key list. `justfile` and `Cargo.toml` have
+no matching setters. These are the configuration, build, workflow, and build
+harness assignment/clearing sites:
+
+| Location | Assignment or clearing |
+|----------|------------------------|
+| `.cargo/config.toml:27` | `rustc-wrapper = ""`: Cargo configuration baseline, no wrapper (§2.1). |
+| `scripts/_defaults.sh:33`, `scripts/_defaults.sh:44-47` | Conditional Homebrew `PATH` prepend; exports `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, `SCCACHE_IDLE_TIMEOUT`, and resolved `RUSTC_WRAPPER` (§2.2). |
+| `scripts/build-release.sh:71-74` | Defaults `SCCACHE_CACHE_SIZE` to `40G`; helper failure exports empty `RUSTC_WRAPPER` and `CARGO_BUILD_RUSTC_WRAPPER`. |
+| `scripts/deploy-release.sh:2128-2138` | Same size default and empty wrapper pair on helper failure. |
+| `scripts/build_token.py:622-631` | Eligible POSIX child only: writes `PATH`, `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, `SCCACHE_IDLE_TIMEOUT`, and `RUSTC_WRAPPER` (§2.4). |
+| `scripts/ci/run-writer-namespace-windows-targets.sh:8` | Defaults `SCCACHE_IDLE_TIMEOUT` to `0`, preserving nonempty overrides. |
+| `.github/workflows/ci-main.yml:22-25` | Workflow env: `RUSTC_WRAPPER=sccache`, size `10G`, GHA enabled, GHA mode `READ_WRITE`. |
+| `.github/workflows/ci-nightly.yml:20-23` | Same workflow env defaults as `ci-main.yml`. |
+| `.github/workflows/ci-pr.yml:23-28` | Same wrapper, size, and GHA enablement; GHA mode is `READ_ONLY` for PRs and `READ_WRITE` otherwise. |
+| `.github/workflows/ci-pr.yml:919-920`, `.github/workflows/ci-pr.yml:997-998` | Hosted macOS jobs write empty `RUSTC_WRAPPER` and `SCCACHE_GHA_ENABLED` to `$GITHUB_ENV`. |
+| `.github/workflows/ci-nightly.yml:108-109` | Hosted macOS job writes the same empty pair to `$GITHUB_ENV`. |
+| `.github/workflows/ci-macos-trusted.yml:54-55` | Hosted macOS job writes the same empty pair to `$GITHUB_ENV`. |
+| `.github/workflows/ci-pr.yml:2010` | H2 module-map step env sets `RUSTC_WRAPPER=""`. |
+| `scripts/ci/h2_env.py:12-13`, `scripts/ci/h2_env.py:42`, `scripts/ci/h2_env.py:59-60` | H2 child env and emitted shell commands clear all four `WRAPPERS` keys, including `RUSTC_WRAPPER` and `CARGO_BUILD_RUSTC_WRAPPER`. |
+| `scripts/run_relay_authority_mutations.sh:204` | Mutation build command unsets `RUSTC_WRAPPER` with `env -u`. |
+
+Search hits in `tests/` and the dry observer's fixture environment
+(`scripts/check_release_token_wiring.py:67-68`) isolate test children; they are
+not build defaults. `scripts/check-ci-runner-hardening.sh` validates expected
+workflow env rather than setting it. `scripts/ci/h2_session.py:100` reads Cargo
+configuration, and `scripts/install.sh` calls the shared helper (§2.2) without
+its own wrapper assignment. Comments and documentation are not setters. The
+Mozilla action's installed binary and runtime-provided cache environment
+(§2.3) are outside this census of checked-in assignments.
 
 ---
 

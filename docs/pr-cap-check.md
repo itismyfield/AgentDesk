@@ -26,7 +26,8 @@ The required Script checks runner invokes the cap unconditionally after its
 protected aggregate. `PR_CAP_CI=1` reads the actual head and declared base SHA
 from `GITHUB_EVENT_PATH`; the synthetic merge SHA is not the measurement head.
 Stacked PRs therefore count the child delta, not their parent's changes. Both
-commits must already exist in the checkout (`fetch-depth: 0`).
+commits must already exist in the checkout (`fetch-depth: 0`); CI does not
+fetch unrelated `origin/main`. Local mode still requires the fresh fetch.
 
 `CAP: PASS` means both production limits passed. A measured violation prints
 `CAP: FAIL` and exits nonzero unless explicitly advisory or exempt. Binary
@@ -41,9 +42,17 @@ A PR body may contain one nonblank, column-zero line:
 PR-CAP-EXEMPT: concrete reason this change cannot be split safely
 ```
 
-Multiple reason lines fail. An empty reason grants nothing. This annotation
+CRLF and CR line endings are normalized. Fenced code, HTML comments and
+quoted lines do not grant exemptions. Separate an exemption after a quotation
+with a blank line so it is not a lazy quote continuation. Multiple reason lines
+fail only when a measured violation is present. An empty reason grants nothing. This annotation
 permits only a measured cap violation, and prints `CAP: EXEMPT`; it is not a
-clean PASS. Reviewers must assess the reason and scope.
+clean PASS. Reviewers must assess the reason and scope. Advisory, disabled and
+exempt results emit a GitHub warning and step summary.
+
+After editing the body or changing the base branch, push a new commit or
+close/reopen the PR to obtain a fresh event and measurement. Re-running an old
+run reuses its original payload. The current workflow does not run on `edited`.
 
 Repository variable `PR_CAP_MODE` selects `enforce` (default), `report-only`
 (measure and report violations without blocking), or `off` (explicit DISABLED,
@@ -68,9 +77,12 @@ head/stacked-base selection. The canonical-copy SHA256 is pinned in the suite;
 recent landed PR outputs were also compared with the external skill producer.
 
 The copied producer uses line-oriented Git numstat and `--no-renames`: a rename
-can count both old and new production paths. Git-quoted tab/newline filenames
-are not a NUL-safe contract. Comment/test classification is lexical, not a Rust
-parser, and the producer treats `git show` failures as empty content. These
+can count both old and new production paths. Git-quoted paths, including non-ASCII and
+tab/newline filenames, are not reliably counted. Lockfiles and the generated
+`scripts/pg_test_lane_manifest.txt` and
+`migrations/postgres/immutable-checksums.json` still consume the budget.
+Comment/test classification is lexical, not a Rust parser, and the producer
+treats `git show` failures as empty content. These
 canonical limitations were preserved rather than silently changing campaign
 measurement. The repository and skill copies must be reconciled by the
 coordinator in a follow-up; changes need parity evidence and a reviewed policy.

@@ -3,6 +3,8 @@
 
 mod inject;
 #[cfg(all(test, unix))]
+mod inject_codex_tests;
+#[cfg(all(test, unix))]
 pub(crate) mod inject_tests;
 
 use std::sync::Arc;

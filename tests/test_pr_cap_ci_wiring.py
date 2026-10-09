@@ -12,7 +12,7 @@ def validate(document):
     job = document["jobs"]["scripts"]
     steps = job["steps"]
     caps = [s for s in steps if s.get("name") == STEP["name"]]
-    return caps == [STEP] and not any(k in job for k in ("if", "continue-on-error")) and steps.index(STEP) > next(i for i, s in enumerate(steps) if s.get("name") == "Run script checks")
+    return caps == [STEP] and not any(k in job for k in ("if", "continue-on-error")) and steps.index(STEP) == next(i for i, s in enumerate(steps) if s.get("name") == "Run script checks") + 1
 
 
 class CapWiringTest(unittest.TestCase):
@@ -33,4 +33,10 @@ class CapWiringTest(unittest.TestCase):
         steps.remove(STEP)
         self.assertFalse(validate(document))
         steps.insert(0, STEP)
+        self.assertFalse(validate(document))
+
+    def test_interstitial_environment_writer_fails(self):
+        document = copy.deepcopy(self.document)
+        steps = document["jobs"]["scripts"]["steps"]
+        steps.insert(steps.index(STEP), {"run": 'echo PR_CAP_CI=0 >> "$GITHUB_ENV"'})
         self.assertFalse(validate(document))

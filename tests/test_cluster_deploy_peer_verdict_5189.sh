@@ -88,7 +88,7 @@ esac
 # single peer — #5189's own defect on a second path. The window is seconds today and
 # grows to the 10-25 minutes a peer leg takes once peers deploy in the ssh foreground.
 marker_line="$(grep -n '^echo "═══ Deploy Complete ═══"$' "$DEPLOY_SH" | head -1 | cut -d: -f1)"
-cluster_line="$(grep -n '^    _deploy_to_all_peers "\$@"$' "$DEPLOY_SH" | head -1 | cut -d: -f1)"
+cluster_line="$(grep -n '^_finish_cluster_stage "\$@" || exit 1$' "$DEPLOY_SH" | head -1 | cut -d: -f1)"
 if [ -z "$marker_line" ] || [ -z "$cluster_line" ]; then
     fail_test "could not locate the terminal marker echo and the cluster-deploy call in $DEPLOY_SH"
 elif [ "$marker_line" -lt "$cluster_line" ]; then

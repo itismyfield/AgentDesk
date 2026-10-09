@@ -598,21 +598,8 @@ def run_protected(command: Sequence[str], env: Mapping[str, str], supervisor: _S
             child.wait()
 
 
-# sccache opt-in for campaign cargo, which reaches cargo only through here: a shell
-# export of RUSTC_WRAPPER dies with the batch, and .cargo/config.toml ships
-# `rustc-wrapper = ""`, so the environment is the only switch. The probe order and the
-# /opt/homebrew/bin, $HOME/.cache/sccache, 40G and 0 literals are copied from
-# `setup_sccache_env` (scripts/_defaults.sh:25) -- a bash function and a dict cannot
-# share an implementation -- so those four defaults move in both places or neither.
-# Two rules deliberately do NOT mirror it; do not "fix" them into agreement.
-# (1) Precedence. setup_sccache_env is imperative -- build-release.sh, deploy-release.sh
-# and install.sh call it to turn sccache on, so overwriting RUSTC_WRAPPER is the point
-# of the call. This is ambient, so a caller decision stands, "" included: env beats
-# .cargo/config.toml and "" is that file's own "no wrapper", which the release scripts
-# export paired with CARGO_BUILD_RUSTC_WRAPPER. Both keys are therefore honoured, which
-# also makes this a no-op under CI, whose workflows set RUSTC_WRAPPER at the `env:`
-# level. (2) An unusable cache dir: the shell exports first and leaks mkdir's exit code,
-# while here nothing is written at all. POSIX only; see docs/ci/sccache-setup.md 2.4.
+# Match shell discovery/defaults for eligible POSIX children, preserving caller wrappers.
+# Commit changes only after cache creation succeeds; see docs/ci/sccache-setup.md 2.4.
 def apply_sccache_env(env: dict[str, str]) -> None:
     """Enable sccache for the child when resolvable; otherwise change nothing."""
     if any(key in env for key in _WRAPPER_ENV_KEYS) or env.get(

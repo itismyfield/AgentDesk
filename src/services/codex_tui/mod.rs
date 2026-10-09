@@ -1,3 +1,4 @@
+pub(crate) mod busy_inject;
 pub(crate) mod canary;
 pub(crate) mod host_input;
 pub mod input;
