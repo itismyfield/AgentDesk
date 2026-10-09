@@ -436,6 +436,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/rotation_tests.rs",
         "src/services/tui_o/writer/recovery_tests.rs",
         "src/services/tui_o/writer/renumber_tests.rs",
+        "src/services/tui_o/writer/source_identity_tests.rs",
         "src/services/tui_input/actor_tests.rs",
         "src/services/tui_input/bounded_tmux_tests.rs",
         "src/services/tui_input/durability_tests.rs",
