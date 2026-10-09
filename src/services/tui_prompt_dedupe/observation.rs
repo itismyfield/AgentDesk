@@ -270,10 +270,11 @@ fn observe_prompt_candidates_by_tmux_inner(
     match claim_injected_steer(&provider, tmux_session_name, &candidates, native_turn) {
         Some(Claim::Deferred) => return PromptObservation::InjectedDeferred,
         Some(Claim::Joined { first }) => {
+            // Every observer's entry id is kept, so a rescan after the ledger expires stays quiet.
+            if let Some(entry_id) = entry_id {
+                record_relayed_entry_id(&provider, tmux_session_name, entry_id);
+            }
             if first {
-                if let Some(entry_id) = entry_id {
-                    record_relayed_entry_id(&provider, tmux_session_name, entry_id);
-                }
                 let _ = take_or_record_recent_observed_prompt(
                     &provider,
                     tmux_session_name,

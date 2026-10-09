@@ -1,18 +1,26 @@
 use super::injected_steer::INJECTED_STEER_TTL;
 use super::*;
 
-/// Moves the session's ledger entries past their lifetime; other state is never reset, since
-/// tests outside this lock keep runtime bindings in it.
+/// Moves the session's ledger and recent prompts past their lifetimes; other state is never
+/// reset, since tests outside this lock keep runtime bindings in it.
 fn expire_ledger(tmux: &str) {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     let key = PromptKey::new("codex", tmux);
-    for entry in state
+    let ledger = state
         .injected_steer_by_tmux
         .get_mut(&key)
         .into_iter()
-        .flatten()
-    {
+        .flatten();
+    for entry in ledger {
         entry.recorded_at = Instant::now() - INJECTED_STEER_TTL - Duration::from_secs(1);
+    }
+    let recent = state
+        .recent_observed_by_tmux
+        .get_mut(&key)
+        .into_iter()
+        .flatten();
+    for entry in recent {
+        entry.recorded_at = Instant::now() - RECENT_OBSERVED_TTL - Duration::from_secs(1);
     }
 }
 
@@ -162,4 +170,22 @@ fn the_ledger_is_bounded_and_forgets_into_the_ordinary_path() {
         published: 1,
     };
     assert_eq!(late, direct);
+}
+
+/// A hook may settle the input before the scanner sees its rollout row; the row's entry id is
+/// still kept, so a rescan after the ledger and recent prompts expire publishes nothing.
+#[test]
+fn a_rollout_row_seen_after_the_hook_is_still_known_once_the_ledger_forgets() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmux = "AgentDesk-codex-injected-hook-first";
+    assert!(register(tmux, "dddd0001", "t1"));
+    let prompt = frame("dddd0001");
+    let steer = quiet(PromptObservation::InjectedSteer);
+    assert_eq!(observe(tmux, &prompt, None, Some("t1")), steer);
+    assert_eq!(observe(tmux, &prompt, Some("e1"), Some("t1")), steer);
+    expire_ledger(tmux);
+    let replayed = quiet(PromptObservation::SuppressedReplayedEntry);
+    assert_eq!(observe(tmux, &prompt, Some("e1"), Some("t1")), replayed);
 }
