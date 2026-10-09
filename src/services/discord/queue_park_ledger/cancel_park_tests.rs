@@ -670,8 +670,9 @@ async fn dequeued_then_represerved_source_remains_waiting() {
     if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
         return;
     }
-    let root = isolated_agentdesk_root();
-    let config = root.1.path().join("park-fixture.yml");
+    let root = tempfile::TempDir::new().expect("isolated queue park root");
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let config = root.path().join("park-fixture.yml");
     std::fs::write(
         &config,
         "server: {}\ndata: {dir: data}\nmemory: {backend: file}\n",
@@ -680,7 +681,7 @@ async fn dequeued_then_represerved_source_remains_waiting() {
     let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
     let _config = set("AGENTDESK_CONFIG", &config);
     let _routing = set("ADK_INTAKE_ROUTING_MODE", std::path::Path::new("disabled"));
-    let tmux = root.1.path().join("tmux");
+    let tmux = root.path().join("tmux");
     std::fs::write(
         &tmux,
         "#!/bin/sh\n[ \"$1\" = -u ] && shift\ncase \"$1\" in\n-V) echo 'tmux 3.5';;\nhas-session) exit 0;;\nlist-panes) echo 0;;\ncapture-pane) echo 'Thinking...';;\n*) exit 1;;\nesac\n",
@@ -688,7 +689,7 @@ async fn dequeued_then_represerved_source_remains_waiting() {
     .expect("busy hosted tmux stand-in");
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut paths = vec![root.1.path().to_path_buf()];
+    let mut paths = vec![root.path().to_path_buf()];
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
@@ -708,7 +709,7 @@ async fn dequeued_then_represerved_source_remains_waiting() {
         &shared,
         &ProviderKind::Claude,
         channel,
-        root.1.path().to_str().unwrap(),
+        root.path().to_str().unwrap(),
         session,
     )
     .await;
@@ -720,7 +721,7 @@ async fn dequeued_then_represerved_source_remains_waiting() {
         .get_mut(&channel)
         .unwrap()
         .channel_name = Some(channel_name.into());
-    let output = root.1.path().join("busy.jsonl");
+    let output = root.path().join("busy.jsonl");
     std::fs::write(
         &output,
         "{\"type\":\"user\",\"message\":{\"content\":\"prior turn still running\"}}\n",
