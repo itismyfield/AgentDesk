@@ -1287,6 +1287,8 @@ mod restart_lifecycle_characterization_tests {
     #[test]
     fn background_provider_keeps_availability_after_its_boot_future_returns() {
         let _root = crate::config::TestRuntimeRootGuard::new();
+        let _allocation = isolate_runtime_root(&crate::config::runtime_root().unwrap());
+        runtime_store::set_process_generation_for_tests(None);
         paused_rt().block_on(async {
             let availability = home_availability::install(
                 "claude",
