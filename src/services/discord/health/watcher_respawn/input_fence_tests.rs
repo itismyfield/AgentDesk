@@ -82,9 +82,8 @@ async fn c2b_admitted_retry_holds_the_input_drain_until_it_returns() {
 /// A `tmux` that reports every pane alive and lists no sessions.
 const FAKE_TMUX: &str = "#!/bin/sh\nwhile [ \"${1#-}\" != \"$1\" ]; do shift; done\ncase \"$1\" in list-panes) echo 0 ;; esac; exit 0\n";
 
-/// An admitted retry over an old-format orphan row on a protected open channel reads, backfills
-/// and rebinds it where the row writer is allowed; a gate closed mid-retry waits for the retry,
-/// and the retry's return releases the drain.
+/// An admitted retry on a protected open channel backfills and rebinds an old-format orphan row;
+/// a gate closed mid-retry waits for it, and its return releases the drain.
 #[test]
 fn c2b_admitted_retry_rebinds_an_old_format_row_through_a_closing_gate() {
     use crate::services::agent_protocol::RuntimeHandoffKind;

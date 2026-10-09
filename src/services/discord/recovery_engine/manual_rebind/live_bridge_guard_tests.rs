@@ -187,9 +187,8 @@ async fn c2_admitted_rebind_holds_the_input_drain_until_it_returns() {
     }
 }
 
-/// An admitted rebind on a protected open channel, through either entry, unpinned or adopting a
-/// pinned episode, completes its row write and watcher claim from async code; returning releases
-/// the drain.
+/// An admitted rebind on a protected open channel, through either entry and pinned or not, writes
+/// its row and claims its watcher from async code; returning releases the drain.
 #[test]
 fn c2b_admitted_rebind_writes_its_row_and_releases_the_drain() {
     let _lock = crate::config::shared_test_env_lock()

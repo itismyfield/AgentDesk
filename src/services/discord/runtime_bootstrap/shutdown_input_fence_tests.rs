@@ -128,9 +128,8 @@ async fn c2_sigterm_handler_dispatch_persists_and_consumes_shutdown_slot() {
 
 const SIGTERM_ISOLATION_CHILD_ENV: &str = "AGENTDESK_TEST_SIGTERM_ISOLATION_CHILD";
 
-/// An injected signal, cancelled or delivered, never installs the process-wide SIGTERM handler;
-/// only the delivered one persists and takes its slot. Run alone in a child process, since the
-/// disposition is global.
+/// An injected signal never installs the process-wide SIGTERM handler, and only a delivered one
+/// persists and takes its slot; runs in a child process because the disposition is global.
 #[cfg(unix)]
 #[test]
 fn c2b_injected_sigterm_never_installs_the_os_handler() {

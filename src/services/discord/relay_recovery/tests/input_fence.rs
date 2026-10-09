@@ -178,9 +178,8 @@ impl super::super::auto_heal_apply::ReservedEpisodeApplyBoundary for GapApplyBou
     }
 }
 
-/// An admitted automatic reattach on a protected open channel completes its pinned rebind where
-/// the row writer is allowed; a gate closed after the reservation waits for the apply, and the
-/// apply's return releases the drain.
+/// An admitted automatic reattach on a protected open channel completes its pinned rebind; a gate
+/// closed after the reservation waits for the apply, whose return releases the drain.
 #[cfg(unix)]
 #[tokio::test]
 async fn c2b_admitted_relay_reattach_rebinds_through_a_closing_gate_and_releases_the_drain() {
