@@ -3,12 +3,12 @@
 
 use std::collections::HashMap;
 
+use super::WriterAlarm;
 use super::binding::{BindingEvent, BindingRecord, BindingTarget};
-use super::deliver::ChannelWriter;
-use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm};
-use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::{SourceCapture, same_file};
-use crate::services::tui_o::store::spool::Cursor;
+use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
+use crate::services::tui_o::store::ChannelStore;
+use crate::services::tui_o::store::spool::{Cursor, source_key};
 
 /// The stored source naming `source`'s file, or `source` when none does. Two stored variants of
 /// one file are refused, not merged, even when one of them is `source` itself.
@@ -101,16 +101,146 @@ pub(super) fn reopen(cursor: &Cursor) -> Result<SourceCapture, Reopen> {
     })
 }
 
-/// Names each logged source by the cursor stored for its file, for the baseline and history.
-pub(super) fn stored_names<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
-    writer: &mut ChannelWriter<P, L, A>,
-    events: &mut [BindingEvent],
-) {
-    let store = writer.store();
-    for event in events {
-        map_sources(event, |source| {
-            canonical(store.cursors(), source).unwrap_or_else(|_| source.clone())
-        });
+/// Binding events as logged and as named by the stored sources, for the baseline and history.
+pub(super) type Logged = (Vec<BindingEvent>, Vec<BindingEvent>);
+
+/// How a running writer names logged sources. A Claude hook may later fill the session a stored
+/// source was bound with empty, so that empty name also stands for one filled session.
+pub(super) struct Names {
+    provider: ShadowProvider,
+    /// The one filled session each stored source with an empty session was taken for, by key.
+    confirmed: HashMap<String, String>,
+    /// Unset until the whole log was read, so the confirmed sessions are not yet known.
+    ready: bool,
+}
+
+impl Names {
+    pub(super) fn new(provider: ShadowProvider) -> Self {
+        let (confirmed, ready) = (HashMap::new(), false);
+        Self {
+            provider,
+            confirmed,
+            ready,
+        }
+    }
+
+    /// Where a read of the log past `after` starts: at 0 until the whole log was read.
+    pub(super) fn from(&self, after: u64) -> u64 {
+        if self.ready { after } else { 0 }
+    }
+
+    /// The stored cursor of `source`'s file: the one exactly naming it, else for Claude the only
+    /// one an empty session leaves compatible, flagged as such. Two exact ones are refused.
+    fn stored<'a>(
+        &self,
+        store: &'a ChannelStore,
+        source: &SourceId,
+    ) -> Result<Option<(&'a Cursor, bool)>, String> {
+        let exact = canonical(store.cursors(), source)?;
+        if let Some(cursor) = store.cursors().find(|cursor| cursor.source == exact) {
+            return Ok(Some((cursor, false)));
+        }
+        if self.provider != ShadowProvider::Claude {
+            return Ok(None);
+        }
+        let mut loose = store
+            .cursors()
+            .filter(|cursor| self.compatible(&cursor.source, source));
+        match (loose.next(), loose.next()) {
+            (Some(one), None) => Ok(Some((one, true))),
+            _ => Ok(None),
+        }
+    }
+
+    /// Same path and inode, sessions equal or one empty, and not a source taken for another one.
+    fn compatible(&self, stored: &SourceId, source: &SourceId) -> bool {
+        let (path, ino) = (stored.path == source.path, stored.ino == source.ino);
+        let (one, other) = (&stored.session_id, &source.session_id);
+        let sessions = one == other || one.is_empty() || other.is_empty();
+        let taken = self.confirmed.get(&source_key(stored));
+        path && ino && sessions && taken.is_none_or(|taken| taken == other)
+    }
+
+    fn confirm(&mut self, stored: &SourceId, source: &SourceId) {
+        if stored.session_id.is_empty() && !source.session_id.is_empty() {
+            let session = source.session_id.clone();
+            self.confirmed.entry(source_key(stored)).or_insert(session);
+        }
+    }
+
+    /// The native session of a stored source: the one it was taken for when stored empty.
+    pub(super) fn session<'a>(&'a self, source: &'a SourceId) -> &'a str {
+        let taken = self.confirmed.get(&source_key(source));
+        taken.map_or(source.session_id.as_str(), String::as_str)
+    }
+
+    /// The stored name a bind uses. A compatible stored source is taken only once its bytes before
+    /// the cursor still read as stored; otherwise the bind halts rather than attach the file anew.
+    pub(super) fn bind_name(
+        &mut self,
+        store: &ChannelStore,
+        source: &SourceId,
+    ) -> Result<SourceId, WriterAlarm> {
+        match self.stored(store, source).map_err(halted)? {
+            Some((cursor, true)) => {
+                reopen(cursor).map_err(Reopen::halt)?;
+                self.confirm(&cursor.source, source);
+                Ok(cursor.source.clone())
+            }
+            Some((cursor, false)) => Ok(cursor.source.clone()),
+            None => Ok(source.clone()),
+        }
+    }
+
+    /// `events` past `after`, raw and by stored name. A whole log first rebuilds, in seq order, the
+    /// sessions taken by events through `applied`, or by every event without a checkpoint.
+    pub(super) fn read(
+        &mut self,
+        store: &ChannelStore,
+        events: Vec<BindingEvent>,
+        after: u64,
+        applied: Option<u64>,
+    ) -> Result<Option<Logged>, WriterAlarm> {
+        let whole = self.from(after) == 0;
+        if whole {
+            (self.confirmed, self.ready) = (HashMap::new(), true);
+        }
+        let mut named = events.clone();
+        let mut failed = Ok(());
+        for event in &mut named {
+            let rebuilt = whole && applied.is_none_or(|applied| event.seq <= applied);
+            map_sources(event, |source| match self.stored(store, source) {
+                Ok(Some((cursor, loose))) => {
+                    if loose && rebuilt {
+                        self.confirm(&cursor.source, source);
+                    }
+                    cursor.source.clone()
+                }
+                Ok(None) => source.clone(),
+                Err(error) => {
+                    failed = Err(error);
+                    source.clone()
+                }
+            });
+        }
+        failed.map_err(halted)?;
+        let past = |event: &BindingEvent| event.seq > after;
+        let (events, named) = (
+            events.into_iter().filter(past),
+            named.into_iter().filter(past),
+        );
+        Ok(Some((events.collect(), named.collect())))
+    }
+
+    /// The whole log by stored name, or `None` when it or a name cannot be read, without alarms.
+    pub(super) fn history(
+        &mut self,
+        store: &ChannelStore,
+        read: Result<Vec<BindingEvent>, String>,
+        applied: Option<u64>,
+    ) -> Option<Vec<BindingEvent>> {
+        let (_, named) = self.read(store, read.ok()?, 0, applied).ok()??;
+        Some(named)
     }
 }
 
