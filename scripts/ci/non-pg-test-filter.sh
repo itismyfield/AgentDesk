@@ -48,6 +48,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::prompt_manifests::tests
   --skip db::relay_dead_letter::tests
   --skip db::scheduled_messages::postgres_tests
+  --skip db::session_observability::tests_pg
   --skip db::session_transcripts::clear_fence_pg_tests
   --skip db::session_transcripts::native_clear_pg_tests
   --skip dispatch::dispatch_cancel::pg_observability_tests
@@ -205,6 +206,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
+  --skip services::discord::tui_prompt_relay::tests::background_child_close_pg_tests
   --skip services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
   --skip services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
@@ -213,6 +215,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::resume_pin_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
+  --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests
   --skip services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
   --skip services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   --skip services::discord::turn_bridge::tmux_runtime::stop_host::tests
@@ -247,7 +250,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::settings::tests
   --skip services::stale_turn_reconciler::tests
   --skip services::tmux_turn_liveness::tests_pg
-  --skip services::tui_o::exact_pg::tests
+  --skip services::tui_o::alarm::postgres_tests
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
@@ -767,8 +770,14 @@ NON_PG_FILTER_REPLAY=(
   services::settings::tests::settings_response_dtos_serialize_existing_contract_fields
   services::settings::tests::settings_write_response_serializes_ok_contract
   services::stale_turn_reconciler::tests::tmux_identity_rejects_provider_mismatch_and_spinner_is_busy
+  services::tui_o::exact_pg::tests::exact_ack_pg_waits_for_commit_barrier
+  services::tui_o::exact_pg::tests::exact_child_ack_precedes_terminal_seal_pg
   services::tui_o::exact_pg::tests::exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt
+  services::tui_o::exact_pg::tests::exact_metadata_pg_restore_and_terminal_port_stub
   services::tui_o::exact_pg::tests::exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged
+  services::tui_o::exact_pg::tests::exact_off_pg_statement_trace_and_files_zero
+  services::tui_o::exact_pg::tests::exact_pg_process_reader_uses_only_metadata
+  services::tui_o::exact_pg::tests::exact_settled_ack_names_normalized_pg_payload
   services::tui_o::exact_pg::tests::exact_snapshot_sibling_construction_is_compile_rejected
   services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
@@ -826,6 +835,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::prompt_manifests::tests
   db::relay_dead_letter::tests
   db::scheduled_messages::postgres_tests
+  db::session_observability::tests_pg
   db::session_transcripts::clear_fence_pg_tests
   db::session_transcripts::native_clear_pg_tests
   dispatch::dispatch_cancel::pg_observability_tests
@@ -983,6 +993,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
+  services::discord::tui_prompt_relay::tests::background_child_close_pg_tests
   services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
   services::discord::turn_bridge::headless_delivery::production_seam_tests
@@ -991,6 +1002,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::turn_bridge::resume_pin_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
+  services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
   services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   services::discord::turn_bridge::tmux_runtime::stop_host::tests
@@ -1025,7 +1037,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::settings::tests
   services::stale_turn_reconciler::tests
   services::tmux_turn_liveness::tests_pg
-  services::tui_o::exact_pg::tests
+  services::tui_o::alarm::postgres_tests
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests
   voice::announce_meta::tests
