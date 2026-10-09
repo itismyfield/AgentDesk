@@ -527,6 +527,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/session_host/test_support.rs",
         "src/services/discord/host_teardown_gate/test_support.rs",
         "src/services/discord/health/legacy_supervision/test_support.rs",
+        "src/services/discord/turn_presence/admission.rs",
         "src/services/tmux_turn_liveness/tests_pg.rs",
         "src/test_env_panic_probe.rs",
     }
