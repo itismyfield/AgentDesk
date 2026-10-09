@@ -355,9 +355,9 @@ impl ManagedWriterHandle {
         self.generation
     }
 
-    /// The captured gate's identity, preserved even when the channel registry changes.
-    pub fn authority(&self) -> &Arc<OwnershipGate> {
-        &self.authority
+    /// Process-local identity of the captured gate, independent of registry replacement.
+    pub fn authority(&self) -> usize {
+        Arc::as_ptr(&self.authority) as usize
     }
 
     /// Leaves shutdown to the existing gateway lifecycle; the host still owns its claim.
