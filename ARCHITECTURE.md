@@ -204,6 +204,9 @@ src/
 │   ├── o_channel_activation.rs
 │   ├── o_channel_homes.rs
 │   ├── o_channel_homes_tests.rs
+│   ├── o_piece_attempts.rs
+│   ├── o_piece_delivery.rs
+│   ├── o_piece_ledger_tests.rs
 │   ├── postgres.rs
 │   ├── relay_dead_letter.rs
 │   ├── scheduled_messages.rs

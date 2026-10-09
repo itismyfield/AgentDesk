@@ -24,6 +24,7 @@ src/db/intake_outbox_dispatched_audit.rs
 src/db/intake_outbox_home_tests.rs
 src/db/o_channel_activation.rs
 src/db/o_channel_homes_tests.rs
+src/db/o_piece_ledger_tests.rs
 src/db/postgres.rs
 src/db/postgres/advisory_lock_tests.rs
 src/db/postgres/test_db_reclaim.rs
@@ -464,6 +465,7 @@ services::settings::tests
 services::stale_turn_reconciler::tests
 services::tmux_turn_liveness::tests_pg
 services::tui_o::alarm::postgres_tests
+services::tui_o::repost::o_piece_ledger_tests
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
 voice::announce_meta::tests
@@ -1746,6 +1748,11 @@ services::tmux_turn_liveness::tests_pg::thread_gc_preserves_resume_rows_when_new
 services::tui_o::alarm::postgres_tests::distinct_channels_and_kinds_enqueue_once_pg
 services::tui_o::alarm::postgres_tests::suppression_settles_existing_rows_and_errors_retry_pg
 services::tui_o::alarm::postgres_tests::writer_alarm_retries_after_insert_failure_without_another_raise_pg
+services::tui_o::repost::o_piece_ledger_tests::a_new_holder_or_serial_reaches_the_same_row_and_a_failed_read_is_no_empty_row_pg
+services::tui_o::repost::o_piece_ledger_tests::a_receipt_resolves_its_piece_once_and_never_moves_to_another_piece_pg
+services::tui_o::repost::o_piece_ledger_tests::a_slot_spent_before_its_post_is_never_refunded_and_slot_two_is_the_last_pg
+services::tui_o::repost::o_piece_ledger_tests::the_piece_tables_refuse_a_second_slot_row_a_fourth_slot_and_a_reattributed_message_pg
+services::tui_o::repost::o_piece_ledger_tests::two_holders_granting_at_one_revision_consume_one_slot_and_a_lost_reply_mints_none_pg
 services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg
 services::turn_lifecycle::host_guard_tests::force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg

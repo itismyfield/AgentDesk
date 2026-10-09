@@ -10852,6 +10852,11 @@ services::tui_o::repost::io::tests::bounded_create_counts_one_post_and_sends_aga
 services::tui_o::repost::io::tests::bounded_create_shares_the_gateway_route_bucket_and_refuses_a_lone_limiter
 services::tui_o::repost::io::tests::bounded_dispatch_times_out_with_the_request_gone_and_waits_429s_inside_the_timeout
 services::tui_o::repost::io::tests::repost_sends_keep_one_nonce_and_marker_outside_the_content
+services::tui_o::repost::o_piece_ledger_tests::a_new_holder_or_serial_reaches_the_same_row_and_a_failed_read_is_no_empty_row_pg
+services::tui_o::repost::o_piece_ledger_tests::a_receipt_resolves_its_piece_once_and_never_moves_to_another_piece_pg
+services::tui_o::repost::o_piece_ledger_tests::a_slot_spent_before_its_post_is_never_refunded_and_slot_two_is_the_last_pg
+services::tui_o::repost::o_piece_ledger_tests::the_piece_tables_refuse_a_second_slot_row_a_fourth_slot_and_a_reattributed_message_pg
+services::tui_o::repost::o_piece_ledger_tests::two_holders_granting_at_one_revision_consume_one_slot_and_a_lost_reply_mints_none_pg
 services::tui_o::shadow::binding_reader::tests::binding_reader_reports_source_changes_once_and_keeps_the_last_on_gaps
 services::tui_o::shadow::binding_reader::tests::binding_view_reads_the_native_transcript_of_tui_runtimes_only
 services::tui_o::shadow::capture::tests::capture_emits_complete_lines_only_and_tracks_the_prefix_hash
