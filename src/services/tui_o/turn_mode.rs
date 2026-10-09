@@ -30,7 +30,6 @@ pub(crate) fn transcript_turns(channel: u64) -> bool {
 
 // Dormant effect gate: execute only the synchronous first HTTP poll under the confirmation lock.
 // Await the remaining HTTP work after this function returns.
-#[allow(dead_code)]
 pub(crate) fn admit_effect<T>(
     channel: u64,
     transcript: bool,

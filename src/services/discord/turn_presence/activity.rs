@@ -289,7 +289,6 @@ pub(in crate::services::discord) async fn reading_now(
 }
 
 /// Dormant presence observer; existing input and supervisor observers retain their policy.
-#[allow(dead_code)]
 pub(super) async fn presence_reading_now(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

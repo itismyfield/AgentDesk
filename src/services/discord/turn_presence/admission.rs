@@ -1,5 +1,4 @@
 //! Dormant typing admission; wake events carry no Busy or ownership authority.
-#![allow(dead_code)]
 
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
