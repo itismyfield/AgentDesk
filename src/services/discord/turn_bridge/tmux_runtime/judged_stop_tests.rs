@@ -680,3 +680,35 @@ fn c1_offline_closed_verdict_uses_failed_handle_not_registry_replacement() {
         }
     });
 }
+
+type StopHook = Box<dyn FnOnce()>;
+
+thread_local! {
+    /// Runs once between a stop's judge and its cancel on this thread.
+    static BEFORE_CANCEL: std::cell::RefCell<Option<StopHook>> = const { std::cell::RefCell::new(None) };
+    /// Runs once after the mailbox's decision reaches the stop on this thread.
+    static AFTER_DECISION: std::cell::RefCell<Option<StopHook>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn before_stop_cancel() {
+    if let Some(hook) = BEFORE_CANCEL.with_borrow_mut(Option::take) {
+        hook();
+    }
+}
+
+/// The decision as the stop branches on it; the mutant rebuilds it from a later token read.
+pub(super) fn after_stop_decision(decision: StopCancel) -> StopCancel {
+    use crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant;
+    if let Some(hook) = AFTER_DECISION.with_borrow_mut(Option::take) {
+        hook();
+    }
+    match decision {
+        StopCancel::Herdr(token)
+            if herdr_interrupt_mutant("p2b_reread_cancelled")
+                && token.cancelled.load(Ordering::Acquire) =>
+        {
+            StopCancel::Published(token)
+        }
+        decision => decision,
+    }
+}
