@@ -1900,6 +1900,7 @@ services::claude_tui::hook_server::observation_ingress::tests::a_codex_session_s
 services::claude_tui::hook_server::observation_ingress::tests::a_herdr_hold_follows_only_the_execution_it_names
 services::claude_tui::hook_server::observation_ingress::tests::a_herdr_refusal_waits_for_a_hook_already_past_its_check
 services::claude_tui::hook_server::observation_ingress::tests::a_hook_behind_an_unlogged_front_is_refused_until_its_own_source_is_logged
+services::claude_tui::hook_server::observation_ingress::tests::a_launched_pane_stays_refused_past_the_grace_until_a_pass_lists_tmux
 services::claude_tui::hook_server::observation_ingress::tests::a_legacy_command_alias_is_kept_until_its_mapping_is_ready
 services::claude_tui::hook_server::observation_ingress::tests::a_legacy_hook_that_cannot_be_logged_is_refused_and_counted
 services::claude_tui::hook_server::observation_ingress::tests::a_pane_whose_boot_registration_failed_stays_refused_after_discovery
@@ -7690,6 +7691,8 @@ services::discord::tui_prompt_relay::local_model_queue_wake_e2e::promoted_b_comp
 services::discord::tui_prompt_relay::rehydration::child_binding_tests::child_marker_rehydrate_publishes_no_child_and_fallback_excludes_it
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_live_pane_marked_for_another_host_is_not_adopted_by_name
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_rehydrated_replacement_execution_uses_its_matching_launch_context_once
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_stale_snapshot_never_lets_the_launch_script_replace_a_hook_adoption
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_stale_snapshot_never_re_registers_over_a_hook_adoption
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::a_stalled_adoption_does_not_delay_a_neighbours_first_rehydration
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_binding_envelope_uses_the_failed_incarnation
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_outer_pass_refuses_until_binding_and_alias_are_ready
@@ -7778,6 +7781,8 @@ services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_primary_s
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_prompt_without_a_notify_bot_is_announced_once_the_bot_returns
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_prompt_without_an_owner_channel_is_announced_once_the_owner_returns
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_refused_announcement_leaves_the_prompt_to_the_idle_scanner
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_queued_behind_a_created_announcement_is_not_announced_again
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_queued_behind_a_refused_announcement_is_announced
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_read_during_a_refused_announcement_is_announced_afterwards
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_timed_out_announcement_keeps_the_scanner_row_suppressed
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_aliased_hook_broadcast_twice_is_announced_once
@@ -11044,6 +11049,7 @@ services::tui_prompt_dedupe::binding_context::tests::binding_context_t1_create_n
 services::tui_prompt_dedupe::binding_context::tests::binding_context_t3_env_is_the_only_launch_source
 services::tui_prompt_dedupe::binding_context::tests::binding_context_t8_gc_requires_retirement_and_rotates
 services::tui_prompt_dedupe::binding_context::tests::binding_context_tmp_sweep_preserves_live_writers_and_uncertain_evidence
+services::tui_prompt_dedupe::binding_context::tests::the_after_lock_fixture_needs_the_env_lock_and_restores_on_drop
 services::tui_prompt_dedupe::binding_events::codex_claim_tests::actual_current_source_replacement_still_blocks_a_returning_claim
 services::tui_prompt_dedupe::binding_events::codex_claim_tests::canonical_witness_must_reference_the_exact_observation_and_proof
 services::tui_prompt_dedupe::binding_events::codex_claim_tests::commit_revalidates_current_context_after_the_optimistic_read
@@ -11099,9 +11105,11 @@ services::tui_prompt_dedupe::native_clear::tests::receiver_cancellation_keeps_gu
 services::tui_prompt_dedupe::native_clear::tests::uncommitted_cut_invalidates_nonce_without_nested_lock_and_corruption_holds
 services::tui_prompt_dedupe::pending::tests::a_late_hook_refused_as_left_leaves_the_waiting_pending_queued
 services::tui_prompt_dedupe::pending::tests::a_pending_refused_before_the_restart_stays_refused_until_it_resolves
+services::tui_prompt_dedupe::pending::tests::a_restored_pending_dropped_while_its_alias_was_away_is_seeded_again
 services::tui_prompt_dedupe::pending::tests::a_transcript_gone_after_the_judgment_is_waited_for
 services::tui_prompt_dedupe::pending::tests::a_waiting_pending_holds_only_its_own_pane_and_the_poll_returns
 services::tui_prompt_dedupe::pending::tests::a_waiting_pending_is_replaced_by_the_next_clear_of_its_pane
+services::tui_prompt_dedupe::pending::tests::a_waiting_pending_stays_queued_when_the_candidate_behind_it_is_refused
 services::tui_prompt_dedupe::pending::tests::another_sessions_pending_does_not_repeat_an_earlier_refusal
 services::tui_prompt_dedupe::pending::tests::file_less_exact_binding_waits_for_that_path_only
 services::tui_prompt_dedupe::pending::tests::history::a_background_start_published_late_does_not_take_the_pane_back
