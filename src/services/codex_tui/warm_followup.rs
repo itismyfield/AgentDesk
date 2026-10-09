@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::mpsc::Sender;
 
@@ -106,67 +107,226 @@ fn hash_field(hasher: &mut Sha256, label: &str, value: &str) {
     hasher.update(value.as_bytes());
 }
 
-fn hash_optional_field(hasher: &mut Sha256, label: &str, value: Option<&str>) {
-    hash_field(hasher, label, value.unwrap_or("<none>"));
-}
+const LAUNCH_OPTIONS_SCHEMA: &str = "agentdesk-codex-tui-launch-v1";
 
-/// Fingerprint process-sticky launch semantics. `prompt` changes every turn;
-/// `resume_session_id` is pinned by the rollout binding; and resumed turns
+/// Process-sticky launch semantics in fingerprint order. `prompt` changes every
+/// turn; `resume_session_id` is pinned by the rollout binding; and resumed turns
 /// intentionally omit `developer_instructions` because the original thread
 /// already owns them. Those three fields are therefore excluded.
-pub(crate) fn codex_tui_launch_options_fingerprint(options: &CodexLaunchOptions) -> String {
-    let mut hasher = Sha256::new();
-    hash_field(&mut hasher, "schema", "agentdesk-codex-tui-launch-v1");
-    hash_optional_field(&mut hasher, "model", options.model.as_deref());
-    hash_optional_field(
-        &mut hasher,
-        "reasoning_effort",
-        options.reasoning_effort.as_deref(),
-    );
-    hash_optional_field(
-        &mut hasher,
-        "compact_token_limit",
+fn launch_option_fields(options: &CodexLaunchOptions) -> Vec<(&'static str, String)> {
+    let optional = |value: Option<String>| value.unwrap_or_else(|| "<none>".to_string());
+    let mut fields = vec![
+        ("model", optional(options.model.clone())),
+        (
+            "reasoning_effort",
+            optional(options.reasoning_effort.clone()),
+        ),
+        (
+            "compact_token_limit",
+            optional(options.compact_token_limit.map(|value| value.to_string())),
+        ),
+        ("readonly_mode", options.readonly_mode.to_string()),
+        (
+            "fast_mode_enabled",
+            optional(options.fast_mode_enabled.map(|value| value.to_string())),
+        ),
+        (
+            "goals_enabled",
+            optional(options.goals_enabled.map(|value| value.to_string())),
+        ),
+        ("cwd", optional(options.cwd.clone())),
+    ];
+    fields.extend(
         options
-            .compact_token_limit
-            .map(|value| value.to_string())
-            .as_deref(),
+            .add_dirs
+            .iter()
+            .map(|add_dir| ("add_dir", add_dir.clone())),
     );
-    hash_field(
-        &mut hasher,
-        "readonly_mode",
-        if options.readonly_mode {
-            "true"
-        } else {
-            "false"
-        },
-    );
-    hash_optional_field(
-        &mut hasher,
-        "fast_mode_enabled",
-        options
-            .fast_mode_enabled
-            .map(|value| value.to_string())
-            .as_deref(),
-    );
-    hash_optional_field(
-        &mut hasher,
-        "goals_enabled",
-        options
-            .goals_enabled
-            .map(|value| value.to_string())
-            .as_deref(),
-    );
-    hash_optional_field(&mut hasher, "cwd", options.cwd.as_deref());
-    for add_dir in &options.add_dirs {
-        hash_field(&mut hasher, "add_dir", add_dir);
-    }
     let hooks_enabled = crate::services::codex::codex_direct_tui_hook_overrides_enabled();
-    hash_field(
-        &mut hasher,
-        "direct_tui_hooks",
-        if hooks_enabled { "true" } else { "false" },
-    );
-    format!("{:x}", hasher.finalize())
+    fields.push(("direct_tui_hooks", hooks_enabled.to_string()));
+    fields
+}
+
+/// Stored next to the fingerprint so a later mismatch can name the fields that moved.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct LaunchOptionsSnapshot {
+    schema: String,
+    fingerprint: String,
+    fields: BTreeMap<String, Vec<String>>,
+}
+
+impl LaunchOptionsSnapshot {
+    fn of(options: &CodexLaunchOptions) -> Self {
+        let mut hasher = Sha256::new();
+        hash_field(&mut hasher, "schema", LAUNCH_OPTIONS_SCHEMA);
+        let mut fields = BTreeMap::<String, Vec<String>>::new();
+        for (label, value) in launch_option_fields(options) {
+            hash_field(&mut hasher, label, &value);
+            fields.entry(label.to_string()).or_default().push(value);
+        }
+        Self {
+            schema: LAUNCH_OPTIONS_SCHEMA.to_string(),
+            fingerprint: format!("{:x}", hasher.finalize()),
+            fields,
+        }
+    }
+
+    fn changes_from(&self, stored: &Self) -> Vec<LaunchOptionChange> {
+        let names: BTreeSet<&String> = self.fields.keys().chain(stored.fields.keys()).collect();
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let before = stored.fields.get(name).cloned().unwrap_or_default();
+                let after = self.fields.get(name).cloned().unwrap_or_default();
+                (before != after).then(|| LaunchOptionChange {
+                    name: name.clone(),
+                    before,
+                    after,
+                })
+            })
+            .collect()
+    }
+}
+
+pub(crate) fn codex_tui_launch_options_fingerprint(options: &CodexLaunchOptions) -> String {
+    LaunchOptionsSnapshot::of(options).fingerprint
+}
+
+/// Records the fingerprint the warm gate compares plus its per-field snapshot.
+/// The snapshot is diagnostic only, so failing to write it never fails the launch.
+pub(crate) fn write_codex_tui_launch_options_evidence(
+    tmux_session_name: &str,
+    options: &CodexLaunchOptions,
+) -> Result<(), String> {
+    let snapshot = LaunchOptionsSnapshot::of(options);
+    super::session::write_codex_tui_launch_options_fingerprint(
+        tmux_session_name,
+        &snapshot.fingerprint,
+    )?;
+    let written = serde_json::to_string(&snapshot)
+        .map_err(|error| error.to_string())
+        .and_then(|json| {
+            super::session::write_codex_tui_launch_options_snapshot(tmux_session_name, &json)
+        });
+    if let Err(error) = written {
+        tracing::warn!(
+            tmux_session_name,
+            error,
+            "Codex TUI launch-options snapshot not recorded; a later mismatch cannot name its fields"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LaunchOptionChange {
+    name: String,
+    before: Vec<String>,
+    after: Vec<String>,
+}
+
+/// Why the recorded launch options do not match this turn's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LaunchOptionsMismatch {
+    Missing,
+    Unreadable(String),
+    /// The fingerprints differ; the error says why the stored snapshot could not name the fields.
+    Changed(Result<Vec<LaunchOptionChange>, String>),
+}
+
+impl LaunchOptionsMismatch {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Unreadable(_) => "unreadable",
+            Self::Changed(_) => "changed",
+        }
+    }
+
+    /// Changed field names, or `None` when no snapshot describes the stored fingerprint.
+    fn changed_field_names(&self) -> Option<Vec<&str>> {
+        match self {
+            Self::Changed(Ok(changes)) => {
+                Some(changes.iter().map(|change| change.name.as_str()).collect())
+            }
+            _ => None,
+        }
+    }
+
+    fn changed_fields_log(&self) -> String {
+        match (self, self.changed_field_names()) {
+            (_, Some(names)) => names.join(","),
+            (Self::Changed(Err(_)), None) => "unknown".to_string(),
+            _ => String::new(),
+        }
+    }
+
+    fn detail_log(&self) -> String {
+        match self {
+            Self::Missing => "fingerprint missing".to_string(),
+            Self::Unreadable(error) => format!("fingerprint unreadable: {error}"),
+            Self::Changed(Err(why)) => why.clone(),
+            Self::Changed(Ok(changes)) => changes
+                .iter()
+                .map(|change| {
+                    format!(
+                        "{}: {} -> {}",
+                        change.name,
+                        change.before.join("|"),
+                        change.after.join("|")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        }
+    }
+}
+
+fn stored_launch_options_snapshot(
+    tmux_session_name: &str,
+    stored_fingerprint: &str,
+) -> Result<LaunchOptionsSnapshot, String> {
+    use super::session::LaunchEvidenceFile;
+    let text = match super::session::read_codex_tui_launch_options_snapshot_file(tmux_session_name)
+    {
+        LaunchEvidenceFile::Missing => return Err("snapshot missing".to_string()),
+        LaunchEvidenceFile::Unreadable(error) => {
+            return Err(format!("snapshot unreadable: {error}"));
+        }
+        LaunchEvidenceFile::Present(text) => text,
+    };
+    let snapshot: LaunchOptionsSnapshot =
+        serde_json::from_str(&text).map_err(|error| format!("snapshot unreadable: {error}"))?;
+    // A snapshot left by another launch must not name fields for this fingerprint.
+    if snapshot.fingerprint != stored_fingerprint {
+        return Err("snapshot describes another fingerprint".to_string());
+    }
+    Ok(snapshot)
+}
+
+/// Compares this turn's launch options with the recorded fingerprint. Only the
+/// fingerprint decides; the snapshot is read solely to name a mismatch.
+fn judge_codex_tui_launch_options(
+    tmux_session_name: &str,
+    options: &CodexLaunchOptions,
+) -> Result<(), LaunchOptionsMismatch> {
+    use super::session::LaunchEvidenceFile;
+    let current = LaunchOptionsSnapshot::of(options);
+    let stored_fingerprint =
+        match super::session::read_codex_tui_launch_options_fingerprint_file(tmux_session_name) {
+            LaunchEvidenceFile::Missing => return Err(LaunchOptionsMismatch::Missing),
+            LaunchEvidenceFile::Unreadable(error) => {
+                return Err(LaunchOptionsMismatch::Unreadable(error));
+            }
+            LaunchEvidenceFile::Present(fingerprint) => fingerprint,
+        };
+    if stored_fingerprint == current.fingerprint {
+        return Ok(());
+    }
+    Err(LaunchOptionsMismatch::Changed(
+        stored_launch_options_snapshot(tmux_session_name, &stored_fingerprint)
+            .map(|stored| current.changes_from(&stored)),
+    ))
 }
 
 fn paths_match(left: &Path, right: &Path) -> bool {
@@ -236,6 +396,20 @@ fn log_fallback(tmux_session_name: &str, reason: CodexWarmFallbackReason, detail
         tmux_session_name,
         fallback_reason = reason.reason_code(),
         detail,
+        "Codex TUI warm follow-up falling back to one cold resume launch"
+    );
+}
+
+fn log_launch_options_fallback(tmux_session_name: &str, mismatch: &LaunchOptionsMismatch) {
+    let changed_fields = mismatch.changed_fields_log();
+    let launch_options_detail = mismatch.detail_log();
+    tracing::warn!(
+        tmux_session_name,
+        fallback_reason = CodexWarmFallbackReason::LaunchOptionsChanged.reason_code(),
+        detail = "eligibility gate rejected reuse",
+        launch_options_mismatch = mismatch.kind(),
+        changed_fields = changed_fields.as_str(),
+        launch_options_detail = launch_options_detail.as_str(),
         "Codex TUI warm follow-up falling back to one cold resume launch"
     );
 }
@@ -317,7 +491,8 @@ fn warm_followup_on(
         }
     };
     let marker = super::session::read_codex_tui_rollout_marker(tmux_session_name);
-    let fingerprint = codex_tui_launch_options_fingerprint(launch_options);
+    let launch_options_judgement =
+        judge_codex_tui_launch_options(tmux_session_name, launch_options);
     let eligibility = decide_warm_eligibility(WarmEligibilitySignals {
         force_fresh,
         session_exists,
@@ -327,14 +502,18 @@ fn warm_followup_on(
             tmux_session_name,
         ) == Some(RuntimeHandoffKind::CodexTui),
         rollout_binding_matches: rollout_binding_matches(selection, marker.as_ref()),
-        launch_options_match: super::session::read_codex_tui_launch_options_fingerprint(
-            tmux_session_name,
-        )
-        .as_deref()
-            == Some(fingerprint.as_str()),
+        launch_options_match: launch_options_judgement.is_ok(),
     });
     match eligibility {
         WarmEligibilityDecision::LegacyPath => return CodexWarmFollowupOutcome::LegacyPath,
+        WarmEligibilityDecision::Fallback(
+            reason @ CodexWarmFallbackReason::LaunchOptionsChanged,
+        ) => {
+            if let Err(mismatch) = &launch_options_judgement {
+                log_launch_options_fallback(tmux_session_name, mismatch);
+            }
+            return CodexWarmFollowupOutcome::Fallback(reason);
+        }
         WarmEligibilityDecision::Fallback(reason) => {
             log_fallback(tmux_session_name, reason, "eligibility gate rejected reuse");
             return CodexWarmFollowupOutcome::Fallback(reason);
@@ -733,6 +912,101 @@ mod tests {
         assert_ne!(
             codex_tui_launch_options_fingerprint(&base),
             codex_tui_launch_options_fingerprint(&changed)
+        );
+    }
+
+    /// Points session temp files at a fresh root with hooks pinned on, under the shared env lock.
+    fn isolated_launch_evidence_env() -> (
+        std::sync::MutexGuard<'static, ()>,
+        tempfile::TempDir,
+        [EnvRestore; 3],
+    ) {
+        let lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let restore = [
+            EnvRestore::capture("AGENTDESK_ROOT_DIR"),
+            EnvRestore::capture("HOSTNAME"),
+            EnvRestore::capture("AGENTDESK_CODEX_DIRECT_TUI_HOOKS"),
+        ];
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", dir.path());
+            std::env::set_var("HOSTNAME", "codex-warm-evidence-host");
+            std::env::remove_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS");
+        }
+        (lock, dir, restore)
+    }
+
+    fn launched_options(prompt: &str) -> CodexLaunchOptions {
+        CodexLaunchOptions::new(prompt)
+            .with_model(Some("gpt-6-luna"))
+            .with_compact_token_limit(Some(217_600))
+            .with_cwd(Some("/tmp/work"))
+    }
+
+    #[test]
+    fn launch_options_mismatch_names_missing_and_each_changed_field() {
+        let (_lock, _dir, _restore) = isolated_launch_evidence_env();
+        let tmux = "AgentDesk-codex-warm-evidence";
+
+        let missing = judge_codex_tui_launch_options(tmux, &launched_options("turn one"));
+        assert_eq!(missing, Err(LaunchOptionsMismatch::Missing));
+        super::super::session::write_codex_tui_launch_options_fingerprint(tmux, "").unwrap();
+        let unreadable = judge_codex_tui_launch_options(tmux, &launched_options("turn one"));
+        assert_eq!(unreadable.unwrap_err().kind(), "unreadable");
+
+        write_codex_tui_launch_options_evidence(tmux, &launched_options("turn one")).unwrap();
+        let next_turn = launched_options("turn two").with_resume_session_id(Some("session-one"));
+        assert_eq!(judge_codex_tui_launch_options(tmux, &next_turn), Ok(()));
+
+        for (changed, field) in [
+            (next_turn.clone().with_model(Some("gpt-6-sol")), "model"),
+            (
+                next_turn.clone().with_compact_token_limit(Some(272_000)),
+                "compact_token_limit",
+            ),
+        ] {
+            let mismatch = judge_codex_tui_launch_options(tmux, &changed).unwrap_err();
+            assert_eq!(mismatch.kind(), "changed");
+            assert_eq!(mismatch.changed_field_names(), Some(vec![field]));
+        }
+    }
+
+    #[test]
+    fn fingerprint_without_matching_snapshot_still_decides_by_fingerprint_alone() {
+        let (_lock, _dir, _restore) = isolated_launch_evidence_env();
+        let tmux = "AgentDesk-codex-warm-legacy-evidence";
+        let launched = launched_options("turn one");
+        // A pane launched by a build that wrote only the fingerprint.
+        super::super::session::write_codex_tui_launch_options_fingerprint(
+            tmux,
+            &codex_tui_launch_options_fingerprint(&launched),
+        )
+        .unwrap();
+        let changed = launched.clone().with_model(Some("gpt-6-sol"));
+
+        assert_eq!(judge_codex_tui_launch_options(tmux, &launched), Ok(()));
+        assert_eq!(
+            judge_codex_tui_launch_options(tmux, &changed),
+            Err(LaunchOptionsMismatch::Changed(Err(
+                "snapshot missing".to_string()
+            )))
+        );
+
+        // A snapshot describing some other launch must not name fields for this one.
+        let other = launched.clone().with_cwd(Some("/tmp/other"));
+        super::super::session::write_codex_tui_launch_options_snapshot(
+            tmux,
+            &serde_json::to_string(&LaunchOptionsSnapshot::of(&other)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(judge_codex_tui_launch_options(tmux, &launched), Ok(()));
+        assert_eq!(
+            judge_codex_tui_launch_options(tmux, &changed)
+                .unwrap_err()
+                .changed_field_names(),
+            None
         );
     }
 

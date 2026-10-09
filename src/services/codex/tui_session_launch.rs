@@ -121,11 +121,9 @@ pub(super) fn prepare_codex_tui_launch_script(
     std::fs::write(&script_path, &script_content)
         .map_err(|e| format!("Failed to write Codex TUI launch script: {}", e))?;
     if warm_followup_enabled {
-        crate::services::codex_tui::session::write_codex_tui_launch_options_fingerprint(
+        crate::services::codex_tui::warm_followup::write_codex_tui_launch_options_evidence(
             tmux_session_name,
-            &crate::services::codex_tui::warm_followup::codex_tui_launch_options_fingerprint(
-                launch_options,
-            ),
+            launch_options,
         )?;
     }
     crate::services::tui_prompt_dedupe::record_discord_originated_prompt(

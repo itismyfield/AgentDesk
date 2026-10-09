@@ -5,10 +5,15 @@ cargo exits 0 when a libtest filter matches zero tests, so a curated CI lane
 pairing the wrong target flag (e.g. `--bin agentdesk`) with a lib-only module
 filter runs 0 tests while its required check stays green. This gate statically
 cross-checks tracked workflow and justfile `cargo test` commands' target
-selection against where the filtered module is declared (module tree walked
-from Cargo.toml target roots, following `#[path = "..."]` redirections; no
-compilation) and the checked-in lib test-ID manifest. A filtered explicit
-target that is statically proven empty is flagged. Default mode remains
+selection with one test-ID oracle: Cargo's target selection (named targets,
+`--bins`/`--tests`/`--examples`/`--benches`/`--all-targets`, or the default
+`test = true` set) picks targets, and libtest's filter rule runs over their
+static test IDs (the checked-in lib manifest; other targets scanned from their
+crate roots, following `#[path = "..."]`; no compilation). A selection or
+module-path filter proven empty is flagged; module declarations only say where
+a missed filter points. Doctests, other crates and `--ignored` are reported
+as unjudged. A name sweep over a target class whose matches all lie in
+unselected targets is reported, not failed. Default mode remains
 diagnostic (rc=0); CI uses `--enforce`, and opt-in `--run-list-check` runs
 `cargo test ... -- --list` (compiles) to flag lanes selecting 0 tests.
 Legitimately-empty lanes (platform `#[cfg]`) are excused via
@@ -53,14 +58,23 @@ COMMENT_OR_LITERAL = re.compile(r"""//|/\*|r\#{0,255}"|"|'""")
 NON_LINE_BREAK = re.compile(r"[^\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
 # Options consuming a value; their value must not be read as a filter.
 CARGO_VALUE_OPTIONS = {
-    "-p", "--package", "--exclude", "-j", "--jobs", "--features", "--profile",
-    "--target", "--target-dir", "--manifest-path", "--color", "--config",
+    "-p", "--package", "--exclude", "-j", "--jobs", "-F", "--features",
+    "--profile", "--target", "--target-dir", "--manifest-path", "--color",
+    "--config", "--message-format", "-Z",
     "--bin", "--test", "--bench", "--example",
 }
-TARGET_VALUE_OPTIONS = {"--bin", "--test"}
-# Target selectors we cannot statically map to a module tree (skipped).
-UNSUPPORTED_TARGET_OPTIONS = {"--tests", "--bench", "--benches",
-                              "--example", "--examples", "--doc"}
+# Named-target options and the Cargo target kind each one selects.
+TARGET_VALUE_OPTIONS = {"--bin": "bin", "--test": "test",
+                        "--example": "example", "--bench": "bench"}
+# Multi-target flags; "tests" is every target with `test = true`.
+TARGET_CLASS_OPTIONS = {"--bins": "bin", "--tests": "tests",
+                        "--examples": "example", "--benches": "bench",
+                        "--all-targets": "all"}
+# Runs whose selection the static test IDs cannot model (left unjudged).
+UNJUDGED_OPTIONS = {
+    "--doc": "doctests are not in the static test-ID inventory",
+    "--no-run": "a compile-only run selects no tests",
+}
 LIBTEST_VALUE_OPTIONS = frozenset({
     "--test-threads", "--format", "--color", "--logfile", "-Z",
 })
@@ -157,6 +171,20 @@ class Violation:
                 f"(command: {self.command})")
 
 
+def allowlist_reason(row: str) -> str:
+    """The reason a `# reason: <why>` comment row gives, else "".
+
+    A reason needs a letter or digit, and the header's `<why>` placeholder
+    copied verbatim is not one.
+    """
+    match = re.fullmatch(r"#\s*reason:\s*(.*)", row)
+    reason = match.group(1).strip() if match else ""
+    if not any(char.isalnum() for char in reason) \
+            or re.fullmatch(r"<+[^<>]*>+", reason):
+        return ""
+    return reason
+
+
 def load_allowlist(path: Path) -> dict[str, int]:
     lines = path.read_text("utf-8").splitlines() if path.is_file() else []
     entries: dict[str, int] = {}
@@ -164,13 +192,15 @@ def load_allowlist(path: Path) -> dict[str, int]:
     for lineno, line in enumerate(lines, 1):
         row = line.strip()
         if row.startswith("#"):
-            match = re.fullmatch(r"#\s*reason:\s*(\S.*)", row)
-            reason = match.group(1) if match else ""
+            reason = allowlist_reason(row)
             continue
         if row:
             if not reason:
-                raise ValueError(f"{path}:{lineno}: allowlist entry needs an "
-                                 "adjacent nonempty # reason: comment")
+                raise ValueError(
+                    f"{path}:{lineno}: allowlist entry needs a reason: the "
+                    "comment line directly above it must be `# reason: <why>` "
+                    "(lowercase `reason:`, a <why> with at least one letter "
+                    "or digit, no blank line in between)")
             if row in entries:
                 raise ValueError(f"{path}:{lineno}: duplicate allowlist entry")
             entries[row] = lineno
@@ -963,9 +993,11 @@ def extract_justfile_commands(justfile: Path,
 
 
 class TargetSelection(Enum):
+    # Every selected target is named without a glob.
     EXPLICIT = "explicit"
     ALL_TARGETS = "all-targets"
-    BINS = "bins"
+    # A multi-target flag or glob: a filter may sweep targets it misses.
+    UNION = "union"
     DEFAULT = "default"
     UNJUDGED = "unjudged"
 
@@ -979,6 +1011,9 @@ class CommandSpec:
     selection: TargetSelection = TargetSelection.UNJUDGED
     skipped: bool = False
     target_inconclusive: bool = False
+    classes: tuple[str, ...] = ()
+    packages: tuple[str, ...] = ()
+    unjudged: str = ""
 
 
 def parse_command(words: list[str]) -> CommandSpec:
@@ -990,10 +1025,10 @@ def parse_command(words: list[str]) -> CommandSpec:
     targets: list[str] = []
     filters: list[str] = []
     skip_filters: list[str] = []
+    classes: list[str] = []
+    packages: list[str] = []
     exact = False
-    all_targets = False
-    bins = False
-    unsupported = False
+    unjudged = ""
     target_inconclusive = False
 
     def dynamic(token: str) -> bool:
@@ -1018,29 +1053,40 @@ def parse_command(words: list[str]) -> CommandSpec:
         else:
             return None
         return position
+    def option_value(name: str, value: str) -> None:
+        nonlocal target_inconclusive, unjudged
+        if name in TARGET_VALUE_OPTIONS:
+            if dynamic(value):
+                target_inconclusive = True
+            else:
+                targets.append(f"{TARGET_VALUE_OPTIONS[name]}:{value}")
+        elif name in ("-p", "--package"):
+            if dynamic(value):
+                unjudged = unjudged or "a dynamic package hides the selection"
+            packages.append(value)
+        elif name == "--manifest-path" and value not in ("Cargo.toml",
+                                                         "./Cargo.toml"):
+            unjudged = unjudged or f"--manifest-path {value} is another crate"
+
     index = 0
     while index < len(before):
         token = before[index]
-        if token in TARGET_VALUE_OPTIONS and index + 1 < len(before):
-            kind = "bin" if token == "--bin" else "test"
-            if dynamic(before[index + 1]):
-                target_inconclusive = True
-            else:
-                targets.append(f"{kind}:{before[index + 1]}")
-            index += 2
-            continue
-        if token == "--lib":
+        name, equals, value = token.partition("=")
+        if equals and name in CARGO_VALUE_OPTIONS:
+            option_value(name, value)
+        elif token in CARGO_VALUE_OPTIONS and index + 1 < len(before):
+            option_value(token, before[index + 1])
+            index += 1
+        elif token == "--lib":
             targets.append("lib")
-        elif token == "--all-targets":
-            all_targets = True
-        elif token == "--bins":
-            bins = True
-        elif token in UNSUPPORTED_TARGET_OPTIONS:
-            unsupported = True
+        elif token in TARGET_CLASS_OPTIONS:
+            classes.append(TARGET_CLASS_OPTIONS[token])
+        elif token in ("--workspace", "--all"):
+            packages.append("--workspace")
+        elif token in UNJUDGED_OPTIONS:
+            unjudged = unjudged or f"{token}: {UNJUDGED_OPTIONS[token]}"
         elif (consumed := consume_filter_option(before, index)) is not None:
             index = consumed
-        elif token in CARGO_VALUE_OPTIONS:
-            index += 1
         elif not token.startswith("-") and not dynamic(token):
             filters.append(token)
         index += 1
@@ -1052,24 +1098,32 @@ def parse_command(words: list[str]) -> CommandSpec:
             index = consumed
         elif token in LIBTEST_VALUE_OPTIONS:
             index += 1
+        elif token == "--ignored":
+            unjudged = unjudged or ("--ignored runs only #[ignore] tests, "
+                                    "which the static inventory does not mark")
         elif not token.startswith("-") and not dynamic(token):
             filters.append(token)
         index += 1
 
     targets_tuple = tuple(dict.fromkeys(targets))
-    if unsupported:
+    classes_tuple = tuple(dict.fromkeys(classes))
+    if unjudged:
         selection = TargetSelection.UNJUDGED
-    elif all_targets:
+    elif "all" in classes_tuple:
         selection = TargetSelection.ALL_TARGETS
-    elif bins:
-        selection = TargetSelection.BINS
+    elif classes_tuple or any(char in target for target in targets_tuple
+                              for char in "*?["):
+        selection = TargetSelection.UNION
     elif targets_tuple:
         selection = TargetSelection.EXPLICIT
+    elif target_inconclusive:
+        selection = TargetSelection.UNJUDGED
     else:
         selection = TargetSelection.DEFAULT
     return CommandSpec(
         targets_tuple, tuple(filters), tuple(skip_filters), exact, selection,
-        unsupported, target_inconclusive,
+        bool(unjudged), target_inconclusive, classes_tuple,
+        tuple(dict.fromkeys(packages)), unjudged,
     )
 
 
@@ -1091,29 +1145,125 @@ def _lib_selection(spec: CommandSpec, test_ids: frozenset[str]) \
     ))
 
 
-def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
-                     repo_root: Path,
-                     lib_test_ids: frozenset[str] | None = None) \
-        -> list[tuple[str, str]]:
-    """Return (kind, detail) findings for one parsed cargo test command."""
-    findings: list[tuple[str, str]] = []
-    selected: dict[str, str] = {}
-    if spec.selection in (TargetSelection.ALL_TARGETS, TargetSelection.DEFAULT):
-        selected_targets = tuple(inventories)
-    elif spec.selection is TargetSelection.BINS:
-        selected_targets = tuple(dict.fromkeys((
-            *spec.targets, *(key for key in inventories if key.startswith("bin:")),
-        )))
-    else:
-        selected_targets = spec.targets
-    selected_targets = tuple(dict.fromkeys(
-        resolved for target in selected_targets
+class PackageTestIds:
+    """One run's lazy view of this package's targets and static test IDs.
+
+    The lib side reads the reviewed manifest; every other target is scanned
+    from its crate root. A target whose IDs cannot be read keeps the error.
+    """
+
+    def __init__(self, repo_root: Path,
+                 lib_test_ids: frozenset[str] | None = None) -> None:
+        self.repo_root = repo_root
+        self.lib_test_ids = lib_test_ids
+        self._manifest: dict | None = None
+        self._roots: dict[str, Path] | None = None
+        self._ids: dict[str, frozenset[str] | str] = {}
+
+    def manifest(self) -> dict:
+        if self._manifest is None:
+            self._manifest = tomllib.loads(
+                (self.repo_root / "Cargo.toml").read_text("utf-8"))
+        return self._manifest
+
+    def ids(self, target: str) -> frozenset[str] | str:
+        """Static test IDs of `target`, or why they cannot be read."""
+        if target not in self._ids:
+            try:
+                if target == "lib" and self.lib_test_ids is not None:
+                    found = self.lib_test_ids
+                else:
+                    if self._roots is None:
+                        self._roots = discover_union_targets(self.repo_root)
+                    root = self._roots.get(target)
+                    if root is None and target.startswith("test:"):
+                        root = integration_test_root(
+                            self.repo_root, target.partition(":")[2])
+                    if root is None or not root.is_file():
+                        raise ValueError(f"missing source for {target}")
+                    inventory = collect_static_tests(root, self.repo_root)
+                    if inventory.module_errors:
+                        raise ValueError(f"{target}: {inventory.module_errors}")
+                    found = frozenset(inventory.tests)
+            except (OSError, UnicodeError, ValueError,
+                    tomllib.TOMLDecodeError) as error:
+                found = str(error) or type(error).__name__
+            self._ids[target] = found
+        return self._ids[target]
+
+    def runs_by_default(self, target: str) -> bool:
+        """Cargo's `test` flag: on for lib/bin/test, off for example/bench."""
+        kind, _, name = target.partition(":")
+        manifest = self.manifest()
+        if kind == "lib":
+            return manifest.get("lib", {}).get("test", True) is not False
+        table = next((entry for entry in manifest.get(kind, [])
+                      if entry.get("name") == name), {})
+        return table.get("test", kind in ("bin", "test")) is True
+
+    def outside_package(self, spec: CommandSpec) -> str:
+        """Why `-p`/`--workspace` reach tests this inventory never sees."""
+        manifest = self.manifest()
+        members = set(manifest.get("workspace", {}).get("members", [])) - {"."}
+        for package in spec.packages:
+            if package == "--workspace":
+                if members:
+                    return "--workspace also runs other members' tests"
+            elif package != manifest.get("package", {}).get("name"):
+                return f"package `{package}` is outside this inventory"
+        return ""
+
+
+def _selected_targets(spec: CommandSpec, universe: tuple[str, ...],
+                      view: PackageTestIds) -> tuple[str, ...]:
+    """Cargo's target selection over the known targets, named ones first."""
+    picked = [
+        resolved for target in spec.targets
         for resolved in (
-            (tuple(key for key in inventories if fnmatch.fnmatchcase(key, target))
+            (tuple(key for key in universe if fnmatch.fnmatchcase(key, target))
              or (target,))
             if any(char in target for char in "*?[") else (target,)
         )
-    ))
+    ]
+    for kind in (*spec.classes,
+                 *(("tests",) if spec.selection is TargetSelection.DEFAULT
+                   else ())):
+        picked.extend(
+            key for key in universe
+            if kind == "all"
+            or (kind == "tests" and view.runs_by_default(key))
+            or key.startswith(f"{kind}:")
+        )
+    return tuple(dict.fromkeys(picked))
+
+
+def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
+                     repo_root: Path,
+                     lib_test_ids: frozenset[str] | None = None, *,
+                     view: PackageTestIds | None = None,
+                     notes: list[str] | None = None) \
+        -> list[tuple[str, str]]:
+    """Return (kind, detail) findings for one parsed cargo test command.
+
+    One oracle judges every selection: libtest's own filter rule (substring,
+    or equality under --exact, minus --skip) over the static test IDs of the
+    targets Cargo would run. `inventories` names the known targets and their
+    module declarations, which only explain where a missed filter points.
+    """
+    findings: list[tuple[str, str]] = []
+    view = view or PackageTestIds(repo_root, lib_test_ids)
+    if spec.skipped:
+        return findings
+    try:
+        outside = view.outside_package(spec)
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
+        return [("inventory-error", f"Cargo.toml: {error}")]
+    if outside:
+        if notes is not None and (spec.filters or spec.skip_filters):
+            notes.append(f"unjudged: {outside}")
+        return findings
+    selected_targets = _selected_targets(spec, tuple(inventories), view)
+    selected: dict[str, str] = {}
     for target in selected_targets:
         if target.startswith("test:") and target not in inventories:
             name = target.partition(":")[2]
@@ -1123,71 +1273,86 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                     f"--test {name}: neither tests/{name}.rs nor "
                     f"tests/{name}/main.rs exists")))
                 continue
-            # setdefault evaluates its argument even on a hit, so it
-            # re-walked an integration root already inventoried here.
-            if target not in inventories:
-                inventories[target] = collect_modules(path, repo_root)
+            inventories[target] = collect_modules(path, repo_root)
         if target not in inventories:
             findings.append(("unknown-target",
                              f"target `{target}` not found in Cargo.toml"))
             continue
         selected.update(inventories[target])
-    lib_judged = lib_test_ids is not None and "lib" in selected_targets
-    if lib_judged and spec.selection is TargetSelection.EXPLICIT \
-            and not spec.target_inconclusive and selected_targets == ("lib",) \
-            and not _lib_selection(spec, lib_test_ids):
-        findings.append(("zero-match", (
-            "lib inventory final selection matches 0 test IDs in "
-            f"{LIB_INVENTORY_MANIFEST_REL}"
-        )))
-    # Non-lib selection uses the same static test-ID subset as the lib scanner;
-    # cfg expansion, include! and macro-generated tests remain outside it.
-    nonlib_ids: set[str] | None = None
-    if spec.filters and not spec.target_inconclusive and not findings \
-            and spec.selection is TargetSelection.EXPLICIT \
-            and "lib" not in selected_targets:
-        nonlib_ids = set()
-        try:
-            roots = discover_union_targets(repo_root)
-            for target in selected_targets:
-                root = roots.get(target)
-                if root is None and target.startswith("test:"):
-                    root = integration_test_root(repo_root, target.partition(":")[2])
-                if root is None or not root.is_file():
-                    raise ValueError(f"missing source for {target}")
-                inventory = collect_static_tests(root, repo_root)
-                if inventory.module_errors:
-                    raise ValueError(f"{target}: {inventory.module_errors}")
-                nonlib_ids.update(inventory.tests)
-        except (OSError, UnicodeError, ValueError) as error:
-            return [("inventory-error", str(error))]
-    for filt in (() if spec.target_inconclusive else spec.filters):
-        lead = filt.split("::", 1)[0]
-        if not lead or lead in selected:
+    if spec.selection is TargetSelection.UNJUDGED or spec.target_inconclusive:
+        if notes is not None and (spec.filters or spec.skip_filters):
+            notes.append("unjudged: a dynamic target value hides the selection")
+        return findings
+    if not spec.filters and not spec.skip_filters:
+        return findings
+    judged = tuple(target for target in selected_targets if target in inventories)
+    selected_ids: set[str] = set()
+    for target in judged:
+        ids = view.ids(target)
+        if isinstance(ids, str):
+            return findings + [("inventory-error", ids)]
+        selected_ids.update(ids)
+    selection_name = "/".join(judged) or "no target"
+    sweep = spec.selection is not TargetSelection.EXPLICIT
+    swept_elsewhere = 0
+    empty: list[tuple[str, str]] = []
+    for filt in spec.filters:
+        if _filter_matches(frozenset(selected_ids), filt, spec.exact):
             continue
-        declared_in = {
-            target: modules[lead]
-            for target, modules in inventories.items() if lead in modules
-        }
-        if declared_in and ("::" in filt or spec.selection is TargetSelection.EXPLICIT):
-            sites = ", ".join(f"{t} ({site})" for t, site in
-                              sorted(declared_in.items()))
+        # A leading `::` only anchors the match; the first named segment is
+        # the module the filter points at.
+        lead = next((part for part in filt.split("::") if part), "")
+        declared: list[str] = []
+        matched: list[str] = []
+        for target, modules in sorted(inventories.items()):
+            if target in judged:
+                continue
+            if lead in modules and lead not in selected:
+                declared.append(f"{target} ({modules[lead]})")
+            ids = view.ids(target)
+            count = 0 if isinstance(ids, str) else len(
+                _filter_matches(ids, filt, spec.exact))
+            if count:
+                matched.append(f"{target} ({count} test ID(s))")
+        elsewhere = "; ".join(
+            ([f"module `{lead}` declared in {', '.join(declared)}"]
+             if declared else [])
+            + ([f"test IDs in {', '.join(matched)}"] if matched else []))
+        if elsewhere and ("::" in filt or not sweep):
             findings.append(("target-mismatch", (
-                f"filter `{filt}` names module `{lead}` declared in {sites}, "
-                f"but the command only selects {'/'.join(selected_targets)}; the "
-                f"filter matches 0 tests there and cargo still exits 0")))
-        elif "::" in filt and not (
-                lib_judged and spec.selection is TargetSelection.EXPLICIT):
+                f"filter `{filt}` names {elsewhere}, but the command only "
+                f"selects {selection_name}; the filter matches 0 tests there "
+                "and cargo still exits 0")))
+        elif elsewhere:
+            # A name sweep across a target class: an empty side is visible,
+            # not fatal, while a typo matching nothing anywhere still fails.
+            swept_elsewhere += 1
+            if notes is not None:
+                notes.append(
+                    f"sweep-empty: filter `{filt}` selects 0 tests in "
+                    f"{selection_name}; it points at {elsewhere}")
+        elif "::" in filt and lead and lead not in selected:
             findings.append(("unknown-module", (
-                f"module-path filter `{filt}`: leading segment `{lead}` is "
-                f"not a module in any known target")))
-    if nonlib_ids is not None and not findings \
-            and not _lib_selection(spec, frozenset(nonlib_ids)):
-        kind = "zero-match" if nonlib_ids else "empty-target"
-        findings.append((kind, (
-            f"selected target(s) {'/'.join(selected_targets)} final selection "
-            "matches 0 statically discovered test IDs")))
-    return findings
+                f"module-path filter `{filt}`: `{lead}` is not a module in "
+                "any known target and no test ID matches it")))
+        elif "::" in filt:
+            empty.append(("zero-match", (
+                f"module-path filter `{filt}` matches 0 test IDs in "
+                f"{selection_name}")))
+    if not findings and not empty \
+            and not _lib_selection(spec, frozenset(selected_ids)) \
+            and not (spec.filters and swept_elsewhere == len(spec.filters)):
+        empty.append(("zero-match" if selected_ids else "empty-target", (
+            f"selected target(s) {selection_name} final selection matches 0 "
+            "statically discovered test IDs")))
+    if spec.selection is TargetSelection.DEFAULT and empty:
+        # A target-less run also runs doctests, which no static inventory
+        # lists, so emptiness there is reported rather than proven.
+        if notes is not None:
+            notes.extend(f"unjudged: {detail}; the default selection also "
+                         "runs doctests" for _, detail in empty)
+        empty = []
+    return findings + empty
 
 
 def run_list_check(words: list[str], repo_root: Path) -> str | None:
@@ -1533,6 +1698,7 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str] 
             )
         except (OSError, ValueError):
             lib_test_ids = None
+    view = PackageTestIds(repo_root, lib_test_ids)
     workflow_sources = [
         (path, extract_commands(path, diagnostics)) for path in workflows
     ]
@@ -1568,11 +1734,18 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str] 
         for lineno, words, normalized in commands:
             allowlisted = normalized in allowlist
             spec = parse_command(words)
+            notes: list[str] = []
+            if spec.skipped and (spec.filters or spec.skip_filters):
+                notes.append(f"unjudged: {spec.unjudged}")
+            findings = validate_command(
+                spec, inventories, repo_root, lib_test_ids,
+                view=view, notes=notes,
+            )
+            if diagnostics is not None:
+                diagnostics.extend(f"{rel}:{lineno}: {note} (command: {normalized})"
+                                   for note in notes)
             if spec.skipped:
                 continue
-            findings = validate_command(
-                spec, inventories, repo_root, lib_test_ids
-            )
             if allowlisted:
                 # A platform exception excuses emptiness, not a broken
                 # target, module path or unreadable source inventory.

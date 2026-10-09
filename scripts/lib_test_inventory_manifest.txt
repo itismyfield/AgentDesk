@@ -2792,8 +2792,10 @@ services::codex_tui::session::tests::warm_lookup_picks_up_newer_rollout_after_fi
 services::codex_tui::verified_tail::diagnostic_tests::verified_tail_hold_diagnostic_is_bounded_to_one_warning_per_minute
 services::codex_tui::warm_followup::tests::eligibility_requires_all_reuse_axes
 services::codex_tui::warm_followup::tests::fallback_reason_codes_are_stable_and_complete
+services::codex_tui::warm_followup::tests::fingerprint_without_matching_snapshot_still_decides_by_fingerprint_alone
 services::codex_tui::warm_followup::tests::kill_switch_defaults_on_and_zero_disables
 services::codex_tui::warm_followup::tests::launch_fingerprint_ignores_per_turn_fields_but_detects_material_change
+services::codex_tui::warm_followup::tests::launch_options_mismatch_names_missing_and_each_changed_field
 services::codex_tui::warm_followup::tests::rollout_binding_requires_same_canonical_path_and_session
 services::codex_tui::warm_followup::tests::submit_fallback_requires_persisted_draft_and_zero_rollout_advance
 services::codex_tui::warm_followup::tests::warm_followup_kills_and_relaunches_only_a_confirmed_tmux_session
