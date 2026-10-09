@@ -10926,6 +10926,12 @@ services::tui_o::writer::adoption::tests::an_open_turn_before_legacys_cursor_is_
 services::tui_o::writer::adoption::tests::assistant_text_past_legacys_frontier_is_reported_undelivered
 services::tui_o::writer::adoption::tests::o_starts_at_legacys_cursor_when_a_unit_lands_after_the_recheck
 services::tui_o::writer::adoption::tests::past_sources_over_the_boot_budget_are_not_adopted
+services::tui_o::writer::codex_adoption::judge_tests::an_evidenced_history_passes_the_boundary_and_strict_rules_only_while_receipts_cover_it
+services::tui_o::writer::codex_adoption::judge_tests::each_missing_or_failing_piece_of_evidence_refuses_or_stays_unknown
+services::tui_o::writer::codex_adoption::judge_tests::every_obligation_kind_must_read_clear
+services::tui_o::writer::codex_adoption::judge_tests::only_a_definite_state_leaves_the_denominator
+services::tui_o::writer::codex_adoption::probe_tests::a_probe_counts_n_k_u_per_distinct_channel_without_body_text
+services::tui_o::writer::codex_adoption::probe_tests::a_probe_fails_instead_of_shrinking_its_input
 services::tui_o::writer::host::claim_tests::an_old_claim_drop_leaves_a_replacement_ready_and_hosted
 services::tui_o::writer::input_facts::resume_tests::a_broken_json_record_halts_without_a_resume_point
 services::tui_o::writer::input_facts::resume_tests::a_mixed_user_row_with_an_untyped_tool_result_stays_unknown

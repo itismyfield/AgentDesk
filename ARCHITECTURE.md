@@ -2351,6 +2351,11 @@ src/
 │   │   │   ├── rotation_tests.rs
 │   │   │   └── spool.rs
 │   │   ├── writer/
+│   │   │   ├── codex_adoption/
+│   │   │   │   ├── judge.rs
+│   │   │   │   ├── judge_tests.rs
+│   │   │   │   ├── probe.rs
+│   │   │   │   └── probe_tests.rs
 │   │   │   ├── input_facts/
 │   │   │   │   ├── reactions.rs
 │   │   │   │   ├── resume_tests.rs
@@ -2363,6 +2368,7 @@ src/
 │   │   │   ├── binding.rs
 │   │   │   ├── canary_policy_tests.rs
 │   │   │   ├── clear_launch_tests.rs
+│   │   │   ├── codex_adoption.rs
 │   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deferred.rs
