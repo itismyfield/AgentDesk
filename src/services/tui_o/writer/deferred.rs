@@ -141,6 +141,7 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
         let Ok(events) = waiting.log.binding_events_since(channel, 0) else {
             continue;
         };
+        let events = super::renumbered::first_named(events);
         let current = adoption::current(&events);
         let version = current
             .as_ref()

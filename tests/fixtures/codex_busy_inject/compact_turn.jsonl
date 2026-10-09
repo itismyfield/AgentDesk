@@ -1,0 +1,20 @@
+{"timestamp": "2026-10-08T23:14:46.844Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "01a11dcc-3da7-7a23-9f47-5067834fa221", "root_turn_id": "01a11dcc-3da7-7a23-9f47-5067834fa221"}}
+{"timestamp": "2026-10-08T23:14:50.479Z", "type": "token_usage_record", "payload": {"turn_id": "01a11dcc-3da7-7a23-9f47-5067834fa221"}}
+{"timestamp": "2026-10-08T23:14:50.481Z", "type": "compacted", "payload": {"message": ""}}
+{"timestamp": "2026-10-08T23:14:50.481Z", "type": "event_msg", "payload": {"type": "thread_settings_applied"}}
+{"timestamp": "2026-10-08T23:14:50.484Z", "type": "event_msg", "payload": {"type": "token_count"}}
+{"timestamp": "2026-10-08T23:14:50.485Z", "type": "event_msg", "payload": {"type": "item_completed", "thread_id": "01a11d9b-772c-7273-8090-bdf8b9af94fb", "turn_id": "01a11dcc-3da7-7a23-9f47-5067834fa221", "item": {"type": "ContextCompaction", "id": "01a11dcc-3dfb-77b2-8bf3-b0e2aaf87984"}}}
+{"timestamp": "2026-10-08T23:14:50.541Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "01a11dcc-3da7-7a23-9f47-5067834fa221", "last_agent_message": null}}
+{"timestamp": "2026-10-08T23:14:50.554Z", "type": "event_msg", "payload": {"type": "thread_settings_applied"}}
+{"timestamp": "2026-10-08T23:14:50.566Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "01a11dcc-4c33-7f41-a788-c90fa7e4906f", "root_turn_id": "01a11dcc-4c33-7f41-a788-c90fa7e4906f"}}
+{"timestamp": "2026-10-08T23:14:50.583Z", "type": "world_state", "payload": {}}
+{"timestamp": "2026-10-08T23:14:50.584Z", "type": "turn_context", "payload": {"turn_id": "01a11dcc-4c33-7f41-a788-c90fa7e4906f", "root_turn_id": "01a11dcc-4c33-7f41-a788-c90fa7e4906f", "approval_policy": "never", "sandbox_policy": {"type": "danger-full-access"}}}
+{"timestamp": "2026-10-08T23:14:50.853Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "[📱 discord · probe · 96f5051a]\nPb8a89-B: in your final reply also add a separate line B_SEEN_Pb8a89"}], "internal_chat_message_metadata_passthrough": {"turn_id": "01a11dcc-4c33-7f41-a788-c90fa7e4906f"}}}
+{"timestamp": "2026-10-08T23:14:50.860Z", "type": "event_msg", "payload": {"type": "item_completed", "thread_id": "01a11d9b-772c-7273-8090-bdf8b9af94fb", "turn_id": "01a11dcc-4c33-7f41-a788-c90fa7e4906f", "item": {"type": "UserMessage", "id": "01a11dcc-4d64-75a0-a4a9-bf8d4db2046e", "content": [{"type": "text", "text": "[📱 discord · probe · 96f5051a]\nPb8a89-B: in your final reply also add a separate line B_SEEN_Pb8a89", "text_elements": []}]}}}
+{"timestamp": "2026-10-08T23:14:52.000Z", "type": "event_msg", "payload": {"type": "item_completed", "thread_id": "01a11d9b-772c-7273-8090-bdf8b9af94fb", "turn_id": "01a11dcc-4c33-7f41-a788-c90fa7e4906f", "item": {"type": "Reasoning", "id": "rs_0ebff96d33a293be016ac823ebf5688191b9a4bfe3197f3a62"}}}
+{"timestamp": "2026-10-08T23:14:52.001Z", "type": "response_item", "payload": {"type": "reasoning"}}
+{"timestamp": "2026-10-08T23:14:52.166Z", "type": "event_msg", "payload": {"type": "item_completed", "thread_id": "01a11d9b-772c-7273-8090-bdf8b9af94fb", "turn_id": "01a11dcc-4c33-7f41-a788-c90fa7e4906f", "item": {"type": "AgentMessage", "id": "msg_0ebff96d33a293be016ac823ebfff88191b0c4c211aadd7af2"}}}
+{"timestamp": "2026-10-08T23:14:52.166Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "B_SEEN_Pb8a89"}], "internal_chat_message_metadata_passthrough": {"turn_id": "01a11dcc-4c33-7f41-a788-c90fa7e4906f"}}}
+{"timestamp": "2026-10-08T23:14:52.237Z", "type": "token_usage_record", "payload": {"turn_id": "01a11dcc-4c33-7f41-a788-c90fa7e4906f"}}
+{"timestamp": "2026-10-08T23:14:52.237Z", "type": "event_msg", "payload": {"type": "token_count"}}
+{"timestamp": "2026-10-08T23:14:52.287Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "01a11dcc-4c33-7f41-a788-c90fa7e4906f", "last_agent_message": "B_SEEN_Pb8a89"}}

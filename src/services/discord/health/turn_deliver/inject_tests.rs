@@ -900,7 +900,8 @@ fn the_row_stamp_or_the_first_bound_pane_decides_whether_a_session_is_tui() {
         .iter()
         .map(|(case, row, named)| {
             let named = named.map(str::to_string);
-            let pane = inject::tui_session(&provider, row.as_ref(), None, named);
+            let claude = RuntimeHandoffKind::ClaudeTui;
+            let pane = inject::tui_session(&provider, claude, row.as_ref(), None, named);
             format!("{case}: {:?}", pane.map(|(session, _)| session == tui))
         })
         .collect();

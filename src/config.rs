@@ -18,8 +18,10 @@ pub use cluster_role::ClusterRole;
 pub(crate) mod session_hosts;
 pub use session_hosts::SessionHostsConfig;
 pub(crate) mod disk_write;
+mod peer_filter;
 pub(crate) use disk_write::render_config_for_path;
 pub use disk_write::save_to_path;
+pub use peer_filter::PeerFilterMode;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Config {
@@ -147,6 +149,9 @@ pub struct ServerConfig {
     /// the recommended path is to set `auth_token` instead.
     #[serde(default)]
     pub allow_insecure_nonloopback_bind: bool,
+    /// Socket-peer source filter for every HTTP route (see `web_surface::peer_filter`).
+    #[serde(default, skip_serializing_if = "PeerFilterMode::is_default")]
+    pub peer_filter: PeerFilterMode,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -162,6 +167,7 @@ impl std::fmt::Debug for ServerConfig {
                 "allow_insecure_nonloopback_bind",
                 &self.allow_insecure_nonloopback_bind,
             )
+            .field("peer_filter", &self.peer_filter)
             .finish()
     }
 }
@@ -2421,6 +2427,7 @@ impl Default for ServerConfig {
             host: default_host(),
             auth_token: None,
             allow_insecure_nonloopback_bind: false,
+            peer_filter: PeerFilterMode::default(),
         }
     }
 }

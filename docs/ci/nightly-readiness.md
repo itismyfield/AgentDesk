@@ -3,9 +3,22 @@
 `Main CI Triage` receives completed `CI Main` and `CI Nightly` runs. Both the
 workflow and helper require the trusted repository and `main`. Main keeps its
 push/streak/recovery policy. Nightly accepts schedule or workflow_dispatch and
-records the first completed workflow failure, including runner shutdowns, without
-fetching historical runs or logs. This happens after the whole workflow completes,
-not immediately when its first job fails. Success/cancellation makes no writes.
+records each completed workflow failure, including runner shutdowns, without
+fetching logs. This happens after the whole workflow completes, not immediately
+when its first job fails. Cancellation makes no writes.
+
+A failure comment also counts the consecutive failed nightly runs on main back to
+the last pass, from one page of run history (cancelled/skipped/neutral runs
+neither count nor break the streak; failure/timed_out/startup_failure count). A
+failed or malformed history read, or any other conclusion before the last pass,
+prints `unavailable`, never a number. A completed pass closes the open canonical issue with a green
+marker comment, so an open issue always means "nightly is red now" and the next
+failure is a reopen, not one more comment under a standing red. A pass handled
+after a newer recorded failure leaves the issue open; a failure older than a
+recorded pass is commented without reopening. Run ID, then attempt, orders them.
+A newer pass on a closed issue rewrites a single green marker line in the issue
+body instead of commenting, so a later rerun of an older run (same ID, higher
+attempt) that fails cannot reopen it and closed issues gain no daily comment.
 
 Nightly owns `[ci-red] CI Nightly 실패(main)` with the exact body marker
 `<!-- agentdesk:ci-nightly:main -->`. It does not use main's identifier/recovery
@@ -15,7 +28,8 @@ attempt is irrelevant. A first create includes its marker in the body; subsequen
 failures include theirs in a comment. Keep these markers when editing the issue.
 
 Closed issues are included: an old marker means no writes; a new failure reopens
-before commenting. Ambiguous candidates, malformed responses and GitHub API errors
+before commenting. A replay of a pass whose comment landed but whose close failed
+only closes. Ambiguous candidates, malformed responses and GitHub API errors
 fail the triage job. If a write was applied but its response failed, rerunning
 reads persisted state first. Lookup/write is not a transaction or exactly-once
 promise. Marker deletion and manual concurrent edits require operator inspection.
