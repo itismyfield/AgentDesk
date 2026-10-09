@@ -99,6 +99,7 @@ use self::rebind_reap::{
     should_reap_dead_watcher_rebind_origin,
 };
 mod removal;
+mod restart_mark;
 #[cfg(test)]
 pub(in crate::services::discord) use self::removal::custody_notice_text;
 pub(crate) use self::removal::invalidate_stale_generation;
@@ -110,8 +111,16 @@ use self::removal::{
 pub(in crate::services::discord) use self::removal::{
     load_channel_inflight_for_probe, load_inflight_states_for_probe_from_root,
 };
-use self::removal::{load_inflight_states_from_root, load_inflight_states_from_root_excluding};
+use self::removal::{
+    load_inflight_probe_from_root_excluding, load_inflight_states_from_root,
+    load_inflight_states_from_root_excluding,
+};
 pub(super) use self::removal::{log_inflight_remove, log_inflight_remove_for_path};
+#[cfg(test)]
+pub(in crate::services::discord) use self::restart_mark::short_pass_event_for_test;
+pub(in crate::services::discord) use self::restart_mark::{
+    ShortPass, mark_restart_mode_blocking, short_passes,
+};
 
 mod watcher_state;
 pub(in crate::services::discord) use self::watcher_state::{
@@ -492,6 +501,7 @@ pub(super) fn inflight_state_file_exists(provider: &ProviderKind, channel_id: u6
     inflight_state_path(&root, provider, channel_id).exists()
 }
 
+#[cfg(test)]
 pub(super) fn mark_all_inflight_states_restart_mode(
     provider: &ProviderKind,
     restart_mode: InflightRestartMode,
@@ -499,46 +509,19 @@ pub(super) fn mark_all_inflight_states_restart_mode(
     mark_all_inflight_states_restart_mode_checked(provider, restart_mode).unwrap_or(0)
 }
 
+#[cfg(test)]
 pub(super) fn mark_all_inflight_states_restart_mode_checked(
     provider: &ProviderKind,
     restart_mode: InflightRestartMode,
 ) -> Result<usize, String> {
-    let Some(root) = inflight_runtime_root() else {
-        return Err("runtime root unavailable".to_string());
-    };
-    // #3860 — set restart_mode via a per-row lock-RMW instead of blind-saving
-    // the unlocked snapshot. `load_inflight_states_from_root` reads each row
-    // WITHOUT holding its advisory lock; the old code then `save`d that stale whole-row
-    // snapshot back under the lock. A draining watcher that advanced the
-    // delivery frontier (`response_sent_offset` / `last_offset`) on disk in the
-    // gap therefore had its progress overwritten (frontier regression) → the
-    // replacement watcher re-relayed `full_response[response_sent_offset..]`,
-    // i.e. a duplicate Discord send (the issue's live sub-2000-char repro).
-    // The enumeration is reused only to discover the live rows (rows its verdict
-    // would retire stay hidden and unmarked); the mutation re-reads the FRESH on-disk
-    // row under the advisory lock and sets ONLY restart_mode / restart_generation,
-    // never the frontier, so it can no longer regress a concurrent writer.
-    let states = load_inflight_states_from_root_excluding(&root, provider, |channel| {
-        crate::services::turn_orchestrator::input_fence::held(provider, channel)
-    });
-    let mut updated = 0usize;
-    for state in states {
-        // A held input channel's row stays as its transition left it.
-        if crate::services::turn_orchestrator::input_fence::held(provider, state.channel_id) {
-            continue;
-        }
-        let path = inflight_state_path(&root, provider, state.channel_id);
-        if set_inflight_restart_mode_under_lock(&path, restart_mode) {
-            updated += 1;
-        } else {
-            return Err(format!(
-                "failed to persist restart mode for provider={} channel_id={}",
-                provider.as_str(),
-                state.channel_id
-            ));
-        }
+    let report = restart_mark::mark_restart_mode_report(provider, restart_mode);
+    match report.failed.first() {
+        Some(channel_id) => Err(format!(
+            "failed to persist restart mode for provider={} channel_id={channel_id}",
+            provider.as_str()
+        )),
+        None => Ok(report.marked),
     }
-    Ok(updated)
 }
 
 /// #3860 — RMW the restart-mode marker on one inflight row under its advisory lock.
@@ -554,6 +537,10 @@ fn set_inflight_restart_mode_under_lock(path: &Path, restart_mode: InflightResta
     let Ok(_lock) = lock_inflight_state_path(path) else {
         return false;
     };
+    #[cfg(test)]
+    if restart_mark::write_fault_for_test(path) {
+        return false;
+    }
     let Some(mut state) = read_inflight_state_content(path) else {
         return false;
     };

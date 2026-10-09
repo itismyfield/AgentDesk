@@ -9,73 +9,110 @@ pub(super) fn run_bot_spawn_sigterm_handler(
     provider_for_shutdown: ProviderKind,
 ) -> tokio::task::JoinHandle<()> {
     let shared_for_signal = shared.clone();
-    #[cfg(test)]
-    let test_signal = SIGTERM_FOR_TEST.with(|slot| slot.borrow_mut().take());
+    let source = SigtermSource::take();
     tokio::spawn(async move {
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{SignalKind, signal};
-            if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
-                #[cfg(test)]
-                if let Some(test_signal) = test_signal {
-                    if test_signal.await.is_err() {
-                        return;
-                    }
-                } else {
-                    sigterm.recv().await;
-                }
-                #[cfg(not(test))]
-                sigterm.recv().await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!("  [{ts}] 🛑 SIGTERM received — graceful shutdown");
+            let Some(boundaries) = source.wait().await else {
+                return;
+            };
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!("  [{ts}] 🛑 SIGTERM received — graceful shutdown");
 
-                // Set global shutdown flag
-                shared_for_signal.restart.legacy_sigterm();
+            // Set global shutdown flag
+            shared_for_signal.restart.legacy_sigterm();
 
-                persist_sigterm_state(&shared_for_signal, &provider_for_shutdown).await;
+            let (after_initial, before_final) = boundaries;
+            persist_sigterm_state_with_boundaries(
+                &shared_for_signal,
+                &provider_for_shutdown,
+                after_initial,
+                before_final,
+            )
+            .await;
 
-                crate::services::opencode::shutdown_warm_servers();
+            crate::services::opencode::shutdown_warm_servers();
 
-                // Wait for all providers to finish saving before exiting.
-                // CAS guard: skip if this provider already decremented via deferred restart path.
+            // Wait for all providers to finish saving before exiting.
+            // CAS guard: skip if this provider already decremented via deferred restart path.
+            if shared_for_signal
+                .restart
+                .shutdown_counted
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
                 if shared_for_signal
                     .restart
-                    .shutdown_counted
-                    .compare_exchange(
-                        false,
-                        true,
-                        std::sync::atomic::Ordering::AcqRel,
-                        std::sync::atomic::Ordering::Relaxed,
-                    )
-                    .is_ok()
+                    .shutdown_remaining
+                    .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+                    == 1
                 {
-                    if shared_for_signal
-                        .restart
-                        .shutdown_remaining
-                        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
-                        == 1
-                    {
-                        std::process::exit(0);
-                    }
+                    std::process::exit(0);
                 }
             }
         }
+        #[cfg(not(unix))]
+        let _ = (source, shared_for_signal, provider_for_shutdown);
     })
 }
 
-#[cfg(test)]
+#[cfg(unix)]
+type Boundary = Box<dyn FnOnce() + Send>;
+
+/// Where the handler's signal comes from; a test source never installs the process-wide handler.
+enum SigtermSource {
+    Os,
+    #[cfg(all(test, unix))]
+    Test(SigtermForTest),
+}
+
+#[cfg(all(test, unix))]
+pub(super) struct SigtermForTest {
+    pub(super) signal: tokio::sync::oneshot::Receiver<()>,
+    pub(super) after_initial: Boundary,
+    pub(super) before_final: Boundary,
+}
+
+impl SigtermSource {
+    fn take() -> Self {
+        #[cfg(all(test, unix))]
+        if let Some(test) = SIGTERM_FOR_TEST.with(|slot| slot.borrow_mut().take()) {
+            return Self::Test(test);
+        }
+        Self::Os
+    }
+
+    /// Resolves with the persistence boundaries once the signal arrives; `None` means never.
+    #[cfg(unix)]
+    async fn wait(self) -> Option<(Boundary, Boundary)> {
+        let none = || -> (Boundary, Boundary) { (Box::new(|| {}), Box::new(|| {})) };
+        match self {
+            Self::Os => {
+                use tokio::signal::unix::{SignalKind, signal};
+                let mut sigterm = signal(SignalKind::terminate()).ok()?;
+                sigterm.recv().await;
+                Some(none())
+            }
+            #[cfg(all(test, unix))]
+            Self::Test(test) => {
+                test.signal.await.ok()?;
+                Some((test.after_initial, test.before_final))
+            }
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
 thread_local! {
-    static SIGTERM_FOR_TEST: std::cell::RefCell<Option<tokio::sync::oneshot::Receiver<()>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static SIGTERM_FOR_TEST: std::cell::RefCell<Option<SigtermForTest>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Persist both restart snapshots around inflight marking without exiting the process.
-async fn persist_sigterm_state(
-    shared: &SharedData,
-    provider: &ProviderKind,
-) -> [crate::services::turn_orchestrator::RestartDrainAllResult; 2] {
-    persist_sigterm_state_with_boundaries(shared, provider, || {}, || {}).await
-}
-
 async fn persist_sigterm_state_with_boundaries(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -111,21 +148,27 @@ async fn persist_sigterm_state_with_boundaries(
 
     after_initial();
 
-    // Preserve inflight state for silent re-attach.
-    let inflight_states = inflight::load_inflight_states_excluding(provider, |channel| {
-        crate::services::turn_orchestrator::input_fence::held(provider, channel)
-    });
-    if !inflight_states.is_empty() {
-        let ts2 = chrono::Local::now().format("%H:%M:%S");
+    // Preserve inflight state for silent re-attach. A failed or partial pass is reported and the
+    // final drain still runs: an unmarked row is lost to the next boot either way.
+    let ts2 = chrono::Local::now().format("%H:%M:%S");
+    let report = inflight::mark_restart_mode_blocking(
+        provider.clone(),
+        crate::services::discord::InflightRestartMode::DrainRestart,
+    )
+    .await;
+    if report.marked > 0 {
         tracing::info!(
-            "  [{ts2}] 👁 preserving {} inflight turn(s) for restart recovery",
-            inflight_states.len()
+            "  [{ts2}] 🔖 marked {} inflight turn(s) as drain_restart",
+            report.marked
         );
-        let marked = inflight::mark_all_inflight_states_restart_mode(
-            provider,
-            crate::services::discord::InflightRestartMode::DrainRestart,
+    }
+    if !report.failed.is_empty() || report.incomplete {
+        tracing::error!(
+            provider = provider.as_str(),
+            failed = ?report.failed,
+            incomplete = report.incomplete,
+            "SIGTERM inflight restart marking left rows unmarked"
         );
-        tracing::info!("  [{ts2}] 🔖 marked {marked} inflight turn(s) as drain_restart");
     }
 
     before_final();
