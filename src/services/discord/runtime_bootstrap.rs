@@ -199,7 +199,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     let boot_config = crate::config::load_graceful();
     let homes = HomeSettings::of(&boot_config);
-    // Judged before anything touches a delegated channel, so a misconfigured switch holds them.
+    // Records the boot judgement before delegation effects start.
     let home_availability = install_home_availability(&provider, &homes, pg_pool.is_some());
     let modules = boot_config.cluster.runtime_profile.modules();
     let voice_config = boot_config.voice;
