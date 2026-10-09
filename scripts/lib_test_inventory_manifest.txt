@@ -7135,6 +7135,7 @@ services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailb
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailbox_release_tests::refused_guarded_clear_releases_nothing
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailbox_release_tests::synthetic_row_born_after_preflight_releases_its_mailbox_on_terminal_commit
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailbox_release_tests::synthetic_row_pinned_by_preflight_still_releases_its_mailbox
+services::discord::tmux::tmux_watcher::terminal_direct_fallback::send_tests::a_failed_edit_keeps_the_claimed_send_counted_through_its_fallback_post
 services::discord::tmux::tmux_watcher::terminal_readiness::rewind_attempt_key_tests::reset_rewind_attempts_keys_offset_with_turn_identity_4115
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::bridge_suppressed_turn_discards_pending_buffer_before_direct_input
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::claude_watcher_ready_keeps_busy_when_partial_user_follows_terminator

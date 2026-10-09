@@ -894,3 +894,7 @@ async fn replace_or_post_after_edit_failure(
 mod tests {
     include!("terminal_direct_fallback_tests.rs");
 }
+
+#[cfg(test)]
+#[path = "terminal_direct_fallback_send_tests.rs"]
+mod send_tests;
