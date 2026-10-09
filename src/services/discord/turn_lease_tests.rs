@@ -350,6 +350,7 @@ async fn operator_release_cas_then_successor_keeps_new_turn_and_row() {
         )
         .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
+            _permit: None,
             request: request.clone(),
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
@@ -622,6 +623,7 @@ async fn restart_mode_row_still_refuses_operator_inspect_and_release() {
         )
         .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
+            _permit: None,
             request,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
@@ -679,6 +681,7 @@ async fn rebind_origin_row_still_refuses_operator_inspect_and_release() {
         )
         .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
+            _permit: None,
             request,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
@@ -740,6 +743,7 @@ async fn restart_mode_pinned_token_still_refuses_release_without_any_row() {
         )
         .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
+            _permit: None,
             request,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
@@ -867,6 +871,7 @@ async fn claim_refuses_unbound_message_id_without_panic() {
         let key = TurnKey::new(channel, 0, expected.generation)
             .with_episode_nonce(Some(&expected.turn_nonce));
         let operator = OperatorRelease {
+            _permit: None,
             request: ReleaseRequest {
                 expected,
                 reason: "operator verified the provider finished".into(),
@@ -946,6 +951,7 @@ async fn operator_release_follow_up_never_latches_a_successor_recovery() {
         let key = TurnKey::new(channel, 123, request.expected.generation)
             .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
+            _permit: None,
             request,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
@@ -1029,4 +1035,70 @@ async fn act7_operator_release_reports_manual_settlement_and_preserves_herdr_inp
         assert_eq!(std::fs::read(&hold).unwrap(), before);
         HERDR_SETTLEMENT_OVERRIDE.set(true);
     }).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn d2b_operator_event_keeps_recovery_after_caller_abort_until_actor_ack() {
+    with_isolated_runtime_root(|| async {
+        use crate::db::o_channel_homes::HomeState;
+        use crate::services::cluster::channel_home;
+        use crate::services::discord::commands::control::home_fence::PAUSE;
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(575499);
+        let request = seed(&shared, channel).await;
+        let home = channel_home::register_for_test(channel.get(), Some(HomeState::Releasing));
+        let barrier = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+        PAUSE.with(|slot| *slot.borrow_mut() = Some(("release_claim", barrier.clone())));
+        let owner = shared.clone();
+        let caller =
+            tokio::spawn(async move { release_on(&owner, &PROVIDER, channel, request).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.0.notified())
+            .await
+            .expect("effect boundary reached");
+        assert_eq!(home.commands_in_flight(), 1, "claim reached actual actor");
+        assert!(
+            shared
+                .mailbox(channel)
+                .snapshot()
+                .await
+                .cancel_token
+                .is_none(),
+            "exact CAS already ran"
+        );
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert_eq!(home.commands_in_flight(), 1, "actor event outlives caller");
+        barrier.1.notify_one();
+        for _ in 0..100 {
+            if home.commands_in_flight() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            home.commands_in_flight(),
+            0,
+            "actor effects and ack completed"
+        );
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+        assert!(inflight::load_inflight_state(&PROVIDER, channel.get()).is_none());
+        PAUSE.with(|slot| *slot.borrow_mut() = None);
+        home.close();
+        let successor = seed(&shared, channel).await;
+        assert_eq!(
+            release_on(&shared, &PROVIDER, channel, successor)
+                .await
+                .unwrap_err(),
+            "home_not_held"
+        );
+        assert!(
+            shared
+                .mailbox(channel)
+                .snapshot()
+                .await
+                .cancel_token
+                .is_some()
+        );
+    })
+    .await;
 }
