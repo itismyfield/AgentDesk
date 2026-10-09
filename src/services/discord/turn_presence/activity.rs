@@ -10,8 +10,10 @@ use poise::serenity_prelude::ChannelId;
 use crate::services::discord::SharedData;
 use crate::services::provider::ProviderKind;
 use crate::services::provider::session_probe::SessionLiveness;
+#[cfg(all(test, unix))]
+use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::MAX_PARTIAL_BYTES;
-use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding, SourceId};
+use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding};
 use crate::services::tui_o::writer::adoption::{Hold, logged};
 use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents, ChannelBindingLog};
 use crate::services::tui_o::writer::input_facts::{InputFacts, Resume, TurnState};
@@ -143,6 +145,7 @@ struct Stamp {
     generation: u64,
     revision: u64,
     source: Option<String>,
+    #[cfg(all(test, unix))]
     source_id: Option<SourceId>,
 }
 
@@ -151,11 +154,13 @@ pub(in crate::services::discord) struct Reading {
     pub observed: Observed,
     stamp: Option<Stamp>,
     watch: Option<Arc<Mutex<Watch>>>,
+    #[cfg(all(test, unix))]
     host_checked: bool,
 }
 
 impl Reading {
     /// Supplies the receiver's binding identity; the bot id comes from its verified HTTP client.
+    #[cfg(all(test, unix))]
     pub(super) fn identity(&self, bot_id: u64) -> Option<super::admission::Identity> {
         if bot_id == 0 {
             return None;
@@ -174,6 +179,7 @@ impl Reading {
     }
 
     /// Unlike observation publication, effect admission requires a live, stamped Busy source.
+    #[cfg(all(test, unix))]
     pub(super) fn with_busy<R>(
         &self,
         identity: &super::admission::Identity,
@@ -241,12 +247,14 @@ impl Reading {
             generation: 0,
             revision: 0,
             source: source.map(str::to_string),
+            #[cfg(all(test, unix))]
             source_id: None,
         });
         Self {
             observed,
             stamp,
             watch: None,
+            #[cfg(all(test, unix))]
             host_checked: false,
         }
     }
@@ -270,12 +278,14 @@ impl Reading {
             generation: 1,
             revision: 0,
             source: None,
+            #[cfg(all(test, unix))]
             source_id: None,
         };
         Self {
             observed,
             stamp: Some(stamp),
             watch: Some(Arc::new(Mutex::new(watch))),
+            #[cfg(all(test, unix))]
             host_checked: false,
         }
     }
@@ -294,6 +304,7 @@ fn at(guard: &Watch, answer: Observed) -> Answer {
         generation: guard.generation,
         revision: guard.revision,
         source,
+        #[cfg(all(test, unix))]
         source_id: match &guard.outcome {
             Outcome::Source { facts, .. } => Some(facts.binding().source.clone()),
             _ => None,
@@ -312,6 +323,7 @@ pub(in crate::services::discord) async fn reading_now(
 }
 
 /// Dormant presence observer; existing input and supervisor observers retain their policy.
+#[cfg(all(test, unix))]
 pub(super) async fn presence_reading_now(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -337,6 +349,7 @@ async fn read_now(
             observed,
             stamp: None,
             watch: None,
+            #[cfg(all(test, unix))]
             host_checked,
         }
     };
@@ -376,6 +389,7 @@ async fn read_now(
             observed,
             stamp,
             watch: Some(watch),
+            #[cfg(all(test, unix))]
             host_checked,
         },
         Err(_) => unstamped(observed(Activity::Unknown, "probe_failed")),
