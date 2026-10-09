@@ -172,6 +172,18 @@ impl ChannelStop {
         result
     }
 
+    /// A user stop's cancel as the mailbox decided it under the token's Herdr slot.
+    async fn cancel_user(&self) -> StopCancel {
+        let mailbox = self.shared.mailbox(self.channel);
+        let reason = CANCEL_REASON.to_string();
+        let expected = self.token.clone();
+        let decision = mailbox
+            .cancel_active_turn_if_current_unless_herdr(expected, reason)
+            .await;
+        self.record(&decision).await;
+        decision
+    }
+
     /// A cancelling token leaves the tombstone under the judged name, and one this stop cancelled
     /// binds the name the judge read; a token the mailbox handed to its Herdr state does neither.
     async fn record(&self, decision: &StopCancel) {
@@ -327,7 +339,7 @@ async fn begin_stop(
     };
     #[cfg(all(test, unix))]
     tests::before_stop_cancel();
-    let decision = decision_of(&stop.cancel().await);
+    let decision = stop.cancel_user().await;
     #[cfg(all(test, unix))]
     let decision = tests::after_stop_decision(decision);
     // The mailbox's decision, as it made it: a token changed since never turns it into another.

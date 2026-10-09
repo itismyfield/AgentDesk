@@ -712,3 +712,126 @@ pub(super) fn after_stop_decision(decision: StopCancel) -> StopCancel {
         decision => decision,
     }
 }
+
+/// The ordering a user stop meets its Herdr turn's prepare in.
+#[derive(Clone, Copy, Debug)]
+enum Order {
+    /// The stop's cancel lands before the turn's prepare.
+    StopFirst,
+    /// The turn prepares after the stop's judge and before its cancel.
+    PrepareBetween,
+    /// As `PrepareBetween`, and another path cancels the token once the mailbox decided.
+    CancelledAfterDecision,
+    /// As `PrepareBetween` without settlement.
+    Unsettled,
+}
+
+/// What a user stop did to a Herdr turn on `channel` met in `order`.
+#[derive(Debug, PartialEq)]
+struct Met {
+    stop: String,
+    cancelled: bool,
+    tombstone: bool,
+    held: bool,
+    prepared: bool,
+    intent: bool,
+}
+
+async fn stop_meets_prepare(shared: &Arc<SharedData>, channel: ChannelId, order: Order) -> Met {
+    use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
+    let logical = format!("AgentDesk-codex-p2b-{}", channel.get());
+    mark(&logical, Mark::Herdr);
+    let owner = crate::db::dispatched_sessions::hosted_execution::HostedOwner {
+        provider: "codex".into(),
+        discord_token_hash: shared.token_hash.clone(),
+        channel_id: channel.to_string(),
+        logical_key: logical,
+        owner_node: "node".into(),
+        runtime_root: "/tmp".into(),
+    };
+    let token = Arc::new(CancelToken::new());
+    start(shared, channel, &token).await;
+    let prepare = {
+        let (token, owner) = (token.clone(), owner.clone());
+        move || drop(token.try_prepare_herdr_interrupt(ProviderKind::Codex, &owner))
+    };
+    match order {
+        Order::StopFirst => {}
+        _ => BEFORE_CANCEL.with_borrow_mut(|hook| *hook = Some(Box::new(prepare.clone()))),
+    }
+    if let Order::CancelledAfterDecision = order {
+        let token = token.clone();
+        let finish = move || token.publish_cancel("turn_finalizer");
+        AFTER_DECISION.with_borrow_mut(|hook| *hook = Some(Box::new(finish)));
+    }
+    HERDR_SETTLEMENT_OVERRIDE.set(!matches!(order, Order::Unsettled));
+    let stop = begin_user_stop(shared, &ProviderKind::Codex, channel, false, "/stop").await;
+    HERDR_SETTLEMENT_OVERRIDE.set(true);
+    let stop = match stop {
+        CommandStop::Herdr(stop) => format!("Herdr({stop:?})"),
+        CommandStop::Stop(_) => "Stop".into(),
+        CommandStop::AlreadyStopping => "AlreadyStopping".into(),
+        CommandStop::NoActiveTurn => "NoActiveTurn".into(),
+        CommandStop::HostRefused => "HostRefused".into(),
+        CommandStop::Session(_) => "Session".into(),
+    };
+    if let Order::StopFirst = order {
+        prepare();
+    }
+    let state = token.herdr_interrupt_state();
+    Met {
+        stop,
+        cancelled: token.cancelled.load(Ordering::SeqCst),
+        tombstone: tombstone(channel).is_some(),
+        held: mailbox_holds(shared, channel, &token).await,
+        prepared: state.is_some(),
+        intent: state.is_some_and(|state| state.user_stop.load(Ordering::SeqCst)),
+    }
+}
+
+// A stop judged before its Herdr turn prepared: a cancel landing first leaves the prepare nothing,
+// a prepare before the mailbox's decision keeps the token for its intent path; unsettled, cancels.
+#[test]
+fn a_stop_judged_before_its_herdr_turn_prepared_never_cancels_it() {
+    use crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE;
+    let _fx = Fixture::new();
+    run(async {
+        let (shared, _registry) = runtime().await;
+        HERDR_CANCEL_OVERRIDE.set(Some(true));
+        let met = |cell: u64, order| {
+            let channel = ChannelId::new(5_340_720_000 + cell * 10);
+            stop_meets_prepare(&shared, channel, order)
+        };
+        let legacy = |tombstone| Met {
+            stop: "Stop".into(),
+            cancelled: true,
+            tombstone,
+            held: true,
+            prepared: false,
+            intent: false,
+        };
+        assert_eq!(met(1, Order::StopFirst).await, legacy(true));
+        let herdr = |stop: &str, cancelled: bool| Met {
+            stop: stop.into(),
+            cancelled,
+            tombstone: false,
+            held: true,
+            prepared: true,
+            // The intent step records nothing on a token another path already cancelled.
+            intent: !cancelled,
+        };
+        let pending = "Herdr(Requested(NotSent(Pending)))";
+        assert_eq!(met(2, Order::PrepareBetween).await, herdr(pending, false));
+        let after = met(3, Order::CancelledAfterDecision).await;
+        assert_eq!(after, herdr("Herdr(AlreadyRequested)", true));
+        let unsettled = met(4, Order::Unsettled).await;
+        assert_eq!(
+            unsettled,
+            Met {
+                prepared: true,
+                ..legacy(true)
+            }
+        );
+        HERDR_CANCEL_OVERRIDE.set(None);
+    });
+}
