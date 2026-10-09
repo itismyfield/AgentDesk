@@ -382,6 +382,7 @@ src/
 │   │   ├── agents_crud.rs
 │   │   ├── agents_host_guard_tests.rs
 │   │   ├── agents_setup.rs
+│   │   ├── agents_stop.rs
 │   │   ├── agents_turn_deliver.rs
 │   │   ├── agents_turn_target.rs
 │   │   ├── analytics.rs

@@ -500,3 +500,29 @@ pub(in crate::services::discord) async fn meeting_status(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod home_command_tests {
+    use super::*;
+    use crate::db::o_channel_homes::HomeState;
+    use crate::services::cluster::channel_home;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_meeting_refusal_precedes_cancel_state_and_artifact() {
+        let channel = ChannelId::new(9200000000000105);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let http = serenity::Http::new("");
+        let home = channel_home::register_for_test(channel.get(), Some(HomeState::Releasing));
+        let mut core = shared.core.lock().await;
+        let result = cancel_meeting(&http, channel, &shared).await;
+        assert!(result.unwrap_err().to_string().contains("home_draining"));
+        assert!(
+            core.active_meetings.is_empty(),
+            "refusal never entered the mutation lock"
+        );
+        assert_eq!(home.commands_in_flight(), 0);
+        core.active_meetings.clear();
+        drop(core);
+        channel_home::unregister(home.channel_id());
+    }
+}

@@ -121,6 +121,10 @@ async fn resume(pool: &PgPool, home: &HomeGate, epoch: i64) {
 }
 
 fn commands_blocker(home: &HomeGate) -> Option<Blocker> {
+    #[cfg(test)]
+    if channel_home::command_mutant("drain_ignores_commands") {
+        return None;
+    }
     let count = home.commands_in_flight();
     (count != 0).then_some(Blocker::CommandsInFlight(count))
 }
@@ -168,7 +172,12 @@ pub(crate) async fn drain_round<P: DrainPort>(
         // Takes the admission lock, so an admission in progress finishes first and none follows.
         home.close();
     }
-    if let Some(blocker) = commands_blocker(home) {
+    #[cfg(test)]
+    let skip_recheck = channel_home::command_mutant("recheck_after_close_removed")
+        || channel_home::command_mutant("recheck_only_in_first_close");
+    #[cfg(not(test))]
+    let skip_recheck = false;
+    if !skip_recheck && let Some(blocker) = commands_blocker(home) {
         return DrainStep::Waiting(blocker);
     }
     match port.posts_in_flight().await {

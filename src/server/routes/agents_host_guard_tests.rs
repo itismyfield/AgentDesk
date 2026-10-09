@@ -296,3 +296,71 @@ async fn stop_routes_keep_a_runtime_turn_on_another_host_pg() {
     }
     db.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn command_agent_and_dispatch_refusal_leave_session_and_dispatch_working_pg() {
+    use crate::db::o_channel_homes::HomeState;
+    use crate::services::cluster::channel_home;
+    use crate::services::discord::host_teardown_gate::test_support::{nameless_turn, runtime};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ScriptedTmux::install();
+    let (db, pool) = postgres().await;
+    let (shared, registry) = runtime(&pool).await;
+    let mut app = state(pool.clone());
+    app.health_registry = Some(registry.clone());
+    let channel = 9200000000000106;
+    let name =
+        crate::services::provider::ProviderKind::Claude.build_tmux_session_name("home-agent-stop");
+    let id = seed_turn(
+        &pool,
+        Case::Stored(Stored::Legacy),
+        ("home-agent-stop", &name),
+        "remote-home",
+        channel,
+    )
+    .await;
+    let dispatch = "home-agent-stop-dispatch";
+    sqlx::query("INSERT INTO task_dispatches (id,title,dispatch_type,status) VALUES ($1,'home-command','implementation','dispatched')")
+        .bind(dispatch).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE sessions SET provider='claude',active_dispatch_id=$2 WHERE id=$1")
+        .bind(id)
+        .bind(dispatch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let token = nameless_turn(&shared, poise::serenity_prelude::ChannelId::new(channel)).await;
+    let home = channel_home::register_for_test(channel, Some(HomeState::Releasing));
+    tmux.take_calls();
+    let (status, Json(body)) =
+        super::stop_agent_turn(State(app), Path("home-agent-stop".into())).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        body["error"].as_str().unwrap().contains("home_draining"),
+        "{body}"
+    );
+    let error = crate::services::queue::QueueService::new(Some(pool.clone()))
+        .cancel_dispatch(Some(&registry), dispatch)
+        .await
+        .unwrap_err();
+    assert_eq!(error.status(), StatusCode::CONFLICT);
+    assert!(error.to_string().contains("home_draining"), "{error}");
+    assert_eq!(row_status(&pool, id).await, "turn_active");
+    let status: String = sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id=$1")
+        .bind(dispatch)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "dispatched");
+    assert!(
+        crate::services::discord::host_teardown_gate::test_support::turn_kept(
+            &shared,
+            poise::serenity_prelude::ChannelId::new(channel),
+            &token
+        )
+        .await
+    );
+    assert!(tmux.take_calls().iter().all(|call| !call.contains("kill")));
+    channel_home::unregister(home.channel_id());
+    pool.close().await;
+    db.drop().await;
+}

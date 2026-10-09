@@ -1063,6 +1063,7 @@ server::rate_limit_sync::tests::unreadable_runtime_config_resolves_to_no_thresho
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
 server::routes::agents::host_guard_tests::auth_login_routes_refuse_a_target_another_host_claims
+server::routes::agents::host_guard_tests::command_agent_and_dispatch_refusal_leave_session_and_dispatch_working_pg
 server::routes::agents::host_guard_tests::diagnostics_routes_never_probe_a_non_legacy_session_pg
 server::routes::agents::host_guard_tests::stop_routes_keep_a_runtime_turn_on_another_host_pg
 server::routes::agents::tmux_relay_adoption_state_tests::absent_and_probe_error_states_are_distinct
@@ -2195,6 +2196,12 @@ services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retire
 services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
 services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
 services::cluster::channel_home::tests::a_replaced_or_unregistered_gate_closes_for_good_and_its_lease_ends
+services::cluster::channel_home::tests::command_admission_expires_at_the_renewal_deadline
+services::cluster::channel_home::tests::command_dormant_admission_does_not_lookup_or_start_a_task
+services::cluster::channel_home::tests::command_permit_drop_panic_and_blocking_abort_are_not_unknown
+services::cluster::channel_home::tests::command_permit_linearizes_close_and_preserves_children
+services::cluster::channel_home::tests::command_registry_unregister_is_immediate_and_reuses_pending_count
+services::cluster::channel_home::tests::command_replacement_and_resume_keep_counter_and_intake_closed
 services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
 services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
 services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
@@ -2209,6 +2216,8 @@ services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_
 services::cluster::channel_home_drain::tests::a_replaced_gates_cleanup_never_unregisters_the_gate_that_replaced_it_pg
 services::cluster::channel_home_drain::tests::an_unreadable_projection_or_a_dropped_hold_keeps_the_drain_waiting_pg
 services::cluster::channel_home_drain::tests::an_unreadable_row_or_intake_or_a_failed_leave_keeps_the_row_pg
+services::cluster::channel_home_drain::tests::command_drain_rechecks_recovery_admitted_during_reset_pg
+services::cluster::channel_home_drain::tests::command_drain_waits_before_reset_and_after_final_close_pg
 services::cluster::channel_home_drain::tests::the_drain_loop_shows_its_blocker_in_health_until_it_leaves_pg
 services::cluster::channel_home_drain::tests::two_nodes_never_hold_or_post_at_once_across_hand_over_and_restarts_pg
 services::cluster::channel_home_port::tests::a_last_send_from_an_ending_actor_reads_as_unknown
@@ -4435,6 +4444,7 @@ services::discord::mcp_credential_watcher::tests::removed_mcp_server_is_reported
 services::discord::mcp_credential_watcher::tests::token_file_rotation_produces_no_summary
 services::discord::mcp_credential_watcher::tests::unchanged_mcp_servers_produce_no_summary
 services::discord::mcp_credential_watcher::tests::watched_paths_exclude_oauth_token_file
+services::discord::meeting_orchestrator::lifecycle::home_command_tests::command_meeting_refusal_precedes_cancel_state_and_artifact
 services::discord::model_catalog::bounded_cache_file::tests::invariant_bounded_cache_file_accepts_regular_file_within_limit
 services::discord::model_catalog::bounded_cache_file::tests::invariant_bounded_cache_file_reads_the_opened_descriptor_after_path_replacement
 services::discord::model_catalog::bounded_cache_file::tests::invariant_bounded_cache_file_rejects_symlink_and_fifo_without_blocking
@@ -9869,6 +9879,7 @@ services::provider_output_guard_tests::invariant_4371_streaming_partial_anchor_i
 services::provider_output_guard_tests::invariant_4371_system_notification_with_private_fields_is_blocked
 services::provider_output_guard_tests::invariant_4371_tool_wrapper_terminal_compound_is_blocked
 services::provider_teardown::tests::teardown_runs_only_for_its_own_clearance_or_an_unkeyed_turn
+services::queue::home_command_tests::command_rest_home_refusal_precedes_forward_and_session_mutation
 services::queue::tests::force_purge_channel_mailbox_drains_queue_without_session_key
 services::queue::tests::force_purge_reaches_queue_hydrated_by_dedup_replay
 services::qwen::child_exit_tests::actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds

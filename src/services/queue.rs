@@ -1041,3 +1041,53 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+mod home_command_tests {
+    use super::*;
+    use crate::db::o_channel_homes::HomeState;
+    use crate::services::cluster::channel_home;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_rest_home_refusal_precedes_forward_and_session_mutation() {
+        let channel = 9200000000000104;
+        let home = channel_home::register_for_test(channel, Some(HomeState::Releasing));
+        let service = QueueService::new(None);
+        let context = crate::services::session_forwarding::ForwardCallerContext {
+            pg_pool: None,
+            config: Arc::new(crate::config::Config::default()),
+            cluster_instance_id: None,
+        };
+        for force in [false, true] {
+            let error = service
+                .cancel_turn(
+                    None,
+                    &channel.to_string(),
+                    force,
+                    &HeaderMap::new(),
+                    &context,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.status(), axum::http::StatusCode::CONFLICT);
+            assert!(error.to_string().contains("home_draining"), "{error}");
+            assert_eq!(home.commands_in_flight(), 0);
+        }
+        channel_home::unregister(home.channel_id());
+        let error = service
+            .cancel_turn(
+                None,
+                &channel.to_string(),
+                false,
+                &HeaderMap::new(),
+                &context,
+            )
+            .await
+            .unwrap_err();
+        assert_ne!(
+            error.status(),
+            axum::http::StatusCode::CONFLICT,
+            "Legacy still reaches its existing pool error"
+        );
+    }
+}

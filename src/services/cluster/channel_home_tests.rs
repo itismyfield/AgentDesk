@@ -614,3 +614,170 @@ fn standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake() {
     unregister(&channel);
     assert_eq!(routing(SELECTED), foreign, "row gone: as before");
 }
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn command_permit_linearizes_close_and_preserves_children() {
+    let home = Arc::new(HomeGate::new(C, "mini"));
+    home.confirm(&written("mini", 1, HomeState::Worker), Instant::now())
+        .unwrap();
+    register(home.clone());
+    let permit = admit_command(C, "claude").unwrap().unwrap();
+    home.close_intake();
+    assert!(home.admit_command("claude").is_none());
+    command_scope(Some(permit.clone()), async {
+        let nested = admit_command(C, "claude").unwrap().unwrap();
+        assert!(admit_command(C, "codex").is_err());
+        assert_eq!(home.commands_in_flight(), 1);
+        drop(nested);
+    })
+    .await;
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let (finish, finished) = tokio::sync::oneshot::channel();
+    let child = tokio::spawn(command_scope(Some(permit.clone()), async move {
+        entered.send(()).unwrap();
+        finished.await.unwrap();
+    }));
+    entry.await.unwrap();
+    drop(permit);
+    assert_eq!(
+        home.commands_in_flight(),
+        1,
+        "child owns the admitted execution"
+    );
+    home.close();
+    assert!(home.admit_recovery("claude").is_none());
+    finish.send(()).unwrap();
+    child.await.unwrap();
+    assert_eq!(home.commands_in_flight(), 0);
+    unregister(C);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn command_permit_drop_panic_and_blocking_abort_are_not_unknown() {
+    let home = register_for_test(9200000000000102, Some(HomeState::Worker));
+    let permit = home.admit_command("claude").unwrap();
+    let dropped = command_scope(Some(permit), std::future::pending::<()>());
+    drop(dropped);
+    assert_eq!(
+        home.commands_in_flight(),
+        0,
+        "unpolled future drops its root"
+    );
+    let permit = home.admit_command("claude").unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = permit;
+        panic!("command panic");
+    }));
+    assert!(result.is_err());
+    assert_eq!(home.commands_in_flight(), 0, "unwind has no Unknown state");
+    let permit = home.admit_command("claude").unwrap();
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let (finish, finished) = std::sync::mpsc::channel();
+    let worker = tokio::task::spawn_blocking(move || {
+        let _held = command_worker_scope(Some(permit));
+        entered.send(()).unwrap();
+        finished.recv().unwrap();
+    });
+    entry.await.unwrap();
+    worker.abort();
+    assert_eq!(
+        home.commands_in_flight(),
+        1,
+        "abort is not a running closure join"
+    );
+    finish.send(()).unwrap();
+    worker.await.unwrap();
+    assert_eq!(home.commands_in_flight(), 0);
+    unregister(home.channel_id());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn command_registry_unregister_is_immediate_and_reuses_pending_count() {
+    let channel = 9200000000000103;
+    let old = register_for_test(channel, Some(HomeState::Worker));
+    let permit = old.admit_command("claude").unwrap();
+    assert!(unregister_if_same(&old));
+    assert!(
+        registered(old.channel_id()).is_none(),
+        "watch removal must not leave a permanent refusal"
+    );
+    assert!(
+        admit_command(old.channel_id(), "claude").unwrap().is_none(),
+        "Legacy executes without restart"
+    );
+    let new = register_for_test(channel, Some(HomeState::Worker));
+    assert_eq!(
+        new.commands_in_flight(),
+        1,
+        "replacement sees old execution"
+    );
+    new.close_intake();
+    assert!(new.admit_command("claude").is_none());
+    let recovery = new.admit_recovery("claude").unwrap();
+    new.close();
+    assert_eq!(new.commands_in_flight(), 2);
+    drop(permit);
+    assert_eq!(new.commands_in_flight(), 1);
+    drop(recovery);
+    assert_eq!(new.commands_in_flight(), 0);
+    assert!(
+        new.admit_command("claude").is_none(),
+        "drop never grants ownership"
+    );
+    unregister(new.channel_id());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn command_replacement_and_resume_keep_counter_and_intake_closed() {
+    let old = Arc::new(HomeGate::new(C, "mini"));
+    old.confirm(&written("mini", 1, HomeState::Worker), Instant::now())
+        .unwrap();
+    register(old.clone());
+    let permit = old.admit_command("claude").unwrap();
+    let new = Arc::new(HomeGate::new(C, "mini"));
+    register(new.clone());
+    assert!(old.admit_command("claude").is_none());
+    new.confirm(&written("mini", 2, HomeState::Reclaiming), Instant::now())
+        .unwrap();
+    new.close();
+    advance(Duration::from_nanos(1)).await;
+    new.resume_drain(&written("mini", 2, HomeState::Reclaiming), Instant::now())
+        .unwrap();
+    assert!(new.admit_command("claude").is_none());
+    assert_eq!(new.commands_in_flight(), 1);
+    assert!(new.admit_recovery("claude").is_some());
+    drop(permit);
+    assert_eq!(new.commands_in_flight(), 0);
+    unregister(C);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn command_admission_expires_at_the_renewal_deadline() {
+    for elapsed in [
+        HOLD_FOR - Duration::from_nanos(1),
+        HOLD_FOR,
+        HOLD_FOR + Duration::from_nanos(1),
+    ] {
+        let home = HomeGate::new(C, "mini");
+        home.confirm(&written("mini", 1, HomeState::Worker), Instant::now())
+            .unwrap();
+        advance(elapsed).await;
+        assert_eq!(home.admit_command("claude").is_some(), elapsed < HOLD_FOR);
+        assert_eq!(home.commands_in_flight(), 0);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn command_dormant_admission_does_not_lookup_or_start_a_task() {
+    assert!(
+        with_homes(|homes| homes.get().is_none()),
+        "fresh thread has no registry"
+    );
+    COMMAND_LOOKUPS.with(|calls| calls.set(0));
+    for _ in 0..3 {
+        let permit = admit_command(C, "claude").unwrap();
+        assert!(permit.is_none());
+        assert_eq!(command_scope(permit, async { 7 }).await, 7);
+    }
+    COMMAND_LOOKUPS.with(|calls| assert_eq!(calls.get(), 0));
+}

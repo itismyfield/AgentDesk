@@ -72,6 +72,10 @@ struct CommandCount {
 struct CommandEffect(Arc<CommandCount>);
 impl Drop for CommandEffect {
     fn drop(&mut self) {
+        #[cfg(test)]
+        if command_mutant("permit_drop_does_not_decrement") {
+            return;
+        }
         if self.0.count.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.0.ended.notify_waiters();
         }
@@ -89,6 +93,10 @@ pub(crate) struct CommandPermit {
 impl CommandPermit {
     fn new(count: &Arc<CommandCount>, channel: &str, provider: &str) -> Self {
         count.count.fetch_add(1, Ordering::AcqRel);
+        #[cfg(test)]
+        if command_mutant("admission_increment_after_lock") {
+            count.count.fetch_sub(1, Ordering::AcqRel);
+        }
         Self {
             _effect: Arc::new(CommandEffect(Arc::clone(count))),
             channel: channel.into(),
@@ -130,6 +138,12 @@ pub(crate) fn command_scope<F: Future>(
     permit: Option<CommandPermit>,
     work: F,
 ) -> impl Future<Output = F::Output> {
+    #[cfg(test)]
+    let permit = if command_mutant("permit_not_moved_into_child") {
+        None
+    } else {
+        permit
+    };
     if permit.is_some() {
         futures::future::Either::Right(COMMAND.scope(
             permit.clone(),
@@ -171,6 +185,10 @@ pub(crate) fn admit_command(
 ) -> Result<Option<CommandPermit>, HomeRefusal> {
     if let Some(permit) = current_command(channel, provider) {
         return Ok(Some(permit));
+    }
+    #[cfg(test)]
+    if command_mutant("off_runs_home_lookup") {
+        COMMAND_LOOKUPS.with(|calls| calls.set(calls.get() + 1));
     }
     if !with_homes(|homes| homes.get().is_some()) {
         return Ok(None);
@@ -600,6 +618,10 @@ pub(crate) fn register(home: Arc<HomeGate>) {
             old.withdraw();
         }
         let mut local = home.locked();
+        #[cfg(test)]
+        if command_mutant("register_ignores_pending_count") {
+            registry.commands.remove(&home.channel_id);
+        }
         let count = registry
             .commands
             .entry(home.channel_id.clone())
@@ -634,6 +656,11 @@ pub(crate) fn unregister_if_same(home: &HomeGate) -> bool {
             .is_some_and(|current| std::ptr::eq(Arc::as_ptr(current), home))
         {
             return false;
+        }
+        #[cfg(test)]
+        if command_mutant("unregister_deferred_without_owner") && home.commands_in_flight() != 0 {
+            home.withdraw();
+            return true;
         }
         registry.gates.remove(&home.channel_id);
         home.withdraw();
@@ -839,3 +866,11 @@ mod tests;
 #[cfg(test)]
 #[path = "channel_home_claim_tests.rs"]
 mod claim_tests;
+
+#[cfg(test)]
+pub(crate) fn command_mutant(name: &str) -> bool {
+    std::env::var("ADK_TEST_HOME_COMMAND_MUTANT")
+        .ok()
+        .as_deref()
+        == Some(name)
+}
