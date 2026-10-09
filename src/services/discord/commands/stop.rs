@@ -107,7 +107,10 @@ pub(in crate::services::discord) async fn run_slash_stop(
         ) {
             return StopReply {
                 refusal: None,
-                stop: CommandStop::HostRefused,
+                stop: {
+                    eprintln!("D2B_UNNAMED_BEGIN_CALLED");
+                    turn_bridge::begin_command_stop(shared, provider, channel, false).await
+                },
                 permit,
             };
         }

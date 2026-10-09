@@ -162,6 +162,7 @@ async fn release_on(
     #[cfg(test)]
     let _permit =
         if crate::services::cluster::channel_home::command_mutant("release_permit_removed") {
+            drop(_permit);
             None
         } else {
             _permit

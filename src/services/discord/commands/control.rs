@@ -681,28 +681,46 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
         return Ok(());
     }
 
-    log_command_received!(ctx.channel_id().get(), user_name, "/clear");
+    let permit = home_fence::admit(ctx.channel_id(), ctx.data().provider.as_str())?;
+    clear_with_reply_scope(permit, async {
+        log_command_received!(ctx.channel_id().get(), user_name, "/clear");
 
-    let http = ctx.serenity_context().http.clone();
-    clear_channel_session_state(
-        &http,
-        &ctx.data().shared,
-        &ctx.data().provider,
-        ctx.channel_id(),
-        "/clear",
-        SoftClearNotifyMode::Suppress,
-    )
-    .await?;
+        let http = ctx.serenity_context().http.clone();
+        clear_channel_session_state(
+            &http,
+            &ctx.data().shared,
+            &ctx.data().provider,
+            ctx.channel_id(),
+            "/clear",
+            SoftClearNotifyMode::Suppress,
+        )
+        .await?;
 
-    ctx.say(super::SESSION_CLEARED_RESPONSE).await?;
-    log_info_event!(
-        "discord_session_cleared",
-        channel_id = ctx.channel_id().get(),
-        provider = ctx.data().provider.as_str(),
-        user_name = %user_name,
-        status = "cleared",
-    );
-    Ok(())
+        ctx.say(super::SESSION_CLEARED_RESPONSE).await?;
+        log_info_event!(
+            "discord_session_cleared",
+            channel_id = ctx.channel_id().get(),
+            provider = ctx.data().provider.as_str(),
+            user_name = %user_name,
+            status = "cleared",
+        );
+        Ok(())
+    })
+    .await
+}
+
+async fn clear_with_reply_scope<F: std::future::Future>(
+    permit: Option<crate::services::cluster::channel_home::CommandPermit>,
+    work: F,
+) -> F::Output {
+    #[cfg(test)]
+    let permit = if home_fence::mutant("clear_reply_outside_scope") {
+        drop(permit);
+        None
+    } else {
+        permit
+    };
+    crate::services::cluster::channel_home::command_scope(permit, work).await
 }
 
 #[cfg(test)]

@@ -312,3 +312,64 @@ async fn d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor() {
     );
     assert!(!token.cancelled.load(std::sync::atomic::Ordering::Acquire));
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn d2b_clear_reply_stays_counted_after_clear_body_finishes() {
+    use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
+    if !api_child(
+        "services::discord::commands::control::home_fence::tests::d2b_clear_reply_stays_counted_after_clear_body_finishes",
+    ) {
+        return;
+    }
+    let api = Recorder::start().await;
+    crate::services::discord::internal_api::init(api.port, None);
+    let http = api.http.clone();
+
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+    let channel = ChannelId::new(CHANNEL + 16);
+    seed_session(&shared, channel).await;
+    let home = channel_home::register_for_test(channel.get(), Some(HomeState::Worker));
+    let permit = admit(channel, "gemini").unwrap();
+    let barrier = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+    let gate = barrier.clone();
+    let owner = shared.clone();
+    let work = tokio::spawn(super::super::clear_with_reply_scope(permit, async move {
+        super::super::clear_channel_session_state_fenced(
+            &http,
+            &owner,
+            &ProviderKind::Gemini,
+            channel,
+            "/clear",
+            SoftClearNotifyMode::Suppress,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(session_state(&owner, channel).await.0, None);
+        gate.0.notify_one();
+        gate.1.notified().await;
+        channel
+            .say(
+                &http,
+                crate::services::discord::commands::SESSION_CLEARED_RESPONSE,
+            )
+            .await
+            .unwrap();
+    }));
+    tokio::time::timeout(std::time::Duration::from_secs(10), barrier.0.notified())
+        .await
+        .expect("clear body finished before reply");
+    home.close_intake();
+    assert_eq!(
+        home.commands_in_flight(),
+        1,
+        "reply remains outstanding after reset completed"
+    );
+    barrier.1.notify_one();
+    work.await.unwrap();
+    assert_eq!(home.commands_in_flight(), 0, "reply completed");
+    assert!(api.take().iter().any(|call| call.contains(crate::services::discord::commands::SESSION_CLEARED_RESPONSE)), "real reply transport reached");
+}
