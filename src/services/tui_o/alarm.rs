@@ -13,22 +13,70 @@ use super::writer::{AlarmSink, WriterAlarm};
 pub(crate) const NOT_FOUND_THRESHOLD: usize = 3;
 pub(crate) const NOT_FOUND_WINDOW: Duration = Duration::from_secs(3600);
 
-/// Outbox source label and reason code for operator-channel alarm messages.
+/// Outbox source label and reason prefix for operator-channel alarm messages.
 pub(crate) const ALARM_SOURCE: &str = "tui_o_alarm";
 pub(crate) const ALARM_REASON_CODE: &str = "tui_o.writer_alarm";
 
 /// Sends one alarm line to the operator channel.
 pub(crate) trait AlarmNotifier: Send + Sync {
-    fn notify(&self, alert_channel: u64, text: String);
+    fn notify(&self, alert_channel: u64, alarm: AlarmNotification, attempt: NotificationAttempt);
 }
 
-/// Alarm reasons in two views: `raised` latches each first occurrence for the one operator
-/// message and stays as history; health reads only the conditions still in force.
+/// History and current health conditions are independent of operator enqueue attempts.
 #[derive(Default)]
 pub(crate) struct AlarmHealth {
     raised: Mutex<BTreeSet<String>>,
+    notifications: Mutex<HashMap<String, NotificationState>>,
     active: Mutex<BTreeSet<String>>,
     not_found: Mutex<HashMap<u64, VecDeque<Instant>>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NotificationState {
+    Pending,
+    Enqueued,
+}
+
+pub(crate) struct AlarmNotification {
+    channel: u64,
+    kind: &'static str,
+    text: String,
+}
+
+/// A failed, suppressed, or cancelled attempt releases its slot for the next observation.
+pub(crate) struct NotificationAttempt {
+    health: Arc<AlarmHealth>,
+    reason: String,
+    enqueued: bool,
+}
+
+impl NotificationAttempt {
+    fn claim(health: Arc<AlarmHealth>, reason: String) -> Option<Self> {
+        let mut notifications = locked(&health.notifications);
+        if notifications.contains_key(&reason) {
+            return None;
+        }
+        notifications.insert(reason.clone(), NotificationState::Pending);
+        drop(notifications);
+        Some(Self {
+            health,
+            reason,
+            enqueued: false,
+        })
+    }
+
+    fn commit(mut self) {
+        locked(&self.health.notifications).insert(self.reason.clone(), NotificationState::Enqueued);
+        self.enqueued = true;
+    }
+}
+
+impl Drop for NotificationAttempt {
+    fn drop(&mut self) {
+        if !self.enqueued {
+            locked(&self.health.notifications).remove(&self.reason);
+        }
+    }
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -182,10 +230,10 @@ impl AlarmRouter {
             None if self.health.record_not_found(channel, now) => NOT_FOUND_FREQUENT,
             None => return,
         };
-        if !self.health.latch(&format!("tui_o:{kind}:{channel}")) {
-            return;
+        let reason = format!("tui_o:{kind}:{channel}");
+        if self.health.latch(&reason) {
+            tracing::warn!(channel, kind, ?alarm, "[tui_o] writer alarm");
         }
-        tracing::warn!(channel, kind, ?alarm, "[tui_o] writer alarm");
         let (Some(alert_channel), Some(notifier)) = (self.alert_channel, &self.notifier) else {
             return;
         };
@@ -197,9 +245,17 @@ impl AlarmRouter {
             );
             return;
         }
+        let Some(attempt) = NotificationAttempt::claim(self.health.clone(), reason) else {
+            return;
+        };
         notifier.notify(
             alert_channel,
-            format!("[tui_o] {kind} on channel {channel}: {alarm:?}"),
+            AlarmNotification {
+                channel,
+                kind,
+                text: format!("[tui_o] {kind} on channel {channel}: {alarm:?}"),
+            },
+            attempt,
         );
     }
 }
@@ -248,7 +304,7 @@ struct OutboxNotifier {
 }
 
 impl AlarmNotifier for OutboxNotifier {
-    fn notify(&self, alert_channel: u64, text: String) {
+    fn notify(&self, alert_channel: u64, alarm: AlarmNotification, attempt: NotificationAttempt) {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             tracing::warn!(
                 alert_channel,
@@ -259,19 +315,27 @@ impl AlarmNotifier for OutboxNotifier {
         let pool = self.pool.clone();
         runtime.spawn(async move {
             let target = format!("channel:{alert_channel}");
+            let reason_code = format!("{ALARM_REASON_CODE}.{}", alarm.kind);
+            let session_key = format!("tui_o:{}", alarm.channel);
             let message = crate::services::message_outbox::OutboxMessage {
                 target: &target,
-                content: &text,
+                content: &alarm.text,
                 bot: crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
                 source: ALARM_SOURCE,
-                reason_code: Some(ALARM_REASON_CODE),
-                session_key: None,
+                reason_code: Some(&reason_code),
+                session_key: Some(&session_key),
             };
-            if let Err(error) =
-                crate::services::message_outbox::enqueue_outbox_best_effort(Some(&pool), message)
-                    .await
+            match crate::services::message_outbox::enqueue_outbox_best_effort(Some(&pool), message)
+                .await
             {
-                tracing::warn!(alert_channel, %error, "[tui_o] alarm message not queued");
+                Ok(true) => attempt.commit(),
+                Ok(false) => tracing::warn!(
+                    alert_channel,
+                    "[tui_o] alarm enqueue suppressed; will retry"
+                ),
+                Err(error) => {
+                    tracing::warn!(alert_channel, %error, "[tui_o] alarm message not queued")
+                }
             }
         });
     }
@@ -288,8 +352,14 @@ mod tests {
     struct Recorder(Mutex<Vec<(u64, String)>>);
 
     impl AlarmNotifier for Recorder {
-        fn notify(&self, alert_channel: u64, text: String) {
-            self.0.lock().unwrap().push((alert_channel, text));
+        fn notify(
+            &self,
+            alert_channel: u64,
+            alarm: AlarmNotification,
+            attempt: NotificationAttempt,
+        ) {
+            locked(&self.0).push((alert_channel, alarm.text));
+            attempt.commit();
         }
     }
 
@@ -495,5 +565,185 @@ mod tests {
             reasons(&["halted:43", "spool_full:42"])
         );
         assert_eq!(sent(&recorder), messages, "resume reports send nothing");
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests {
+    use super::*;
+
+    async fn row_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE source = $1")
+            .bind(ALARM_SOURCE)
+            .fetch_one(pool)
+            .await
+            .expect("count actual alarm outbox rows")
+    }
+
+    #[tokio::test]
+    async fn distinct_channels_and_kinds_enqueue_once_pg() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_o_alarm_identity",
+            "O alarm outbox identity",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        let health = Arc::new(AlarmHealth::default());
+        let router = Arc::new(AlarmRouter::new(
+            Some(900),
+            Some(Arc::new(OutboxNotifier { pool: pool.clone() })),
+            health.clone(),
+        ));
+        let mut tasks = Vec::new();
+        for (channel, alarm) in [
+            (42, WriterAlarm::Blocked { status: 403 }),
+            (7, WriterAlarm::Blocked { status: 403 }),
+            (
+                42,
+                WriterAlarm::Halted {
+                    detail: "io".into(),
+                },
+            ),
+            (42, WriterAlarm::Blocked { status: 403 }),
+        ] {
+            let router = router.clone();
+            tasks.push(tokio::spawn(async move { router.raise(channel, alarm) }));
+        }
+        for task in tasks {
+            task.await.expect("concurrent alarm producer");
+        }
+        settled(&health).await;
+        let destinations: Vec<(String, String)> =
+            sqlx::query_as("SELECT target, bot FROM message_outbox WHERE source = $1")
+                .bind(ALARM_SOURCE)
+                .fetch_all(&pool)
+                .await
+                .expect("read actual alarm destinations");
+        assert!(
+            destinations
+                .iter()
+                .all(|(target, bot)| target == "channel:900" && bot == "notify")
+        );
+        let actual = row_count(&pool).await;
+        pool.close().await;
+        db.drop().await;
+        assert_eq!(
+            actual, 3,
+            "different channel/kind identities each need a PG row"
+        );
+        assert_eq!(health.history().len(), 3);
+    }
+
+    async fn settled(health: &AlarmHealth) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !locked(&health.notifications)
+                    .values()
+                    .any(|state| *state == NotificationState::Pending)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual outbox enqueue attempt finished");
+    }
+
+    fn pg_router(pool: &PgPool, health: Arc<AlarmHealth>) -> Arc<AlarmRouter> {
+        Arc::new(AlarmRouter::new(
+            Some(900),
+            Some(Arc::new(OutboxNotifier { pool: pool.clone() })),
+            health,
+        ))
+    }
+
+    #[tokio::test]
+    async fn suppressed_failed_and_runtime_missing_enqueues_retry_pg() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_o_alarm_retry",
+            "O alarm outbox retry",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        assert!(
+            crate::services::message_outbox::enqueue_outbox_best_effort(
+                Some(&pool),
+                crate::services::message_outbox::OutboxMessage {
+                    target: "channel:900",
+                    content: "old alarm row",
+                    bot: "notify",
+                    source: ALARM_SOURCE,
+                    reason_code: Some(ALARM_REASON_CODE),
+                    session_key: None,
+                },
+            )
+            .await
+            .expect("seed the previous alarm identity")
+        );
+
+        let health = Arc::new(AlarmHealth::default());
+        let router = pg_router(&pool, health.clone());
+        let no_runtime = router.clone();
+        std::thread::spawn(move || no_runtime.raise(42, WriterAlarm::PausedNoGateway))
+            .join()
+            .expect("alarm observation outside a runtime");
+        assert_eq!(row_count(&pool).await, 1);
+        router.raise(42, WriterAlarm::PausedNoGateway);
+        settled(&health).await;
+        assert_eq!(
+            row_count(&pool).await,
+            2,
+            "old identity does not suppress the new alarm"
+        );
+
+        let restarted_health = Arc::new(AlarmHealth::default());
+        let restarted = pg_router(&pool, restarted_health.clone());
+        restarted.raise(42, WriterAlarm::PausedNoGateway);
+        settled(&restarted_health).await;
+        assert_eq!(
+            row_count(&pool).await,
+            2,
+            "PG suppressed a replay after restart"
+        );
+        sqlx::query("UPDATE message_outbox SET status = 'failed' WHERE id = (SELECT MAX(id) FROM message_outbox)")
+            .execute(&pool).await.expect("remove the fixture duplicate from the active set");
+        restarted.raise(42, WriterAlarm::PausedNoGateway);
+        settled(&restarted_health).await;
+        assert_eq!(
+            row_count(&pool).await,
+            3,
+            "NoRow did not consume the notification latch"
+        );
+        restarted.raise(42, WriterAlarm::PausedNoGateway);
+        settled(&restarted_health).await;
+        assert_eq!(
+            row_count(&pool).await,
+            3,
+            "successful enqueue latches the same event"
+        );
+
+        sqlx::query("ALTER TABLE message_outbox ADD CONSTRAINT alarm_fixture_failure CHECK (content NOT LIKE '%channel 77:%')")
+            .execute(&pool).await.expect("inject a real PG insert failure");
+        restarted.raise(77, WriterAlarm::SpoolFull);
+        settled(&restarted_health).await;
+        assert_eq!(row_count(&pool).await, 3);
+        assert_eq!(
+            restarted_health.current_at(Instant::now()),
+            ["tui_o:paused_no_gateway:42", "tui_o:spool_full:77"]
+        );
+        sqlx::query("ALTER TABLE message_outbox DROP CONSTRAINT alarm_fixture_failure")
+            .execute(&pool)
+            .await
+            .expect("repair the isolated PG fixture");
+        restarted.raise(77, WriterAlarm::SpoolFull);
+        settled(&restarted_health).await;
+        assert_eq!(
+            row_count(&pool).await,
+            4,
+            "PG error did not consume the notification latch"
+        );
+        pool.close().await;
+        db.drop().await;
     }
 }
