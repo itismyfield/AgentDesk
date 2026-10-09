@@ -9181,6 +9181,7 @@ services::discord::zombie_foreground_release::tests::fixtures::an_unlistable_sto
 services::discord::zombie_foreground_release::tests::fixtures::cancelled_turn_with_live_inflight_keeps_its_foreground_slot
 services::discord::zombie_foreground_release::tests::fixtures::episode_identity_is_extracted_from_the_stable_fields_only
 services::discord::zombie_foreground_release::tests::fixtures::uncancelled_live_turn_keeps_its_foreground_slot
+services::discord::zombie_foreground_release::tests::fixtures::unmeasured_session_keeps_foreground_until_a_later_idle_probe
 services::discord::zombie_foreground_release::tests::fixtures::unreadable_ambiguous_and_rebind_only_stores_are_not_reported_as_a_claim
 services::discord::zombie_foreground_release::tests::fixtures::zombie_foreground_turn_is_released_and_the_queue_survives
 services::discord::zombie_foreground_release::tests::idle_mailbox_is_a_hold_not_a_release

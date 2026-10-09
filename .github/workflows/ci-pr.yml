@@ -751,6 +751,7 @@ jobs:
               - 'src/services/discord/turn_finalizer/**'
               - 'src/services/discord/turn_presence/**'
               - 'src/services/discord/voice_barge_in/**'
+              - 'src/services/discord/zombie_foreground_release.rs'
               - 'src/services/git/**'
               # Cover Windows-compiled cfg consumers outside the relay tree;
               # the source-wide derivation test rejects newly uncovered owners.
