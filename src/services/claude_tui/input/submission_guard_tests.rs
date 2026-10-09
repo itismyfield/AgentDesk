@@ -70,6 +70,7 @@ fn submit_text(
 
 fn state(after: &[Option<&str>]) -> SpyState {
     SpyState {
+        pane_size: Some((80, 24)),
         captures: std::iter::repeat_n(Some(IDLE.to_string()), 16).collect(),
         captures_after_send: Some(after.iter().map(|s| s.map(str::to_string)).collect()),
         ..SpyState::default()
@@ -219,7 +220,7 @@ fn claude_actual_idle_entries_preserve_measured_faint_empty_composer_semantics()
             assert_eq!(calls.iter().filter(|c| *c == "keys:Enter").count(), 1);
             let paste = calls.iter().position(|c| c == "paste:delete=true").unwrap();
             let enter = calls.iter().position(|c| c == "keys:Enter").unwrap();
-            assert_eq!(&calls[paste + 1..enter], ["capture:draft", "alive"]);
+            assert_eq!(&calls[paste + 1..enter], ["size", "alive", "capture:draft"]);
             assert_eq!(&calls[enter + 1..], ["capture:draft", "alive"]);
             assert_no_cleanup(&calls);
         }
@@ -275,7 +276,7 @@ fn claude_actual_entries_submit_owned_expanded_and_folded_drafts_once() {
             );
             let paste = calls.iter().position(|c| c == "paste:delete=true").unwrap();
             let enter = calls.iter().position(|c| c == "keys:Enter").unwrap();
-            assert_eq!(&calls[paste + 1..enter], ["capture:draft", "alive"]);
+            assert_eq!(&calls[paste + 1..enter], ["size", "alive", "capture:draft"]);
             assert_no_cleanup(&calls);
         }
     }
@@ -299,7 +300,12 @@ fn claude_actual_entries_leave_post_enter_drafts_and_blind_confirmation_untouche
             None,
         ] {
             let session = format!("claude-guard-confirm-{}", uuid::Uuid::new_v4());
-            let spy = SpyGuard::install(state(&[Some(OWN), confirmation]));
+            let spy = SpyGuard::install(state(&[
+                Some(OWN),
+                confirmation,
+                confirmation,
+                confirmation,
+            ]));
             let error = submit(entry, &session, None).unwrap_err();
             assert_late_hold(&error);
             let calls = spy.calls();
@@ -315,7 +321,7 @@ fn claude_actual_entries_leave_post_enter_drafts_and_blind_confirmation_untouche
                     .iter()
                     .filter(|c| c.starts_with("capture"))
                     .count(),
-                1,
+                3,
                 "{calls:?}"
             );
             assert_no_cleanup(&calls);
@@ -442,7 +448,7 @@ fn claude_actual_token_entries_stop_after_enter_cancellation_without_confirmatio
 }
 
 #[test]
-fn claude_actual_fresh_entry_withholds_enter_for_unattested_eighty_column_wrap() {
+fn claude_actual_fresh_entry_submits_observed_eighty_column_wrap_once() {
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
@@ -453,19 +459,19 @@ fn claude_actual_fresh_entry_withholds_enter_for_unattested_eighty_column_wrap()
     let banner = " ▐▛███▛█   Claude Code v2.1.289\n~/.adk/release/workspaces/e2e\n\n";
     let footer = format!("{rule}\n  ⏱ 0m │ ░░░░░░░░░░ │ 0% │ 0/1.0M │ $0.00\n  MCP: 2");
     let empty = format!("{banner}{rule}\n❯ \n{footer}");
-    // This observed composer wrapped a single literal line; the transport has no width proof.
+    // This observed composer wrapped one literal line; the whole visible body must match.
     let wrapped = format!(
         "{banner}{rule}\n❯ [User: 명령봇 (ID: 1479017284805722200)] 응답에 정확히 한 줄로\n  \
          [E2E:E50:run:AFTER_CLEAR] 만\n  출력해줘.\n\n{footer}"
     );
     let spy = SpyGuard::install(SpyState {
+        pane_size: Some((80, 24)),
         captures: std::iter::repeat_n(Some(empty), 16).collect(),
-        captures_after_send: Some([Some(wrapped)].into()),
+        captures_after_send: Some([Some(wrapped), Some(BUSY.to_string())].into()),
         ..SpyState::default()
     });
     let token = CancelToken::new();
-    let error = send_fresh_prompt(&session, prompt, Some(&token)).unwrap_err();
-    assert_late_hold(&error);
+    assert_eq!(send_fresh_prompt(&session, prompt, Some(&token)), Ok(()));
     let calls = spy.calls();
     assert_eq!(
         calls
@@ -474,6 +480,387 @@ fn claude_actual_fresh_entry_withholds_enter_for_unattested_eighty_column_wrap()
             .count(),
         1
     );
-    assert!(!calls.iter().any(|c| c == "keys:Enter"), "{calls:?}");
+    assert_eq!(
+        calls.iter().filter(|c| *c == "keys:Enter").count(),
+        1,
+        "{calls:?}"
+    );
     assert_no_cleanup(&calls);
+}
+
+fn constructed_composer(width: usize, body: &str) -> String {
+    let border = "─".repeat(width);
+    let shown = body
+        .split('\n')
+        .enumerate()
+        .map(|(i, row)| {
+            if i == 0 {
+                format!("❯ {row}")
+            } else if row.is_empty() {
+                String::new()
+            } else {
+                format!("  {row}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "⏺ Done.\n\n\n{border}\n{shown}\n{border}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+    )
+}
+
+#[test]
+fn claude_actual_entries_submit_wrapped_whole_prompts_once() {
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let korean = format!(
+        "[User: 에이전트데스크봇 (ID: 1479017284805722200)] {}",
+        "가".repeat(40)
+    );
+    let plain = format!("plain-{}", "x".repeat(160));
+    let cases = [
+        (
+            (80, 24),
+            &*korean,
+            include_str!(
+                "../../../../tests/fixtures/tui_input/claude-constructed-korean-wrap-80.txt"
+            ),
+        ),
+        (
+            (46, 37),
+            &*korean,
+            include_str!(
+                "../../../../tests/fixtures/tui_input/claude-constructed-korean-wrap-46.txt"
+            ),
+        ),
+        (
+            (125, 39),
+            &*korean,
+            include_str!(
+                "../../../../tests/fixtures/tui_input/claude-constructed-korean-wrap-125.txt"
+            ),
+        ),
+        (
+            (80, 24),
+            &*plain,
+            include_str!(
+                "../../../../tests/fixtures/tui_input/claude-constructed-plain-wrap-80.txt"
+            ),
+        ),
+        (
+            (46, 37),
+            &*plain,
+            include_str!(
+                "../../../../tests/fixtures/tui_input/claude-constructed-plain-wrap-46.txt"
+            ),
+        ),
+        (
+            (125, 39),
+            &*plain,
+            include_str!(
+                "../../../../tests/fixtures/tui_input/claude-constructed-plain-wrap-125.txt"
+            ),
+        ),
+    ];
+    for entry in ENTRIES {
+        for ((width, height), prompt, owned) in cases {
+            let ending = format!("\n{}\n  ⏵⏵", "─".repeat(width));
+            let foreign = owned.replacen(&ending, &format!(" 사람이붙인문자{ending}"), 1);
+            assert_ne!(foreign, owned);
+            for after in [owned, &*foreign] {
+                let session = format!("claude-r3-wrap-{}", uuid::Uuid::new_v4());
+                let mut setup = state(&[Some(after), Some(BUSY)]);
+                let empty = constructed_composer(width, "");
+                setup.captures = std::iter::repeat_n(Some(empty), 16).collect();
+                setup.pane_size = Some((width, height));
+                let spy = SpyGuard::install(setup);
+                let result = submit_text(entry, &session, prompt, None);
+                let calls = spy.calls();
+                assert_eq!(
+                    calls
+                        .iter()
+                        .filter(|c| *c == &format!("literal:{prompt}"))
+                        .count(),
+                    1,
+                    "{calls:?}"
+                );
+                assert_eq!(
+                    calls.iter().filter(|c| *c == "keys:Enter").count(),
+                    usize::from(after == owned),
+                    "{entry:?}: width={width}: {result:?}: {calls:?}"
+                );
+                if after == owned {
+                    assert_eq!(result, Ok(()));
+                    let enter = calls.iter().position(|c| c == "keys:Enter").unwrap();
+                    assert_eq!(&calls[enter - 3..enter], ["size", "alive", "capture:draft"]);
+                } else {
+                    assert_late_hold(&result.unwrap_err());
+                }
+                assert_no_cleanup(&calls);
+            }
+        }
+    }
+}
+
+#[test]
+fn claude_actual_entries_submit_modal_words_in_body_and_history_once() {
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    for entry in ENTRIES {
+        for prompt in [
+            "settings.json allow 목록에 X 넣고 deny 에서 Y 빼줘",
+            "왜 rejected 됐는지 allowed 목록 확인해줘",
+            "Enter 키로 select 하는 방법을 설명해줘",
+            "✳ Architecting…",
+            "• Working (1s • esc to interrupt)",
+            "다음 화면을 설명해줘\n✳ Architecting…",
+            "다음 화면을 설명해줘\n• Working (1s • esc to interrupt)",
+        ] {
+            let session = format!("claude-r3-modal-body-{}", uuid::Uuid::new_v4());
+            let owned = constructed_composer(125, prompt);
+            let mut setup = state(&[Some(&owned), Some(BUSY)]);
+            let empty = constructed_composer(125, "");
+            setup.captures = std::iter::repeat_n(Some(empty), 16).collect();
+            setup.pane_size = Some((125, 39));
+            let spy = SpyGuard::install(setup);
+            assert_eq!(
+                submit_text(entry, &session, prompt, None),
+                Ok(()),
+                "{entry:?}"
+            );
+            let calls = spy.calls();
+            assert_eq!(calls.iter().filter(|c| *c == "keys:Enter").count(), 1);
+            assert_no_cleanup(&calls);
+        }
+    }
+    // Steering has separate modal admission; normal turn entries accept separated history.
+    for entry in [Entry::Fresh, Entry::Followup, Entry::ProvenWarm] {
+        for history in [
+            "⏺ allow this setting and reject that setting",
+            "❯ Enter to select · Esc to cancel was quoted in the previous turn\n⏺ Here is how that interface works.",
+            "⏺ Sign in instructions:\n  1. Open settings\n  2. Select the account",
+        ] {
+            let session = format!("claude-r3-modal-history-{}", uuid::Uuid::new_v4());
+            let before = format!("{history}\n\n{IDLE}");
+            let mut setup = state(&[Some(OWN), Some(BUSY)]);
+            setup.captures = std::iter::repeat_n(Some(before), 16).collect();
+            let spy = SpyGuard::install(setup);
+            assert_eq!(submit(entry, &session, None), Ok(()), "{entry:?}");
+            let calls = spy.calls();
+            assert_eq!(calls.iter().filter(|c| *c == "keys:Enter").count(), 1);
+            assert_no_cleanup(&calls);
+        }
+    }
+}
+
+#[test]
+fn claude_actual_entries_withhold_enter_for_current_permission_chrome() {
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let footer_permission =
+        format!("{OWN}Allow this command\nReject this command\nEnter to confirm · Esc to cancel\n");
+    let above_permission = OWN.replacen(
+        "────────────────────\n❯",
+        "Allow this command\nReject this command\n────────────────────\n❯",
+        1,
+    );
+    assert_ne!(above_permission, OWN);
+    for entry in ENTRIES {
+        for after in [MODAL, &*footer_permission, &*above_permission] {
+            assert_eq!(
+                crate::services::tui_input::actor::gate::judge_pane(
+                    crate::services::tui_o::shadow::ShadowProvider::Claude,
+                    after,
+                ),
+                crate::services::tui_input::actor::gate::PaneVerdict::Modal,
+            );
+            let session = format!("claude-r3-current-modal-{}", uuid::Uuid::new_v4());
+            let spy = SpyGuard::install(state(&[Some(after)]));
+            let error = submit(entry, &session, None).unwrap_err();
+            assert_late_hold(&error);
+            let calls = spy.calls();
+            assert_eq!(calls.iter().filter(|c| *c == "keys:Enter").count(), 0);
+            assert_no_cleanup(&calls);
+        }
+    }
+}
+
+#[test]
+fn claude_actual_entries_passively_wait_for_three_readonly_repaints() {
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    for entry in ENTRIES {
+        for final_capture in [BUSY, OWN] {
+            let session = format!("claude-r3-passive-{}", uuid::Uuid::new_v4());
+            let spy = SpyGuard::install(state(&[
+                Some(OWN),
+                Some(OWN),
+                Some(OWN),
+                Some(final_capture),
+            ]));
+            let result = submit(entry, &session, None);
+            let calls = spy.calls();
+            if final_capture == BUSY {
+                assert_eq!(result, Ok(()), "{entry:?}: {calls:?}");
+            } else {
+                assert_late_hold(&result.unwrap_err());
+            }
+            assert_eq!(calls.iter().filter(|c| *c == "keys:Enter").count(), 1);
+            let enter = calls.iter().position(|c| c == "keys:Enter").unwrap();
+            assert_eq!(
+                calls[enter + 1..]
+                    .iter()
+                    .filter(|c| *c == "capture:draft")
+                    .count(),
+                3,
+                "{calls:?}"
+            );
+            assert!(
+                calls[enter + 1..]
+                    .iter()
+                    .all(|c| c == "capture:draft" || c == "alive"),
+                "{calls:?}"
+            );
+            assert_no_cleanup(&calls);
+        }
+    }
+}
+
+#[test]
+fn claude_actual_token_entries_stop_passive_poll_on_cancellation() {
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    for entry in [Entry::Fresh, Entry::Followup, Entry::ProvenWarm] {
+        let session = format!("claude-r3-passive-cancel-{}", uuid::Uuid::new_v4());
+        let token = std::sync::Arc::new(CancelToken::new());
+        let mut setup = state(&[Some(OWN), Some(OWN), Some(BUSY)]);
+        let passive_read = if matches!(entry, Entry::Fresh) { 3 } else { 4 };
+        setup.cancel_on = Some(("capture:draft", passive_read, token.clone()));
+        let spy = SpyGuard::install(setup);
+        assert_eq!(
+            submit(entry, &session, Some(token.as_ref())),
+            Err(PROMPT_READY_CANCELLED_ERROR.to_string())
+        );
+        let calls = spy.calls();
+        assert_eq!(calls.iter().filter(|c| *c == "keys:Enter").count(), 1);
+        let enter = calls.iter().position(|c| c == "keys:Enter").unwrap();
+        assert_eq!(
+            calls[enter + 1..]
+                .iter()
+                .filter(|c| *c == "capture:draft")
+                .count(),
+            1
+        );
+        assert!(
+            calls[enter + 1..]
+                .iter()
+                .all(|c| c == "capture:draft" || c == "alive"),
+            "{calls:?}"
+        );
+        assert_no_cleanup(&calls);
+    }
+}
+
+#[test]
+fn claude_actual_entries_submit_large_multiline_native_bfold_with_exact_lf_count() {
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let prompt = format!(
+        "첫째{}\n둘째{}\n셋째{}\n넷째{}",
+        "가".repeat(300),
+        "나".repeat(300),
+        "다".repeat(300),
+        "라".repeat(300),
+    );
+    assert!(prompt.chars().count() > 1000);
+    assert_eq!(prompt.bytes().filter(|b| *b == b'\n').count(), 3);
+    let empty = constructed_composer(80, "");
+    let folded = constructed_composer(80, "[Pasted text #19 +3 lines]");
+    let wrong_lf_count = constructed_composer(80, "[Pasted text #19 +4 lines]");
+    let codex_count_only = constructed_composer(
+        80,
+        &format!("[Pasted Content {} chars]", prompt.chars().count()),
+    );
+    for entry in ENTRIES {
+        for after in [&folded, &wrong_lf_count, &codex_count_only] {
+            let session = format!("claude-r3-large-bfold-{}", uuid::Uuid::new_v4());
+            let mut setup = state(&[Some(after), Some(BUSY)]);
+            setup.captures = std::iter::repeat_n(Some(empty.clone()), 16).collect();
+            setup.pane_size = Some((80, 24));
+            let spy = SpyGuard::install(setup);
+            let result = submit_text(entry, &session, &prompt, None);
+            let calls = spy.calls();
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|c| *c == &format!("load:{prompt}"))
+                    .count(),
+                1,
+                "{entry:?}: {calls:?}",
+            );
+            assert_eq!(
+                calls.iter().filter(|c| *c == "paste:delete=true").count(),
+                1
+            );
+            assert_eq!(
+                calls.iter().filter(|c| *c == "keys:Enter").count(),
+                usize::from(after == &folded),
+                "{entry:?}: {result:?}: {calls:?}",
+            );
+            if after == &folded {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert_late_hold(&result.unwrap_err());
+            }
+            assert_no_cleanup(&calls);
+        }
+    }
+}
+
+#[test]
+fn claude_actual_entries_refuse_literal_overflow_before_any_payload_write() {
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let prompt = "가".repeat(1200);
+    assert!(prompt.len() < 64 * 1024);
+    assert!(prompt.chars().count() * 2 > (80 - 4) * 24);
+    let empty = constructed_composer(80, "");
+    assert_eq!(
+        crate::services::tui_input::actor::gate::judge_pane(
+            crate::services::tui_o::shadow::ShadowProvider::Claude,
+            &empty,
+        ),
+        crate::services::tui_input::actor::gate::PaneVerdict::Ready,
+    );
+    for entry in ENTRIES {
+        let session = format!("claude-r3-literal-capacity-{}", uuid::Uuid::new_v4());
+        let mut setup = state(&[Some(BUSY)]);
+        setup.captures = std::iter::repeat_n(Some(empty.clone()), 16).collect();
+        setup.pane_size = Some((80, 24));
+        let spy = SpyGuard::install(setup);
+        let result = submit_text(entry, &session, &prompt, None);
+        let calls = spy.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("literal:")
+                || c.starts_with("load:")
+                || c.starts_with("paste:")
+                || c.starts_with("keys:")),
+            "{entry:?}: {result:?}: {calls:?}",
+        );
+        let error = result.unwrap_err();
+        assert!(
+            error.starts_with("claude tui input refused before mutation:"),
+            "{entry:?}: {error}",
+        );
+        assert!(error.contains("Composer(UnpredictableRender)"), "{error}");
+        assert!(!is_prompt_ready_timeout_error(&error), "{error}");
+        assert_no_cleanup(&calls);
+    }
 }

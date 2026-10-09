@@ -32,6 +32,10 @@ pub(crate) trait CodexWrites {
 /// Codex pane reads and the legacy kill barrier. Codex keeps its own transport
 /// because the Claude one also retires sessions under the Claude termination owner.
 pub(crate) trait CodexTransport: CodexWrites {
+    fn pane_size(&mut self, _session: &str) -> Option<(usize, usize)> {
+        None
+    }
+
     fn capture_ansi(&mut self, session: &str, scroll_back: i32) -> Option<String>;
     fn capture_bounded(
         &mut self,
@@ -115,6 +119,10 @@ impl CodexWrites for SubmissionTmux {
 }
 
 impl CodexTransport for SubmissionTmux {
+    fn pane_size(&mut self, session: &str) -> Option<(usize, usize)> {
+        SubmissionTmux::pane_size(self, session)
+    }
+
     fn capture_ansi(&mut self, session: &str, scroll_back: i32) -> Option<String> {
         InputTransport::capture(self, session, scroll_back)
     }
@@ -492,6 +500,7 @@ pub(crate) fn run_prompt_submission_legacy(
         let stopped = RefCell::new(None);
         let composer_attempted = Cell::new(false);
         let enter_attempted = Cell::new(false);
+        let size = Cell::new(None);
         let run = run_prompt_submission_using(
             Submission {
                 provider: ShadowProvider::Codex,
@@ -502,6 +511,17 @@ pub(crate) fn run_prompt_submission_legacy(
             cancel_token,
             || {
                 let mut transport = transport.borrow_mut();
+                let current_size = transport.pane_size(session_name);
+                size.set(current_size);
+                if cancel_requested(cancel_token) {
+                    return InputRun::Cancelled { confirmed: 0 };
+                }
+                let uses_paste = payload
+                    .iter()
+                    .any(|action| matches!(action, TuiInputAction::PasteBuffer(_)));
+                if !super::input::prompt_submission_fits_pane(&frame, uses_paste, current_size) {
+                    return InputRun::Refused(InputRefusal::Composer(Refusal::UnpredictableRender));
+                }
                 let mut writes = SubmissionWrites {
                     transport: &mut **transport,
                     attempted: &composer_attempted,
@@ -523,16 +543,25 @@ pub(crate) fn run_prompt_submission_legacy(
                     return None;
                 }
                 if let Err(refusal) = gate.admit(session_name) {
-                    *stopped.borrow_mut() = Some(InputRun::Indeterminate {
-                        confirmed: payload.len(),
-                        cause: StopCause::Refused(refusal),
+                    *stopped.borrow_mut() = Some(if cancel_requested(cancel_token) {
+                        InputRun::Cancelled {
+                            confirmed: payload.len(),
+                        }
+                    } else {
+                        InputRun::Indeterminate {
+                            confirmed: payload.len(),
+                            cause: StopCause::Refused(refusal),
+                        }
                     });
                     return None;
                 }
                 let mut transport = transport.borrow_mut();
-                let pane = transport.capture_ansi(session_name, -80);
-                let alive = transport.pane_alive(session_name);
-                alive.then_some(pane).flatten()
+                if transport.pane_size(session_name) != size.get()
+                    || !transport.pane_alive(session_name)
+                {
+                    return None;
+                }
+                transport.capture_ansi(session_name, -80)
             },
             || {
                 let mut transport = transport.borrow_mut();
@@ -722,7 +751,6 @@ pub(super) mod spy {
         tmux_key_name,
     };
 
-    #[derive(Default)]
     pub(crate) struct SpyState {
         pub calls: Vec<String>,
         /// Answer for the n-th send (load, literal, paste or keys), counted from 0.
@@ -734,9 +762,32 @@ pub(super) mod spy {
         pub captures: VecDeque<Option<String>>,
         pub buffers: Vec<String>,
         pub dead: bool,
+        pub dead_after_send: Option<usize>,
+        pub pane_size: Option<(usize, usize)>,
+        pub cancel_after_size: Option<Arc<CancelToken>>,
         pub pane_pid: Option<u32>,
         pub sends: usize,
         pub assert_composer_lock: Option<String>,
+    }
+
+    impl Default for SpyState {
+        fn default() -> Self {
+            Self {
+                calls: Vec::new(),
+                fail_send: None,
+                cancel_after_send: None,
+                refuse_after: None,
+                captures: VecDeque::new(),
+                buffers: Vec::new(),
+                dead: false,
+                dead_after_send: None,
+                pane_size: Some((80, 24)),
+                cancel_after_size: None,
+                pane_pid: None,
+                sends: 0,
+                assert_composer_lock: None,
+            }
+        }
     }
 
     pub(crate) struct Spy(pub Rc<RefCell<SpyState>>);
@@ -831,6 +882,14 @@ pub(super) mod spy {
     }
 
     impl CodexTransport for Spy {
+        fn pane_size(&mut self, _session: &str) -> Option<(usize, usize)> {
+            let state = self.record("pane_size");
+            if let Some(token) = &state.cancel_after_size {
+                token.cancelled.store(true, Ordering::Relaxed);
+            }
+            state.pane_size
+        }
+
         fn capture_ansi(&mut self, _session: &str, _scroll_back: i32) -> Option<String> {
             self.read("capture_ansi")
         }
@@ -840,7 +899,8 @@ pub(super) mod spy {
         }
 
         fn pane_alive(&mut self, _session: &str) -> bool {
-            !self.record("alive").dead
+            let state = self.record("alive");
+            !state.dead && state.dead_after_send.is_none_or(|at| state.sends <= at)
         }
 
         fn pane_pid(&mut self, _session: &str) -> Option<u32> {
@@ -999,9 +1059,11 @@ mod tests {
         let submitted = [
             "capture_ansi",
             "alive",
+            "pane_size",
             &literal,
-            "capture_ansi",
+            "pane_size",
             "alive",
+            "capture_ansi",
             "keys:Enter",
             "capture_ansi",
             "alive",
@@ -1009,8 +1071,8 @@ mod tests {
         assert_eq!(guard.calls(), calls(&submitted));
         drop(guard);
 
-        // A large multi-line Korean prompt goes load → paste → Enter through one buffer.
-        let paste = format!("첫 줄 한글\n{}", "둘째 줄 긴 붙여넣기 ".repeat(800));
+        // A small multi-line Korean prompt goes load → paste → Enter through one buffer.
+        let paste = "첫 줄 한글\n둘째 줄".to_string();
         let own_paste = format!(
             "› {}\n\n  gpt-5.4 · Fast off · Context 100% left",
             paste.replace('\n', "\n  ")
@@ -1025,10 +1087,12 @@ mod tests {
         let pasted = [
             "capture_ansi",
             "alive",
+            "pane_size",
             &load,
             "paste:delete=true",
-            "capture_ansi",
+            "pane_size",
             "alive",
+            "capture_ansi",
             "keys:Enter",
             "capture_ansi",
             "alive",
@@ -1040,20 +1104,31 @@ mod tests {
         assert!(buffers[0].starts_with("agentdesk-codex-tui-input-"));
         drop(guard);
 
-        // A long single line goes as 1800-char literal chunks, then Enter.
+        // An oversized single line cannot prove visible ownership in an 80×24 pane.
         let long = "가".repeat(2000);
-        let own_long = draft_pane(&long);
-        let guard = SpyGuard::install(state(&[READY, &own_long, READY]));
-        assert!(matches!(
-            submit_codex_followup_prompt(name, &long, None),
-            CodexFollowupPromptSubmitOutcome::Submitted
-        ));
-        let sent = guard.calls();
-        assert_eq!(sent[2], format!("literal:{}", "가".repeat(1800)));
-        assert_eq!(sent[3], format!("literal:{}", "가".repeat(200)));
-        assert_eq!(sent[4], "capture_ansi");
-        assert_eq!(sent[5], "alive");
-        assert_eq!(sent[6], "keys:Enter");
+        let guard = SpyGuard::install(state(&[READY]));
+        let outcome = submit_codex_followup_prompt(name, &long, None);
+        assert!(
+            matches!(
+                outcome,
+                CodexFollowupPromptSubmitOutcome::NotSubmitted { .. }
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            guard.calls(),
+            calls(&["capture_ansi", "alive", "pane_size"])
+        );
+        assert_eq!(guard.0.borrow().sends, 0);
+        let planned = crate::services::codex_tui::input::plan_prompt_submit(&long).unwrap();
+        assert_eq!(
+            planned,
+            vec![
+                TuiInputAction::Literal("가".repeat(1800)),
+                TuiInputAction::Literal("가".repeat(200)),
+                TuiInputAction::Enter,
+            ]
+        );
         drop(guard);
 
         // The busy signal reads the bounded capture of the same transport.
@@ -1168,7 +1243,7 @@ mod tests {
         );
         assert_eq!(
             guard.calls(),
-            calls(&["capture_ansi", "alive", "literal:x"])
+            calls(&["capture_ansi", "alive", "pane_size", "literal:x"])
         );
         drop(guard);
 
@@ -1182,7 +1257,7 @@ mod tests {
         );
         assert_eq!(
             guard.calls(),
-            calls(&["capture_ansi", "alive", "load:first\nsecond"])
+            calls(&["capture_ansi", "alive", "pane_size", "load:first\nsecond"])
         );
         drop(guard);
 
@@ -1201,6 +1276,7 @@ mod tests {
             calls(&[
                 "capture_ansi",
                 "alive",
+                "pane_size",
                 "load:first\nsecond",
                 "paste:delete=true"
             ])
@@ -1220,9 +1296,11 @@ mod tests {
         let expected = [
             "capture_ansi",
             "alive",
+            "pane_size",
             "literal:x",
-            "capture_ansi",
+            "pane_size",
             "alive",
+            "capture_ansi",
             "keys:Enter",
             "capture_ansi",
             "alive",
@@ -1242,7 +1320,10 @@ mod tests {
             matches!(&outcome, CodexFollowupPromptSubmitOutcome::Refused { run } if *run == InputRun::Refused(refusal)),
             "{outcome:?}"
         );
-        assert_eq!(guard.calls(), calls(&["capture_ansi", "alive"]));
+        assert_eq!(
+            guard.calls(),
+            calls(&["capture_ansi", "alive", "pane_size"])
+        );
         drop(guard);
 
         // The host is swapped after the literal: no Enter, and the partial count is kept.
@@ -1261,7 +1342,7 @@ mod tests {
         );
         assert_eq!(
             guard.calls(),
-            calls(&["capture_ansi", "alive", "literal:x"])
+            calls(&["capture_ansi", "alive", "pane_size", "literal:x"])
         );
         drop(guard);
 
@@ -1284,6 +1365,7 @@ mod tests {
             let mut expected = vec![
                 "capture_ansi",
                 "alive",
+                "pane_size",
                 "literal:hello world and more",
                 "capture_ansi",
                 "alive",
@@ -1291,6 +1373,165 @@ mod tests {
             expected.extend(cleared.then_some("keys:C-u"));
             assert_eq!(guard.calls(), calls(&expected), "{refuse_after:?}");
         }
+    }
+
+    #[test]
+    fn foldable_multiline_host_plan_is_a_typed_preflight_refusal() {
+        use crate::services::tui_input::submission::Refusal;
+
+        let prompt = format!("{}\ny", "x".repeat(1000));
+        let plan = [TuiInputAction::PasteBuffer(prompt), TuiInputAction::Enter];
+        let guard = SpyGuard::install(SpyState {
+            pane_size: Some((2000, 24)),
+            ..SpyState::default()
+        });
+        let result =
+            run_prompt_submission_legacy("host-folded-preflight-fixture", &plan, Some(READY), None);
+        assert_eq!(
+            result.run,
+            InputRun::Refused(InputRefusal::Composer(Refusal::UnpredictableRender))
+        );
+        assert!(!result.composer_mutated);
+        assert!(!result.enter_attempted);
+        assert_eq!(guard.calls(), calls(&["pane_size"]));
+        assert_eq!(guard.0.borrow().sends, 0);
+    }
+
+    #[test]
+    fn host_guard_observes_liveness_before_the_last_capture_and_enter() {
+        let own = draft_pane("hello");
+        let guard = SpyGuard::install(state(&[READY, &own, READY]));
+        let outcome = submit_codex_followup_prompt("host-last-read-order-fixture", "hello", None);
+        assert!(
+            matches!(outcome, CodexFollowupPromptSubmitOutcome::Submitted),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            guard.calls(),
+            calls(&[
+                "capture_ansi",
+                "alive",
+                "pane_size",
+                "literal:hello",
+                "pane_size",
+                "alive",
+                "capture_ansi",
+                "keys:Enter",
+                "capture_ansi",
+                "alive",
+            ])
+        );
+        drop(guard);
+
+        let guard = SpyGuard::install(SpyState {
+            dead_after_send: Some(0),
+            ..state(&[READY, &own])
+        });
+        let outcome =
+            submit_codex_followup_prompt("host-dead-before-last-capture-fixture", "hello", None);
+        assert!(
+            matches!(outcome, CodexFollowupPromptSubmitOutcome::Refused { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            guard.calls(),
+            calls(&[
+                "capture_ansi",
+                "alive",
+                "pane_size",
+                "literal:hello",
+                "pane_size",
+                "alive",
+            ])
+        );
+        assert_eq!(
+            guard.0.borrow().captures.len(),
+            1,
+            "dead pane was captured after liveness failed"
+        );
+    }
+
+    #[test]
+    fn host_preflight_preserves_prior_guard_validation_and_cancellation() {
+        use crate::services::tui_input::submission::Refusal;
+        use std::sync::atomic::Ordering;
+
+        let plan = [
+            TuiInputAction::Literal("hello".into()),
+            TuiInputAction::Enter,
+        ];
+        let foreign = draft_pane("a person's draft");
+        let modal = format!("Approval required\n1. Yes\n2. No\n{READY}");
+        for before in [&foreign, &modal] {
+            let guard = SpyGuard::install(SpyState {
+                pane_size: None,
+                ..SpyState::default()
+            });
+            let result =
+                run_prompt_submission_legacy("host-prior-guard-fixture", &plan, Some(before), None);
+            assert_eq!(
+                result.run,
+                InputRun::Refused(InputRefusal::Composer(Refusal::NotReady))
+            );
+            assert!(!result.composer_mutated);
+            assert!(!result.enter_attempted);
+            assert!(
+                guard.calls().is_empty(),
+                "first guard consulted capacity: {:?}",
+                guard.calls()
+            );
+            assert_eq!(guard.0.borrow().sends, 0);
+        }
+
+        let invalid = [
+            TuiInputAction::Literal("hello\u{1b}".into()),
+            TuiInputAction::Enter,
+        ];
+        let guard = SpyGuard::install(SpyState {
+            pane_size: None,
+            ..SpyState::default()
+        });
+        let result = run_prompt_submission_legacy(
+            "host-prior-validation-fixture",
+            &invalid,
+            Some(READY),
+            None,
+        );
+        assert_eq!(
+            result.run,
+            InputRun::Refused(InputRefusal::Composer(Refusal::InvalidPrompt))
+        );
+        assert!(!result.composer_mutated);
+        assert!(!result.enter_attempted);
+        assert!(
+            guard.calls().is_empty(),
+            "invalid prompt consulted capacity: {:?}",
+            guard.calls()
+        );
+        assert_eq!(guard.0.borrow().sends, 0);
+        drop(guard);
+
+        let token = CancelToken::new();
+        token.cancelled.store(true, Ordering::Relaxed);
+        let guard = SpyGuard::install(SpyState {
+            pane_size: None,
+            ..SpyState::default()
+        });
+        let result = run_prompt_submission_legacy(
+            "host-prior-cancellation-fixture",
+            &plan,
+            Some(READY),
+            Some(&token),
+        );
+        assert_eq!(result.run, InputRun::Cancelled { confirmed: 0 });
+        assert!(!result.composer_mutated);
+        assert!(!result.enter_attempted);
+        assert!(
+            guard.calls().is_empty(),
+            "cancelled prompt consulted capacity: {:?}",
+            guard.calls()
+        );
+        assert_eq!(guard.0.borrow().sends, 0);
     }
 
     #[test]

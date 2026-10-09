@@ -231,14 +231,26 @@ new output"
             "legacy-fast-first",
         ] {
             let pane = if model == "legacy-fast-first" {
-                include_str!("../../../../tests/fixtures/tui_input/codex-idle-dim.ansi")
-                    .replace("╭", "Approval required: this is answer prose.\n\n╭")
+                include_str!("../../../../tests/fixtures/tui_input/codex-idle-dim.ansi").replace(
+                    "\x1b[0;1m›",
+                    "Approval required: this is answer prose.\n\n\x1b[0;1m›",
+                )
             } else {
                 idle.replace("GPT-6.1-Sol xhigh", model).replace(
                     "FIXTURE_READY",
                     "Fixture answer\nApproval required: this is answer prose.",
                 )
             };
+            let plain = strip_ansi_escape_sequences(&pane);
+            let separator = if model == "legacy-fast-first" {
+                "Approval required: this is answer prose.\n\n›"
+            } else {
+                "Approval required: this is answer prose.\n\n  Worked for"
+            };
+            assert!(
+                plain.contains(separator),
+                "historical prose lost its separator: {model}"
+            );
             let draft = own_draft(&pane);
             let guard = SpyGuard::install(SpyState {
                 captures: vec![
@@ -299,9 +311,12 @@ new output"
             "Sign in to continue",
             "Authentication required",
         ] {
-            let pane = idle
-                .replace("GPT-6.1-Sol xhigh", "codex-next none")
-                .replace("Worked for 2s • 7:26 AM", state);
+            let pane = idle.replace("GPT-6.1-Sol xhigh", "codex-next none");
+            let pane = if state == "• Working (2s • esc to interrupt)" {
+                pane.replace("Worked for 2s • 7:26 AM", state)
+            } else {
+                pane.replace("\x1b[1m›\x1b[0m", &format!("{state}\n\x1b[1m›\x1b[0m"))
+            };
             for pane in [
                 pane.clone(),
                 pane.replace(

@@ -4,8 +4,8 @@ use crate::services::claude_tui::prompt_readiness::normalize_prompt_readiness_pa
 use crate::services::claude_tui::startup_dialog::detect_claude_startup_dialog;
 use crate::services::claude_tui::{busy_inject, composer_lock::DraftSighting};
 use crate::services::codex_tui::input::{
-    prompt_readiness_from_ansi_pane, strip_ansi_escape_sequences, submission_draft_in_pane,
-    submission_modal_in_pane,
+    strip_ansi_escape_sequences, submission_draft_in_pane, submission_modal_in_pane,
+    submission_readiness_from_ansi_pane,
 };
 use crate::services::tmux_common::{
     tmux_capture_indicates_claude_tui_busy, tmux_capture_indicates_claude_tui_exact_empty_composer,
@@ -39,7 +39,7 @@ fn judge_claude(capture: &str) -> PaneVerdict {
     let plain = strip_ansi_escape_sequences(capture);
     let pane = normalize_prompt_readiness_panel_in_capture(&plain);
     if detect_claude_startup_dialog(&pane).is_some()
-        || tmux_capture_indicates_claude_tui_interactive_modal(&pane)
+        || claude_submission_modal(&pane)
         || tmux_capture_indicates_claude_tui_mcp_auth_required(&pane)
     {
         return PaneVerdict::Modal;
@@ -59,7 +59,7 @@ fn judge_claude(capture: &str) -> PaneVerdict {
 
 fn judge_codex(capture: &str) -> PaneVerdict {
     let (composer_marker_detected, prompt_draft_detected, _) =
-        prompt_readiness_from_ansi_pane(capture);
+        submission_readiness_from_ansi_pane(capture);
     let plain = strip_ansi_escape_sequences(capture);
     if submission_modal_in_pane(&plain) {
         return PaneVerdict::Modal;
@@ -67,7 +67,7 @@ fn judge_codex(capture: &str) -> PaneVerdict {
     if composer_marker_detected && !prompt_draft_detected {
         PaneVerdict::Ready
     } else {
-        PaneVerdict::Modal
+        PaneVerdict::NotReady
     }
 }
 
@@ -87,7 +87,7 @@ pub(crate) fn own_draft(
     }
     let plain = strip_ansi_escape_sequences(capture);
     if provider == ShadowProvider::Codex {
-        let (empty_marker, has_draft, _) = prompt_readiness_from_ansi_pane(capture);
+        let (empty_marker, has_draft, _) = submission_readiness_from_ansi_pane(capture);
         if empty_marker && !has_draft {
             return false;
         }
@@ -98,7 +98,11 @@ pub(crate) fn own_draft(
             .strip_prefix("[Pasted Content ")
             .and_then(|count| count.strip_suffix(" chars]"))
             .is_some_and(|count| !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()));
-        return draft == frame && !folded && !submission_modal_in_pane(&plain);
+        return !folded
+            && (draft == frame
+                || draft.split_whitespace().collect::<String>()
+                    == frame.split_whitespace().collect::<String>())
+            && !submission_modal_in_pane(&plain);
     }
     if !claude_composer_not_known_empty(capture) {
         return false;
@@ -107,7 +111,10 @@ pub(crate) fn own_draft(
         return false;
     };
     let body = rows.join("\n");
-    if body == frame {
+    if body == frame
+        || body.split_whitespace().collect::<String>()
+            == frame.split_whitespace().collect::<String>()
+    {
         return true;
     }
     #[cfg(test)]
@@ -160,10 +167,54 @@ pub(crate) fn claude_composer_empty_when_present(capture: &str) -> bool {
         })
 }
 
+// Submit modal controls belong to current adjacent chrome, outside the typed composer body.
+fn claude_submission_modal(plain: &str) -> bool {
+    let lines: Vec<_> = plain.lines().collect();
+    let Some(start) = lines.iter().rposition(|line| claude_prompt_row(line)) else {
+        return tmux_capture_indicates_claude_tui_interactive_modal(plain);
+    };
+    let Some(end) = (start + 1..lines.len()).find(|&i| claude_border_row(lines[i])) else {
+        return tmux_capture_indicates_claude_tui_interactive_modal(plain);
+    };
+    let top = (0..start)
+        .rev()
+        .take_while(|&i| !lines[i].trim().is_empty())
+        .last()
+        .unwrap_or(start);
+    let chrome = lines[top..start]
+        .iter()
+        .chain(lines[end + 1..].iter())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    tmux_capture_indicates_claude_tui_interactive_modal(&chrome)
+}
+
+// Busy evidence excludes a proven composer body while retaining native activity above it.
+pub(crate) fn submission_busy(provider: ShadowProvider, plain: &str) -> bool {
+    if provider == ShadowProvider::Codex {
+        return crate::services::codex_tui::input::submission_busy_in_pane(plain);
+    }
+    let lines: Vec<_> = plain.lines().collect();
+    let outside = claude_composer_rows(plain).and_then(|_| {
+        let start = lines.iter().rposition(|line| claude_prompt_row(line))?;
+        let end = (start + 1..lines.len()).find(|&i| claude_border_row(lines[i]))?;
+        Some(
+            lines[..start]
+                .iter()
+                .chain(lines[end + 1..].iter())
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    });
+    tmux_capture_indicates_claude_tui_busy(outside.as_deref().unwrap_or(plain))
+}
+
 // The bottom Claude composer's rows, prompt and continuation indent removed; none under a modal.
 fn claude_composer_rows(plain: &str) -> Option<Vec<&str>> {
     if detect_claude_startup_dialog(plain).is_some()
-        || tmux_capture_indicates_claude_tui_interactive_modal(plain)
+        || claude_submission_modal(plain)
         || tmux_capture_indicates_claude_tui_mcp_auth_required(plain)
     {
         return None;

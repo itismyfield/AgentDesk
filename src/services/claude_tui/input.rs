@@ -935,8 +935,22 @@ fn run_actions_with_submission_confirmation(
         }
         run => run.into_legacy()?,
     }
-    std::thread::sleep(PROMPT_SUBMIT_INITIAL_SETTLE);
-    host_input::confirm_prompt_submission_passively(session_name, cancel_token)
+    let mut attempt = 0;
+    loop {
+        check_prompt_cancel(cancel_token)?;
+        std::thread::sleep(prompt_submit_settle_for_attempt(attempt));
+        check_prompt_cancel(cancel_token)?;
+        match host_input::confirm_prompt_submission_passively(session_name, cancel_token) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if is_prompt_ready_cancelled_error(&error)
+                    || attempt >= PROMPT_SUBMIT_CONFIRM_RETRIES =>
+            {
+                return Err(error);
+            }
+            Err(_) => attempt += 1,
+        }
+    }
 }
 
 fn prompt_submit_settle_for_attempt(attempt: usize) -> Duration {

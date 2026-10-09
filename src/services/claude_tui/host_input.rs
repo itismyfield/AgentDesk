@@ -253,6 +253,10 @@ pub(crate) trait InputTransport {
     fn capture_draft(&mut self, _session: &str) -> Option<String> {
         None
     }
+    /// A bounded geometry read for submission preflight; unavailable dimensions prove no fit.
+    fn pane_size(&mut self, _session: &str) -> Option<(usize, usize)> {
+        None
+    }
     fn pane_alive(&mut self, session: &str) -> bool;
     fn present(&mut self, session: &str) -> bool;
     /// Records the termination and exit reason, then kills the session.
@@ -670,6 +674,35 @@ pub(crate) fn run_legacy(
     with_transport(|transport| run_plan(&target, &LegacyTmuxGate, transport, actions, cancel_token))
 }
 
+// A necessary capacity veto; the captured whole draft still proves actual ownership.
+fn prompt_submission_fits_pane(
+    frame: &str,
+    payload: &[TuiInputAction],
+    size: Option<(usize, usize)>,
+) -> bool {
+    use unicode_width::UnicodeWidthStr;
+    size.is_some_and(|(width, height)| {
+        let width = width.saturating_sub(4);
+        let rows = height.saturating_sub(10);
+        if width == 0 || rows == 0 {
+            return false;
+        }
+        let lf = frame.matches('\n').count();
+        let paste =
+            matches!(payload, [TuiInputAction::PasteBuffer(text)] if text.as_str() == frame);
+        if paste && (frame.encode_utf16().count() > 800 || lf > rows.min(2)) {
+            return lf > 0 || frame.chars().count() > 800;
+        }
+        frame
+            .split('\n')
+            .try_fold(0usize, |total, line| {
+                let cells = line.split_whitespace().collect::<String>().width();
+                total.checked_add(cells.div_ceil(width).max(1))
+            })
+            .is_some_and(|needed| needed <= rows)
+    })
+}
+
 /// Submits only a prompt plan; the caller holds the existing composer mutex throughout.
 pub(crate) fn run_prompt_submission_legacy(
     session_name: &str,
@@ -700,6 +733,7 @@ pub(crate) fn run_prompt_submission_legacy(
                 .filter(|_| transport.pane_alive(session_name));
             let transport = std::cell::RefCell::new(transport);
             let target = InputTarget::legacy_tmux(session_name);
+            let size = std::cell::Cell::new(None);
             run_prompt_submission_using(
                 Submission {
                     provider: ShadowProvider::Claude,
@@ -709,6 +743,16 @@ pub(crate) fn run_prompt_submission_legacy(
                 },
                 cancel_token,
                 || {
+                    let current_size = transport.borrow_mut().pane_size(session_name);
+                    size.set(current_size);
+                    if cancel_requested(cancel_token) {
+                        return InputRun::Cancelled { confirmed: 0 };
+                    }
+                    if !prompt_submission_fits_pane(&frame, payload, current_size) {
+                        return InputRun::Refused(InputRefusal::Composer(
+                            Refusal::UnpredictableRender,
+                        ));
+                    }
                     run_plan(
                         &target,
                         &LegacyTmuxGate,
@@ -722,9 +766,12 @@ pub(crate) fn run_prompt_submission_legacy(
                         std::thread::sleep(POST_LITERAL_SETTLE);
                     }
                     let mut transport = transport.borrow_mut();
-                    transport
-                        .capture_draft(session_name)
-                        .filter(|_| transport.pane_alive(session_name))
+                    if transport.pane_size(session_name) != size.get()
+                        || !transport.pane_alive(session_name)
+                    {
+                        return None;
+                    }
+                    transport.capture_draft(session_name)
                 },
                 || {
                     run_plan(
@@ -959,9 +1006,9 @@ mod spy {
     use super::*;
     use crate::services::session_host::tmux_key_name;
 
-    #[derive(Default)]
     pub(crate) struct SpyState {
         pub calls: Vec<String>,
+        pub pane_size: Option<(usize, usize)>,
         /// Answer for the n-th send (load, literal, paste or keys), counted from 0.
         pub fail_send: Option<(usize, Result<Output, String>)>,
         pub captures: VecDeque<Option<String>>,
@@ -973,6 +1020,23 @@ mod spy {
         pub sends: usize,
         /// Cancels this token when the n-th (from 1) call with this prefix is recorded.
         pub cancel_on: Option<(&'static str, usize, std::sync::Arc<CancelToken>)>,
+    }
+
+    impl Default for SpyState {
+        fn default() -> Self {
+            Self {
+                calls: Vec::new(),
+                pane_size: Some((80, 24)),
+                fail_send: None,
+                captures: VecDeque::new(),
+                captures_after_send: None,
+                draft_capture_at: None,
+                dead: false,
+                absent: false,
+                sends: 0,
+                cancel_on: None,
+            }
+        }
     }
 
     pub(crate) struct Spy(pub Rc<RefCell<SpyState>>);
@@ -1075,6 +1139,12 @@ mod spy {
                 return capture.clone();
             }
             state.capture()
+        }
+
+        fn pane_size(&mut self, _session: &str) -> Option<(usize, usize)> {
+            let mut state = self.0.borrow_mut();
+            state.record("size".to_string());
+            state.pane_size
         }
 
         fn pane_alive(&mut self, _session: &str) -> bool {
@@ -1507,10 +1577,12 @@ mod tests {
                 "alive".to_string(),
                 "capture:draft".to_string(),
                 "alive".to_string(),
+                "size".to_string(),
                 format!("load:{prompt}"),
                 "paste:delete=true".to_string(),
-                "capture:draft".to_string(),
+                "size".to_string(),
                 "alive".to_string(),
+                "capture:draft".to_string(),
                 "keys:Enter".to_string(),
                 "capture:draft".to_string(),
                 "alive".to_string(),
@@ -1533,25 +1605,29 @@ mod tests {
                 "alive".to_string(),
                 "capture:draft".to_string(),
                 "alive".to_string(),
+                "size".to_string(),
                 format!("load:{prompt}"),
                 "paste:delete=true".to_string(),
             ]
         );
         drop(guard);
 
-        // Chunking is retained; a busy or unprovable post-payload pane withholds Enter.
+        // This literal cannot fit the known pane, so none of its planned chunks may be sent.
         let line = "가".repeat(2000);
-        let guard = SpyGuard::install(state(&[
-            Some(EMPTY_COMPOSER),
-            Some(EMPTY_COMPOSER),
-            Some(BUSY),
-        ]));
-        let error = inject_steering_prompt(name, &line).unwrap_err();
-        assert!(error.starts_with("claude tui input held after mutation:"));
-        let calls = guard.calls();
-        assert_eq!(calls[4], format!("literal:{}", "가".repeat(1800)));
-        assert_eq!(calls[5], format!("literal:{}", "가".repeat(200)));
-        assert!(!calls.iter().any(|call| call.starts_with("keys:")));
+        let mut setup = state(&[Some(EMPTY_COMPOSER), Some(EMPTY_COMPOSER), Some(BUSY)]);
+        setup.pane_size = Some((80, 24));
+        let guard = SpyGuard::install(setup);
+        assert_eq!(
+            inject_steering_prompt(name, &line),
+            InputRun::Refused(InputRefusal::Composer(
+                crate::services::tui_input::submission::Refusal::UnpredictableRender,
+            ))
+            .into_legacy(),
+        );
+        assert_eq!(
+            guard.calls(),
+            ["capture", "alive", "capture:draft", "alive", "size"]
+        );
     }
 
     #[test]
@@ -1859,5 +1935,28 @@ mod tests {
                 assert!(!target.keys_may_follow(&run), "{target:?} {run:?}");
             }
         }
+    }
+    #[test]
+    fn prompt_helper_refuses_known_literal_overflow_with_typed_pre_effect_result() {
+        let rule = "─".repeat(80);
+        let empty = format!(
+            "⏺ Done.\n\n\n{rule}\n❯ \n{rule}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+        );
+        let prompt = "가".repeat(1200);
+        let actions = crate::services::claude_tui::input::plan_prompt_submit(&prompt).unwrap();
+        let mut setup = state(&[Some(&empty)]);
+        setup.pane_size = Some((80, 24));
+        let spy = SpyGuard::install(setup);
+        assert_eq!(
+            run_prompt_submission_legacy("claude-r3-helper-capacity", &actions, None),
+            InputRun::Refused(InputRefusal::Composer(
+                crate::services::tui_input::submission::Refusal::UnpredictableRender,
+            )),
+        );
+        assert!(!spy.calls().iter().any(|call| call.starts_with("literal:")
+            || call.starts_with("load:")
+            || call.starts_with("paste:")
+            || call.starts_with("keys:")
+            || call.starts_with("retire:")),);
     }
 }

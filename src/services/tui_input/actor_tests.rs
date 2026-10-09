@@ -54,14 +54,13 @@ const CODEX_READY: &str = "\
 
   gpt-5.5 · gpt-5.5 xhigh · ~/.adk/release/workspaces/agentdesk · agentdesk · main";
 
-// Approval wording that does not adjoin the composer, so readiness alone accepts it.
+// Current approval controls directly adjoin the composer.
 const CODEX_APPROVAL: &str = "\
 • previous response
 
 Approval required
   rm -rf build
   [y] yes  [n] no
-
 ›
 
   gpt-5.5 · gpt-5.5 xhigh · ~/.adk/release/workspaces/agentdesk · agentdesk · main";
@@ -451,6 +450,38 @@ async fn modal_and_unknown_screens_never_receive_input() {
         judge_pane(ShadowProvider::Codex, CODEX_READY),
         PaneVerdict::Ready
     );
+}
+
+#[tokio::test]
+async fn codex_busy_and_unknown_without_controls_wait_before_being_held() {
+    for screen in [
+        "unrecognized screen",
+        "• Working (1s • esc to interrupt)
+
+›
+
+  gpt-5.5 · gpt-5.5 xhigh · /tmp · repo · main",
+    ] {
+        assert_eq!(
+            judge_pane(ShadowProvider::Codex, screen),
+            PaneVerdict::NotReady
+        );
+        let world = World::new(ShadowProvider::Codex);
+        let mut ledger = world.ledger(&[(1, "hello")]);
+        let mut actor = InputActor::new(world.binding.clone(), FakePane::new(screen));
+        let t0 = Instant::now();
+        for at in [t0, t0 + READY_WINDOW / 2] {
+            assert_eq!(
+                idle_step(&mut actor, &mut ledger, &world, at).await,
+                Step::Wait("pane_not_ready")
+            );
+        }
+        assert_eq!(
+            idle_step(&mut actor, &mut ledger, &world, t0 + READY_WINDOW).await,
+            Step::Moved(1, RowState::Held(HeldReason::NotReady))
+        );
+        assert!(actor.pane_submitted().is_empty());
+    }
 }
 
 struct FakeTmux {

@@ -29,6 +29,27 @@ impl SubmissionTmux {
         })
     }
 
+    pub(crate) fn pane_size(&self, session: &str) -> Option<(usize, usize)> {
+        let target = format!("={session}:");
+        let output = self
+            .run(&[
+                "display-message",
+                "-p",
+                "-t",
+                &target,
+                "#{pane_width} #{pane_height}",
+            ])
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8(output.stdout).ok()?;
+        let mut parts = raw.split_ascii_whitespace();
+        let width = parts.next()?.parse::<usize>().ok()?;
+        let height = parts.next()?.parse::<usize>().ok()?;
+        (width > 0 && height > 0 && parts.next().is_none()).then_some((width, height))
+    }
+
     pub(crate) fn capture_raw(&self, session: &str, scroll_back: i32) -> Option<String> {
         let target = format!("={session}:");
         let scroll_back = scroll_back.to_string();
@@ -51,6 +72,10 @@ impl SubmissionTmux {
 }
 
 impl InputTransport for SubmissionTmux {
+    fn pane_size(&mut self, session: &str) -> Option<(usize, usize)> {
+        SubmissionTmux::pane_size(self, session)
+    }
+
     fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String> {
         let target = format!("={session}:");
         self.run(&["send-keys", "-t", &target, "-l", "--", text])

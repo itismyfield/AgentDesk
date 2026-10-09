@@ -1,0 +1,10 @@
+⏺ Done.
+
+
+──────────────────────────────────────────────
+❯ plain-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+──────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

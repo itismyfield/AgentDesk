@@ -106,8 +106,11 @@ const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 mod composer_content;
 mod composer_lock;
 mod submission;
-use submission::prompt_readiness_snapshot_with_pane;
-pub(crate) use submission::{submission_draft_in_pane, submission_modal_in_pane};
+use submission::{prompt_readiness_snapshot_with_pane, submission_snapshot_with_pane};
+pub(crate) use submission::{
+    prompt_submission_fits_pane, submission_busy_in_pane, submission_draft_in_pane,
+    submission_modal_in_pane, submission_readiness_from_ansi_pane,
+};
 mod composer_status;
 mod inline_banner;
 use composer_content::boxed_composer_body;
@@ -986,6 +989,14 @@ fn classify_prompt_submit_confirmation(
     }
 }
 
+// A submission snapshot already scoped modal and busy evidence to the current composer.
+fn snapshot_allows_guarded_submission(snapshot: &PromptReadinessSnapshot) -> bool {
+    snapshot.tmux_pane_alive
+        && snapshot.capture_available
+        && snapshot.composer_marker_detected
+        && !snapshot.prompt_draft_detected
+}
+
 fn snapshot_allows_warm_followup_submit(snapshot: &PromptReadinessSnapshot) -> bool {
     snapshot.tmux_pane_alive
         && snapshot.capture_available
@@ -1177,14 +1188,14 @@ fn submit_codex_followup_prompt_under_lock(
     // Take one final canonical snapshot immediately before mutating the
     // composer so a just-arrived user draft or active turn is never appended
     // to or submitted as the Discord follow-up.
-    let (mut final_snapshot, mut before) = prompt_readiness_snapshot_with_pane(session_name, true);
-    if snapshot_allows_warm_followup_submit(&final_snapshot)
+    let (mut final_snapshot, mut before) = submission_snapshot_with_pane(session_name);
+    if snapshot_allows_guarded_submission(&final_snapshot)
         && inline_banner::pane_has_dismissible_action_banner(&final_snapshot.pane_tail)
     {
         let _ = inline_banner::dismiss_action_banner_once(session_name);
-        (final_snapshot, before) = prompt_readiness_snapshot_with_pane(session_name, true);
+        (final_snapshot, before) = submission_snapshot_with_pane(session_name);
     }
-    if !snapshot_allows_warm_followup_submit(&final_snapshot)
+    if !snapshot_allows_guarded_submission(&final_snapshot)
         || inline_banner::pane_has_dismissible_action_banner(&final_snapshot.pane_tail)
     {
         return CodexFollowupPromptSubmitOutcome::NotSubmitted {
@@ -1197,6 +1208,21 @@ fn submit_codex_followup_prompt_under_lock(
         before.as_deref(),
         cancel_token,
     );
+    if !submit.composer_mutated
+        && !submit.enter_attempted
+        && matches!(
+            &submit.run,
+            crate::services::claude_tui::host_input::InputRun::Refused(
+                crate::services::claude_tui::host_input::InputRefusal::Composer(
+                    crate::services::tui_input::submission::Refusal::UnpredictableRender
+                )
+            )
+        )
+    {
+        return CodexFollowupPromptSubmitOutcome::NotSubmitted {
+            error: "Codex TUI prompt cannot be rendered predictably before submission".to_string(),
+        };
+    }
     if host_input::refused_by_gate(&submit.run) {
         return CodexFollowupPromptSubmitOutcome::Refused { run: submit.run };
     }
