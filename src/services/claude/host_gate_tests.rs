@@ -89,6 +89,53 @@ fn a_session_marked_for_another_host_is_never_probed_killed_or_relaunched() {
     }
 }
 
+// A test turn on the host's tmux makes no tmux call unless its socket is isolated, so a turn
+// that outlives its fixture never starts a session on the user's server.
+#[test]
+fn a_test_turn_reaches_the_host_tmux_only_on_an_isolated_socket() {
+    const NAME: &str = "adk-i6719-claude-host-tmux";
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = FakeTmux::install(NAME);
+    // With the temp dir moved elsewhere the fake reads as the host's own binary.
+    let elsewhere = std::env::temp_dir().join("adk-i6719-elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _elsewhere = set("TMPDIR", &elsewhere);
+    let capture = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock;
+    let _env = [capture("TMUX"), capture("TMUX_TMPDIR")];
+    let attached = Some("/tmp/tmux-0/default,1,0");
+    let cases = [
+        (None, None, false),
+        (Some(&elsewhere), attached, false),
+        (Some(&elsewhere), None, true),
+    ];
+    for (entry, turn) in ENTRIES {
+        for (sockets, tmux_env, admitted) in cases {
+            let label = format!("{entry} TMUX_TMPDIR={sockets:?} TMUX={tmux_env:?}");
+            unsafe {
+                match sockets {
+                    Some(dir) => std::env::set_var("TMUX_TMPDIR", dir),
+                    None => std::env::remove_var("TMUX_TMPDIR"),
+                }
+                match tmux_env {
+                    Some(value) => std::env::set_var("TMUX", value),
+                    None => std::env::remove_var("TMUX"),
+                }
+            }
+            let error = turn(NAME, Some(&cleared(NAME))).expect_err(&label);
+            assert_eq!(error.contains("refused"), !admitted, "{label}: {error}");
+            let calls = tmux.take_calls();
+            assert_eq!(
+                called(&calls, "kill-session"),
+                admitted,
+                "{label}: {calls:?}"
+            );
+            assert!(admitted || calls.is_empty(), "{label}: {calls:?}");
+            crate::services::tmux_common::cleanup_session_temp_files(NAME);
+        }
+    }
+}
+
 // A stale TUI session is audited and killed only under the turn's own clearance or with
 // no key; any refusal ends the turn with no audit, kill or relaunch.
 #[test]

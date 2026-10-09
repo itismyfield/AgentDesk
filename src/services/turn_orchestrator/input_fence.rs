@@ -316,6 +316,9 @@ pub(super) fn refuse(state: &ChannelMailboxState, msg: ChannelMailboxMsg, failur
                 already_stopping: false,
             });
         }
+        M::CancelActiveTurnIfCurrentUnlessHerdr { reply, .. } => {
+            let _ = reply.send(StopCancel::NotCurrent);
+        }
         M::CloseIfIdle { reply } => {
             let _ = reply.send(Err("input-mode-fenced"));
         }

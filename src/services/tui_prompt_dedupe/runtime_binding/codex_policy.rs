@@ -200,7 +200,7 @@ pub(crate) fn codex_verified_event_allowed(event: &binding_events::BindingEvent)
         {
             return false;
         }
-        owned_source_allowed(authority, source)
+        owned_source_allowed(authority, source, |proof, source| proof == source)
     })
 }
 
@@ -208,14 +208,19 @@ pub(crate) fn codex_verified_o_source_allowed(
     channel: u64,
     source: &binding_events::SourceId,
 ) -> bool {
+    // O's cursor keeps the dev it first stored; the proof reads the file's dev now.
+    let same = crate::services::tui_o::shadow::capture::same_file;
     verified_panes(channel).into_iter().all(|tmux| {
-        tc::with_tmux_source_authority(&tmux, |authority| owned_source_allowed(authority, source))
+        tc::with_tmux_source_authority(&tmux, |authority| {
+            owned_source_allowed(authority, source, same)
+        })
     })
 }
 
 fn owned_source_allowed(
     authority: &TmuxSourceAuthority<'_>,
     source: &binding_events::SourceId,
+    proves: fn(&binding_events::SourceId, &binding_events::SourceId) -> bool,
 ) -> bool {
     let context = match disposition(authority) {
         SourcePolicyState::Legacy => return true,
@@ -227,7 +232,7 @@ fn owned_source_allowed(
     };
     fold.verified
         .as_ref()
-        .is_some_and(|proof| &proof.source == source)
+        .is_some_and(|proof| proves(&proof.source, source))
         && codex_verified_source_allowed_under_source_authority(
             authority,
             &source.path.display().to_string(),

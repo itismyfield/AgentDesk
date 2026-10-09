@@ -109,6 +109,8 @@ struct PoolConnectSettings {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PgConnectFailureKind {
     PoolTimedOut,
+    /// The database carries migrations newer than this binary embeds; retrying cannot help.
+    SchemaAhead,
     Other,
 }
 
@@ -122,6 +124,13 @@ impl PgConnectFailure {
     pub(crate) fn other(message: impl Into<String>) -> Self {
         Self {
             kind: PgConnectFailureKind::Other,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn schema_ahead(message: impl Into<String>) -> Self {
+        Self {
+            kind: PgConnectFailureKind::SchemaAhead,
             message: message.into(),
         }
     }

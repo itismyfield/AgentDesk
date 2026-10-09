@@ -18,6 +18,8 @@ use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_m
 /// host or cannot be read; an absent or tmux marker keeps the existing path.
 #[cfg(unix)]
 pub(super) fn tmux_turn_admitted(tmux_session_name: &str) -> Result<(), String> {
+    #[cfg(test)]
+    test_tmux_isolated(tmux_session_name)?;
     match read_host_kind_marker(tmux_session_name) {
         HostKindMarker::Absent | HostKindMarker::Known(HostKind::Tmux) => Ok(()),
         marker => {
@@ -31,6 +33,23 @@ pub(super) fn tmux_turn_admitted(tmux_session_name: &str) -> Result<(), String> 
             ))
         }
     }
+}
+
+/// A test turn's pane would run the test binary and die, so it reaches only a fake tmux under
+/// the temp dir or an isolated socket, even when it outlives the fixture that set either.
+#[cfg(all(unix, test))]
+fn test_tmux_isolated(tmux_session_name: &str) -> Result<(), String> {
+    let resolved = crate::services::platform::binary_resolver::runtime_command("tmux");
+    let real = resolved.is_ok_and(|command| {
+        !std::path::Path::new(command.get_program()).starts_with(std::env::temp_dir())
+    });
+    let set = |name| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    if !real || (set("TMUX_TMPDIR") && !set("TMUX")) {
+        return Ok(());
+    }
+    Err(format!(
+        "test turn on {tmux_session_name} refused: real tmux without TMUX_TMPDIR isolation"
+    ))
 }
 
 /// Whether the session exists for a startup decision; a failed probe is `Err` before any

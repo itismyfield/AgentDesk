@@ -16,6 +16,7 @@ NON_PG_SKIP_ARGS=(
   --skip pg_
   --skip postgres
   --skip cli::channel_home::tests
+  --skip cli::dcserver_pg_bootstrap::tests
   --skip cli::herdr::tests
   --skip db::auto_queue::entries::dispatch_failure::tests
   --skip db::auto_queue::entries::tests
@@ -141,6 +142,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
   --skip services::discord::health::recovery::stall_alert::tests
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
+  --skip services::discord::health::turn_deliver::inject_codex_tests
   --skip services::discord::health::turn_deliver::inject_tests
   --skip services::discord::host_defer_gate::tests
   --skip services::discord::host_key_derivation::tests
@@ -251,13 +253,17 @@ NON_PG_SKIP_ARGS=(
   --skip voice::turn_link::tests
 )
 NON_PG_FILTER_REPLAY=(
+  cli::dcserver_pg_bootstrap::tests::a_schema_ahead_failure_stops_at_once_only_while_the_hold_is_on
   cli::dcserver_pg_bootstrap::tests::backoff_delay_follows_exponential_schedule
   cli::dcserver_pg_bootstrap::tests::backoff_delay_saturates_at_cap
   cli::dcserver_pg_bootstrap::tests::connect_exhausts_budget_and_reports_last_error
   cli::dcserver_pg_bootstrap::tests::connect_retries_then_succeeds_recording_backoff
   cli::dcserver_pg_bootstrap::tests::connect_returns_immediately_on_first_success
   cli::dcserver_pg_bootstrap::tests::exhausted_ok_none_reports_required_message
+  cli::dcserver_pg_bootstrap::tests::hold_ends_for_a_binary_replaced_before_it_started
+  cli::dcserver_pg_bootstrap::tests::hold_ends_only_when_the_install_path_holds_a_new_file
   cli::dcserver_pg_bootstrap::tests::pool_timeout_diagnostic_includes_timestamp_source_and_attempt
+  cli::dcserver_pg_bootstrap::tests::schema_ahead_needs_every_unknown_version_past_the_latest
   cli::dcserver_pg_bootstrap::tests::slow_startup_timeout_exhausts_retries_and_reports_the_exit_line
   cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
   db::auto_queue::entries::tests::pinned_dispatch_identity_is_declared_before_the_stale_retry_loop
@@ -422,6 +428,8 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::reachability_warrant_vetoes_transport_unknown_watchdog_branch
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::reuse_no_op_reattach_tick_still_skips_the_destructive_branches_5396
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::stall_watchdog_cleanup_keeps_orphan_pending_token_without_measured_death
+  services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_refuses_unsteerable_turns_before_the_lock
+  services::discord::health::turn_deliver::inject_codex_tests::codex_input_is_refused_as_before_until_codex_is_enabled
   services::discord::health::turn_deliver::inject_tests::a_channel_closed_to_legacy_input_takes_no_paste
   services::discord::health::turn_deliver::inject_tests::a_headless_claim_returns_the_token_it_registered
   services::discord::health::turn_deliver::inject_tests::a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox
@@ -766,6 +774,7 @@ PG_INCLUDE_ARGS_SHARD_0=(
 PG_INCLUDE_ARGS_SHARD_1=(
   _pg
   cli::channel_home::tests
+  cli::dcserver_pg_bootstrap::tests
   cli::herdr::tests
   db::auto_queue::entries::dispatch_failure::tests
   db::auto_queue::entries::tests
@@ -891,6 +900,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::health::recovery::live_agent_recovery::host_guard_tests
   services::discord::health::recovery::stall_alert::tests
   services::discord::health::recovery::stall_watchdog_auto_heal_tests
+  services::discord::health::turn_deliver::inject_codex_tests
   services::discord::health::turn_deliver::inject_tests
   services::discord::host_defer_gate::tests
   services::discord::host_key_derivation::tests

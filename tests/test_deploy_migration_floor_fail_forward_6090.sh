@@ -55,6 +55,7 @@ fi
 # probe that only accepts rc 0 would look correct here and ship a live-runtime bug.
 curl() {
     local fail_on_http=0 a
+    printf '%s\n' "$@" >"$TMP_ROOT/curl.args"
     for a in "$@"; do
         case "$a" in --fail) fail_on_http=1 ;; --*) ;; -*f*) fail_on_http=1 ;; esac
     done
@@ -342,6 +343,13 @@ else
     pass "a refused connection counts as not serving"
 fi
 STUB_CURL_RC=0
+if _release_runtime_is_serving "$REL_PORT" 2>"$TMP_ROOT/serving.err" \
+    && ! grep -q 'unbound variable' "$TMP_ROOT/serving.err" \
+    && grep -qx "Origin: http://[^:]*:$REL_PORT" "$TMP_ROOT/curl.args"; then
+    pass "the serving probe sends the loopback Origin for its own port"
+else
+    fail "the serving probe built its Origin header without the port: $(head -c 160 "$TMP_ROOT/serving.err")"
+fi
 # An unresolved port proves nothing, so it must not license skipping the gate.
 if _release_runtime_is_serving ""; then
     pass "an unresolved port counts as serving, so the gate still runs"
