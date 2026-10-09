@@ -38,6 +38,10 @@ if pathlib.Path(sys.argv[0]).name == "curl":
         "https://agentdesk.example/api/github/repos/itismyfield/AgentDesk/sync"], a
     s["writes"].append("sync")
     finish(s.get("sync_status", "200"), s.get("sync_rc", 0))
+if a[:2] == ["api", f"/repos/{repo}/actions/workflows/1/runs?branch=main&status=completed&per_page=100"]:
+    assert len(a) == 2, a  # One page of run history, newest first.
+    if s.get("fail_read") == "runs": finish(code=1)
+    finish(json.dumps({"total_count": len(s.get("runs", [])), "workflow_runs": s.get("runs", [])}))
 if a[0] == "api":
     assert a[-1] == "--paginate", a
     endpoint = a[1]
@@ -80,9 +84,9 @@ else:
         print(f'invalid issue format: "{a[2]}"', file=sys.stderr); finish(code=1)
     issue = next(i for i in s["issues"]
         if isinstance(i, dict) and number_of(i) == float(a[2].lstrip("#")))
-    if kind == "reopen":
+    if kind in ("reopen", "close"):
         assert len(a) == 5, a
-        issue["state"] = "open"
+        issue["state"] = "open" if kind == "reopen" else "closed"
     elif kind == "comment":
         assert a[5] == "--body-file" and len(a) == 7, a
         issue["comments"].append({"body": pathlib.Path(a[6]).read_text()})
@@ -100,6 +104,10 @@ def event():
 
 def marker(run=200, attempt=1):
     return f"<!-- agentdesk:ci-nightly:main:{REPO}:{run}:{attempt} -->"
+
+
+def green(run=200, attempt=1):
+    return f"<!-- agentdesk:ci-nightly:main:green:{REPO}:{run}:{attempt} -->"
 
 
 class NightlyTriage(unittest.TestCase):
@@ -303,6 +311,77 @@ class NightlyTriage(unittest.TestCase):
         self.assertEqual(self.run_entry(sync=True), [])
         self.assertEqual(self.numeric_arguments(), ["7"])
 
+    def passing(self, run=200, attempt=1):
+        self.payload = event()
+        self.payload["workflow_run"].update(id=run, run_attempt=attempt, conclusion="success")
+
+    def test_a_pass_closes_the_open_issue_and_the_next_failure_reopens_it(self):
+        self.seed(comments=[{"body": marker(199)}])
+        self.passing()
+        self.assertEqual(self.run_entry(sync=True), ["comment", "close", "sync"])
+        issue = self.load()["issues"][0]
+        self.assertEqual(issue["state"], "closed")
+        self.assertIn(green(), issue["comments"][-1]["body"].splitlines())
+        self.assertEqual(self.run_entry(sync=True), [])
+        self.payload = event(); self.payload["workflow_run"]["id"] = 201
+        self.assertEqual(self.run_entry(), ["reopen", "comment"])
+
+    def test_a_pass_without_an_open_issue_writes_nothing(self):
+        self.passing()
+        self.assertEqual(self.run_entry(sync=True), [])
+        self.seed(state="closed", comments=[{"body": marker(199)}])
+        self.assertEqual(self.run_entry(sync=True), [])
+
+    def test_out_of_order_outcomes_keep_the_newest_one(self):
+        # A pass handled after a newer recorded failure leaves the issue open.
+        self.seed(comments=[{"body": marker(201)}])
+        self.passing()
+        self.assertEqual(self.run_entry(), [])
+        # A rerun attempt that passes is newer than the attempt that failed.
+        self.seed(comments=[{"body": marker(200, 1)}])
+        self.passing(attempt=2)
+        self.assertEqual(self.run_entry(), ["comment", "close"])
+        # A failure older than a recorded pass is kept on the record without reopening.
+        self.seed(state="closed", comments=[{"body": marker(199)}, {"body": green(201)}])
+        self.payload = event()
+        self.assertEqual(self.run_entry(), ["comment"])
+        issue = self.load()["issues"][0]
+        self.assertEqual(issue["state"], "closed")
+        self.assertIn(marker(), issue["comments"][-1]["body"].splitlines())
+
+    def test_a_close_that_failed_after_its_comment_replays_only_the_close(self):
+        self.save({"issues": [], "calls": [], "writes": [], "fail_after": "comment"})
+        self.seed()
+        self.passing()
+        self.assertEqual(self.run_entry(success=False), ["comment"])
+        state = self.load(); state.pop("fail_after"); state["fail_before"] = "close"; self.save(state)
+        self.assertEqual(self.run_entry(success=False), [])
+        state = self.load(); state.pop("fail_before"); self.save(state)
+        self.assertEqual(self.run_entry(), ["close"])
+        self.assertEqual(len(self.load()["issues"][0]["comments"]), 1)
+
+    def test_a_failure_counts_the_failed_runs_back_to_the_last_pass(self):
+        def streak_line():
+            self.save({"issues": [], "calls": [], "writes": [], **extras})
+            self.run_entry()
+            body = self.load()["issues"][0]["body"].splitlines()
+            return [line for line in body if line.startswith("- Consecutive failed")]
+        history = [{"id": 201, "event": "schedule", "conclusion": "success"},
+            {"id": 199, "event": "schedule", "conclusion": "failure"},
+            {"id": 198, "event": "schedule", "conclusion": "cancelled"},
+            {"id": 197, "event": "workflow_dispatch", "conclusion": "failure"},
+            {"id": 196, "event": "pull_request", "conclusion": "success"},
+            {"id": 195, "event": "schedule", "conclusion": "success"},
+            {"id": 194, "event": "schedule", "conclusion": "failure"}]
+        for extras, expected in [
+                ({"runs": history}, "3"),
+                ({"runs": history[:5]}, "at least 3 (no earlier success in the last 100 runs)"),
+                ({"runs": history, "fail_read": "runs"}, "unavailable"),
+                ({"runs": [{"id": 199, "event": "schedule"}]}, "unavailable")]:
+            with self.subTest(expected=expected):
+                self.assertEqual(streak_line(),
+                    [f"- Consecutive failed nightly runs on main: {expected}"])
+
     def test_mandatory_write_errors_propagate(self):
         for kind in ("label", "create", "comment", "reopen"):
             with self.subTest(kind=kind):
@@ -320,8 +399,7 @@ class NightlyTriage(unittest.TestCase):
     def test_helper_rejects_wrong_provenance_and_event_combinations(self):
         changes = [("head_branch", "other"), ("name", "CI Other"), ("event", "push"),
             ("event", "pull_request"), ("status", "in_progress"),
-            ("head_repository", {"full_name": "fork/AgentDesk"}),
-            ("conclusion", "success"), ("conclusion", "cancelled")]
+            ("head_repository", {"full_name": "fork/AgentDesk"}), ("conclusion", "cancelled")]
         for key, value in changes:
             with self.subTest(key=key, value=value):
                 self.payload = event(); self.payload["workflow_run"][key] = value
@@ -372,14 +450,15 @@ class NightlyWorkflow(unittest.TestCase):
         for job in workflow["jobs"].values():
             self.assertEqual(job["steps"][0]["with"], {"repository": REPO, "ref": "${{ github.sha }}", "persist-credentials": False})
             self.assertEqual(job["steps"][-1]["run"], "./scripts/main-ci-triage.sh")
-        cases = [(event(), False, True)]
+        passed = event(); passed["workflow_run"]["conclusion"] = "success"
+        cases = [(event(), False, True), (passed, False, True)]
         for name, upstream, main, night in [("CI Nightly", "workflow_dispatch", False, True),
                 ("CI Main", "push", True, False), ("CI Main", "schedule", False, False),
                 ("CI Nightly", "push", False, False), ("CI Nightly", "pull_request", False, False)]:
             payload = event(); payload["workflow_run"].update(name=name, event=upstream)
             cases.append((payload, main, night))
         for key, value in [("name", "other"), ("head_branch", "other"), ("status", "in_progress"),
-                ("conclusion", "success"), ("conclusion", "cancelled"), ("id", 0), ("run_attempt", 0),
+                ("conclusion", "cancelled"), ("id", 0), ("run_attempt", 0),
                 ("head_repository", {"full_name": "fork/AgentDesk"})]:
             payload = event(); payload["workflow_run"][key] = value; cases.append((payload, False, False))
         for key, value in [("action", "requested"), ("repository", {"full_name": "other/repo"})]:
