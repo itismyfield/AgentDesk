@@ -253,6 +253,58 @@ pub(in crate::services::discord) fn clear_inflight_state_for_captured_episode(
     }
 }
 
+/// Clears a restart-settled admitted Herdr row only while the fresh row under the canonical lock is
+/// still that exact delivered episode: the same non-empty nonce, a prior generation, the same
+/// admitted kind, its durable delivery, and the snapshot's anchor and save generation.
+#[cfg(unix)]
+pub(in crate::services::discord) fn clear_admitted_restart_terminal(
+    provider: &ProviderKind,
+    snapshot: &InflightTurnState,
+    nonce: &str,
+    current_generation: u64,
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    let path = inflight_state_path(&root, provider, snapshot.channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedClearOutcome::IoError;
+    };
+    let Ok(data) = fs::read_to_string(&path) else {
+        return GuardedClearOutcome::Missing;
+    };
+    let Ok(fresh) = serde_json::from_str::<InflightTurnState>(&data) else {
+        return GuardedClearOutcome::Missing;
+    };
+    let pin = crate::services::discord::inflight::InflightEpisodePin::from_state(snapshot);
+    if nonce.is_empty()
+        || fresh.turn_nonce.as_deref() != Some(nonce)
+        || super::reconcile_gate::row_is_current_generation(&fresh, current_generation)
+        || fresh.tui_terminal_kind.is_none()
+        || fresh.tui_terminal_kind != snapshot.tui_terminal_kind
+        || !fresh.terminal_delivery_committed
+        || fresh.save_generation != snapshot.save_generation
+        || !pin.matches_state(&fresh)
+    {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    let expected = InflightTurnIdentity::from_state(snapshot);
+    let outcome = guarded_identity_clear_outcome(&fresh, &expected, Some(nonce));
+    if outcome != GuardedClearOutcome::Cleared {
+        return outcome;
+    }
+    let reason = "clear_admitted_restart_terminal";
+    remove_identity_matched_state(
+        &path,
+        provider,
+        snapshot.channel_id,
+        &expected,
+        fresh,
+        reason,
+    )
+    .0
+}
+
 fn clear_rebind_origin_inflight_state_if_matches_identity_impl_in_root(
     root: &std::path::Path,
     provider: &ProviderKind,
