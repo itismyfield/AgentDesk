@@ -309,4 +309,5 @@ pub(super) async fn evaluate_provider(registry: &HealthRegistry, provider: &Prov
 }
 
 #[cfg(test)]
+#[path = "queue_park_ledger/cancel_park_tests.rs"]
 mod tests;
