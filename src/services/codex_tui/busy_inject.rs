@@ -194,8 +194,12 @@ fn inject_locked(
     let Some((width, height)) = state.size else {
         return not_sent(Veto::UnpredictableRender);
     };
-    let fits = predicted_rows(text, width).is_some_and(|rows| rows + RESERVED_ROWS <= height);
-    if text.chars().count() > MAX_UNFOLDED_CHARS || !fits {
+    let rows = predicted_rows(text, width);
+    let fits = rows
+        .is_some_and(|rows| rows + RESERVED_ROWS <= height && rows <= screen::MAX_COMPOSER_ROWS);
+    // The screen reader cannot follow a blank row inside the composer, so it could not prove it.
+    let readable = text.split('\n').all(|line| !line.trim().is_empty());
+    if text.chars().count() > MAX_UNFOLDED_CHARS || !fits || !readable {
         return not_sent(Veto::UnpredictableRender);
     }
     let Some(before) = pane.capture() else {
@@ -209,6 +213,8 @@ fn inject_locked(
         return not_sent(Veto::QueueShown);
     }
     match shown.composer {
+        // Images above an empty textarea are a draft an Enter would submit with the input.
+        screen::Composer::Empty if shown.attachments => return not_sent(Veto::Draft),
         screen::Composer::Empty => {}
         screen::Composer::Text(_) => return not_sent(Veto::Draft),
         screen::Composer::Unread => return not_sent(Veto::NoComposer),
