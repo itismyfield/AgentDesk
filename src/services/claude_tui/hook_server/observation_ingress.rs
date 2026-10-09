@@ -285,7 +285,7 @@ fn classify_skip(
 }
 
 /// A hook from a Claude pane this runtime launched; the grace expiry never gives up on it, only
-/// a rehydrate pass that listed tmux does.
+/// a pass that listed tmux does. Its captured nonce already passed the adoption's execution fence.
 fn managed_here(
     envelope: Option<&crate::services::tui_prompt_dedupe::binding_context::HookBindingEnvelope>,
 ) -> bool {

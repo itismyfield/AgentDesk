@@ -551,11 +551,15 @@ pub(crate) mod tests {
             let _lock = lock();
             std::env::var_os("AGENTDESK_ROOT_DIR")
         };
+        // The refusal panics before touching the env, and leaves that thread free to lock.
         let refused = std::thread::spawn(|| {
-            std::panic::catch_unwind(fixture_after_shared_test_env_lock).is_err()
+            let refused = std::panic::catch_unwind(fixture_after_shared_test_env_lock).is_err();
+            let _lock = lock();
+            (refused, std::env::var_os("AGENTDESK_ROOT_DIR"))
         });
-        assert!(
+        assert_eq!(
             refused.join().unwrap(),
+            (true, before.clone()),
             "a thread without the lock is refused"
         );
         {

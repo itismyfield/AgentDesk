@@ -7783,6 +7783,7 @@ services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_prompt_wi
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_refused_announcement_leaves_the_prompt_to_the_idle_scanner
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_queued_behind_a_created_announcement_is_not_announced_again
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_queued_behind_a_refused_announcement_is_announced
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_queued_behind_a_timed_out_announcement_is_not_announced_again
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_read_during_a_refused_announcement_is_announced_afterwards
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_timed_out_announcement_keeps_the_scanner_row_suppressed
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_aliased_hook_broadcast_twice_is_announced_once
@@ -11109,6 +11110,7 @@ services::tui_prompt_dedupe::pending::tests::a_restored_pending_dropped_while_it
 services::tui_prompt_dedupe::pending::tests::a_transcript_gone_after_the_judgment_is_waited_for
 services::tui_prompt_dedupe::pending::tests::a_waiting_pending_holds_only_its_own_pane_and_the_poll_returns
 services::tui_prompt_dedupe::pending::tests::a_waiting_pending_is_replaced_by_the_next_clear_of_its_pane
+services::tui_prompt_dedupe::pending::tests::a_waiting_pending_leaves_the_queue_once_the_candidate_behind_it_settles
 services::tui_prompt_dedupe::pending::tests::a_waiting_pending_stays_queued_when_the_candidate_behind_it_is_refused
 services::tui_prompt_dedupe::pending::tests::another_sessions_pending_does_not_repeat_an_earlier_refusal
 services::tui_prompt_dedupe::pending::tests::file_less_exact_binding_waits_for_that_path_only

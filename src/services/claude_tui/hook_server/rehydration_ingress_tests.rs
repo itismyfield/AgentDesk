@@ -663,7 +663,8 @@ fn stale_snapshot_keeps_the_adoption(launch: bool) {
     let (tmux, channel, b) = (race.tmux.clone(), race.channel, race.b.clone());
     let a_path = ingress_transcript_dir(&race).join(format!("{}.jsonl", race.a));
     let (stale, stale_path) = if launch {
-        // A binding the launch script may replace: its transcript is gone.
+        // A binding the launch script may replace: its transcript is gone, and with no channel
+        // mapped yet only the launch gate judges it.
         let x = uuid();
         (x.clone(), a_path.with_file_name(format!("{x}.jsonl")))
     } else {
@@ -675,10 +676,13 @@ fn stale_snapshot_keeps_the_adoption(launch: bool) {
         .unwrap();
         (race.a.clone(), a_path)
     };
+    // The source the pass would register: the launch script's A, or the snapshot's own binding.
+    let candidate = if launch {
+        race.a.clone()
+    } else {
+        stale.clone()
+    };
     dedupe::register_provider_session("claude", &stale, &tmux);
-    if launch {
-        dedupe::register_tmux_channel(&tmux, channel);
-    }
     dedupe::register_tmux_runtime_binding(&tmux, claude(&stale_path, &stale));
     let names = |session: &str| {
         let names = |e: &BindingEvent| match &e.new {
@@ -707,8 +711,8 @@ fn stale_snapshot_keeps_the_adoption(launch: bool) {
     assert_eq!(bound(), Some(b.clone()), "the adoption stands");
     let logged = events(channel).len();
     assert_eq!(names(&b), 1, "B logged once");
-    assert_eq!(names(&stale), 0, "the stale source is not logged");
-    let refused = dedupe::pane_registration::pane_registration_failed(&stale, None);
+    assert_eq!(names(&candidate), 0, "the stale source is not logged");
+    let refused = dedupe::pane_registration::pane_registration_failed(&candidate, None);
     assert!(
         !refused,
         "the given-up registration leaves the pane's hooks admitted"
@@ -716,7 +720,7 @@ fn stale_snapshot_keeps_the_adoption(launch: bool) {
     let _ = dedupe::clear_claude_session_rotation(&tmux);
     rehydrate_existing_claude_tui_bindings(&shared);
     assert_eq!(bound(), Some(b.clone()), "the next pass keeps B");
-    assert_eq!(names(&stale), 0);
+    assert_eq!(names(&candidate), 0);
     assert_eq!(
         events(channel).len(),
         logged,

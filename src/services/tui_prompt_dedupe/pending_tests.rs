@@ -929,6 +929,37 @@ fn a_waiting_pending_stays_queued_when_the_candidate_behind_it_is_refused() {
 }
 
 #[test]
+fn a_waiting_pending_leaves_the_queue_once_the_candidate_behind_it_settles() {
+    let lane = Lane::new();
+    let (channel, tmux) = (7_521, "p2b-yield-durable");
+    let a = launched(&lane, channel, tmux);
+    let (b, c) = (uuid(), uuid());
+    let pending = AdoptionHttp::Durable(DurableKind::Pending);
+    assert_eq!(adopt_from_hook(&a, &b, &clear(&lane.path(&b))), pending);
+    lane.touch(&c);
+    APPEND_FAULT.with(|fault| fault.set(Some("write")));
+    let refused = adopt_from_hook(&a, &c, &clear(&lane.path(&c)));
+    APPEND_FAULT.with(|fault| fault.set(None));
+    assert_eq!(refused, AdoptionHttp::NotDurable(NotDurableReason::Append));
+    assert_eq!(deferred_adoption_count(), 2, "C waits behind B");
+
+    // The poll settles C durably, so B gives way to it and is never adopted afterwards.
+    retry_deferred_claude_adoptions();
+    assert_eq!(bound_session(tmux), Some(c.clone()));
+    assert!(clear_claude_session_rotation(tmux));
+    lane.touch(&b);
+    retry_deferred_claude_adoptions();
+    assert_eq!(deferred_adoption_count(), 0);
+    assert_eq!(bound_session(tmux), Some(c));
+    let records = records_strict(channel).unwrap().unwrap();
+    let adopted_b = records.iter().any(|r| match &r.new {
+        BindingTarget::Source(s) | BindingTarget::Resolved { source: s, .. } => s.session_id == b,
+        _ => false,
+    });
+    assert!(!adopted_b, "B is never adopted");
+}
+
+#[test]
 fn a_restored_pending_dropped_while_its_alias_was_away_is_seeded_again() {
     let lane = Lane::new();
     let (channel, tmux) = (7_520, "p2b-alias-trip");

@@ -19,8 +19,22 @@ thread_local! { pub(crate) static BEFORE_JUDGED: std::cell::RefCell<Option<Box<d
 #[cfg(test)]
 thread_local! { pub(crate) static BEFORE_COMPLETE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
 
+// The rehydrate pass registers through `register_judged_claude_pane`; these unjudged forms are for tests.
+#[cfg(test)]
 pub(crate) fn register_claude_pane(tmux: &str, channel: u64, binding: TuiRuntimeBinding) {
     register_claude_pane_with(tmux, channel, binding, Record::Stat);
+}
+
+/// A launch registration without a judged binding, for tests that drive it directly.
+#[cfg(test)]
+pub(crate) fn register_launched_claude_pane(
+    tmux: &str,
+    channel: u64,
+    binding: TuiRuntimeBinding,
+    context_path: Option<&std::path::Path>,
+) -> bool {
+    register_claude_pane_with_cause(tmux, channel, binding, Record::Stat, context_path)
+        .is_some_and(Persisted::published)
 }
 
 /// A rehydrate pass's registration of `binding`, decided from the pane's binding `judged`. It is
@@ -69,6 +83,7 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
 
 /// A restore names how the pane's binding is logged; see `Record`. `None` when nothing was published;
 /// an unpublished `Persisted` when the pane's pin refused it.
+#[cfg(test)]
 pub(crate) fn register_claude_pane_with(
     tmux: &str,
     channel: u64,
@@ -88,6 +103,7 @@ pub(crate) fn register_unmoved_claude_pane(
     register_judged_claude_pane(tmux, channel, binding, None, Some(&judged))
 }
 
+#[cfg(test)]
 fn register_claude_pane_with_cause(
     tmux: &str,
     channel: u64,
