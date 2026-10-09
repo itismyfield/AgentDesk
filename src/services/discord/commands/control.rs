@@ -11,7 +11,7 @@ use super::super::catch_up::retry_state::clear_channel_discarding_catch_up_backl
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::queue_io::mailbox_cancel_queued_primary_message;
 use super::super::settings::save_bot_settings;
-use super::super::turn_bridge::{CommandStop, stop_active_turn};
+use super::super::turn_bridge::stop_active_turn;
 use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_global_active};
 mod home_fence;
 mod managed_reset;
@@ -616,53 +616,9 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     }
 
     let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
-    match super::super::turn_bridge::begin_command_stop(shared, provider, channel_id, false).await {
-        CommandStop::Session(stop) => {
-            ctx.say(super::STOPPING_RESPONSE).await?;
-            stop.interrupt("/stop").await;
-        }
-        CommandStop::Stop(stop) => {
-            ctx.say(super::STOPPING_RESPONSE).await?;
-
-            // The judged stop keeps the abort-key-then-SIGKILL order identical
-            // across every stop entrypoint.
-            let policy = super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
-            stop.stop(policy, "/stop").await;
-            // #5176 — "the interrupt was sent (or deliberately skipped)" is not
-            // cancel success. When the runtime this turn belonged to is already
-            // gone, the stop delivery layer decides `skip_pre_generation` and
-            // there is nobody left to run the turn-bridge exit that would
-            // normally release the mailbox. Without this the channel keeps a
-            // foreground anchor forever and every queued user message stays
-            // locked behind it. The guard inside
-            // `release_zombie_foreground_turn` is what keeps a live turn safe.
-            let release = super::super::zombie_foreground_release::release_zombie_foreground_turn(
-                &ctx.data().shared,
-                &ctx.data().provider,
-                channel_id,
-                "/stop",
-            )
-            .await;
-            log_info_event!(
-                "discord_cancel_signal_sent",
-                channel_id = channel_id.get(),
-                provider = ctx.data().provider.as_str(),
-                status = if release.released { "released" } else { "sent" },
-                mailbox_foreground_released = release.released,
-                zombie_verdict = release.verdict_str(),
-                queue_depth_after = release.queue_depth_after,
-                queue_kickoff_scheduled = release.queue_kickoff_scheduled,
-            );
-        }
-        other => {
-            let response = match other {
-                CommandStop::AlreadyStopping => super::ALREADY_STOPPING_RESPONSE,
-                CommandStop::HostRefused => super::HOST_REFUSED_STOP_RESPONSE,
-                _ => super::NO_ACTIVE_TURN_RESPONSE,
-            };
-            ctx.say(response).await?;
-        }
-    }
+    let reply = super::stop::run_slash_stop(shared, provider, channel_id).await;
+    ctx.say(reply.text()).await?;
+    reply.finish(shared, provider, channel_id).await;
     Ok(())
 }
 
