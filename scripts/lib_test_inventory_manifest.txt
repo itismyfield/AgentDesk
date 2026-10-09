@@ -5246,12 +5246,15 @@ services::discord::queue_marker::tests::regression_4049_stale_dispatch_drain_gen
 services::discord::queue_overflow_dlq::tests::clear_and_purge_superseded_events_are_never_dead_lettered
 services::discord::queue_overflow_dlq::tests::overflow_events_are_dead_letter_and_notice_candidates
 services::discord::queue_overflow_dlq::tests::placeholder_backed_overflow_is_excluded_from_the_orphan_notice
+services::discord::queue_park_ledger::tests::actual_health_snapshot_serializes_registered_park_fields_flat
+services::discord::queue_park_ledger::tests::actual_health_snapshot_uses_default_projection_for_unresolved_provider
 services::discord::queue_park_ledger::tests::cancel_preserved_source_parked_errors_once_at_600s
 services::discord::queue_park_ledger::tests::claimed_merged_sources_resolve_resumed_once
 services::discord::queue_park_ledger::tests::dequeued_then_represerved_source_remains_waiting
 services::discord::queue_park_ledger::tests::disappearance_without_claim_or_exit_is_unknown_not_resumed
 services::discord::queue_park_ledger::tests::drain_registers_sources_before_first_evaluation_with_preserved_origin
 services::discord::queue_park_ledger::tests::explicit_queue_cancel_is_explicitly_removed_not_resumed
+services::discord::queue_park_ledger::tests::failed_mailbox_observations_preserve_sources_age_and_escalation
 services::discord::queue_park_ledger::tests::live_uncancelled_turn_never_escalates
 services::discord::queue_park_ledger::tests::merged_carrier_tracks_more_than_queue_capacity_and_keeps_original_age
 services::discord::queue_park_ledger::tests::observation_failure_keeps_unknown_projection_but_errors_once_at_600s
@@ -5260,6 +5263,7 @@ services::discord::queue_park_ledger::tests::observation_keeps_legacy_inflight_b
 services::discord::queue_park_ledger::tests::periodic_discovery_records_cancelled_anchor_origin_without_drain
 services::discord::queue_park_ledger::tests::provider_evaluator_visits_all_registered_runtimes
 services::discord::queue_park_ledger::tests::selective_dequeue_of_later_item_keeps_head_waiting
+services::discord::queue_park_ledger::tests::stale_cancelled_snapshot_cannot_rediscover_explicitly_removed_source
 services::discord::queue_park_ledger::tests::stall_watchdog_task_evaluates_parks_without_backstop_or_health_calls
 services::discord::queue_park_ledger::tests::unobserved_source_age_is_none_instead_of_zero
 services::discord::queue_reactions::tests::drain_sets_include_only_queue_markers

@@ -168,6 +168,7 @@ async fn drain_registers_sources_before_first_evaluation_with_preserved_origin()
         .lock()
         .expect("park ledger");
     let sources = channels
+        .sources
         .get(&channel)
         .expect("drain registered before any evaluator");
     assert_eq!(sources.len(), 1);
@@ -182,10 +183,18 @@ async fn periodic_discovery_records_cancelled_anchor_origin_without_drain() {
     let channel = ChannelId::new(6_016_111);
     let (_, shared) = held_fixture(channel).await;
     enqueue(&shared, channel, 6_016_112, false).await;
-    assert!(shared.queue_park_ledger.channels.lock().unwrap().is_empty());
+    assert!(
+        shared
+            .queue_park_ledger
+            .channels
+            .lock()
+            .unwrap()
+            .sources
+            .is_empty()
+    );
     evaluate(&shared, channel).await;
     let channels = shared.queue_park_ledger.channels.lock().unwrap();
-    let source = &channels[&channel][&6_016_112];
+    let source = &channels.sources[&channel][&6_016_112];
     assert!(matches!(source.origin, Origin::CancelledAnchorObserved));
 }
 
@@ -254,7 +263,7 @@ async fn observation_failure_keeps_unknown_projection_but_errors_once_at_600s() 
     let before = snapshot(&shared, channel).await;
     let held_token = before.cancel_token.clone().expect("held cancelled anchor");
     assert_eq!(
-        shared.queue_park_ledger.channels.lock().unwrap()[&channel].len(),
+        shared.queue_park_ledger.channels.lock().unwrap().sources[&channel].len(),
         1,
         "the actual post-cancel drain registers before the read fails",
     );
@@ -404,7 +413,7 @@ async fn merged_carrier_tracks_more_than_queue_capacity_and_keeps_original_age()
         .queue_park_ledger
         .register(channel, &original, Origin::PostCancelPreserved);
     let first_seen =
-        shared.queue_park_ledger.channels.lock().unwrap()[&channel][&6_016_200].first_seen;
+        shared.queue_park_ledger.channels.lock().unwrap().sources[&channel][&6_016_200].first_seen;
     tokio::time::advance(Duration::from_secs(599)).await;
     for id in 6_016_201..=6_016_234 {
         enqueue(&shared, channel, id, true).await;
@@ -423,15 +432,18 @@ async fn merged_carrier_tracks_more_than_queue_capacity_and_keeps_original_age()
     {
         let channels = shared.queue_park_ledger.channels.lock().unwrap();
         assert_eq!(
-            channels[&channel].len(),
+            channels.sources[&channel].len(),
             35,
             "queue capacity cannot cap tracked sources"
         );
         assert!(
-            channels[&channel].contains_key(&6_016_234),
+            channels.sources[&channel].contains_key(&6_016_234),
             "the source beyond 30 remains tracked"
         );
-        assert_eq!(channels[&channel][&6_016_200].first_seen, first_seen);
+        assert_eq!(
+            channels.sources[&channel][&6_016_200].first_seen,
+            first_seen
+        );
     }
     tokio::time::advance(Duration::from_secs(1)).await;
     evaluate(&shared, channel).await;
@@ -500,20 +512,98 @@ async fn disappearance_without_claim_or_exit_is_unknown_not_resumed() {
     shared
         .queue_park_ledger
         .register(channel, &tracked, Origin::PostCancelPreserved);
+    let first_seen =
+        shared.queue_park_ledger.channels.lock().unwrap().sources[&channel][&6_016_162].first_seen;
     shared
         .queue_park_ledger
         .evaluate(&shared, &ProviderKind::Claude, channel, &Default::default());
-    assert_eq!(capture.outcome("unknown"), 1);
+    assert_eq!(capture.outcome("tracked source left the queue"), 1);
     assert_eq!(capture.outcome("resumed"), 0);
+    let projection = shared.queue_park_ledger.project(
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+        &Default::default(),
+    );
+    assert_eq!(
+        projection.reason.as_deref(),
+        Some("source_disposition_unknown")
+    );
+    assert_eq!(projection.recovery_state, Some("unknown"));
+    assert_eq!(projection.tracked_source_ids, vec![6_016_162]);
+    assert_eq!(projection.tracked_source_count, 1);
+    assert_eq!(projection.oldest_tracked_secs, Some(0));
+    tokio::time::advance(Duration::from_secs(600)).await;
+    let unrelated_live = ChannelMailboxSnapshot {
+        cancel_token: Some(Arc::new(CancelToken::new())),
+        active_user_message_id: Some(MessageId::new(6_016_169)),
+        ..Default::default()
+    };
     assert!(
+        !unrelated_live
+            .cancel_token
+            .as_ref()
+            .unwrap()
+            .cancelled
+            .load(Ordering::Relaxed)
+    );
+    shared
+        .queue_park_ledger
+        .evaluate(&shared, &ProviderKind::Claude, channel, &unrelated_live);
+    assert_eq!(
+        capture.errors(),
+        1,
+        "unresolved disappearance still reaches the park deadline"
+    );
+    let captured = capture.text();
+    let error = captured
+        .lines()
+        .find(|line| {
+            line.contains("queue_park")
+                && line.contains("ERROR")
+                && line.contains("source_disposition_unknown")
+        })
+        .expect("the unresolved source emits its own error despite the unrelated live turn");
+    assert!(error.contains("recovery_owner=\"none\""), "{error}");
+    assert!(error.contains("recovery_state=\"unknown\""), "{error}");
+    assert_eq!(
+        capture.outcome("tracked source left the queue"),
+        1,
+        "unknown is reported once without erasing the source"
+    );
+    let aged =
         shared
             .queue_park_ledger
-            .channels
-            .lock()
-            .unwrap()
-            .get(&channel)
-            .is_none_or(|sources| sources.is_empty())
+            .project(&shared, &ProviderKind::Claude, channel, &unrelated_live);
+    assert_eq!(aged.reason.as_deref(), Some("source_disposition_unknown"));
+    assert_eq!(aged.owner, Some("none"));
+    assert_eq!(aged.recovery_state, Some("unknown"));
+    assert_eq!(aged.oldest_tracked_secs, Some(600));
+    assert_eq!(aged.tracked_source_ids, vec![6_016_162]);
+    {
+        let state = shared.queue_park_ledger.channels.lock().unwrap();
+        let source = &state.sources[&channel][&6_016_162];
+        assert_eq!(source.first_seen, first_seen);
+        assert!(source.disposition_unknown);
+        assert!(source.escalated);
+    }
+    tokio::time::advance(Duration::from_secs(600)).await;
+    shared
+        .queue_park_ledger
+        .evaluate(&shared, &ProviderKind::Claude, channel, &Default::default());
+    assert_eq!(capture.errors(), 1);
+    shared.queue_park_ledger.exit(
+        channel,
+        &[crate::services::turn_orchestrator::QueueExitEvent {
+            intervention: tracked.intervention_queue[0].clone(),
+            kind: crate::services::turn_orchestrator::QueueExitKind::Cancelled,
+        }],
     );
+    assert_eq!(capture.outcome("explicitly_removed"), 1);
+    assert_eq!(capture.outcome("resumed"), 0);
+    let state = shared.queue_park_ledger.channels.lock().unwrap();
+    assert!(!state.sources.contains_key(&channel));
+    assert!(state.revisions.contains_key(&channel));
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -651,7 +741,7 @@ async fn selective_dequeue_of_later_item_keeps_head_waiting() {
     assert_eq!(capture.outcome("resumed"), 0);
     assert_eq!(capture.outcome("unknown"), 0);
     assert_eq!(
-        shared.queue_park_ledger.channels.lock().unwrap()[&channel].len(),
+        shared.queue_park_ledger.channels.lock().unwrap().sources[&channel].len(),
         2
     );
 }
@@ -799,7 +889,7 @@ async fn dequeued_then_represerved_source_remains_waiting() {
     assert_eq!(capture.outcome("resumed"), 0);
     assert_eq!(capture.outcome("unknown"), 0);
     assert_eq!(
-        shared.queue_park_ledger.channels.lock().unwrap()[&channel].len(),
+        shared.queue_park_ledger.channels.lock().unwrap().sources[&channel].len(),
         1
     );
 }
@@ -964,7 +1054,7 @@ async fn provider_evaluator_visits_all_registered_runtimes() {
     enqueue(&second, channel, 6_016_242, false).await;
     evaluate_provider(&registry, &ProviderKind::Claude).await;
     assert_eq!(
-        second.queue_park_ledger.channels.lock().unwrap()[&channel].len(),
+        second.queue_park_ledger.channels.lock().unwrap().sources[&channel].len(),
         1
     );
     tokio::time::advance(Duration::from_secs(600)).await;
@@ -974,5 +1064,408 @@ async fn provider_evaluator_visits_all_registered_runtimes() {
         1,
         "later same-provider runtime is evaluated"
     );
-    assert!(first.queue_park_ledger.channels.lock().unwrap().is_empty());
+    assert!(
+        first
+            .queue_park_ledger
+            .channels
+            .lock()
+            .unwrap()
+            .sources
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn actual_health_snapshot_serializes_registered_park_fields_flat() {
+    let _root = isolated_agentdesk_root();
+    let capture = LogCapture::default();
+    let _capture = capture.install();
+    let channel = ChannelId::new(6_016_301);
+    let (registry, shared) = held_fixture(channel).await;
+    enqueue(&shared, channel, 6_016_302, false).await;
+    let drain = recovery::schedule_pending_queue_drain_after_cancel(
+        &registry,
+        "claude",
+        channel,
+        "queue-park-health-wiring-test",
+    )
+    .await;
+    assert!(drain.scheduled);
+    assert_eq!(drain.queue_depth_after, Some(1));
+    tokio::time::advance(Duration::from_secs(600)).await;
+    evaluate_provider(&registry, &ProviderKind::Claude).await;
+    assert_eq!(
+        capture.errors(),
+        1,
+        "the source reached the real park threshold"
+    );
+    let health = recovery::build_health_snapshot(&registry).await;
+    let json = serde_json::to_value(health).expect("serialize actual detailed health");
+    let mailbox = json["mailboxes"]
+        .as_array()
+        .expect("actual health includes mailbox details")
+        .iter()
+        .find(|mailbox| mailbox["channel_id"] == channel.get() && mailbox["provider"] == "claude")
+        .expect("the registered channel reaches the actual health builder");
+    assert_eq!(mailbox["queue_depth"], 1);
+    assert_eq!(mailbox["has_cancel_token"], true);
+    assert_eq!(
+        mailbox["queue_park_reason"],
+        "cancelled_anchor_held:hold_inflight_present"
+    );
+    assert_eq!(mailbox["queue_park_owner"], "idle_queue_backstop");
+    assert_eq!(mailbox["queue_park_oldest_tracked_secs"], 600);
+    assert_eq!(
+        mailbox["queue_park_tracked_source_ids"],
+        serde_json::json!([6_016_302])
+    );
+    assert_eq!(mailbox["queue_park_tracked_source_count"], 1);
+    assert_eq!(mailbox["queue_park_ids_truncated"], false);
+    assert_eq!(mailbox["queue_park_inflight_row_kind"], "no_tmux_identity");
+    assert_eq!(mailbox["queue_park_recovery_state"], "no_periodic_caller");
+    assert!(
+        mailbox.get("queue_park").is_none(),
+        "the production JSON flattens the filled projection"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn actual_health_snapshot_uses_default_projection_for_unresolved_provider() {
+    let _root = isolated_agentdesk_root();
+    let channel = ChannelId::new(6_016_311);
+    let (registry, shared) = held_fixture(channel).await;
+    enqueue(&shared, channel, 6_016_312, false).await;
+    let drain = recovery::schedule_pending_queue_drain_after_cancel(
+        &registry,
+        "claude",
+        channel,
+        "queue-park-unresolved-health-test",
+    )
+    .await;
+    assert!(drain.scheduled);
+    assert_eq!(drain.queue_depth_after, Some(1));
+    tokio::time::advance(Duration::from_secs(600)).await;
+    evaluate_provider(&registry, &ProviderKind::Claude).await;
+    assert_eq!(
+        shared.queue_park_ledger.channels.lock().unwrap().sources[&channel].len(),
+        1
+    );
+    let unresolved_name = "queue-park-unresolved-provider";
+    assert!(ProviderKind::from_str(unresolved_name).is_none());
+    let unresolved = HealthRegistry::new();
+    unresolved.register(unresolved_name.into(), shared).await;
+    let health = recovery::build_health_snapshot(&unresolved).await;
+    let json = serde_json::to_value(health).expect("serialize unresolved-provider health");
+    let mailbox = json["mailboxes"]
+        .as_array()
+        .expect("actual health includes mailbox details")
+        .iter()
+        .find(|mailbox| {
+            mailbox["channel_id"] == channel.get() && mailbox["provider"] == unresolved_name
+        })
+        .expect("provider resolution failure still reports the actual occupied mailbox");
+    assert_eq!(mailbox["queue_depth"], 1);
+    assert_eq!(mailbox["has_cancel_token"], true);
+    for field in [
+        "queue_park_reason",
+        "queue_park_owner",
+        "queue_park_oldest_tracked_secs",
+        "queue_park_inflight_row_kind",
+        "queue_park_recovery_state",
+    ] {
+        assert_eq!(
+            mailbox.get(field),
+            Some(&serde_json::Value::Null),
+            "unresolved field {field}"
+        );
+    }
+    assert_eq!(
+        mailbox["queue_park_tracked_source_ids"],
+        serde_json::json!([])
+    );
+    assert_eq!(mailbox["queue_park_tracked_source_count"], 0);
+    assert_eq!(mailbox["queue_park_ids_truncated"], false);
+    assert!(
+        mailbox.get("queue_park").is_none(),
+        "default fields also remain flat"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn failed_mailbox_observations_preserve_sources_age_and_escalation() {
+    use crate::services::turn_orchestrator::MailboxObservationFailure;
+    use crate::services::turn_orchestrator::registry_purge::MailboxRefusal;
+
+    let _root = isolated_agentdesk_root();
+    for (index, case) in ["reply_dropping", "unreachable", "missing"]
+        .into_iter()
+        .enumerate()
+    {
+        let capture = LogCapture::default();
+        let _capture = capture.install();
+        let channel = ChannelId::new(6_016_321 + (index as u64) * 10);
+        let source_id = channel.get() + 1;
+        let (registry, shared) = held_fixture(channel).await;
+        discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(enqueue(
+            &shared, channel, source_id, false,
+        ))
+        .await;
+        let drain = recovery::schedule_pending_queue_drain_after_cancel(
+            &registry,
+            "claude",
+            channel,
+            "queue-park-observation-unavailable-test",
+        )
+        .await;
+        assert!(drain.scheduled);
+        assert_eq!(drain.queue_depth_after, Some(1));
+        let original = snapshot(&shared, channel).await;
+        let first_seen = shared.queue_park_ledger.channels.lock().unwrap().sources[&channel]
+            [&source_id]
+            .first_seen;
+        let row_path = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &ProviderKind::Claude,
+            channel.get(),
+        );
+        let row_bytes = std::fs::read(&row_path).unwrap();
+        let failure = match case {
+            "reply_dropping" => {
+                shared.mailboxes.insert_reply_dropping_for_test(channel);
+                MailboxObservationFailure::Unreachable
+            }
+            "unreachable" => {
+                shared.mailboxes.insert_unreachable_for_test(channel);
+                MailboxObservationFailure::Unreachable
+            }
+            "missing" => {
+                shared.mailboxes.remove_fixture_for_test(channel);
+                MailboxObservationFailure::Missing
+            }
+            _ => unreachable!(),
+        };
+        tokio::time::advance(Duration::from_secs(600)).await;
+        evaluate_provider(&registry, &ProviderKind::Claude).await;
+        {
+            let state = shared.queue_park_ledger.channels.lock().unwrap();
+            let source = &state.sources[&channel][&source_id];
+            assert_eq!(
+                source.first_seen, first_seen,
+                "{case} cannot reset the observed age"
+            );
+            assert!(!source.escalated);
+            assert!(!source.disposition_unknown);
+            assert!(matches!(source.origin, Origin::PostCancelPreserved));
+            assert_eq!(state.unavailable.get(&channel), Some(&failure));
+        }
+        assert_eq!(
+            capture.errors(),
+            0,
+            "{case}: the failed read makes no source disposition judgment"
+        );
+        assert_eq!(capture.outcome("resumed"), 0);
+        assert_eq!(capture.outcome("tracked source left the queue"), 0);
+        let json = serde_json::to_value(recovery::build_health_snapshot(&registry).await)
+            .expect("serialize actual health after mailbox observation failure");
+        let failures = json["queue_park_observation_failures"]
+            .as_array()
+            .expect("health names channels absent from its successful mailbox observations");
+        let diagnostic = failures
+            .iter()
+            .find(|entry| entry["provider"] == "claude" && entry["channel_id"] == channel.get())
+            .expect("the actual failure reaches the health diagnostic array");
+        assert_eq!(diagnostic["observation_failure"], failure.as_str());
+        assert_eq!(diagnostic["queue_park_reason"], "observation_unavailable");
+        assert_eq!(diagnostic["queue_park_recovery_state"], "unknown");
+        assert_eq!(
+            diagnostic["queue_park_tracked_source_ids"],
+            serde_json::json!([source_id])
+        );
+        assert_eq!(diagnostic["queue_park_tracked_source_count"], 1);
+        assert_eq!(diagnostic["queue_park_oldest_tracked_secs"], 600);
+        assert!(diagnostic.get("queue_park").is_none());
+        assert_eq!(std::fs::read(&row_path).unwrap(), row_bytes);
+        if failure == MailboxObservationFailure::Missing {
+            assert!(
+                crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(channel)
+                    .is_none(),
+                "observation must not recreate the missing actor"
+            );
+        }
+        shared.mailboxes.insert_snapshot_only_for_test(
+            channel,
+            original.clone(),
+            MailboxRefusal::Closed,
+        );
+        let fresh_json = serde_json::to_value(recovery::build_health_snapshot(&registry).await)
+            .expect("serialize newly restored actor before periodic evaluation catches up");
+        assert!(
+            fresh_json.get("queue_park_observation_failures").is_none(),
+            "a fresh successful health observation overrides the cached failure"
+        );
+        let fresh_mailbox = fresh_json["mailboxes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["provider"] == "claude" && entry["channel_id"] == channel.get())
+            .expect("restored actor reaches detailed mailbox health");
+        assert_eq!(
+            fresh_mailbox["queue_park_reason"],
+            "cancelled_anchor_held:hold_inflight_present"
+        );
+        assert_eq!(fresh_mailbox["queue_park_owner"], "idle_queue_backstop");
+        assert_eq!(fresh_mailbox["queue_park_oldest_tracked_secs"], 600);
+        assert_eq!(
+            fresh_mailbox["queue_park_tracked_source_ids"],
+            serde_json::json!([source_id])
+        );
+        assert_eq!(fresh_mailbox["queue_park_tracked_source_count"], 1);
+        assert_eq!(
+            shared
+                .queue_park_ledger
+                .channels
+                .lock()
+                .unwrap()
+                .unavailable
+                .get(&channel),
+            Some(&failure),
+            "health does not mutate the periodic evaluator's cached observation"
+        );
+        assert_eq!(
+            capture.errors(),
+            0,
+            "health projection does not run periodic escalation"
+        );
+        evaluate_provider(&registry, &ProviderKind::Claude).await;
+        assert_eq!(
+            capture.errors(),
+            1,
+            "{case}: recovery uses the original 600-second deadline"
+        );
+        {
+            let state = shared.queue_park_ledger.channels.lock().unwrap();
+            let source = &state.sources[&channel][&source_id];
+            assert_eq!(source.first_seen, first_seen);
+            assert!(source.escalated);
+            assert!(!source.disposition_unknown);
+            assert!(!state.unavailable.contains_key(&channel));
+        }
+        let restored = snapshot(&shared, channel).await;
+        assert!(Arc::ptr_eq(
+            restored.cancel_token.as_ref().unwrap(),
+            original.cancel_token.as_ref().unwrap()
+        ));
+        assert_eq!(
+            restored.active_user_message_id,
+            original.active_user_message_id
+        );
+        assert_eq!(
+            restored.intervention_queue[0].message_id,
+            original.intervention_queue[0].message_id
+        );
+        assert_eq!(
+            restored.intervention_queue[0].text,
+            original.intervention_queue[0].text
+        );
+        shared.mailboxes.insert_unreachable_for_test(channel);
+        tokio::time::advance(Duration::from_secs(600)).await;
+        evaluate_provider(&registry, &ProviderKind::Claude).await;
+        {
+            let state = shared.queue_park_ledger.channels.lock().unwrap();
+            let source = &state.sources[&channel][&source_id];
+            assert_eq!(source.first_seen, first_seen);
+            assert!(
+                source.escalated,
+                "a later failed read preserves the one-shot state"
+            );
+        }
+        shared
+            .mailboxes
+            .insert_snapshot_only_for_test(channel, original, MailboxRefusal::Closed);
+        evaluate_provider(&registry, &ProviderKind::Claude).await;
+        assert_eq!(
+            capture.errors(),
+            1,
+            "{case}: restored observation cannot re-escalate"
+        );
+        assert_eq!(capture.outcome("resumed"), 0);
+        assert_eq!(capture.outcome("tracked source left the queue"), 0);
+        assert_eq!(std::fs::read(row_path).unwrap(), row_bytes);
+        shared.mailboxes.remove_fixture_for_test(channel);
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn stale_cancelled_snapshot_cannot_rediscover_explicitly_removed_source() {
+    let _root = isolated_agentdesk_root();
+    let capture = LogCapture::default();
+    let _capture = capture.install();
+    let channel = ChannelId::new(6_016_351);
+    let source_id = 6_016_352;
+    let (registry, shared) = held_fixture(channel).await;
+    discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(enqueue(
+        &shared, channel, source_id, false,
+    ))
+    .await;
+    let drain = recovery::schedule_pending_queue_drain_after_cancel(
+        &registry,
+        "claude",
+        channel,
+        "queue-park-stale-observation-test",
+    )
+    .await;
+    assert!(drain.scheduled);
+    let revision_before = shared.queue_park_ledger.channels.lock().unwrap().revisions[&channel];
+    let observed = Arc::new(tokio::sync::Barrier::new(2));
+    let apply = Arc::new(tokio::sync::Barrier::new(2));
+    *shared.queue_park_ledger.observation_gate.lock().unwrap() =
+        Some((observed.clone(), apply.clone()));
+    let evaluator =
+        tokio::spawn(async move { evaluate_provider(&registry, &ProviderKind::Claude).await });
+    tokio::time::timeout(Duration::from_secs(5), observed.wait())
+        .await
+        .expect("evaluator captured the real cancelled-token queue snapshot");
+    let removed = discord::queue_io::mailbox_cancel_queued_primary_message(
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+        MessageId::new(source_id),
+    )
+    .await;
+    let removed = removed.expect("the operational queue cancel removes the captured source");
+    assert_eq!(removed.message_id, MessageId::new(source_id));
+    let revision_after_exit = {
+        let state = shared.queue_park_ledger.channels.lock().unwrap();
+        assert!(!state.sources.contains_key(&channel));
+        let revision = state.revisions[&channel];
+        assert!(revision > revision_before);
+        revision
+    };
+    tokio::time::timeout(Duration::from_secs(5), apply.wait())
+        .await
+        .expect("resume snapshot application");
+    tokio::time::timeout(Duration::from_secs(5), evaluator)
+        .await
+        .expect("evaluator finishes after the operational exit")
+        .expect("evaluator task succeeded");
+    {
+        let state = shared.queue_park_ledger.channels.lock().unwrap();
+        assert!(
+            !state.sources.contains_key(&channel),
+            "an older cancelled snapshot cannot rediscover the exited source"
+        );
+        assert_eq!(
+            state.revisions[&channel], revision_after_exit,
+            "discarding a stale observation cannot commit a revision"
+        );
+    }
+    let next = HealthRegistry::new();
+    next.register("claude".into(), shared.clone()).await;
+    evaluate_provider(&next, &ProviderKind::Claude).await;
+    assert_eq!(capture.outcome("explicitly_removed"), 1);
+    assert_eq!(capture.outcome("resumed"), 0);
+    assert_eq!(capture.outcome("tracked source left the queue"), 0);
+    let state = shared.queue_park_ledger.channels.lock().unwrap();
+    assert!(!state.sources.contains_key(&channel));
+    assert!(state.revisions[&channel] >= revision_after_exit);
 }

@@ -232,6 +232,8 @@ pub struct DiscordHealthSnapshot {
     expired_relay_ledgers: Vec<String>,
     providers: Vec<ProviderHealthSnapshot>,
     mailboxes: Vec<MailboxHealthSnapshot>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    queue_park_observation_failures: Vec<super::mailbox::QueueParkObservationFailureSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     transcript_turns: Option<super::transcript_turn::TranscriptTurnsHealth>,
 }
@@ -811,6 +813,7 @@ pub(super) async fn build_health_snapshot_with_options(
     let mut watcher_count = 0usize;
     let mut recovery_duration = 0.0f64;
     let mut mailbox_entries = Vec::new();
+    let mut queue_park_observation_failures = Vec::new();
     let mut provider_active_turns = 0usize;
     // Read the authority switch once per snapshot. Structural polarity is a
     // no-op, so the public build skips channel observation entirely (#5736).
@@ -837,6 +840,12 @@ pub(super) async fn build_health_snapshot_with_options(
         watcher_count += provider_probe.watcher_count;
         recovery_duration = recovery_duration.max(provider_probe.recovery_duration);
         let provider_kind = ProviderKind::from_str(&entry.name);
+        let queue_park_observations = super::mailbox::QueueParkHealthObservations::observe(
+            entry,
+            include_mailbox_details,
+            &mut queue_park_observation_failures,
+        )
+        .await;
         let observed_mailboxes = observe_channels
             .then_some(&provider_probe.mailbox_snapshots)
             .into_iter()
@@ -1004,12 +1013,7 @@ pub(super) async fn build_health_snapshot_with_options(
                     channel_id: channel.get(),
                     has_cancel_token: mailbox_has_cancel_token,
                     queue_depth,
-                    queue_park: super::mailbox::queue_park_projection(
-                        &entry.shared,
-                        provider_kind.as_ref(),
-                        channel,
-                        &snapshot,
-                    ),
+                    queue_park: queue_park_observations.project(channel),
                     recovery_started: snapshot.recovery_started_at.is_some(),
                     active_request_owner: snapshot.active_request_owner.map(|id| id.get()),
                     active_user_message_id: mailbox_active_user_msg_id,
@@ -1100,6 +1104,7 @@ pub(super) async fn build_health_snapshot_with_options(
         expired_relay_ledgers,
         providers: provider_entries,
         mailboxes: mailbox_entries,
+        queue_park_observation_failures,
         transcript_turns,
     }
 }
