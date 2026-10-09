@@ -1,6 +1,17 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 
+type RetryPolicyState = (
+    String,
+    String,
+    i64,
+    Option<String>,
+    Option<i64>,
+    String,
+    String,
+    Option<String>,
+);
+
 struct RuntimeFixture {
     _config_guard: crate::config::TestEnvVarGuard,
     _guard: crate::config::TestEnvVarGuard,
@@ -260,16 +271,7 @@ async fn replay_hold_dormant_and_classified_generic_failure_preserve_retry_polic
         tx.commit().await.unwrap();
         assert_eq!(outcome, DispatchFailureWriteOutcome::Updated);
         assert!(post_commit.is_some());
-        let state: (
-            String,
-            String,
-            i64,
-            Option<String>,
-            Option<i64>,
-            String,
-            String,
-            Option<String>,
-        ) = sqlx::query_as(
+        let state: RetryPolicyState = sqlx::query_as(
             "SELECT d.status, e.status, e.retry_count, e.dispatch_id, e.slot_index,
                     r.status, s.status, s.active_dispatch_id
              FROM task_dispatches d JOIN auto_queue_entries e ON e.id = $2
