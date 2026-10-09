@@ -1001,6 +1001,7 @@ async fn operator_release_follow_up_never_latches_a_successor_recovery() {
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn act7_operator_release_reports_manual_settlement_and_preserves_herdr_input() {
     use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
