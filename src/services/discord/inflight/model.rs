@@ -1163,10 +1163,13 @@ impl InflightTurnState {
         !self.replay_hold_reasons.is_empty()
     }
 
-    /// Keep the receipt and every hold reason of the same episode; refuse a different episode
+    /// Keep a projected episode's receipt and hold reasons; refuse a different projected episode
     /// or a conflicting receipt before the guarded writer can persist anything.
     pub(in crate::services::discord) fn merge_replay_projection(&mut self, other: &Self) -> bool {
-        if self.turn_nonce != other.turn_nonce
+        let has_projection = self.replay_receipt_id.or(other.replay_receipt_id).is_some()
+            || self.replay_rerun_blocked()
+            || other.replay_rerun_blocked();
+        if (has_projection && self.turn_nonce != other.turn_nonce)
             || self
                 .replay_receipt_id
                 .zip(other.replay_receipt_id)

@@ -15,15 +15,16 @@ ALTER TABLE intake_outbox
 ALTER TABLE intake_outbox
     ADD CONSTRAINT intake_outbox_replay_disposition_check CHECK (
         CASE WHEN replay_disposition IS NULL
-             THEN replay_source_message_ids IS NULL AND NOT replay_only
+             THEN NOT replay_only
              ELSE replay_disposition IN ('registered_not_started', 'started_unclassified',
                       'startup_failed_no_effect', 'classified_normal', 'withheld')
-                  AND COALESCE(user_msg_id = ANY(replay_source_message_ids), FALSE)
-                  AND cardinality(replay_source_message_ids) > 0
-                  AND array_position(replay_source_message_ids, NULL) IS NULL
-                  AND array_position(replay_source_message_ids, '') IS NULL
+                  AND replay_source_message_ids IS NOT NULL
                   AND (NOT replay_only OR (status = 'unknown' AND attempt_no = 1))
-        END
+        END AND (replay_source_message_ids IS NULL OR (
+            COALESCE(user_msg_id = ANY(replay_source_message_ids), FALSE)
+            AND cardinality(replay_source_message_ids) > 0
+            AND array_position(replay_source_message_ids, NULL) IS NULL
+            AND array_position(replay_source_message_ids, '') IS NULL))
     ) NOT VALID;
 
 -- Same name as the replaced tuple constraint so the Rust conflict classifier keeps matching it;
@@ -127,6 +128,10 @@ CREATE OR REPLACE FUNCTION intake_outbox_replay_fence() RETURNS trigger LANGUAGE
 DECLARE
     refusal TEXT;
 BEGIN
+    IF TG_OP = 'INSERT' AND NEW.parent_outbox_id IS NOT NULL THEN
+        SELECT COALESCE(p.replay_source_message_ids, NEW.replay_source_message_ids)
+          INTO NEW.replay_source_message_ids FROM intake_outbox p WHERE p.id = NEW.parent_outbox_id;
+    END IF;
     IF TG_OP <> 'DELETE' THEN
         PERFORM replay_lock_sources(NEW.provider, NEW.channel_id,
             COALESCE(NEW.replay_source_message_ids, ARRAY[NEW.user_msg_id]));
@@ -137,8 +142,10 @@ BEGIN
         END IF;
     ELSIF TG_OP = 'INSERT' THEN
         IF NEW.parent_outbox_id IS NOT NULL AND EXISTS (
-            SELECT 1 FROM intake_outbox p WHERE p.id = NEW.parent_outbox_id AND p.replay_only) THEN
-            refusal := format('replay-only receipt %s cannot parent a retry', NEW.parent_outbox_id);
+            SELECT 1 FROM intake_outbox p WHERE p.id = NEW.parent_outbox_id
+              AND (p.replay_only OR replay_disposition_blocks_rerun(p.replay_disposition)
+                   OR replay_sources_blocked(p.provider, p.channel_id, COALESCE(p.replay_source_message_ids, ARRAY[p.user_msg_id])))) THEN
+            refusal := format('started or replay-only receipt %s cannot parent a retry', NEW.parent_outbox_id);
         ELSIF replay_sources_blocked(NEW.provider, NEW.channel_id,
                                      COALESCE(NEW.replay_source_message_ids,
                                               ARRAY[NEW.user_msg_id])) THEN
@@ -148,18 +155,19 @@ BEGIN
           AND replay_sources_blocked(NEW.provider, NEW.channel_id,
                                      NEW.replay_source_message_ids, NEW.id) THEN
         refusal := format('row %s cannot register a source that already started', NEW.id);
-    ELSIF OLD.replay_disposition IS NOT NULL AND (
+    ELSIF (OLD.replay_disposition IS NOT NULL OR OLD.replay_source_message_ids IS NOT NULL) AND (
             NEW.replay_source_message_ids IS DISTINCT FROM OLD.replay_source_message_ids
             OR NEW.provider IS DISTINCT FROM OLD.provider
             OR NEW.channel_id IS DISTINCT FROM OLD.channel_id
             OR NEW.user_msg_id IS DISTINCT FROM OLD.user_msg_id
-            OR NEW.replay_request_key IS DISTINCT FROM OLD.replay_request_key
             OR NEW.user_text IS DISTINCT FROM OLD.user_text
             OR NEW.replay_only IS DISTINCT FROM OLD.replay_only
-            OR NEW.replay_request_hash IS DISTINCT FROM OLD.replay_request_hash
-            OR NOT replay_disposition_transition_allowed(
-                   OLD.replay_disposition, NEW.replay_disposition,
-                   NEW.replay_episode_nonce IS DISTINCT FROM OLD.replay_episode_nonce)) THEN
+            OR (OLD.replay_disposition IS NOT NULL AND (
+                NEW.replay_request_key IS DISTINCT FROM OLD.replay_request_key
+                OR NEW.replay_request_hash IS DISTINCT FROM OLD.replay_request_hash
+                OR NOT replay_disposition_transition_allowed(
+                    OLD.replay_disposition, NEW.replay_disposition,
+                    NEW.replay_episode_nonce IS DISTINCT FROM OLD.replay_episode_nonce)))) THEN
         refusal := format('row %s cannot weaken its %s request', OLD.id, OLD.replay_disposition);
     ELSIF OLD.replay_disposition = 'withheld' AND (
             (OLD.replay_preserved IS NOT NULL
@@ -261,7 +269,7 @@ BEGIN
                OR NEW.claim_owner IS DISTINCT FROM OLD.claim_owner
                OR NEW.claimed_at IS DISTINCT FROM OLD.claimed_at
                OR NEW.parent_dispatch_id IS DISTINCT FROM OLD.parent_dispatch_id
-               OR (OLD.result IS NOT NULL AND NEW.result IS NULL)
+               OR (OLD.result IS NOT NULL AND LEFT(NEW.result, LENGTH(OLD.result)) IS DISTINCT FROM OLD.result)
                OR NEW.claim_expires_at IS DISTINCT FROM OLD.claim_expires_at) THEN
         refusal := format('held dispatch %s keeps its status and claim', OLD.id);
     END IF;
@@ -392,6 +400,8 @@ BEGIN
            AND NEW.session_key IS NOT DISTINCT FROM OLD.session_key
            AND NEW.cwd IS NOT DISTINCT FROM OLD.cwd
            AND NEW.instance_id IS NOT DISTINCT FROM OLD.instance_id
+           AND NEW.provider IS NOT DISTINCT FROM OLD.provider AND NEW.channel_id IS NOT DISTINCT FROM OLD.channel_id
+           AND NEW.identity_kind IS NOT DISTINCT FROM OLD.identity_kind AND NEW.discord_token_hash IS NOT DISTINCT FROM OLD.discord_token_hash
            AND NEW.status NOT IN ('idle', 'disconnected', 'aborted')
            AND (fresh_handoff OR (
                NEW.active_dispatch_id IS NOT DISTINCT FROM OLD.active_dispatch_id

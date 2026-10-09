@@ -87,17 +87,14 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_matches_ide
             return GuardedSaveOutcome::SuccessorOwned;
         }
     }
-    // Completion preservation is a durable-first merge, never a stale row
-    // replay. A generation match allows a deliberate non-prefix response
-    // rewrite (for example API_FRICTION stripping). Once another same-turn
-    // writer advances the generation, only prefix-compatible forward progress
-    // is merged; anchor/runtime/session/owner/tool evidence stays durable.
+    // Held rows and stale generations accept only prefix-compatible response progress.
+    // An unheld generation match retains deliberate rewrites such as API_FRICTION stripping.
     let generation_matches = on_disk.save_generation == state.save_generation;
     let mut updated = on_disk;
     if !updated.merge_replay_projection(&state) {
         return GuardedSaveOutcome::AuthorityPinned;
     }
-    if generation_matches {
+    if generation_matches && !updated.replay_rerun_blocked() {
         updated.full_response.clone_from(&state.full_response);
         updated.response_sent_offset =
             normalize_response_sent_offset(&updated.full_response, state.response_sent_offset);

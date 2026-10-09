@@ -283,6 +283,24 @@ async fn held_dispatch_nonnull_result_rewrite_is_fenced_pg() {
             .await
             .unwrap();
     assert_eq!(retained, "preserved output");
+    sqlx::query("UPDATE task_dispatches SET result=result || ' appended capture' WHERE id='result-rewrite-dispatch'")
+        .execute(&pool).await.expect("held result may append captured output without replacing its prefix");
+    let progressed: String =
+        sqlx::query_scalar("SELECT result FROM task_dispatches WHERE id='result-rewrite-dispatch'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        progressed.strip_prefix(&retained),
+        Some(" appended capture")
+    );
+    assert_eq!(
+        receipt_disposition(&pool, receipt)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("withheld")
+    );
     finish(fixture, pool).await;
 }
 
@@ -409,6 +427,31 @@ async fn normal_retry_parent_absorbed_sources_survive_sweep_and_old_writer_child
             .await
             .unwrap();
     assert_eq!(sources, Some(vec!["earlier".into(), "last".into()]));
+    for sql in [
+        "UPDATE intake_outbox SET replay_source_message_ids=NULL WHERE id=$1",
+        "UPDATE intake_outbox SET replay_source_message_ids=ARRAY['last'] WHERE id=$1",
+        "UPDATE intake_outbox SET provider='codex' WHERE id=$1",
+        "UPDATE intake_outbox SET channel_id='rewritten-child-channel' WHERE id=$1",
+        "UPDATE intake_outbox SET user_text='replacement request' WHERE id=$1",
+    ] {
+        assert_fenced(sqlx::query(sql).bind(new_id).execute(&pool).await, sql);
+    }
+    let original_tuple: (String, String, String, String) = sqlx::query_as(
+        "SELECT provider,channel_id,user_msg_id,user_text FROM intake_outbox WHERE id=$1",
+    )
+    .bind(new_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        original_tuple,
+        (
+            "claude".into(),
+            "child-before-hold".into(),
+            "last".into(),
+            "original request".into()
+        )
+    );
     sqlx::query("UPDATE intake_outbox SET replay_disposition='withheld' WHERE id=$1")
         .bind(authority)
         .execute(&pool)

@@ -277,7 +277,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
                  WHERE open_row.channel_id = parent.channel_id
                    AND open_row.status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
            )
-           AND NOT replay_sources_blocked(parent.provider, parent.channel_id, ARRAY[parent.user_msg_id])
+           AND NOT replay_sources_blocked(parent.provider, parent.channel_id, COALESCE(parent.replay_source_message_ids, ARRAY[parent.user_msg_id]))
            AND EXISTS (
                 SELECT 1 FROM worker_nodes worker
                  WHERE worker.status = 'online'
@@ -354,7 +354,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
                      WHERE open_row.channel_id = parent.channel_id
                        AND open_row.status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
                )
-               AND NOT replay_sources_blocked(parent.provider, parent.channel_id, ARRAY[parent.user_msg_id])
+               AND NOT replay_sources_blocked(parent.provider, parent.channel_id, COALESCE(parent.replay_source_message_ids, ARRAY[parent.user_msg_id]))
              ORDER BY parent.updated_at ASC, parent.id ASC
              LIMIT 1
              FOR UPDATE OF parent SKIP LOCKED
