@@ -13,6 +13,25 @@ const O: &str = "4370001";
 const LEGACY: &str = "4370002";
 const RUNNER: &str = "runner-4370";
 
+#[tokio::test]
+async fn unavailable_delegation_blocks_before_a_home_read_or_local_fallback() {
+    use crate::services::cluster::home_availability::{self, Unavailable};
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://postgres@127.0.0.1:1/unreachable")
+        .unwrap();
+    let _availability =
+        home_availability::install("claude", Err(Unavailable::MissingInstanceId), || {
+            [O.parse().unwrap()].into()
+        });
+    let decision = try_route_intake(&pool, &ctx_for_channel(IntakeRoutingMode::Disabled, O)).await;
+    assert!(blocked(&decision).contains("missing_instance_id"));
+    assert_eq!(
+        pool.size(),
+        0,
+        "no database read or forwarding was attempted"
+    );
+}
+
 async fn outbox_rows(pool: &PgPool, channel: &str) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1")
         .bind(channel)

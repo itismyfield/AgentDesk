@@ -3352,6 +3352,15 @@ pub(crate) mod test_env_lock {
         }
     }
 
+    /// Panics unless this thread took the lock through `acquire_shared_test_env_lock`.
+    pub(crate) fn assert_shared_test_env_lock_held() {
+        let held = SHARED_TEST_ENV_LOCK_HELD.with(|held| held.get());
+        assert!(
+            held,
+            "an *_after_shared_test_env_lock helper needs acquire_shared_test_env_lock first"
+        );
+    }
+
     pub(crate) fn acquire_shared_test_env_lock() -> SharedTestEnvLockGuard {
         // Resolve the mutex first: the accessor carries the `E`-after-`P`
         // ordering tripwire, and running it before the re-entry flag is armed

@@ -858,6 +858,7 @@ async fn task_notification_status_only_preserves_existing_turn_request_anchor() 
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        row_prompt_id: None,
         native_turn_id: None,
         steer_echo: false,
     };
@@ -1823,6 +1824,7 @@ fn local_control_prompt(tmux: &str, body: &str, entry_id: &str) -> ObservedTuiPr
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        row_prompt_id: None,
         native_turn_id: None,
         steer_echo: false,
     }
@@ -2617,6 +2619,7 @@ async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        row_prompt_id: None,
         native_turn_id: None,
         steer_echo: false,
     };
@@ -2692,6 +2695,7 @@ fn task_notification_repeat_clears_its_recorded_external_lease() {
             ssh_direct_observation_generation:
                 crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
             hook_prompt_id: None,
+            row_prompt_id: None,
             native_turn_id: None,
             steer_echo: false,
         };
@@ -2756,6 +2760,7 @@ fn task_notification_repeat_lease_clear_preserves_newer_turn() {
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        row_prompt_id: None,
         native_turn_id: None,
         steer_echo: false,
     };
@@ -4759,6 +4764,7 @@ async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free(
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        row_prompt_id: None,
         native_turn_id: None,
         steer_echo: false,
     };
@@ -4839,6 +4845,7 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
         ssh_direct_observation_generation:
             crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
         hook_prompt_id: None,
+        row_prompt_id: None,
         native_turn_id: None,
         steer_echo: false,
     };
@@ -6392,6 +6399,9 @@ mod scenario_census_e2e;
 
 #[cfg(all(test, unix))]
 mod synthetic_bridge_handoff_pg_tests;
+
+#[cfg(unix)]
+mod background_child_close_pg_tests;
 
 #[cfg(unix)]
 #[path = "tests/o_tool_first_panel_tests.rs"]

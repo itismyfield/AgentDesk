@@ -155,6 +155,8 @@ src/
 │   │   ├── mod.rs
 │   │   └── transitions.rs
 │   ├── postgres/
+│   │   ├── advisory_lock.rs
+│   │   ├── advisory_lock_tests.rs
 │   │   ├── shared_config.rs
 │   │   └── test_db_reclaim.rs
 │   ├── prompt_manifests/
@@ -174,6 +176,8 @@ src/
 │   │   ├── outbox.rs
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
+│   ├── session_observability/
+│   │   └── background_ordering_pg_tests.rs
 │   ├── agent_read.rs
 │   ├── agents.rs
 │   ├── automation_candidate_card_program.rs
@@ -383,6 +387,7 @@ src/
 │   │   ├── agents_crud.rs
 │   │   ├── agents_host_guard_tests.rs
 │   │   ├── agents_setup.rs
+│   │   ├── agents_stop.rs
 │   │   ├── agents_turn_deliver.rs
 │   │   ├── agents_turn_target.rs
 │   │   ├── analytics.rs
@@ -702,6 +707,9 @@ src/
 │   │   ├── channel_home_tests.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
+│   │   ├── home_availability.rs
+│   │   ├── home_supervisor.rs
+│   │   ├── home_supervisor_tests.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs
@@ -800,7 +808,8 @@ src/
 │   │   │   │   ├── native_herdr_e2e_tests.rs
 │   │   │   │   ├── native_herdr_tests.rs
 │   │   │   │   ├── native_policy_tests.rs
-│   │   │   │   └── native_tests.rs
+│   │   │   │   ├── native_tests.rs
+│   │   │   │   └── provider_reset.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
 │   │   │   │   └── reports.rs
@@ -834,6 +843,7 @@ src/
 │   │   │   ├── session.rs
 │   │   │   ├── sidecar.rs
 │   │   │   ├── skill.rs
+│   │   │   ├── stop.rs
 │   │   │   ├── text_commands.rs
 │   │   │   ├── tmux_recreate.rs
 │   │   │   ├── tui_passthrough.rs
@@ -1174,6 +1184,8 @@ src/
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
+│   │   │   ├── herdr_admitted_restart.rs
+│   │   │   ├── herdr_admitted_restart_tests.rs
 │   │   │   ├── herdr_reader.rs
 │   │   │   ├── herdr_reader_tests.rs
 │   │   │   ├── host_reconcile.rs
@@ -1338,6 +1350,7 @@ src/
 │   │   │   ├── gateway_handback_integration_tests.rs
 │   │   │   ├── gateway_handback_mock.rs
 │   │   │   ├── gateway_lease.rs
+│   │   │   ├── gateway_lease_expiry.rs
 │   │   │   ├── gateway_lease_recovery.rs
 │   │   │   ├── gateway_lease_recovery_tests.rs
 │   │   │   ├── gateway_lease_tests.rs
@@ -1594,6 +1607,7 @@ src/
 │   │   │   │   │   │   ├── loss_tests.rs
 │   │   │   │   │   │   └── native_turn_tests.rs
 │   │   │   │   │   └── boundary_tests.rs
+│   │   │   │   ├── background_child_close_pg_tests.rs
 │   │   │   │   ├── codex_direct_owner_tests.rs
 │   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
@@ -1603,6 +1617,7 @@ src/
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
 │   │   │   │   └── synthetic_terminal_ordering_tests.rs
 │   │   │   ├── anchor_completion.rs
+│   │   │   ├── background_child_completion.rs
 │   │   │   ├── bridge_completion.rs
 │   │   │   ├── bridge_gateway.rs
 │   │   │   ├── claude_idle_bridge.rs
@@ -1693,6 +1708,7 @@ src/
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/
 │   │   │   │   │   ├── rowless_receipt_tests/
+│   │   │   │   │   │   ├── background_child_ordering_tests.rs
 │   │   │   │   │   │   ├── o_after_done_chain_tests.rs
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
@@ -1803,6 +1819,8 @@ src/
 │   │   ├── turn_presence/
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_tests.rs
+│   │   │   ├── admission.rs
+│   │   │   ├── admission_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
@@ -2023,6 +2041,7 @@ src/
 │   │   └── auth_profiles.rs
 │   ├── dispatched_sessions/
 │   │   ├── canonical_identity.rs
+│   │   ├── hook.rs
 │   │   ├── output.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
@@ -2365,6 +2384,8 @@ src/
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_home_tests.rs
+│   │   │   ├── host_io_tests.rs
+│   │   │   ├── host_managed_tests.rs
 │   │   │   ├── host_renumber_tests.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── input_facts.rs

@@ -34,6 +34,10 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/db/session_observability/background_ordering_pg_tests.rs",
+        "src/services/cluster/home_supervisor_tests.rs",
+        "src/services/tui_o/writer/host_managed_tests.rs",
+        "src/services/tui_o/writer/host_io_tests.rs",
         "src/services/discord/health/recovery/retirement_await_tests.rs",
         "src/services/discord/placeholder_sweeper/retirement_tests.rs",
         "src/services/discord/tmux_reaper/retirement_await_tests.rs",
@@ -86,6 +90,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/input_facts/tests.rs",
         "src/services/tui_o/writer/input_facts/resume_tests.rs",
         "src/services/discord/turn_presence/activity_tests.rs",
+        "src/services/discord/turn_presence/admission_tests.rs",
         "src/services/discord/turn_presence/supervisor_tests.rs",
         "src/services/claude_tui/input/final_ready_tests.rs",
         "src/services/claude_tui/hook_server/codex_ingress_tests.rs",
@@ -172,6 +177,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/db/dispatched_sessions/tests.rs",
         "src/db/intake_outbox_dispatch_stamp/tests.rs",
         "src/db/o_channel_homes_tests.rs",
+        "src/db/postgres/advisory_lock_tests.rs",
         "src/db/intake_outbox_home_tests.rs",
         "src/db/session_transcripts_native_clear_tests.rs",
         "src/db/prompt_manifests/tests.rs",
@@ -344,6 +350,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_direct_pending_start/tests/retire_tests.rs",
         "src/services/discord/tui_prompt_relay/rehydration/idempotency_tests.rs",
         "src/services/discord/tui_prompt_relay/tests.rs",
+        "src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/loss_tests.rs",
@@ -369,6 +376,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/stream_tick/o_adoption_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests.rs",
+        "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/background_child_ordering_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/o_after_done_chain_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/preloop_cleanup_tests.rs",
@@ -456,6 +464,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/router/intake_gate/stale_turn_host_tests.rs",
         "src/cli/herdr_tests.rs",
         "src/services/discord/recovery_engine/herdr_reader_tests.rs",
+        "src/services/discord/recovery_engine/herdr_admitted_restart_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs",
         "src/services/session_host/herdr_clear_adapter_tests.rs",
         "src/services/tui_o/writer/rotation_unsettled_tests.rs",
@@ -528,6 +537,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/session_host/test_support.rs",
         "src/services/discord/host_teardown_gate/test_support.rs",
         "src/services/discord/health/legacy_supervision/test_support.rs",
+        "src/services/discord/turn_presence/admission.rs",
         "src/services/tmux_turn_liveness/tests_pg.rs",
         "src/test_env_panic_probe.rs",
     }

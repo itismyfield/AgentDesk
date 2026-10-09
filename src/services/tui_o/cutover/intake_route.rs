@@ -36,6 +36,9 @@ pub(crate) fn route_text_for_placement(provider: &str, channel: &str) -> IntakeR
 }
 
 fn placed(provider: &str, channel: Option<u64>) -> IntakeRoute {
+    if let Some(reason) = channel.and_then(crate::services::cluster::home_availability::refusal) {
+        return IntakeRoute::Hold(format!("delegation unavailable: {reason}"));
+    }
     if let Err(detail) = super::claim_for_placement(channel) {
         return IntakeRoute::Hold(detail);
     }
@@ -52,7 +55,11 @@ pub(crate) fn held_channels(provider: &str) -> Vec<String> {
     };
     let mut held: Vec<String> = owned.iter().filter_map(held).collect();
     // A gate closing between the two reads can name a channel twice; keep the first.
-    for channel in channel_home::intake_held_channels() {
+    let unavailable = crate::services::cluster::home_availability::held_channels(provider);
+    for channel in channel_home::intake_held_channels()
+        .into_iter()
+        .chain(unavailable.into_iter().map(|c| c.to_string()))
+    {
         if !held.contains(&channel) {
             held.push(channel);
         }
@@ -64,6 +71,11 @@ pub(crate) fn held_channels(provider: &str) -> Vec<String> {
 /// never delays it; an unknown one is held once any channel is O-owned.
 fn route_parsed(provider: &str, channel: impl FnOnce() -> Option<u64>) -> IntakeRoute {
     match channel() {
+        Some(channel)
+            if crate::services::cluster::home_availability::refusal(channel).is_some() =>
+        {
+            IntakeRoute::Hold(format!("O channel {channel} delegation is unavailable"))
+        }
         Some(channel) => match super::owned_kind(channel) {
             Some(kind) => judge(provider, channel, kind),
             None if super::delegated(channel).is_some() => IntakeRoute::Hold(format!(
@@ -71,7 +83,10 @@ fn route_parsed(provider: &str, channel: impl FnOnce() -> Option<u64>) -> Intake
             )),
             None => IntakeRoute::Unselected,
         },
-        None if super::owned_channels().is_empty() && !channel_home::any_registered() => {
+        None if super::owned_channels().is_empty()
+            && !channel_home::any_registered()
+            && crate::services::cluster::home_availability::held_channels(provider).is_empty() =>
+        {
             IntakeRoute::Unselected
         }
         None => IntakeRoute::Hold("intake destination channel is unknown".into()),

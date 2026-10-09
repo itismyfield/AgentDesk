@@ -290,10 +290,7 @@ async fn a_published_flag_alone_does_not_accept_work() {
     assert!(ready.accepts(CHANNEL));
     hosts.iter().for_each(|host| host.abort());
     polls(3).await;
-    assert!(
-        ready.is_ready(CHANNEL),
-        "nothing cleared the flag once its host was gone"
-    );
+    assert!(!ready.is_ready(CHANNEL), "the exited host closes readiness");
     assert!(!ready.accepts(CHANNEL), "an ended actor takes no work");
 }
 
@@ -1168,6 +1165,9 @@ mod rotation_unsettled;
 
 #[path = "host_home_tests.rs"]
 mod home;
+
+#[path = "host_managed_tests.rs"]
+mod managed;
 
 #[cfg(unix)]
 #[path = "host_renumber_tests.rs"]
