@@ -396,6 +396,19 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         return;
     }
+    // A scanner row queued behind its hook's open announcement is that announcement once it landed.
+    if crate::services::tui_prompt_dedupe::withdraw_row_announced_by_its_hook(
+        &prompt,
+        channel_id.get(),
+    ) {
+        tracing::info!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            "scanner row already announced by its hook; not announced again"
+        );
+        return;
+    }
     let injected_class = relay_prompt_decision.injected_class;
     let task_notification =
         task_notification_prompt::observe(shared, &prompt, channel_id, injected_class);

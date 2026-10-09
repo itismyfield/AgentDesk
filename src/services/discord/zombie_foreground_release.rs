@@ -53,8 +53,8 @@ pub(in crate::services::discord) struct ZombieForegroundEvidence {
     pub(in crate::services::discord) active_turn_cancelled: bool,
     /// A persistent inflight-turn record exists for this provider/channel.
     pub(in crate::services::discord) inflight_state_present: bool,
-    /// The provider tmux pane is structurally terminal (missing / prompt-ready).
-    pub(in crate::services::discord) tui_structurally_idle: bool,
+    /// Some(true) proves a terminal pane; None means no usable session was measured.
+    pub(in crate::services::discord) tui_structurally_idle: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,7 +114,7 @@ pub(in crate::services::discord) fn classify_zombie_foreground(
     if evidence.inflight_state_present {
         return ZombieForegroundVerdict::HoldInflightPresent;
     }
-    if !evidence.tui_structurally_idle {
+    if evidence.tui_structurally_idle != Some(true) {
         return ZombieForegroundVerdict::HoldTuiNotIdle;
     }
     // Dead by construction. Staying total keeps the P0 relay cancel path free of
@@ -142,12 +142,12 @@ pub(in crate::services::discord) const fn terminal_evidence_allows_mailbox_relea
     mailbox_holds_active_turn: bool,
     release_authorized: bool,
     inflight_state_present: bool,
-    tui_structurally_idle: bool,
+    tui_structurally_idle: Option<bool>,
 ) -> bool {
     mailbox_holds_active_turn
         && release_authorized
         && !inflight_state_present
-        && tui_structurally_idle
+        && matches!(tui_structurally_idle, Some(true))
 }
 
 /// What a cancel surface actually accomplished at the mailbox.
@@ -180,30 +180,27 @@ fn readiness_is_structurally_idle(readiness: IndependentTmuxReadiness) -> bool {
     )
 }
 
-/// Probe the provider pane through the same authority the stale-turn
-/// reconciler uses, so the two surfaces can never disagree about what "idle"
-/// means. A token with no bound tmux session has no pane to contradict the
-/// other two evidences, so it is treated as structurally idle — the inflight
-/// and cancelled gates still have to pass.
+/// Probe through the shared readiness authority. An absent or blank binding is
+/// unmeasured, so it cannot authorize releasing foreground ownership.
 pub(in crate::services::discord) fn tui_structurally_idle(
     provider: &ProviderKind,
     token: &Arc<CancelToken>,
-) -> bool {
+) -> Option<bool> {
     let Some(tmux_session) = token
         .tmux_session_name()
         .filter(|session| !session.trim().is_empty())
     else {
-        return true;
+        return None;
     };
     // Another host's session is never read as idle from a tmux probe.
     if !super::host_liveness::local_tmux(&tmux_session, None) {
-        return false;
+        return None;
     }
     let runtime_kind =
         crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&tmux_session);
     let output_path =
         crate::services::tmux_common::resolve_session_temp_path(&tmux_session, "jsonl");
-    readiness_is_structurally_idle(
+    Some(readiness_is_structurally_idle(
         crate::services::tmux_turn_liveness::independent_tmux_readiness(
             &tmux_session,
             provider,
@@ -211,7 +208,7 @@ pub(in crate::services::discord) fn tui_structurally_idle(
             output_path.as_deref().map(Path::new),
             None,
         ),
-    )
+    ))
 }
 
 /// Stable identity of one persisted inflight episode.
@@ -329,7 +326,7 @@ pub(in crate::services::discord) fn collect_zombie_foreground_evidence(
             mailbox_holds_active_turn: false,
             active_turn_cancelled: false,
             inflight_state_present: false,
-            tui_structurally_idle: false,
+            tui_structurally_idle: None,
         };
     };
     ZombieForegroundEvidence {
@@ -373,7 +370,7 @@ pub(crate) async fn release_zombie_foreground_turn(
             mailbox_holds_active_turn = evidence.mailbox_holds_active_turn,
             active_turn_cancelled = evidence.active_turn_cancelled,
             inflight_state_present = evidence.inflight_state_present,
-            tui_structurally_idle = evidence.tui_structurally_idle,
+            tui_structurally_idle = ?evidence.tui_structurally_idle,
             "[zombie-foreground] mailbox foreground ownership held"
         );
         return ZombieForegroundReleaseOutcome {
@@ -412,7 +409,7 @@ pub(crate) async fn release_zombie_foreground_turn(
         queue_depth_after,
         queue_kickoff_scheduled,
         inflight_state_present = evidence.inflight_state_present,
-        tui_structurally_idle = evidence.tui_structurally_idle,
+        tui_structurally_idle = ?evidence.tui_structurally_idle,
         "[zombie-foreground] released mailbox foreground ownership after a cancel with nothing to interrupt"
     );
 
@@ -425,7 +422,7 @@ pub(crate) async fn release_zombie_foreground_turn(
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::services::discord) mod tests {
     use super::*;
 
     fn zombie() -> ZombieForegroundEvidence {
@@ -433,7 +430,7 @@ mod tests {
             mailbox_holds_active_turn: true,
             active_turn_cancelled: true,
             inflight_state_present: false,
-            tui_structurally_idle: true,
+            tui_structurally_idle: Some(true),
         }
     }
 
@@ -465,7 +462,7 @@ mod tests {
         );
 
         let streaming_pane = ZombieForegroundEvidence {
-            tui_structurally_idle: false,
+            tui_structurally_idle: Some(false),
             ..zombie()
         };
         assert_eq!(
@@ -489,7 +486,7 @@ mod tests {
             mailbox_holds_active_turn: true,
             active_turn_cancelled: false,
             inflight_state_present: true,
-            tui_structurally_idle: false,
+            tui_structurally_idle: Some(false),
         };
         assert!(!classify_zombie_foreground(fully_live).is_release());
     }
@@ -500,7 +497,7 @@ mod tests {
             mailbox_holds_active_turn: false,
             active_turn_cancelled: false,
             inflight_state_present: false,
-            tui_structurally_idle: true,
+            tui_structurally_idle: Some(true),
         };
         assert_eq!(
             classify_zombie_foreground(idle),
@@ -512,7 +509,7 @@ mod tests {
                 mailbox_holds_active_turn: false,
                 active_turn_cancelled: false,
                 inflight_state_present: false,
-                tui_structurally_idle: false,
+                tui_structurally_idle: None,
             }
         );
     }
@@ -531,7 +528,7 @@ mod tests {
         );
     }
 
-    mod fixtures {
+    pub(in crate::services::discord) mod fixtures {
         use std::sync::Arc;
         use std::sync::atomic::Ordering;
         use std::time::Instant;
@@ -552,6 +549,21 @@ mod tests {
         /// stays set across the awaits without a bare lock guard on the stack.
         fn isolated_runtime_root(tmp: &tempfile::TempDir) -> crate::config::TestEnvVarGuard {
             crate::config::TestEnvVarGuard::set_path(AGENTDESK_ROOT_DIR_ENV, tmp.path())
+        }
+
+        #[cfg(unix)]
+        pub(in crate::services::discord) fn missing_tmux_fixture(
+            tmp: &tempfile::TempDir,
+        ) -> crate::config::TestEnvVarGuard {
+            use std::os::unix::fs::PermissionsExt;
+            let binary = tmp.path().join("tmux");
+            std::fs::write(
+                &binary,
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.calls\"\necho 'no server running on test socket' >&2\nexit 1\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(tmp.path())
         }
 
         fn queued_user_message(message_id: u64) -> Intervention {
@@ -591,15 +603,8 @@ mod tests {
             )
         }
 
-        /// #5176 reproduction fixture, shared by the release direction and the
-        /// hold direction so the only difference between them is the evidence
-        /// under test.
-        ///
-        /// Shape: `mailbox_has_cancel_token=true` (foreground anchored),
-        /// `inflight_state_present=false` (isolated runtime root, so no
-        /// inflight row exists), TUI structurally idle (no tmux session bound
-        /// to the token), plus one queued user message — the message the real
-        /// incident kept locked for a week.
+        /// Anchor a foreground token with no inflight row and one queued message.
+        /// Each caller supplies the session evidence it needs to exercise.
         async fn seed_zombie_channel(
             shared: &Arc<crate::services::discord::SharedData>,
             provider: &ProviderKind,
@@ -627,19 +632,93 @@ mod tests {
             token
         }
 
+        #[tokio::test]
+        async fn unmeasured_session_keeps_foreground_until_a_later_idle_probe() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _root = isolated_runtime_root(&tmp);
+            #[cfg(unix)]
+            let _tmux = missing_tmux_fixture(&tmp);
+            let provider = ProviderKind::Claude;
+            let mut wrongly_released = Vec::new();
+            for (i, name) in [None, Some(""), Some(" \t\n")].into_iter().enumerate() {
+                let channel_id = ChannelId::new(6_037_001 + i as u64);
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                let token = seed_zombie_channel(&shared, &provider, channel_id, true).await;
+                *token.tmux_binding.lock().unwrap() = name.map(|name| {
+                    crate::services::provider::cancel_token_cleanup::authority::TmuxBinding::NameOnly {
+                        name: name.to_string(),
+                    }
+                });
+                let outcome = release_zombie_foreground_turn(
+                    &shared,
+                    &provider,
+                    channel_id,
+                    "test/unmeasured",
+                )
+                .await;
+                if outcome.verdict != Some(ZombieForegroundVerdict::HoldTuiNotIdle) {
+                    wrongly_released.push(name);
+                    continue;
+                }
+                assert!(!outcome.released);
+                assert!(!outcome.queue_kickoff_scheduled);
+                let snapshot = shared.mailbox(channel_id).snapshot().await;
+                assert!(
+                    snapshot
+                        .cancel_token
+                        .as_ref()
+                        .is_some_and(|active| Arc::ptr_eq(active, &token))
+                );
+                assert_eq!(snapshot.intervention_queue.len(), 1);
+                assert!(
+                    !tmp.path().join("tmux.calls").exists(),
+                    "an unbound token must not probe tmux"
+                );
+                #[cfg(unix)]
+                {
+                    token.bind_unmanaged_session_name(&format!("AgentDesk-claude-unmeasured-{i}"));
+                    let outcome = release_zombie_foreground_turn(
+                        &shared,
+                        &provider,
+                        channel_id,
+                        "test/rebound",
+                    )
+                    .await;
+                    assert!(
+                        outcome.released,
+                        "a measured missing pane remains terminal evidence"
+                    );
+                    assert!(outcome.queue_kickoff_scheduled);
+                    assert!(
+                        std::fs::read_to_string(tmp.path().join("tmux.calls"))
+                            .unwrap()
+                            .contains("has-session")
+                    );
+                    std::fs::remove_file(tmp.path().join("tmux.calls")).unwrap();
+                }
+            }
+            assert!(
+                wrongly_released.is_empty(),
+                "unmeasured sessions released: {wrongly_released:?}"
+            );
+        }
+
         /// The zombie is actually released, AND the queued user message
         /// survives the release and gets a promotion scheduled. `/stop` and the
         /// cancel API both reach this code through
         /// `release_zombie_foreground_turn`, so pinning it here pins both.
+        #[cfg(unix)]
         #[tokio::test]
         async fn zombie_foreground_turn_is_released_and_the_queue_survives() {
             let tmp = tempfile::tempdir().unwrap();
             let _root = isolated_runtime_root(&tmp);
+            let _tmux = missing_tmux_fixture(&tmp);
 
             let provider = ProviderKind::Claude;
             let channel_id = ChannelId::new(5_176_001);
             let shared = crate::services::discord::make_shared_data_for_tests();
             let token = seed_zombie_channel(&shared, &provider, channel_id, true).await;
+            token.bind_unmanaged_session_name("AgentDesk-claude-measured-zombie");
 
             let outcome =
                 release_zombie_foreground_turn(&shared, &provider, channel_id, "test/stop").await;
@@ -674,11 +753,19 @@ mod tests {
         async fn uncancelled_live_turn_keeps_its_foreground_slot() {
             let tmp = tempfile::tempdir().unwrap();
             let _root = isolated_runtime_root(&tmp);
+            #[cfg(unix)]
+            let _tmux = missing_tmux_fixture(&tmp);
 
             let provider = ProviderKind::Claude;
             let channel_id = ChannelId::new(5_176_002);
             let shared = crate::services::discord::make_shared_data_for_tests();
             let token = seed_zombie_channel(&shared, &provider, channel_id, false).await;
+            token.bind_unmanaged_session_name("AgentDesk-claude-measured-uncancelled");
+            #[cfg(unix)]
+            assert_eq!(
+                super::super::tui_structurally_idle(&provider, &token),
+                Some(true)
+            );
 
             let outcome =
                 release_zombie_foreground_turn(&shared, &provider, channel_id, "test/stop").await;
@@ -707,11 +794,19 @@ mod tests {
         async fn cancelled_turn_with_live_inflight_keeps_its_foreground_slot() {
             let tmp = tempfile::tempdir().unwrap();
             let _root = isolated_runtime_root(&tmp);
+            #[cfg(unix)]
+            let _tmux = missing_tmux_fixture(&tmp);
 
             let provider = ProviderKind::Claude;
             let channel_id = ChannelId::new(5_176_003);
             let shared = crate::services::discord::make_shared_data_for_tests();
             let token = seed_zombie_channel(&shared, &provider, channel_id, true).await;
+            token.bind_unmanaged_session_name("AgentDesk-claude-measured-inflight");
+            #[cfg(unix)]
+            assert_eq!(
+                super::super::tui_structurally_idle(&provider, &token),
+                Some(true)
+            );
             crate::services::discord::inflight::save_inflight_state(&inflight_row(channel_id))
                 .expect("seed a live inflight turn row");
 

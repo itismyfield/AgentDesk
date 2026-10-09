@@ -488,6 +488,18 @@ pub(crate) fn last_restore_outcome(tmux_session: &str) -> Option<PendingRestore>
         .map(|(_, outcome)| outcome.clone())
 }
 
+/// Drops a `Seeded` memo whose queued Pending left the hook queue unsettled, so the next pass
+/// judges the log again instead of returning early on the memo.
+pub(crate) fn forget_seeded_restore(tmux_session: &str) {
+    let mut outcomes = outcomes();
+    if matches!(
+        outcomes.get(tmux_session),
+        Some((_, PendingRestore::Seeded { .. }))
+    ) {
+        outcomes.remove(tmux_session);
+    }
+}
+
 /// Whether `binding` is a transcript a restore bound before it existed; nothing may stand in.
 pub(crate) fn awaits_exact_path(tmux_session: &str, binding: &TuiRuntimeBinding) -> bool {
     matches!(

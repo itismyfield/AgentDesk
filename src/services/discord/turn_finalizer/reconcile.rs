@@ -175,7 +175,7 @@ async fn reconcile_guarded_finish_residues(shared: &Arc<SharedData>) {
                 same_terminal_episode,
                 separately_cancelled,
                 inflight_state_present,
-                tui_structurally_idle,
+                ?tui_structurally_idle,
                 "TurnFinalizer residual mailbox ownership held pending terminal evidence"
             );
             continue;

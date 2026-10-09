@@ -267,7 +267,10 @@ fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
     tui.put("composer", "");
     tui.put("footer", FOOTER);
     let recovered = tui.capture();
-    let guard = spy(&[&recovered, &recovered, &recovered, BUSY], None);
+    let guard = spy(
+        &[&recovered, &recovered, &recovered, &recovered, BUSY],
+        None,
+    );
     let ended = send_followup_prompt_or_idle_transcript(&session, "follow-up", None, &idle);
     assert_eq!(ended, Ok(()));
     assert!(writes(&guard.calls()).contains(&"keys:Enter".to_string()));
@@ -324,6 +327,31 @@ fn the_tui_send_endpoint_keeps_off_a_pane_in_recovery() {
     assert_eq!(tui.applied(), ["C-s", "paste", "paste", "Enter"]);
     assert_eq!(tui.records(), ["C"]);
     assert_eq!(tui.drafts(), (String::new(), None));
+}
+
+/// A new message sent to an idle pane whose composer holds a person's draft no path has seen yet,
+/// or that cannot be read, sends nothing; an empty composer takes it once.
+#[test]
+fn the_tui_send_endpoint_never_submits_a_new_message_over_an_unseen_draft() {
+    let tui = Tui::new("human draft A");
+    tui.put("head", IDLE_HEAD);
+    let (status, body) = relay(&tui, "C", false);
+    let refused = (StatusCode::CONFLICT, json!("draft_recovery_hold"));
+    assert_eq!((status, body["error"].clone()), refused);
+    assert!(tui.applied().is_empty());
+    assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
+
+    let empty = Tui::new("");
+    empty.put("head", IDLE_HEAD);
+    let (status, body) = relay(&empty, "C", true);
+    let unread = (StatusCode::CONFLICT, json!("composer_unread"));
+    assert_eq!((status, body["error"].clone()), unread);
+    assert!(empty.applied().is_empty());
+    let (status, body) = relay(&empty, "C", false);
+    let sent = (StatusCode::OK, json!(true));
+    assert_eq!((status, body["submitted"].clone()), sent);
+    assert_eq!(empty.applied(), ["paste", "Enter"]);
+    assert_eq!(empty.records(), ["C"]);
 }
 
 /// A draft Claude handed back stays the person's: the next follow-up and `/tui/send` hold before

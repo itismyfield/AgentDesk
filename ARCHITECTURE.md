@@ -155,6 +155,8 @@ src/
 │   │   ├── mod.rs
 │   │   └── transitions.rs
 │   ├── postgres/
+│   │   ├── advisory_lock.rs
+│   │   ├── advisory_lock_tests.rs
 │   │   ├── shared_config.rs
 │   │   └── test_db_reclaim.rs
 │   ├── prompt_manifests/
@@ -383,6 +385,7 @@ src/
 │   │   ├── agents_crud.rs
 │   │   ├── agents_host_guard_tests.rs
 │   │   ├── agents_setup.rs
+│   │   ├── agents_stop.rs
 │   │   ├── agents_turn_deliver.rs
 │   │   ├── agents_turn_target.rs
 │   │   ├── analytics.rs
@@ -610,7 +613,8 @@ src/
 │   │   │   └── warm_followup.rs
 │   │   ├── input/
 │   │   │   ├── draft_hold.rs
-│   │   │   └── final_ready_tests.rs
+│   │   │   ├── final_ready_tests.rs
+│   │   │   └── timeout_draft_tests.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
 │   │   ├── busy_inject.rs
@@ -701,6 +705,9 @@ src/
 │   │   ├── channel_home_tests.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
+│   │   ├── home_availability.rs
+│   │   ├── home_supervisor.rs
+│   │   ├── home_supervisor_tests.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs
@@ -1338,6 +1345,7 @@ src/
 │   │   │   ├── gateway_handback_integration_tests.rs
 │   │   │   ├── gateway_handback_mock.rs
 │   │   │   ├── gateway_lease.rs
+│   │   │   ├── gateway_lease_expiry.rs
 │   │   │   ├── gateway_lease_recovery.rs
 │   │   │   ├── gateway_lease_recovery_tests.rs
 │   │   │   ├── gateway_lease_tests.rs
@@ -1642,6 +1650,9 @@ src/
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── o_panel_below.rs
 │   │   │   │   └── o_panel_below_tests.rs
+│   │   │   ├── followup_requeue/
+│   │   │   │   └── tests/
+│   │   │   │       └── person_draft_tests.rs
 │   │   │   ├── headless_delivery/
 │   │   │   │   ├── durable_outbox.rs
 │   │   │   │   ├── intake_outbox_argument.rs
@@ -2362,6 +2373,8 @@ src/
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_home_tests.rs
+│   │   │   ├── host_io_tests.rs
+│   │   │   ├── host_managed_tests.rs
 │   │   │   ├── host_renumber_tests.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── input_facts.rs

@@ -34,6 +34,9 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/cluster/home_supervisor_tests.rs",
+        "src/services/tui_o/writer/host_managed_tests.rs",
+        "src/services/tui_o/writer/host_io_tests.rs",
         "src/services/discord/health/recovery/retirement_await_tests.rs",
         "src/services/discord/placeholder_sweeper/retirement_tests.rs",
         "src/services/discord/tmux_reaper/retirement_await_tests.rs",
@@ -172,6 +175,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/db/dispatched_sessions/tests.rs",
         "src/db/intake_outbox_dispatch_stamp/tests.rs",
         "src/db/o_channel_homes_tests.rs",
+        "src/db/postgres/advisory_lock_tests.rs",
         "src/db/intake_outbox_home_tests.rs",
         "src/db/session_transcripts_native_clear_tests.rs",
         "src/db/prompt_manifests/tests.rs",
@@ -201,8 +205,10 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/claude_tui/busy_inject/screen_tests.rs",
         "src/services/claude_tui/busy_inject/stash_tests.rs",
         "src/services/claude_tui/busy_inject/stash_tests/hold_tests.rs",
+        "src/services/claude_tui/input/timeout_draft_tests.rs",
         "src/services/discord/health/turn_deliver/inject_codex_tests.rs",
         "src/services/discord/health/turn_deliver/inject_tests.rs",
+        "src/services/discord/turn_bridge/followup_requeue/tests/person_draft_tests.rs",
         "src/services/discord/health/watcher_respawn/claude_original_tests.rs",
         "src/services/claude_tui/hook_output_guard_tests.rs",
         "src/services/claude_tui/hook_payload_fixture_tests.rs",
