@@ -180,38 +180,45 @@ async fn run_skill_slash_command(
             if !super::enforce_slash_command_policy(&ctx, "/stop").await? {
                 return Ok(());
             }
-            let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
-            let begin = super::super::turn_bridge::begin_user_stop;
-            let reason = format!("{invoked_as} stop");
-            match begin(shared, provider, ctx.channel_id(), false, &reason).await {
-                CommandStop::Session(stop) => {
-                    ctx.say(super::STOPPING_RESPONSE).await?;
-                    stop.interrupt(&format!("{invoked_as} stop")).await;
+            let permit = crate::services::cluster::channel_home::admit_command(
+                &ctx.channel_id().get().to_string(),
+                ctx.data().provider.as_str(),
+            )?;
+            return crate::services::cluster::channel_home::command_scope(permit, async {
+                let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
+                let begin = super::super::turn_bridge::begin_user_stop;
+                let reason = format!("{invoked_as} stop");
+                match begin(shared, provider, ctx.channel_id(), false, &reason).await {
+                    CommandStop::Session(stop) => {
+                        ctx.say(super::STOPPING_RESPONSE).await?;
+                        stop.interrupt(&format!("{invoked_as} stop")).await;
+                    }
+                    CommandStop::Stop(stop) => {
+                        ctx.say(super::STOPPING_RESPONSE).await?;
+                        let policy = super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
+                        stop.stop(policy, &format!("{invoked_as} stop")).await;
+                        log_info_event!(
+                            "discord_cancel_signal_sent",
+                            channel_id = ctx.channel_id().get(),
+                            provider = ctx.data().provider.as_str(),
+                            status = "sent",
+                        );
+                    }
+                    other => {
+                        let response = match other {
+                            // The turn stays with its provider; nothing was cancelled.
+                            #[cfg(unix)]
+                            CommandStop::Herdr(stop) => stop.reply(),
+                            CommandStop::AlreadyStopping => super::ALREADY_STOPPING_RESPONSE,
+                            CommandStop::HostRefused => super::HOST_REFUSED_STOP_RESPONSE,
+                            _ => super::NO_ACTIVE_TURN_RESPONSE,
+                        };
+                        ctx.say(response).await?;
+                    }
                 }
-                CommandStop::Stop(stop) => {
-                    ctx.say(super::STOPPING_RESPONSE).await?;
-                    let policy = super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
-                    stop.stop(policy, &format!("{invoked_as} stop")).await;
-                    log_info_event!(
-                        "discord_cancel_signal_sent",
-                        channel_id = ctx.channel_id().get(),
-                        provider = ctx.data().provider.as_str(),
-                        status = "sent",
-                    );
-                }
-                other => {
-                    let response = match other {
-                        // The turn stays with its provider; nothing was cancelled.
-                        #[cfg(unix)]
-                        CommandStop::Herdr(stop) => stop.reply(),
-                        CommandStop::AlreadyStopping => super::ALREADY_STOPPING_RESPONSE,
-                        CommandStop::HostRefused => super::HOST_REFUSED_STOP_RESPONSE,
-                        _ => super::NO_ACTIVE_TURN_RESPONSE,
-                    };
-                    ctx.say(response).await?;
-                }
-            }
-            return Ok(());
+                Ok(())
+            })
+            .await;
         }
         "pwd" => {
             let current_path = {

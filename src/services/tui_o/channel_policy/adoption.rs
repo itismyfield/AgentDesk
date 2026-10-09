@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 #[cfg(test)]
@@ -32,10 +33,36 @@ impl Adoption {
     }
 }
 
+/// Legacy body sends a candidate let through: `started` moves under the candidate lock as a body
+/// claim passes, `finished` as that send's guard drops.
+#[derive(Debug, Default)]
+struct LegacySends {
+    started: AtomicU64,
+    finished: AtomicU64,
+}
+
+/// A Legacy body send under way on its channel, held until its transport is done.
+#[derive(Debug)]
+pub(crate) struct LegacySend(Arc<LegacySends>);
+
+impl Drop for LegacySend {
+    fn drop(&mut self) {
+        self.0.finished.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// A body claim's answer: whether O owns the channel and, when Legacy sends, that send.
+#[derive(Debug)]
+pub(crate) struct BodyClaimed {
+    pub(crate) owned: bool,
+    pub(crate) send: Option<LegacySend>,
+}
+
 /// One selected channel's adoption and the lock every transition of it takes.
 #[derive(Clone, Debug)]
 pub(crate) struct Candidate {
     state: Arc<Mutex<Adoption>>,
+    sends: Arc<LegacySends>,
     /// Test builds: set when a claim released a pending adoption, cleared once a sink saw a body.
     #[cfg(test)]
     bodiless: Arc<std::sync::atomic::AtomicBool>,
@@ -45,6 +72,7 @@ impl Candidate {
     pub(crate) fn new(state: Adoption) -> Self {
         Self {
             state: Arc::new(Mutex::new(state)),
+            sends: Arc::default(),
             #[cfg(test)]
             bodiless: Arc::default(),
         }
@@ -59,9 +87,26 @@ impl Candidate {
         *self.lock()
     }
 
-    /// Whether O owns the channel for a body Legacy would otherwise send; a pending adoption is
-    /// released first, and a deferred one later adopts only past what Legacy delivered.
+    /// Whether O owns the channel for a placement, which carries no body; a pending adoption is
+    /// released first. A placement is not a Legacy send, so it is not counted.
     pub(in crate::services::tui_o) fn claim(&self, channel: u64) -> bool {
+        self.take(channel).owned()
+    }
+
+    /// Whether O owns the channel for a body Legacy would otherwise send, releasing a pending
+    /// adoption first; a Legacy send is counted under this lock until its guard drops.
+    pub(in crate::services::tui_o) fn claim_body(&self, channel: u64) -> BodyClaimed {
+        let state = self.take(channel);
+        let owned = state.owned();
+        let send = (!owned).then(|| {
+            self.sends.started.fetch_add(1, Ordering::SeqCst);
+            LegacySend(Arc::clone(&self.sends))
+        });
+        drop(state);
+        BodyClaimed { owned, send }
+    }
+
+    fn take(&self, channel: u64) -> MutexGuard<'_, Adoption> {
         let mut state = self.lock();
         if *state == Adoption::Pending {
             *state = Adoption::Released;
@@ -69,7 +114,15 @@ impl Candidate {
             body_check::note_release(self);
             tracing::info!(channel, "[tui_o] Legacy took the channel before O adoption");
         }
-        state.owned()
+        state
+    }
+
+    /// Legacy body sends this channel started and finished so far.
+    #[cfg(test)]
+    pub(crate) fn sends(&self) -> (u64, u64) {
+        let sends = &self.sends;
+        let started = sends.started.load(Ordering::SeqCst);
+        (started, sends.finished.load(Ordering::SeqCst))
     }
 
     /// Leaves a pending or deferred adoption to Legacy for the rest of this process; a decided

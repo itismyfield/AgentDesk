@@ -111,6 +111,9 @@ mod o_recovery_cut_tests;
 #[path = "recovery_engine/restore_inflight.rs"]
 mod restore_inflight;
 pub(crate) use completion_delivery::CapturedReadyDeliveryCommit;
+#[cfg(unix)]
+#[path = "recovery_engine/herdr_admitted_restart.rs"]
+pub(in crate::services::discord) mod herdr_admitted_restart;
 // Unix only, like the `tmux::execution_identity` comparison it calls.
 #[cfg(unix)]
 #[path = "recovery_engine/herdr_reader.rs"]

@@ -10,6 +10,10 @@ use super::gateway_lease_recovery::{
     try_create_restart_marker,
 };
 use crate::services::tui_o::ownership::release_gateway;
+use expiry::{PreferredWaitWarning, gateway_lease_idle_expiry};
+
+#[path = "gateway_lease_expiry.rs"]
+mod expiry;
 
 /// #4351: resolved view of `cluster.gateway_preferred_instance_id` for this node.
 struct GatewayPreference {
@@ -200,6 +204,7 @@ async fn acquire_as_preferred_gateway(
         tracing::warn!("GATEWAY-LEASE: could not publish gateway waiter capability: {error}");
     }
 
+    let mut long_wait = PreferredWaitWarning::start();
     let mut attempts: u64 = 0;
     loop {
         let acquired = if attempts == 0 {
@@ -233,6 +238,9 @@ async fn acquire_as_preferred_gateway(
                         provider.display_name()
                     );
                 }
+                long_wait
+                    .observe(pool, discord_gateway_lock_id(token_hash), provider)
+                    .await;
                 attempts += 1;
                 tokio::time::sleep(GATEWAY_PREFERENCE_POLL_INTERVAL).await;
             }
@@ -261,11 +269,12 @@ pub(super) async fn try_acquire_discord_gateway_lease(
     token_hash: &str,
     provider: &ProviderKind,
 ) -> Result<Option<crate::db::postgres::AdvisoryLockLease>, String> {
-    crate::db::postgres::AdvisoryLockLease::try_acquire_named(
+    crate::db::postgres::AdvisoryLockLease::try_acquire_named_expiring(
         pool,
         discord_gateway_lock_id(token_hash),
         format!("discord gateway {}", provider.as_str()),
         gateway_lease_application_name(provider),
+        gateway_lease_idle_expiry(&crate::config::load_graceful().cluster),
     )
     .await
 }
@@ -653,8 +662,8 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                     current_lease = Some(new_lease);
                 }
                 Err(error) => {
-                    // DB still unreachable — no other instance can hold the lock
-                    // while the DB is down, so keep the gateway up and retry.
+                    // DB unreachable from here: keep the gateway up and retry. A peer
+                    // may already hold the lock; the next Ok(None) retry self-fences.
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
                         "  [{ts}] ⚠ GATEWAY-LEASE: {} re-acquire deferred (db unavailable): {} — retrying next tick",

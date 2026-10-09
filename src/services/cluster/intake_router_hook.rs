@@ -123,6 +123,14 @@ pub(crate) async fn try_route_intake(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
 ) -> IntakeRouterDecision {
+    if let Some(reason) = ctx
+        .channel_id
+        .parse()
+        .ok()
+        .and_then(super::home_availability::refusal)
+    {
+        return required_block(format!("delegation unavailable: {reason}"));
+    }
     // A channel's home row, read on every intake in every mode, outranks all other placement.
     match o_channel_homes::read_home(pool, ctx.channel_id).await {
         Ok(None) => {}

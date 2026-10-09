@@ -45,9 +45,10 @@ pub(super) fn spawn_admitted(
     worker: impl std::future::Future<Output = ()> + Send + 'static,
 ) {
     if let Ok(permit) = effect {
+        // An admitted worker is polled on the input worker, where its claim's row writer is allowed.
         super::super::task_supervisor::spawn_observed(
             "tui_direct_pending_start_worker",
-            fence::effect::scope(permit, worker),
+            fence::effect::detached(permit.clone(), fence::effect::scope(permit, worker)),
         );
     }
 }

@@ -16,6 +16,7 @@ CRATE_ALLOW = {
     "crate::services::discord::formatting::split_for_shadow",
     "crate::services::provider::ProviderKind::Claude",
     "crate::services::provider::ProviderKind::Codex",
+    "crate::services::tui_o::repost::config::RepostConfig",
     "crate::services::tui_o::turn_mode::TurnConfig",
     "crate::services::tui_prompt_dedupe::TuiRuntimeBinding",
     "crate::services::tui_prompt_dedupe::peek_tmux_runtime_binding",

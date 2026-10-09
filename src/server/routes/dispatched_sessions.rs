@@ -9,7 +9,7 @@ use crate::error::{AppError, AppResult, ErrorCode};
 
 pub(crate) use crate::services::dispatched_sessions::force_kill_session_impl_with_reason;
 pub use crate::services::dispatched_sessions::{
-    DeleteSessionQuery, ForceKillOptions, HookSessionBody, KillTmuxOptions,
+    DeleteSessionQuery, ForceKillOptions, HookSessionBody, HookSessionQuery, KillTmuxOptions,
     ListDispatchedSessionsQuery, TmuxOutputQuery, UpdateDispatchedSessionBody,
 };
 
@@ -25,9 +25,15 @@ pub async fn list_dispatched_sessions(
 /// POST /api/dispatched-sessions/webhook — upsert session from dcserver
 pub async fn hook_session(
     State(state): State<AppState>,
+    Query(query): Query<HookSessionQuery>,
     Json(body): Json<HookSessionBody>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    crate::services::dispatched_sessions::hook_session(State(state), Json(body)).await
+    crate::services::dispatched_sessions::hook_session_with_query(
+        State(state),
+        Query(query),
+        Json(body),
+    )
+    .await
 }
 
 /// DELETE /api/dispatched-sessions/cleanup — manual: delete disconnected sessions

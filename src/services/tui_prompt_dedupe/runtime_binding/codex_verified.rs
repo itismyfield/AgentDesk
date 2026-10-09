@@ -19,6 +19,8 @@ use crate::services::tmux_common::{self as tc, TmuxSourceAuthority};
 use binding_events::codex::{Claim, ClaimEvidence, Decision, Fold, VerifiedProof};
 use std::{io, path::Path};
 
+pub(crate) mod provenance;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeliveryPermission {
     Allowed,

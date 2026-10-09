@@ -17,6 +17,8 @@ pub(crate) mod channel_home_drain;
 pub(crate) mod channel_home_port;
 pub(crate) mod execution_capacity;
 pub(crate) mod execution_requirements;
+pub(crate) mod home_availability;
+pub(crate) mod home_supervisor;
 pub(crate) mod intake_preflight;
 pub(crate) mod intake_router_hook;
 pub(crate) mod intake_routing;

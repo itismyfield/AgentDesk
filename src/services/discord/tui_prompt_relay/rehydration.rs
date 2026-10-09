@@ -19,7 +19,9 @@ use super::launch_script::{
     claude_launch_observation, claude_launch_transcript, claude_tui_rehydrated_binding,
 };
 use super::*;
-use crate::services::tui_prompt_dedupe::pane_registration::register_launched_claude_pane;
+use crate::services::tui_prompt_dedupe::pane_registration::{
+    register_judged_claude_pane, register_unmoved_claude_pane,
+};
 use std::collections::HashMap;
 
 #[cfg(unix)]
@@ -272,8 +274,6 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
 /// One pane of the rehydrate pass; a durable Pending is restored before the binding judgment.
 #[cfg(unix)]
 fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) {
-    let existing_binding =
-        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
     // #3018: dedupe lookup here is a diagnostic/mirror rehydration hint only
     // (subordinate to the freshly resolved channel below), never a routing
     // authority — the authoritative resolver is owner_channel_for_tmux_session.
@@ -359,6 +359,9 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
     if super::headless::restore_holds(tmux_session_name, restored) {
         return;
     }
+    // Read after the restore so its own registration is judged; a later hook move gives it up.
+    let existing_binding =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
     let fresh_binding = super::headless::tui_binding(shared, tmux_session_name, fresh_binding);
     // #5188 (R1): both gates below consult the session id a live hook payload
     // most recently reported for this pane. A `/clear` rotates Claude onto a
@@ -394,11 +397,12 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
             None => true,
         };
         if should_refresh {
-            if !register_launched_claude_pane(
+            if !register_judged_claude_pane(
                 tmux_session_name,
                 channel_id,
                 fresh.clone(),
                 launch_context.as_deref(),
+                existing_binding.as_ref(),
             ) {
                 return;
             }
@@ -417,11 +421,9 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
             return;
         }
         if Path::new(&binding.output_path).exists() {
-            crate::services::tui_prompt_dedupe::pane_registration::register_claude_pane(
-                tmux_session_name,
-                channel_id,
-                binding.clone(),
-            );
+            if !register_unmoved_claude_pane(tmux_session_name, channel_id, binding.clone()) {
+                return;
+            }
             tracing::info!(
                 tmux_session_name = %tmux_session_name,
                 channel_id,
