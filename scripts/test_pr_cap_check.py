@@ -24,7 +24,7 @@ class PrCapCheckTest(unittest.TestCase):
         self.repo = self.root / "consumer"
         self.env = {
             key: value for key, value in os.environ.items()
-            if not key.startswith("GIT_")
+            if not key.startswith(("GIT_", "GITHUB_", "PR_CAP_"))
         }
         self.env.update({
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -232,6 +232,112 @@ class PrCapCheckTest(unittest.TestCase):
         self.env["PR_CAP_MODE"] = "bogus"
         self.assert_fail(self.check_cap())
 
+    def test_exemption_accepts_crlf_and_cr_body_lines(self):
+        self.add_lines(801)
+        self.commit()
+        for ending in ("\r\n", "\r"):
+            with self.subTest(ending=repr(ending)):
+                self.event(ending.join(("Summary", "PR-CAP-EXEMPT: compatibility migration", "End")))
+                result = self.check_cap()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("CAP: EXEMPT (compatibility migration)", result.stdout)
+
+    def test_exemption_examples_do_not_authorize_a_violation(self):
+        self.add_lines(801)
+        self.commit()
+        examples = (
+            "```text\nPR-CAP-EXEMPT: example\n```",
+            "````text\n```\nPR-CAP-EXEMPT: example\n````",
+            "~~~text\nPR-CAP-EXEMPT: example\n~~~",
+            "<!--\nPR-CAP-EXEMPT: example\n-->",
+            "<!-- PR-CAP-EXEMPT: example -->",
+            "> PR-CAP-EXEMPT: example",
+            "  > PR-CAP-EXEMPT: example",
+        )
+        for body in examples:
+            with self.subTest(body=body):
+                self.event(body)
+                result = self.check_cap()
+                self.assert_fail(result)
+                self.assertIn("CAP: FAIL", result.stdout)
+                self.event(body + "\n\nPR-CAP-EXEMPT: reviewed migration")
+                result = self.check_cap()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("CAP: EXEMPT (reviewed migration)", result.stdout)
+
+    def test_lazy_quote_continuation_cannot_authorize_exemption(self):
+        self.add_lines(801)
+        self.commit()
+        self.event("> Quoted example\nPR-CAP-EXEMPT: quoted reason")
+        result = self.check_cap()
+        self.assert_fail(result)
+        self.assertIn("CAP: FAIL", result.stdout)
+        self.event("> Quoted example\n\nPR-CAP-EXEMPT: reviewed migration")
+        result = self.check_cap()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CAP: EXEMPT (reviewed migration)", result.stdout)
+
+    def test_multiple_exemptions_error_only_after_measured_violation(self):
+        self.event("PR-CAP-EXEMPT: one\nPR-CAP-EXEMPT: two")
+        self.assert_pass(self.check_cap(), "0 files net +0 code")
+        self.add_lines(801)
+        self.commit()
+        self.event("PR-CAP-EXEMPT: one\nPR-CAP-EXEMPT: two")
+        result = self.check_cap()
+        self.assert_fail(result)
+        self.assertIn("CAP: FAIL", result.stdout)
+        self.assertIn("multiple exemption reasons", result.stderr)
+
+    def test_advisory_modes_and_exemption_annotate_github_checks(self):
+        self.add_lines(801)
+        self.commit()
+        summary = self.root / "step-summary.md"
+        self.env.update(GITHUB_ACTIONS="true", GITHUB_STEP_SUMMARY=str(summary))
+        for mode, body, status in (
+            ("off", "", "CAP: DISABLED (PR_CAP_MODE=off)"),
+            ("report-only", "", "CAP: REPORT-ONLY (measured violation; enforcement disabled)"),
+            ("enforce", "PR-CAP-EXEMPT: reviewed migration", "CAP: EXEMPT (reviewed migration)"),
+        ):
+            with self.subTest(mode=mode):
+                summary.write_text("Earlier step\n")
+                self.env["PR_CAP_MODE"] = mode
+                self.event(body)
+                result = self.check_cap()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("::warning title=PR cap::" + status, result.stdout)
+                self.assertEqual(summary.read_text(), "Earlier step\n" + status + "\n")
+
+    def test_github_annotation_escapes_exemption_and_summary_is_optional(self):
+        self.add_lines(801)
+        self.commit()
+        self.env["GITHUB_ACTIONS"] = "true"
+        self.env.pop("GITHUB_STEP_SUMMARY", None)
+        self.event("PR-CAP-EXEMPT: reviewed 100%0A::error:: migration")
+        result = self.check_cap()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("::warning title=PR cap::CAP: EXEMPT (reviewed 100%250A::error:: migration)", result.stdout)
+        self.assertNotIn("\n::error::", result.stdout)
+
+    def test_report_only_within_limits_annotates_disabled_enforcement(self):
+        self.add_lines(3)
+        self.commit()
+        summary = self.root / "step-summary.md"
+        summary.write_text("Earlier step\n")
+        self.env.update(PR_CAP_MODE="report-only", GITHUB_ACTIONS="true", GITHUB_STEP_SUMMARY=str(summary))
+        result = self.check_cap()
+        self.assert_pass(result, "1 files net +3 code")
+        status = "CAP: REPORT-ONLY (within limits; enforcement disabled)"
+        self.assertIn("::warning title=PR cap::" + status, result.stdout)
+        self.assertEqual(summary.read_text(), "Earlier step\n" + status + "\n")
+
+    def test_local_advisory_mode_does_not_emit_github_notice(self):
+        summary = self.root / "step-summary.md"
+        self.env.update(PR_CAP_MODE="off", GITHUB_ACTIONS="false", GITHUB_STEP_SUMMARY=str(summary))
+        result = self.check_cap()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("::warning", result.stdout)
+        self.assertFalse(summary.exists())
+
     def test_report_only_and_exemption_cannot_hide_errors(self):
         self.add_lines(801)
         self.commit()
@@ -249,6 +355,26 @@ class PrCapCheckTest(unittest.TestCase):
         self.event(base=parent)
         self.git(self.repo, "checkout", "main")
         self.assert_pass(self.check_cap(), "1 files net +1 code")
+
+    def test_ci_event_commits_measure_without_fetching_main(self):
+        self.add_lines(3)
+        self.commit()
+        head = self.git(self.repo, "rev-parse", "HEAD")
+        self.event()
+        self.git(self.repo, "checkout", "main")
+        self.git(self.repo, "remote", "set-url", "origin", str(self.root / "missing.git"))
+        result = self.check_cap()
+        self.assert_pass(result, "1 files net +3 code")
+        self.assertIn(f"base={self.initial} target={head}", result.stdout)
+
+    def test_ci_missing_event_commit_cannot_fall_back_to_main(self):
+        self.event("PR-CAP-EXEMPT: migration", base="a" * 40)
+        self.env["PR_CAP_MODE"] = "report-only"
+        self.git(self.repo, "remote", "set-url", "origin", str(self.root / "missing.git"))
+        result = self.check_cap()
+        self.assert_fail(result)
+        self.assertIn("cannot resolve base", result.stderr)
+        self.assertNotIn("cannot fetch", result.stderr)
 
     def test_exclusions_comments_and_inline_tests(self):
         for name in ("docs/a.md", "tests/a.rs", "src/generated/a.rs", "src/fixtures/a.txt", "scripts/test_a.py"):

@@ -691,7 +691,7 @@ unless execution_contract(script_check_execution, expected_script_check_executio
 end
 expected_cap = {"name" => "Production PR cap", "shell" => "bash", "run" => "bash scripts/pr_cap_check.sh", "env" => {"PR_CAP_CI" => "1", "PR_CAP_MODE" => "${{ vars.PR_CAP_MODE || 'enforce' }}", "BASH_ENV" => "/dev/null"}}
 cap_steps = Array(script_checks_job["steps"]).select { |step| step.is_a?(Hash) && step["name"] == "Production PR cap" }
-unless cap_steps == [expected_cap] && Array(script_checks_job["steps"]).index(expected_cap) > script_check_step_index
+unless cap_steps == [expected_cap] && Array(script_checks_job["steps"]).index(expected_cap) == script_check_step_index + 1
   warn "#{path}: production PR cap must retain its unconditional exact post-aggregate execution"
   exit 1
 end
@@ -1367,7 +1367,8 @@ validate_main_full_sweep() {
 require "yaml"
 main_path, pr_path = ARGV
 main_jobs = YAML.load_file(main_path).fetch("jobs", {})
-pr_sweep = YAML.load_file(pr_path).dig("jobs", "library_sweep")
+pr_jobs = YAML.load_file(pr_path).fetch("jobs", {})
+pr_sweep = pr_jobs["library_sweep"]
 errors = []
 sweep_name = "Library sweep (selection-set gated)"
 lint_tests_name = "Non-lib tests and doctests"
@@ -1398,14 +1399,19 @@ if lint.is_a?(Hash)
     set -o pipefail
     mkdir -p target/clippy-observation
     cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
-    if ! python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json; then
-      echo '::warning::Clippy observation invalid; no warning baseline can be derived'
-    fi
+    python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1
   CLIPPY
   expected_lint = {"name" => "just lint", "shell" => "bash", "run" => expected_lint_run}
   errors << "main Clippy observation must retain exact argv and fail-closed compilation" unless lint_steps.select { |step| step["name"] == "just lint" } == [expected_lint]
   expected_upload = {"name" => "Upload Clippy observation", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "clippy-observation-${{ github.sha }}", "path" => "target/clippy-observation/", "if-no-files-found" => "error"}}
   errors << "main Clippy observation upload must remain exact" unless lint_steps.select { |step| step["name"] == "Upload Clippy observation" } == [expected_upload]
+  {"main" => [lint, expected_lint, 2], "PR" => [pr_jobs["lint"], expected_lint.merge("run" => expected_lint_run.sub("--base-ref HEAD^1", '--base-ref "$CLIPPY_BASE_REF"'), "env" => {"CLIPPY_BASE_REF" => "${{ github.event.pull_request.base.sha }}"}), 0]}.each do |label, (job, expected, depth)|
+    steps = Array(job && job["steps"])
+    errors << "#{label} warning ceiling must retain exact fail-closed execution" unless steps.select { |step| step["name"] == "just lint" } == [expected]
+    errors << "#{label} warning baseline comparison requires the base commit checkout" unless steps.first == {"uses" => "actions/checkout@v4", "with" => {"fetch-depth" => depth}}
+    toolchain = steps.find { |step| step["name"] == "Install Rust toolchain" }
+    errors << "#{label} warning ceiling requires the measured toolchain" unless toolchain && toolchain.dig("with", "toolchain") == "1.94.1"
+  end
   tests = lint_steps.find { |step| step["name"] == lint_tests_name }
   %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].each do |key|
     errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"

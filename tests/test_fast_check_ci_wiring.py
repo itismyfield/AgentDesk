@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "2fa2a6eafb40adc53c8ec888ab1e118864e974dca0b7ad2131cea0c7e5916dbe"
+    "0e8c43697c07fe11c2c08b0a0c4401cac6c6cd0b0e8f07f5ef20a7c13ecfec59"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Job-level condition of every required-context mirror and its source line.
@@ -862,9 +862,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "set -o pipefail",
                 "mkdir -p target/clippy-observation",
                 "cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
-                "if ! python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json; then",
-                "echo '::warning::Clippy observation invalid; no warning baseline can be derived'",
-                "fi",
+                "python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1",
                 "source scripts/ci/non-pg-test-filter.sh",
                 *non_lib,
                 "sccache --show-stats || true",
@@ -2065,6 +2063,21 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_warning_ceiling_and_cap_adjacency_reject_bypass(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        main = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        command = 'python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref '
+        variants = (
+            (workflow.replace("      - name: Production PR cap\n", '      - run: echo PR_CAP_CI=0 >> "$GITHUB_ENV"\n\n      - name: Production PR cap\n', 1), main, "production PR cap"),
+            (workflow.replace(command + '"$CLIPPY_BASE_REF"', 'true', 1), main, "PR warning ceiling"),
+            (workflow, main.replace(command + "HEAD^1", "true", 1), "main Clippy observation"),
+        )
+        for pr, altered_main, expected in variants:
+            with self.subTest(expected=expected):
+                result = self.run_hardening_fixture(pr, {"ci-main.yml": altered_main})
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(expected, result.stderr)
 
     def test_documented_harmless_surface_edits_are_not_overblocked(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

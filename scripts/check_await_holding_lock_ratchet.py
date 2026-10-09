@@ -69,9 +69,9 @@ def count_allows(repo_root: Path) -> tuple[int, list[str]]:
     Best-effort source scan: full-line comments are skipped and trailing line
     comments are stripped so prose mentioning the lint (e.g. lib.rs guidance)
     is not counted. Assumes single-line attributes, which rustfmt (enforced by
-    fmt-check in CI) normalizes to. The crate-wide `deny` in Cargo.toml is the
-    primary gate; this ratchet only prevents the documented allow count from
-    creeping back up.
+    fmt-check in CI) normalizes to. Staged `-W clippy::all` downgrades the
+    configured deny; warning totals and this suppression count are separate
+    gates. This scan does not count unsuppressed lock warnings.
     """
     total = 0
     locations: list[str] = []
