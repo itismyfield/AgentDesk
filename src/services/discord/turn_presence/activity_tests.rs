@@ -21,14 +21,26 @@ struct Fake {
     present: AtomicBool,
     ready: AtomicBool,
     busy: AtomicBool,
+    liveness: Mutex<SessionLiveness>,
     folds: AtomicUsize,
     jobs: Mutex<Vec<Job>>,
     spawns: AtomicUsize,
     /// The next pane read reports it started, then waits until released.
     pause: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    /// A host read pauses independently from the pane readiness read.
+    host_pause: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
 }
 
 impl Ports for Fake {
+    fn liveness(&self, _: ShadowProvider, _: u64, _: &str) -> SessionLiveness {
+        let answer = *lock(&self.liveness);
+        let pause = lock(&self.host_pause).take();
+        if let Some((started, release)) = pause {
+            started.send(()).unwrap();
+            release.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        answer
+    }
     fn binding_seq(&self, _: u64) -> Result<u64, String> {
         lock(&self.seq).clone()
     }
@@ -74,10 +86,12 @@ impl Probe {
             present: AtomicBool::new(true),
             ready: AtomicBool::new(true),
             busy: AtomicBool::new(false),
+            liveness: Mutex::new(SessionLiveness::Alive),
             folds: AtomicUsize::new(0),
             jobs: Mutex::new(Vec::new()),
             spawns: AtomicUsize::new(0),
             pause: Mutex::new(None),
+            host_pause: Mutex::new(None),
         });
         let target = Target::Bound(SESSION.into());
         let watch = Arc::default();
@@ -92,6 +106,18 @@ impl Probe {
     fn ask(&self) -> (Activity, &'static str) {
         let ports: Arc<dyn Ports> = self.fake.clone();
         let observed = observe(
+            &self.watch,
+            &ports,
+            self.provider,
+            CHANNEL,
+            self.target.clone(),
+        );
+        (observed.activity, observed.reason)
+    }
+
+    fn ask_presence(&self) -> (Activity, &'static str) {
+        let ports: Arc<dyn Ports> = self.fake.clone();
+        let (observed, _) = judge_presence(
             &self.watch,
             &ports,
             self.provider,
@@ -404,6 +430,112 @@ fn bytes_past_the_chunk_budget_read_catching_up_before_any_judgment() {
     assert_eq!(probe.counts(), (1, 1), "reading on never rebuilds");
 }
 
+/// Presence requires a live host; the dormant observer preserves the existing input judgments.
+#[test]
+fn presence_requires_live_host_without_changing_existing_open_or_closed_judgments() {
+    let root = tempfile::tempdir().unwrap();
+    for provider in [ShadowProvider::Claude, ShadowProvider::Codex] {
+        let dir = root.path().join(format!("{provider:?}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (open, _) = match provider {
+            ShadowProvider::Claude => claude(&dir.join("open"), &[prompt("A")]),
+            ShadowProvider::Codex => codex_probe(&dir, &[codex("task_started", "A")]),
+        };
+        assert_eq!(open.settle(), (Activity::Busy, "open"));
+        assert_eq!(open.ask_presence(), (Activity::Busy, "open"));
+        let closed_dir = dir.join("closed");
+        std::fs::create_dir_all(&closed_dir).unwrap();
+        let (closed, _) = match provider {
+            ShadowProvider::Claude => claude(&closed_dir, &[prompt("A"), end()]),
+            ShadowProvider::Codex => codex_probe(
+                &closed_dir,
+                &[codex("task_started", "A"), codex("task_complete", "A")],
+            ),
+        };
+        assert_eq!(closed.settle(), (Activity::Idle, "closed"));
+        for (liveness, reason) in [
+            (SessionLiveness::Missing, "host_dead"),
+            (SessionLiveness::ProbeFailed, "host_probe_failed"),
+            (SessionLiveness::Unknown, "host_unobservable"),
+        ] {
+            *lock(&open.fake.liveness) = liveness;
+            *lock(&closed.fake.liveness) = liveness;
+            assert_eq!(open.ask_presence(), (Activity::Unknown, reason));
+            assert_eq!(closed.ask_presence(), (Activity::Unknown, reason));
+            assert_eq!(open.ask(), (Activity::Busy, "open"));
+            assert_eq!(closed.ask(), (Activity::Idle, "closed"));
+        }
+        *lock(&open.fake.liveness) = SessionLiveness::Alive;
+        assert_eq!(open.ask_presence(), (Activity::Busy, "open"));
+    }
+}
+
+/// Foreign completions and aborts cannot finish the bound parent turn.
+#[test]
+fn presence_keeps_codex_parent_busy_until_its_own_closer() {
+    let root = tempfile::tempdir().unwrap();
+    let (probe, path) = codex_probe(root.path(), &[codex("task_started", "A")]);
+    assert_eq!(probe.settle(), (Activity::Busy, "open"));
+    for kind in ["task_complete", "turn_aborted"] {
+        write(&path, &[codex(kind, "B")]);
+        assert_eq!(probe.ask_presence(), (Activity::Busy, "open"), "{kind}");
+    }
+    write(&path, &[codex("task_complete", "A")]);
+    assert_eq!(probe.ask_presence(), (Activity::Idle, "closed"));
+}
+
+/// A slow host answer cannot publish a judgment that a newer poll or binding superseded.
+#[test]
+fn presence_host_read_overtaken_by_a_poll_or_rebind_answers_unknown() {
+    let root = tempfile::tempdir().unwrap();
+    for case in ["closed", "rebound", "backlog"] {
+        let (probe, path) = claude(&root.path().join(case), &[prompt("A")]);
+        assert_eq!(probe.settle(), (Activity::Busy, "open"));
+        let (started, entered) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (finished, completion) = mpsc::channel();
+        let (overtook, overtaking) = mpsc::channel();
+        *lock(&probe.fake.host_pause) = Some((started, released));
+        let (later, paused) = std::thread::scope(|scope| {
+            // Dropping the sender on any failed assertion releases the paused host read.
+            let release = release;
+            scope.spawn(|| finished.send(probe.ask_presence()).unwrap());
+            entered.recv_timeout(Duration::from_secs(5)).unwrap();
+            let expected = match case {
+                "closed" => {
+                    write(&path, &[end()]);
+                    (Activity::Idle, "closed")
+                }
+                "rebound" => {
+                    *lock(&probe.fake.seq) = Ok(9);
+                    (Activity::Unknown, "catching_up")
+                }
+                "backlog" => {
+                    write(
+                        &path,
+                        &[
+                            json!({"type":"summary","summary":"x".repeat(CHUNK_BUDGET as usize + 1024)}),
+                        ],
+                    );
+                    (Activity::Unknown, "catching_up")
+                }
+                _ => unreachable!(),
+            };
+            scope.spawn(|| overtook.send(probe.ask_presence()).unwrap());
+            let later = overtaking.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(later, expected, "{case}");
+            release.send(()).unwrap();
+            let paused = completion.recv_timeout(Duration::from_secs(5)).unwrap();
+            (later, paused)
+        });
+        assert_eq!(
+            paused,
+            (Activity::Unknown, "superseded"),
+            "{case}: {later:?}"
+        );
+    }
+}
+
 /// Each stored outcome answers from memory for the same key; only an unreadable one retries,
 /// once, after its delay.
 #[test]
@@ -687,6 +819,7 @@ fn a_reading_publishes_only_while_its_watch_is_unmoved() {
             observed,
             stamp,
             watch,
+            host_checked: false,
         }
     };
     let fresh = read();

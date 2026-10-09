@@ -28,6 +28,24 @@ pub(crate) fn transcript_turns(channel: u64) -> bool {
     })
 }
 
+// Dormant effect gate: execute only the synchronous first HTTP poll under the confirmation lock.
+// Await the remaining HTTP work after this function returns.
+#[allow(dead_code)]
+pub(crate) fn admit_effect<T>(
+    channel: u64,
+    transcript: bool,
+    hand_off: impl FnOnce() -> T,
+) -> Option<T> {
+    if channel == 0 {
+        return None;
+    }
+    let channels = CONFIRMED
+        .get_or_init(|| RwLock::new(BTreeSet::new()))
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    (channels.contains(&channel) == transcript).then(hand_off)
+}
+
 // The caller must read the retirement population before confirming a selected channel.
 pub(crate) fn confirm(channel: u64) {
     if channel != 0 {
@@ -182,6 +200,84 @@ mod tests {
         assert!(!transcript_turns(channel + 100));
         drop(confirmation);
         assert!(!transcript_turns(channel));
+    }
+
+    #[test]
+    fn b1_effect_admission_rejects_mismatched_modes() {
+        let channel = 63250061;
+        assert_eq!(admit_effect(channel, false, || 7), Some(7));
+        assert_eq!(
+            admit_effect(channel, true, || panic!("transcript before confirm")),
+            None
+        );
+        let confirmation = TestConfirmation::new(channel);
+        assert_eq!(
+            admit_effect(channel, false, || panic!("native after confirm")),
+            None
+        );
+        assert_eq!(admit_effect(channel, true, || 8), Some(8));
+        drop(confirmation);
+    }
+
+    #[test]
+    fn b1_effect_admission_rejects_zero_without_callback() {
+        for transcript in [false, true] {
+            assert_eq!(
+                admit_effect(0, transcript, || panic!("zero has no effect authority")),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn b1_native_admission_does_not_confirm_turn_mode() {
+        let channel = 63250062;
+        assert!(!transcript_turns(channel));
+        assert_eq!(admit_effect(channel, false, || "native"), Some("native"));
+        assert!(!transcript_turns(channel));
+    }
+
+    #[test]
+    fn b1_confirmation_waits_for_native_effect_handoff() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let channel = 63250063;
+        let timeout = Duration::from_secs(5);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let effect = std::thread::spawn(move || {
+            admit_effect(channel, false, || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(timeout).unwrap();
+            })
+        });
+        entered_rx.recv_timeout(timeout).unwrap();
+        assert!(
+            CONFIRMED.get().unwrap().try_write().is_err(),
+            "handoff must hold the read lock"
+        );
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (committed_tx, committed_rx) = mpsc::channel();
+        let confirmation = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            confirm(channel);
+            committed_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(timeout).unwrap();
+        assert_eq!(committed_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        release_tx.send(()).unwrap();
+        committed_rx.recv_timeout(timeout).unwrap();
+        assert_eq!(effect.join().unwrap(), Some(()));
+        confirmation.join().unwrap();
+        let confirmed = TestConfirmation::confirmed(channel);
+        assert_eq!(
+            admit_effect(channel, false, || panic!("commit blocks native")),
+            None
+        );
+        assert_eq!(admit_effect(channel, true, || ()), Some(()));
+        drop(confirmed);
     }
 }
 
