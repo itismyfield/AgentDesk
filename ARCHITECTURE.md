@@ -806,7 +806,8 @@ src/
 │   │   │   │   ├── native_herdr_e2e_tests.rs
 │   │   │   │   ├── native_herdr_tests.rs
 │   │   │   │   ├── native_policy_tests.rs
-│   │   │   │   └── native_tests.rs
+│   │   │   │   ├── native_tests.rs
+│   │   │   │   └── provider_reset.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
 │   │   │   │   └── reports.rs
@@ -1181,6 +1182,8 @@ src/
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
+│   │   │   ├── herdr_admitted_restart.rs
+│   │   │   ├── herdr_admitted_restart_tests.rs
 │   │   │   ├── herdr_reader.rs
 │   │   │   ├── herdr_reader_tests.rs
 │   │   │   ├── host_reconcile.rs
@@ -1811,6 +1814,8 @@ src/
 │   │   ├── turn_presence/
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_tests.rs
+│   │   │   ├── admission.rs
+│   │   │   ├── admission_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
