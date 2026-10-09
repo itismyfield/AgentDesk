@@ -30,9 +30,14 @@ const UNCONFIRMED: &str = "❓ 터미널 입력을 확인하지 못했습니다.
 
 /// A Discord id of a message sent moments ago, distinct within this process.
 fn fresh_id() -> u64 {
+    id_aged(5)
+}
+
+/// A Discord id of a message sent `secs` seconds ago, distinct within this process.
+fn id_aged(secs: i64) -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
-    let ms = chrono::Utc::now().timestamp_millis() - 5_000 - DISCORD_EPOCH_MS;
+    let ms = chrono::Utc::now().timestamp_millis() - secs * 1_000 - DISCORD_EPOCH_MS;
     (u64::try_from(ms).expect("after the Discord epoch") << 22)
         | NEXT.fetch_add(1, Ordering::SeqCst)
 }
@@ -404,6 +409,8 @@ async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
         (answer, "answer", true),
         (message, "status?", false),
     ]);
+    // The sweep runs after the live yield window, as the operator's did.
+    let _later = hook::skew_clock(60);
     rt.h.run_catch_up().await;
     let observed = (handed, ran, started, rt.queue().await);
     rt.finish().await;
@@ -743,4 +750,92 @@ async fn a_vetoed_paste_queues_with_the_sender_s_own_marks_pg() {
     let bot = (vec![true], vec![(true, true, vec![false])]);
     let person = (vec![true], vec![(true, false, vec![true])]);
     assert_eq!(observed, [bot, person]);
+}
+
+/// Source ids the channel's queue holds, oldest first.
+async fn queued_sources(rt: &Runtime) -> Vec<u64> {
+    let channel = ChannelId::new(CHANNEL_ID);
+    let snapshot = crate::services::discord::mailbox_snapshot(&rt.h.shared, channel).await;
+    let queue = snapshot.intervention_queue.iter();
+    queue
+        .flat_map(|entry| entry.source_message_ids.iter().map(|id| id.get()))
+        .collect()
+}
+
+/// A runtime whose checkpoint sits before `earlier`, a message already answered by `answer`,
+/// so a catch-up sweep reads every message after them.
+fn answered_before(rt: &Runtime, earlier: u64, answer: u64, rest: &[(u64, &str)]) {
+    let channel = ChannelId::new(CHANNEL_ID);
+    let advance = crate::services::discord::advance_last_message_checkpoint;
+    advance(
+        &rt.h.shared,
+        &ProviderKind::Claude,
+        channel,
+        MessageId::new(earlier),
+    );
+    let mut history = vec![(earlier, "earlier", false), (answer, "answer", true)];
+    history.extend(rest.iter().map(|(id, text)| (*id, *text, false)));
+    rt.h.seed_channel_history(&history);
+}
+
+/// On a gated busy channel catch-up leaves a message under 20 seconds old to its live arrival,
+/// which the pane then takes; the sweep after that finds it taken and queues nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catch_up_leaves_a_fresh_message_to_its_live_offer_pg() {
+    let busy = busy().await;
+    let rt = &busy.rt;
+    let (earlier, answer, message) = (id_aged(60), id_aged(59), fresh_id());
+    answered_before(rt, earlier, answer, &[(message, "status?")]);
+    rt.h.run_catch_up().await;
+    let swept = (queued_sources(rt).await, rt.h.checkpoint());
+    rt.h.deliver_user_message(message, "status?").await.unwrap();
+    rt.h.run_catch_up().await;
+    let observed = (
+        swept,
+        busy.pane.keys(),
+        rt.marks(message),
+        queued_sources(rt).await,
+    );
+    let keys = vec!["paste-buffer".to_string(), "send-keys".to_string()];
+    rt.finish().await;
+    // The bot's answer settles; the checkpoint stops before the message left to its live arrival.
+    let swept = (vec![], Some(answer));
+    assert_eq!(observed, (swept, keys, vec!["📥".to_string()], vec![]));
+}
+
+/// A message whose live arrival never comes is recovered once it is 20 seconds old, behind an
+/// older one the first sweep already recovered: nothing is lost or reordered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catch_up_recovers_a_yielded_message_once_its_window_passes_pg() {
+    let busy = busy().await;
+    let rt = &busy.rt;
+    rt.hold_mailbox().await;
+    let (earlier, answer, older, message) = (id_aged(60), id_aged(59), id_aged(30), fresh_id());
+    answered_before(
+        rt,
+        earlier,
+        answer,
+        &[(older, "older"), (message, "status?")],
+    );
+    rt.h.run_catch_up().await;
+    let first = queued_sources(rt).await;
+    let _later = hook::skew_clock(30);
+    rt.h.run_catch_up().await;
+    let observed = (first, queued_sources(rt).await, busy.pane.keys());
+    rt.finish().await;
+    assert_eq!(observed, (vec![older], vec![older, message], vec![]));
+}
+
+/// Outside the gate catch-up recovers a fresh message on the same busy pane at once, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catch_up_recovers_a_fresh_message_outside_the_gate_at_once_pg() {
+    let rt = runtime().await;
+    let _pane = InjectPane::new(CHANNEL_ID, "off");
+    rt.hold_mailbox().await;
+    let (earlier, answer, message) = (id_aged(60), id_aged(59), fresh_id());
+    answered_before(&rt, earlier, answer, &[(message, "status?")]);
+    rt.h.run_catch_up().await;
+    let observed = queued_sources(&rt).await;
+    rt.finish().await;
+    assert_eq!(observed, vec![message]);
 }

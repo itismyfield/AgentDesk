@@ -122,6 +122,15 @@ pub(in crate::services::discord) fn take_catch_up_retry_checkpoint_after_queue_d
         .map(|(_, checkpoint)| checkpoint)
 }
 
+fn log_catch_up_live_yield(phase: &str, channel_id: ChannelId, message_id: u64) {
+    tracing::info!(
+        phase,
+        channel_id = channel_id.get(),
+        message_id,
+        "catch-up left a fresh message on a busy-inject channel to its live arrival"
+    );
+}
+
 fn arm_catch_up_retry_pending(shared: &SharedData, channel_id: ChannelId, retry_after: u64) -> u64 {
     arm_catch_up_retry_state(shared, channel_id, CatchUpRetryState::new(retry_after)).checkpoint
 }
@@ -1071,6 +1080,14 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 }
                 (outcome, _) => outcome,
             };
+            // A fresh message on a gated channel waits for its live arrival; the checkpoint stays.
+            if outcome == CatchUpClassification::Recover
+                && router::catch_up_yields(channel_id, msg.id)
+            {
+                frontier.seal(mid);
+                log_catch_up_live_yield("phase1", channel_id, mid);
+                break;
+            }
             // Check the cap before counting a recover so refused work is not tallied.
             // Keep the checkpoint at the last queued message so newer ids stay retryable.
             if outcome == CatchUpClassification::Recover && stats.recovered >= remaining_capacity {
@@ -1483,6 +1500,11 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     stats.skipped += 1;
                     continue;
                 }
+            }
+            if router::catch_up_yields(channel_id, msg.id) {
+                frontier.leave_open(mid);
+                log_catch_up_live_yield("phase2", channel_id, mid);
+                break;
             }
             stats.eligible += 1;
             debug_assert!(should_phase2_recover_message(

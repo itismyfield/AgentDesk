@@ -81,6 +81,25 @@ fn covers(channel: ChannelId, parent: Option<ChannelId>) -> bool {
     !herdr(Some(channel.get())) && !parent.is_some_and(|id| herdr(Some(id.get())))
 }
 
+/// How long catch-up leaves a gated channel's newest message to its live arrival, which offers it.
+const LIVE_YIELD_SECS: i64 = 20;
+
+/// Whether catch-up leaves `message` to its live arrival: a gated channel's message whose snowflake
+/// time is within the yield window of now either way, so a skewed clock delays it a bounded time.
+pub(in crate::services::discord) fn catch_up_yields(
+    channel: ChannelId,
+    message: MessageId,
+) -> bool {
+    #[cfg(test)]
+    let now = chrono::Utc::now() + test_support::clock_skew();
+    #[cfg(not(test))]
+    let now = chrono::Utc::now();
+    let age = now
+        .signed_duration_since(*message.created_at())
+        .num_seconds();
+    age.abs() < LIVE_YIELD_SECS && covers(channel, None)
+}
+
 /// Whether a thread may take a message its gated parent passed on; a parent injection that owns
 /// or ended it blocks the promotion, and an allowed one records the thread's intake.
 pub(super) fn thread_may_take(

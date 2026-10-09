@@ -12,6 +12,8 @@ static OPEN: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
 static SEEN: Mutex<Option<HashMap<u64, Seen>>> = Mutex::new(None);
 type Park = (Arc<Notify>, Arc<Notify>);
 static PARKS: Mutex<Option<HashMap<u64, Park>>> = Mutex::new(None);
+/// Seconds added to the clock catch-up's live yield reads, so a test can age a message.
+static CLOCK_SKEW_SECS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Seen {
@@ -88,4 +90,22 @@ pub(super) fn note_promotion(message: u64, allowed: bool) {
 pub(super) fn note_outcome(message: u64, attempt: &InjectAttempt) {
     let outcome = format!("{attempt:?}");
     record(message, |seen| seen.outcomes.push(outcome));
+}
+
+/// Moves the clock catch-up's live yield reads by `secs` until the guard drops.
+pub(crate) struct ClockSkew;
+
+impl Drop for ClockSkew {
+    fn drop(&mut self) {
+        CLOCK_SKEW_SECS.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn skew_clock(secs: i64) -> ClockSkew {
+    CLOCK_SKEW_SECS.store(secs, std::sync::atomic::Ordering::SeqCst);
+    ClockSkew
+}
+
+pub(super) fn clock_skew() -> chrono::Duration {
+    chrono::Duration::seconds(CLOCK_SKEW_SECS.load(std::sync::atomic::Ordering::SeqCst))
 }
