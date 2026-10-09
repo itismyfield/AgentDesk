@@ -5,54 +5,47 @@ use super::*;
 pub(super) async fn hydrate_replay_hold(
     pool: Option<&sqlx::PgPool>,
     state: &mut inflight::InflightTurnState,
-) {
+) -> bool {
     use crate::db::replay_disposition as replay;
-    let reason = if let Some(receipt_id) = state.replay_receipt_id {
-        match pool {
-            None => Some(format!("receipt {receipt_id} unreadable without postgres")),
-            Some(pool) => match replay::receipt_disposition(pool, receipt_id).await {
-                Ok(Some(disposition))
-                    if !replay::stored_disposition_blocks_rerun(Some(&disposition)) =>
-                {
+    let Some(pool) = pool else {
+        return state.replay_receipt_id.is_none();
+    };
+    let receipt = match state.replay_receipt_id {
+        Some(receipt_id) => match replay::receipt_disposition(pool, receipt_id).await {
+            Ok(Some(disposition)) => Some((receipt_id, disposition)),
+            _ => return false,
+        },
+        None => {
+            let sources: Vec<String> = state
+                .source_message_ids
+                .iter()
+                .chain([&state.user_msg_id])
+                .filter(|&&id| id != 0)
+                .map(|id| id.to_string())
+                .collect();
+            let provider = &state.provider;
+            let channel = state.channel_id.to_string();
+            match replay::blocked_receipt_for_sources(pool, provider, &channel, &sources).await {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    tracing::warn!(channel_id = state.channel_id, %error, "replay source lookup failed");
+                    #[cfg(test)]
+                    super::replay_hold_tests::apply_read_error_mutant(state, &error);
                     None
                 }
-                Ok(Some(disposition)) => Some(format!("receipt {receipt_id} {disposition}")),
-                Ok(None) => Some(format!("receipt {receipt_id} disposition missing")),
-                Err(error) => Some(format!("receipt {receipt_id} unreadable: {error}")),
-            },
-        }
-    } else if let Some(pool) = pool {
-        let sources: Vec<String> = state
-            .source_message_ids
-            .iter()
-            .copied()
-            .chain(std::iter::once(state.user_msg_id))
-            .filter(|id| *id != 0)
-            .map(|id| id.to_string())
-            .collect();
-        match replay::blocked_receipt_for_sources(
-            pool,
-            &state.provider,
-            &state.channel_id.to_string(),
-            &sources,
-        )
-        .await
-        {
-            Ok(Some((receipt_id, disposition))) => {
-                state.replay_receipt_id = Some(receipt_id);
-                Some(format!("receipt {receipt_id} {disposition}"))
             }
-            Ok(None) => None,
-            Err(error) => Some(format!("replay source disposition unreadable: {error}")),
         }
-    } else {
-        None
     };
-    if let Some(reason) = reason
-        && !state.replay_hold_reasons.contains(&reason)
+    if let Some((receipt_id, disposition)) = receipt
+        .filter(|(_, disposition)| replay::stored_disposition_blocks_rerun(Some(disposition)))
     {
-        state.replay_hold_reasons.push(reason);
+        state.replay_receipt_id = Some(receipt_id);
+        let reason = format!("receipt {receipt_id} {disposition}");
+        if !state.replay_hold_reasons.contains(&reason) {
+            state.replay_hold_reasons.push(reason);
+        }
     }
+    true
 }
 
 pub(super) async fn deliver_held_debt(
@@ -67,10 +60,9 @@ pub(super) async fn deliver_held_debt(
     // Re-serializing an unknown runtime or newer format would erase data; keep its raw row.
     if state.runtime_kind_unknown_on_disk
         || state.version > inflight::inflight_state_version()
-        || state
+        || !state
             .full_response
-            .get(state.response_sent_offset..)
-            .is_none()
+            .is_char_boundary(state.response_sent_offset)
     {
         return;
     }

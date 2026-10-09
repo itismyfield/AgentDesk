@@ -106,7 +106,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         {
             continue;
         }
-        replay_hold::hydrate_replay_hold(shared.pg_pool.as_ref(), &mut state).await;
+        // An unverified projected receipt waits for another pass without persisting a read error.
+        if !replay_hold::hydrate_replay_hold(shared.pg_pool.as_ref(), &mut state).await {
+            continue;
+        }
         if state.replay_rerun_blocked() {
             replay_hold::deliver_held_debt(http, shared, provider, &mut state).await;
             continue;

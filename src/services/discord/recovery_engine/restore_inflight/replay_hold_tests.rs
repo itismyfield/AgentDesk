@@ -9,13 +9,26 @@ use crate::services::session_host::test_support::{InjectedLivenessGuard, Injecte
 use crate::services::session_host::{HostLiveness, HostPresence, HostSessionRef};
 use poise::serenity_prelude::ChannelId;
 
+pub(super) fn apply_read_error_mutant(
+    state: &mut inflight::InflightTurnState,
+    error: &sqlx::Error,
+) {
+    if std::env::var("ADK_REPLAY_FENCE_MUTANT").ok().as_deref() == Some("restore-read-error") {
+        state
+            .replay_hold_reasons
+            .push(format!("replay source disposition unreadable: {error}"));
+    }
+}
+
 async fn fixture() -> (
     crate::db::auto_queue::test_support::TestPostgresDb,
     sqlx::PgPool,
 ) {
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
+    if std::env::var("ADK_REPLAY_FENCE_MUTANT").ok().as_deref() != Some("restore-read-error") {
+        crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
+    }
     let version: String = sqlx::query_scalar("SELECT version()")
         .fetch_one(&pool)
         .await
@@ -228,13 +241,21 @@ async fn replay_hold_restore_missing_receipt_keeps_request_and_frozen_state_pg()
     original.replay_receipt_id = Some(i64::MAX);
     original.response_sent_offset = original.full_response.len();
     inflight::save_inflight_state_create_new(&original).unwrap();
+    let path = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &provider,
+        original.channel_id,
+    );
+    let before = std::fs::read(&path).unwrap();
     let discord = o_cut_recorder::start(original.channel_id).await;
 
     restore_inflight_turns(&discord.http, &shared, &provider).await;
 
     let state = inflight::load_inflight_state(&provider, original.channel_id)
         .expect("missing authority must keep debt");
-    assert!(state.replay_rerun_blocked());
+    assert!(state.replay_hold_reasons.is_empty());
+    assert_eq!(state.replay_receipt_id, original.replay_receipt_id);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(state.full_response, original.full_response);
     assert_eq!(state.user_text, original.user_text);
     assert_eq!(state.session_id, original.session_id);
@@ -333,6 +354,147 @@ async fn replay_hold_restore_dormant_rows_keep_existing_missing_host_disposal_pg
     );
     assert!(shared.core.lock().await.sessions.is_empty());
     assert_eq!(shared.tmux_watchers.len(), 0);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn replay_hold_restore_read_error_is_not_a_durable_hold_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let (db, pool) = fixture().await;
+    let provider = ProviderKind::Claude;
+    let channel = 1_479_671_301_387_178_000;
+    let name = provider.build_tmux_session_name("replay-read-error");
+    let shared = shared_on(&pool).await;
+    seed(
+        &pool,
+        &channel_key(&shared, &name),
+        &name,
+        channel,
+        Stored::Legacy,
+    )
+    .await;
+    let original = row(channel, name.clone());
+    inflight::save_inflight_state_create_new(&original).unwrap();
+    let path = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &provider,
+        channel,
+    );
+    let before = std::fs::read(&path).unwrap();
+    let closed = sqlx::PgPool::connect(&db.database_url).await.unwrap();
+    closed.close().await;
+    let unavailable = shared_on(&closed).await;
+    let discord = o_cut_recorder::start(channel).await;
+    {
+        let _pane =
+            InjectedLivenessGuard::set(HostSessionRef::tmux(&name), HostLiveness::ProbeError);
+        let _presence =
+            InjectedPresenceGuard::set(HostSessionRef::tmux(&name), HostPresence::ProbeFailed);
+        restore_inflight_turns(&discord.http, &unavailable, &provider).await;
+    }
+    let kept = inflight::load_inflight_state(&provider, channel)
+        .expect("the existing failed host probe keeps the row");
+    assert!(
+        kept.replay_hold_reasons.is_empty(),
+        "read errors are not durable holds"
+    );
+    assert_eq!(kept.replay_receipt_id, None);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(discord.contents().is_empty());
+    assert!(unavailable.core.lock().await.sessions.is_empty());
+    assert_eq!(unavailable.tmux_watchers.len(), 0);
+
+    let _pane = InjectedLivenessGuard::set(HostSessionRef::tmux(&name), HostLiveness::DeadOrAbsent);
+    let _presence = InjectedPresenceGuard::set(HostSessionRef::tmux(&name), HostPresence::Missing);
+    restore_inflight_turns(&discord.http, &shared, &provider).await;
+    assert!(inflight::load_inflight_state(&provider, channel).is_none());
+    assert!(
+        discord
+            .contents()
+            .iter()
+            .any(|body| body.contains("saved partial result")),
+        "a healthy second pass must take the existing missing-host disposal"
+    );
+    assert!(shared.core.lock().await.sessions.is_empty());
+    assert_eq!(shared.tmux_watchers.len(), 0);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn replay_hold_restore_projected_read_errors_keep_bytes_until_authority_recovers_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let (db, pool) = fixture().await;
+    let provider = ProviderKind::Claude;
+    let shared = shared_on(&pool).await;
+    let closed = sqlx::PgPool::connect(&db.database_url).await.unwrap();
+    closed.close().await;
+    let unavailable = [
+        shared_on(&closed).await,
+        crate::services::discord::make_shared_data_for_tests_with_storage(None),
+    ];
+    let mut rows = Vec::new();
+    let mut probes = Vec::new();
+    for n in 0..2 {
+        let channel = 1_479_671_301_387_179_000 + n;
+        let name = provider.build_tmux_session_name(&format!("replay-projected-read-error-{n}"));
+        seed(
+            &pool,
+            &channel_key(&shared, &name),
+            &name,
+            channel,
+            Stored::Legacy,
+        )
+        .await;
+        probes.push((
+            InjectedLivenessGuard::set(HostSessionRef::tmux(&name), HostLiveness::DeadOrAbsent),
+            InjectedPresenceGuard::set(HostSessionRef::tmux(&name), HostPresence::Missing),
+        ));
+        let mut original = row(channel, name);
+        original.replay_receipt_id =
+            Some(receipt(&pool, &original, "registered_not_started").await);
+        inflight::save_inflight_state_create_new(&original).unwrap();
+        let path = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &provider,
+            channel,
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        rows.push((original, path, bytes));
+    }
+    let discord = o_cut_recorder::start(rows[0].0.channel_id).await;
+    for unavailable in unavailable {
+        unavailable.settings.write().await.provider = provider.clone();
+        restore_inflight_turns(&discord.http, &unavailable, &provider).await;
+        for (original, path, bytes) in &rows {
+            let kept = inflight::load_inflight_state(&provider, original.channel_id).unwrap();
+            assert_eq!(kept.replay_receipt_id, original.replay_receipt_id);
+            assert!(kept.replay_hold_reasons.is_empty());
+            assert_eq!(&std::fs::read(path).unwrap(), bytes);
+        }
+        assert!(discord.contents().is_empty());
+        assert!(unavailable.core.lock().await.sessions.is_empty());
+        assert_eq!(unavailable.tmux_watchers.len(), 0);
+    }
+    restore_inflight_turns(&discord.http, &shared, &provider).await;
+    for (original, ..) in rows {
+        assert!(inflight::load_inflight_state(&provider, original.channel_id).is_none());
+    }
+    assert_eq!(
+        discord
+            .contents()
+            .iter()
+            .filter(|body| body.contains("saved partial result"))
+            .count(),
+        2,
+        "read recovery must resume the existing dormant disposal"
+    );
+    assert!(shared.core.lock().await.sessions.is_empty());
+    assert_eq!(shared.tmux_watchers.len(), 0);
+    drop(probes);
     pool.close().await;
     db.drop().await;
 }
