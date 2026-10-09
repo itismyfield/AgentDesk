@@ -207,6 +207,7 @@ jobs:
               # which scripts/ci-script-checks.sh reruns, demanding an empty diff. paths-
               # filter ORs patterns, so a '!' excludes nothing (#5232): refused anywhere.
               - 'src/cli/channel_home_tests.rs'
+              - 'src/cli/dcserver_pg_bootstrap.rs'
               - 'src/cli/herdr_tests.rs'
               - 'src/db/auto_queue/entries.rs'
               - 'src/db/auto_queue/entries/dispatch_failure.rs'
