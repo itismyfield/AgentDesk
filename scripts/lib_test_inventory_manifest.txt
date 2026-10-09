@@ -7712,6 +7712,7 @@ services::discord::tui_prompt_relay::rehydration::tests::markerless_codex_tui_fa
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_busy_pane_takes_the_announce_bot_s_text_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_channel_outside_the_gate_reaches_no_injection_step_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_fresh_message_that_cannot_be_held_is_recovered_at_once_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_handback_that_never_lands_ends_the_message_with_a_notice_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_handback_with_an_unknown_answer_is_neither_resent_nor_queued_again_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg
@@ -7721,9 +7722,11 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_taken_message
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_text_command_on_a_gated_channel_is_never_offered_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_vetoed_paste_hands_the_message_back_ahead_of_input_sent_meanwhile_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_vetoed_paste_queues_with_the_sender_s_own_marks_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_yielded_message_is_recovered_once_after_a_restart_past_it_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_aborted_intake_leaves_the_owner_to_record_the_injection_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_owner_refused_before_its_reservation_leaves_the_message_to_intake_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_owner_that_dies_outside_the_effect_reports_the_input_unknown_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::catch_up_holds_a_fresh_message_only_its_unanswered_scan_reads_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::catch_up_leaves_a_fresh_message_to_its_live_offer_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::catch_up_recovers_a_fresh_message_outside_the_gate_at_once_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::catch_up_recovers_a_yielded_message_once_its_window_passes_pg
