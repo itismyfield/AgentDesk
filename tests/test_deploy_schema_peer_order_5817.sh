@@ -39,12 +39,13 @@ extract_function() {
 
 for fn in _resolve_deploy_peers _deploy_peer_env_prelude _deploy_to_one_peer \
     _deploy_to_all_peers _wait_for_peer_deploy_verdict _report_peer_verdict_failure \
-    _schema_order_peers _schema_order_refusal _schema_order_guard_before_build \
+    _schema_order_peers _schema_order_refusal _cluster_target_refusal \
+    _schema_order_guard_before_build \
     _doctor_migration_snapshot _classify_schema_peer_failure \
     _pin_cluster_target_to_built_source _run_schema_peers_first \
-    _apply_release_migrations _finish_cluster_stage _cleanup_on_exit \
+    _prepare_release_migrations _finish_cluster_stage _cleanup_on_exit \
     _preserve_staged_binary_for_recovery _migration_floor_artifact_path \
-    _spawn_detached_helper; do
+    _spawn_detached_helper _handle_cleanup_signal; do
     body="$(extract_function "$fn")"
     if [ -z "$body" ]; then
         printf 'FAIL: %s is not defined in %s\n' "$fn" "$DEPLOY_SH" >&2
@@ -52,6 +53,21 @@ for fn in _resolve_deploy_peers _deploy_peer_env_prelude _deploy_to_one_peer \
     fi
     eval "$body"
 done
+
+# The top-level migration step, from the tunnel migration up to the forward-only
+# floor, runs as a function so a refusal returns instead of ending the test.
+step_body="$(awk '
+    /^_migrate_pg_tunnel_before_release_stop$/ { printing = 1; next }
+    /^# Migration 0100 is now a forward-only binary floor/ { exit }
+    printing { print }
+' "$DEPLOY_SH" | sed -E 's/exit 1$/return 1/')"
+case "$step_body" in
+    *release-migrate-postgres*) : ;;
+    *) printf 'FAIL: the top-level migration step was not found in %s\n' "$DEPLOY_SH" >&2; exit 1 ;;
+esac
+eval "_release_migration_step() {
+$step_body
+}"
 
 # --- fixtures ----------------------------------------------------------------
 # H1 is what the leader built (two new migrations, 0002 and 0003); H2 lands on
@@ -176,34 +192,43 @@ DEPLOY_PEERS_OVERRIDE=()
 DEPLOY_PEERS_FILE="$TMP_ROOT/no-peers-file"
 export AGENTDESK_PEER_REPO_DIR="$PEER"
 
+# Resets the fixtures and loads a scenario's defaults plus its KEY=VALUE settings
+# into the calling subshell.
+reset_fixtures() {
+    rm -f "$FAKE_CALLS" "$TMP_ROOT/state" "$ADK_REL/bin/"agentdesk*
+    : >"$FAKE_CALLS"
+    git -C "$PEER" checkout --quiet main
+    git -C "$PEER" reset --quiet --hard "$H0"
+    git -C "$REPO" reset --quiet --hard "$H1"
+}
+load_scenario() {
+    DEPLOY_ALL_NODES=1 DEPLOY_PEER_INVOCATION=0 DEPLOY_TARGET_SHA=""
+    AGENTDESK_DEPLOY_PEERS=peer-stub PEER_APPLIES=all PEER_LAUNCH_RC=0
+    PROBE_MARKER=success FLOOR_ADVANCES=1 DEPLOY_BUILT_SOURCE_SHA="$H1"
+    AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=0 AGENTDESK_DEPLOY_BINARY=""
+    AGENTDESK_DEPLOY_TARGET_SHA="" MIGRATION_FLOOR_ARMED=0 DEPLOY_OK=0
+    SCHEMA_PEERS_FIRST_STATE="" SCHEMA_PEERS_FIRST_FAILED=0
+    PEER_LEG_LAUNCHED=0 PEER_VERDICT_MARKER=unknown RUN_FINISH=0 RUN_CLEANUP=0
+    DB_INIT=1
+    local kv
+    for kv in "$@"; do eval "${kv%%=*}=\${kv#*=}"; done
+    export AGENTDESK_DEPLOY_PEERS PEER_APPLIES PEER_LAUNCH_RC FAKE_DOCTOR_BROKEN
+    tr ' ' '\n' <<<"$DB_INIT" >"$FAKE_DB"
+    cp "$FAKE_BIN" "$ADK_REL/bin/agentdesk.deploy.test"
+    STAGED_BINARY="$ADK_REL/bin/agentdesk.deploy.test"
+}
+
 # Runs the production migration step in a subshell, the way the top level calls
 # it, and records what happened. (label, then KEY=VALUE scenario settings)
 run_step() {
     local label="$1"
     shift
-    rm -f "$FAKE_CALLS" "$TMP_ROOT/state"
-    printf '1\n' >"$FAKE_DB"
-    : >"$FAKE_CALLS"
-    git -C "$PEER" checkout --quiet main
-    git -C "$PEER" reset --quiet --hard "$H0"
-    git -C "$REPO" reset --quiet --hard "$H1"
+    reset_fixtures
     (
-        DEPLOY_ALL_NODES=1 DEPLOY_PEER_INVOCATION=0 DEPLOY_TARGET_SHA=""
-        AGENTDESK_DEPLOY_PEERS=peer-stub PEER_APPLIES=all PEER_LAUNCH_RC=0
-        PROBE_MARKER=success FLOOR_ADVANCES=1 DEPLOY_BUILT_SOURCE_SHA="$H1"
-        AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=0 AGENTDESK_DEPLOY_BINARY=""
-        AGENTDESK_DEPLOY_TARGET_SHA="" MIGRATION_FLOOR_ARMED=0 DEPLOY_OK=0
-        SCHEMA_PEERS_FIRST_STATE="" SCHEMA_PEERS_FIRST_FAILED=0
-        PEER_LEG_LAUNCHED=0 PEER_VERDICT_MARKER=unknown RUN_FINISH=0 RUN_CLEANUP=0
-        local kv
-        for kv in "$@"; do eval "$kv"; done
-        export AGENTDESK_DEPLOY_PEERS PEER_APPLIES PEER_LAUNCH_RC FAKE_DOCTOR_BROKEN
-        cp "$FAKE_BIN" "$ADK_REL/bin/agentdesk.deploy.test"
-        STAGED_BINARY="$ADK_REL/bin/agentdesk.deploy.test"
-        rm -f "$ADK_REL/bin/agentdesk.migration-floor-recovery"
+        load_scenario "$@"
         local rc=0 guard_rc=0 finish_rc=skipped
         _schema_order_guard_before_build >"$TMP_ROOT/guard.out" 2>&1 || guard_rc=$?
-        _apply_release_migrations >"$TMP_ROOT/step.out" 2>&1 || rc=$?
+        _release_migration_step >"$TMP_ROOT/step.out" 2>&1 || rc=$?
         if [ "$RUN_FINISH" = 1 ] && [ "$rc" = 0 ]; then
             finish_rc=0
             _finish_cluster_stage >>"$TMP_ROOT/step.out" 2>&1 || finish_rc=$?
@@ -294,13 +319,31 @@ state_is "rc=0"
 state_is "armed=1"
 state_is "state=completed"
 
-run_step "cluster, schema already current" FLOOR_ADVANCES=0 "FAKE_KNOWN=1" RUN_FINISH=1
+# Nothing advances for the binary built here (H1 embeds and the database holds
+# 1-3), but origin/main has moved on to H2 with 0004: the peer still deploys after
+# this node, and builds H1, so it never applies a migration this node lacks.
+run_step "cluster, schema already current" FLOOR_ADVANCES=0 "DB_INIT=1 2 3" RUN_FINISH=1
 state_is "rc=0"
+state_is "finish_rc=0"
+state_is "state="
 peer_line="$(first_line_of peer-deploy)"
 leader_line="$(first_line_of leader-migrate)"
 if [ -z "$peer_line" ] || [ -z "$leader_line" ] || [ "$peer_line" -lt "$leader_line" ]; then
     fail_test "$CURRENT_LABEL: without a schema change the peer stays after this node; calls: $(tr '\n' '|' <"$FAKE_CALLS")"
 fi
+case "$(grep '^peer-deploy' "$FAKE_CALLS" | head -1)" in
+    *"head=$H1 AGENTDESK_DEPLOY_TARGET_SHA=$H1"*) : ;;
+    *) fail_test "$CURRENT_LABEL: the peer must build and be pinned to $H1; calls: $(tr '\n' '|' <"$FAKE_CALLS")" ;;
+esac
+! db_has 4 || fail_test "$CURRENT_LABEL: the peer applied migration 4, which the leader's binary does not embed"
+
+# An external artifact has no source the peer could build, schema change or not.
+run_step "external artifact, schema current" FLOOR_ADVANCES=0 "DB_INIT=1 2 3" RUN_FINISH=1 \
+    "AGENTDESK_DEPLOY_BINARY=$TMP_ROOT/elsewhere" DEPLOY_BUILT_SOURCE_SHA=""
+state_is "guard_rc=1"
+state_is "rc=1"
+! leader_migrated || fail_test "$CURRENT_LABEL: this node migrated although the peers cannot be pinned"
+[ "$(calls_count peer-deploy)" = 0 ] || fail_test "$CURRENT_LABEL: the peer deployed an unpinned source"
 
 # --- 3. the 2026-09-09 shape: the peer refuses before migrating -----------------
 run_step "peer refused before migrating" PEER_APPLIES=none PROBE_MARKER=failure RUN_CLEANUP=1
@@ -344,10 +387,6 @@ state_is "state=unresolved"
 [ -e "$ADK_REL/bin/agentdesk.migration-floor-recovery" ] \
     || fail_test "$CURRENT_LABEL: an unreadable schema must keep the staged binary"
 
-# Interrupted while the peer leg runs (TERM reaches the EXIT path with this state).
-run_step "interrupted during the peer leg" "SCHEMA_PEERS_FIRST_STATE=running" FLOOR_ADVANCES=0 "FAKE_KNOWN=1" RUN_CLEANUP=1
-[ -e "$ADK_REL/bin/agentdesk.migration-floor-recovery" ] \
-    || fail_test "$CURRENT_LABEL: an interrupted peer leg must not delete the staged binary"
 
 # --- 6. the peer builds exactly the staged source -------------------------------
 run_step "origin/main moved past the built source" RUN_FINISH=1
@@ -366,7 +405,58 @@ run_step "pinned target is not the built source" "DEPLOY_TARGET_SHA=$H2"
 state_is "rc=1"
 [ "$(calls_count peer-deploy)" = 0 ] || fail_test "$CURRENT_LABEL: a conflicting pin must be refused before the peer deploys"
 
-# --- 7. the detached relaunch keeps the override ---------------------------------
+# --- 7. a real TERM around the peer leg ------------------------------------------
+# A child shell runs the migration step under the production EXIT/TERM traps and
+# receives TERM on the first command after the condition in TERM_WHEN holds.
+term_step() {
+    local label="$1"
+    shift
+    reset_fixtures
+    printf 'old\n' >"$ADK_REL/bin/agentdesk"
+    local rc=0
+    (
+        set +e
+        load_scenario "$@"
+        REL_BINARY="$ADK_REL/bin/agentdesk"
+        eval "$(extract_function _recover_or_preserve_past_migration_floor)"
+        trap _cleanup_on_exit EXIT
+        trap '_handle_cleanup_signal 143' TERM
+        self_pid="$(exec sh -c 'echo $PPID')"
+        depth="$BASH_SUBSHELL"
+        fired=0
+        set -o functrace
+        trap '[ "$fired" = 1 ] || [ "$BASH_SUBSHELL" != "$depth" ] || ! eval "$TERM_WHEN" || { fired=1; kill -TERM "$self_pid"; }' DEBUG
+        _release_migration_step
+        echo "not interrupted"
+    ) >"$TMP_ROOT/step.out" 2>&1 || rc=$?
+    CURRENT_LABEL="$label"
+    [ "$rc" = 143 ] || fail_test "$label: expected the TERM exit 143, got $rc: $(cat "$TMP_ROOT/step.out")"
+    ! grep -q "not interrupted" "$TMP_ROOT/step.out" || fail_test "$label: TERM never fired"
+    ! leader_migrated || fail_test "$label: this node migrated after the TERM"
+    [ ! -e "$ADK_REL/bin/agentdesk.deploy.test" ] || fail_test "$label: the staged path was left behind"
+}
+same_as_staged() { cmp -s "$FAKE_BIN" "$1"; }
+
+# Leaving "running" after the peer moved the schema: the floor must already be
+# armed, so the binary that boots on the new schema is installed.
+LEFT_RUNNING='[ "$SCHEMA_PEERS_FIRST_STATE" = running ] && seen_running=1; [ "${seen_running:-0}" = 1 ] && { [ "$SCHEMA_PEERS_FIRST_STATE" != running ] || [ "$MIGRATION_FLOOR_ARMED" = 1 ]; }'
+for scenario in "peer succeeded|PEER_APPLIES=all PROBE_MARKER=success" \
+    "peer moved the schema, then failed|PEER_APPLIES=first PROBE_MARKER=failure"; do
+    # shellcheck disable=SC2086  # The settings are whitespace-free KEY=VALUE words.
+    term_step "TERM as the peer leg settles: ${scenario%%|*}" "TERM_WHEN=$LEFT_RUNNING" ${scenario#*|}
+    same_as_staged "$ADK_REL/bin/agentdesk" \
+        || fail_test "$CURRENT_LABEL: the staged binary was not installed: $(cat "$TMP_ROOT/step.out")"
+    [ "$(cat "$ADK_REL/bin/agentdesk.pre-migration-floor" 2>/dev/null)" = old ] \
+        || fail_test "$CURRENT_LABEL: the replaced binary was not kept"
+done
+
+# Still inside the peer leg, the schema is unknown: keep the staged binary, install nothing.
+term_step "TERM during the peer leg" 'TERM_WHEN=[ "$PEER_LEG_LAUNCHED" = 1 ]'
+[ "$(cat "$ADK_REL/bin/agentdesk")" = old ] || fail_test "$CURRENT_LABEL: an unknown outcome installed the staged binary"
+same_as_staged "$ADK_REL/bin/agentdesk.migration-floor-recovery" \
+    || fail_test "$CURRENT_LABEL: the staged binary must be kept for recovery: $(ls "$ADK_REL/bin")"
+
+# --- 8. the detached relaunch keeps the override ---------------------------------
 HELPER_DIR="$TMP_ROOT/helper-scripts"
 mkdir -p "$HELPER_DIR"
 cat >"$HELPER_DIR/deploy-release.sh" <<'SH'

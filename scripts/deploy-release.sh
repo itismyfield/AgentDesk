@@ -53,12 +53,13 @@ fi
 #                                      exactly origin/main.
 #   AGENTDESK_DEPLOY_ALLOW_DIRTY=1     allow deploying with local changes.
 #   AGENTDESK_DEPLOY_TARGET_SHA=<sha>  deploy this CI-Main-green origin/main ancestor, not the tip.
-# Cluster schema order: Postgres is shared, so a deploy that advances its schema
-# deploys the single peer (pinned to the source built here) BEFORE this node
-# migrates or restarts, and a deploy without --all-nodes is refused when peers
-# exist. An old binary cannot boot on a schema newer than it embeds.
-#   AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=1  skip that order (peers may be
-#                                      left unable to boot until redeployed).
+# Cluster schema order: Postgres is shared and an old binary cannot boot on a
+# schema newer than it embeds. Every --all-nodes peer builds the source built here,
+# never a newer origin/main; a deploy that advances the schema deploys the single
+# peer BEFORE this node migrates or restarts, and without --all-nodes it is refused
+# when peers exist.
+#   AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=1  skip that pin and order (peers
+#                                      may be left unable to boot until redeployed).
 #   AGENTDESK_DEPLOY_SKIP_FRESHNESS=1  skip both source-identity and remote
 #                                      freshness gates for an intentional
 #                                      offline/emergency deploy. In this mode,
@@ -1948,7 +1949,7 @@ _deploy_to_all_peers() {
 }
 
 _schema_order_peers() {
-    # Peers the schema order applies to; empty for a peer leg or under the override.
+    # Peers the target pin and schema order apply to; empty for a peer leg or under the override.
     [ "$DEPLOY_PEER_INVOCATION" != "1" ] || return 0
     [ "${AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS:-0}" != "1" ] || return 0
     _resolve_deploy_peers
@@ -1963,12 +1964,18 @@ _schema_order_refusal() {
         echo "✗ [schema-order] this deploy advances the shared Postgres schema, but peer(s) ${peer_list}would keep a binary that cannot boot on it; rerun with --all-nodes"
     elif [ "$peer_count" -gt 1 ]; then
         echo "✗ [schema-order] a schema-advancing cluster deploy supports one peer; got $peer_count (${peer_list% })"
-    elif [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
-        echo "✗ [schema-order] AGENTDESK_DEPLOY_BINARY cannot be tied to the source the peer builds; deploy a build of this source"
     else
         return 0
     fi
     echo "  Set AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=1 only when the peers may stay unable to boot until redeployed."
+    return 1
+}
+
+_cluster_target_refusal() {
+    # An external artifact has no source the cluster peers could be pinned to.
+    [ "$DEPLOY_ALL_NODES" = "1" ] && [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 0
+    echo "✗ [schema-order] AGENTDESK_DEPLOY_BINARY cannot be tied to the source the peers build; deploy a build of this source"
+    echo "  Set AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=1 only when the peers may build another source."
     return 1
 }
 
@@ -1977,6 +1984,7 @@ _schema_order_guard_before_build() {
     local peers
     peers="$(_schema_order_peers)"
     [ -n "$peers" ] || return 0
+    _cluster_target_refusal || return 1
     _migration_floor_may_advance || return 0
     _schema_order_refusal "$peers"
 }
@@ -2033,8 +2041,11 @@ _classify_schema_peer_failure() {
 }
 
 _pin_cluster_target_to_built_source() {
-    # The peer must build exactly the staged source, never a newer origin/main.
+    # Every cluster peer builds exactly the staged source, never a newer origin/main,
+    # whether or not this deploy advances the schema.
     local head_sha
+    [ "$DEPLOY_ALL_NODES" = "1" ] && [ -n "$(_schema_order_peers)" ] || return 0
+    _cluster_target_refusal || return 1
     head_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
     if [ -z "$DEPLOY_BUILT_SOURCE_SHA" ] || [ "$head_sha" != "$DEPLOY_BUILT_SOURCE_SHA" ]; then
         echo "✗ [schema-order] workspace HEAD (${head_sha:-unknown}) is not the source this node built (${DEPLOY_BUILT_SOURCE_SHA:-unknown}); refusing to send the peer another schema"
@@ -2051,7 +2062,7 @@ _pin_cluster_target_to_built_source() {
     DEPLOY_TARGET_SHA="$DEPLOY_BUILT_SOURCE_SHA"
     AGENTDESK_DEPLOY_TARGET_SHA="$DEPLOY_BUILT_SOURCE_SHA"
     export AGENTDESK_DEPLOY_TARGET_SHA
-    echo "▸ [schema-order] peer pinned to the built source ${DEPLOY_BUILT_SOURCE_SHA}"
+    echo "▸ [schema-order] peers pinned to the built source ${DEPLOY_BUILT_SOURCE_SHA}"
 }
 
 _run_schema_peers_first() {
@@ -2064,14 +2075,14 @@ _run_schema_peers_first() {
         return 0
     fi
     _schema_order_refusal "$peers" || return 1
-    _pin_cluster_target_to_built_source || return 1
     echo "▸ [schema-order] the shared Postgres schema advances — deploying the peer before this node migrates or restarts"
     PEER_LEG_LAUNCHED=0
     PEER_VERDICT_MARKER="unknown"
     SCHEMA_PEERS_FIRST_STATE=running
+    # Arm before leaving running: a signal in between then recovers or keeps the binary.
     if _deploy_to_all_peers "$@"; then
-        SCHEMA_PEERS_FIRST_STATE=completed
         MIGRATION_FLOOR_ARMED=1
+        SCHEMA_PEERS_FIRST_STATE=completed
         return 0
     fi
     after="$(_doctor_migration_snapshot "$STAGED_BINARY")" || after=""
@@ -2083,9 +2094,9 @@ _run_schema_peers_first() {
             return 1
             ;;
         advanced)
+            MIGRATION_FLOOR_ARMED=1
             SCHEMA_PEERS_FIRST_STATE=failed
             SCHEMA_PEERS_FIRST_FAILED=1
-            MIGRATION_FLOOR_ARMED=1
             echo "⚠ [schema-order] the peer leg failed after the shared schema moved (before: $before; after: $after); finishing this node on the new binary"
             return 0
             ;;
@@ -2110,19 +2121,10 @@ _finish_cluster_stage() {
     fi
 }
 
-_apply_release_migrations() {
-    # Peer first when the schema advances, then this node's forward-only migration.
-    _run_schema_peers_first "$@" || return 1
-    # A partial apply advances Postgres even when the command reports failure, so
-    # arm before the attempt.
-    if _migration_floor_may_advance; then
-        MIGRATION_FLOOR_ARMED=1
-    fi
-    echo "▸ Applying release PostgreSQL migrations before restart drain..."
-    if ! "$STAGED_BINARY" release-migrate-postgres; then
-        echo "✗ Release PostgreSQL migration failed before restart was requested; the existing runtime remains active."
-        return 1
-    fi
+_prepare_release_migrations() {
+    # The peer target is fixed first; the schema then decides only the order.
+    _pin_cluster_target_to_built_source || return 1
+    _run_schema_peers_first "$@"
 }
 
 _acquire_release_deploy_lock() {
@@ -2355,8 +2357,9 @@ elif [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
 else
     SOURCE_BINARY="$(_resolve_default_release_binary "$DEPLOY_BUILD_PROFILE")"
 fi
-# The peer-first leg pins the peer to this commit, so record it before building.
-if [ -n "$(_schema_order_peers)" ]; then
+# Cluster peers are pinned to this commit, so record it before building; an
+# external artifact has no source to record.
+if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ -n "$(_schema_order_peers)" ]; then
     DEPLOY_BUILT_SOURCE_SHA="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
 fi
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
@@ -2986,12 +2989,25 @@ if [ -f "$LOCK_FILE" ]; then
     OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || true)
 fi
 
+# Postgres is shared: pin the cluster peers to this build and, when the schema
+# advances, deploy the peer before this node migrates or restarts.
+_prepare_release_migrations "$@" || exit 1
+
 # Apply the forward-only database boundary before requesting restart_pending.
 # The runtime may consume a persisted restart request and exit on its own, so no
 # drain marker or self-exit trigger may exist when candidate migration runs. The
 # tunnel migration above is a fail-closed, SQL-ready prerequisite; its EXIT trap
 # restores the previous tunnel state if that prerequisite itself fails.
-_apply_release_migrations "$@" || exit 1
+# A partial apply advances Postgres even when the command reports failure, so
+# arm before the attempt.
+if _migration_floor_may_advance; then
+    MIGRATION_FLOOR_ARMED=1
+fi
+echo "▸ Applying release PostgreSQL migrations before restart drain..."
+if ! "$STAGED_BINARY" release-migrate-postgres; then
+    echo "✗ Release PostgreSQL migration failed before restart was requested; the existing runtime remains active."
+    exit 1
+fi
 
 # Migration 0100 is now a forward-only binary floor: once it commits, a pre-0100
 # binary cannot restart because SQLx rejects a database migration newer than its
