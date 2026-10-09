@@ -191,7 +191,8 @@ async fn c2b_admitted_relay_reattach_rebinds_through_a_closing_gate_and_releases
     use std::os::unix::fs::PermissionsExt;
     let _guard = auto_heal_test_lock().lock().await;
     clear_auto_heal_attempts_for_tests();
-    let (_root_guard, root_dir) = isolated_agentdesk_root();
+    let root_dir = tempfile::tempdir().unwrap();
+    let _root_guard = crate::config::set_agentdesk_root_for_test(root_dir.path());
     // A `tmux` that reports every pane alive and lists no sessions.
     let tmux_dir = tempfile::tempdir().unwrap();
     let script = tmux_dir.path().join("tmux");
