@@ -64,9 +64,9 @@ pub(super) async fn deliver_held_debt(
     let Some(channel_id) = inflight::opt_channel_id(state.channel_id) else {
         return;
     };
-    // Re-serializing an unknown runtime would erase its original spelling; keep its raw row.
+    // Re-serializing an unknown runtime or newer format would erase data; keep its raw row.
     if state.runtime_kind_unknown_on_disk
-        || (state.runtime_kind.is_none() && state.version > inflight::inflight_state_version())
+        || state.version > inflight::inflight_state_version()
         || state
             .full_response
             .get(state.response_sent_offset..)

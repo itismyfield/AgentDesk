@@ -343,24 +343,39 @@ async fn replay_hold_restore_preserves_unknown_runtime_bytes_before_legacy_clear
     let (db, pool) = fixture().await;
     let shared = shared_on(&pool).await;
     let provider = ProviderKind::Claude;
-    let mut original = row(1_479_671_301_387_174_000, "future-runtime-held".into());
-    original.replay_receipt_id = Some(receipt(&pool, &original, "withheld").await);
-    inflight::save_inflight_state_create_new(&original).unwrap();
-    let root = inflight::inflight_runtime_root().unwrap();
-    let path = inflight::inflight_state_path(&root, &provider, original.channel_id);
-    let mut forward: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    forward["runtime_kind"] = serde_json::json!("future_runtime_v2");
-    let bytes = serde_json::to_vec(&forward).unwrap();
-    std::fs::write(&path, &bytes).unwrap();
-    let discord = o_cut_recorder::start(original.channel_id).await;
+    let mut raw_rows = Vec::new();
+    for n in 0..2 {
+        let mut original = row(
+            1_479_671_301_387_174_000 + n,
+            format!("future-runtime-held-{n}"),
+        );
+        original.replay_receipt_id = Some(receipt(&pool, &original, "withheld").await);
+        inflight::save_inflight_state_create_new(&original).unwrap();
+        let root = inflight::inflight_runtime_root().unwrap();
+        let path = inflight::inflight_state_path(&root, &provider, original.channel_id);
+        let mut forward: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        if n == 0 {
+            forward["runtime_kind"] = serde_json::json!("future_runtime_v2");
+        } else {
+            forward["runtime_kind"] = serde_json::json!("legacy_tmux_wrapper");
+            forward["version"] = serde_json::json!(inflight::inflight_state_version() + 1);
+            forward["future_delivery_proof"] = serde_json::json!({"unrecognized": "must retain"});
+        }
+        let bytes = serde_json::to_vec(&forward).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        raw_rows.push((path, bytes));
+    }
+    let discord = o_cut_recorder::start(1_479_671_301_387_174_000).await;
 
     restore_inflight_turns(&discord.http, &shared, &provider).await;
 
-    assert_eq!(
-        std::fs::read(&path).expect("held forward row must not clear"),
-        bytes
-    );
+    for (path, bytes) in raw_rows {
+        assert_eq!(
+            std::fs::read(&path).expect("held forward row must not clear or erase future fields"),
+            bytes
+        );
+    }
     assert!(discord.contents().is_empty());
     assert!(shared.core.lock().await.sessions.is_empty());
     assert_eq!(shared.tmux_watchers.len(), 0);
