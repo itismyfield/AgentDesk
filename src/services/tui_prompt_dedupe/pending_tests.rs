@@ -936,20 +936,19 @@ fn a_waiting_pending_leaves_the_queue_once_the_candidate_behind_it_settles() {
     let (b, c) = (uuid(), uuid());
     let pending = AdoptionHttp::Durable(DurableKind::Pending);
     assert_eq!(adopt_from_hook(&a, &b, &clear(&lane.path(&b))), pending);
-    lane.touch(&c);
     APPEND_FAULT.with(|fault| fault.set(Some("write")));
     let refused = adopt_from_hook(&a, &c, &clear(&lane.path(&c)));
     APPEND_FAULT.with(|fault| fault.set(None));
     assert_eq!(refused, AdoptionHttp::NotDurable(NotDurableReason::Append));
     assert_eq!(deferred_adoption_count(), 2, "C waits behind B");
 
-    // The poll settles C durably, so B leaves the queue with it and is never adopted afterwards.
+    // The poll records C's own Pending, so B leaves the queue; its transcript later adopts nothing.
     retry_deferred_claude_adoptions();
-    assert_eq!(bound_session(tmux), Some(c.clone()));
-    assert!(clear_claude_session_rotation(tmux));
-    retry_deferred_claude_adoptions();
-    assert_eq!(deferred_adoption_count(), 0, "B left with C");
+    assert_eq!(deferred_adoption_count(), 1, "only C waits");
     lane.touch(&b);
+    retry_deferred_claude_adoptions();
+    assert_eq!(bound_session(tmux), Some(a));
+    lane.touch(&c);
     retry_deferred_claude_adoptions();
     assert_eq!(bound_session(tmux), Some(c));
     let records = records_strict(channel).unwrap().unwrap();
