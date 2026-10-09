@@ -387,7 +387,6 @@ async fn clear_channel_session_state_body(
     if let Some(reason) = refusal(shared, provider, channel_id, explicit_session_key).await {
         anyhow::bail!(reason);
     }
-    #[cfg(test)]
     home_fence::pause("clear").await;
     // Judged before the clear changes anything: main's tmux reset, a host's own clear or a refusal.
     let hosted = native::target(http, shared, provider, channel_id, explicit_session_key).await?;
@@ -661,7 +660,6 @@ async fn cancel_queued_with_home_permit(
 ) -> Result<Option<crate::services::turn_orchestrator::Intervention>, home_fence::CommandRefused> {
     let permit = home_fence::admit(channel, provider.as_str())?;
     crate::services::cluster::channel_home::command_scope(permit, async {
-        #[cfg(test)]
         home_fence::pause("queued").await;
         Ok(mailbox_cancel_queued_primary_message(shared, provider, channel, message).await)
     })

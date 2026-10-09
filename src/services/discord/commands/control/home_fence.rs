@@ -78,3 +78,6 @@ pub(in crate::services::discord) async fn pause(label: &str) {
         barrier.1.notified().await;
     }
 }
+
+#[cfg(not(test))]
+pub(in crate::services::discord) async fn pause(_label: &str) {}
