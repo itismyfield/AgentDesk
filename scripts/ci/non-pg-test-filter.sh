@@ -247,6 +247,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::settings::tests
   --skip services::stale_turn_reconciler::tests
   --skip services::tmux_turn_liveness::tests_pg
+  --skip services::tui_o::exact_pg::tests
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
@@ -1015,6 +1016,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::settings::tests
   services::stale_turn_reconciler::tests
   services::tmux_turn_liveness::tests_pg
+  services::tui_o::exact_pg::tests
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests
   voice::announce_meta::tests

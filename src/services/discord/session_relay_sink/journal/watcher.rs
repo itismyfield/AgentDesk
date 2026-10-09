@@ -142,6 +142,7 @@ pub(in crate::services::discord) fn settle_without_transport(
         return Vec::new();
     };
     process_observer().submit(AppendCommand {
+        ack: None,
         pool,
         events: events.clone(),
     });
@@ -182,6 +183,7 @@ pub(in crate::services::discord) fn begin_watcher_terminal(
     let pool = admit(shared, coordinates.channel_id, obligation_id)?;
     let attempt_id = Uuid::new_v5(&obligation_id, b"attempt:0");
     process_observer().submit(AppendCommand {
+        ack: None,
         pool: pool.clone(),
         events: vec![
             event(obligation_id, None, "O", 0, obligation_payload(coordinates, TERMINAL_DISPOSITION)),

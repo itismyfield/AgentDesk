@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "d96a6aa90733423f8180cedd8f853f0cfae6e07a",
+  "measured_at_sha": "4d52486300957c242177fefa76a44f59fee47a98",
   "records": [
     {
       "root": "migrations/postgres",
@@ -28611,7 +28611,7 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:52fef74430ec7c7d15bc27f6fbe2986eee7ee56636636c0b3c32e7e64cc7b3fd"
+      "fingerprint": "sha256:35b698e1e9d2ae594687a24b3b4e52a1e724932a01ae5086ade84236b306f4d9"
     },
     {
       "root": "src",
@@ -28621,6 +28621,33 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:9478ebf7650734af0612da2c252b00ab27ef4b895cf84adf18077791e46f2995"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/session_relay_sink/journal/pg_store.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:24ece1f031cc3a0cb5cff227d81e8471c3ec4a162a3d6263d0c3b6b82fa9e5f2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/session_relay_sink/journal/pg_store.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:ceca8b4a2250f7a1cbd40840e7f92e5eeb62607f68cd9855c4ff95d26cf0eb8d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/session_relay_sink/journal/pg_store.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5fd575d0c617ebeebf4b52d905f5dacb31f65f0adce46899717733f546288606"
     },
     {
       "root": "src",
@@ -36064,6 +36091,69 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:803169d7934477002a9678d177a3b1714c57e5b82026b72069658597d8cecb5e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/exact_pg.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8cce4223759e053d86f8a3af7f94076dd5b8c118a2b466d2e97641963e63f054"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/exact_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:75ecc5a3b1620a335850c52105edac4c21c7cecf2d9c9336f07104f19f715eb2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/exact_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:79017b800f8ada794ae2c36718abfc22d629f5193e23d38a0674f4959c5a9ec4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/exact_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ce72c549862378537715b5b43fb08e9c8c828a4292d64d26493415c12f82799d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/exact_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:21db218fb5aa7c91f496b6fcf2e7f811a84fac950e69d003f745dcbc6e9be10c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/exact_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2d042345885f63f8433416b1298bb8147c20f46fb84915bfc75684a1edbd00ac"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/exact_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:70cc0ddc43d91e1c9147241544672df19882e4958d57e5f0bb84edcecf9bb329"
     },
     {
       "root": "src",

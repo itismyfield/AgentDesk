@@ -10786,6 +10786,14 @@ services::tui_o::channel_policy::tests::the_body_check_fails_a_bodiless_claim_an
 services::tui_o::cutover::channel_gate::tests::an_empty_list_leaves_even_an_unknown_destination_to_legacy_while_no_snapshot_holds
 services::tui_o::cutover::channel_gate::tests::claim_then_send_releases_a_pending_adoption_only_for_the_send_it_runs
 services::tui_o::cutover::test_override::without_a_delegated_home_owned_channels_match_boot_ownership
+services::tui_o::exact_episode::tests::exact_body_requires_full_child_attempt_receipt_and_whole_frontier
+services::tui_o::exact_episode::tests::exact_empty_and_parent_transport_never_grant_body
+services::tui_o::exact_episode::tests::exact_source_resolution_extra_proof_and_missing_piece_fail_closed
+services::tui_o::exact_episode::tests::exact_submission_closure_and_settlement_do_not_manufacture_body
+services::tui_o::exact_episode::tests::exact_versioned_reader_is_closed_without_mode_fallback
+services::tui_o::exact_pg::tests::exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt
+services::tui_o::exact_pg::tests::exact_metadata_pg_ack_restore_off_zero_and_db_port
+services::tui_o::exact_pg::tests::exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
 services::tui_o::ownership::tests::release_records_lost_before_the_release_runs
 services::tui_o::ownership::tests::transitions_close_admission_and_epochs_grow_per_acquisition
@@ -10861,6 +10869,7 @@ services::tui_o::store::ledger::lock_tests::a_recovery_lock_ends_with_the_recove
 services::tui_o::store::ledger::lock_tests::operator_child
 services::tui_o::store::ledger::lock_tests::recovery_excludes_an_operator_in_a_separate_process
 services::tui_o::store::ledger::lock_tests::successful_operator_append_survives_recovery_tail_truncation
+services::tui_o::store::ledger::tests::exact_evidence_ledger_replays_without_changing_legacy_frontier
 services::tui_o::store::ledger::tests::recovery_withdraws_only_a_whole_last_prepared_its_evidence_names
 services::tui_o::store::ledger::tests::replay_flags_the_ownership_invariant_breaks_that_pause_a_channel
 services::tui_o::store::rotation::tests::a_decided_boundary_is_never_rewritten_and_an_unowed_source_keeps_its_spool
