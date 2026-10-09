@@ -268,7 +268,8 @@ pub(in crate::services::discord) enum CommandStop {
     Herdr(super::codex_stop_delivery::HerdrStop),
 }
 
-/// A user stop: judged before any write, then cancelled only when the host is admitted.
+/// Historical unnamed-stop behavior, retained only for regression tests and mutations.
+#[cfg(test)]
 pub(in crate::services::discord) async fn begin_command_stop(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -278,8 +279,7 @@ pub(in crate::services::discord) async fn begin_command_stop(
     begin_stop(shared, provider, channel, bind_unbound, None).await
 }
 
-/// [`begin_command_stop`] for a stop naming its command: a Herdr turn takes the intent and
-/// Escape path instead of any cancel.
+/// A named user stop takes Herdr intent and Escape instead of any cancel.
 pub(in crate::services::discord) async fn begin_user_stop(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

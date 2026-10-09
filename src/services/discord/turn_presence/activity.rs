@@ -9,6 +9,9 @@ use poise::serenity_prelude::ChannelId;
 
 use crate::services::discord::SharedData;
 use crate::services::provider::ProviderKind;
+use crate::services::provider::session_probe::SessionLiveness;
+#[cfg(all(test, unix))]
+use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::MAX_PARTIAL_BYTES;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding};
 use crate::services::tui_o::writer::adoption::{Hold, logged};
@@ -52,6 +55,7 @@ enum Target {
 /// A rebuild is valid only for the provider, session and binding seq it read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Key {
+    channel: u64,
     provider: ShadowProvider,
     session: String,
     seq: u64,
@@ -109,6 +113,7 @@ trait Ports: Send + Sync + 'static {
     fn session_present(&self, session: &str) -> bool;
     fn final_ready(&self, session: &str) -> bool;
     fn pane_busy(&self, session: &str) -> bool;
+    fn liveness(&self, provider: ShadowProvider, channel: u64, session: &str) -> SessionLiveness;
     /// False when the worker could not start.
     fn spawn(&self, job: Job) -> bool;
 }
@@ -117,6 +122,11 @@ static WATCHES: LazyLock<Mutex<HashMap<u64, Arc<Mutex<Watch>>>>> = LazyLock::new
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// An unstamped fresh result still supersedes earlier Busy effect approvals.
+fn supersede_unstamped(watch: &Mutex<Watch>) {
+    lock(watch).revision += 1;
 }
 
 /// Judged fresh for an effect point; callers ask only for confirmed turn-mode channels.
@@ -135,6 +145,8 @@ struct Stamp {
     generation: u64,
     revision: u64,
     source: Option<String>,
+    #[cfg(all(test, unix))]
+    source_id: Option<SourceId>,
 }
 
 /// One fresh judgment and the watch state it read.
@@ -142,9 +154,55 @@ pub(in crate::services::discord) struct Reading {
     pub observed: Observed,
     stamp: Option<Stamp>,
     watch: Option<Arc<Mutex<Watch>>>,
+    #[cfg(all(test, unix))]
+    host_checked: bool,
 }
 
 impl Reading {
+    /// Supplies the receiver's binding identity; the bot id comes from its verified HTTP client.
+    #[cfg(all(test, unix))]
+    pub(super) fn identity(&self, bot_id: u64) -> Option<super::admission::Identity> {
+        if bot_id == 0 {
+            return None;
+        }
+        let stamp = self.stamp.as_ref()?;
+        let identity = super::admission::Identity {
+            provider: stamp.key.provider,
+            channel: stamp.key.channel,
+            session: stamp.key.session.clone(),
+            source: stamp.source_id.as_ref()?.clone(),
+            binding_seq: stamp.key.seq,
+            bot_id,
+        };
+        self.with_busy(&identity, || ())?;
+        Some(identity)
+    }
+
+    /// Unlike observation publication, effect admission requires a live, stamped Busy source.
+    #[cfg(all(test, unix))]
+    pub(super) fn with_busy<R>(
+        &self,
+        identity: &super::admission::Identity,
+        hand_off: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let (Some(stamp), Some(watch)) = (&self.stamp, &self.watch) else {
+            return None;
+        };
+        if !self.host_checked
+            || self.observed.activity != Activity::Busy
+            || stamp.key.channel != identity.channel
+            || stamp.key.provider != identity.provider
+            || stamp.key.seq != identity.binding_seq
+            || stamp.key.session != identity.session
+            || stamp.source_id.as_ref() != Some(&identity.source)
+        {
+            return None;
+        }
+        let guard = lock(watch);
+        let current = guard.key.as_ref() == Some(&stamp.key)
+            && (guard.generation, guard.revision) == (stamp.generation, stamp.revision);
+        current.then(hand_off)
+    }
     pub(in crate::services::discord) fn session(&self) -> Option<&str> {
         self.stamp.as_ref().map(|stamp| stamp.key.session.as_str())
     }
@@ -181,6 +239,7 @@ impl Reading {
     ) -> Self {
         let stamp = session.map(|session| Stamp {
             key: Key {
+                channel: 0,
                 provider: ShadowProvider::Claude,
                 session: session.into(),
                 seq: 0,
@@ -188,17 +247,22 @@ impl Reading {
             generation: 0,
             revision: 0,
             source: source.map(str::to_string),
+            #[cfg(all(test, unix))]
+            source_id: None,
         });
         Self {
             observed,
             stamp,
             watch: None,
+            #[cfg(all(test, unix))]
+            host_checked: false,
         }
     }
 
     /// A judgment whose watch has since moved one revision on under the same key and generation.
     pub(in crate::services::discord) fn overtaken_for_tests(observed: Observed) -> Self {
         let key = Key {
+            channel: 0,
             provider: ShadowProvider::Claude,
             session: "overtaken".into(),
             seq: 1,
@@ -214,11 +278,15 @@ impl Reading {
             generation: 1,
             revision: 0,
             source: None,
+            #[cfg(all(test, unix))]
+            source_id: None,
         };
         Self {
             observed,
             stamp: Some(stamp),
             watch: Some(Arc::new(Mutex::new(watch))),
+            #[cfg(all(test, unix))]
+            host_checked: false,
         }
     }
 }
@@ -236,6 +304,11 @@ fn at(guard: &Watch, answer: Observed) -> Answer {
         generation: guard.generation,
         revision: guard.revision,
         source,
+        #[cfg(all(test, unix))]
+        source_id: match &guard.outcome {
+            Outcome::Source { facts, .. } => Some(facts.binding().source.clone()),
+            _ => None,
+        },
     });
     (answer, stamp)
 }
@@ -246,10 +319,39 @@ pub(in crate::services::discord) async fn reading_now(
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> Reading {
-    let unstamped = |observed| Reading {
-        observed,
-        stamp: None,
-        watch: None,
+    read_now(shared, provider, channel, false).await
+}
+
+/// Dormant presence observer; existing input and supervisor observers retain their policy.
+#[cfg(all(test, unix))]
+pub(super) async fn presence_reading_now(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Reading {
+    read_now(shared, provider, channel, true).await
+}
+
+async fn read_now(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    host_checked: bool,
+) -> Reading {
+    let unstamped = |observed| {
+        if host_checked {
+            let watch = lock(&WATCHES).get(&channel.get()).cloned();
+            if let Some(watch) = watch {
+                supersede_unstamped(&watch);
+            }
+        }
+        Reading {
+            observed,
+            stamp: None,
+            watch: None,
+            #[cfg(all(test, unix))]
+            host_checked,
+        }
     };
     let shadow = match provider {
         ProviderKind::Claude => ShadowProvider::Claude,
@@ -275,13 +377,20 @@ pub(in crate::services::discord) async fn reading_now(
         root: crate::services::tui_prompt_dedupe::binding_events::test_root(),
     });
     let held = watch.clone();
-    let judged =
-        tokio::task::spawn_blocking(move || judge(&held, &ports, shadow, channel.get(), target));
+    let judged = tokio::task::spawn_blocking(move || {
+        if host_checked {
+            judge_presence(&held, &ports, shadow, channel.get(), target)
+        } else {
+            judge(&held, &ports, shadow, channel.get(), target)
+        }
+    });
     match judged.await {
         Ok((observed, stamp)) => Reading {
             observed,
             stamp,
             watch: Some(watch),
+            #[cfg(all(test, unix))]
+            host_checked,
         },
         Err(_) => unstamped(observed(Activity::Unknown, "probe_failed")),
     }
@@ -317,6 +426,7 @@ fn judge(
         Err(_) => return (observed(Activity::Unknown, "binding_unreadable"), None),
     };
     let key = Key {
+        channel,
         provider,
         session,
         seq,
@@ -392,6 +502,41 @@ fn judge(
         }),
         TurnState::Unknown => at(&guard, observed(Activity::Unknown, "no_turn_boundary")),
     }
+}
+
+fn judge_presence(
+    watch: &Arc<Mutex<Watch>>,
+    ports: &Arc<dyn Ports>,
+    provider: ShadowProvider,
+    channel: u64,
+    target: Target,
+) -> Answer {
+    let (answer, stamp) = judge(watch, ports, provider, channel, target);
+    let Some(stamp) = stamp else {
+        supersede_unstamped(watch);
+        return (answer, None);
+    };
+    if answer.activity == Activity::Unknown {
+        return (answer, Some(stamp));
+    }
+    let liveness = ports.liveness(provider, channel, &stamp.key.session);
+    let mut guard = lock(watch);
+    if guard.key.as_ref() != Some(&stamp.key)
+        || (guard.generation, guard.revision) != (stamp.generation, stamp.revision)
+    {
+        return at(&guard, observed(Activity::Unknown, "superseded"));
+    }
+    let answer = match liveness {
+        SessionLiveness::Alive => answer,
+        SessionLiveness::Missing => observed(Activity::Unknown, "host_dead"),
+        SessionLiveness::ProbeFailed => observed(Activity::Unknown, "host_probe_failed"),
+        SessionLiveness::Unknown => observed(Activity::Unknown, "host_unobservable"),
+    };
+    if liveness != SessionLiveness::Alive {
+        guard.revision += 1;
+        return at(&guard, answer);
+    }
+    (answer, Some(stamp))
 }
 
 /// Reads the pane outside the channel's lock; if the key, generation or read moved on meanwhile the
@@ -571,6 +716,23 @@ impl LivePorts {
 }
 
 impl Ports for LivePorts {
+    fn liveness(&self, provider: ShadowProvider, channel: u64, session: &str) -> SessionLiveness {
+        let provider = match provider {
+            ShadowProvider::Claude => ProviderKind::Claude,
+            ShadowProvider::Codex => ProviderKind::Codex,
+        };
+        self.scoped(|| {
+            let row = crate::services::discord::inflight::load_inflight_state_read_only_result(
+                &provider, channel,
+            );
+            match row {
+                Ok(row) => {
+                    crate::services::discord::host_liveness::observe_liveness(session, row.as_ref())
+                }
+                Err(_) => SessionLiveness::ProbeFailed,
+            }
+        })
+    }
     fn binding_seq(&self, channel: u64) -> Result<u64, String> {
         use crate::services::tui_prompt_dedupe::binding_events::subscribe_binding_events;
         self.scoped(|| subscribe_binding_events(channel))

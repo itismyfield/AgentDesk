@@ -740,7 +740,14 @@ struct Met {
 async fn stop_meets_prepare(shared: &Arc<SharedData>, channel: ChannelId, order: Order) -> Met {
     use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
     let logical = format!("AgentDesk-codex-p2b-{}", channel.get());
-    mark(&logical, Mark::Herdr);
+    mark(
+        &logical,
+        if matches!(order, Order::PrepareBetween) {
+            Mark::Absent
+        } else {
+            Mark::Herdr
+        },
+    );
     let owner = crate::db::dispatched_sessions::hosted_execution::HostedOwner {
         provider: "codex".into(),
         discord_token_hash: shared.token_hash.clone(),

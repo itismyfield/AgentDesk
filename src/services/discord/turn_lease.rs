@@ -53,11 +53,20 @@ pub(crate) struct ReleaseRequest {
     pub(crate) reason: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(in crate::services::discord) struct OperatorRelease {
     request: ReleaseRequest,
+    _permit: Option<crate::services::cluster::channel_home::CommandPermit>,
     observed_before: Instant,
     clear_outcome: Arc<OnceLock<inflight::GuardedClearOutcome>>,
+}
+
+impl std::fmt::Debug for OperatorRelease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OperatorRelease")
+            .field("request", &self.request)
+            .finish_non_exhaustive()
+    }
 }
 
 async fn identity(
@@ -143,6 +152,21 @@ async fn release_on(
     channel: ChannelId,
     request: ReleaseRequest,
 ) -> Result<serde_json::Value, String> {
+    let _permit = match crate::services::cluster::channel_home::registered_channel(channel.get()) {
+        Some(home) => Some(
+            home.admit_recovery(provider.as_str())
+                .ok_or_else(|| "home_not_held".to_string())?,
+        ),
+        None => None,
+    };
+    #[cfg(test)]
+    let _permit =
+        if crate::services::cluster::channel_home::command_mutant("release_permit_removed") {
+            drop(_permit);
+            None
+        } else {
+            _permit
+        };
     if request.reason.trim().is_empty() {
         return Err("operator reason is required".into());
     }
@@ -156,6 +180,24 @@ async fn release_on(
         return Err("lease changed; inspect again".into());
     }
     let _ = matching_inflight(provider, &current)?;
+    let held = shared.mailbox(channel).snapshot().await.cancel_token;
+    let provider_preserved = held
+        .as_ref()
+        .filter(|token| token.turn_nonce() == Some(current.turn_nonce.as_str()))
+        .is_some_and(|token| {
+            token.herdr_interrupt_state().is_some()
+                || token.tmux_session_name().is_some_and(|name| {
+                    #[cfg(unix)]
+                    {
+                        super::turn_bridge::herdr_marked(&name)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = name;
+                        false
+                    }
+                })
+        });
     // The mailbox CAS (`release_turn_lease_if_matches`) binds an exact
     // `MessageId`, and an episode that never bound one has no such key —
     // `MessageId::new(0)` panics. Refuse explicitly instead of releasing an
@@ -171,9 +213,40 @@ async fn release_on(
     let clear_outcome = Arc::new(OnceLock::new());
     let event = TerminalEvent::OperatorRelease(Box::new(OperatorRelease {
         request,
+        _permit: {
+            #[cfg(test)]
+            if crate::services::cluster::channel_home::command_mutant("release_permit_not_in_event")
+            {
+                None
+            } else {
+                _permit.clone()
+            }
+            #[cfg(not(test))]
+            {
+                _permit.clone()
+            }
+        },
         observed_before: Instant::now(),
         clear_outcome: clear_outcome.clone(),
     }));
+    #[cfg(test)]
+    let event = if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
+        "operator_synthesizes_cancel",
+    ) {
+        TerminalEvent::Cancel
+    } else {
+        event
+    };
+    #[cfg(test)]
+    if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
+        "operator_flips_token",
+    ) {
+        if let Some(token) = held.as_ref() {
+            token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
     match shared
         .turn_finalizer
         .submit_terminal(
@@ -206,6 +279,9 @@ async fn release_on(
             Ok(serde_json::json!({
                 "released": true,
                 "status": "operator_released",
+                "settlement": "operator_released",
+                "provider_preserved": provider_preserved,
+                "provider_terminal_confirmed": false,
                 "rebind_pin_verified": matches!(
                     clear_outcome.get(),
                     Some(inflight::GuardedClearOutcome::Cleared)
@@ -295,9 +371,12 @@ impl OperatorRelease {
             ),
         };
         let _ = self.clear_outcome.set(cleared);
+        #[cfg(test)]
+        super::commands::control::home_fence::pause("release_claim").await;
         tracing::warn!(channel_id = key.channel_id.get(), turn_id = key.user_msg_id,
             turn_nonce = %self.request.expected.turn_nonce, generation = key.generation,
             reason = %self.request.reason, inflight_clear = ?cleared,
+            settlement = "operator_released", provider_terminal_confirmed = false,
             "operator_turn_lease_released");
         Some(result)
     }

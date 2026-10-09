@@ -705,6 +705,9 @@ src/
 │   │   ├── channel_home_tests.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
+│   │   ├── home_availability.rs
+│   │   ├── home_supervisor.rs
+│   │   ├── home_supervisor_tests.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs
@@ -803,7 +806,8 @@ src/
 │   │   │   │   ├── native_herdr_e2e_tests.rs
 │   │   │   │   ├── native_herdr_tests.rs
 │   │   │   │   ├── native_policy_tests.rs
-│   │   │   │   └── native_tests.rs
+│   │   │   │   ├── native_tests.rs
+│   │   │   │   └── provider_reset.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
 │   │   │   │   └── reports.rs
@@ -837,6 +841,7 @@ src/
 │   │   │   ├── session.rs
 │   │   │   ├── sidecar.rs
 │   │   │   ├── skill.rs
+│   │   │   ├── stop.rs
 │   │   │   ├── text_commands.rs
 │   │   │   ├── tmux_recreate.rs
 │   │   │   ├── tui_passthrough.rs
@@ -1809,6 +1814,8 @@ src/
 │   │   ├── turn_presence/
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_tests.rs
+│   │   │   ├── admission.rs
+│   │   │   ├── admission_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
@@ -2371,6 +2378,8 @@ src/
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_home_tests.rs
+│   │   │   ├── host_io_tests.rs
+│   │   │   ├── host_managed_tests.rs
 │   │   │   ├── host_renumber_tests.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── input_facts.rs

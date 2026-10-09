@@ -1530,6 +1530,8 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_codex_stop_never_takes_a_later_native_turn_for_its_own
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_rollout_rewritten_in_place_never_retargets_a_late_stop
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_cold_start_accepts_intent_without_marker_then_sends_once
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_generation_only_stale_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_generation_only_stale_sends_no_escape

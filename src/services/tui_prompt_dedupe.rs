@@ -118,6 +118,9 @@ pub struct ObservedTuiPrompt {
     /// Hook-submitted Claude `prompt_id`, held unannounced until the relay's
     /// announcement POST result settles it.
     pub(crate) hook_prompt_id: Option<String>,
+    /// A transcript row's `prompt_id` that was still unannounced when the scanner published the
+    /// row; only looked up again before the relay announces, never settled by it.
+    pub(crate) row_prompt_id: Option<String>,
     /// Codex native turn this input opened, when its hook or record named one.
     pub(crate) native_turn_id: Option<String>,
     /// A steering input that joined its running native turn: its text is shown, nothing is owned.

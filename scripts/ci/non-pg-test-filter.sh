@@ -417,6 +417,7 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::intake_preflight::tests::missing_source_expectations_fail_closed
   services::cluster::intake_preflight::tests::ready_target_requires_no_execution_callback
   services::cluster::intake_preflight::tests::unsupported_provider_fails_closed
+  services::cluster::intake_router_hook::o_route_tests::unavailable_delegation_blocks_before_a_home_read_or_local_fallback
   services::cluster::intake_router_hook::owner_record::tests::advisory_lock_key_is_stable
   services::cluster::intake_router_hook::owner_record::tests::idempotency_key_is_composed_and_normalized
   services::cluster::machine_resources::store::tests::recorder_queue_is_bounded_without_waiting_for_the_database
@@ -425,6 +426,11 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::clear_persist_failure_tests::failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
+  services::discord::commands::control::home_fence::tests::d2b_clear_and_reset_keep_admission_across_effect_await
+  services::discord::commands::control::home_fence::tests::d2b_clear_reply_stays_counted_after_clear_body_finishes
+  services::discord::commands::control::home_fence::tests::d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor
+  services::discord::commands::control::home_fence::tests::d2b_reset_sink_refuses_claimed_turn_and_drain_reset_remains_allowed
+  services::discord::commands::control::home_fence::tests::d2b_slash_stop_reply_keeps_permit_until_finish_and_dormant_is_unchanged
   services::discord::commands::control::input_clear::tests::without_postgres_the_adapter_refuses_with_the_retry_notice
   services::discord::health::recovery::stall_alert::tests::owner_zero_and_tui_sentinel_never_render_mentions
   services::discord::health::recovery::stall_alert::tests::producer_liveness_suppresses_stall_page
@@ -569,6 +575,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_response_bypasses_normal_turn
   services::discord::router::message_handler::watchdog::host_tests::a_scheduled_paused_attach_rereads_the_host_before_each_attempt
   services::discord::runtime_bootstrap::channel_homes_tests::a_standby_writers_port_posts_over_the_bot_tokens_rest_client
+  services::discord::runtime_bootstrap::channel_homes_tests::a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels
   services::discord::runtime_bootstrap::channel_homes_tests::turns_count_as_restored_only_where_the_role_restored_them
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests::existing_marker_cancel_restores_promotion_fence_for_retry
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests::foreign_nonce_terminal_artifact_does_not_mask_our_cancellation
@@ -670,6 +677,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::resume_pin_tests::c1_same_synthetic_and_handoff_pin_resume_without_clearing_marker
   services::discord::turn_bridge::resume_pin_tests::c1_synthetic_and_handoff_stale_pins_leave_replacement_untouched
   services::discord::turn_bridge::resume_pin_tests::sa2_capture_hands_off_owned_provider_receiver
+  services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_each_stop_reason_preserves_delivery_and_settlement_axes
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_sends_one_escape_and_spends_the_claim_only_once_sent
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_writes_nothing_unless_every_fence_passes
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_stop_for_another_provider_is_refused_before_any_io
