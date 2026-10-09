@@ -34,6 +34,10 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/codex_tui/rollout_tail/provenance_tests.rs",
+        "src/services/tui_o/store/rotation/provenance_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/provenance_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant_tests.rs",
         "src/services/cluster/home_supervisor_tests.rs",
         "src/services/tui_o/writer/host_managed_tests.rs",
         "src/services/tui_o/writer/host_io_tests.rs",
@@ -481,6 +485,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/codex_tui/rollout_tail/provenance.rs",
+        "src/services/tui_o/writer/rotation/provenance.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant.rs",
         "src/services/discord/relay_recovery/tests/retirement.rs",
         "src/services/discord/recovery_engine/o_cut_recorder.rs",
         "src/services/tui_o/channel_policy/adoption/body_check.rs",
