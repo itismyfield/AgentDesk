@@ -4,7 +4,7 @@
 use poise::serenity_prelude::ChannelId;
 
 use super::super::super::{Context, Error};
-use crate::services::cluster::channel_home::{self, HomeRefusal};
+use crate::services::cluster::channel_home::{self, CommandPermit, HomeRefusal};
 
 /// A delegated channel's command refused on this node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,10 +24,17 @@ impl std::fmt::Display for CommandRefused {
 
 impl std::error::Error for CommandRefused {}
 
+pub(in crate::services::discord) fn admit(
+    channel_id: ChannelId,
+    provider: &str,
+) -> Result<Option<CommandPermit>, CommandRefused> {
+    channel_home::admit_command(&channel_id.get().to_string(), provider).map_err(CommandRefused)
+}
+
 /// Refuses the command when the channel's home is registered here but not held with intake open;
 /// a channel with no registered home passes unread.
 pub(super) fn check(channel_id: ChannelId) -> Result<(), CommandRefused> {
-    channel_home::refusal(channel_id.get()).map_or(Ok(()), |refusal| Err(CommandRefused(refusal)))
+    admit(channel_id, "preflight").map(drop)
 }
 
 /// [`check`] for a slash command: a refusal is answered and the command ends there.
@@ -44,3 +51,33 @@ pub(super) async fn refused(ctx: &Context<'_>) -> Result<bool, Error> {
 #[cfg(test)]
 #[path = "home_fence_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::services::discord) fn mutant(name: &str) -> bool {
+    crate::services::cluster::channel_home::command_mutant(name)
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(in crate::services::discord) static PAUSE: std::cell::RefCell<Option<(&'static str, ArcPause)>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(in crate::services::discord) type ArcPause =
+    std::sync::Arc<(tokio::sync::Notify, tokio::sync::Notify)>;
+
+#[cfg(test)]
+pub(in crate::services::discord) async fn pause(label: &str) {
+    let barrier = PAUSE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .filter(|(name, _)| *name == label)
+            .map(|(_, barrier)| barrier.clone())
+    });
+    if let Some(barrier) = barrier {
+        barrier.0.notify_one();
+        barrier.1.notified().await;
+    }
+}
+
+#[cfg(not(test))]
+pub(in crate::services::discord) async fn pause(_label: &str) {}

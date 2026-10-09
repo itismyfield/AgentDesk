@@ -11,16 +11,19 @@ use std::sync::Arc;
 use super::*;
 
 use crate::services::agent_protocol::TaskNotificationKind;
-use crate::services::discord::formatting::{
-    DeferredReplaceLongMessageOutcome, replace_long_message_raw_deferred,
-    replace_long_message_raw_deferred_returning_receipt,
-};
+use crate::services::discord::formatting::replace_long_message_raw_deferred;
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
 use crate::services::discord::task_notification_delivery as task_delivery;
 use crate::services::discord::turn_finalizer::TurnKey;
 use crate::services::discord::{DeliveryLeaseCell, SharedData};
 use crate::services::provider::ProviderKind;
 use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+
+#[path = "terminal_direct_fallback_edit.rs"]
+mod edit_fallback;
+use edit_fallback::{
+    EditFailureRecheck, WatcherDeferredReplaceOutcome, replace_or_post_after_edit_failure,
+};
 
 pub(in crate::services::discord) use super::terminal_delivery_types::WatcherDirectFallbackLocals;
 
@@ -325,65 +328,24 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                     let mut last_chunk_anchor = None;
                     // Receipt of each arm's anchor: tail chunk on edit, first chunk on fallback.
                     let mut edit_anchor_receipt = None;
-                    let (anchor, receipt) = (&mut last_chunk_anchor, &mut edit_anchor_receipt);
-                    let text = relay_text.as_str();
-                    let replace = move || {
-                        // Moved in whole, so the send may keep them for as long as it runs.
-                        let (anchor, receipt) = (anchor, receipt);
-                        replace_long_message_raw_deferred_returning_receipt(
-                            http, channel_id, msg_id, text, shared, anchor, receipt,
-                        )
+                    let recheck = EditFailureRecheck {
+                        provider: watcher_provider,
+                        tmux_session_name,
+                        expected: expected_transcript.as_ref(),
+                        range_end: watcher_lease_end,
                     };
-                    let Ok(BodySend::Sent(replace_outcome)) =
-                        claim_then_send(body_claim, replace).await
+                    let Some(replace_outcome) = replace_or_post_after_edit_failure(
+                        http,
+                        shared,
+                        (channel_id, msg_id),
+                        &relay_text,
+                        recheck,
+                        body_claim,
+                        (&mut last_chunk_anchor, &mut edit_anchor_receipt),
+                    )
+                    .await
                     else {
                         return false; // Nothing sent: O owns the channel or its identity is held.
-                    };
-                    enum WatcherDeferredReplaceOutcome {
-                        Replace(ReplaceLongMessageOutcome),
-                        AlreadyCommittedAfterEditFailure { edit_error: String },
-                    }
-                    let replace_outcome = match replace_outcome {
-                        Ok(DeferredReplaceLongMessageOutcome::Edited(outcome)) => {
-                            Ok(WatcherDeferredReplaceOutcome::Replace(outcome))
-                        }
-                        Ok(DeferredReplaceLongMessageOutcome::EditFailed { edit_error }) => {
-                            if crate::services::discord::outbound::delivery_record::range_committed_after_edit_failure(
-                                shared,
-                                watcher_provider,
-                                channel_id,
-                                tmux_session_name,
-                                expected_transcript.as_ref(),
-                                watcher_lease_end,
-                            ) {
-                                Ok(WatcherDeferredReplaceOutcome::AlreadyCommittedAfterEditFailure {
-                                    edit_error,
-                                })
-                            } else {
-                                crate::services::discord::formatting::send_long_message_raw_with_rollback_returning_receipts(
-                                    http,
-                                    channel_id,
-                                    msg_id,
-                                    &relay_text,
-                                    shared,
-                                )
-                                .await
-                                .and_then(|receipts| {
-                                    let message_ids =
-                                        crate::services::discord::formatting::message_ids_from_receipts(
-                                            receipts.clone(),
-                                        )?;
-                                    edit_anchor_receipt = receipts.first().cloned();
-                                    Ok(WatcherDeferredReplaceOutcome::Replace(
-                                        ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
-                                            edit_error,
-                                            replacement_anchor: message_ids.first().copied(),
-                                        },
-                                    ))
-                                })
-                            }
-                        }
-                        Err(error) => Err(error),
                     };
                     match replace_outcome {
                         Ok(WatcherDeferredReplaceOutcome::Replace(
@@ -848,3 +810,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
 mod tests {
     include!("terminal_direct_fallback_tests.rs");
 }
+
+#[cfg(test)]
+#[path = "terminal_direct_fallback_send_tests.rs"]
+mod send_tests;

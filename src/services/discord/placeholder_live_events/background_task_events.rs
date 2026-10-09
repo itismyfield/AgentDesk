@@ -58,7 +58,7 @@ pub(super) fn tool_use_id_from_notification(value: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(super) fn notification_is_terminal(status: &str) -> bool {
+pub(in crate::services::discord) fn notification_is_terminal(status: &str) -> bool {
     matches!(
         status.trim().to_ascii_lowercase().as_str(),
         "completed"
@@ -75,7 +75,7 @@ pub(super) fn notification_is_terminal(status: &str) -> bool {
     )
 }
 
-pub(super) fn notification_is_error(status: &str) -> bool {
+pub(in crate::services::discord) fn notification_is_error(status: &str) -> bool {
     matches!(
         status.trim().to_ascii_lowercase().as_str(),
         "failed" | "error" | "aborted" | "killed" | "stopped" | "cancelled" | "canceled"

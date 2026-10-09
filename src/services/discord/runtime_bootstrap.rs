@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::cluster::node_registry::GatewayWaiterGuard;
+use crate::services::cluster::{home_availability, node_registry::GatewayWaiterGuard};
 
 #[cfg(test)]
 mod channel_homes_tests;
@@ -199,6 +199,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     let boot_config = crate::config::load_graceful();
     let homes = HomeSettings::of(&boot_config);
+    // Records the boot judgement before delegation effects start.
+    let home_availability = install_home_availability(&provider, &homes, pg_pool.is_some());
     let modules = boot_config.cluster.runtime_profile.modules();
     let voice_config = boot_config.voice;
     let voice_barge_in = Arc::new(if modules.voice {
@@ -250,6 +252,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         bot_settings,
         &provider,
         RuntimeServices {
+            home_availability,
             initial_skills,
             token_hash: token_hash.clone(),
             api_port,
@@ -512,6 +515,43 @@ impl HomeSettings {
     }
 }
 
+/// Records whether this provider's delegated homes can run; one that cannot holds every selected
+/// Herdr channel. With the switch off it returns before any read.
+fn install_home_availability(
+    provider: &ProviderKind,
+    settings: &HomeSettings,
+    has_pool: bool,
+) -> Option<crate::services::cluster::home_availability::Registration> {
+    home_availability::install_enabled(
+        provider.as_str(),
+        settings.switch,
+        || home_availability::preflight(has_pool, settings.instance_id.as_deref()),
+        || selected_herdr_channels(provider),
+    )
+}
+
+/// The selected channels with a Herdr endpoint on any node: those a delegation may name.
+fn selected_herdr_channels(provider: &ProviderKind) -> std::collections::BTreeSet<u64> {
+    use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
+    use crate::services::tui_o::channel_policy::BootChannels;
+    let read = |boot: Option<&BootChannels>| {
+        let configured = |channel: &u64| {
+            let kind = boot.and_then(|boot| boot.kind(*channel));
+            let ours = matches!(
+                (provider, kind),
+                (ProviderKind::Claude, Some(ClaudeTui)) | (ProviderKind::Codex, Some(CodexTui))
+            );
+            ours && crate::config::session_hosts::herdr_endpoint(*channel).is_some()
+        };
+        let selected = boot.map(|boot| boot.selected().iter().copied().filter(configured));
+        selected.map(Iterator::collect).unwrap_or_default()
+    };
+    #[cfg(not(test))]
+    return read(crate::services::tui_o::channel_policy::boot());
+    #[cfg(test)]
+    crate::services::tui_o::cutover::test_override::with_channels(read)
+}
+
 /// Registers the delegated homes this provider runtime takes part in and starts their lease and
 /// drain; with `runtime.channel_home_delegation_enabled` off it returns before any read.
 async fn start_channel_homes(
@@ -577,7 +617,7 @@ fn legacy_reset(
             let http = shared.serenity_http_or_token_fallback();
             let http =
                 http.ok_or_else(|| ResetRefused::Refused("no Discord REST client".into()))?;
-            let reset = super::commands::reset_channel_provider_state(
+            let reset = super::commands::control::reset_channel_provider_state_for_home_drain(
                 &http,
                 &shared,
                 &provider,
@@ -1183,12 +1223,20 @@ mod restart_lifecycle_characterization_tests {
     fn build_shared_with_injected_shutdown_remaining(
         shutdown_remaining: &Arc<AtomicUsize>,
     ) -> Arc<SharedData> {
+        build_shared_with_home_availability(shutdown_remaining, None)
+    }
+
+    fn build_shared_with_home_availability(
+        shutdown_remaining: &Arc<AtomicUsize>,
+        home_availability: Option<home_availability::Registration>,
+    ) -> Arc<SharedData> {
         let voice = Arc::new(voice_barge_in::VoiceBargeInRuntime::disabled());
         let health_registry = Arc::new(health::HealthRegistry::new());
         run_bot_build_shared_data(
             DiscordBotSettings::default(),
             &ProviderKind::Claude,
             RuntimeServices {
+                home_availability,
                 initial_skills: Vec::new(),
                 token_hash: "s3-restart-characterization-token-hash".to_string(),
                 api_port: 9,
@@ -1233,6 +1281,35 @@ mod restart_lifecycle_characterization_tests {
             .start_paused(true)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn background_provider_keeps_availability_after_its_boot_future_returns() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let _allocation = isolate_runtime_root(&crate::config::runtime_root().unwrap());
+        runtime_store::set_process_generation_for_tests(None);
+        paused_rt().block_on(async {
+            let availability = home_availability::install(
+                "claude",
+                Err(home_availability::Unavailable::MissingPool),
+                || [7].into(),
+            );
+            let shared = build_shared_with_home_availability(
+                &Arc::new(AtomicUsize::new(1)),
+                Some(availability),
+            );
+            let background = Arc::clone(&shared);
+            drop(shared);
+            assert_eq!(
+                home_availability::refusal(7),
+                Some(home_availability::Unavailable::MissingPool)
+            );
+            drop(background);
+            assert_eq!(
+                home_availability::state("claude"),
+                home_availability::Availability::Off
+            );
+        });
     }
 
     #[test]

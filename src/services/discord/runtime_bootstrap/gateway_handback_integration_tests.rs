@@ -450,3 +450,111 @@ async fn backend_exit_removes_home_waiter_until_live_home_takes_handback_pg() {
     drop(backup);
     fixture.close().await;
 }
+
+impl Fixture {
+    fn save_config(&self, edit: impl FnOnce(&mut crate::config::Config)) {
+        let mut config = self.config.clone();
+        edit(&mut config);
+        crate::config::save_to_path(&self._root.path().join("agentdesk.yaml"), &config).unwrap();
+    }
+
+    async fn peer_takes_lease_within(&self, within: Duration) -> postgres::AdvisoryLockLease {
+        tokio::time::timeout(within, async {
+            loop {
+                if let Some(lease) =
+                    try_acquire_discord_gateway_lease(&self.pool, TOKEN, &ProviderKind::Claude)
+                        .await
+                        .unwrap()
+                {
+                    break lease;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the idle holder session expires and frees the lease")
+    }
+}
+
+#[tokio::test]
+async fn preferred_node_takes_the_lease_once_a_silent_holder_session_expires_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture.save_config(|config| {
+        config.cluster.instance_id = Some("home".into());
+        config.cluster.gateway_lease_idle_expiry_secs = 2;
+    });
+    // An earlier process's lease whose client went silent: held, never kept alive.
+    let silent = try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
+        .await
+        .unwrap()
+        .unwrap();
+    let silent_pid = fixture.holder().await.unwrap();
+    let shared = super::super::make_shared_data_for_tests_with_storage(Some(fixture.pool.clone()));
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        fixture.acquire(&shared, &mut fixture.breaker()),
+    )
+    .await
+    .expect("the preferred waiter acquires once the silent session expires");
+    let GatewayLeaseOutcome::Proceed(Some(acquired)) = outcome else {
+        panic!("preferred node must take the freed lease")
+    };
+    assert_ne!(fixture.holder().await, Some(silent_pid));
+    acquired.lease.unlock().await.unwrap();
+    drop(silent);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn configured_idle_expiry_reaches_the_lease_session_and_zero_disables_it_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    for (secs, expected) in [(2, "2s"), (0, "0")] {
+        fixture.save_config(|config| config.cluster.gateway_lease_idle_expiry_secs = secs);
+        let mut lease =
+            try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(lease.session_idle_timeout().await.unwrap(), expected);
+        if secs == 0 {
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            let peer =
+                try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
+                    .await
+                    .unwrap();
+            assert!(peer.is_none(), "a disabled expiry keeps an idle lease");
+        }
+        lease.unlock().await.unwrap();
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn idle_expired_holder_loses_the_lease_to_a_peer_and_self_fences_pg() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture.save_config(|config| config.cluster.gateway_lease_idle_expiry_secs = 2);
+    let mut running = fixture.backup().await;
+    // The production keepalive ticks every 15s, so a 2s expiry ends the session between ticks.
+    let mut peer = fixture
+        .peer_takes_lease_within(Duration::from_secs(10))
+        .await;
+    tokio::time::timeout(Duration::from_secs(25), async {
+        while !running.backend.is_finished() {
+            peer.keepalive().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("the holder self-fences on its next keepalive tick");
+    running.ended().await;
+    assert!(!running.shared.bot_connected.load(Ordering::SeqCst));
+    peer.unlock().await.unwrap();
+    drop(running);
+    fixture.close().await;
+}

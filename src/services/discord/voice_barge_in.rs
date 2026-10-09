@@ -1350,6 +1350,7 @@ mod tests {
             // preserved — the three members hoisted above the spawn calls are
             // side-effect-free constructors; see run_bot_build_shared_data).
             restart: super::super::RestartLifecycle {
+                _home_availability: None,
                 recovering_channels: dashmap::DashMap::new(),
                 shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 intake_worker_lifecycle:

@@ -130,8 +130,11 @@ impl Drop for Running {
 }
 
 /// A delegated channel posts only through its registered home gate, which also ends a lapsed hold;
-/// any other channel through the writer's gate.
+/// any other channel through the writer's gate. A channel whose delegation is unavailable posts none.
 fn admit<T>(gate: &OwnershipGate, channel: u64, hand_off: impl FnOnce(u64) -> T) -> Option<T> {
+    if crate::services::cluster::home_availability::refusal(channel).is_some() {
+        return None;
+    }
     match channel_home::registered_channel(channel) {
         Some(home) => home.admit_post(hand_off),
         None => gate.admit(hand_off),

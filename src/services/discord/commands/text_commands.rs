@@ -34,34 +34,41 @@ fn schedule_text_stop_pending_queue_drain(
 ) {
     let shared = shared.clone();
     let provider = provider.clone();
-    tokio::spawn(async move {
-        if let Some(registry) = shared.health_registry() {
-            let _ = super::super::health::schedule_pending_queue_drain_after_cancel(
-                registry.as_ref(),
-                provider.as_str(),
+    let permit = crate::services::cluster::channel_home::current_command(
+        &channel_id.get().to_string(),
+        provider.as_str(),
+    );
+    tokio::spawn(crate::services::cluster::channel_home::command_scope(
+        permit,
+        async move {
+            if let Some(registry) = shared.health_registry() {
+                let _ = super::super::health::schedule_pending_queue_drain_after_cancel(
+                    registry.as_ref(),
+                    provider.as_str(),
+                    channel_id,
+                    stop_source,
+                )
+                .await;
+                return;
+            }
+
+            let snapshot = shared
+                .mailbox(channel_id)
+                .snapshot()
+                .await
+                .intervention_queue
+                .len();
+            if snapshot == 0 {
+                return;
+            }
+            super::super::schedule_deferred_idle_queue_kickoff(
+                shared,
+                provider,
                 channel_id,
                 stop_source,
-            )
-            .await;
-            return;
-        }
-
-        let snapshot = shared
-            .mailbox(channel_id)
-            .snapshot()
-            .await
-            .intervention_queue
-            .len();
-        if snapshot == 0 {
-            return;
-        }
-        super::super::schedule_deferred_idle_queue_kickoff(
-            shared,
-            provider,
-            channel_id,
-            stop_source,
-        );
-    });
+            );
+        },
+    ));
 }
 
 async fn fetch_escalation_settings_via_api()
@@ -379,6 +386,11 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
         }
 
         TextCommandId::Stop => {
+            let permit = crate::services::cluster::channel_home::admit_command(
+                &channel_id.get().to_string(),
+                data.provider.as_str(),
+            )?;
+            return crate::services::cluster::channel_home::command_scope(permit, async {
             let stop_lookup =
                 cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id, "!stop")
                     .await;
@@ -430,7 +442,8 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                     let _ = msg.reply(&ctx.http, stop.reply()).await;
                 }
             }
-            return Ok(true);
+            Ok(true)
+            }).await;
         }
 
         TextCommandId::Clear => {
@@ -1284,6 +1297,11 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         let _ = msg.reply(&ctx.http, reply).await;
                         return Ok(true);
                     }
+                    let permit = crate::services::cluster::channel_home::admit_command(
+                        &channel_id.get().to_string(),
+                        data.provider.as_str(),
+                    )?;
+                    return crate::services::cluster::channel_home::command_scope(permit, async {
                     let stop_lookup = cancel_text_stop_token_mailbox(
                         &data.shared,
                         &data.provider,
@@ -1337,7 +1355,8 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                             let _ = msg.reply(&ctx.http, stop.reply()).await;
                         }
                     }
-                    return Ok(true);
+                    Ok(true)
+                    }).await;
                 }
                 "pwd" => {
                     return Box::pin(handle_text_command(ctx, msg, data, channel_id, "!pwd")).await;
@@ -1412,7 +1431,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             };
 
             rate_limit_wait(&data.shared, channel_id).await;
-            let confirm = channel_id
+            let confirmation = channel_id
                 .send_message(
                     &ctx.http,
                     CreateMessage::new().content(format!("Running skill: `/{skill}`")),
@@ -1430,7 +1449,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                 &deps,
                 data.provider.clone(),
                 channel_id,
-                confirm.id,
+                confirmation.id,
                 msg.author.id,
                 msg.author.name.clone(),
                 skill_prompt,
@@ -1543,5 +1562,135 @@ mod command_dispatch_contract_tests {
                 "handle_text_command(ctx, msg, data, channel_id, \"!{name}\")"
             )));
         }
+    }
+}
+
+#[cfg(test)]
+mod home_command_tests {
+    use super::*;
+    use crate::db::o_channel_homes::HomeState;
+    use crate::services::cluster::channel_home;
+    async fn text_context(
+        http: Arc<serenity::Http>,
+    ) -> (serenity::Context, tokio::task::JoinHandle<()>) {
+        use self::serenity::gateway::{
+            Shard, ShardManager, ShardManagerOptions, ShardMessenger, ShardRunner,
+            ShardRunnerOptions,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(|ws: axum::extract::ws::WebSocketUpgrade| async {
+                ws.on_upgrade(|mut socket| async move { while socket.recv().await.is_some() {} })
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let ws_url = Arc::new(tokio::sync::Mutex::new(format!("ws://{address}")));
+        let data = Arc::new(tokio::sync::RwLock::new(serenity::prelude::TypeMap::new()));
+        let cache = Arc::new(serenity::Cache::default());
+        let intents = serenity::GatewayIntents::empty();
+        let (manager, _) = ShardManager::new(ShardManagerOptions {
+            data: data.clone(),
+            event_handlers: vec![],
+            raw_event_handlers: vec![],
+            framework: Arc::new(std::sync::OnceLock::new()),
+            shard_index: 0,
+            shard_init: 0,
+            shard_total: 1,
+            voice_manager: None,
+            ws_url: ws_url.clone(),
+            cache: cache.clone(),
+            http: http.clone(),
+            intents,
+            presence: None,
+        });
+        let shard = Shard::new(
+            ws_url,
+            "test-token",
+            serenity::ShardInfo {
+                id: serenity::ShardId(0),
+                total: 1,
+            },
+            intents,
+            None,
+        )
+        .await
+        .unwrap();
+        let runner = ShardRunner::new(ShardRunnerOptions {
+            data: data.clone(),
+            event_handlers: vec![],
+            raw_event_handlers: vec![],
+            framework: None,
+            manager,
+            shard,
+            voice_manager: None,
+            cache: cache.clone(),
+            http: http.clone(),
+        });
+        let context = serenity::Context {
+            data,
+            shard: ShardMessenger::new(&runner),
+            shard_id: serenity::ShardId(0),
+            http,
+            cache,
+        };
+        (context, server)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_text_and_alias_dispatch_refuse_before_stop_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        let channel = serenity::ChannelId::new(9200000000000107);
+        let shared = make_shared_data_for_tests();
+        shared.settings.write().await.owner_user_id = Some(1);
+        let token = crate::services::discord::host_teardown_gate::test_support::nameless_turn(
+            &shared, channel,
+        )
+        .await;
+        let home = channel_home::register_for_test(channel.get(), Some(HomeState::Releasing));
+        let http = Arc::new(
+            serenity::HttpBuilder::new("test-token")
+                .proxy("http://127.0.0.1:1")
+                .ratelimiter_disabled(true)
+                .build(),
+        );
+        let (ctx, server) = text_context(http).await;
+        let mut voice_config = crate::voice::VoiceConfig::default();
+        voice_config.audio.recordings_dir = root.path().join("recordings");
+        voice_config.keep_recordings = true;
+        let data = Data {
+            shared: shared.clone(),
+            token: "home-text-test".into(),
+            provider: crate::services::provider::ProviderKind::Claude,
+            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
+            voice_config,
+        };
+        let mut msg = serenity::Message::default();
+        msg.id = serenity::MessageId::new(channel.get() + 2);
+        msg.channel_id = channel;
+        msg.author.id = serenity::UserId::new(1);
+        for text in ["!stop", "!cc stop", "!skill stop"] {
+            msg.content = text.into();
+            let result = handle_text_command(&ctx, &msg, &data, channel, text).await;
+            assert!(
+                result.unwrap_err().to_string().contains("home_draining"),
+                "{text}"
+            );
+            assert!(!token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+            assert!(
+                crate::services::discord::host_teardown_gate::test_support::mailbox_turn_active(
+                    &shared, channel
+                )
+                .await
+            );
+            assert_eq!(home.commands_in_flight(), 0);
+        }
+        channel_home::unregister(home.channel_id());
+        server.abort();
+        let _ = server.await;
     }
 }

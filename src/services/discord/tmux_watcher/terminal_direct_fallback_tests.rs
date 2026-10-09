@@ -2,7 +2,10 @@ use super::*;
 
 #[test]
 fn legacy_edit_failure_revalidation_precedes_fallback_post_4508() {
-    let source = include_str!("terminal_direct_fallback.rs");
+    let source = concat!(
+        include_str!("terminal_direct_fallback.rs"),
+        include_str!("terminal_direct_fallback_edit.rs")
+    );
     // #5071 T1 S3a: both transports moved to their receipt-returning parallel
     // entry points so the delivery journal can name the channel Discord answered
     // with. Same deferred-edit/fallback authority, so only the names change here.
