@@ -7,6 +7,28 @@ use super::session_canonical_identity::HookCanonicalIdentity;
 use super::{RoleBinding, SharedData};
 use crate::services::provider::ProviderKind;
 
+#[derive(Default)]
+pub(super) struct StatusHookTarget<'a> {
+    pub(super) canonical: Option<HookCanonicalIdentity<'a>>,
+    pub(super) turn_nonce: Option<&'a str>,
+}
+
+pub(super) struct TurnTerminalStatus<'a> {
+    pub(super) session_key: Option<&'a str>,
+    pub(super) name: Option<&'a str>,
+    pub(super) model: Option<&'a str>,
+    pub(super) status: &'a str,
+    pub(super) provider: &'a ProviderKind,
+    pub(super) session_info: Option<&'a str>,
+    pub(super) tokens: Option<u64>,
+    pub(super) cwd: Option<&'a str>,
+    pub(super) dispatch_id: Option<&'a str>,
+    pub(super) thread_channel_id: Option<u64>,
+    pub(super) channel_id: Option<serenity::ChannelId>,
+    pub(super) agent_id: Option<&'a str>,
+    pub(super) turn_nonce: Option<&'a str>,
+}
+
 pub(super) async fn post_status(
     session_key: &str,
     name: Option<&str>,
@@ -20,8 +42,12 @@ pub(super) async fn post_status(
     thread_channel_id: Option<u64>,
     channel_id: Option<serenity::ChannelId>,
     agent_id: Option<&str>,
-    canonical: Option<HookCanonicalIdentity<'_>>,
+    target: StatusHookTarget<'_>,
 ) {
+    let StatusHookTarget {
+        canonical,
+        turn_nonce,
+    } = target;
     let status = crate::db::session_status::normalize_incoming_session_status(Some(status));
     let channel_id_string = channel_id.map(|id| id.get().to_string());
     let body = crate::services::dispatched_sessions::HookSessionBody {
@@ -58,7 +84,11 @@ pub(super) async fn post_status(
         Some(session_key),
     );
     async {
-        if let Err(err) = super::internal_api::hook_session(body).await {
+        let result = match turn_nonce {
+            Some(nonce) => super::internal_api::hook_session_terminal(body, nonce).await,
+            None => super::internal_api::hook_session(body).await,
+        };
+        if let Err(err) = result {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!("  [{ts}] ⚠ ADK session POST failed: {err}");
         }
@@ -110,7 +140,10 @@ pub(super) async fn post_canonical(
         thread_channel_id,
         channel_id,
         agent_id,
-        canonical,
+        StatusHookTarget {
+            canonical,
+            ..Default::default()
+        },
     )
     .await;
 }
@@ -179,7 +212,32 @@ pub(super) async fn post_legacy(
         thread_channel_id,
         channel_id,
         agent_id,
-        None,
+        StatusHookTarget::default(),
+    )
+    .await;
+}
+
+pub(super) async fn post_turn_terminal(request: TurnTerminalStatus<'_>) {
+    let Some(session_key) = request.session_key else {
+        return;
+    };
+    post_status(
+        session_key,
+        request.name,
+        request.model,
+        request.status,
+        request.provider,
+        request.session_info,
+        request.tokens,
+        request.cwd,
+        request.dispatch_id,
+        request.thread_channel_id,
+        request.channel_id,
+        request.agent_id,
+        StatusHookTarget {
+            turn_nonce: request.turn_nonce,
+            ..Default::default()
+        },
     )
     .await;
 }
@@ -257,7 +315,7 @@ mod tests {
                 None,
                 Some(serenity::ChannelId::new(4_221_000)),
                 Some("agent-boundary"),
-                None,
+                StatusHookTarget::default(),
             ));
         });
 

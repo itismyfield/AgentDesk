@@ -154,6 +154,8 @@ use self::synthetic_start::{
 };
 
 #[cfg(unix)]
+pub(in crate::services::discord) mod background_child_completion;
+#[cfg(unix)]
 mod claude_idle_bridge;
 #[cfg(unix)]
 mod claude_idle_runtime;

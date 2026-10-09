@@ -378,6 +378,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "o_owns_recovery_body:peek",
         "relay_recovered_body_to_placeholder:claim",
     ),
+    "src/services/discord/recovery_engine/herdr_admitted_restart.rs": ("o_owns:peek",),
     "src/services/discord/recovery_engine/terminal_text_idempotency.rs": (
         "relay_no_anchor_terminal_text:claim",
         "relay_no_anchor_terminal_text:claim",
