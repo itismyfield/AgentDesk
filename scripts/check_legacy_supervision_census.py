@@ -27,7 +27,7 @@ PROTECTED = {
     'src/services/discord/runtime_bootstrap.rs': '2c76094a3c6bb098ee0b4eccd87416a7927fe80f52739995ca4c56efc2490d0a',
     'src/services/discord/inflight/removal/boot_reaper.rs': '14b7475c4471438af7667b50f7053d5cc86fba5d10f3d5407253f6b92dc81b1e',
     'src/services/discord/tui_direct_pending_start/turn_retirement.rs': 'ce57184a831746d7ad6d65ef81d9a53b3d18a68d843e783382dfce116d919d9c',
-    'src/services/discord/runtime_bootstrap/o_writer_host.rs': '52d696ebffbf91e7d24ea8344ff9d034ba9b158ceceb6afe13add7349488abe0',
+    'src/services/discord/runtime_bootstrap/o_writer_host.rs': 'd27d371f10798a78637752cb274eabe7cec1aed5598d9d91c519cbc0b959c598',
     'src/services/discord/health/legacy_supervision.rs': '1c1497db24b104d698762e3d24c51e224acce622e0cc4255806b1d02dd55a4b3',
     'src/services/discord/health/snapshot.rs': 'a389f92170602c561a021ab6f36d4db543648817b4da8b6f5d90f2ba4eb9a035'}
 SYMBOL = re.compile(r"\b(?:Boot(?:Cohort|Slot|Publication|WorkOnce|Roster|Bot|Selection|Result|RetirementHealth)|boot_retirement|boot_status|install_process|wait_released|publish_with)\b")
