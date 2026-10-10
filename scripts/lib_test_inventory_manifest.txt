@@ -10924,6 +10924,8 @@ services::tui_o::repost::io::probe::tests::f4r_the_marker_names_the_channel_and_
 services::tui_o::repost::io::tests::bounded_create_counts_one_post_and_sends_again_only_after_a_confirmed_429
 services::tui_o::repost::io::tests::bounded_create_shares_the_gateway_route_bucket_and_refuses_a_lone_limiter
 services::tui_o::repost::io::tests::bounded_dispatch_times_out_with_the_request_gone_and_waits_429s_inside_the_timeout
+services::tui_o::repost::io::tests::f1r_a_handed_over_request_carries_its_guard_and_counts_like_send_within
+services::tui_o::repost::io::tests::f1r_an_unpolled_request_dropped_sends_and_counts_nothing
 services::tui_o::repost::io::tests::repost_sends_keep_one_nonce_and_marker_outside_the_content
 services::tui_o::repost::o_piece_ledger_tests::a_new_holder_or_serial_reaches_the_same_row_and_a_failed_read_is_no_empty_row_pg
 services::tui_o::repost::o_piece_ledger_tests::a_receipt_resolves_its_piece_once_and_never_moves_to_another_piece_pg
