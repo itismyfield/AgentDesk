@@ -4523,6 +4523,15 @@ services::discord::input_runtime::supervisor::tests::every_boot_closes_admission
 services::discord::input_runtime::supervisor::tests::failed_append_reopens_on_the_next_access_and_keeps_the_chain
 services::discord::input_runtime::supervisor::tests::finished_clear_loan_returns_the_handle_to_the_slot
 services::discord::input_runtime::supervisor::tests::held_move_never_enters_handback_while_a_finished_one_does
+services::discord::input_runtime::supervisor::tests::mapping_guard::x13_mapping_both_endpoints_hold_before_freeze_and_recheck_the_actual_map
+services::discord::input_runtime::supervisor::tests::mapping_guard::x13_mapping_close_flush_success_and_failure_never_clear_mapping_or_reopen_admission
+services::discord::input_runtime::supervisor::tests::mapping_guard::x13_mapping_drain_timeout_is_not_an_empty_mapping_proof
+services::discord::input_runtime::supervisor::tests::mapping_guard::x13_mapping_empty_does_not_substitute_for_a_gate_freeze_ack
+services::discord::input_runtime::supervisor::tests::mapping_guard::x13_mapping_hold_slots_are_independent_of_close_and_gate_failures
+services::discord::input_runtime::supervisor::tests::mapping_guard::x13_mapping_legacy_handback_skips_inspection_without_clearing_a_mapping_hold
+services::discord::input_runtime::supervisor::tests::mapping_guard::x13_mapping_production_source_census
+services::discord::input_runtime::supervisor::tests::mapping_guard::x13_mapping_unavailable_preserves_prior_hold_and_retries_without_a_cached_pass
+services::discord::input_runtime::supervisor::tests::mapping_guard::x13_mapping_waits_for_the_last_admitted_writer_before_inspection
 services::discord::input_runtime::supervisor::tests::one_slot_handle_continues_through_move_append_checkpoint_and_reopen
 services::discord::input_runtime::supervisor::tests::refused_session_host_reopens_legacy_only_without_ledger_history
 services::discord::input_runtime::supervisor::tests::registered_holds_join_fence_health_and_leave_on_release
