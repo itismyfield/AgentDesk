@@ -46,6 +46,7 @@ static LOG: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 // `$1` after global flags. Builtins only: a failed read or an unknown state is recorded,
 // never mistaken for another pane state. `deadpane` keeps the session with a dead pane,
 // `unanswered` has no server socket, `listfail` fails only `list-panes`; kills are logged.
+// A `list-fails` file fails `list-sessions`.
 const FAKE_TMUX: &str = r#"#!/bin/sh
 while [ "${1#-}" != "$1" ]; do shift; done
 echo "$*" >> "ROOT/tmux-calls"
@@ -57,7 +58,7 @@ case "$1" in
   list-panes) [ "$state" = listfail ] && exit 1
     case "$state" in dead|deadpane) echo 1 ;; *) echo 0 ;; esac; exit 0 ;;
   kill-session) echo "$*" >> "ROOT/tmux-kills"; exit 0 ;;
-  list-sessions) [ -f "ROOT/sessions" ] && while read -r s; do echo "$s"; done < "ROOT/sessions"; exit 0 ;;
+  list-sessions) [ -f "ROOT/list-fails" ] && exit 1; [ -f "ROOT/sessions" ] && while read -r s; do echo "$s"; done < "ROOT/sessions"; exit 0 ;;
   capture-pane) [ "$state" = busy ] && printf '%s\n' '⏺ Running 1 shell command…' '· Actioning… (4m 7s · esc to interrupt)'; exit 0 ;;
 esac
 exit 0

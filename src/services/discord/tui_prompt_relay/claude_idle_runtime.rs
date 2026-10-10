@@ -89,26 +89,11 @@ pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
         "claude_idle_transcript_relay",
         async move {
             let mut next_rehydrate = tokio::time::Instant::now();
+            let boot_discovery = Arc::new(AtomicBool::new(true));
             loop {
                 let now = tokio::time::Instant::now();
                 if now >= next_rehydrate {
-                    // #3105 (codex P2): `rehydrate_existing_claude_tui_bindings` is a
-                    // fully BLOCKING pass (synchronous `tmux` subprocess calls + a
-                    // `std::thread::sleep` between multi-sample pane probes); running it
-                    // inline would stall the executor for samples×delay plus tmux latency.
-                    // Move it onto the blocking pool via `spawn_blocking` (the sync core
-                    // and its unit-testable logic are unchanged).
-                    let shared_for_rehydrate = shared.clone();
-                    let rehydrate_result = tokio::task::spawn_blocking(move || {
-                        rehydrate_existing_claude_tui_bindings(&shared_for_rehydrate);
-                    })
-                    .await;
-                    if let Err(error) = rehydrate_result {
-                        tracing::warn!(
-                            error = %error,
-                            "Claude TUI binding rehydrate task panicked or was cancelled"
-                        );
-                    }
+                    super::launch_script::run_claude_rehydrate_pass(&shared, &boot_discovery).await;
                     next_rehydrate = now + CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL;
                 }
                 // #5188 (R2): the tick's two phases, dispatched in the declared

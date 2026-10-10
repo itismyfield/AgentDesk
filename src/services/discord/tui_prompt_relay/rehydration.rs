@@ -16,7 +16,7 @@ use super::super::recovery_engine::host_reconcile::names_another_host;
 #[cfg(unix)]
 pub(super) use super::launch_script::rehydrated_claude_tui_binding_for_tmux_session;
 use super::launch_script::{
-    claude_launch_observation, claude_launch_transcript, claude_tui_rehydrated_binding,
+    claude_launch_transcript, claude_rehydrate_launch_observation, claude_tui_rehydrated_binding,
 };
 use super::*;
 use crate::services::tui_prompt_dedupe::pane_registration::{
@@ -259,6 +259,7 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
                 rehydrate_claude_tui_pane(shared, &tmux_session_name);
             }
             crate::services::claude_tui::hook_server::mark_boot_discovery_complete();
+            super::launch_script::boot_listing_completed();
         }
         Err(error) => {
             tracing::debug!(error = %error, "Claude TUI binding rehydrate skipped; tmux sessions unavailable");
@@ -279,7 +280,7 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
     // authority — the authoritative resolver is owner_channel_for_tmux_session.
     let existing_channel =
         crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name);
-    let (fresh_binding, launch_context) = claude_launch_observation(tmux_session_name);
+    let (fresh_binding, launch_context) = claude_rehydrate_launch_observation(tmux_session_name);
     // #3105: prefer the settings-derived (authoritative) channel; only fall
     // back to the dedupe mirror's last-seen channel for the dedupe binding
     // refresh below. The mirror's value must NOT be promoted into the

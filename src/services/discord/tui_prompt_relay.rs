@@ -97,7 +97,14 @@ pub(in crate::services::discord) mod herdr_source;
 #[cfg(unix)]
 mod launch_script;
 #[cfg(unix)]
+pub(in crate::services::discord) use self::launch_script::boot_read_start;
+#[cfg(unix)]
 use self::launch_script::parse_claude_tui_launch_script;
+#[cfg(all(unix, test))]
+pub(in crate::services::discord) use self::launch_script::{
+    boot_observation_for_tests, boot_read_starts_held, panic_next_rehydrate_pass_at,
+    pause_next_boot_observation, run_claude_rehydrate_pass_for_tests,
+};
 
 #[cfg(unix)]
 mod idle_offset_resolution;

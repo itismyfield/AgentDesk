@@ -7603,10 +7603,14 @@ services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stre
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_offset_harness_tests::a_read_trailing_a_delivered_frontier_does_not_reopen_the_turn
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_offset_harness_tests::a_restore_before_the_boot_observation_starts_at_the_transcript_end
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_offset_harness_tests::a_row_at_a_recorded_zero_keeps_it
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_offset_harness_tests::a_row_with_no_transcript_offset_restores_at_the_furthest_known_position
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_offset_harness_tests::a_row_with_no_transcript_offset_restores_past_older_turns
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_offset_harness_tests::an_undelivered_tail_before_the_restart_is_read_from_the_frontier
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_offset_harness_tests::only_the_first_completed_tmux_listing_observes_boot_read_starts
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_offset_harness_tests::output_written_after_the_boot_rehydrate_is_read_from_where_it_saw_the_transcript
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_offset_harness_tests::the_first_boot_observation_of_a_transcript_keeps_its_length
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_after_a_normal_exit_baseline_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_against_a_same_identity_successor_baseline
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::planned_drain_pinned_row_baseline

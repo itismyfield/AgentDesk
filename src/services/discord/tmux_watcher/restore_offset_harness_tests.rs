@@ -2,6 +2,7 @@
 //! Claude TUI pane whose open row a restart finds on disk.
 
 use super::*;
+use std::sync::mpsc;
 
 const MODULE: &str = "restore_offset_harness_tests";
 const OLD: [&str; 3] = [
@@ -21,12 +22,24 @@ fn old_turn(body: &str) -> String {
 /// transcript holds older completed turns; `wrapper` also lands them in the wrapper JSONL.
 async fn restart_pane(case: u64, wrapper: bool) -> Harness {
     let mut h = Harness::new(case, "").await;
-    let root = std::env::var("AGENTDESK_ROOT_DIR").unwrap();
     h.tmux = CLAUDE.build_tmux_session_name(&format!("rr0-restore-{case}-cc"));
-    std::fs::write(format!("{root}/sessions"), format!("{}\n", h.tmux)).unwrap();
+    list_sessions(&[&h.tmux]);
     let temp = |ext: &str| crate::services::tmux_common::session_temp_path(&h.tmux, ext);
     std::fs::write(temp("generation"), "restore-generation").unwrap();
     crate::services::tmux_common::write_tmux_channel_binding(&h.tmux, h.channel.get()).unwrap();
+    let old: String = OLD.iter().map(|body| old_turn(body)).collect();
+    h.path = launch_pane(&h.tmux, case, Some(&old));
+    if wrapper {
+        h.path = temp("jsonl");
+        std::fs::write(&h.path, &old).unwrap();
+    }
+    h
+}
+
+/// Writes `tmux`'s launch script into `workspace-{case}` and returns its transcript path,
+/// holding `body` if given and missing otherwise.
+fn launch_pane(tmux: &str, case: u64, body: Option<&str>) -> String {
+    let root = std::env::var("AGENTDESK_ROOT_DIR").unwrap();
     let cwd = std::path::PathBuf::from(format!("{root}/workspace-{case}"));
     std::fs::create_dir_all(&cwd).unwrap();
     let launch = format!(
@@ -34,7 +47,8 @@ async fn restart_pane(case: u64, wrapper: bool) -> Harness {
         cwd.display()
     );
     let launch_ext = crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT;
-    std::fs::write(temp(launch_ext), launch).unwrap();
+    let script = crate::services::tmux_common::session_temp_path(tmux, launch_ext);
+    std::fs::write(script, launch).unwrap();
     let home = std::env::var("CLAUDE_CONFIG_DIR").unwrap();
     let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
         &cwd,
@@ -43,14 +57,17 @@ async fn restart_pane(case: u64, wrapper: bool) -> Harness {
     )
     .unwrap();
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    let old: String = OLD.iter().map(|body| old_turn(body)).collect();
-    std::fs::write(&transcript, &old).unwrap();
-    h.path = transcript.display().to_string();
-    if wrapper {
-        h.path = temp("jsonl");
-        std::fs::write(&h.path, &old).unwrap();
+    if let Some(body) = body {
+        std::fs::write(&transcript, body).unwrap();
     }
-    h
+    transcript.display().to_string()
+}
+
+/// The tmux sessions the fake `tmux` lists from now on.
+fn list_sessions(names: &[&str]) {
+    let root = std::env::var("AGENTDESK_ROOT_DIR").unwrap();
+    let listed: String = names.iter().map(|name| format!("{name}\n")).collect();
+    std::fs::write(format!("{root}/sessions"), listed).unwrap();
 }
 
 /// Saves the open turn the bridge started on this pane, with no transcript offset or output
@@ -91,15 +108,54 @@ async fn restore(h: &Harness) -> u64 {
     at.split(')').next().unwrap().parse().unwrap()
 }
 
-/// The boot rehydrate's binding for this pane, registered, as the registry then holds it.
-fn boot_rehydrate(h: &Harness) -> (String, u64) {
+/// A rehydrate's binding for this pane, registered, as the registry then holds it.
+fn rehydrate_binding(h: &Harness) -> (String, u64) {
     let rehydrated =
         crate::services::discord::tui_prompt_relay::rehydrated_claude_binding_for_tests;
-    let seed = rehydrated(&h.tmux).expect("the boot rehydrate binding");
+    let seed = rehydrated(&h.tmux).expect("the rehydrate binding");
     crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&h.tmux, seed);
     let registered = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&h.tmux)
         .expect("the registered binding");
     (registered.output_path, registered.last_offset)
+}
+
+/// One idle relay rehydrate pass, the boot discovery while `boot` holds.
+async fn rehydrate_pass(h: &Harness, boot: &Arc<AtomicBool>) {
+    crate::services::discord::tui_prompt_relay::run_claude_rehydrate_pass_for_tests(
+        &h.shared, boot,
+    )
+    .await;
+}
+
+fn boot_read_start(h: &Harness) -> Option<u64> {
+    crate::services::discord::tui_prompt_relay::boot_read_start(&h.path)
+}
+
+/// Holds the next boot observation of `path` once it has read the length: the receiver gets
+/// that length and the sender releases it.
+fn pause_boot_observation(path: &str) -> (mpsc::Receiver<u64>, mpsc::Sender<()>) {
+    let (seen_tx, seen) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    crate::services::discord::tui_prompt_relay::pause_next_boot_observation(path, move |len| {
+        seen_tx.send(len).unwrap();
+        let _ = released.recv();
+    });
+    (seen, release)
+}
+
+/// The restore offset, the frames starting before `start`, and the frames routed other than
+/// the existing soft-terminal authority refusal.
+type Refused = (u64, Vec<(u64, u64, String)>, Vec<(u64, u64, String)>);
+
+fn refused_from(offset: u64, frames: &[(u64, u64, String)], start: u64) -> Refused {
+    let before = frames.iter().filter(|f| f.0 < start).cloned().collect();
+    let refusal = "soft_terminal_no_authority:";
+    let other = frames
+        .iter()
+        .filter(|f| !f.2.starts_with(refusal))
+        .cloned()
+        .collect();
+    (offset, before, other)
 }
 
 /// Lets the restored watcher read through `end` and go quiet, then returns its relay frames.
@@ -152,9 +208,8 @@ async fn a_row_with_no_transcript_offset_restores_past_older_turns() {
     assert_eq!(offset, old_end);
 }
 
-// The current turn's tail written before the restart is still read: the boot rehydrate seeds
-// the binding at that EOF, but only the delivered frontier says where the watcher resumes. A
-// watcher-owned row whose turn started at the frontier then shows that tail.
+// The tail before the restart is read from the delivered frontier, not a later boot read start:
+// a watcher-owned row shows it; the bridge's own row is refused only by soft-terminal authority.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_undelivered_tail_before_the_restart_is_read_from_the_frontier() {
     let test = "an_undelivered_tail_before_the_restart_is_read_from_the_frontier";
@@ -168,7 +223,13 @@ async fn an_undelivered_tail_before_the_restart_is_read_from_the_frontier() {
         h.commit(0, delivered);
         h.append(old_turn(PENDING).as_bytes());
         let end = h.len();
-        assert_eq!(boot_rehydrate(&h), (h.path.clone(), end));
+        rehydrate_pass(&h, &Arc::new(AtomicBool::new(true))).await;
+        assert_eq!(
+            boot_read_start(&h),
+            Some(end),
+            "a boot read start past the frontier"
+        );
+        assert_eq!(rehydrate_binding(&h), (h.path.clone(), end));
         let turn_start = if starts_at_frontier { delivered } else { 0 };
         save_bridge_row(&h, |row| {
             row.turn_start_offset = Some(turn_start);
@@ -179,22 +240,26 @@ async fn an_undelivered_tail_before_the_restart_is_read_from_the_frontier() {
             }
         })
         .await;
-        assert_eq!(restore(&h).await, delivered, "{case}");
+        let offset = restore(&h).await;
+        assert_eq!(offset, delivered, "{case}");
         let frames = read_through(&h, end).await;
         assert_eq!(shown_old_bodies(&h), Vec::<&str>::new(), "{frames:?}");
-        assert!(frames.iter().all(|f| f.0 >= delivered), "{frames:?}");
+        if starts_at_frontier {
+            assert!(frames.iter().all(|f| f.0 >= delivered), "{frames:?}");
+            assert_eq!(shown(&h, PENDING), (0, 1), "{frames:?}");
+        } else {
+            let refused = refused_from(offset, &frames, delivered);
+            assert_eq!(refused, (delivered, vec![], vec![]), "{frames:?}");
+        }
         assert!(
             frames.iter().any(|f| f.0 == delivered && f.1 >= end),
             "{frames:?}"
         );
-        if starts_at_frontier {
-            assert_eq!(shown(&h, PENDING), (0, 1), "{frames:?}");
-        }
     }
 }
 
-// With no delivery evidence, output the pane wrote after the boot rehydrate first saw its
-// transcript is read from where it saw it, not skipped to the transcript's end at restore.
+// With no delivery evidence, output written after the boot pass saw the transcript is read from
+// there, even when another session's lookup reads it while that observation is recorded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn output_written_after_the_boot_rehydrate_is_read_from_where_it_saw_the_transcript() {
     let test = "output_written_after_the_boot_rehydrate_is_read_from_where_it_saw_the_transcript";
@@ -204,7 +269,40 @@ async fn output_written_after_the_boot_rehydrate_is_read_from_where_it_saw_the_t
     }
     let h = restart_pane(5, false).await;
     let boot = h.len();
-    assert_eq!(boot_rehydrate(&h), (h.path.clone(), boot));
+    let (seen, release) = pause_boot_observation(&h.path);
+    let pass = {
+        let shared = h.shared.clone();
+        let boot = Arc::new(AtomicBool::new(true));
+        tokio::spawn(async move {
+            let pass =
+                crate::services::discord::tui_prompt_relay::run_claude_rehydrate_pass_for_tests;
+            pass(&shared, &boot).await;
+            boot.load(Ordering::Acquire)
+        })
+    };
+    let wait = Duration::from_secs(30);
+    assert_eq!(
+        seen.recv_timeout(wait),
+        Ok(boot),
+        "the boot observation's length"
+    );
+    h.append(old_turn(BOOTED).as_bytes());
+    let end = h.len();
+    let shared = h.shared.clone();
+    let lookup = tokio::task::spawn_blocking(move || {
+        let claimed = crate::services::discord::tui_prompt_relay::other_session_claimed_transcripts;
+        claimed(&shared, "rr0-other")
+    });
+    let claimed = tokio::time::timeout(wait, lookup)
+        .await
+        .expect("lookup while held");
+    assert!(claimed.unwrap().contains(std::path::Path::new(&h.path)));
+    release.send(()).unwrap();
+    assert!(
+        !pass.await.unwrap(),
+        "the pass completed the boot discovery"
+    );
+    assert_eq!(boot_read_start(&h), Some(boot));
     save_bridge_row(&h, |_| {}).await;
     let frontier = delivered_frontier_current_generation(&CLAUDE, h.channel, &h.tmux, None);
     let checkpoint =
@@ -214,16 +312,190 @@ async fn output_written_after_the_boot_rehydrate_is_read_from_where_it_saw_the_t
         (frontier.is_some(), checkpoint, turn_start),
         (false, None, Some(0))
     );
-    h.append(old_turn(BOOTED).as_bytes());
-    let end = h.len();
-    assert_eq!(restore(&h).await, boot);
+    let offset = restore(&h).await;
+    assert_eq!(offset, boot);
     let frames = read_through(&h, end).await;
     assert_eq!(shown_old_bodies(&h), Vec::<&str>::new(), "{frames:?}");
-    assert!(frames.iter().all(|f| f.0 >= boot), "{frames:?}");
+    assert_eq!(refused_from(offset, &frames, boot), (boot, vec![], vec![]));
     assert!(
         frames.iter().any(|f| f.0 == boot && f.1 >= end),
         "{frames:?}"
     );
+}
+
+// Two boot observations of one transcript keep the length the first read under the map lock, and
+// re-observation, re-registration, a checkpoint or a periodic pass do not move it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_first_boot_observation_of_a_transcript_keeps_its_length() {
+    let test = "the_first_boot_observation_of_a_transcript_keeps_its_length";
+    let (_home, home) = claude_home();
+    if !isolated_in(MODULE, test, &[("CLAUDE_CONFIG_DIR", &home)]) {
+        return;
+    }
+    use crate::services::discord::tui_prompt_relay::{
+        boot_observation_for_tests as observe, boot_read_starts_held,
+    };
+    let h = restart_pane(51, false).await;
+    let twin = CLAUDE.build_tmux_session_name("rr0-restore-51-twin-cc");
+    assert_eq!(launch_pane(&twin, 51, None), h.path, "one transcript");
+    let boot = h.len();
+    let (seen, release) = pause_boot_observation(&h.path);
+    let first = {
+        let tmux = h.tmux.clone();
+        std::thread::spawn(move || observe(&tmux))
+    };
+    let wait = Duration::from_secs(30);
+    assert_eq!(
+        seen.recv_timeout(wait),
+        Ok(boot),
+        "the first observation's length"
+    );
+    assert!(
+        boot_read_starts_held(),
+        "the length is read under the map lock"
+    );
+    h.append(old_turn(BOOTED).as_bytes());
+    let end = h.len();
+    let (entered_tx, entered) = mpsc::channel();
+    let (done_tx, done) = mpsc::channel();
+    let second = std::thread::spawn(move || {
+        entered_tx.send(()).unwrap();
+        let found = observe(&twin);
+        done_tx.send(()).unwrap();
+        found
+    });
+    entered
+        .recv_timeout(wait)
+        .expect("the second observation started");
+    let waiting = done.recv_timeout(Duration::from_millis(300));
+    assert_eq!(
+        waiting,
+        Err(mpsc::RecvTimeoutError::Timeout),
+        "it waits for the first"
+    );
+    release.send(()).unwrap();
+    assert!(first.join().unwrap());
+    done.recv_timeout(wait)
+        .expect("the second observation finished");
+    assert!(second.join().unwrap());
+    assert_eq!(boot_read_start(&h), Some(boot));
+
+    assert_eq!(rehydrate_binding(&h), (h.path.clone(), end));
+    crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_checkpoint(
+        &h.tmux, &h.path, end,
+    );
+    assert!(observe(&h.tmux));
+    rehydrate_pass(&h, &Arc::new(AtomicBool::new(false))).await;
+    assert_eq!(boot_read_start(&h), Some(boot));
+    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&h.tmux);
+    let checkpoint =
+        crate::services::tui_prompt_dedupe::runtime_binding_resume_checkpoint(&h.tmux, &h.path);
+    assert_eq!(
+        (binding.map(|b| b.last_offset), checkpoint),
+        (Some(end), Some(end))
+    );
+}
+
+// Only passes up to the first completed tmux listing observe boot read starts, even if it then
+// panicked in Herdr; a transcript first seen later gets none and its row starts at EOF.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_first_completed_tmux_listing_observes_boot_read_starts() {
+    let test = "only_the_first_completed_tmux_listing_observes_boot_read_starts";
+    let (_home, home) = claude_home();
+    if !isolated_in(MODULE, test, &[("CLAUDE_CONFIG_DIR", &home)]) {
+        return;
+    }
+    use crate::services::discord::tui_prompt_relay::panic_next_rehydrate_pass_at as panic_at;
+    let root = std::env::var("AGENTDESK_ROOT_DIR").unwrap();
+    let mut h = restart_pane(61, false).await;
+    let boot = Arc::new(AtomicBool::new(true));
+    std::fs::write(format!("{root}/list-fails"), "").unwrap();
+    rehydrate_pass(&h, &boot).await;
+    assert_eq!(boot_read_start(&h), None, "a failed listing");
+    std::fs::remove_file(format!("{root}/list-fails")).unwrap();
+
+    let first = h.len();
+    panic_at(Some("listed"));
+    rehydrate_pass(&h, &boot).await;
+    assert_eq!(panic_at(None), None, "the pass reached its panic");
+    assert_eq!(
+        boot_read_start(&h),
+        Some(first),
+        "observed before the panic"
+    );
+
+    h.append(old_turn(PENDING).as_bytes());
+    let pane = |n: u64| CLAUDE.build_tmux_session_name(&format!("rr0-restore-{n}-cc"));
+    let missing = launch_pane(&pane(63), 63, None);
+    let late = launch_pane(&pane(64), 64, Some(&old_turn(OLD[0])));
+    list_sessions(&[&h.tmux, &pane(63), &pane(64)]);
+    rehydrate_pass(&h, &boot).await;
+    let at = crate::services::discord::tui_prompt_relay::boot_read_start;
+    let late_len = old_turn(OLD[0]).len() as u64;
+    assert_eq!(boot_read_start(&h), Some(first), "a retried observation");
+    assert_eq!((at(&missing), at(&late)), (None, Some(late_len)));
+
+    let after = launch_pane(&pane(65), 65, Some(&old_turn(OLD[1])));
+    list_sessions(&[&h.tmux, &pane(65)]);
+    rehydrate_pass(&h, &boot).await;
+    assert_eq!(at(&after), None, "first seen after a completed listing");
+
+    let herdr = Arc::new(AtomicBool::new(true));
+    let listed = launch_pane(&pane(66), 66, Some(&old_turn(OLD[2])));
+    list_sessions(&[&pane(66)]);
+    panic_at(Some("herdr"));
+    rehydrate_pass(&h, &herdr).await;
+    assert_eq!(panic_at(None), None, "the pass reached its Herdr panic");
+    assert!(at(&listed).is_some());
+    h = restart_pane(62, false).await;
+    rehydrate_pass(&h, &herdr).await;
+    assert_eq!(
+        boot_read_start(&h),
+        None,
+        "first seen after the Herdr panic"
+    );
+    assert_eq!(rehydrate_binding(&h), (h.path.clone(), h.len()));
+    assert_eq!(boot_read_start(&h), None, "nor does its binding");
+    save_bridge_row(&h, |_| {}).await;
+    h.append(old_turn(BOOTED).as_bytes());
+    assert_eq!(restore(&h).await, h.len());
+}
+
+// A restore before the boot pass observes a transcript starts at its EOF; a lookup fixes no read
+// start, and the one the boot pass fixes later does not move the restored watcher.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restore_before_the_boot_observation_starts_at_the_transcript_end() {
+    let test = "a_restore_before_the_boot_observation_starts_at_the_transcript_end";
+    let (_home, home) = claude_home();
+    if !isolated_in(MODULE, test, &[("CLAUDE_CONFIG_DIR", &home)]) {
+        return;
+    }
+    let h = restart_pane(71, false).await;
+    let other = CLAUDE.build_tmux_session_name("rr0-restore-72-cc");
+    launch_pane(&other, 72, Some(&old_turn(OLD[0])));
+    list_sessions(&[&h.tmux, &other]);
+    let shared = h.shared.clone();
+    let lookup = tokio::task::spawn_blocking(move || {
+        let claimed = crate::services::discord::tui_prompt_relay::other_session_claimed_transcripts;
+        claimed(&shared, &other)
+    });
+    assert!(
+        lookup
+            .await
+            .unwrap()
+            .contains(std::path::Path::new(&h.path))
+    );
+    assert_eq!(boot_read_start(&h), None, "a lookup fixes no read start");
+    h.append(old_turn(PENDING).as_bytes());
+    save_bridge_row(&h, |_| {}).await;
+    let start = h.len();
+    assert_eq!(restore(&h).await, start);
+    rehydrate_pass(&h, &Arc::new(AtomicBool::new(true))).await;
+    assert_eq!(boot_read_start(&h), Some(start));
+    h.append(old_turn(BOOTED).as_bytes());
+    let frames = read_through(&h, h.len()).await;
+    assert_eq!(shown_old_bodies(&h), Vec::<&str>::new(), "{frames:?}");
+    assert!(frames.iter().all(|f| f.0 >= start), "{frames:?}");
 }
 
 // Such a row starts at the furthest position known within the transcript, among a durable
@@ -359,6 +631,8 @@ async fn a_row_at_a_recorded_zero_keeps_it() {
     h.save(&row);
     let reads = &super::super::super::utf8_chunk_decoder::SOURCE_READS;
     *reads.lock().unwrap() = Some(Vec::new());
+    let polls = &super::super::super::utf8_chunk_decoder::POLLS;
+    *polls.lock().unwrap() = Some(Vec::new());
     assert_eq!(restore(&h).await, 0, "the Codex rollout");
     let fallback = format!("{} — codex rollout fallback {}", h.tmux, h.path);
     assert_eq!(
@@ -366,21 +640,29 @@ async fn a_row_at_a_recorded_zero_keeps_it() {
         1,
         "restored over the rollout"
     );
-    let first_read = || {
-        let reads = reads.lock().unwrap();
-        reads
+    let first_poll = || {
+        let polls = polls.lock().unwrap();
+        polls
             .iter()
             .flatten()
-            .find(|read| read.0 == h.path)
+            .find(|poll| poll.0 == h.path)
             .cloned()
     };
-    h.until("the restored watcher's first read", |_| {
-        first_read().is_some()
+    h.until("the restored watcher's first poll", |_| {
+        first_poll().is_some()
     })
     .await;
-    let (_, start, bytes) = first_read().unwrap();
-    assert_eq!((start, bytes.len()), (0, rollout.len()), "the first read");
-    assert_eq!(bytes, rollout.as_bytes());
+    let (_, read_start, end, raw) = first_poll().unwrap();
+    let whole = (0, rollout.len() as u64, rollout.as_bytes());
+    assert_eq!((read_start, end, raw.as_slice()), whole, "the first poll");
+    let reads = reads.lock().unwrap();
+    let first_read = reads.iter().flatten().find(|read| read.0 == h.path);
+    let (_, start, bytes) = first_read.expect("the first non-empty read");
+    assert_eq!(
+        (*start, bytes.as_slice()),
+        (0, rollout.as_bytes()),
+        "the first read"
+    );
 }
 
 // A watcher streaming a turn the bridge delivered, reading in chunks below a frontier that

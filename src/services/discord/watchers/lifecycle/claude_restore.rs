@@ -116,7 +116,7 @@ fn select_claude_tui_restore_scan_cwd(
 }
 
 /// Start for a Claude transcript fallback whose inflight row never recorded a position in it: the
-/// furthest delivery evidence in the file, else where a rehydrate first saw it, else EOF.
+/// furthest delivery evidence in the file, else where the boot discovery first saw it, else EOF.
 pub(super) fn claude_fallback_unrecorded_start_offset(
     state: &crate::services::discord::inflight::InflightTurnState,
     channel_id: ChannelId,
@@ -144,8 +144,8 @@ pub(super) fn claude_fallback_unrecorded_start_offset(
         .flatten()
         .filter(|&offset| offset > 0 && offset <= file_len)
         .max();
-    // Output after the first rehydrate observation postdates the old process, so it is unsent.
-    let boot = crate::services::tui_prompt_dedupe::boot_read_start(transcript_path)
+    // Output after the boot discovery's observation postdates the old process, so it is unsent.
+    let boot = super::super::super::tui_prompt_relay::boot_read_start(transcript_path)
         .filter(|&offset| offset > 0 && offset <= file_len);
     Some(known.or(boot).unwrap_or(file_len))
 }

@@ -32,14 +32,19 @@ impl WatcherReadBatch {
         Ok(self)
     }
 
+    /// The poll's parts; `_path` and `_start`, the offset it read from, feed the test record.
     pub(super) fn into_retained_parts(
         self,
+        _path: &str,
+        _start: u64,
     ) -> (
         Vec<u8>,
         u64,
         SourceFileIdentity,
         std::sync::Arc<std::fs::File>,
     ) {
+        #[cfg(test)]
+        record_poll(_path, _start, self.end, &self.bytes);
         (
             self.bytes,
             self.end,
@@ -61,6 +66,21 @@ pub(super) type SourceRead = (String, u64, Vec<u8>);
 #[cfg(test)]
 pub(super) static SOURCE_READS: std::sync::Mutex<Option<Vec<SourceRead>>> =
     std::sync::Mutex::new(None);
+
+/// Test-only `(path, read start, returned end, bytes)` of one successful watcher poll read.
+#[cfg(test)]
+pub(super) type PolledRead = (String, u64, u64, Vec<u8>);
+
+/// Test-only record of every successful watcher poll read, once a test enables it.
+#[cfg(test)]
+pub(super) static POLLS: std::sync::Mutex<Option<Vec<PolledRead>>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(super) fn record_poll(path: &str, start: u64, end: u64, bytes: &[u8]) {
+    if let Some(polls) = POLLS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        polls.push((path.to_owned(), start, end, bytes.to_vec()));
+    }
+}
 
 pub(super) fn read_watcher_source_chunk(path: &str, offset: u64) -> SourceChunk {
     let file = std::fs::File::open(path).map_err(|error| format!("open: {error}"))?;
