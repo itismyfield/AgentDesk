@@ -173,11 +173,36 @@ pub(super) fn run_bot_spawn_reachability_observation(
     });
 }
 
-/// Exclude Held rows before restart snapshot classification and compatibility backfill.
-fn deferred_restart_inflight_snapshot(provider: &ProviderKind) -> Vec<InflightTurnState> {
-    inflight::load_inflight_states_excluding(provider, |channel| {
-        crate::services::turn_orchestrator::input_fence::held(provider, channel)
-    })
+/// Marks inflight rows for re-attach before the exit. A row whose marker failed retains the
+/// runtime; a scan that could not see every row still exits, as a short scan always has.
+async fn deferred_restart_marked(provider: &ProviderKind) -> bool {
+    let report = inflight::mark_restart_mode_blocking(
+        provider.clone(),
+        crate::services::discord::InflightRestartMode::DrainRestart,
+    )
+    .await;
+    if report.marked > 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] 🔖 marked {} inflight turn(s) as drain_restart",
+            report.marked
+        );
+    }
+    if !report.failed.is_empty() {
+        tracing::error!(
+            provider = provider.as_str(),
+            failed = ?report.failed,
+            "restart_pending inflight persistence failed; retaining marker and runtime"
+        );
+        return false;
+    }
+    if report.incomplete {
+        tracing::error!(
+            provider = provider.as_str(),
+            "restart_pending inflight scan incomplete; unseen rows stay unmarked"
+        );
+    }
+    true
 }
 
 /// Background: poll for the deferred restart marker for gateway and standby
@@ -257,32 +282,8 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                             &ids,
                         );
                     }
-                    let inflight_states_qe =
-                        deferred_restart_inflight_snapshot(&provider_for_deferred);
-                    if !inflight_states_qe.is_empty() {
-                        let ts2 = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts2}] 👁 preserving {} inflight turn(s) for restart recovery",
-                            inflight_states_qe.len()
-                        );
-                        let marked_qe =
-                            match inflight::mark_all_inflight_states_restart_mode_checked(
-                                &provider_for_deferred,
-                                crate::services::discord::InflightRestartMode::DrainRestart,
-                            ) {
-                                Ok(marked) => marked,
-                                Err(error) => {
-                                    tracing::error!(
-                                        provider = provider_for_deferred.as_str(),
-                                        error = %error,
-                                        "restart_pending inflight persistence failed; retaining marker and runtime"
-                                    );
-                                    continue;
-                                }
-                            };
-                        tracing::info!(
-                            "  [{ts2}] 🔖 marked {marked_qe} inflight turn(s) as drain_restart"
-                        );
+                    if !deferred_restart_marked(&provider_for_deferred).await {
+                        continue;
                     }
                     if cancellation_guard.cancelled() {
                         continue;

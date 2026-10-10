@@ -905,6 +905,7 @@ src/
 │   │   │   │   ├── stop_judgement/
 │   │   │   │   │   └── judged_finish_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
+│   │   │   │   ├── legacy_send_tests.rs
 │   │   │   │   ├── live_agent_recovery.rs
 │   │   │   │   ├── retirement_await_tests.rs
 │   │   │   │   ├── self_watchdog.rs
@@ -926,6 +927,7 @@ src/
 │   │   │   ├── watcher_respawn/
 │   │   │   │   ├── claude_original_tests.rs
 │   │   │   │   ├── idle_relay_absence.rs
+│   │   │   │   ├── input_fence_tests.rs
 │   │   │   │   └── live_bridge_guard.rs
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── legacy_supervision.rs
@@ -1018,7 +1020,9 @@ src/
 │   │   │   ├── ownership_ops.rs
 │   │   │   ├── rebind_reap.rs
 │   │   │   ├── removal.rs
+│   │   │   ├── restart_mark.rs
 │   │   │   ├── restart_mark_fence_tests.rs
+│   │   │   ├── restart_mark_tests.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
@@ -1543,6 +1547,8 @@ src/
 │   │   │   ├── terminal_commit_epilogue.rs
 │   │   │   ├── terminal_delivery_types.rs
 │   │   │   ├── terminal_direct_fallback.rs
+│   │   │   ├── terminal_direct_fallback_edit.rs
+│   │   │   ├── terminal_direct_fallback_send_tests.rs
 │   │   │   ├── terminal_direct_fallback_tests.rs
 │   │   │   ├── terminal_long_chunks.rs
 │   │   │   ├── terminal_preflight.rs
@@ -1619,6 +1625,7 @@ src/
 │   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
 │   │   │   │   ├── o_tool_first_panel_tests.rs
+│   │   │   │   ├── pending_start_input_fence_tests.rs
 │   │   │   │   ├── retired_pending_start_claim_tests.rs
 │   │   │   │   ├── scenario_census_e2e.rs
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
@@ -2426,6 +2433,10 @@ src/
 │   │   ├── alarm.rs
 │   │   ├── channel_policy.rs
 │   │   ├── cutover.rs
+│   │   ├── exact_episode.rs
+│   │   ├── exact_episode_tests.rs
+│   │   ├── exact_pg.rs
+│   │   ├── exact_pg_tests.rs
 │   │   ├── ownership.rs
 │   │   ├── shadow_host.rs
 │   │   ├── topology.rs
