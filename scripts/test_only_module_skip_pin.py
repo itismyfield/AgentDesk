@@ -491,12 +491,20 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/store/rotation/provenance_tests.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/provenance_tests.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant_tests.rs",
+        "src/services/discord/input_runtime/activation/scope_tests.rs",
+        "src/services/discord/input_runtime/activation/selection_tests.rs",
+        "src/services/tui_input/actor/pane/ownership_tests.rs",
     }
 )
 
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/discord/input_runtime/activation.rs",
+        "src/services/discord/input_runtime/activation/plan.rs",
+        "src/services/discord/input_runtime/activation/scope.rs",
+        "src/services/discord/input_runtime/offer.rs",
+        "src/services/tui_input/actor/pane/ownership.rs",
         "src/services/codex_tui/rollout_tail/provenance.rs",
         "src/services/tui_o/writer/rotation/provenance.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant.rs",
