@@ -41,7 +41,7 @@ pub(crate) enum RecoveryKind {
     OriginUnknown,
 }
 
-/// A message of this piece and how it was told apart; F5 records `receipt`.
+/// A message of this piece and how it was told apart; recording `receipt` is the caller's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ValidatedReceipt {
     pub(crate) receipt: Receipt,
