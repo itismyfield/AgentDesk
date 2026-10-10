@@ -191,6 +191,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::settings::tests
   --skip services::stale_turn_reconciler::tests
   --skip services::tui_o::exact_submission::tests
+  --skip services::tui_o::repost::admission_tests
+  --skip services::tui_o::repost::o_piece_ledger_tests
   --skip services::tui_o::writer::tests::actor::host_start::deferred::pg
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
@@ -743,6 +745,9 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::exact_pg::tests::exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged
   services::tui_o::exact_pg::tests::exact_snapshot_sibling_construction_is_compile_rejected
   services::tui_o::exact_submission::tests::exact_submission_none_preserves_result_without_runtime
+  services::tui_o::repost::admission_tests::a_torn_sidecar_tail_is_cut_and_any_other_damage_refuses_the_sidecar
+  services::tui_o::repost::admission_tests::only_an_uncertain_original_sent_while_on_is_eligible_and_the_rest_is_reported_once
+  services::tui_o::repost::admission_tests::with_the_switch_off_no_admitter_exists_to_reach_postgres_or_the_sidecar
   services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
   services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
@@ -942,6 +947,8 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::settings::tests
   services::stale_turn_reconciler::tests
   services::tui_o::exact_submission::tests
+  services::tui_o::repost::admission_tests
+  services::tui_o::repost::o_piece_ledger_tests
   services::tui_o::writer::tests::actor::host_start::deferred::pg
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests

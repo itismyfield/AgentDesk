@@ -25,6 +25,7 @@ src/db/intake_outbox_home_tests.rs
 src/db/o_channel_activation.rs
 src/db/o_channel_activation_fence_tests.rs
 src/db/o_channel_homes_tests.rs
+src/db/o_piece_ledger_tests.rs
 src/db/postgres.rs
 src/db/postgres/advisory_lock_tests.rs
 src/db/postgres/test_db_reclaim.rs
@@ -252,6 +253,7 @@ src/services/tmux_turn_liveness/tests_pg.rs
 src/services/tui_o/alarm.rs
 src/services/tui_o/exact_pg_tests.rs
 src/services/tui_o/exact_submission.rs
+src/services/tui_o/repost/admission_tests.rs
 src/services/tui_o/writer/deferred_pg_tests.rs
 src/services/turn_host_tests.rs
 src/services/turn_lifecycle.rs
@@ -523,6 +525,8 @@ services::tmux_turn_liveness::tests_pg
 services::tui_o::alarm::postgres_tests
 services::tui_o::exact_pg::tests
 services::tui_o::exact_submission::tests
+services::tui_o::repost::admission_tests
+services::tui_o::repost::o_piece_ledger_tests
 services::tui_o::writer::tests::actor::host_start::deferred::pg
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
@@ -1901,6 +1905,18 @@ services::tui_o::exact_submission::tests::exact_submission_pg_attempt_before_clo
 services::tui_o::exact_submission::tests::exact_submission_pg_closed_admission_rejects_late_attempt
 services::tui_o::exact_submission::tests::exact_submission_pg_executor_classifies_no_attempt_and_typed_refusal
 services::tui_o::exact_submission::tests::exact_submission_pg_reopen_process_resolves_policy_without_source
+services::tui_o::repost::admission_tests::a_local_posted_of_an_admitted_piece_becomes_its_receipt_before_any_further_slot_pg
+services::tui_o::repost::admission_tests::a_new_holder_never_resends_an_admitted_original_and_a_changed_payload_gets_no_budget_pg
+services::tui_o::repost::admission_tests::an_admission_a_crash_or_outage_cut_resumes_from_the_sidecar_with_one_slot_zero_pg
+services::tui_o::repost::admission_tests::an_operator_retry_and_the_automatic_reconfirm_share_one_three_post_budget_pg
+services::tui_o::repost::admission_tests::f4_nonce_receipt_closes_the_existing_budget_pg
+services::tui_o::repost::admission_tests::f4_receipt_race_never_reattributes_a_message_pg
+services::tui_o::repost::admission_tests::f4_row_change_invalidates_absence_evidence_pg
+services::tui_o::repost::o_piece_ledger_tests::a_new_holder_or_serial_reaches_the_same_row_and_a_failed_read_is_no_empty_row_pg
+services::tui_o::repost::o_piece_ledger_tests::a_receipt_resolves_its_piece_once_and_never_moves_to_another_piece_pg
+services::tui_o::repost::o_piece_ledger_tests::a_slot_spent_before_its_post_is_never_refunded_and_slot_two_is_the_last_pg
+services::tui_o::repost::o_piece_ledger_tests::the_piece_tables_refuse_a_second_slot_row_a_fourth_slot_and_a_reattributed_message_pg
+services::tui_o::repost::o_piece_ledger_tests::two_holders_granting_at_one_revision_consume_one_slot_and_a_lost_reply_mints_none_pg
 services::tui_o::writer::tests::actor::host_start::deferred::pg::expired_handoff_fence_blocks_actual_sweep_until_init_published_pg
 services::tui_o::writer::tests::actor::host_start::deferred::pg::normal_deferred_fence_blocks_actual_sweep_until_init_published_pg
 services::tui_o::writer::tests::actor::host_start::deferred::pg::normal_deferred_rejects_headless_enqueue_completed_after_fence_from_a_preexisting_reservation_pg

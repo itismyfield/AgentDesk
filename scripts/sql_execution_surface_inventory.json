@@ -1264,6 +1264,15 @@
     },
     {
       "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0138_o_piece_delivery.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:b4468dfd8804125f020972ce7f762ae7dff1d5c459c6024c395fc490cbdcb623"
+    },
+    {
+      "root": "migrations/postgres",
       "kind": "MIGRATION_METADATA",
       "path": "migrations/postgres/checksum-repair-allowlist.json",
       "api": "migration.non_sql_tracked",
@@ -1278,7 +1287,7 @@
       "api": "migration.non_sql_tracked",
       "symbol": "non_sql_tracked",
       "classification": "NON_SQL_TRACKED",
-      "fingerprint": "sha256:72877e3ea620dcfe87456b0ff20731c35da8abe9493556fb41c67fa43fadc8e4"
+      "fingerprint": "sha256:91df8d850bb334a550fcf6aef9b1020537bc3b66b12b7af870638eb9ea60d6c9"
     },
     {
       "root": "policies",
@@ -11179,6 +11188,222 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:1d9fce9c9730375e2b16b2da833f6817b2669634fe243a8b4d2e4c624211f021"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_attempts.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:4eac5aa9681360c86ec475024ddcc94de0221314e11563d7ef30c14c3c028668"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_attempts.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:583635a3fb7682e859451672b38403a093a817f8517940a0a0f323841f08dd22"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_attempts.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:63d89ad9337f5fccc429c4b245751ad37fe84d89bbdc89a0460f0123235890c4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_attempts.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:86836182f04d07e95c765d6f804abdd946f7f9c1e6e3ee56a3bfd41378fd45f1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_attempts.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:ab58bb73925a7702cbc9bc02a1c1d30a0356eb1cbdb2c0e50bf09da2dcf1c1d8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_attempts.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:c001d32d88f5385a38020a2a068b8e8a07bbab5fc6d3a6a7d4e5baf4294e7024"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_attempts.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:fcdfae48004e90da3510651363812ca9f472e0b5d8d7015a64412b365c868598"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_delivery.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:0009cd53ee00c5ebf654f8e87784e149fedb77cfcce1daefa94dae46321fdba1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_delivery.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:0e2ba5a82b9ebb535ba472725bf8851ce7df027e513b48f2fd89f465d86c3172"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_delivery.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:36bc73f46dca841f9d8db3b9fe0829fa2d8ab81cfce1a0c72e744035ca2c71e8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_delivery.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:4ecfb88720bfd81beed06cc242c0ecef5913897f1b19190961b16c441b7c64ed"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_delivery.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:72828049d7005cedc46171b9a9862f9c3aed6bf453eb013708c1246eb14f8993"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_delivery.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:892cec05bf9d7cd6e92f1d8df001e0cbf734ede6f644b2d4f7f55f7ecc3758d0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_delivery.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:bba7e386c281d01c0652833d926ddec4f7beeccd0f87e0f95997ebb8ce62047f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_ledger_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3e9d6110cad113b22e1a1b20be03be95d1ea5d5bd421330ef898e5239c8a8b92"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_ledger_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4639a57fb37ee97aff3240abd8e8858d509bcca594bcb7e91b4a07e0f9a75d4b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_ledger_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:718792f0c52b8b41ec973f444d2d3f60f2afbcea0f92db82726df905567ada52"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_ledger_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:aaedfa6cfdd9dce05f9aba9f310c732226af25750b68253f4cd1f4e22afcb6a4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_ledger_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b20e600b2f87d1cd0003630db989b8bd4cc11f852811732336eae587e35d4ccb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_ledger_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e32f237c30a64eba881fbd3622b7a9b57f3eedfcbe4d97cdc846e1ca0b23a39b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_ledger_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e85beee72060f484b667680b0b2caef2d982cab55127f5578e78b6193703f97a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_ledger_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:99dac42a410d4b7251b08e40d78b74ca6a8a6e9bbe855e102d76953fe413957f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_ledger_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:fdd724ecb41921836d11245c2c4987ebd7bb4c5e0cd4bc6a12170e453db777d0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_piece_ledger_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:182bed2255dc7f0276f8c072fa44677f1cb6cdd626d72a61524496dc7fe7054c"
     },
     {
       "root": "src",

@@ -9,11 +9,18 @@ use poise::serenity_prelude as serenity;
 use reqwest::StatusCode;
 use serenity::http::{LightMethod, Ratelimit, RatelimitInfo, Request, Route};
 use serenity::{ChannelId, MessageId, UserId};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::services::tui_o::repost::send::{
     AttemptGuard, BoundedTransport, CreatedMessage, RepostEnvelope, WireOutcome,
 };
+use probe::ProbeRead;
+use probe::matcher::ObservedMessage;
+
+// The read-only probe, declared beside its reads so it stays dormant with them.
+#[path = "../../tui_o/repost/probe.rs"]
+pub(crate) mod probe;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Unsupported {
@@ -96,6 +103,9 @@ struct Author {
 #[derive(serde::Deserialize)]
 struct Embed {
     footer: Option<Footer>,
+    /// `rich` for a sent embed; Discord's link previews carry another type.
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -223,6 +233,140 @@ impl BoundedTransport for RepostHttp {
                 }
             }
         }
+    }
+}
+
+/// A message as history or a single read returns it.
+#[derive(serde::Deserialize)]
+struct Seen {
+    id: MessageId,
+    channel_id: ChannelId,
+    author: Author,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    embeds: Vec<Embed>,
+    #[serde(default)]
+    nonce: Option<serde_json::Value>,
+}
+
+impl Seen {
+    fn observed(self) -> ObservedMessage {
+        // A sent embed stays counted even when its footer is gone, so the loss stays visible.
+        let rich: Vec<Embed> = self
+            .embeds
+            .into_iter()
+            .filter(|embed| embed.kind.as_deref().is_none_or(|kind| kind == "rich"))
+            .collect();
+        ObservedMessage {
+            id: self.id.get(),
+            channel_id: self.channel_id.get(),
+            author_id: self.author.id.get(),
+            content: self.content,
+            rich_embeds: rich.len(),
+            footers: rich
+                .into_iter()
+                .filter_map(|embed| Some(embed.footer?.text))
+                .collect(),
+            // Discord sends a nonce as a string or a number; an absent one stays absent.
+            nonce: self.nonce.and_then(|nonce| match nonce {
+                serde_json::Value::String(text) => Some(text),
+                serde_json::Value::Number(number) => Some(number.to_string()),
+                _ => None,
+            }),
+        }
+    }
+}
+
+impl RepostHttp {
+    /// One GET through the shared route bucket. `Ok(None)` is a 404; a 429 is an error, unretried.
+    async fn get(
+        &self,
+        route: Route<'_>,
+        params: Vec<(&'static str, String)>,
+    ) -> Result<Option<reqwest::Response>, String> {
+        let limiter = self
+            .http
+            .ratelimiter
+            .as_ref()
+            .ok_or("no shared rate limiter")?;
+        let params = (!params.is_empty()).then_some(params);
+        let request = Request::new(route, LightMethod::Get).params(params);
+        let bucket = Arc::clone(
+            limiter
+                .routes()
+                .write()
+                .await
+                .entry(route.ratelimiting_bucket())
+                .or_default(),
+        );
+        bucket.lock().await.pre_hook(&request, &no_callback).await;
+        let built = request
+            .clone()
+            .build(&self.client, self.http.token(), self.base.as_deref())
+            .map_err(|error| error.to_string())?
+            .build()
+            .map_err(|error| error.to_string())?;
+        let response = self
+            .client
+            .execute(built)
+            .await
+            .map_err(|error| error.to_string())?;
+        let status = response.status();
+        // The hook would sleep out a 429; a read just fails instead.
+        if status != StatusCode::TOO_MANY_REQUESTS && hookable(&response) {
+            let mut hook = bucket.lock().await;
+            let _ = hook
+                .post_hook(&response, &request, &no_callback, false)
+                .await;
+        }
+        match status {
+            StatusCode::NOT_FOUND => Ok(None),
+            status if status.is_success() => Ok(Some(response)),
+            status => Err(format!("HTTP {status}")),
+        }
+    }
+}
+
+fn ids(channel: u64, id: Option<u64>) -> Result<(ChannelId, Option<MessageId>), String> {
+    let nonzero = channel != 0 && id != Some(0);
+    nonzero
+        .then(|| (ChannelId::new(channel), id.map(MessageId::new)))
+        .ok_or_else(|| "a zero id".to_owned())
+}
+
+impl ProbeRead for RepostHttp {
+    fn credentials(&self) -> String {
+        hex::encode(Sha256::digest(self.http.token().as_bytes()))[..16].to_owned()
+    }
+
+    async fn message(&self, channel: u64, id: u64) -> Result<Option<ObservedMessage>, String> {
+        let (channel_id, message_id) = ids(channel, Some(id))?;
+        let message_id = message_id.ok_or("no message id")?;
+        let route = Route::ChannelMessage {
+            channel_id,
+            message_id,
+        };
+        let Some(response) = self.get(route, Vec::new()).await? else {
+            return Ok(None);
+        };
+        let seen: Seen = response.json().await.map_err(|error| error.to_string())?;
+        Ok(Some(seen.observed()))
+    }
+
+    async fn history(
+        &self,
+        channel: u64,
+        before: Option<u64>,
+        limit: u8,
+    ) -> Result<Vec<ObservedMessage>, String> {
+        let (channel_id, before) = ids(channel, before)?;
+        let mut params = vec![("limit", limit.to_string())];
+        params.extend(before.map(|before| ("before", before.get().to_string())));
+        let route = Route::ChannelMessages { channel_id };
+        let response = self.get(route, params).await?.ok_or("HTTP 404 Not Found")?;
+        let page: Vec<Seen> = response.json().await.map_err(|error| error.to_string())?;
+        Ok(page.into_iter().map(Seen::observed).collect())
     }
 }
 
