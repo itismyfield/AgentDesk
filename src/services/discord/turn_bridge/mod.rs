@@ -20,6 +20,8 @@ mod panel_lifecycle;
 mod post_loop_finalize;
 mod recall_feedback;
 pub(in crate::services::discord) mod recovery_text;
+#[cfg(test)]
+pub(crate) mod replay_policy;
 mod response_delivery;
 mod retry_state;
 mod runtime_handoff_loop;
@@ -698,9 +700,9 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let unconfirmed = stream_loop::exit_reconcile::herdr_stop_unconfirmed;
         if (is_external_input_tui_direct && rx_disconnected)
             || unconfirmed(&cancel_token, cancelled, terminal_admitted)
+            || stream_loop::exit_reconcile::held_before_submit(&bridge.inflight_state, cancelled)
         {
-            // No admitted terminal frame: keep the source/row for recovery, or a stopped
-            // Herdr turn for its provider; a partial stream is not a terminal response.
+            // No admitted terminal frame: leave the row (Waiting if held) to recovery or Herdr.
             completion_guard.relinquish_bridge_authority();
             inflight_guard.defuse();
             return;
