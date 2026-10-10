@@ -489,6 +489,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/store/rotation/provenance_tests.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/provenance_tests.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/permission_tests.rs",
     }
 )
 
@@ -553,6 +554,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/turn_presence/admission.rs",
         "src/services/tmux_turn_liveness/tests_pg.rs",
         "src/test_env_panic_probe.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/permission.rs",
     }
 )
 
