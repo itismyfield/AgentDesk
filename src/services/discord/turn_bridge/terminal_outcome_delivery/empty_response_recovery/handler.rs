@@ -6,6 +6,9 @@ use super::guidance;
 use crate::services::discord::turn_bridge::chunk_compose::body_mutation_telemetry::{
     BodyMutationCorrelation, BodyMutationSite, observe_body_mutation,
 };
+use crate::services::discord::turn_bridge::retry_state::{
+    StaleRetry, StaleRetryState, retry_stale_resume,
+};
 
 pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) enum EmptyResponseRecoveryMessage
 {
