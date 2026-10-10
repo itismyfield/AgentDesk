@@ -1810,6 +1810,7 @@ src/
 │   │   │   │   ├── stop_host.rs
 │   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs
+│   │   │   ├── before_start_stop.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
 │   │   │   ├── bridge_entry_persist.rs
@@ -2236,6 +2237,7 @@ src/
 │   │   ├── cancel_token_cleanup.rs
 │   │   ├── cancel_watchdog.rs
 │   │   ├── channel_rules.rs
+│   │   ├── herdr_before_start.rs
 │   │   ├── output_reader.rs
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs

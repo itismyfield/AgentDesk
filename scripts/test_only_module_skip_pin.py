@@ -536,6 +536,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/discord/turn_bridge/before_start_stop.rs",
         "src/services/discord/input_runtime/activation.rs",
         "src/services/discord/input_runtime/activation/plan.rs",
         "src/services/discord/input_runtime/activation/scope.rs",
