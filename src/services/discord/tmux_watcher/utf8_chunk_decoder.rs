@@ -53,9 +53,13 @@ impl WatcherReadBatch {
     }
 }
 
-/// Test-only `(path, offset, bytes)` of every non-empty source read, once a test enables it.
+/// Test-only `(path, offset, bytes)` of one non-empty source read.
 #[cfg(test)]
-pub(super) static SOURCE_READS: std::sync::Mutex<Option<Vec<(String, u64, Vec<u8>)>>> =
+pub(super) type SourceRead = (String, u64, Vec<u8>);
+
+/// Test-only record of every non-empty source read, once a test enables it.
+#[cfg(test)]
+pub(super) static SOURCE_READS: std::sync::Mutex<Option<Vec<SourceRead>>> =
     std::sync::Mutex::new(None);
 
 pub(super) fn read_watcher_source_chunk(path: &str, offset: u64) -> SourceChunk {
