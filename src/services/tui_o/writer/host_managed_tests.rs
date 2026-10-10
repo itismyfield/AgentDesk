@@ -98,6 +98,62 @@ async fn operator_resume_managed_restart_joins_old_generation_and_runs_approved_
     assert!(!ready.accepts(CHANNEL));
 }
 
+// `agentdesk o resume` only records the approval; the next managed writer sends the refused piece
+// once, then later output, and a repeated command reports the consumed approval.
+#[tokio::test(start_paused = true)]
+async fn operator_resume_cli_approval_is_sent_once_by_the_next_managed_writer() {
+    let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
+    let (harness, path) = fresh(startup);
+    harness.gate.acquired();
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let refusal = Reply::Refused(403);
+    harness.port.replies.lock().unwrap().push_back(refusal);
+    let mut refused = managed(&harness, &io, &ready);
+    assert_eq!(refused.len(), 1);
+    polls(3).await;
+    append(&path, &row("refused", "original bytes"));
+    polls(3).await;
+    refused.pop().unwrap().stop_and_join().await.unwrap();
+    let (root, channel) = (root(&harness), CHANNEL.to_string());
+    let status = ["o", "status", "--channel", &channel];
+    let (code, shown, _) = crate::cli::o::tests::run_cli(&root, &status);
+    assert_eq!(code, Some(0));
+    assert!(shown.contains("approval absent"), "{shown}");
+    let resume = [
+        "o",
+        "resume",
+        "--channel",
+        &channel,
+        "--rejected-serial",
+        "0",
+    ];
+    let approve = |reason| [&resume[..], &["--reason", reason]].concat();
+    let (code, _, error) = crate::cli::o::tests::run_cli(&root, &approve("restored"));
+    assert_eq!(code, Some(0), "{error}");
+    assert_eq!(
+        harness.port.posts(),
+        ["original bytes"],
+        "the CLI posts nothing"
+    );
+    let mut approved = managed(&harness, &io, &ready);
+    assert_eq!(approved.len(), 1, "a writer really started after the CLI");
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["original bytes", "original bytes"]);
+    append(&path, &row("following", "later"));
+    polls(3).await;
+    let sent = ["original bytes", "original bytes", "later"];
+    assert_eq!(harness.port.posts(), sent);
+    approved.pop().unwrap().stop_and_join().await.unwrap();
+    let (code, _, error) = crate::cli::o::tests::run_cli(&root, &approve("again"));
+    assert_eq!(code, Some(3), "{error}");
+    assert!(error.contains("(consumed by serial 1)"), "{error}");
+    let (_, shown, _) = crate::cli::o::tests::run_cli(&root, &status);
+    assert!(
+        shown.contains("approval consumed by serial 1 Posted("),
+        "{shown}"
+    );
+}
+
 fn managed(
     harness: &Harness,
     io: &Arc<TestIo>,

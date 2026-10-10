@@ -209,3 +209,42 @@ Other channels stay on Legacy throughout. Check that their delivery is unchanged
 - Deploying an external binary (`AGENTDESK_DEPLOY_BINARY`) while the source switch is `true`, or
   rolling back to a build whose manifest does not record `o_tui_writer` as `true`. The deploy
   script refuses both.
+
+## 7. Recover a piece Discord refused
+
+A POST refused with 400, 403 or 404 blocks the channel's O output with a `Blocked` alarm. A restart
+alone keeps it blocked. After the cause is fixed, one explicit approval lets the next writer send
+the original piece once, then the output that followed. Run these on the O home, in order:
+
+1. Note the channel and serial from the `Blocked` log.
+2. `agentdesk o status --channel <CHANNEL_ID>` lists every refused piece with its latest attempt
+   and approval (`absent`, `unconsumed` or `consumed by serial <n> <outcome>`). It writes nothing,
+   but it holds the ledger lock while it reads, so do not run it during a restart.
+3. Fix the cause of the refusal, for example the channel permission. Do not send a test POST.
+4. `agentdesk o resume --channel <CHANNEL_ID> --rejected-serial <SERIAL> --reason "<what was
+   fixed>"`. `--operator` defaults to `operator`. Only the latest refused attempt of a piece, with
+   no POST in flight, can be approved. The approval sends nothing and does not check the cause.
+5. Wait for the command to exit, then run the managed restart. The new writer sends the original
+   piece, which gets a new serial, and continues with later output. Check the new serial's result.
+
+`o resume` exits with:
+
+| Exit | Meaning | Next step |
+|---|---|---|
+| 0 | The approval is durable | Managed restart |
+| 1 | No runtime root, or no `o_store` under it; nothing was written | Run it on the O home |
+| 3 | The serial already has an approval; the first one stands, with its state | Nothing more to record |
+| 4 | Refused: not the latest 400/403/404 attempt, a POST in flight, blank input or a damaged ledger; nothing was written | Run `o status`; an unfinished ledger tail is recovered by the next writer start |
+| 5 | The ledger is locked by a writer or another operator; nothing was written | Retry once the other command or the restart is done |
+| 6 | An I/O error before the rollback floor existed; nothing was written | Fix the disk or permission and retry |
+| 7 | An I/O error after the floor existed; the approval may be durable | Run `o status`, then the same command again |
+
+- A writer that starts while the ledger is locked holds the channel; the next managed restart
+  recovers it.
+- If the retry is refused again, its new serial needs a new approval. A retry whose result is
+  uncertain is recorded and alarmed as any other POST, and the output continues.
+- A piece Discord refuses with 400 again has no exit in this build: its payload cannot be changed
+  or discarded. Escalate it as a separate fix.
+- The first approval creates `<runtime_root>/o_store/operator_resume.floor`. From then on the deploy
+  script refuses a source or a rollback target that does not record `o_ledger_operator_resume` as
+  `true`. Fix forward instead, and never delete approval lines from the ledger to get past it.

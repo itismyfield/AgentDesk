@@ -173,6 +173,11 @@ cli::json_output::tests::status_projects_counts_and_discord
 cli::json_output::tests::terminations_empty_is_empty_array
 cli::json_output::tests::terminations_projects_events_with_bool_alive
 cli::migrate::apply_config_tests::migrate_apply_keeps_disk_secrets_and_adds_the_imported_agent
+cli::o::tests::o_cli_child
+cli::o::tests::o_resume_records_one_approval_and_a_repeat_reports_it_without_writing
+cli::o::tests::o_resume_refusals_exit_with_their_own_code_and_write_nothing
+cli::o::tests::o_resume_two_racing_operators_leave_one_approval_and_one_exit_zero
+cli::o::tests::o_status_reports_the_refused_piece_and_writes_nothing
 cli::o_shadow::tests::an_allowlisted_thread_bound_to_a_default_tui_provider_covers_its_profile
 cli::o_shadow::tests::population_joins_resolver_defaults_with_numeric_channels_and_warns_on_name_only
 cli::o_shadow::tests::the_report_reads_a_secret_bearing_config_without_changing_its_mode
@@ -11468,6 +11473,7 @@ services::tui_o::writer::tests::actor::host_start::managed::a_supervised_channel
 services::tui_o::writer::tests::actor::host_start::managed::an_unpolled_stop_waiter_still_stops_and_releases_its_writer
 services::tui_o::writer::tests::actor::host_start::managed::dropping_a_managed_handle_stops_its_writer_and_keeps_the_legacy_adapter_detached
 services::tui_o::writer::tests::actor::host_start::managed::failed_preparation_does_not_reserve_a_channel_without_a_host
+services::tui_o::writer::tests::actor::host_start::managed::operator_resume_cli_approval_is_sent_once_by_the_next_managed_writer
 services::tui_o::writer::tests::actor::host_start::managed::operator_resume_managed_restart_joins_old_generation_and_runs_approved_retry
 services::tui_o::writer::tests::actor::host_start::missing_or_damaged_store_state_holds_instead_of_a_first_init
 services::tui_o::writer::tests::actor::host_start::nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel
