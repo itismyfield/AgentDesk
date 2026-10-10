@@ -732,4 +732,4 @@ impl From<CloseEffect>
 
 #[cfg(test)]
 #[path = "herdr_gate_tests.rs"]
-mod tests;
+pub(super) mod tests;

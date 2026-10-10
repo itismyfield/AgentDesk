@@ -30,6 +30,9 @@ mod resolve;
 mod session_record;
 #[cfg(test)]
 pub(crate) mod test_support;
+// The termination service's Herdr fixture, for the discord relay test that drives it end to end.
+#[cfg(test)]
+pub(crate) use herdr_gate::tests::p11 as herdr_termination_rig;
 mod tmux_host;
 mod traits;
 

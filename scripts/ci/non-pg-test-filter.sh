@@ -153,6 +153,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::rehydration::tests::host_defer
   --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
@@ -393,6 +394,8 @@ NON_PG_FILTER_REPLAY=(
   services::discord::herdr_terminate::tests::m1_disabled_service_has_zero_io
   services::discord::herdr_terminate::tests::m1_hold_release_window_preserves_input_until_settlement
   services::discord::herdr_terminate::tests::m1_host_terminated_settles_exact_turn_and_publishes_queue_once
+  services::discord::herdr_terminate::tests::m2_natural_a_then_b_late_settlement_preserves_b
+  services::discord::herdr_terminate::tests::m2_unreadable_mailbox_is_never_an_idle_channel
   services::discord::idle_recap_interaction::tests::claim_database_error_fails_closed_without_injection
   services::discord::idle_recap_interaction::tests::compact_uses_claimed_recap_target_and_native_prompt
   services::discord::idle_recap_interaction::tests::concurrent_compact_claims_allow_exactly_one_injection
@@ -705,6 +708,9 @@ NON_PG_FILTER_REPLAY=(
   services::session_host::herdr_gate::tests::m1_service_missing_pane_absent_provider_retires_pg
   services::session_host::herdr_gate::tests::m1_stale_a_never_releases_b_pg
   services::session_host::herdr_gate::tests::m1_unreadable_process_never_means_absent_pg
+  services::session_host::herdr_gate::tests::m2_already_finalized_with_active_a_is_indeterminate_pg
+  services::session_host::herdr_gate::tests::m2_settlement_mailbox_unreadable_is_indeterminate_pg
+  services::session_host::herdr_gate::tests::m2_turn_changed_before_close_has_zero_effect_pg
   services::session_resume::tests::completed_critical_section_cancels_its_watchdog
   services::session_resume::tests::critical_section_watchdog_records_once_without_cancelling_work
   services::session_resume::tests::discover_excludes_live_bound_session
@@ -895,6 +901,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tui_prompt_relay::rehydration::tests::host_defer
   services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
+  services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
   services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e

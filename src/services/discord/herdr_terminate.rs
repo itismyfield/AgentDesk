@@ -14,6 +14,7 @@ use crate::services::session_host::{HerdrTarget, herdr_endpoints};
 use crate::services::termination_audit::host_terminate::herdr_terminate::{
     HerdrTerminateResult, OperatorTerminateWarrant, terminate_herdr_once,
 };
+use crate::services::turn_orchestrator::{ChannelMailboxHandle, MailboxUnreachable};
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -32,6 +33,8 @@ pub(crate) enum TerminationResult {
 struct CapturedTurn {
     key: TurnKey,
     token: Arc<CancelToken>,
+    /// The actor seen holding `token`; settlement is confirmed on it, never on a re-resolved one.
+    mailbox: ChannelMailboxHandle,
     snapshot: SyntheticClaimSnapshot,
 }
 async fn capture_turn(
@@ -42,7 +45,10 @@ async fn capture_turn(
     let Some(mailbox) = shared.mailbox_peek(channel) else {
         return Ok(None);
     };
-    let state = mailbox.snapshot().await;
+    let state = mailbox
+        .try_snapshot()
+        .await
+        .map_err(|MailboxUnreachable| "mailbox unreadable")?;
     let Some(token) = state.cancel_token else {
         return Ok(None);
     };
@@ -65,6 +71,7 @@ async fn capture_turn(
         key: TurnKey::new(channel, id, shared.restart.current_generation)
             .with_episode_nonce(Some(&nonce)),
         token,
+        mailbox,
         snapshot,
     }))
 }
@@ -106,14 +113,27 @@ async fn retire_confirmed(
 type SettlementWindowProbe =
     Box<dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>>;
 #[cfg(test)]
+type ProbeSlot = std::cell::RefCell<Option<SettlementWindowProbe>>;
+#[cfg(test)]
 thread_local! {
-    static SETTLEMENT_WINDOW: std::cell::RefCell<Option<SettlementWindowProbe>> =
-        const { std::cell::RefCell::new(None) };
+    static SETTLEMENT_WINDOW: ProbeSlot = const { std::cell::RefCell::new(None) };
+    static AFTER_SETTLEMENT: ProbeSlot = const { std::cell::RefCell::new(None) };
 }
 /// Runs once between the hold release and the captured-turn settlement on this thread.
 #[cfg(test)]
 pub(crate) fn probe_settlement_window(probe: SettlementWindowProbe) {
     SETTLEMENT_WINDOW.with(|slot| *slot.borrow_mut() = Some(probe));
+}
+/// Runs once after the captured-turn settlement, while the exclusion is still held.
+#[cfg(test)]
+pub(crate) fn probe_after_settlement(probe: SettlementWindowProbe) {
+    AFTER_SETTLEMENT.with(|slot| *slot.borrow_mut() = Some(probe));
+}
+#[cfg(test)]
+async fn run_probe(slot: &'static std::thread::LocalKey<ProbeSlot>) {
+    if let Some(probe) = slot.with(|slot| slot.borrow_mut().take()) {
+        probe().await;
+    }
 }
 
 /// `exclusion` (channel transition guard and execution fence) drops only after settlement, so
@@ -129,10 +149,10 @@ async fn settle_and_release(
         return TerminationResult::Indeterminate("retired but hold release incomplete".into());
     }
     #[cfg(test)]
-    if let Some(probe) = SETTLEMENT_WINDOW.with(|slot| slot.borrow_mut().take()) {
-        probe().await;
-    }
+    run_probe(&SETTLEMENT_WINDOW).await;
     let result = settle_captured(shared, provider, turn).await;
+    #[cfg(test)]
+    run_probe(&AFTER_SETTLEMENT).await;
     drop(exclusion);
     result
 }
@@ -142,32 +162,62 @@ async fn settle_captured(
     provider: &ProviderKind,
     turn: Option<CapturedTurn>,
 ) -> TerminationResult {
-    if let Some(turn) = turn {
-        let outcome = shared
-            .turn_finalizer
-            .submit_terminal_with_claim_snapshot(
-                turn.key,
-                provider.clone(),
-                TerminalEvent::HostTerminated,
-                FinalizeContext::host_terminated(),
-                Some(turn.snapshot),
-                shared.clone(),
-            )
-            .await;
-        match outcome {
-            FinalizeOutcome::Finalized {
-                removed_token: Some(token),
-                ..
-            } if Arc::ptr_eq(&token, &turn.token) => {}
-            FinalizeOutcome::AlreadyFinalized => {}
-            _ => {
-                return TerminationResult::Indeterminate(
-                    "captured turn settlement unconfirmed".into(),
-                );
-            }
+    let Some(CapturedTurn {
+        key,
+        token,
+        mailbox,
+        snapshot,
+    }) = turn
+    else {
+        return TerminationResult::Retired;
+    };
+    let outcome = shared
+        .turn_finalizer
+        .submit_terminal_with_claim_snapshot(
+            key,
+            provider.clone(),
+            TerminalEvent::HostTerminated,
+            FinalizeContext::host_terminated(),
+            Some(snapshot),
+            shared.clone(),
+        )
+        .await;
+    let confirmed = match outcome {
+        FinalizeOutcome::Finalized {
+            removed_token: Some(removed),
+            ..
+        } if Arc::ptr_eq(&removed, &token) => Ok(()),
+        FinalizeOutcome::AlreadyFinalized => {
+            confirm_captured_released(shared, key.channel_id, &mailbox, &token).await
         }
+        _ => Err("captured turn settlement unconfirmed"),
+    };
+    match confirmed {
+        Ok(()) => TerminationResult::Retired,
+        // The CAS and hold release already happened; this reports that, it does not undo them.
+        Err(why) => TerminationResult::Indeterminate(format!("retired, hold released; {why}")),
     }
-    TerminationResult::Retired
+}
+
+/// `AlreadyFinalized` also covers a finalizer that failed before releasing `token`, so success
+/// needs the captured actor to answer without it and still be the channel's actor.
+async fn confirm_captured_released(
+    shared: &SharedData,
+    channel: ChannelId,
+    mailbox: &ChannelMailboxHandle,
+    token: &Arc<CancelToken>,
+) -> Result<(), &'static str> {
+    match mailbox.cancel_token().await {
+        Err(MailboxUnreachable) => return Err("captured mailbox unreadable"),
+        Ok(Some(active)) if Arc::ptr_eq(&active, token) => {
+            return Err("captured turn still active");
+        }
+        Ok(_) => {}
+    }
+    match shared.mailbox_peek(channel) {
+        Some(current) if current.same_actor(mailbox) => Ok(()),
+        _ => Err("captured mailbox replaced"),
+    }
 }
 /// No production entry calls this until the operator activation slice is approved.
 pub(crate) async fn terminate_explicit_herdr(
@@ -216,11 +266,15 @@ pub(crate) async fn terminate_explicit_herdr(
     let Ok(transition) = shared.acquire_session_transition(channel).await else {
         return TerminationResult::Refused("transition busy".into());
     };
-    let now = shared.mailbox(channel).snapshot().await.cancel_token;
-    let same_turn = match (&turn, now.as_ref()) {
+    // An unreadable or replaced actor is a changed turn, never an idle channel.
+    let same_turn = match (&turn, shared.mailbox_peek(channel)) {
         (None, None) => true,
-        (Some(turn), Some(now)) => Arc::ptr_eq(&turn.token, now),
-        _ => false,
+        (None, Some(now)) => matches!(now.cancel_token().await, Ok(None)),
+        (Some(turn), Some(now)) => {
+            now.same_actor(&turn.mailbox)
+                && matches!(now.cancel_token().await, Ok(Some(active)) if Arc::ptr_eq(&active, &turn.token))
+        }
+        (Some(_), None) => false,
     };
     if !same_turn {
         return TerminationResult::Refused("turn changed under transition".into());
@@ -353,6 +407,117 @@ pub(crate) mod test_queue {
             .iter()
             .map(|i| i.text.clone())
             .collect()
+    }
+}
+
+/// An active turn for settlement tests that live outside the discord module.
+#[cfg(test)]
+pub(crate) mod test_turn {
+    use super::super::inflight::{InflightTurnState, RelayOwnerKind, save_inflight_state};
+    use super::super::turn_finalizer::CompletionAdmissionPlan;
+    use super::{
+        Arc, CancelToken, ChannelId, FinalizeContext, FinalizeOutcome, ProviderKind, SharedData,
+        TerminalEvent, TurnKey,
+    };
+    use serenity::model::id::{MessageId, UserId};
+    use std::sync::atomic::Ordering;
+
+    /// Turn `nonce` holds `channel` on message `id`, with matching inflight evidence and a live
+    /// finalizer entry, as a running watcher-owned turn leaves them.
+    pub(crate) async fn start(
+        shared: &Arc<SharedData>,
+        channel: ChannelId,
+        id: u64,
+        nonce: &str,
+    ) -> Arc<CancelToken> {
+        let token = Arc::new(CancelToken::from_persisted_turn_nonce(Some(nonce.into())));
+        shared
+            .mailbox(channel)
+            .restore_active_turn(token.clone(), UserId::new(7), MessageId::new(id))
+            .await;
+        shared.restart.global_active.fetch_add(1, Ordering::Relaxed);
+        shared
+            .turn_finalizer
+            .register_start_with_completion_admission(
+                key(shared, channel, id, nonce),
+                ProviderKind::Claude,
+                RelayOwnerKind::Watcher,
+                CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
+                shared,
+            );
+        let mut row = InflightTurnState::new(
+            ProviderKind::Claude,
+            channel.get(),
+            None,
+            7,
+            id,
+            id + 1,
+            "original prompt".into(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        row.turn_nonce = Some(nonce.into());
+        save_inflight_state(&row).unwrap();
+        token
+    }
+
+    fn key(shared: &SharedData, channel: ChannelId, id: u64, nonce: &str) -> TurnKey {
+        TurnKey::new(channel, id, shared.restart.current_generation).with_episode_nonce(Some(nonce))
+    }
+
+    /// A natural terminal settles turn `nonce`, releasing exactly `token`.
+    pub(crate) async fn finish_naturally(
+        shared: &Arc<SharedData>,
+        channel: ChannelId,
+        id: u64,
+        nonce: &str,
+        token: &Arc<CancelToken>,
+    ) {
+        let outcome = shared
+            .turn_finalizer
+            .submit_terminal(
+                key(shared, channel, id, nonce),
+                ProviderKind::Claude,
+                TerminalEvent::Complete,
+                FinalizeContext::watcher(),
+                shared.clone(),
+            )
+            .await;
+        assert!(
+            matches!(&outcome, FinalizeOutcome::Finalized { removed_token: Some(t), .. } if Arc::ptr_eq(t, token)),
+            "the natural terminal releases exactly this turn"
+        );
+    }
+
+    /// The channel's active token; a mailbox that does not answer fails the test.
+    pub(crate) async fn active(
+        shared: &SharedData,
+        channel: ChannelId,
+    ) -> Option<Arc<CancelToken>> {
+        let mailbox = shared.mailbox_peek(channel)?;
+        mailbox.cancel_token().await.expect("mailbox answers")
+    }
+
+    /// Whether the channel's registered mailbox actor still answers a read.
+    pub(crate) async fn answers(shared: &SharedData, channel: ChannelId) -> bool {
+        let Some(mailbox) = shared.mailbox_peek(channel) else {
+            return false;
+        };
+        mailbox.try_snapshot().await.is_ok()
+    }
+
+    /// The persisted inflight turn's message id and nonce.
+    pub(crate) fn inflight(channel: ChannelId) -> Option<(u64, Option<String>)> {
+        super::super::inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get())
+            .map(|row| (row.effective_finalizer_turn_id(), row.turn_nonce))
+    }
+
+    /// The next finalize on this thread fails before releasing its token.
+    pub(crate) fn arm_settlement_panic() {
+        super::super::turn_finalizer::arm_finalize_panic_once_for_test();
     }
 }
 
@@ -525,5 +690,88 @@ mod tests {
             assert_eq!(test_queue::take_queued(&shared, channel).await.as_deref(), Some(test_queue::ORIGINAL), "the settled channel kicks its queue exactly once");
             assert_eq!(test_queue::take_queued(&shared, channel).await, None);
         });
+    }
+
+    // A natural terminal settled A and B took the channel before the late HostTerminated for A:
+    // that duplicate settles nothing of B and still reports the retire.
+    #[test]
+    fn m2_natural_a_then_b_late_settlement_preserves_b() {
+        let _lock = crate::config::shared_test_env_lock();
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let shared = super::super::make_shared_data_for_tests();
+                let channel = ChannelId::new(5_340_116);
+                let token_a = test_turn::start(&shared, channel, 51, "turn-a").await;
+                let captured = capture_turn(&shared, &ProviderKind::Claude, channel)
+                    .await
+                    .unwrap();
+                crate::services::claude::herdr_turn::hold("execution-a").unwrap();
+                crate::services::claude::herdr_turn::hold("execution-b").unwrap();
+                let transition = shared.session_transition_lock(channel).lock_owned().await;
+                let token_b = Arc::new(std::sync::Mutex::new(None));
+                let (probe_shared, probe_a, probe_b) =
+                    (shared.clone(), token_a.clone(), token_b.clone());
+                probe_settlement_window(Box::new(move || {
+                    Box::pin(async move {
+                        test_turn::finish_naturally(&probe_shared, channel, 51, "turn-a", &probe_a)
+                            .await;
+                        let b = test_turn::start(&probe_shared, channel, 61, "turn-b").await;
+                        *probe_b.lock().unwrap() = Some(b);
+                    })
+                }));
+                assert_eq!(
+                    settle_and_release(
+                        &shared,
+                        &ProviderKind::Claude,
+                        "execution-a",
+                        captured,
+                        transition
+                    )
+                    .await,
+                    TerminationResult::Retired
+                );
+                let token_b = token_b
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("B started in the window");
+                let active = test_turn::active(&shared, channel).await.expect("B active");
+                assert!(Arc::ptr_eq(&active, &token_b));
+                assert!(!token_b.cancelled.load(Ordering::Relaxed));
+                assert_eq!(token_b.turn_nonce(), Some("turn-b"));
+                assert_eq!(
+                    test_turn::inflight(channel),
+                    Some((61, Some("turn-b".into())))
+                );
+                let holds = crate::services::claude::herdr_turn::input_holds().unwrap();
+                assert!(holds.iter().any(|(nonce, _)| nonce == "execution-b"));
+                assert!(!holds.iter().any(|(nonce, _)| nonce == "execution-a"));
+                assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+            });
+    }
+
+    // A mailbox actor that never answers is not an idle channel: capture refuses instead of
+    // proceeding as if no turn were running.
+    #[test]
+    fn m2_unreadable_mailbox_is_never_an_idle_channel() {
+        let _lock = crate::config::shared_test_env_lock();
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let shared = super::super::make_shared_data_for_tests();
+                let channel = ChannelId::new(5_340_117);
+                shared.mailboxes.insert_unreachable_for_test(channel);
+                assert!(matches!(
+                    capture_turn(&shared, &ProviderKind::Claude, channel).await,
+                    Err(why) if why == "mailbox unreadable"
+                ));
+            });
     }
 }

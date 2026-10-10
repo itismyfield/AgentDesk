@@ -21,6 +21,9 @@ mod cancel_backstop_e2e;
 mod catch_up_pagination_e2e;
 mod consumed_command_guard_e2e;
 pub(in crate::services::discord) mod discord_mock;
+#[cfg(unix)]
+#[path = "herdr_terminate_e2e_tests.rs"]
+mod herdr_terminate_e2e;
 #[path = "n1a_turn_mode_tests.rs"]
 mod n1a_turn_mode;
 #[path = "prompt_identity_e2e_tests.rs"]

@@ -37,6 +37,8 @@ use crate::services::session_host::{
 };
 
 const PANE: &str = "w1-1";
+/// The root pane a launch through this server creates.
+const LAUNCHED: &str = "w2-1";
 const LOGICAL: &str = "AgentDesk-claude-herdr";
 const SHELL: u32 = 10;
 const PROVIDER: u32 = 20;
@@ -57,6 +59,8 @@ struct Server {
     stop: Arc<AtomicBool>,
     version: Arc<Mutex<String>>,
     close_reply: Arc<Mutex<Option<Value>>>,
+    /// Once set, a close removes the pane from every later snapshot, as a last-pane close does.
+    vanish_on_close: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -76,8 +80,11 @@ fn serve() -> Server {
     let stop = Arc::new(AtomicBool::new(false));
     let version = Arc::new(Mutex::new("0.9.3".into()));
     let close_reply = Arc::new(Mutex::new(None));
+    let vanish_on_close = Arc::new(AtomicBool::new(false));
+    let gone = Arc::new(AtomicBool::new(false));
     let (state, stopped) = (conns.clone(), stop.clone());
     let (hello_version, closed) = (version.clone(), close_reply.clone());
+    let vanish = vanish_on_close.clone();
     let thread = thread::spawn(move || {
         let mut handlers = Vec::new();
         let mut index = 0;
@@ -89,8 +96,9 @@ fn serve() -> Server {
             state.lock().unwrap().insert(index, Seen::default());
             let state = state.clone();
             let (version, close_reply) = (hello_version.clone(), closed.clone());
+            let pane = (vanish.clone(), gone.clone());
             handlers.push(thread::spawn(move || {
-                answer(stream, index, &state, &version, &close_reply)
+                answer(stream, index, &state, &version, &close_reply, &pane)
             }));
             index += 1;
         }
@@ -104,17 +112,23 @@ fn serve() -> Server {
         stop,
         version,
         close_reply,
+        vanish_on_close,
         thread: Some(thread),
     }
 }
 
-fn reply(request: &Value, version: &str, close_reply: Option<Value>) -> Value {
+fn reply(request: &Value, version: &str, close_reply: Option<Value>, gone: bool) -> Value {
     if request["method"] == "pane.close"
         && let Some(mut reply) = close_reply
     {
         reply["id"] = request["id"].clone();
         return reply;
     }
+    let panes = match gone {
+        true => json!([]),
+        false => json!([{"pane_id": PANE, "terminal_id": "t1", "workspace_id": "w1",
+            "tab_id": "w1:1", "focused": false, "agent_status": "idle", "revision": 7}]),
+    };
     let result = match request["method"].as_str().unwrap_or("") {
         "ping" => json!({"type": "pong", "version": version, "protocol": 22}),
         "pane.process_info" => json!({"type": "pane_process_info", "process_info": {
@@ -123,8 +137,12 @@ fn reply(request: &Value, version: &str, close_reply: Option<Value>) -> Value {
         }}),
         "session.snapshot" => json!({"type": "session_snapshot", "snapshot": {
             "version": "0.9.3", "protocol": 22, "workspaces": [], "tabs": [], "layouts": [],
-            "agents": [], "panes": [{"pane_id": PANE, "terminal_id": "t1", "workspace_id": "w1",
-                "tab_id": "w1:1", "focused": false, "agent_status": "idle", "revision": 7}]
+            "agents": [], "panes": panes
+        }}),
+        // A launch's root pane opens where it was asked to.
+        "workspace.create" => json!({"type": "workspace_created", "root_pane": {
+            "pane_id": LAUNCHED, "workspace_id": "w2", "tab_id": "w2:1", "revision": 0,
+            "cwd": request["params"]["cwd"]
         }}),
         _ => json!({"type": "ok"}),
     };
@@ -137,6 +155,7 @@ fn answer(
     conns: &Mutex<BTreeMap<usize, Seen>>,
     version: &Mutex<String>,
     close_reply: &Mutex<Option<Value>>,
+    (vanish_on_close, gone): &(Arc<AtomicBool>, Arc<AtomicBool>),
 ) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
@@ -151,7 +170,11 @@ fn answer(
             &request,
             &version.lock().unwrap(),
             close_reply.lock().unwrap().clone(),
+            gone.load(Ordering::SeqCst),
         );
+        if request["method"] == "pane.close" && vanish_on_close.load(Ordering::SeqCst) {
+            gone.store(true, Ordering::SeqCst);
+        }
         let _ = writer.write_all(format!("{reply}\n").as_bytes());
     }
     // One reply, then Herdr's side is closed; later bytes are only counted.
@@ -1190,7 +1213,7 @@ mod service {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     pub(super) use crate::services::discord::herdr_terminate::{
         OperatorTerminate, TerminationResult, probe_settlement_window, terminate_explicit_herdr,
-        test_queue,
+        test_queue, test_turn,
     };
 
     pub(super) const KEY: &str = "claude/hash/mac-mini:AgentDesk-claude-service";
@@ -1697,4 +1720,365 @@ fn m1_retire_cas_failure_keeps_hold_pg() {
         assert!(held(NONCE), "a failed CAS never releases the hold");
         service.finish().await;
     });
+}
+
+// P2-1: a finalizer that fails before releasing captured turn A is acknowledged
+// `AlreadyFinalized`; the retire and hold release that already happened are reported as
+// Indeterminate, with A's token, the queue and the counter left exactly as they were.
+#[test]
+fn m2_already_finalized_with_active_a_is_indeterminate_pg() {
+    if run_terminate_child("m2_already_finalized_with_active_a_is_indeterminate_pg") {
+        return;
+    }
+    use service::{test_queue, test_turn};
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, true, false);
+    let os = ScriptedOs::new(launched_os(&rig), Ok(false));
+    block_on(async {
+        let service = Service::start(&rig, pane, os, NONCE).await;
+        let channel = serenity::model::id::ChannelId::new(1);
+        let token = test_turn::start(&service.shared, channel, 51, "turn-a").await;
+        test_queue::queue_original(&service.shared, channel).await;
+        test_turn::arm_settlement_panic();
+        let result = service.terminate(NONCE).await;
+        assert!(
+            matches!(&result, TerminationResult::Indeterminate(why) if why.contains("captured turn still active")),
+            "{result:?}"
+        );
+        assert_eq!(service.row().await.0, "retired");
+        assert!(
+            !held(NONCE),
+            "the partial completion is reported, not undone"
+        );
+        let active = test_turn::active(&service.shared, channel).await;
+        assert!(active.is_some_and(|active| Arc::ptr_eq(&active, &token)));
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(
+            test_queue::queued_texts(&service.shared, channel).await,
+            vec![test_queue::ORIGINAL.to_string()],
+            "nothing finishes the channel or starts its queue"
+        );
+        assert_eq!(
+            service.shared.restart.global_active.load(Ordering::Relaxed),
+            1
+        );
+        assert!(rig.server.mutations().is_empty());
+        service.finish().await;
+    });
+}
+
+// P2-1: the captured actor stops answering between the hold release and the settlement check;
+// an unanswered read is never an idle mailbox.
+#[test]
+fn m2_settlement_mailbox_unreadable_is_indeterminate_pg() {
+    if run_terminate_child("m2_settlement_mailbox_unreadable_is_indeterminate_pg") {
+        return;
+    }
+    use service::{probe_settlement_window, test_turn};
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, true, false);
+    let os = ScriptedOs::new(launched_os(&rig), Ok(false));
+    block_on(async {
+        let service = Service::start(&rig, pane, os, NONCE).await;
+        let channel = serenity::model::id::ChannelId::new(1);
+        // The mailbox actor lives on a runtime of its own, so the test can end it mid-service.
+        let (started, stop) = (
+            std::sync::mpsc::channel(),
+            tokio::sync::oneshot::channel::<()>(),
+        );
+        let (shared, started_tx, stop_rx) = (service.shared.clone(), started.0, stop.1);
+        let actor = thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let token = test_turn::start(&shared, channel, 51, "turn-a").await;
+                    started_tx.send(token).unwrap();
+                    let _ = stop_rx.await;
+                });
+        });
+        let token = started.1.recv().unwrap();
+        let stopper = Arc::new(Mutex::new(Some((stop.0, actor))));
+        let ended = Arc::new(AtomicBool::new(false));
+        let (probe_stopper, probe_ended) = (stopper.clone(), ended.clone());
+        probe_settlement_window(Box::new(move || {
+            Box::pin(async move {
+                let (stop, thread) = probe_stopper.lock().unwrap().take().unwrap();
+                stop.send(()).unwrap();
+                thread.join().unwrap();
+                probe_ended.store(true, Ordering::SeqCst);
+            })
+        }));
+        test_turn::arm_settlement_panic();
+        let result = service.terminate(NONCE).await;
+        assert!(
+            ended.load(Ordering::SeqCst),
+            "the actor ended inside the window"
+        );
+        assert!(
+            matches!(&result, TerminationResult::Indeterminate(why) if why.contains("unreadable")),
+            "{result:?}"
+        );
+        assert!(
+            !test_turn::answers(&service.shared, channel).await,
+            "the captured actor is gone"
+        );
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(service.row().await.0, "retired");
+        assert!(!held(NONCE));
+        service.finish().await;
+    });
+}
+
+// P2-1: the turn captured before the transition lock is replaced by B before the recheck; the
+// service refuses with no close, no settlement of B and B's execution hold kept.
+#[test]
+fn m2_turn_changed_before_close_has_zero_effect_pg() {
+    if run_terminate_child("m2_turn_changed_before_close_has_zero_effect_pg") {
+        return;
+    }
+    use crate::services::discord::herdr_terminate::test_turn;
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, false, true);
+    let os = ScriptedOs::new(launched_os(&rig), Ok(false));
+    block_on(async {
+        let service = Service::start(&rig, pane, os, NONCE).await;
+        let channel = serenity::model::id::ChannelId::new(1);
+        let token_a = test_turn::start(&service.shared, channel, 51, "turn-a").await;
+        assert_eq!(Arc::weak_count(&token_a), 0);
+        let transition = service
+            .shared
+            .session_transition_lock(channel)
+            .lock_owned()
+            .await;
+        let shared = service.shared.clone();
+        let (result, token_b) = tokio::join!(service.terminate(NONCE), async {
+            // The capture keeps a weak pointer to A; the service then waits on the transition.
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while Arc::weak_count(&token_a) == 0 {
+                assert!(std::time::Instant::now() < deadline, "A was never captured");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            test_turn::finish_naturally(&shared, channel, 51, "turn-a", &token_a).await;
+            let token_b = test_turn::start(&shared, channel, 61, "turn-b").await;
+            drop(transition);
+            token_b
+        });
+        assert_eq!(
+            result,
+            TerminationResult::Refused("turn changed under transition".into())
+        );
+        assert!(
+            rig.server.mutations().is_empty(),
+            "no close for a changed turn"
+        );
+        assert_eq!(service.row().await, ("bound".into(), NONCE.into()));
+        assert!(held(NONCE), "the execution keeps its hold");
+        let active = test_turn::active(&service.shared, channel).await;
+        assert!(active.is_some_and(|active| Arc::ptr_eq(&active, &token_b)));
+        assert!(!token_b.cancelled.load(Ordering::Relaxed));
+        assert_eq!(
+            test_turn::inflight(channel),
+            Some((61, Some("turn-b".into())))
+        );
+        assert_eq!(
+            service.shared.restart.global_active.load(Ordering::Relaxed),
+            1
+        );
+        service.finish().await;
+    });
+}
+
+/// The termination service's fake Herdr server and scripted OS, wired into a runtime the caller
+/// owns: its `SharedData`, pool, runtime root and one Herdr-configured channel. Each thread of
+/// that runtime reads the boot section's own registry, whose launch host dials the same server.
+pub(crate) mod p11 {
+    use super::*;
+    use crate::config::session_hosts::BootSessionHosts;
+    use crate::services::session_host::herdr::observe::CANONICAL_CONFIG;
+    use service::ScriptedOs;
+
+    pub(crate) const NODE: &str = "mac-mini";
+    pub(crate) const EXECUTION: &str = NONCE;
+
+    /// Re-runs test `path` (its `module_path!()` name) in a child that owns its whole process:
+    /// the boot section, the O writer list, and Herdr provenance naming this child as the
+    /// server, whose config home the parent wrote before the child started. Returns whether
+    /// this is that child.
+    pub(crate) fn in_child(path: &str, channel: u64) -> bool {
+        let name = path.split_once("::").unwrap().1;
+        if let Some(child) = std::env::var_os(TERMINATE_TEST_CHILD) {
+            assert_eq!(child, name);
+            return true;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config.toml");
+        std::fs::write(&config, CANONICAL_CONFIG).unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(3_600);
+        let file = std::fs::File::options().write(true).open(&config).unwrap();
+        file.set_modified(old).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(TERMINATE_TEST_CHILD, name)
+            .env("HERDR_CONFIG_PATH", &config)
+            .env("XDG_CONFIG_HOME", home.path().join("xdg"))
+            .env_remove(crate::services::herdr_admission::ADMISSION_ENV)
+            .env(
+                crate::services::tui_o::cutover::test_override::CHILD_ENV,
+                "1",
+            )
+            .env(
+                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+                format!("[[{channel},\"claude_tui\"]]"),
+            )
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success()
+                && stdout.lines().any(|line| line
+                    .starts_with("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")),
+            "{name}: {}\n{stdout}\n{stderr}",
+            output.status
+        );
+        eprintln!("isolated child verified: {name}; selected=1");
+        false
+    }
+
+    pub(crate) struct P11TerminationRig {
+        server: Server,
+        boot: BootSessionHosts,
+        os: Arc<ScriptedOs>,
+        channel: u64,
+    }
+
+    impl P11TerminationRig {
+        /// The server and the boot section for `channel`, installed for this whole child
+        /// process; nothing under the runtime root is written yet.
+        pub(crate) fn boot(channel: u64) -> Self {
+            assert!(std::env::var_os(TERMINATE_TEST_CHILD).is_some());
+            let server = serve();
+            server.vanish_on_close.store(true, Ordering::SeqCst);
+            let home = PathBuf::from(std::env::var_os("HERDR_CONFIG_PATH").unwrap());
+            let config: crate::config::Config = serde_json::from_value(json!({
+                "server": {},
+                "cluster": {"instance_id": NODE},
+                "agents": [{"id": "p11-m2", "name": "P11", "channels": {
+                    "claude": {"id": channel.to_string(), "runtime": "tui"}
+                }}],
+                "session_hosts": {"herdr": {
+                    "endpoints": {"mini": {
+                        "execution_node": NODE,
+                        "socket_path": server.path,
+                        "herdr_home": home.parent().unwrap(),
+                        "herdr_session": "agentdesk"
+                    }},
+                    "channels": {channel.to_string(): "mini"}
+                }}
+            }))
+            .unwrap();
+            let boot = BootSessionHosts::from_config(&config).unwrap();
+            crate::config::session_hosts::install(&config).unwrap();
+            let pending: Arc<dyn ProcessOs> = Arc::new(FakeOs::launched(Vec::new()));
+            Self {
+                server,
+                boot,
+                os: ScriptedOs::new(pending, Ok(false)),
+                channel,
+            }
+        }
+
+        /// Installs this node's registry and an accepting O writer on the calling thread for the
+        /// rest of its life; a runtime runs it on every thread it starts.
+        pub(crate) fn thread_installer(&self) -> impl Fn() + Send + Sync + 'static {
+            let (boot, os) = (self.boot.clone(), self.os.clone());
+            move || {
+                let os: Arc<dyn ProcessOs> = os.clone();
+                let registry = HerdrRegistry::build(&boot).with_reads((off_where_dialled, os));
+                std::mem::forget(herdr_registry::force_for_test(registry));
+                std::mem::forget(crate::services::herdr_launch::force_writer_accepts(Some(
+                    true,
+                )));
+            }
+        }
+
+        /// Execution `EXECUTION` Bound on the server's pane under `session_key`, launched by
+        /// this runtime root, its provider alive and its input hold taken; the live terminate
+        /// and Herdr turn switches on.
+        pub(crate) async fn bind(
+            &self,
+            pool: &sqlx::PgPool,
+            token_hash: &str,
+            session_key: &str,
+        ) -> LiveSwitches {
+            let logical = session_key.rsplit_once(':').unwrap().1;
+            let marker = crate::services::tmux_common::session_temp_path(logical, "host_kind");
+            std::fs::write(marker, "herdr").unwrap();
+            self.os
+                .swap(Arc::new(FakeOs::launched(env_naming(&context(NONCE)))));
+            let mut record = stored(&self.server, HostedState::Bound);
+            record.owner.discord_token_hash = token_hash.into();
+            record.owner.channel_id = self.channel.to_string();
+            record.owner.logical_key = logical.into();
+            record.source_ref.channel = self.channel.to_string();
+            record.source_ref.logical_key = logical.into();
+            sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id, hosted_execution) VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, $4)")
+                .bind(session_key).bind(token_hash).bind(self.channel.to_string())
+                .bind(serde_json::to_value(&record).unwrap())
+                .execute(pool).await.unwrap();
+            crate::services::claude::herdr_turn::hold(NONCE).unwrap();
+            let switches = LiveSwitches(LiveTerminateSwitch::new());
+            let mut config = switches.0.0.clone();
+            config.runtime.herdr_terminate_enabled = Some(true);
+            config.runtime.herdr_turn_enabled = Some(true);
+            crate::config_live_reload::install(config);
+            switches
+        }
+
+        /// The record `bind` stored, as a fresh input target would read it.
+        pub(crate) fn record(&self, token_hash: &str, session_key: &str) -> HostedExecution {
+            let logical = session_key.rsplit_once(':').unwrap().1;
+            let mut record = stored(&self.server, HostedState::Bound);
+            record.owner.discord_token_hash = token_hash.into();
+            record.owner.channel_id = self.channel.to_string();
+            record.owner.logical_key = logical.into();
+            record
+        }
+
+        /// Every write the server received, as `(method, pane_id)`, in order.
+        pub(crate) fn writes(&self) -> Vec<(String, String)> {
+            self.server
+                .mutations()
+                .into_iter()
+                .map(|m| {
+                    let method = m["method"].as_str().unwrap_or("").to_owned();
+                    let pane = m["params"]["pane_id"].as_str().unwrap_or("").to_owned();
+                    (method, pane)
+                })
+                .collect()
+        }
+    }
+
+    /// Restores the live config the child started with.
+    pub(crate) struct LiveSwitches(LiveTerminateSwitch);
+
+    /// Whether the execution's input hold is still taken.
+    pub(crate) fn held() -> bool {
+        service::held(NONCE)
+    }
+
+    /// A fresh input target of the execution, refused while its termination fence is shut.
+    pub(crate) fn input_pin(record: &HostedExecution) -> Result<(), HerdrGateRefusal> {
+        let target = herdr_registry::registry()
+            .target(record)
+            .ok_or(HerdrGateRefusal::NoStoredExecution)?;
+        let pinned = target.pin(Mutation::Input);
+        target.discard_pin();
+        pinned
+    }
 }

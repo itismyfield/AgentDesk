@@ -907,6 +907,13 @@ mod test_panic_hook {
     }
 }
 
+/// Arms this thread's next `do_finalize` to panic, so a caller outside the finalizer can drive a
+/// terminal that is acknowledged `AlreadyFinalized` with its token still held.
+#[cfg(test)]
+pub(in crate::services::discord) fn arm_finalize_panic_once_for_test() {
+    test_panic_hook::arm_in_finalize_once();
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;

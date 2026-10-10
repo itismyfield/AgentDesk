@@ -3950,6 +3950,8 @@ services::discord::herdr_terminate::tests::m1_disabled_service_has_zero_io
 services::discord::herdr_terminate::tests::m1_hold_release_window_preserves_input_until_settlement
 services::discord::herdr_terminate::tests::m1_host_terminated_settles_exact_turn_and_publishes_queue_once
 services::discord::herdr_terminate::tests::m1_retire_cas_failure_preserves_successor_pg
+services::discord::herdr_terminate::tests::m2_natural_a_then_b_late_settlement_preserves_b
+services::discord::herdr_terminate::tests::m2_unreadable_mailbox_is_never_an_idle_channel
 services::discord::host_defer_gate::tests::the_promote_gate_holds_only_what_the_host_guard_keeps_pg
 services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_under_another_name_pg
 services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_with_no_channel_name_pg
@@ -8120,6 +8122,7 @@ services::discord::tui_prompt_relay::relay_e2e::discord_mock::history_page_retur
 services::discord::tui_prompt_relay::relay_e2e::discord_mock::unregistered_channels_are_unhandled_until_explicitly_allowed
 services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::headless_turn_provider_mismatch_refuses_before_mailbox_or_session_mutation
 services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::headless_turn_setup_failure_releases_only_its_slot_and_active_count
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_real_intake_waits_through_settlement_and_listener_hands_off_pg
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_claude_idle_binding_does_not_resume_its_synthetic_row
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_direct_prompt_posts_only_its_notice
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance
@@ -10807,6 +10810,9 @@ services::session_host::herdr_gate::tests::m1_retire_cas_failure_keeps_hold_pg
 services::session_host::herdr_gate::tests::m1_service_missing_pane_absent_provider_retires_pg
 services::session_host::herdr_gate::tests::m1_stale_a_never_releases_b_pg
 services::session_host::herdr_gate::tests::m1_unreadable_process_never_means_absent_pg
+services::session_host::herdr_gate::tests::m2_already_finalized_with_active_a_is_indeterminate_pg
+services::session_host::herdr_gate::tests::m2_settlement_mailbox_unreadable_is_indeterminate_pg
+services::session_host::herdr_gate::tests::m2_turn_changed_before_close_has_zero_effect_pg
 services::session_host::herdr_gate::tests::only_a_registered_local_endpoint_makes_a_herdr_target
 services::session_host::herdr_gate::tests::stopped_admission_refuses_input_but_lets_a_cancel_key_through
 services::session_host::herdr_gate::tests::the_boot_registry_holds_only_this_nodes_endpoints
