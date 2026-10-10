@@ -213,6 +213,9 @@ src/
 │   ├── o_channel_activation_fence_tests.rs
 │   ├── o_channel_homes.rs
 │   ├── o_channel_homes_tests.rs
+│   ├── o_piece_attempts.rs
+│   ├── o_piece_delivery.rs
+│   ├── o_piece_ledger_tests.rs
 │   ├── postgres.rs
 │   ├── relay_dead_letter.rs
 │   ├── replay_disposition.rs
@@ -652,6 +655,7 @@ src/
 │   │   ├── session.rs
 │   │   ├── source_verify.rs
 │   │   ├── startup_dialog.rs
+│   │   ├── submission_fence.rs
 │   │   ├── transcript_tail.rs
 │   │   └── tui_relay.rs
 │   ├── cluster/
@@ -1040,6 +1044,8 @@ src/
 │   │   │   ├── host_recovery_guard.rs
 │   │   │   ├── host_recovery_guard_keyed_tests.rs
 │   │   │   ├── invariant_test_capture.rs
+│   │   │   ├── managed_submission.rs
+│   │   │   ├── managed_submission_tests.rs
 │   │   │   ├── model.rs
 │   │   │   ├── orphan_relay_reclaim.rs
 │   │   │   ├── ownership_ops.rs
@@ -1379,6 +1385,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
+│   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
@@ -2463,8 +2470,16 @@ src/
 │   │   │   ├── sink.rs
 │   │   │   └── sink_tests.rs
 │   │   ├── repost/
+│   │   │   ├── admission.rs
+│   │   │   ├── admission_tests.rs
 │   │   │   ├── config.rs
+│   │   │   ├── evidence.rs
+│   │   │   ├── identity.rs
+│   │   │   ├── matcher.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── probe.rs
+│   │   │   ├── probe_tests.rs
+│   │   │   ├── provenance.rs
 │   │   │   └── send.rs
 │   │   ├── shadow/
 │   │   │   ├── binding_reader.rs

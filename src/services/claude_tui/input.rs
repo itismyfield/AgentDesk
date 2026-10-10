@@ -453,6 +453,7 @@ fn send_prompt_with_readiness(
         if readiness.is_followup() {
             refuse_composer_draft(session_name, readiness)?;
         }
+        super::submission_fence::before_first_payload()?;
         crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
             "claude",
             session_name,
@@ -1203,6 +1204,7 @@ pub fn send_followup_prompt_or_idle_transcript(
             return Err("claude tui composer changed before follow-up mutation".to_string());
         }
         refuse_composer_draft(session_name, PromptReadinessKind::ProvenWarmFollowup)?;
+        super::submission_fence::before_first_payload()?;
         crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
             "claude",
             session_name,
