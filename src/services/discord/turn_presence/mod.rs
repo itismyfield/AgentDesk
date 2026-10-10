@@ -3,4 +3,6 @@
 pub(in crate::services::discord) mod activity;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) mod admission;
+#[cfg(all(test, unix))]
+pub(crate) mod lifecycle;
 pub(in crate::services::discord) mod supervisor;
