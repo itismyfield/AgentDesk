@@ -6,7 +6,7 @@ use std::fmt::Debug;
 
 use super::{
     Anchor, CandidateState, Closed, Coverage, Evidence, Load, Obligation, Parse, Proof, Provider,
-    Retirement, Role, RuntimeKind, SourceEvidence, SourceRole, Step, StoreState, Suffix,
+    Retirement, Role, RuntimeKind, SourceEvidence, SourceRole, Step, StoreState, Suffix, Wrapper,
     WrapperEvidence,
 };
 
@@ -169,10 +169,15 @@ fn channel(evidence: &Evidence, found: &mut Found) {
 }
 
 fn sources(sources: &[SourceEvidence], found: &mut Found) {
-    if sources.len() > BUDGET_SOURCES {
+    // Every native file and every wrapper spool counts against one read budget.
+    let spools = sources
+        .iter()
+        .filter(|s| s.wrapper.present().is_some())
+        .count();
+    if sources.len() + spools > BUDGET_SOURCES {
         found.refuse("budget_sources");
     }
-    let wrapper = |s: &SourceEvidence| s.wrapper.as_ref().and_then(|w| w.eof).unwrap_or(0);
+    let wrapper = |s: &SourceEvidence| s.wrapper.present().and_then(|w| w.eof).unwrap_or(0);
     let bytes: u64 = (sources.iter())
         .map(|s| s.bytes.unwrap_or(0).saturating_add(wrapper(s)))
         .fold(0, u64::saturating_add);
@@ -223,7 +228,7 @@ fn bound_source(role: &str, source: &SourceEvidence, found: &mut Found) {
         Parse::Malformed => found.refuse(format!("{role}.prefix_malformed")),
         Parse::Unknown => found.unknown(format!("{role}.prefix")),
     }
-    if let Some(wrapper) = &source.wrapper {
+    if let Some(wrapper) = source.wrapper.present() {
         wrapped(wrapper, found);
     }
 }
@@ -235,6 +240,10 @@ fn current(source: &SourceEvidence, found: &mut Found) {
         _ => {}
     }
     suffix("current", source.suffix, found);
+    // A live pane may read a spool; only a confirmed absence lets the current source skip it.
+    if matches!(source.wrapper, Wrapper::Unknown) {
+        found.unknown("wrapper");
+    }
     match source.closed {
         Closed::Own => {}
         Closed::Open => found.refuse("current.turn_open"),
@@ -252,10 +261,10 @@ fn wrapped(wrapper: &WrapperEvidence, found: &mut Found) {
         (Some(_), Some(_)) => {}
         _ => found.unknown("wrapper.floor"),
     }
-    if let (Some(cursor), Some(eof)) = (wrapper.cursor, wrapper.eof)
-        && cursor > eof
-    {
-        found.refuse("wrapper.cursor_past_eof");
+    match (wrapper.cursor, wrapper.eof) {
+        (Some(cursor), Some(eof)) if cursor > eof => found.refuse("wrapper.cursor_past_eof"),
+        (Some(_), _) => {}
+        (None, _) => found.unknown("wrapper.cursor"),
     }
     suffix("wrapper", wrapper.suffix, found);
     match wrapper.backlog {

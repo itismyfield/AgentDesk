@@ -325,3 +325,45 @@ fn only_a_definite_state_leaves_the_denominator() {
         );
     }
 }
+
+#[test]
+fn a_wrapper_is_skipped_only_when_its_absence_is_stated() {
+    let wrapper = "/sources/0/wrapper";
+    let mut null = eligible(1);
+    null["sources"][0]["wrapper"] = Value::Null;
+    for (case, evidence) in [("deleted", with(wrapper, Value::Null)), ("null", null)] {
+        let judged = judged(&evidence);
+        assert_eq!(judged.boundary, Verdict::Unknown, "{case}");
+        assert!(judged.unknown.contains("wrapper"), "{case}: {judged:?}");
+    }
+    assert_eq!(
+        judged(&with(wrapper, json!("absent"))).boundary,
+        Verdict::Eligible
+    );
+    let busy = judged(&with("/sources/0/wrapper/backlog", json!("busy")));
+    assert!(busy.boundary == Verdict::Refused && busy.refused.contains("wrapper.backlog"));
+    let mut null_cursor = eligible(1);
+    null_cursor["sources"][0]["wrapper"]["cursor"] = Value::Null;
+    for evidence in [with("/sources/0/wrapper/cursor", Value::Null), null_cursor] {
+        let judged = judged(&evidence);
+        assert_eq!(judged.boundary, Verdict::Unknown);
+        assert!(judged.unknown.contains("wrapper.cursor"), "{judged:?}");
+    }
+}
+
+#[test]
+fn every_wrapper_spool_counts_against_the_file_budget() {
+    let sized = |currents: usize| {
+        let mut evidence = eligible(1);
+        let current = evidence["sources"][0].clone();
+        evidence["sources"] = Value::Array(vec![current; currents]);
+        judged(&evidence)
+    };
+    assert_eq!(
+        sized(32).boundary,
+        Verdict::Eligible,
+        "32 rollouts and 32 spools"
+    );
+    let over = sized(33);
+    assert!(over.refused.contains("budget_sources"), "{over:?}");
+}

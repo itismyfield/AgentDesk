@@ -75,3 +75,15 @@ fn a_probe_fails_instead_of_shrinking_its_input() {
     let bare = probe(&snapshot(vec![json!({"channel": 9})])).unwrap();
     assert_eq!((bare.counts.n, bare.counts.k, bare.counts.u), (1, 0, 1));
 }
+
+#[test]
+fn a_wrapper_without_its_read_cursor_is_never_counted_adoptable() {
+    let mut unread = eligible(1);
+    unread["sources"][0]["wrapper"]["cursor"] = serde_json::Value::Null;
+    let report = probe(&snapshot(vec![unread])).unwrap();
+    assert_eq!(
+        (report.counts.n, report.counts.k, report.counts.u),
+        (1, 0, 1)
+    );
+    assert_eq!(report.reasons.get("wrapper.cursor"), Some(&1));
+}

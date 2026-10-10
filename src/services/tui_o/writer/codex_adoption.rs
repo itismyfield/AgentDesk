@@ -46,9 +46,46 @@ pub struct SourceEvidence {
     pub suffix: Suffix,
     pub closed: Closed,
     pub retirement: Retirement,
-    pub wrapper: Option<WrapperEvidence>,
+    pub wrapper: Wrapper,
     /// Whether Legacy's receipts cover every unit to `B`; only the strict rule asks.
     pub receipts: Coverage,
+}
+
+/// A source's normalized wrapper spool: `Absent` only once its absence was confirmed.
+#[derive(Clone, Debug, Default)]
+pub enum Wrapper {
+    #[default]
+    Unknown,
+    Absent,
+    Present(WrapperEvidence),
+}
+
+impl Wrapper {
+    pub fn present(&self) -> Option<&WrapperEvidence> {
+        match self {
+            Self::Present(wrapper) => Some(wrapper),
+            _ => None,
+        }
+    }
+}
+
+/// A snapshot states `"absent"` or the wrapper's evidence; null, a missing field or anything else
+/// reads as Unknown.
+impl<'de> Deserialize<'de> for Wrapper {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Stated {
+            Tag(String),
+            Present(WrapperEvidence),
+            Other(serde::de::IgnoredAny),
+        }
+        Ok(match Option::<Stated>::deserialize(deserializer)? {
+            Some(Stated::Tag(tag)) if tag == "absent" => Self::Absent,
+            Some(Stated::Present(wrapper)) => Self::Present(wrapper),
+            _ => Self::Unknown,
+        })
+    }
 }
 
 /// A normalized wrapper spool, judged in its own coordinates and never by the native cursor.

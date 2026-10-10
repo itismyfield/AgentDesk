@@ -568,3 +568,128 @@ fn every_live_pane_keeps_its_own_current_source() {
     let [s0, s1, s2] = &fixture.sources;
     assert_eq!(starts, vec![s2, &s3, s1, s0]);
 }
+
+#[test]
+fn a_past_sources_torn_tail_is_not_a_strict_prefix() {
+    let tails: [&[u8]; 3] = [
+        b"{\"type\":",
+        b"{\"type\":\"event_msg\",\"x\":\"\xe2\x82",
+        b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\"}}",
+    ];
+    for tail in tails {
+        let fixture = fixture();
+        let path = &fixture.sources[1].path;
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(tail).unwrap();
+        let refused = fixture.refused();
+        assert!(
+            refused.contains(&"retired.prefix_malformed".to_owned()),
+            "{tail:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unkeyed_call_or_an_item_an_earlier_turn_left_open_keeps_the_source_open() {
+    let event = |kind: &str, id: &str| json!({"type": "event_msg", "payload": {"type": kind, "turn_id": id}});
+    let call = |call_id: Value| {
+        let mut call = json!({"type": "response_item", "payload": {"type": "function_call",
+            "id": "fc-x", "name": "shell", "arguments": "{}"}});
+        if !call_id.is_null() {
+            call["payload"]["call_id"] = call_id;
+        }
+        call
+    };
+    let mut explicit_null = call(Value::Null);
+    explicit_null["payload"]["call_id"] = Value::Null;
+    let keyed = call(json!("c-open"));
+    let announce = json!({"type": "event_msg", "payload": {"type": "item_completed",
+        "item": {"type": "AgentMessage", "id": "unsealed"}}});
+    let cases: Vec<(&str, Vec<Value>)> = vec![
+        (
+            "missing call_id",
+            vec![
+                event("task_started", "x"),
+                call(Value::Null),
+                event("task_complete", "x"),
+            ],
+        ),
+        (
+            "null call_id",
+            vec![
+                event("task_started", "x"),
+                explicit_null,
+                event("task_complete", "x"),
+            ],
+        ),
+        (
+            "empty call_id",
+            vec![
+                event("task_started", "x"),
+                call(json!("")),
+                event("task_complete", "x"),
+            ],
+        ),
+        (
+            "a call left open",
+            vec![
+                event("task_started", "x"),
+                keyed,
+                event("task_started", "y"),
+                event("task_complete", "y"),
+            ],
+        ),
+        (
+            "an announcement left open",
+            vec![
+                event("task_started", "x"),
+                announce,
+                event("task_started", "y"),
+                event("task_complete", "y"),
+            ],
+        ),
+    ];
+    for (case, records) in cases {
+        let mut fixture = fixture();
+        append(&fixture.sources[2].path, &records);
+        fixture.checkpoints[0].cursor.at = len(&fixture.sources[2].path);
+        assert!(
+            fixture.refused().contains(&"current.turn_open".to_owned()),
+            "{case}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_named_source_that_cannot_be_opened_is_unreadable() {
+    let mut fixture = fixture();
+    // A socket stats as an empty file of its own inode but refuses to open, even for root.
+    let path = PathBuf::from(format!("/tmp/adk-u3-named-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let meta = std::fs::metadata(&path).unwrap();
+    assert_eq!(meta.len(), 0);
+    let (dev, ino) = file_identity(&meta);
+    let named = SourceId {
+        session_id: "named".into(),
+        path: path.clone(),
+        dev,
+        ino,
+    };
+    if let BindingRecord::Bound { old, .. } = &mut fixture.events[1].record {
+        *old = Some(named);
+    }
+    let verified = fixture.verify();
+    let _ = std::fs::remove_file(&path);
+    match verified {
+        Err(Refusal::Judged(judgment)) => {
+            assert_eq!(judgment.boundary, Verdict::Unknown);
+            assert!(
+                judgment.unknown.contains("named.unreadable"),
+                "{judgment:?}"
+            );
+        }
+        other => panic!("expected an unreadable named source, got {other:?}"),
+    }
+}

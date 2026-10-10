@@ -7,7 +7,9 @@ use std::fmt::{Debug, Write};
 use serde::Deserialize;
 
 use super::judge::{Judgment, Verdict, judge, snake};
-use super::{Anchor, Evidence, Load, Obligation, SourceEvidence, SourceRole, WrapperEvidence};
+use super::{
+    Anchor, Evidence, Load, Obligation, SourceEvidence, SourceRole, Wrapper, WrapperEvidence,
+};
 
 pub const SCHEMA: u32 = 1;
 
@@ -126,7 +128,7 @@ fn line(head: &str, evidence: &Evidence, judgment: &Judgment) -> String {
     };
     let obligation = |kind| snake(evidence.obligations.get(&kind).unwrap_or(&Load::Unknown));
     let total: u64 = (evidence.sources.iter())
-        .map(|s| s.bytes.unwrap_or(0) + s.wrapper.as_ref().and_then(|w| w.eof).unwrap_or(0))
+        .map(|s| s.bytes.unwrap_or(0) + s.wrapper.present().and_then(|w| w.eof).unwrap_or(0))
         .sum();
     let retired: Vec<String> = of(SourceRole::Retired)
         .map(|s| snake(&s.retirement))
@@ -158,10 +160,7 @@ fn line(head: &str, evidence: &Evidence, judgment: &Judgment) -> String {
         ("source_proof", each(|s| snake(&s.proof))),
         ("native_cursor", each(|s| number(s.native_cursor))),
         ("native_eof", each(|s| number(s.bytes))),
-        (
-            "relay_namespace",
-            each(|s| ["native", "wrapper"][usize::from(s.wrapper.is_some())].into()),
-        ),
+        ("relay_namespace", each(|s| namespace(&s.wrapper).into())),
         ("relay_cursor", each(|s| relay(s, |w| w.cursor))),
         ("relay_eof", each(|s| relay(s, |w| w.eof))),
         ("committed_floor", each(|s| relay(s, |w| w.floor))),
@@ -187,7 +186,15 @@ fn line(head: &str, evidence: &Evidence, judgment: &Judgment) -> String {
 }
 
 fn relay(source: &SourceEvidence, field: fn(&WrapperEvidence) -> Option<u64>) -> String {
-    (source.wrapper.as_ref()).map_or("none".into(), |wrapper| number(field(wrapper)))
+    (source.wrapper.present()).map_or("none".into(), |wrapper| number(field(wrapper)))
+}
+
+fn namespace(wrapper: &Wrapper) -> &'static str {
+    match wrapper {
+        Wrapper::Present(_) => "wrapper",
+        Wrapper::Absent => "native",
+        Wrapper::Unknown => "unknown",
+    }
 }
 
 fn number(value: Option<u64>) -> String {

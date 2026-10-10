@@ -5,7 +5,7 @@ use super::coord::{self, NativeCheckpoint, WrapperCheckpoint};
 use super::fold::{LivePane, fold};
 use super::judge::{BUDGET_BYTES, BUDGET_SOURCES, Judgment, Verdict, judge};
 use super::scan::{Scanned, scan};
-use super::{Anchor, Evidence, Proof, Retirement, SourceEvidence, SourceRole, Suffix};
+use super::{Anchor, Evidence, Proof, Retirement, SourceEvidence, SourceRole, Suffix, Wrapper};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
 use crate::services::tui_o::store::InitSource;
@@ -81,8 +81,10 @@ pub fn verify(mut facts: Evidence, reads: Reads<'_>) -> Result<VerifiedCodexInit
         let live = reads.live.iter().find(|live| live.pane == *pane);
         let relay = live.and_then(|live| live.relay_output_path.as_deref());
         let wrapper = reads.wrappers.iter().find(|w| w.pane == *pane);
+        // No live relay path and no checkpoint is the confirmed absence of a spool.
         let wrapper = coord::wrapper(channel, pane, relay, wrapper);
-        budget = budget.saturating_sub(wrapper.as_ref().and_then(|w| w.eof).unwrap_or(0));
+        let wrapper = wrapper.map_or(Wrapper::Absent, Wrapper::Present);
+        budget = budget.saturating_sub(wrapper.present().and_then(|w| w.eof).unwrap_or(0));
         sources.push(SourceEvidence {
             role: SourceRole::Current,
             proof: if file == Proof::Linked { marker } else { file },
@@ -108,8 +110,9 @@ pub fn verify(mut facts: Evidence, reads: Reads<'_>) -> Result<VerifiedCodexInit
         pinned.push((source, scanned));
     }
     for source in &folded.named {
-        let meta = std::fs::metadata(&source.path).ok();
-        let same = meta.filter(|meta| file_identity(meta).1 == source.ino);
+        // Opened, not only stat'ed: a file that cannot be read is not a proven empty source.
+        let meta = std::fs::File::open(&source.path).and_then(|file| file.metadata());
+        let same = meta.ok().filter(|meta| file_identity(meta).1 == source.ino);
         let bytes = same.map(|meta| meta.len());
         let role = SourceRole::Named;
         sources.push(SourceEvidence {

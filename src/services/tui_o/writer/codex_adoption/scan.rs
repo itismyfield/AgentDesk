@@ -29,6 +29,8 @@ enum Class {
         opens: Option<String>,
         closes: Option<String>,
     },
+    /// A tool call with no `call_id`: no output can be shown to answer it.
+    UnkeyedCall,
     Unrecognized,
 }
 
@@ -99,7 +101,8 @@ pub fn scan(path: &Path, budget: u64) -> Result<Scanned, String> {
         len,
         hash: hex::encode(hasher.finalize()),
         session,
-        prefix: if malformed {
+        // Strict only when every byte read is a complete JSONL record.
+        prefix: if malformed || torn {
             Parse::Malformed
         } else {
             Parse::Strict
@@ -128,7 +131,10 @@ impl Scanned {
                 Class::Prompt => return Suffix::Prompt,
                 Class::Start(_) => return Suffix::Start,
                 Class::Unrecognized => return Suffix::Unrecognized,
-                Class::Close(_) | Class::Announce(_) | Class::Output { .. } => {
+                Class::Close(_)
+                | Class::Announce(_)
+                | Class::Output { .. }
+                | Class::UnkeyedCall => {
                     return Suffix::Output;
                 }
             }
@@ -158,6 +164,9 @@ fn class(record: &Value) -> Class {
     let closes = call
         .filter(|_| response && item.ends_with("_output"))
         .map(str::to_owned);
+    if response && item.ends_with("_call") && call.is_none() {
+        return Class::UnkeyedCall;
+    }
     let output = |seals: Option<&String>| Class::Output {
         seals: seals.cloned(),
         opens: opens.clone(),
@@ -176,17 +185,17 @@ fn class(record: &Value) -> Class {
 }
 
 /// `Own` when the last turn closed by its own named completion with no announcement unsealed, no
-/// tool call unanswered and nothing but quiet records after it; a file with no turn is `Own` too.
+/// tool call unanswered or unkeyed, and nothing but quiet records after it; no turn is `Own` too.
 fn closed(records: &[(u64, Class)]) -> Closed {
     let (mut turn, mut idle, mut unnamed) = (None::<Option<String>>, true, false);
+    // A call with no key can never be answered; announcements and calls stay open across turns.
+    let mut unkeyed = false;
     let (mut announced, mut calls) = (BTreeSet::new(), BTreeSet::new());
     for (_, class) in records {
         match class {
             Class::Quiet => continue,
             Class::Start(id) => {
                 (turn, unnamed) = (Some(id.clone()), false);
-                announced.clear();
-                calls.clear();
             }
             Class::Close(id) => match &turn {
                 Some(Some(open)) if id.as_deref() == Some(open.as_str()) => {
@@ -214,11 +223,13 @@ fn closed(records: &[(u64, Class)]) -> Closed {
                     calls.remove(id);
                 }
             }
+            Class::UnkeyedCall => unkeyed = true,
             Class::Prompt | Class::Unrecognized => {}
         }
         idle = false;
     }
     match turn {
+        _ if unkeyed => Closed::Open,
         None if idle => Closed::Own,
         Some(None) if unnamed => Closed::Unknown,
         _ => Closed::Open,
