@@ -2,6 +2,7 @@
 //! each row, pending-start record and TUI-direct turn holds that no earlier boot preserved.
 
 use super::*;
+use crate::services::discord::input_runtime::fence::{BootTarget, boot_skip};
 use crate::services::discord::runtime_store;
 use crate::services::discord::tui_direct_pending_start::TuiDirectPendingStart;
 use serde_json::{Value, json};
@@ -49,7 +50,12 @@ fn preserve(inflight_root: &Path, provider: &ProviderKind) {
         let entry = episodes.entry(sha(key.to_string().as_bytes()));
         entry.or_insert_with(|| (key, Vec::new())).1.push(item);
     };
+    // A protected channel's row and pending start wait, unread, for its move or handback.
+    let protected = |channel| boot_skip(BootTarget::Channel(provider, channel));
     for path in json_files(&inflight_provider_dir(inflight_root, provider), provider) {
+        if protected(channel_id_from_path(&path)) {
+            continue;
+        }
         let lock = lock_inflight_state_path(&path);
         if let Err(error) = &lock {
             let path = path.display();
@@ -63,6 +69,9 @@ fn preserve(inflight_root: &Path, provider: &ProviderKind) {
     }
     let pending = runtime_store::tui_direct_pending_start_root();
     for path in pending.map_or_else(Vec::new, |dir| json_files(&dir, provider)) {
+        if pending_channel(provider, &path).is_some_and(protected) {
+            continue;
+        }
         let bytes = read_source(&path);
         if let Some(item) = bytes.and_then(|bytes| pending_item(provider, path, bytes)) {
             add(item);
@@ -227,6 +236,13 @@ fn row_item(
     let anchorless = (row.user_msg_id == 0).then(|| turn.map_or_else(started, Value::from));
     let key = episode_key(provider, [row.channel_id, row.user_msg_id], anchorless);
     (key, Item("row", source, bytes, segment, None))
+}
+
+/// The channel a pending-start record names; the writer names it `<provider>_<channel>_<anchor>.json`.
+fn pending_channel(provider: &ProviderKind, path: &Path) -> Option<u64> {
+    let name = path.file_stem()?.to_str()?;
+    let ids = name.strip_prefix(&format!("{}_", provider.as_str()))?;
+    ids.split_once('_')?.0.parse().ok()
 }
 
 /// Records of another provider are left to that provider's reaper pass.

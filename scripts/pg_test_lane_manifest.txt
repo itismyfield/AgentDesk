@@ -170,6 +170,7 @@ src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
+src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs
 src/services/discord/session_idle_cleanup_tests.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
@@ -236,6 +237,7 @@ src/services/stale_turn_reconciler.rs
 src/services/tmux_turn_liveness/tests_pg.rs
 src/services/tui_o/alarm.rs
 src/services/tui_o/exact_pg_tests.rs
+src/services/tui_o/exact_submission.rs
 src/services/turn_host_tests.rs
 src/services/turn_lifecycle.rs
 src/voice/announce_meta.rs
@@ -421,6 +423,7 @@ services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+services::discord::runtime_bootstrap::orphan_recovery::fence_tests
 services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
@@ -490,6 +493,7 @@ services::stale_turn_reconciler::tests
 services::tmux_turn_liveness::tests_pg
 services::tui_o::alarm::postgres_tests
 services::tui_o::exact_pg::tests
+services::tui_o::exact_submission::tests
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
 voice::announce_meta::tests
@@ -1437,6 +1441,7 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settle
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settles_stale_spawned_as_unknown_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_live_interactive_turn_without_dispatch_binding_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
+services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::exact_owned_row_with_null_cwd_is_channel_scoped_empty_path
@@ -1497,6 +1502,7 @@ services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispa
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::live_turn_without_dispatch_keeps_its_inflight_row
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::real_dispatched_origin_ghost_is_consumed_after_the_probe
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::release_that_takes_no_session_row_reports_no_consumed_ghost
+services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests::c2b_startup_cleanup_leaves_a_protected_channel_alone_pg
 services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests::startup_cleanup_runs_only_after_the_host_guard_admits_the_stored_rows_pg
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::dispatched_origin_ghost_marker_is_consumed_only_for_matching_turn
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::interactive_restore_without_dispatch_is_untouched
@@ -1504,6 +1510,8 @@ services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::restored_dispatch_rebinds_valid_dispatch_with_cas
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::watcher_recovery_cwd_does_not_cross_channels
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::watcher_recovery_cwd_legacy_null_channel_id_not_reused
+services::discord::tmux_reaper::host_guard_tests::c2b_dead_session_reaper_leaves_a_protected_channel_pg
+services::discord::tmux_reaper::host_guard_tests::c2b_orphan_cleanup_leaves_protected_and_unplaced_sessions_pg
 services::discord::tmux_reaper::host_guard_tests::dead_session_reaper_kills_only_what_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::fresh_routine_backstop_keeps_the_session_when_ownership_is_unreadable_pg
 services::discord::tmux_reaper::host_guard_tests::fresh_routine_backstop_reads_the_run_that_owned_the_listed_session_pg
@@ -1818,6 +1826,10 @@ services::tui_o::exact_pg::tests::exact_metadata_pg_restore_and_terminal_port_st
 services::tui_o::exact_pg::tests::exact_off_pg_statement_trace_and_files_zero
 services::tui_o::exact_pg::tests::exact_pg_process_reader_uses_only_metadata
 services::tui_o::exact_pg::tests::exact_settled_ack_names_normalized_pg_payload
+services::tui_o::exact_submission::tests::exact_submission_pg_attempt_before_closure_never_becomes_no_attempt
+services::tui_o::exact_submission::tests::exact_submission_pg_closed_admission_rejects_late_attempt
+services::tui_o::exact_submission::tests::exact_submission_pg_executor_classifies_no_attempt_and_typed_refusal
+services::tui_o::exact_submission::tests::exact_submission_pg_reopen_process_resolves_policy_without_source
 services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg
 services::turn_lifecycle::host_guard_tests::force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg
