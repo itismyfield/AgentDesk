@@ -2481,7 +2481,9 @@ src/
 │   │   │   ├── codex_verified/
 │   │   │   │   ├── provenance/
 │   │   │   │   │   ├── dormant.rs
-│   │   │   │   │   └── dormant_tests.rs
+│   │   │   │   │   ├── dormant_tests.rs
+│   │   │   │   │   ├── permission.rs
+│   │   │   │   │   └── permission_tests.rs
 │   │   │   │   └── provenance.rs
 │   │   │   ├── adopt_skip.rs
 │   │   │   ├── binding_access.rs
