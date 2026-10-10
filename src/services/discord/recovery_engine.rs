@@ -569,3 +569,8 @@ impl std::fmt::Display for RebindError {
 pub(crate) use rebind_runtime::codex_rebind_spawn_for_tests;
 #[cfg(test)]
 pub(crate) use restore_persist_outcome::codex_restart_output_for_tests;
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use self::restore_inflight::{
+    install_inflight_scoped, resume_inflight_scoped,
+};

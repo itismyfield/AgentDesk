@@ -106,3 +106,136 @@ impl DrainPort for ChannelHomePort {
 #[cfg(test)]
 #[path = "channel_home_port_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+pub(crate) mod scoped_restore {
+    use crate::db::o_channel_homes::{ChannelHome, HomeState};
+    use crate::services::agent_protocol::NativeTerminalKind;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    /// Installation identity, distinct from a live output or intake permit.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct RestoreScope {
+        pub(crate) channel: u64,
+        pub(crate) provider: String,
+        pub(crate) epoch: i64,
+        pub(crate) state: HomeState,
+        pub(crate) holder: Option<String>,
+        pub(crate) target: Option<String>,
+        pub(crate) local: String,
+    }
+    impl RestoreScope {
+        pub(crate) fn new(row: &ChannelHome, provider: &str, local: &str) -> Result<Self, String> {
+            let channel = row
+                .channel_id
+                .parse::<u64>()
+                .ok()
+                .filter(|id| *id != 0)
+                .ok_or("invalid restore channel")?;
+            let held = row.holder.as_deref() == Some(local)
+                && matches!(
+                    row.state,
+                    HomeState::Worker | HomeState::Releasing | HomeState::Reclaiming
+                );
+            let preparing =
+                row.state == HomeState::Released && row.target.as_deref() == Some(local);
+            if local.is_empty()
+                || row.epoch <= 0
+                || row.provider != provider
+                || !(held || preparing)
+            {
+                return Err("restore home identity is not local".into());
+            }
+            Ok(Self {
+                channel,
+                provider: provider.into(),
+                epoch: row.epoch,
+                state: row.state,
+                holder: row.holder.clone(),
+                target: row.target.clone(),
+                local: local.into(),
+            })
+        }
+        pub(crate) fn matches(&self, row: &ChannelHome) -> bool {
+            row.channel_id == self.channel.to_string()
+                && row.provider == self.provider
+                && row.epoch == self.epoch
+                && row.state == self.state
+                && row.holder == self.holder
+                && row.target == self.target
+        }
+        pub(crate) fn held_locally(&self) -> bool {
+            self.state != HomeState::Released && self.holder.as_deref() == Some(self.local.as_str())
+        }
+    }
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) enum RestoreStatus {
+        Pending,
+        Restoring,
+        Restored,
+        Blocked(String),
+    }
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) enum InflightObservation {
+        Empty,
+        Active,
+        ReplayHeld {
+            receipt: Option<i64>,
+            reasons: Vec<String>,
+            delivery: Option<Result<(), String>>,
+        },
+        HerdrHeld,
+        Admitted {
+            kind: NativeTerminalKind,
+        },
+        Retained {
+            kind: NativeTerminalKind,
+            reason: String,
+        },
+        Settled {
+            kind: NativeTerminalKind,
+        },
+        Deferred(String),
+    }
+    /// Only installation metadata; mailbox and canonical rows remain the busy authorities.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct RestoreWitness {
+        pub(crate) scope: Option<RestoreScope>,
+        pub(crate) generation: u64,
+        pub(crate) status: RestoreStatus,
+        pub(crate) inflight: Option<InflightObservation>,
+    }
+    impl Default for RestoreWitness {
+        fn default() -> Self {
+            Self {
+                scope: None,
+                generation: 0,
+                status: RestoreStatus::Pending,
+                inflight: None,
+            }
+        }
+    }
+    pub(crate) struct RestoreContext {
+        pub(crate) scope: RestoreScope,
+        pub(crate) generation: u64,
+        pub(crate) current: Arc<AtomicU64>,
+    }
+    impl RestoreContext {
+        pub(crate) fn check(&self) -> Result<(), String> {
+            if self.generation == 0
+                || (self.current.load(Ordering::Acquire) != self.generation
+                    && !mutant("old-generation"))
+            {
+                Err("restore runtime generation changed".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+    pub(crate) fn mutant(name: &str) -> bool {
+        std::env::var("ADK_S3ACT_B2_MUTANT").ok().as_deref() == Some(name)
+    }
+}

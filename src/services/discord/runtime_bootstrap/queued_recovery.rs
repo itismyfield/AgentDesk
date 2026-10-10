@@ -269,3 +269,161 @@ pub(super) async fn restore_queued_and_inflight_work(
 #[cfg(test)]
 #[path = "queued_recovery_fence_tests.rs"]
 mod fence_tests;
+
+#[cfg(all(test, unix))]
+use crate::services::cluster::channel_home_port::scoped_restore::{
+    InflightObservation, RestoreContext, RestoreScope, RestoreStatus, RestoreWitness, mutant,
+};
+
+#[cfg(all(test, unix))]
+pub(crate) struct ScopedRestoreLane {
+    channel: u64,
+    serial: Arc<tokio::sync::Mutex<()>>,
+    current: Arc<std::sync::atomic::AtomicU64>,
+    witness: Arc<std::sync::Mutex<RestoreWitness>>,
+}
+#[cfg(all(test, unix))]
+impl ScopedRestoreLane {
+    pub(crate) fn new(channel: u64) -> Arc<Self> {
+        Arc::new(Self {
+            channel,
+            serial: Arc::default(),
+            current: Arc::default(),
+            witness: Arc::default(),
+        })
+    }
+    pub(crate) fn witness(&self) -> RestoreWitness {
+        self.witness.lock().unwrap().clone()
+    }
+    /// The owned task keeps serialization even if its caller abandons the join handle.
+    pub(crate) fn run<F, Fut>(
+        self: &Arc<Self>,
+        scope: RestoreScope,
+        generation: u64,
+        work: F,
+    ) -> tokio::task::JoinHandle<Result<(), String>>
+    where
+        F: FnOnce(ScopedRestoreAttempt) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        let lane = self.clone();
+        tokio::spawn(async move {
+            let guard = lane.serial.clone().lock_owned().await;
+            if scope.channel != lane.channel
+                || generation == 0
+                || generation <= lane.current.load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err("restore reservation is stale or foreign".into());
+            }
+            lane.current
+                .store(generation, std::sync::atomic::Ordering::Release);
+            *lane.witness.lock().unwrap() = RestoreWitness {
+                scope: Some(scope.clone()),
+                generation,
+                status: RestoreStatus::Restoring,
+                inflight: None,
+            };
+            let attempt = ScopedRestoreAttempt {
+                lane: lane.clone(),
+                _guard: guard,
+                next: 0,
+                context: RestoreContext {
+                    scope,
+                    generation,
+                    current: lane.current.clone(),
+                },
+            };
+            let result =
+                crate::services::discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
+                    work(attempt),
+                )
+                .await;
+            if let Err(reason) = &result {
+                let mut witness = lane.witness.lock().unwrap();
+                if witness.generation == generation && witness.status != RestoreStatus::Restored {
+                    witness.status = RestoreStatus::Blocked(reason.clone());
+                }
+            }
+            result
+        })
+    }
+}
+#[cfg(all(test, unix))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstallStage {
+    Queue,
+    Inflight,
+    Marker,
+    Placeholder,
+}
+#[cfg(all(test, unix))]
+pub(crate) struct ScopedRestoreAttempt {
+    lane: Arc<ScopedRestoreLane>,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    next: usize,
+    pub(crate) context: RestoreContext,
+}
+#[cfg(all(test, unix))]
+impl ScopedRestoreAttempt {
+    pub(crate) fn acknowledge(&mut self, stage: InstallStage) -> Result<(), String> {
+        self.context.check()?;
+        if [
+            InstallStage::Queue,
+            InstallStage::Inflight,
+            InstallStage::Marker,
+            InstallStage::Placeholder,
+        ]
+        .get(self.next)
+            != Some(&stage)
+        {
+            self.block("installation stage out of order");
+            return Err("installation stage out of order".into());
+        }
+        self.next += 1;
+        Ok(())
+    }
+    pub(crate) fn observe(&self, observation: InflightObservation) {
+        let mut witness = self.lane.witness.lock().unwrap();
+        if mutant("retained-restored")
+            && matches!(observation, InflightObservation::Retained { .. })
+        {
+            witness.status = RestoreStatus::Restored;
+        }
+        witness.inflight = Some(observation);
+    }
+    pub(crate) fn block(&self, reason: &str) {
+        self.lane.witness.lock().unwrap().status = RestoreStatus::Blocked(reason.into());
+    }
+    pub(crate) fn finish(&self) -> Result<RestoreWitness, String> {
+        self.context.check()?;
+        let mut witness = self.lane.witness.lock().unwrap();
+        if self.next != 4
+            || witness.inflight.is_none()
+            || !matches!(witness.status, RestoreStatus::Restoring)
+        {
+            witness.status =
+                RestoreStatus::Blocked("installation acknowledgements incomplete".into());
+            return Err("installation acknowledgements incomplete".into());
+        }
+        witness.status = RestoreStatus::Restored;
+        Ok(witness.clone())
+    }
+}
+#[cfg(all(test, unix))]
+impl Drop for ScopedRestoreAttempt {
+    fn drop(&mut self) {
+        let mut witness = self.lane.witness.lock().unwrap();
+        if witness.status == RestoreStatus::Restoring {
+            witness.status =
+                RestoreStatus::Blocked("restore task left installation incomplete".into());
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+#[path = "scoped_restore_lane_tests.rs"]
+mod scoped_restore_lane_tests;
+
+#[cfg(all(test, unix))]
+#[path = "scoped_inflight_restore_tests.rs"]
+mod scoped_inflight_restore_tests;

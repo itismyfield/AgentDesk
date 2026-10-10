@@ -82,6 +82,21 @@ impl AdmittedRestartTerminal {
         shared: &Arc<SharedData>,
         state: &inflight::InflightTurnState,
     ) -> AdmittedRestart {
+        match self.settle_checked(http, shared, state).await {
+            AdmittedRestartReport::Settled => AdmittedRestart::Settled,
+            AdmittedRestartReport::Retained(reason) => {
+                debug_assert!(!reason.is_empty());
+                AdmittedRestart::Retained
+            }
+        }
+    }
+
+    pub(super) async fn settle_checked(
+        self,
+        http: &Arc<serenity::Http>,
+        shared: &Arc<SharedData>,
+        state: &inflight::InflightTurnState,
+    ) -> AdmittedRestartReport {
         let (provider, channel_id) = (&self.provider, self.channel);
         if state.restart_mode.is_some() && !mutant("restart_admitted_restart_mode_settled") {
             return kept(state, "planned restart owns the row");
@@ -158,7 +173,7 @@ impl AdmittedRestartTerminal {
             inflight::clear_admitted_restart_terminal(provider, &row, &self.turn_nonce, current)
         };
         if cleared == inflight::GuardedClearOutcome::Cleared {
-            AdmittedRestart::Settled
+            AdmittedRestartReport::Settled
         } else {
             kept(state, "the fresh row is not this delivered episode")
         }
@@ -174,13 +189,20 @@ pub(super) enum AdmittedRestart {
     Retained,
 }
 
-fn kept(state: &inflight::InflightTurnState, why: &'static str) -> AdmittedRestart {
+/// Settlement evidence, never an installation acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AdmittedRestartReport {
+    Settled,
+    Retained(&'static str),
+}
+
+fn kept(state: &inflight::InflightTurnState, why: &'static str) -> AdmittedRestartReport {
     tracing::warn!(
         channel_id = state.channel_id,
         why,
         "recovery kept an admitted Herdr terminal"
     );
-    AdmittedRestart::Retained
+    AdmittedRestartReport::Retained(why)
 }
 
 /// Whether O owns this row's destination body; an unreadable answer counts as owned.
