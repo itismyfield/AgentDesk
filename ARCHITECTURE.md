@@ -1297,6 +1297,8 @@ src/
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── policy_channel.rs
 │   │   │   │   ├── queued.rs
+│   │   │   │   ├── replay_admission.rs
+│   │   │   │   ├── replay_admission_tests.rs
 │   │   │   │   ├── skill.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── intake_gate/
@@ -1718,7 +1720,10 @@ src/
 │   │   │   ├── intake_settlement/
 │   │   │   │   └── tests.rs
 │   │   │   ├── replay_policy/
-│   │   │   │   └── live.rs
+│   │   │   │   ├── live.rs
+│   │   │   │   ├── permit.rs
+│   │   │   │   ├── permit_tests.rs
+│   │   │   │   └── policy_tests.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs

@@ -26,6 +26,12 @@ impl From<String> for Disposition {
     }
 }
 
+impl Disposition {
+    pub(crate) fn blocks_rerun(&self) -> bool {
+        !matches!(self, Self::RegisteredNotStarted | Self::ClassifiedNormal)
+    }
+}
+
 /// One receipt as stored: its full source set, current attempt and preserved request.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub(crate) struct ReceiptSnapshot {
