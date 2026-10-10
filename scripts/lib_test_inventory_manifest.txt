@@ -1300,6 +1300,8 @@ server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_unobserved_reply_unreachable_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_force_purge_without_global_mirror_is_unknown_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_recorded_preserve_removal_is_still_unknown_pg
+server::routes::queue_api::home_stop_tests::f1_direct_cancel_refuses_the_envelope_before_the_service_and_keeps_legacy_bodies
+server::routes::queue_api::home_stop_tests::f1_holder_route_needs_internal_auth_and_the_trusted_forward
 server::routes::receipt::tests::concurrent_token_analytics_misses_are_single_flighted
 server::routes::receipt::tests::concurrent_token_analytics_refreshes_are_coalesced
 server::routes::receipt::tests::token_analytics_cache_state_header_values_are_stable
@@ -8871,6 +8873,8 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_user_stop_sends_one_escape_and_keeps_the_turn
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_user_stop_with_the_switch_or_settlement_off_records_and_sends_nothing
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_writer_unwinding_after_its_escape_keeps_the_claim_spent
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::slash_stop_asks_the_home_before_the_legacy_owner_forward_and_ends_there
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::t9_f1_holder_runs_only_a_trusted_fresh_request_and_refusals_send_nothing
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::claude_session_preserving_interrupt_tests::control_request_envelope_matches_agent_sdk_interrupt_shape
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::claude_session_preserving_interrupt_tests::tui_pane_uses_escape_keystroke
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::claude_session_preserving_interrupt_tests::wrapper_pane_uses_stream_json_control_request
@@ -10462,6 +10466,12 @@ services::session_backend::stream_tail_guard_tests::tool_use_only_turn_forwards_
 services::session_backend::terminal_usage::tests::extract_turn_analytics_adopts_qwen_terminal_usage
 services::session_backend::terminal_usage::tests::extract_turn_analytics_backstop_rejects_millions_usage
 services::session_backend::terminal_usage::tests::extract_turn_analytics_suppresses_codex_wrapper_result_usage
+services::session_forwarding::home_stop::tests::f1_receiver_shape_and_trust_refusals_run_nothing
+services::session_forwarding::home_stop::tests::off_reads_nothing_and_advertises_nothing
+services::session_forwarding::home_stop::tests::t10_only_a_matching_typed_answer_counts_and_nothing_is_retried_or_run_here
+services::session_forwarding::home_stop::tests::t18_c_legacy_reads_no_row_and_g_without_a_row_is_refused_not_legacy
+services::session_forwarding::home_stop::tests::t18_holder_comes_from_the_home_row_never_the_session_owner
+services::session_forwarding::home_stop::tests::t18_row_states_decide_before_anything_is_sent
 services::session_forwarding::probe::tests::reachability_checks_authenticated_response_identity_and_protocol
 services::session_forwarding::probe::tests::reachability_requires_trusted_origin_before_any_credentials_are_sent
 services::session_forwarding::tests::cancel_owner_does_not_fall_back_to_agent_binding_pg

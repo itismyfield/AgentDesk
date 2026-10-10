@@ -432,6 +432,7 @@ src/
 │   │   ├── provider_auth_profiles.rs
 │   │   ├── provider_cli_api.rs
 │   │   ├── queue_api.rs
+│   │   ├── queue_api_home_stop_tests.rs
 │   │   ├── receipt.rs
 │   │   ├── resume.rs
 │   │   ├── reviews.rs
@@ -1754,6 +1755,7 @@ src/
 │   │   │   │   ├── claude_stop_delivery.rs
 │   │   │   │   ├── claude_stop_pane_tests.rs
 │   │   │   │   ├── codex_stop_delivery.rs
+│   │   │   │   ├── codex_stop_delivery_home_stop_tests.rs
 │   │   │   │   ├── codex_stop_delivery_tests.rs
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── judged_stop.rs
@@ -2267,6 +2269,8 @@ src/
 │   ├── session_forwarding/
 │   │   ├── probe/
 │   │   │   └── tests.rs
+│   │   ├── home_stop.rs
+│   │   ├── home_stop_tests.rs
 │   │   ├── probe.rs
 │   │   └── trusted_target.rs
 │   ├── session_host/

@@ -30884,6 +30884,33 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:45e0bb0d4df263efd33b639db93fa7e952d7ad78ee2d13547b144cf472b74007"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:90cf95d35e83b0a57869607d2e7613c2ec3d2d8bada1d9eae3adb6fdae37a08a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:dc4a17176ff91d9eebb57dbe2f62f60575d2e596501834dcca6f167e550d013d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -35920,6 +35947,33 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:b8d4d569b8576a52ccade72cbdddd30af9314eb76554c10d7e7693514564db91"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_forwarding/home_stop_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:02c57835f7940ddb528be86fee9db405c1ff06bde1400495e3ed6a28a3e12537"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_forwarding/home_stop_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:14da387de0234e6be4e740131187fe4eeb3c0f70b24d728ce1de921ea28fce32"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_forwarding/home_stop_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5889a7f12a892fb340ff7ef3335649c716cd232bcd36bb5574bd33496c31d6f6"
     },
     {
       "root": "src",
