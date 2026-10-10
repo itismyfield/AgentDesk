@@ -373,3 +373,160 @@ async fn d2b_clear_reply_stays_counted_after_clear_body_finishes() {
     assert_eq!(home.commands_in_flight(), 0, "reply completed");
     assert!(api.take().iter().any(|call| call.contains(crate::services::discord::commands::SESSION_CLEARED_RESPONSE)), "real reply transport reached");
 }
+
+#[cfg(unix)]
+async fn b2b1_effect(
+    label: &'static str,
+    shared: Arc<crate::services::discord::SharedData>,
+    channel: ChannelId,
+) -> bool {
+    let http = Arc::new(
+        serenity::HttpBuilder::new("test-token")
+            .proxy("http://127.0.0.1:1")
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    let provider = ProviderKind::Gemini;
+    match label {
+        "clear" => super::super::clear_channel_session_state_fenced(
+            &http,
+            &shared,
+            &provider,
+            channel,
+            "!clear",
+            SoftClearNotifyMode::Suppress,
+            None,
+        )
+        .await
+        .is_ok(),
+        _ => matches!(
+            super::super::reset_channel_provider_state(
+                &http, &shared, &provider, channel, "pending", true, false, false
+            )
+            .await,
+            super::super::ManagedReset::Applied(_)
+        ),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn b2b1_clear_and_reset_withdraw_only_once_admitted_and_restore_nothing() {
+    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    for label in ["clear", "reset"] {
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let probe = Probe::install(&shared);
+        let channel = ChannelId::new(CHANNEL + 20);
+        seed_session(&shared, channel).await;
+        let ticket = probe.arm(channel.get());
+        let home = channel_home::register_for_test(channel.get(), Some(HomeState::Worker));
+        home.close_intake();
+        assert!(!b2b1_effect(label, shared.clone(), channel).await);
+        assert!(
+            Probe::current(&ticket),
+            "{label}: a refusal withdraws nothing"
+        );
+        channel_home::unregister(&channel.get().to_string());
+        let barrier = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+        PAUSE.with(|slot| *slot.borrow_mut() = Some((label, barrier.clone())));
+        let work = tokio::spawn(b2b1_effect(label, shared.clone(), channel));
+        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.0.notified())
+            .await
+            .expect("effect boundary reached");
+        assert!(
+            Probe::current(&ticket),
+            "{label}: withdrawn before its refusal check"
+        );
+        barrier.1.notify_one();
+        assert!(work.await.unwrap(), "{label} applied");
+        PAUSE.with(|slot| *slot.borrow_mut() = None);
+        assert!(
+            !Probe::current(&ticket),
+            "{label}: the change withdrew the approval"
+        );
+        assert!(
+            Probe::current(&probe.arm(channel.get())),
+            "{label}: fresh after"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn b2b1_a_clear_whose_persist_fails_still_withdraws_and_keeps_its_session() {
+    use super::super::clear_persist_failure_tests::{break_queue_persist, queue_file};
+    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let provider = ProviderKind::Gemini;
+    let channel = ChannelId::new(CHANNEL + 21);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let probe = Probe::install(&shared);
+        seed_session(&shared, channel).await;
+        seed_backlog(&shared, &provider, channel).await;
+        break_queue_persist(&queue_file(root.path(), &shared, &provider, channel));
+        let ticket = probe.arm(channel.get());
+        assert!(!b2b1_effect("clear", shared.clone(), channel).await);
+        assert_eq!(queue_len(&shared, channel).await, 1, "backlog restored");
+        let session = session_state(&shared, channel).await;
+        assert_eq!(session, (Some(SESSION_ID.to_string()), false));
+        assert!(
+            !Probe::current(&ticket),
+            "the failed clear restored no approval"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn b2b1_queued_cancel_and_drain_reset_keep_the_active_turn_scope() {
+    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+    let probe = Probe::install(&shared);
+    let provider = ProviderKind::Gemini;
+    let channel = ChannelId::new(CHANNEL + 22);
+    seed_session(&shared, channel).await;
+    seed_backlog(&shared, &provider, channel).await;
+    let ticket = probe.arm(channel.get());
+    let removed = super::super::cancel_queued_with_home_permit(
+        &shared,
+        &provider,
+        channel,
+        MessageId::new(channel.get() + 1),
+    )
+    .await
+    .unwrap();
+    assert!(removed.is_some());
+    assert_eq!(queue_len(&shared, channel).await, 0);
+    assert!(
+        Probe::current(&ticket),
+        "a queued cancel is no parent change"
+    );
+    let http = Arc::new(serenity::Http::new(""));
+    let reset = super::super::reset_channel_provider_state_for_home_drain(
+        &http,
+        &shared,
+        &provider,
+        channel,
+        "home release",
+        true,
+        false,
+        false,
+    )
+    .await;
+    assert!(matches!(reset, super::super::ManagedReset::Applied(_)));
+    assert!(
+        !Probe::current(&ticket),
+        "the drain reset shares the reset body"
+    );
+}

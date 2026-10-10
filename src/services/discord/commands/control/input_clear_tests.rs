@@ -604,3 +604,49 @@ async fn without_postgres_the_adapter_refuses_with_the_retry_notice() {
     .await;
     assert_eq!(refused.err().as_deref(), Some(PG_RETRY_NOTICE));
 }
+
+// Only an admitted clear withdraws, before the row clear, and a reset that runs later withdraws again.
+#[test]
+fn b2b1_ledger_clear_withdraws_at_admission_and_again_when_its_reset_runs_pg() {
+    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
+    runtime().block_on(async {
+        let fixture = Fixture::new(10, ProviderKind::Claude).await;
+        let probe = Probe::install(&fixture.shared);
+        let fake = Arc::new(Fake::default());
+        let channel = fixture.channel_id.get();
+        let herdr = crate::config::session_hosts::force_for_test(None, &[(channel, "mac-mini")]);
+        let kept = probe.arm(channel);
+        let effects: Arc<dyn ClearEffects> = fake.clone();
+        let admit = LedgerClear::admit_with;
+        let (http, shared) = (&fixture.http, &fixture.shared);
+        let refused = admit(
+            http,
+            shared,
+            &fixture.provider,
+            fixture.channel_id,
+            None,
+            effects,
+        );
+        assert!(
+            refused.await.is_err(),
+            "the host guard keeps a Herdr channel"
+        );
+        assert!(
+            Probe::current(&kept),
+            "a refused admission withdraws nothing"
+        );
+        drop(herdr);
+        let admitted = probe.arm(channel);
+        let mut host = fixture.host(&fake).await;
+        assert!(
+            !Probe::current(&admitted),
+            "admission withdrew before the row clear"
+        );
+        let since = probe.arm(fixture.channel_id.get());
+        let ticket = host.capture().unwrap();
+        assert!(Probe::current(&since), "capturing a ticket changes nothing");
+        assert!(host.reset(&ticket).await);
+        assert!(!Probe::current(&since), "the reset body withdrew again");
+        fixture.drop_db().await;
+    });
+}

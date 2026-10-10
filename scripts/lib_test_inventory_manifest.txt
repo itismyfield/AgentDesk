@@ -3187,6 +3187,9 @@ services::discord::commands::control::codex_verified_clear_tests::codex_verified
 services::discord::commands::control::codex_verified_clear_tests::codex_verified_managed_reset_refuses_history_reset_and_recreation
 services::discord::commands::control::codex_verified_clear_tests::legacy_codex_and_claude_clear_admission_remains_open
 services::discord::commands::control::home_fence::tests::a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open_pg
+services::discord::commands::control::home_fence::tests::b2b1_a_clear_whose_persist_fails_still_withdraws_and_keeps_its_session
+services::discord::commands::control::home_fence::tests::b2b1_clear_and_reset_withdraw_only_once_admitted_and_restore_nothing
+services::discord::commands::control::home_fence::tests::b2b1_queued_cancel_and_drain_reset_keep_the_active_turn_scope
 services::discord::commands::control::home_fence::tests::d2b_clear_and_reset_keep_admission_across_effect_await
 services::discord::commands::control::home_fence::tests::d2b_clear_reply_stays_counted_after_clear_body_finishes
 services::discord::commands::control::home_fence::tests::d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor
@@ -3197,6 +3200,7 @@ services::discord::commands::control::input_clear::tests::a_lost_commit_reply_is
 services::discord::commands::control::input_clear::tests::a_resume_host_admits_no_reset_until_its_ticket_needs_one_pg
 services::discord::commands::control::input_clear::tests::a_superseded_ticket_holds_until_a_new_clear_cuts_its_inputs_pg
 services::discord::commands::control::input_clear::tests::a_wal_failure_keeps_the_postgres_ticket_unresolved_until_resume_pg
+services::discord::commands::control::input_clear::tests::b2b1_ledger_clear_withdraws_at_admission_and_again_when_its_reset_runs_pg
 services::discord::commands::control::input_clear::tests::postgres_lost_mid_commit_holds_until_the_stored_ticket_replays_pg
 services::discord::commands::control::input_clear::tests::the_production_adapter_cuts_resets_and_resolves_for_both_providers_pg
 services::discord::commands::control::input_clear::tests::without_postgres_the_adapter_refuses_with_the_retry_notice
@@ -6433,6 +6437,7 @@ services::discord::runtime_bootstrap::gateway_handback_breaker::tests::malformed
 services::discord::runtime_bootstrap::gateway_handback_breaker::tests::pending_create_and_rename_failures_refuse_yield_and_settlement_retries_original_observation
 services::discord::runtime_bootstrap::gateway_handback_breaker::tests::pending_survives_disable_errors_and_restarts_and_is_settled_only_once
 services::discord::runtime_bootstrap::gateway_handback_breaker::tests::sparse_daily_budget_and_second_dense_activation_survive_restart_until_deleted
+services::discord::runtime_bootstrap::gateway_handback_integration_tests::b2b1_lease_loss_and_yield_withdraw_only_gateway_approvals_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::backend_exit_removes_home_waiter_until_live_home_takes_handback_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::configured_idle_expiry_reaches_the_lease_session_and_zero_disables_it_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self_fences_pg
@@ -6526,6 +6531,8 @@ services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::backend_ex
 services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::gateway_waiter_cancel_and_prebackend_panic_withdraw_intent
 services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::gateway_waiter_exit_arms_withdraw_before_diagnostic_and_lease_abort
 services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::gateway_waiter_last_same_provider_owner_controls_advertisement
+services::discord::runtime_bootstrap::shutdown::input_fence_tests::b2b1_backend_exit_withdraws_only_its_gateway_approvals
+services::discord::runtime_bootstrap::shutdown::input_fence_tests::b2b1_sigterm_closes_presence_before_drain_and_marking
 services::discord::runtime_bootstrap::shutdown::input_fence_tests::c2_sigterm_handler_dispatch_persists_and_consumes_shutdown_slot
 services::discord::runtime_bootstrap::shutdown::input_fence_tests::c2_sigterm_initial_and_final_snapshots_preserve_held_population_and_save_legacy
 services::discord::runtime_bootstrap::shutdown::input_fence_tests::c2b_injected_sigterm_never_installs_the_os_handler
@@ -6537,6 +6544,7 @@ services::discord::runtime_bootstrap::spawns::tests::a_failed_restore_keeps_the_
 services::discord::runtime_bootstrap::spawns::tests::an_absent_latch_defers_to_the_identity_artifact_before_rolling_back
 services::discord::runtime_bootstrap::spawns::tests::an_unflushed_parent_sync_publishes_the_identity_without_an_index
 services::discord::runtime_bootstrap::spawns::tests::an_unsafe_nonce_publishes_nothing_and_refuses_the_commit
+services::discord::runtime_bootstrap::spawns::tests::b2b1_deferred_restart_fences_presence_and_only_rollback_reopens_it_fresh
 services::discord::runtime_bootstrap::spawns::tests::c2_deferred_marking_skips_old_format_held_rows_before_backfill
 services::discord::runtime_bootstrap::spawns::tests::c2b_deferred_poller_marks_rows_and_proceeds_past_an_incomplete_scan
 services::discord::runtime_bootstrap::spawns::tests::c2b_deferred_poller_retains_the_runtime_when_a_row_marker_fails
@@ -6596,6 +6604,7 @@ services::discord::session_identity::tests::legacy_parser_preserves_last_colon_t
 services::discord::session_identity::tests::parses_legacy_session_key
 services::discord::session_identity::tests::parses_namespaced_session_key
 services::discord::session_identity::tests::rejects_missing_or_empty_parts
+services::discord::session_idle_cleanup::tests::b2b1_idle_cleanup_retires_only_the_sessions_it_removes_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_relay_sink::delivery_orchestration_tests::fenced_terminal_without_parser_delivery_is_terminal_not_delivered
@@ -7748,6 +7757,9 @@ services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::restored_dispatch_rebinds_valid_dispatch_with_cas
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::watcher_recovery_cwd_does_not_cross_channels
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::watcher_recovery_cwd_legacy_null_channel_id_not_reused
+services::discord::tmux::watcher_lifecycle::tests::b2b1_presence_withdraw_tests::b2b1_removals_withdraw_while_cas_misses_and_owner_bookkeeping_keep_the_successor
+services::discord::tmux::watcher_lifecycle::tests::b2b1_presence_withdraw_tests::b2b1_replacement_withdraws_the_channel_and_the_session_it_displaced
+services::discord::tmux::watcher_lifecycle::tests::b2b1_presence_withdraw_tests::b2b1_restore_claim_withdraws_only_when_it_replaces_an_incumbent
 services::discord::tmux::watcher_lifecycle::tests::tests::cancel_suppression_only_applies_before_terminal_delivery
 services::discord::tmux::watcher_lifecycle::tests::tests::delivered_then_idle_death_surfaces_no_lifecycle_signal
 services::discord::tmux::watcher_lifecycle::tests::tests::forced_rebind_replaces_live_same_output_incumbent
@@ -9048,6 +9060,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_stop
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_cold_start_accepts_intent_without_marker_then_sends_once
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_each_stop_reason_preserves_delivery_and_settlement_axes
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::b2b1_only_an_escape_that_leaves_withdraws_the_herdr_turn_approval
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cold_unsubmitted_stop_keeps_the_bridge_hold_without_a_terminal
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_generation_only_stale_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
@@ -9088,12 +9101,15 @@ services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_judged_
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_keeps_a_turn_it_could_not_read
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::a_stop_on_another_host_leaves_a_real_tmux_session_as_it_was
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::an_idle_skip_reads_the_judged_session_not_a_later_binding
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::b2b1_a_user_stop_withdraws_only_when_its_cancel_is_published
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::b2b1_the_common_stop_withdraws_its_live_session_channel_as_it_starts
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::c1_offline_closed_verdict_uses_failed_handle_not_registry_replacement
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::c1_unreachable_mailbox_keeps_confirmed_session_without_fallback_or_interrupt
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_observes_child_termination
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_returns_immediately_for_nonexistent_pid
 services::discord::turn_bridge::tmux_runtime::pid_exit::pid_exit_tests::wait_for_pid_exit_times_out_when_child_keeps_running
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::b2b1_a_session_stop_withdraws_at_its_delivery_recheck_not_at_its_judgment
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::c1_stop_some_none_and_unreachable_preserve_exact_authority
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::codex_parent_without_session_meta_refuses_stop_and_replies
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused
@@ -9374,6 +9390,8 @@ services::discord::turn_presence::admission::tests::b2_reading_started_before_in
 services::discord::turn_presence::admission::tests::b2_strict_observer_rechecks_ticket_after_a_blocked_read
 services::discord::turn_presence::admission::tests::b2_suspend_blocks_first_poll_and_resume_requires_new_reading_authority
 services::discord::turn_presence::admission::tests::b2_unchanged_identity_and_owner_keep_the_ticket_and_approval
+services::discord::turn_presence::admission::tests::b2b1_reading_kept_across_resume_cannot_seed_or_approve_the_new_ticket
+services::discord::turn_presence::admission::tests::b2b1_watcher_unpair_waits_for_a_first_poll_and_then_withdraws_its_approvals
 services::discord::turn_presence::admission::tests::fresh_busy_admits_one_first_poll_and_response_waits_outside_locks
 services::discord::turn_presence::admission::tests::gateway_epoch_unknown_and_loss_refuse_previously_approved_requests
 services::discord::turn_presence::admission::tests::home_epoch_loss_expiry_and_replacement_never_fall_back_to_gateway
@@ -9383,6 +9401,7 @@ services::discord::turn_presence::admission::tests::replaced_and_restarted_incar
 services::discord::turn_presence::admission::tests::unstamped_or_legacy_busy_cannot_authorize_a_typing_effect
 services::discord::turn_presence::admission::tests::unsupported_host_and_unreadable_inflight_are_unknown_without_writes
 services::discord::turn_presence::admission::tests::zero_bot_or_channel_cannot_seed_runtime_authority
+services::discord::turn_presence::entrypoints::tests::b2b1_suspend_and_resume_reach_only_the_runtime_installed_for_that_shared
 services::discord::turn_presence::lifecycle::tests::b2_completed_children_are_reaped_and_running_children_cancel_on_drop
 services::discord::turn_presence::lifecycle::tests::b2_late_invalidate_and_retire_preserve_successor_and_other_runtime
 services::discord::turn_presence::lifecycle::tests::b2_lifecycle_owns_and_cancels_every_child_even_before_first_poll
@@ -9391,6 +9410,7 @@ services::discord::turn_presence::lifecycle::tests::b2_parent_abort_before_first
 services::discord::turn_presence::lifecycle::tests::b2_retire_then_prune_removes_only_departed_registration
 services::discord::turn_presence::lifecycle::tests::b2_suspend_refuses_admission_and_resume_is_fresh_unknown
 services::discord::turn_presence::lifecycle::tests::b2_ticket_capture_and_invalidation_serialize_in_both_orders
+services::discord::turn_presence::lifecycle::tests::b2b1_fence_withdraws_only_existing_registrations_and_never_revives_retired_ones
 services::discord::turn_presence::supervisor::tests::a_mailbox_token_keeps_presence_from_typing
 services::discord::turn_presence::supervisor::tests::a_marker_left_on_disk_alone_is_woken_at_once_and_every_half_minute
 services::discord::turn_presence::supervisor::tests::a_new_supervisor_over_an_idle_channel_stays_silent
@@ -11689,6 +11709,7 @@ services::tui_prompt_dedupe::binding_context::tests::binding_context_tmp_sweep_p
 services::tui_prompt_dedupe::binding_context::tests::the_after_lock_fixture_needs_the_env_lock_and_restores_on_drop
 services::tui_prompt_dedupe::binding_events::admission_tests::b2_first_poll_handoff_and_real_commit_share_the_log_mutex
 services::tui_prompt_dedupe::binding_events::admission_tests::b2_seq_admission_is_read_only_and_refuses_missing_or_unhealthy_log
+services::tui_prompt_dedupe::binding_events::admission_tests::b2b1_seq_admission_refuses_a_cached_seq_without_a_healthy_writer
 services::tui_prompt_dedupe::binding_events::codex_claim_tests::actual_current_source_replacement_still_blocks_a_returning_claim
 services::tui_prompt_dedupe::binding_events::codex_claim_tests::canonical_witness_must_reference_the_exact_observation_and_proof
 services::tui_prompt_dedupe::binding_events::codex_claim_tests::commit_revalidates_current_context_after_the_optimistic_read

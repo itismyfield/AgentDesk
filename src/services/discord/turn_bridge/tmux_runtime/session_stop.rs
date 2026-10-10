@@ -87,7 +87,14 @@ impl SessionStop {
         let open = Arc::new(move || {
             #[cfg(test)]
             let _root = TestBindingRoot::enter(binding_root.as_deref());
-            observe(&shared, &provider, channel).ok().flatten().as_ref() == Some(&expected)
+            let open =
+                observe(&shared, &provider, channel).ok().flatten().as_ref() == Some(&expected);
+            // Withdrawn at each delivery recheck that lets the interrupt go, not at the judgment.
+            if open {
+                let withdraw = crate::services::discord::turn_presence::entrypoints::withdraw;
+                withdraw(channel.get(), "session_stop");
+            }
+            open
         });
         super::interrupt_session_on(&self.target, &self.provider, reason, open).await
     }

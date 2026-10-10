@@ -222,6 +222,15 @@ impl Ticket {
         self.channel
     }
 
+    /// The ticket a registration holds after its token advanced under this one.
+    pub(super) fn successor(&self, registration: &Registration) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            channel: self.channel,
+            token: registration.token.clone(),
+        }
+    }
+
     /// Create and retain each child under the fence, before its async body can be polled.
     pub(super) fn spawn_child(
         &self,
@@ -232,6 +241,49 @@ impl Ticket {
             registration.children.push(tokio::spawn(work));
         })
         .is_some()
+    }
+}
+
+impl super::entrypoints::Fence for Runtime {
+    fn withdraw(&self, channel: u64, retire: bool, cause: &'static str) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(registration) = state.channels.get_mut(&channel).filter(|r| !r.retired) else {
+            return;
+        };
+        registration.reset();
+        registration.retired = retire;
+        tracing::debug!(
+            channel_id = channel,
+            cause,
+            retire,
+            "presence approval withdrawn"
+        );
+    }
+
+    fn withdraw_gateway(
+        &self,
+        gate: &Arc<crate::services::tui_o::ownership::OwnershipGate>,
+        cause: &'static str,
+    ) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        for (channel, registration) in state.channels.iter_mut() {
+            if !registration.retired && registration.incarnation.rests_on(gate) {
+                registration.reset();
+                tracing::debug!(
+                    channel_id = channel,
+                    cause,
+                    "presence gateway approval withdrawn"
+                );
+            }
+        }
+    }
+
+    fn suspend(&self) {
+        self.suspend_runtime();
+    }
+
+    fn resume(&self) {
+        self.resume_fresh();
     }
 }
 

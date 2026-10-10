@@ -554,6 +554,7 @@ fn strict_reading(probe: &Probe) -> Reading {
         stamp,
         watch: Some(probe.watch.clone()),
         host_checked: true,
+        ticket: None,
     }
 }
 
@@ -923,6 +924,7 @@ fn a_reading_publishes_only_while_its_watch_is_unmoved() {
             stamp,
             watch,
             host_checked: false,
+            ticket: None,
         }
     };
     let fresh = read();

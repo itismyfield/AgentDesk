@@ -87,6 +87,7 @@ impl Drop for DeferredRestartCancellationGuard {
 /// per-provider CAS gives exactly one poller permission to wait, persist, and
 /// consume that provider's shutdown-barrier slot.
 pub(super) fn begin_deferred_restart(shared: &SharedData) -> Option<DeferredRestartPermit> {
+    crate::services::discord::turn_presence::entrypoints::suspend(shared);
     shared.restart.intake_worker_lifecycle.fence_admission();
     shared.restart.legacy_deferred_begin();
     shared
@@ -213,6 +214,8 @@ pub(super) fn rollback_deferred_restart(shared: &SharedData) {
     shared.restart.intake_worker_lifecycle.unfence_admission();
     shared.restart.legacy_deferred_rollback();
     release_deferred_restart_ownership(shared);
+    // Only a rollback reopens Presence, fresh; a superseded handoff stays closed.
+    crate::services::discord::turn_presence::entrypoints::resume_fresh(shared);
 }
 
 /// Release only the stale poller's per-provider barrier ownership. A newer

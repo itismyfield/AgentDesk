@@ -9,7 +9,8 @@ use crate::db::dispatched_sessions::hosted_execution::{HostedOwner, HostedState}
 use crate::services::discord::{DiscordSession, SESSION_MAX_IDLE, adk_session};
 use crate::services::provider::ProviderKind;
 
-/// Fake tmux that logs each call: `probefail` targets fail the probe, every other is gone.
+/// Fake tmux that logs each call: `probefail` targets fail the probe, `revived` ones wait for `go`,
+/// and every other is gone.
 fn install_fake_tmux() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
     let temp = tempfile::TempDir::new().expect("tmux dir");
     let binary = temp.path().join("tmux");
@@ -18,6 +19,8 @@ fn install_fake_tmux() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
         file,
         "#!/bin/sh\n[ \"$1\" = -u ] && shift\necho \"$*\" >> \"$(dirname \"$0\")/calls\"\n\
          case \"$3\" in *probefail*) echo 'permission denied' >&2; exit 1 ;; esac\n\
+         case \"$3\" in *revived*) d=\"$(dirname \"$0\")\"; touch \"$d/probed\"; \
+         while [ ! -f \"$d/go\" ]; do sleep 0.05; done ;; esac\n\
          echo \"can't find session: $3\" >&2; exit 1"
     )
     .expect("fake tmux body");
@@ -88,6 +91,8 @@ async fn idle_cleanup_expires_only_legacy_tmux_sessions_pg() {
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let probe =
+        crate::services::discord::turn_presence::entrypoints::tests::Probe::install(&shared);
     let token = shared.token_hash.clone();
     let provider = ProviderKind::Claude;
     let tmux = |n: &str| provider.build_tmux_session_name(&format!("idle-guard-{n}"));
@@ -149,10 +154,22 @@ async fn idle_cleanup_expires_only_legacy_tmux_sessions_pg() {
     tokio::time::pause();
     tokio::time::advance(SESSION_MAX_IDLE + std::time::Duration::from_secs(60)).await;
     tokio::time::resume();
+    let tickets: Vec<_> = names
+        .iter()
+        .map(|n| probe.arm(channel(n).parse().unwrap()))
+        .collect();
 
     cleanup_expired_sessions(&shared).await;
 
     let expired = ["legacy", "noncanonical"];
+    for (n, ticket) in names.iter().zip(&tickets) {
+        let current = crate::services::discord::turn_presence::entrypoints::tests::Probe::current;
+        assert_eq!(
+            !current(ticket),
+            expired.contains(n),
+            "{n}: only removed sessions retire"
+        );
+    }
     let mut remaining: Vec<u64> = shared
         .core
         .lock()
@@ -272,5 +289,70 @@ async fn idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg() {
     let calls = std::fs::read_to_string(tmux_dir.path().join("calls")).unwrap_or_default();
     assert!(!calls.contains(&tmux("configured")), "{calls}");
     pool.close().await;
+    db.drop().await;
+}
+
+// A candidate whose session is used again while its probe runs keeps its session and approval.
+#[tokio::test(flavor = "current_thread")]
+async fn b2b1_idle_cleanup_retires_only_the_sessions_it_removes_pg() {
+    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (tmux_dir, _path_guard) = install_fake_tmux();
+    let runtime_root = tempfile::TempDir::new().expect("runtime root");
+    let _root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        runtime_root.path(),
+    );
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let probe = Probe::install(&shared);
+    let (token, provider) = (shared.token_hash.clone(), ProviderKind::Claude);
+    let mut armed = Vec::new();
+    for (n, name) in ["b2b1-gone", "b2b1-revived"].into_iter().enumerate() {
+        let id = ChannelId::new(1_500_600_700_800_901_000 + n as u64);
+        let tmux = provider.build_tmux_session_name(name);
+        let key = adk_session::build_namespaced_session_key(&token, &provider, &tmux);
+        let channel = id.get().to_string();
+        insert_row(&pool, &key, Some((token.as_str(), channel.as_str())), None).await;
+        shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .insert(id, expired_session(name));
+        armed.push(id);
+    }
+    tokio::time::pause();
+    tokio::time::advance(SESSION_MAX_IDLE + std::time::Duration::from_secs(60)).await;
+    tokio::time::resume();
+    let tickets: Vec<_> = armed.iter().map(|id| probe.arm(id.get())).collect();
+    let cleanup = tokio::spawn({
+        let shared = shared.clone();
+        async move { cleanup_expired_sessions(&shared).await }
+    });
+    while !tmux_dir.path().join("probed").exists() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let mut data = shared.core.lock().await;
+    data.sessions.get_mut(&armed[1]).unwrap().last_active = tokio::time::Instant::now();
+    drop(data);
+    std::fs::write(tmux_dir.path().join("go"), "").unwrap();
+    cleanup.await.unwrap();
+    let sessions = shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(sessions, vec![armed[1]], "the revived session stays");
+    assert!(!Probe::current(&tickets[0]), "the removed session retired");
+    assert!(
+        Probe::current(&tickets[1]),
+        "the revived session keeps its approval"
+    );
+    drop(pool);
     db.drop().await;
 }

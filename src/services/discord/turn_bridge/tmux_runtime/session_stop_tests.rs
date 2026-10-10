@@ -524,3 +524,50 @@ fn n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_u
         server.abort();
     });
 }
+
+// The withdrawal rides the delivery-time recheck: neither the judgment nor a recheck that finds
+// another parent turn withdraws the channel's approval.
+#[test]
+fn b2b1_a_session_stop_withdraws_at_its_delivery_recheck_not_at_its_judgment() {
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::b2b1_a_session_stop_withdraws_at_its_delivery_recheck_not_at_its_judgment"
+    )) {
+        return;
+    }
+    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
+    let fx = Fixture::new();
+    let root = tempfile::tempdir().unwrap();
+    let _binding_root = TestBindingRoot::enter(Some(root.path()));
+    run(async {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let probe = Probe::install(&shared);
+        let channel = ChannelId::new(6_325_445);
+        let provider = ProviderKind::Claude;
+        let session = "b2b1-session-stop-parent";
+        let path = root.path().join("parent.jsonl");
+        open(&path, "first");
+        bind(&shared, &provider, channel, session, &path);
+        let _confirmed = TestConfirmation::new(channel.get());
+        mark(session, Mark::Absent);
+        let ticket = probe.arm(channel.get());
+        let CommandStop::Session(stop) = SessionStop::judge(&shared, &provider, channel).await
+        else {
+            panic!("open parent must be judged");
+        };
+        assert!(Probe::current(&ticket), "judging withdraws nothing");
+        open(&path, "replacement");
+        assert!(!stop.interrupt("!stop").await.sent_keys);
+        assert!(
+            Probe::current(&ticket),
+            "a failed recheck withdraws nothing"
+        );
+        let CommandStop::Session(stop) = SessionStop::judge(&shared, &provider, channel).await
+        else {
+            panic!("the replacement parent must be judged");
+        };
+        assert!(stop.interrupt("!stop").await.sent_keys);
+        assert!(!Probe::current(&ticket), "the delivered interrupt withdrew");
+        let _ = fx.take_calls();
+    });
+}

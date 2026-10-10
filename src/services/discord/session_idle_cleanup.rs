@@ -160,6 +160,7 @@ async fn cleanup_expired_sessions(shared: &Arc<SharedData>) {
                 }
             }
             data.sessions.remove(&ch);
+            super::turn_presence::entrypoints::retire(ch.get());
         }
     }
     // #3588: idle 정리는 in-memory/worktree 메모리 회수만 수행하고 provider

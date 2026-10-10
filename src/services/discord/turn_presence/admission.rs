@@ -82,7 +82,25 @@ impl Incarnation {
         *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    pub(super) fn replace(&self, ticket: &Ticket, identity: Identity) -> bool {
+    /// Adopts a strict reading's identity only while the ticket it was observed under is current;
+    /// the reading then carries the advanced ticket, so no other reading can borrow it.
+    pub(super) fn adopt(&self, reading: &mut Reading, bot_id: u64) -> bool {
+        let ticket = reading.observed_under().cloned();
+        let (Some(ticket), Some(identity)) = (ticket, reading.identity(bot_id)) else {
+            return false;
+        };
+        let Some(successor) = self.seat(&ticket, identity) else {
+            return false;
+        };
+        reading.rebind(successor);
+        true
+    }
+
+    fn replace(&self, ticket: &Ticket, identity: Identity) -> bool {
+        self.seat(ticket, identity).is_some()
+    }
+
+    fn seat(&self, ticket: &Ticket, identity: Identity) -> Option<Ticket> {
         let owner = (identity.channel != 0 && identity.bot_id != 0)
             .then(|| Owner::current(&identity))
             .flatten();
@@ -91,14 +109,14 @@ impl Incarnation {
                 if ticket.channel() != identity.channel
                     || !std::ptr::eq(self, registration.incarnation.as_ref())
                 {
-                    return false;
+                    return None;
                 }
                 let mut current = self.0.lock().unwrap_or_else(|e| e.into_inner());
                 if let (Some(current), Some(owner)) = (current.as_ref(), owner.as_ref())
                     && current.identity == identity
                     && current.owner.same(owner)
                 {
-                    return true;
+                    return Some(ticket.clone());
                 }
                 registration.advance_ticket();
                 *current = owner.map(|owner| Current {
@@ -106,15 +124,45 @@ impl Incarnation {
                     identity,
                     owner,
                 });
-                current.is_some()
+                current.as_ref()?;
+                Some(ticket.successor(registration))
             })
-            .unwrap_or(false)
+            .flatten()
     }
 
-    pub(super) fn approve(self: &Arc<Self>, ticket: &Ticket, reading: Reading) -> Option<Approval> {
+    /// Only the ticket the reading was observed under, or the one its adoption advanced to.
+    pub(super) fn approve(self: &Arc<Self>, reading: Reading) -> Option<Approval> {
+        let ticket = reading.observed_under()?.clone();
         ticket
-            .admit(self, || self.approve_current(ticket, reading))
+            .admit(self, || self.approve_current(&ticket, reading))
             .flatten()
+    }
+
+    /// Seats an approval on a Gateway witness the caller names, as a provider gate would.
+    pub(super) fn seat_gateway_for_tests(
+        &self,
+        ticket: &Ticket,
+        identity: Identity,
+        gate: Arc<OwnershipGate>,
+    ) -> bool {
+        ticket
+            .with_current(|registration| {
+                registration.advance_ticket();
+                *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Current {
+                    token: Arc::new(()),
+                    identity,
+                    owner: Owner::Gateway(gate, 1),
+                });
+            })
+            .is_some()
+    }
+
+    pub(super) fn rests_on(&self, gate: &Arc<OwnershipGate>) -> bool {
+        let current = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        matches!(
+            current.as_ref().map(|current| &current.owner),
+            Some(Owner::Gateway(owner, _)) if Arc::ptr_eq(owner, gate)
+        )
     }
 
     fn approve_current(self: &Arc<Self>, ticket: &Ticket, reading: Reading) -> Option<Approval> {
@@ -153,7 +201,7 @@ impl<F: Future> Started<F> {
 }
 
 impl Approval {
-    /// First poll holds mode, lifecycle, incarnation, source-log, Reading and owner fences.
+    /// First poll holds registry, mode, lifecycle, incarnation, source-log, Reading and owner fences.
     pub(super) async fn start<F: Future>(
         self,
         bot_id: u64,
@@ -162,6 +210,8 @@ impl Approval {
     ) -> Option<Started<F>> {
         let mut request = Some(request);
         poll_fn(|cx| {
+            // A watcher change and its withdrawal land under this lock, never between the checks.
+            let _registry = crate::services::discord::lock_tmux_watcher_registry();
             Poll::Ready(
                 turn_mode::admit_effect(actual_channel, true, || {
                     self.ticket

@@ -206,6 +206,7 @@ where
         if let Some(reason) = refusal(shared, provider, channel_id, true, true, None).await {
             return Ok(Err(reason));
         }
+        super::super::turn_presence::entrypoints::withdraw(channel_id.get(), "restart");
 
         // Warn if a turn is in flight, then cancel it via the same path /stop uses.
         if mailbox_has_active_turn(shared, channel_id).await {
@@ -331,6 +332,8 @@ mod host_guard_tests {
         let tmux = ScriptedTmux::install();
         let (db, pool) = postgres().await;
         let shared = shared_on(&pool).await;
+        let probe =
+            crate::services::discord::turn_presence::entrypoints::tests::Probe::install(&shared);
         let (provider, http) = (ProviderKind::Claude, Arc::new(serenity::Http::new("")));
         for (n, case) in Case::ALL.into_iter().enumerate() {
             let channel = serenity::ChannelId::new(1_479_671_302_387_071_000 + n as u64);
@@ -342,9 +345,16 @@ mod host_guard_tests {
             let token = busy_turn(&shared, channel, &name).await;
             let alive = process(&name, n as u32 + 68_000);
             tmux.take_calls();
+            let ticket = probe.arm(channel.get());
 
             let warned = AtomicBool::new(false);
             let warn = || {
+                // An admitted restart withdraws the approval before it cancels the turn.
+                assert!(
+                    !crate::services::discord::turn_presence::entrypoints::tests::Probe::current(
+                        &ticket
+                    )
+                );
                 warned.store(true, Ordering::SeqCst);
                 async { Ok(()) }
             };
@@ -360,6 +370,11 @@ mod host_guard_tests {
                 let calls = tmux.take_calls();
                 let recreated = calls.iter().any(|call| call.contains(&name));
                 assert!(recreated, "{case:?}: main recreates tmux: {calls:?}");
+                assert!(
+                    !crate::services::discord::turn_presence::entrypoints::tests::Probe::current(
+                        &ticket
+                    )
+                );
                 crate::services::session_backend::remove_process_session(&name);
                 continue;
             }
@@ -372,6 +387,12 @@ mod host_guard_tests {
             );
             assert!(alive.load(Ordering::SeqCst), "{case:?}: process kept");
             assert_eq!(tmux.take_calls(), Vec::<String>::new(), "{case:?}: no tmux");
+            let current =
+                crate::services::discord::turn_presence::entrypoints::tests::Probe::current;
+            assert!(
+                current(&ticket),
+                "{case:?}: a refused restart withdraws nothing"
+            );
             crate::services::session_backend::remove_process_session(&name);
         }
 

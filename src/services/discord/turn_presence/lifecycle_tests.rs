@@ -283,3 +283,30 @@ fn b2_old_owner_drop_preserves_replacement_and_closed_claim_stays_closed() {
         Some((Activity::Unknown, None))
     );
 }
+
+#[test]
+fn b2b1_fence_withdraws_only_existing_registrations_and_never_revives_retired_ones() {
+    use super::super::entrypoints::Fence;
+    let (runtime, _lifetime) = owned_runtime();
+    runtime.withdraw(7, false, "absent");
+    runtime.withdraw(7, true, "absent");
+    assert!(!runtime.0.lock().unwrap().channels.contains_key(&7));
+    let a = runtime.register(1).unwrap();
+    let b = runtime.register(2).unwrap();
+    busy(&a);
+    busy(&b);
+    runtime.withdraw(1, false, "stop");
+    assert!(a.incarnation().is_none());
+    let successor = runtime.register(1).unwrap();
+    assert_eq!(
+        successor.with_current(|r| (r.activity, r.deadline)),
+        Some((Activity::Unknown, None))
+    );
+    runtime.withdraw(2, true, "expired");
+    runtime.withdraw(2, false, "late");
+    assert!(b.incarnation().is_none());
+    assert!(runtime.0.lock().unwrap().channels[&2].retired);
+    runtime.prune();
+    assert!(!runtime.0.lock().unwrap().channels.contains_key(&2));
+    assert!(successor.incarnation().is_some());
+}

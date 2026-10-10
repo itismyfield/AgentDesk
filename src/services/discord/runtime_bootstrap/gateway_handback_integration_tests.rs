@@ -558,3 +558,73 @@ async fn idle_expired_holder_loses_the_lease_to_a_peer_and_self_fences_pg() {
     drop(running);
     fixture.close().await;
 }
+
+/// A keepalive loss and a later yield each withdraw the approvals resting on the provider's
+/// Gateway witness; an approval resting elsewhere stays.
+#[tokio::test]
+async fn b2b1_lease_loss_and_yield_withdraw_only_gateway_approvals_pg() {
+    use crate::services::discord::turn_presence::entrypoints::{Fence, tests};
+    use tests::Probe;
+    // Whether the node still reported itself serving at each Gateway withdrawal.
+    struct Serving(Arc<SharedData>, std::sync::Mutex<Vec<bool>>);
+    impl Fence for Serving {
+        fn withdraw(&self, _: u64, _: bool, _: &'static str) {}
+        fn withdraw_gateway(
+            &self,
+            _: &Arc<crate::services::tui_o::ownership::OwnershipGate>,
+            _: &'static str,
+        ) {
+            let serving = self.0.bot_connected.load(Ordering::SeqCst);
+            self.1.lock().unwrap().push(serving);
+        }
+        fn suspend(&self) {}
+        fn resume(&self) {}
+    }
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let mut running = fixture.backup().await;
+    let probe = Probe::install(&running.shared);
+    let serving = Arc::new(Serving(running.shared.clone(), Default::default()));
+    let fence = Arc::downgrade(&serving) as std::sync::Weak<dyn Fence>;
+    let _seen = tests::install(&running.shared, fence);
+    let gate = crate::services::tui_o::ownership::gate("claude");
+    let uncertain = probe.arm_gateway(6_325_621, gate.clone());
+    let elsewhere = probe.arm(6_325_622);
+    let pid = fixture.holder().await.unwrap();
+    sqlx::query("SELECT pg_terminate_backend($1)")
+        .bind(pid)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(25), async {
+        while fixture.holder().await.is_none_or(|holder| holder == pid) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the free lease is re-acquired");
+    assert!(
+        !Probe::current(&uncertain),
+        "the keepalive loss withdrew it"
+    );
+    assert!(!running.backend.is_finished(), "the gateway keeps serving");
+    let yielded = probe.arm_gateway(6_325_623, gate.clone());
+    serving.1.lock().unwrap().clear();
+    fixture.advertise(true).await;
+    fixture.unlock_observation().await;
+    running.ended().await;
+    let first = serving.1.lock().unwrap().first().copied();
+    assert_eq!(
+        first,
+        Some(true),
+        "the yield withdrew before it stopped serving"
+    );
+    assert!(
+        !Probe::current(&yielded),
+        "the yield's self-fence withdrew it"
+    );
+    assert!(Probe::current(&elsewhere));
+    drop(running);
+    fixture.close().await;
+}

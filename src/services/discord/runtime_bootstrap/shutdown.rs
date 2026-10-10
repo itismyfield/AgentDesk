@@ -16,6 +16,8 @@ pub(super) fn run_bot_spawn_sigterm_handler(
             let Some(boundaries) = source.wait().await else {
                 return;
             };
+            // Presence closes before any marking or persistence wait.
+            crate::services::discord::turn_presence::entrypoints::suspend(&shared_for_signal);
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!("  [{ts}] 🛑 SIGTERM received — graceful shutdown");
 
@@ -258,7 +260,9 @@ async fn finish_gateway_backend<E, F>(
     }
     // The backend is gone: close O admission, even against a late re-acquisition, before the
     // lease task is aborted and drops the lease.
-    crate::services::tui_o::ownership::gate(provider_for_error.as_str()).close();
+    let gate = crate::services::tui_o::ownership::gate(provider_for_error.as_str());
+    gate.close();
+    crate::services::discord::turn_presence::entrypoints::withdraw_gateway(&gate, "backend_exit");
     drop(gateway_waiter);
     release_catalog_before_diagnostic(model_catalog_refresh_task, diagnostic).await;
     abort_and_join_task(gateway_lease_task).await;

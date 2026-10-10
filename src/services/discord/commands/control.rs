@@ -404,6 +404,8 @@ async fn clear_channel_session_state_body(
         anyhow::bail!(reason);
     }
     let hosted = native::replan(shared, provider, channel_id, explicit_session_key, hosted).await?;
+    // From here the clear changes the turn, so no earlier approval survives success or failure.
+    super::super::turn_presence::entrypoints::withdraw(channel_id.get(), "clear");
     let tmux_name = {
         let data = shared.core.lock().await;
         data.sessions
@@ -876,7 +878,7 @@ mod clear_persist_failure_tests {
         assert!(enqueued.enqueued, "the backlog is queued and persisted");
     }
 
-    fn queue_file(
+    pub(super) fn queue_file(
         root: &Path,
         shared: &SharedData,
         provider: &ProviderKind,
@@ -890,7 +892,7 @@ mod clear_persist_failure_tests {
 
     /// An emptied queue is persisted by removing its file, so a directory in
     /// that file's place makes the clear's persist fail.
-    fn break_queue_persist(path: &Path) {
+    pub(super) fn break_queue_persist(path: &Path) {
         std::fs::remove_file(path).expect("persisted queue file");
         std::fs::create_dir(path).expect("directory in the queue file's place");
     }

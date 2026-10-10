@@ -101,6 +101,7 @@ async fn reset_body(
     }
     #[cfg(test)]
     home_fence::pause("reset").await;
+    crate::services::discord::turn_presence::entrypoints::withdraw(channel_id.get(), "reset");
     let tmux_name = {
         let mut data = shared.core.lock().await;
         data.sessions.get_mut(&channel_id).and_then(|session| {
