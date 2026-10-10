@@ -418,13 +418,13 @@ pub(super) struct BridgeEntryAuthorityContext<'a> {
     pub(super) resumed_placeholder_clear_applied: &'a mut bool,
 }
 
-/// Proves durable bridge authority, then materializes an absent Discord anchor.
-/// The caller may construct finalizer/broadcast/cleanup guards only after true.
+/// Proves durable bridge authority, then materializes an absent Discord anchor. Guards may be
+/// built only after `Ok`; an identity refusal hands back its notice for after the unwind.
 pub(super) async fn establish_bridge_entry_authority(
     ctx: BridgeEntryAuthorityContext<'_>,
     mut runtime: BridgeEntryRuntimeState<'_>,
     anchor_text: &str,
-) -> bool {
+) -> Result<(), Option<EntryAbortNotice>> {
     let outcome = persist_bridge_entry_inflight_state(
         &ctx.bridge.inflight_state,
         ctx.shared,
@@ -436,10 +436,7 @@ pub(super) async fn establish_bridge_entry_authority(
         outcome == crate::services::discord::inflight::GuardedSaveOutcome::RowAbsent;
     if !bridge_entry_disposition_continues(outcome, !anchor_was_absent) {
         signal_bridge_entry_abort_completion(&mut ctx.bridge.completion_tx);
-        if outcome.is_identity_mismatch_legacy() {
-            notify_bridge_entry_identity_abort(ctx.bridge, outcome).await;
-        }
-        return false;
+        return Err(capture_entry_abort_notice(ctx.bridge, outcome));
     }
 
     let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(
@@ -459,7 +456,7 @@ pub(super) async fn establish_bridge_entry_authority(
     .await
     {
         signal_bridge_entry_abort_completion(&mut ctx.bridge.completion_tx);
-        return false;
+        return Err(None);
     }
     // The Discord send above is an await boundary. Anchor bind/reuse refreshes
     // the lock-held row so watcher progress during that gap cannot be flushed
@@ -471,7 +468,7 @@ pub(super) async fn establish_bridge_entry_authority(
             ctx.last_edit_text.push_str(anchor_text);
         }
     }
-    true
+    Ok(())
 }
 
 /// Channel, finalizer turn id, nonce and start stamp of a turn row.
@@ -494,12 +491,23 @@ static ENTRY_ABORT_NOTICED: std::sync::LazyLock<
 const ENTRY_ABORT_NOTICE_MEMORY: usize = 256;
 const ENTRY_ABORT_NOTICE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Posts one channel notice per attempted turn, and per blocking row, whose identity refused
-/// the entry. Nothing is deleted or finalized; the notice only explains the dropped start.
-async fn notify_bridge_entry_identity_abort(
+/// A captured entry-refusal notice owning only the gateway, channel and finished text, so
+/// sending it can hold no cancel token, receiver or registration of the refused turn.
+pub(super) struct EntryAbortNotice {
+    gateway: std::sync::Arc<dyn TurnGateway>,
+    channel_id: ChannelId,
+    text: String,
+}
+
+/// Builds one notice per attempted turn, and per blocking row, whose identity refused the
+/// entry; other refusals and repeats get none. Reads the row only, deletes nothing.
+fn capture_entry_abort_notice(
     bridge: &TurnBridgeContext,
     outcome: crate::services::discord::inflight::GuardedSaveOutcome,
-) {
+) -> Option<EntryAbortNotice> {
+    if !outcome.is_identity_mismatch_legacy() {
+        return None;
+    }
     let attempted = &bridge.inflight_state;
     let preserved = crate::services::discord::inflight::load_inflight_state_read_only(
         &bridge.provider,
@@ -514,7 +522,7 @@ async fn notify_bridge_entry_identity_abort(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if keys.iter().any(|key| noticed.contains(key)) {
-            return;
+            return None;
         }
         for key in keys {
             if noticed.len() >= ENTRY_ABORT_NOTICE_MEMORY {
@@ -523,19 +531,33 @@ async fn notify_bridge_entry_identity_abort(
             noticed.push_back(key);
         }
     }
-    let notice = bridge_entry_abort_notice(outcome, attempted, preserved.as_ref());
-    // Bounded: the caller unwinds the mailbox claim only after this returns.
-    let sent = TurnGateway::send_message(bridge.gateway.as_ref(), bridge.channel_id, &notice);
-    let error = match tokio::time::timeout(ENTRY_ABORT_NOTICE_TIMEOUT, sent).await {
-        Ok(Ok(_)) => return,
-        Ok(Err(error)) => error,
-        Err(_) => "timed out".to_string(),
+    Some(EntryAbortNotice {
+        gateway: bridge.gateway.clone(),
+        channel_id: bridge.channel_id,
+        text: bridge_entry_abort_notice(outcome, attempted, preserved.as_ref()),
+    })
+}
+
+/// Sends a captured notice on its own bounded task; the caller has already unwound the turn
+/// and nothing awaits this, so its success, error or timeout changes no turn state.
+pub(super) fn spawn_entry_abort_notice(notice: Option<EntryAbortNotice>) {
+    let Some(notice) = notice else {
+        return;
     };
-    tracing::warn!(
-        channel_id = attempted.channel_id,
-        error = %error,
-        "bridge-entry identity abort notice failed to send"
-    );
+    tokio::spawn(async move {
+        let sent =
+            TurnGateway::send_message(notice.gateway.as_ref(), notice.channel_id, &notice.text);
+        let error = match tokio::time::timeout(ENTRY_ABORT_NOTICE_TIMEOUT, sent).await {
+            Ok(Ok(_)) => return,
+            Ok(Err(error)) => error,
+            Err(_) => "timed out".to_string(),
+        };
+        tracing::warn!(
+            channel_id = notice.channel_id.get(),
+            error = %error,
+            "bridge-entry identity abort notice failed to send"
+        );
+    });
 }
 
 /// Cause, attempted turn, the row left in place and what to do next; never the prompt text.
@@ -545,11 +567,19 @@ fn bridge_entry_abort_notice(
     preserved: Option<&InflightTurnState>,
 ) -> String {
     use crate::services::discord::inflight::GuardedSaveOutcome;
-    let cause = match outcome {
-        GuardedSaveOutcome::SuccessorOwned => "다른 턴의 진행 기록이 채널을 점유 중",
-        GuardedSaveOutcome::AuthorityPinned => "재시작·재바인딩 표시 등 기존 기록의 권한이 고정됨",
-        GuardedSaveOutcome::Unnameable => "이 턴의 식별 정보로 진행 기록을 특정할 수 없음",
-        _ => "진행 기록 소유자 불일치",
+    let (code, cause) = match outcome {
+        GuardedSaveOutcome::SuccessorOwned => {
+            ("successor_owned", "다른 턴의 진행 기록이 채널을 점유 중")
+        }
+        GuardedSaveOutcome::AuthorityPinned => (
+            "authority_pinned",
+            "기존 진행 기록의 권한(재시작·재바인딩 표시, 저장 전제 등)이 쓰기를 막음",
+        ),
+        GuardedSaveOutcome::Unnameable => (
+            "unnameable",
+            "이 턴의 식별 정보로 진행 기록을 특정할 수 없음",
+        ),
+        _ => ("identity_mismatch", "진행 기록 소유자 불일치"),
     };
     let preserved = preserved.map_or_else(
         || "확인되지 않음".to_string(),
@@ -563,7 +593,7 @@ fn bridge_entry_abort_notice(
         },
     );
     format!(
-        "⚠️ 이번 턴을 시작하지 못했습니다: {cause}.\n\
+        "⚠️ 이번 턴을 시작하지 못했습니다: {cause} (사유 코드: {code}).\n\
          시도한 턴: {}\n\
          보존한 기존 기록: {preserved} (삭제하지 않음)\n\
          기존 턴이 끝난 뒤 다시 보내 주세요. 계속 막히면 운영자에게 남은 inflight 기록 확인을 요청하세요.",
@@ -1001,31 +1031,79 @@ mod tests {
         assert_eq!(std::fs::read(path).expect("successor survives"), before);
     }
 
-    /// An entry refused because another episode owns the row tells the channel once per turn
+    /// Runs the real entry once for `bridge` and returns the notice text it hands back; the
+    /// entry itself must abort, signal EntryAborted and send nothing.
+    async fn refused_entry_notice(
+        shared: &SharedData,
+        bridge: &mut TurnBridgeContext,
+        gateway: &super::super::stream_tick::provider_output_guard_tests::CapturingGateway,
+    ) -> Option<String> {
+        let (completion_tx, mut completion_rx) = tokio::sync::oneshot::channel();
+        bridge.completion_tx = Some(completion_tx);
+        let mut durable = bridge.inflight_state.clone();
+        let channel = ChannelId::new(bridge.inflight_state.channel_id);
+        let harness = ReconcileHarness::new(&mut durable, channel);
+        let (mut rowless, mut created, mut last_edit, mut cleared) =
+            (false, None, String::new(), false);
+        let ctx = BridgeEntryAuthorityContext {
+            entry_was_rowless: &mut rowless,
+            bridge,
+            shared,
+            bridge_created_placeholder: &mut created,
+            last_edit_text: &mut last_edit,
+            resumed_placeholder_clear_applied: &mut cleared,
+        };
+        let Err(notice) =
+            establish_bridge_entry_authority(ctx, harness.runtime, "processing").await
+        else {
+            panic!("entry must abort");
+        };
+        assert_eq!(
+            completion_rx.try_recv(),
+            Ok(BridgeCompletionSignal::EntryAborted)
+        );
+        assert!(gateway.sends.lock().expect("sends lock").is_empty());
+        notice.map(|notice| notice.text)
+    }
+
+    fn notice_row(channel_id: u64, user_msg_id: u64, user_text: &str) -> InflightTurnState {
+        InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some(format!("notice-{channel_id}")),
+            343_742_347_365_974_026,
+            user_msg_id,
+            91,
+            user_text.to_string(),
+            Some("notice-session".to_string()),
+            Some(format!("AgentDesk-notice-{channel_id}")),
+            Some(format!("/tmp/notice-{channel_id}.jsonl")),
+            Some(format!("/tmp/notice-{channel_id}.input")),
+            9_100,
+        )
+    }
+
+    fn bridge_with(
+        row: InflightTurnState,
+        gateway: &std::sync::Arc<
+            super::super::stream_tick::provider_output_guard_tests::CapturingGateway,
+        >,
+    ) -> TurnBridgeContext {
+        let mut bridge = seed_context("", row);
+        let dyn_gateway: std::sync::Arc<dyn TurnGateway> = gateway.clone();
+        bridge.gateway = dyn_gateway;
+        bridge
+    }
+
+    /// An entry refused because another episode owns the row hands back one notice per turn
     /// and blocking row, without the prompt, and leaves that row and the mailbox as they were.
     #[tokio::test(flavor = "current_thread")]
     async fn an_identity_refused_entry_notifies_the_channel_once_and_keeps_the_row() {
-        use super::super::stream_tick::provider_output_guard_tests::CapturingGateway;
-
         let temp = tempfile::TempDir::new().expect("runtime root");
         let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let provider = ProviderKind::Codex;
         let channel_id = 4_259_648;
-        let successor = InflightTurnState::new(
-            provider.clone(),
-            channel_id,
-            Some("notice-successor".to_string()),
-            343_742_347_365_974_026,
-            77_648,
-            91,
-            "successor prompt".to_string(),
-            Some("successor-session".to_string()),
-            Some("AgentDesk-notice-successor".to_string()),
-            Some("/tmp/notice-successor.jsonl".to_string()),
-            Some("/tmp/notice-successor.input".to_string()),
-            9_100,
-        );
+        let successor = notice_row(channel_id, 77_648, "successor prompt");
         let mut stale = successor.clone();
         stale.started_at = "stale-started-at".to_string();
         stale.tmux_session_name = Some("AgentDesk-notice-stale-owner".to_string());
@@ -1034,60 +1112,101 @@ mod tests {
             .expect("seed successor row");
         let root =
             crate::services::discord::inflight::inflight_runtime_root().expect("runtime root");
-        let path =
-            crate::services::discord::inflight::inflight_state_path(&root, &provider, channel_id);
+        let path = crate::services::discord::inflight::inflight_state_path(
+            &root,
+            &ProviderKind::Codex,
+            channel_id,
+        );
         let before = std::fs::read(&path).expect("read successor bytes");
-        let gateway = std::sync::Arc::new(CapturingGateway::default());
-        let mut bridge = seed_context("", stale);
-        let dyn_gateway: std::sync::Arc<dyn TurnGateway> = gateway.clone();
-        bridge.gateway = dyn_gateway;
+        let gateway = std::sync::Arc::new(Default::default());
+        let mut bridge = bridge_with(stale, &gateway);
 
+        let mut notices = Vec::new();
         for attempt in 0..3 {
             if attempt == 2 {
                 // A fresh attempt held off by the same row adds no second notice.
                 bridge.inflight_state.started_at = "next-attempt-started-at".to_string();
             }
-            let (completion_tx, mut completion_rx) = tokio::sync::oneshot::channel();
-            bridge.completion_tx = Some(completion_tx);
-            let mut durable = bridge.inflight_state.clone();
-            let harness = ReconcileHarness::new(&mut durable, ChannelId::new(channel_id));
-            let (mut rowless, mut created, mut last_edit, mut cleared) =
-                (false, None, String::new(), false);
-            let ctx = BridgeEntryAuthorityContext {
-                entry_was_rowless: &mut rowless,
-                bridge: &mut bridge,
-                shared: &shared,
-                bridge_created_placeholder: &mut created,
-                last_edit_text: &mut last_edit,
-                resumed_placeholder_clear_applied: &mut cleared,
-            };
-            assert!(
-                !establish_bridge_entry_authority(ctx, harness.runtime, "processing").await,
-                "attempt {attempt}: entry must abort"
-            );
-            assert_eq!(
-                completion_rx.try_recv(),
-                Ok(BridgeCompletionSignal::EntryAborted)
-            );
+            notices.extend(refused_entry_notice(&shared, &mut bridge, &gateway).await);
         }
 
-        let sends = gateway.sends.lock().expect("sends lock").clone();
         assert_eq!(
-            sends.len(),
+            notices.len(),
             1,
-            "one notice per turn and blocking row: {sends:?}"
+            "one notice per turn and blocking row: {notices:?}"
         );
-        assert!(sends[0].contains("시도한 턴: 77648"), "{}", sends[0]);
+        assert!(notices[0].contains("시도한 턴: 77648"), "{}", notices[0]);
         assert!(
-            sends[0].contains("보존한 기존 기록: 턴 77648 (Managed, 시작 "),
+            notices[0].contains("보존한 기존 기록: 턴 77648 (Managed, 시작 "),
             "{}",
-            sends[0]
+            notices[0]
         );
-        assert!(!sends[0].contains("prompt"), "no prompt text: {}", sends[0]);
+        assert!(
+            !notices[0].contains("prompt"),
+            "no prompt text: {}",
+            notices[0]
+        );
         assert_eq!(std::fs::read(&path).expect("successor survives"), before);
         let mailbox =
             crate::services::discord::mailbox_snapshot(&shared, ChannelId::new(channel_id)).await;
         assert!(mailbox.cancel_token.is_none() && mailbox.intervention_queue.is_empty());
+    }
+
+    /// Each identity refusal the guarded store produces names its own cause in the notice.
+    #[tokio::test(flavor = "current_thread")]
+    async fn each_identity_refusal_names_its_own_cause() {
+        use crate::services::discord::inflight::patch_bridge_entry_state_if_identity_unchanged;
+
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let gateway = std::sync::Arc::new(Default::default());
+        let mut causes = Vec::new();
+        for (channel_id, expected, code) in [
+            (
+                4_259_651,
+                GuardedSaveOutcome::SuccessorOwned,
+                "successor_owned",
+            ),
+            (
+                4_259_652,
+                GuardedSaveOutcome::AuthorityPinned,
+                "authority_pinned",
+            ),
+            (4_259_653, GuardedSaveOutcome::Unnameable, "unnameable"),
+        ] {
+            let user_msg_id = if expected == GuardedSaveOutcome::Unnameable {
+                0
+            } else {
+                77_650
+            };
+            let mut durable = notice_row(channel_id, user_msg_id, "durable prompt");
+            let mut attempted = durable.clone();
+            match expected {
+                GuardedSaveOutcome::SuccessorOwned => {
+                    attempted.started_at = "older-started-at".to_string();
+                }
+                GuardedSaveOutcome::AuthorityPinned => durable.rebind_origin = true,
+                _ => attempted.turn_start_offset = None,
+            }
+            crate::services::discord::inflight::save_inflight_state(&durable).expect("seed row");
+            let mut probe = attempted.clone();
+            assert_eq!(
+                patch_bridge_entry_state_if_identity_unchanged(&attempted, &mut probe, "test"),
+                expected
+            );
+            let mut bridge = bridge_with(attempted, &gateway);
+            let notice = refused_entry_notice(&shared, &mut bridge, &gateway)
+                .await
+                .unwrap_or_else(|| panic!("{expected:?} must hand back a notice"));
+            assert!(notice.contains(&format!("(사유 코드: {code})")), "{notice}");
+            let cause = notice.lines().next().unwrap().to_string();
+            assert!(
+                !causes.contains(&cause),
+                "{expected:?} reuses a cause: {cause}"
+            );
+            causes.push(cause);
+        }
     }
 
     #[test]
@@ -1099,7 +1218,7 @@ mod tests {
             .find("pub(in crate::services::discord) fn spawn_turn_bridge_with_pin")
             .expect("production bridge entry remains present");
         let authority = caller[spawn..]
-            .find("if !bridge_entry_persist::establish_bridge_entry_authority")
+            .find("if let Err(notice) = bridge_entry_persist::establish_bridge_entry_authority")
             .map(|offset| spawn + offset)
             .expect("production caller establishes authority");
         let guards = caller[authority..]
@@ -1161,7 +1280,7 @@ mod tests {
         assert!(
             helper[anchor..refresh]
                 .contains("signal_bridge_entry_abort_completion(&mut ctx.bridge.completion_tx);")
-                && helper[anchor..refresh].contains("return false;"),
+                && helper[anchor..refresh].contains("return Err(None);"),
             "failed anchor materialization must signal EntryAborted and return before guards"
         );
         let abort = helper
@@ -1184,7 +1303,7 @@ mod tests {
         );
         assert!(
             helper[gate..anchor].contains("signal_bridge_entry_abort_completion")
-                && helper[gate..anchor].contains("return false;"),
+                && helper[gate..anchor].contains("return Err(capture_entry_abort_notice("),
             "failed persistence must signal only the waiter and abort"
         );
         assert!(

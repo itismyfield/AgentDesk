@@ -458,7 +458,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut entry_was_rowless = false;
 
         let anchor_text = super::formatting::build_processing_status_block(SPINNER[0]).to_string();
-        if !bridge_entry_persist::establish_bridge_entry_authority(
+        if let Err(notice) = bridge_entry_persist::establish_bridge_entry_authority(
             bridge_entry_persist::BridgeEntryAuthorityContext {
                 entry_was_rowless: &mut entry_was_rowless,
                 bridge: &mut bridge,
@@ -494,7 +494,8 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         )
         .await
         {
-            return unwind_unstarted_turn(&shared_owned, channel_id, &cancel_token).await;
+            unwind_unstarted_turn(&shared_owned, channel_id, &cancel_token).await;
+            return bridge_entry_persist::spawn_entry_abort_notice(notice);
         }
         let mut bridge_entry_watcher_owner_epoch_current = inflight_state
             .effective_relay_owner_kind()

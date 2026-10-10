@@ -3830,6 +3830,7 @@ services::discord::health::turn_deliver::inject_tests::a_handback_onto_a_full_qu
 services::discord::health::turn_deliver::inject_tests::a_handback_that_never_lands_refuses_the_delivery_and_keeps_no_place_pg
 services::discord::health::turn_deliver::inject_tests::a_headless_claim_returns_the_token_it_registered
 services::discord::health::turn_deliver::inject_tests::a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox
+services::discord::health::turn_deliver::inject_tests::a_pane_veto_stays_logged_when_the_delivery_starts_or_fails
 services::discord::health::turn_deliver::inject_tests::a_paste_its_rows_cannot_prove_is_handed_back_unpasted_pg
 services::discord::health::turn_deliver::inject_tests::a_rebound_transcript_or_input_queued_during_the_last_lookups_vetoes_the_paste_pg
 services::discord::health::turn_deliver::inject_tests::a_row_replaced_after_its_last_read_does_not_stop_the_reservation_allowed_range_pg
@@ -8365,6 +8366,7 @@ services::discord::tui_task_card::tests::parses_tool_use_id_and_derives_kind_fro
 services::discord::tui_task_card::tests::single_subagent_completion_card_previews_not_dumps
 services::discord::tui_task_card::tests::task_card_clamps_many_short_headings_under_discord_limit
 services::discord::tui_task_card::tests::task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822
+services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::a_pending_or_failing_refusal_notice_never_holds_the_unwind
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::c1_actual_spawn_bridge_retains_effect_until_future_disposal
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::headless_entry_abort_releases_mailbox_without_touching_durable_owner
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::herdr_settlement::a_herdr_turn_settles_on_its_own_admitted_terminal_after_a_stop
@@ -8382,6 +8384,7 @@ services::discord::turn_bridge::bridge_entry_persist::tests::bridge_entry_failur
 services::discord::turn_bridge::bridge_entry_persist::tests::cancelled_watcher_is_unavailable_and_not_pinned_during_reconcile
 services::discord::turn_bridge::bridge_entry_persist::tests::cleared_watcher_owner_falls_back_to_delivery_channel
 services::discord::turn_bridge::bridge_entry_persist::tests::durable_placeholder_clear_and_response_advance_suppresses_restart_notice_edit
+services::discord::turn_bridge::bridge_entry_persist::tests::each_identity_refusal_names_its_own_cause
 services::discord::turn_bridge::bridge_entry_persist::tests::entry_gate_matrix_over_outcome_and_anchor
 services::discord::turn_bridge::bridge_entry_persist::tests::post_authority_owner_snapshot_observes_same_identity_watcher_adoption
 services::discord::turn_bridge::bridge_entry_persist::tests::pre_authority_abort_preserves_same_id_successor_bytes

@@ -1506,31 +1506,27 @@ async fn an_injection_without_a_discord_message_records_no_disposition_pg() {
     assert_eq!(observed, (injected, true, false, false));
 }
 
-/// The delivery result log carries the veto beside the queue reason, the caller's ids and the
-/// attempt flag, and none of the input text.
-#[tokio::test(flavor = "current_thread")]
-async fn a_vetoed_delivery_logs_its_veto_and_ids_without_the_text() {
-    #[derive(Clone, Default)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Sink {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
+#[derive(Clone, Default)]
+struct LogSink(Arc<Mutex<Vec<u8>>>);
 
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let ch = 6_484_301;
-    let registry = HealthRegistry::new();
-    register_inject_runtime(&registry, &[ch], None).await;
-    let pane = InjectPane::new(ch, "all");
-    let ended = format!("{BUSY_TURN}{{\"type\":\"result\",\"subtype\":\"success\"}}\n");
-    pane.set("transcript.jsonl", &ended);
+impl std::io::Write for LogSink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Delivers `secret-6484 body` to `channel` through the real entry and returns its result with
+/// every INFO line logged meanwhile.
+async fn deliver_logged(
+    registry: &HealthRegistry,
+    channel: u64,
+) -> (Result<HumanInputDelivery, super::HumanInputError>, String) {
     let request = HumanInputRequest {
-        channel_id: ChannelId::new(ch),
+        channel_id: ChannelId::new(channel),
         provider: ProviderKind::Claude,
         text: "secret-6484 body".to_string(),
         author_id: 200,
@@ -1538,7 +1534,7 @@ async fn a_vetoed_delivery_logs_its_veto_and_ids_without_the_text() {
         metadata: Some(serde_json::json!({"human_input": {"origin_id": "origin-6484"}})),
         channel_name_hint: None,
     };
-    let sink = Sink::default();
+    let sink = LogSink::default();
     let writer = sink.clone();
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -1548,8 +1544,34 @@ async fn a_vetoed_delivery_logs_its_veto_and_ids_without_the_text() {
         .finish();
     crate::logging::test_capture::pin_callsite_interest();
     let guard = tracing::subscriber::set_default(subscriber);
-    let delivered = deliver_human_input(&registry, request).await;
+    let delivered = deliver_human_input(registry, request).await;
     drop(guard);
+    let logs = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+    assert!(!logs.contains("secret-6484"), "input text leaked: {logs}");
+    (delivered, logs)
+}
+
+fn delivery_line(logs: &str) -> &str {
+    let lines: Vec<_> = logs
+        .lines()
+        .filter(|line| line.contains("human_input_delivery"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{logs}");
+    lines[0]
+}
+
+/// The delivery result log carries the veto beside the queue reason, the caller's ids and the
+/// attempt flag, and none of the input text.
+#[tokio::test(flavor = "current_thread")]
+async fn a_vetoed_delivery_logs_its_veto_and_ids_without_the_text() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let ch = 6_484_301;
+    let registry = HealthRegistry::new();
+    register_inject_runtime(&registry, &[ch], None).await;
+    let pane = InjectPane::new(ch, "all");
+    let ended = format!("{BUSY_TURN}{{\"type\":\"result\",\"subtype\":\"success\"}}\n");
+    pane.set("transcript.jsonl", &ended);
+    let (delivered, logs) = deliver_logged(&registry, ch).await;
 
     let Ok(HumanInputDelivery::Queued {
         turn_id,
@@ -1563,12 +1585,7 @@ async fn a_vetoed_delivery_logs_its_veto_and_ids_without_the_text() {
         (reason.as_str(), inject_veto.as_deref()),
         ("external_turn_active", Some("not_busy"))
     );
-    let logs = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
-    let lines: Vec<_> = logs
-        .lines()
-        .filter(|line| line.contains("human_input_delivery"))
-        .collect();
-    assert_eq!(lines.len(), 1, "{logs}");
+    let line = delivery_line(&logs);
     for field in [
         format!("turn_id=\"{turn_id}\""),
         "source=\"imessage\"".to_string(),
@@ -1578,7 +1595,36 @@ async fn a_vetoed_delivery_logs_its_veto_and_ids_without_the_text() {
         "inject_veto=\"not_busy\"".to_string(),
         "inject_attempted=true".to_string(),
     ] {
-        assert!(lines[0].contains(&field), "missing {field}: {}", lines[0]);
+        assert!(line.contains(&field), "missing {field}: {line}");
     }
-    assert!(!logs.contains("secret-6484"), "input text leaked: {logs}");
+}
+
+/// A veto the pane answered stays in the result log when the delivery then starts a turn or
+/// fails, beside that final outcome rather than replaced by it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_pane_veto_stays_logged_when_the_delivery_starts_or_fails() {
+    for (ch, start, outcome, reason) in [
+        (6_484_302, true, "started", None),
+        (6_484_303, false, "refused", Some("runtime_unavailable")),
+    ] {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let registry = HealthRegistry::new();
+        let shared = register_inject_runtime(&registry, &[ch], None).await;
+        let pane = InjectPane::new(ch, "all");
+        let ended = format!("{BUSY_TURN}{{\"type\":\"result\",\"subtype\":\"success\"}}\n");
+        pane.set("transcript.jsonl", &ended);
+        pane.drop_row(&shared).await;
+        if start {
+            start_without_gateway(ch);
+        }
+        let (delivered, logs) = deliver_logged(&registry, ch).await;
+        assert_eq!(delivered.is_ok(), start, "{delivered:?}");
+        let line = delivery_line(&logs);
+        assert!(line.contains(&format!("outcome=\"{outcome}\"")), "{line}");
+        if let Some(reason) = reason {
+            assert!(line.contains(&format!("reason=\"{reason}\"")), "{line}");
+        }
+        assert!(line.contains("inject_veto=\"not_busy\""), "{line}");
+        assert!(line.contains("inject_attempted=true"), "{line}");
+    }
 }

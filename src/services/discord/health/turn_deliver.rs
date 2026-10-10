@@ -269,8 +269,15 @@ struct LivePorts {
     /// Gateway context and bot token; only a start needs them, a queued delivery does not.
     runtime: Result<(serenity::Context, String), String>,
     request: HumanInputRequest,
-    /// Set once a pane injection was asked for, for the delivery result log.
-    inject_attempted: std::sync::atomic::AtomicBool,
+    /// What a pane injection reported, kept apart from the final delivery for its log.
+    inject_observed: std::sync::Mutex<InjectObservation>,
+}
+
+/// Whether a pane injection was asked for and the veto it answered, whatever came after.
+#[derive(Default)]
+struct InjectObservation {
+    attempted: bool,
+    veto: Option<&'static str>,
 }
 
 #[async_trait]
@@ -358,9 +365,20 @@ impl DeliveryPorts for LivePorts {
     }
 
     async fn try_inject(&self) -> InjectAttempt {
-        let attempted = &self.inject_attempted;
-        attempted.store(true, std::sync::atomic::Ordering::Relaxed);
-        inject::attempt(&self.shared, &self.request, inject::Origin::External).await
+        let attempt = inject::attempt(&self.shared, &self.request, inject::Origin::External).await;
+        let veto = match &attempt {
+            InjectAttempt::NotSent(veto) | InjectAttempt::HandedBack { veto, .. } => Some(*veto),
+            _ => None,
+        };
+        let observed = InjectObservation {
+            attempted: true,
+            veto,
+        };
+        *self
+            .inject_observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = observed;
+        attempt
     }
 }
 
@@ -406,28 +424,19 @@ pub async fn deliver_human_input(
         .and_then(|metadata| metadata.pointer("/human_input/origin_id"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
-    let (result, inject_attempted) = deliver_resolved(registry, request).await;
+    let (result, inject) = deliver_resolved(registry, request).await;
     // One line per delivery, keyed by ids only; the input text never reaches the log.
-    let (outcome, turn_id, reason, inject_veto) = match &result {
-        Ok(HumanInputDelivery::Started { turn_id }) => {
-            ("started", Some(turn_id.clone()), None, None)
-        }
+    let (outcome, turn_id, reason) = match &result {
+        Ok(HumanInputDelivery::Started { turn_id }) => ("started", Some(turn_id.clone()), None),
         Ok(HumanInputDelivery::Queued {
-            turn_id,
-            reason,
-            inject_veto,
-        }) => (
-            "queued",
-            Some(turn_id.clone()),
-            Some(reason.clone()),
-            inject_veto.clone(),
-        ),
-        Ok(HumanInputDelivery::Injected { turn_id }) => ("injected", turn_id.clone(), None, None),
+            turn_id, reason, ..
+        }) => ("queued", Some(turn_id.clone()), Some(reason.clone())),
+        Ok(HumanInputDelivery::Injected { turn_id }) => ("injected", turn_id.clone(), None),
         Ok(HumanInputDelivery::Unconfirmed { turn_id, detail }) => {
-            ("unconfirmed", turn_id.clone(), Some(detail.clone()), None)
+            ("unconfirmed", turn_id.clone(), Some(detail.clone()))
         }
         // Only the error kind: router and runtime details are free text.
-        Err(error) => ("refused", None, Some(error.kind().to_string()), None),
+        Err(error) => ("refused", None, Some(error.kind().to_string())),
     };
     tracing::info!(
         channel_id,
@@ -437,8 +446,8 @@ pub async fn deliver_human_input(
         turn_id = turn_id.as_deref(),
         outcome,
         reason = reason.as_deref(),
-        inject_veto = inject_veto.as_deref(),
-        inject_attempted,
+        inject_veto = inject.veto,
+        inject_attempted = inject.attempted,
         "human_input_delivery"
     );
     result
@@ -447,7 +456,10 @@ pub async fn deliver_human_input(
 async fn deliver_resolved(
     registry: &HealthRegistry,
     request: HumanInputRequest,
-) -> (Result<HumanInputDelivery, HumanInputError>, bool) {
+) -> (
+    Result<HumanInputDelivery, HumanInputError>,
+    InjectObservation,
+) {
     let shared = match resolve_direct_meeting_shared(
         registry,
         request.channel_id,
@@ -456,7 +468,10 @@ async fn deliver_resolved(
     .await
     {
         Ok(shared) => shared,
-        Err(error) => return (Err(HumanInputError::RuntimeUnavailable(error)), false),
+        Err(error) => {
+            let unavailable = HumanInputError::RuntimeUnavailable(error);
+            return (Err(unavailable), InjectObservation::default());
+        }
     };
     let allowed = {
         let settings = shared.settings.read().await;
@@ -467,7 +482,7 @@ async fn deliver_resolved(
         )
     };
     if !allowed {
-        return (Err(HumanInputError::AuthorNotAllowed), false);
+        return (Err(HumanInputError::AuthorNotAllowed), Default::default());
     }
     let runtime = match shared.http.cached_serenity_ctx.get().cloned() {
         None => Err("provider runtime is not ready".to_string()),
@@ -484,11 +499,14 @@ async fn deliver_resolved(
         shared,
         runtime,
         request,
-        inject_attempted: Default::default(),
+        inject_observed: Default::default(),
     };
     let result = deliver_with_ports(&ports).await;
-    let inject_attempted = ports.inject_attempted.into_inner();
-    (result, inject_attempted)
+    let observed = ports.inject_observed.into_inner();
+    (
+        result,
+        observed.unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
 }
 
 /// Registers a bot runtime bound to `channel_id` with the given auth settings.
