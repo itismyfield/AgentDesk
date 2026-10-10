@@ -1,5 +1,5 @@
 //! A deferred channel whose Legacy stays behind, driven through the real host: O starts at the
-//! source's end once Legacy stood still for `STALLED`, and any Legacy movement restarts the wait.
+//! source's end after delivery stops progressing; marker and capture activity do not reset it.
 
 use super::*;
 use crate::services::tui_o::writer::adoption::LegacyEpoch;
@@ -12,6 +12,7 @@ struct Behind {
     cursor: Mutex<LegacyCursor>,
     frontier: Mutex<Option<u64>>,
     reconnects: AtomicU64,
+    tail: AtomicBool,
 }
 
 impl Behind {
@@ -35,7 +36,7 @@ impl LegacyView for Behind {
     }
 
     fn tail_running(&self, _: &str) -> bool {
-        false
+        self.tail.load(Ordering::SeqCst)
     }
 
     fn epoch(&self, _: u64) -> LegacyEpoch {
@@ -70,6 +71,7 @@ impl Stalled {
             cursor: Mutex::new(LegacyCursor::Unbound),
             frontier: Mutex::new(frontier),
             reconnects: AtomicU64::default(),
+            tail: AtomicBool::default(),
         });
         legacy.at(cursor);
         *io.legacy.lock().unwrap() = Some(Arc::clone(&legacy) as Arc<dyn LegacyView>);
@@ -246,15 +248,15 @@ async fn an_inflight_row_alone_does_not_keep_legacy_busy_but_an_active_custody_d
 #[tokio::test(start_paused = true)]
 async fn a_turn_opened_and_closed_during_the_stall_restarts_it() {
     let stalled = Stalled::dead_tail();
-    let _tasks = stalled.start();
+    let tasks = stalled.start();
     tokio::time::sleep(30 * MINUTE).await;
     append(&stalled.path, &row("m1", "again"));
     tokio::time::sleep(15 * MINUTE).await;
+    stalled.assert_waiting("an open turn blocks the expired clock");
     append(&stalled.path, &closed());
-    tokio::time::sleep(39 * MINUTE).await;
-    stalled.assert_waiting("the stall restarted when the turn closed");
-    tokio::time::sleep(3 * MINUTE).await;
+    retried().await;
     stalled.assert_adopted_at_end(Some(0)).await;
+    abort(tasks);
 }
 
 /// Legacy moves for one retry at 30 minutes while the source, cursor and frontier stand still:
@@ -272,9 +274,23 @@ async fn stall_restarted_by(nudge: impl FnOnce(&Stalled), settle: impl FnOnce(&S
     stalled.assert_adopted_at_end(Some(0)).await;
 }
 
+async fn stall_not_restarted_by(nudge: impl FnOnce(&Stalled), settle: impl FnOnce(&Stalled)) {
+    let stalled = Stalled::dead_tail();
+    let tasks = stalled.start();
+    tokio::time::sleep(30 * MINUTE).await;
+    nudge(&stalled);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    settle(&stalled);
+    tokio::time::sleep(9 * MINUTE).await;
+    stalled.assert_waiting("marker activity did not shorten the wait");
+    tokio::time::sleep(2 * MINUTE).await;
+    stalled.assert_adopted_at_end(Some(0)).await;
+    abort(tasks);
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_active_custody_seen_once_restarts_the_stall() {
-    stall_restarted_by(
+    stall_not_restarted_by(
         |s| *s.io.custody.lock().unwrap() = Ok(Custody::Active),
         |s| *s.io.custody.lock().unwrap() = Ok(Custody::Row),
     )
@@ -283,7 +299,7 @@ async fn an_active_custody_seen_once_restarts_the_stall() {
 
 #[tokio::test(start_paused = true)]
 async fn an_emission_between_rereads_restarts_the_stall() {
-    stall_restarted_by(
+    stall_not_restarted_by(
         |s| s.io.relaying.store(true, Ordering::SeqCst),
         |s| s.io.relaying.store(false, Ordering::SeqCst),
     )
@@ -303,13 +319,13 @@ async fn a_new_legacy_redrive_episode_restarts_the_stall() {
 
 #[tokio::test(start_paused = true)]
 async fn a_cursor_that_moves_restarts_the_stall() {
-    stall_restarted_by(|s| s.legacy.at(0), |s| s.legacy.at(s.len())).await;
+    stall_not_restarted_by(|s| s.legacy.at(0), |s| s.legacy.at(s.len())).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn legacy_intake_open_when_the_stall_ends_restarts_it() {
     let stalled = Stalled::dead_tail();
-    let _tasks = stalled.start();
+    let tasks = stalled.start();
     let intake = |open| {
         stalled
             .io
@@ -323,12 +339,11 @@ async fn legacy_intake_open_when_the_stall_ends_restarts_it() {
     tokio::time::sleep(39 * MINUTE).await;
     intake(1);
     tokio::time::sleep(2 * MINUTE).await;
-    stalled.assert_waiting("an open intake holds the adoption");
+    stalled.assert_waiting("an open intake holds the expired adoption");
     intake(0);
-    tokio::time::sleep(39 * MINUTE).await;
-    stalled.assert_waiting("the stall restarted");
-    tokio::time::sleep(3 * MINUTE).await;
+    retried().await;
     stalled.assert_adopted_at_end(Some(0)).await;
+    abort(tasks);
 }
 
 #[tokio::test(start_paused = true)]
@@ -384,22 +399,28 @@ async fn a_stalled_adoption_refused_under_the_lock_reports_nothing_and_waits_aga
         return;
     }
     let stalled = Stalled::dead_tail();
-    let io = Arc::clone(&stalled.io);
+    let candidate =
+        test_override::with_channels(|boot| boot.unwrap().candidate(CHANNEL).unwrap().clone());
+    let held = Arc::new(Mutex::new(None));
+    let save = Arc::clone(&held);
     let reached = hook_reached(Step::BeforeLock, move || {
-        io.relaying.store(true, Ordering::SeqCst);
+        let claimed = candidate.claim_body(CHANNEL);
+        assert!(!claimed.owned);
+        *save.lock().unwrap() = claimed.send;
     });
-    let _tasks = stalled.start();
+    let tasks = stalled.start();
     tokio::time::sleep(41 * MINUTE).await;
     assert!(
         reached.load(Ordering::SeqCst),
         "the stalled adoption reached the lock"
     );
-    stalled.assert_waiting("an emission under the lock refuses it");
-    stalled.io.relaying.store(false, Ordering::SeqCst);
+    stalled.assert_waiting("an actual send under the lock refuses it");
+    drop(held.lock().unwrap().take());
     tokio::time::sleep(39 * MINUTE).await;
-    stalled.assert_waiting("the stall started over");
+    stalled.assert_waiting("body completion restarted the soft clock");
     tokio::time::sleep(3 * MINUTE).await;
     stalled.assert_adopted_at_end(Some(0)).await;
+    abort(tasks);
 }
 
 /// Legacy moves right before the lock of the adoption its stall ended in: nothing commits, and a
@@ -442,7 +463,14 @@ async fn a_cursor_moving_right_before_the_lock_restarts_the_stall() {
     )) {
         return;
     }
-    moved_before_the_lock(Stalled::dead_tail(), |legacy| legacy.at(0), 0).await;
+    let stalled = Stalled::dead_tail();
+    let legacy = Arc::clone(&stalled.legacy);
+    let reached = hook_reached(Step::BeforeLock, move || legacy.at(0));
+    let tasks = stalled.start();
+    tokio::time::sleep(41 * MINUTE).await;
+    assert!(reached.load(Ordering::SeqCst));
+    stalled.assert_adopted_at_end(Some(0)).await;
+    abort(tasks);
 }
 
 #[tokio::test(start_paused = true)]
@@ -462,3 +490,6 @@ async fn a_delivery_right_before_the_lock_restarts_the_stall() {
     };
     moved_before_the_lock(stalled, nudge, first.len() as u64).await;
 }
+
+#[path = "stall_handoff_tests.rs"]
+mod handoff;

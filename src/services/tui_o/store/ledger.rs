@@ -14,11 +14,21 @@ use super::{StoreError, damage};
 use crate::services::discord::runtime_store::fsync_parent_dir;
 use crate::services::tui_o::shadow::{SourceId, UnitKey};
 
+/// This build includes both the ledger reader and the guarded writer consumer.
+pub const OPERATOR_RESUME_SUPPORTED: bool = true;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LedgerEntry {
     ExactEvidence {
         metadata: Box<crate::services::tui_o::exact_episode::EpisodeMetadata>,
+    },
+    OperatorResume {
+        rejected_serial: u64,
+        approval_id: uuid::Uuid,
+        operator: String,
+        reason: String,
+        at: DateTime<Utc>,
     },
     /// Written before the POST; `epoch` is the gateway ownership the POST was admitted under.
     Prepared {
@@ -95,6 +105,26 @@ pub struct PieceRecord {
     pub outcome: Option<PieceOutcome>,
 }
 
+/// The UUID follows the approval across homes; `(channel, rejected_serial)` is local audit identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResumeApproval {
+    pub rejected_serial: u64,
+    pub approval_id: uuid::Uuid,
+    pub operator: String,
+    pub reason: String,
+    pub at: DateTime<Utc>,
+    pub consumed_serial: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PieceDisposition {
+    Fresh,
+    Blocked { serial: u64, status: u16 },
+    Authorized { rejected_serial: u64 },
+    Open { serial: u64 },
+    Settled,
+}
+
 /// Replayed ledger. `anchor` moves only on Posted; the first invariant break pauses the channel.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LedgerState {
@@ -108,6 +138,7 @@ pub struct LedgerState {
     resolved: HashMap<SourceId, u64>,
     violation: Option<String>,
     exact_evidence: Vec<crate::services::tui_o::exact_episode::EpisodeMetadata>,
+    approvals: BTreeMap<u64, ResumeApproval>,
 }
 
 impl LedgerState {
@@ -143,6 +174,73 @@ impl LedgerState {
         self.excluded.get(unit_key).map(String::as_str)
     }
 
+    pub fn approval(&self, rejected_serial: u64) -> Option<&ResumeApproval> {
+        self.approvals.get(&rejected_serial)
+    }
+
+    pub fn disposition(&self, key: &UnitKey, index: u32) -> PieceDisposition {
+        let Some((serial, piece)) = self.latest_piece(key, index) else {
+            return PieceDisposition::Fresh;
+        };
+        match piece.outcome {
+            Some(PieceOutcome::Rejected(status)) => {
+                if self
+                    .approval(serial)
+                    .is_some_and(|approval| approval.consumed_serial.is_none())
+                {
+                    PieceDisposition::Authorized {
+                        rejected_serial: serial,
+                    }
+                } else {
+                    PieceDisposition::Blocked { serial, status }
+                }
+            }
+            None => PieceDisposition::Open { serial },
+            Some(_) => PieceDisposition::Settled,
+        }
+    }
+
+    pub fn blocked(&self) -> Option<(u64, u16)> {
+        self.pieces.values().find_map(|piece| {
+            match self.disposition(&piece.unit_key, piece.piece_index) {
+                PieceDisposition::Blocked { serial, status } => Some((serial, status)),
+                _ => None,
+            }
+        })
+    }
+
+    /// Unconsumed approvals and their still-open first attempts belong in the ordinary owed queue.
+    pub fn resume_pieces(&self) -> impl Iterator<Item = (u64, &PieceRecord)> {
+        self.approvals.iter().filter_map(|(&rejected, approval)| {
+            let original = self.piece(rejected)?;
+            let (serial, latest) = self.latest_piece(&original.unit_key, original.piece_index)?;
+            if self.excluded(&original.unit_key).is_some() {
+                return None;
+            }
+            let pending = matches!(self.disposition(&original.unit_key, original.piece_index),
+                PieceDisposition::Authorized { rejected_serial } if rejected_serial == rejected);
+            let open = approval.consumed_serial == Some(serial) && latest.outcome.is_none();
+            (pending || open).then_some((rejected, latest))
+        })
+    }
+
+    pub(super) fn can_resume(&self, serial: u64) -> bool {
+        let Some(piece) = self.piece(serial) else {
+            return false;
+        };
+        self.violation.is_none()
+            && self.open_serial.is_none()
+            && matches!(piece.outcome, Some(PieceOutcome::Rejected(400 | 403 | 404)))
+            && self
+                .latest_piece(&piece.unit_key, piece.piece_index)
+                .is_some_and(|(latest, _)| latest == serial)
+            && !self.pieces.values().any(|other| {
+                other.unit_key == piece.unit_key
+                    && other.piece_index == piece.piece_index
+                    && matches!(other.outcome, Some(PieceOutcome::Posted(_)))
+            })
+    }
+
     pub fn gc_through(&self, source: &SourceId) -> Option<u64> {
         self.gc_segments(source).last().map(|&(_, through)| through)
     }
@@ -169,6 +267,41 @@ impl LedgerState {
 
     pub(super) fn apply(&mut self, at: DateTime<Utc>, entry: LedgerEntry) {
         match entry {
+            LedgerEntry::OperatorResume {
+                rejected_serial,
+                approval_id,
+                operator,
+                reason,
+                at,
+            } => {
+                if self.approvals.contains_key(&rejected_serial) {
+                    tracing::warn!(
+                        rejected_serial,
+                        "[tui_o] duplicate approval ignored; first record stands"
+                    );
+                } else if !self.can_resume(rejected_serial)
+                    || approval_id.is_nil()
+                    || operator.trim().is_empty()
+                    || reason.trim().is_empty()
+                {
+                    tracing::warn!(
+                        rejected_serial,
+                        "[tui_o] invalid approval ignored; no sending authority"
+                    );
+                } else {
+                    self.approvals.insert(
+                        rejected_serial,
+                        ResumeApproval {
+                            rejected_serial,
+                            approval_id,
+                            operator,
+                            reason,
+                            at,
+                            consumed_serial: None,
+                        },
+                    );
+                }
+            }
             LedgerEntry::ExactEvidence { metadata } => {
                 if !metadata.supported() {
                     self.violate("unsupported exact ledger evidence".into());
@@ -192,6 +325,15 @@ impl LedgerState {
                 }
                 self.next_serial = self.next_serial.max(serial.saturating_add(1));
                 self.open_serial = Some(serial);
+                for (&rejected, approval) in &mut self.approvals {
+                    if approval.consumed_serial.is_none()
+                        && self.pieces.get(&rejected).is_some_and(|piece| {
+                            piece.unit_key == unit_key && piece.piece_index == piece_index
+                        })
+                    {
+                        approval.consumed_serial = Some(serial);
+                    }
+                }
                 self.latest.insert((unit_key.clone(), piece_index), serial);
                 let piece = PieceRecord {
                     unit_key,
@@ -296,6 +438,37 @@ fn line(at: DateTime<Utc>, entry: &LedgerEntry) -> Result<Vec<u8>, StoreError> {
     line.push(b'\n');
     Ok(line)
 }
+
+/// Operator snapshots use the same reducer without sweeping, cutting a tail or withdrawing a POST.
+pub(super) fn read_only(file: &mut File, initial_anchor: u64) -> Result<LedgerState, StoreError> {
+    let mut state = LedgerState {
+        anchor: initial_anchor,
+        ..LedgerState::default()
+    };
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut offset = 0;
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 {
+            return Ok(state);
+        }
+        if line.last() != Some(&b'\n') {
+            return Err(StoreError::Rejected(
+                "unfinished ledger entry; start the writer to recover it".into(),
+            ));
+        }
+        let parsed: LedgerLine = serde_json::from_slice(&line)
+            .map_err(|error| damage(format!("ledger byte {offset}: {error}")))?;
+        state.apply(parsed.at, parsed.entry);
+        offset += read;
+    }
+}
+
+#[cfg(test)]
+#[path = "operator_resume_ledger_tests.rs"]
+mod operator_resume_tests;
 
 /// The `from` of a durable `BoundaryResolved` for `source`, read without recovering the ledger.
 /// An unfinished last line is refused: a line appended after it would become mid-file damage.

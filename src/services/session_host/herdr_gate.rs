@@ -2,11 +2,14 @@
 //! execution are checked on one server before every input, which goes only to that server.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
-use super::herdr::contract::{self, ForegroundProcesses, HerdrTransport, ServerWitness};
+use super::herdr::contract::{
+    self, CloseEffect, ForegroundProcesses, HerdrTransport, ServerWitness,
+};
 use super::herdr::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
 use super::herdr::observe::{self, RestoreResume, RestoreUnverified};
 use super::herdr::pane_probe::{self, EvidenceGap, HostOs, PaneProcesses, ProbeRequest, ProcessOs};
@@ -37,6 +40,9 @@ pub(crate) enum HerdrGateRefusal {
     OtherNonce,
     RootReplaced,
     ProviderReplaced,
+    TerminateUnsupportedServer,
+    MutationBusy,
+    ExecutionClosing,
 }
 
 /// What one server reports of the recorded pane: a reading for a reconnect or a retire, never an
@@ -66,6 +72,7 @@ pub(crate) enum PaneProvider {
 pub(crate) enum Mutation {
     Input,
     Cancel,
+    Terminate,
 }
 
 /// Herdr key names a cancel judgment may carry.
@@ -86,10 +93,79 @@ fn herdr_key(key: HostKey) -> &'static str {
     }
 }
 
+#[derive(Default)]
+struct ExecutionFence {
+    state: Mutex<(bool, bool)>, // active permit, closing
+}
+
+struct MutationPermit {
+    fence: Arc<ExecutionFence>,
+}
+impl Drop for MutationPermit {
+    fn drop(&mut self) {
+        self.fence
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .0 = false;
+    }
+}
+
+fn execution_fence(endpoint: &HerdrEndpoint, pane: &str, nonce: &str) -> Arc<ExecutionFence> {
+    type Key = (String, String, String, String, String, String);
+    static FENCES: OnceLock<Mutex<HashMap<Key, Arc<ExecutionFence>>>> = OnceLock::new();
+    let key = (
+        endpoint.execution_node().to_string(),
+        endpoint.config_key().to_string(),
+        endpoint.socket_path().to_string_lossy().into_owned(),
+        endpoint.herdr_session().to_string(),
+        pane.to_string(),
+        nonce.to_string(),
+    );
+    // Closing tombstones must outlive targets so a fresh target cannot reuse an uncertain nonce.
+    FENCES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(key)
+        .or_default()
+        .clone()
+}
+
+impl ExecutionFence {
+    fn acquire(self: &Arc<Self>, mutation: Mutation) -> Result<MutationPermit, HerdrGateRefusal> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.0 {
+            return Err(HerdrGateRefusal::MutationBusy);
+        }
+        if state.1 && mutation != Mutation::Terminate {
+            return Err(HerdrGateRefusal::ExecutionClosing);
+        }
+        state.0 = true;
+        Ok(MutationPermit {
+            fence: self.clone(),
+        })
+    }
+}
+
+pub(crate) struct TerminationFence(MutationPermit, bool);
+impl TerminationFence {
+    /// A pre-write refusal can reopen only this execution, never a successor nonce.
+    pub(crate) fn reopen(&self) {
+        self.0
+            .fence
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .1 = self.1;
+    }
+}
+
 /// One gate decision; only the gate makes one, and one send consumes it.
 struct Judged {
     witness: ServerWitness,
     mutation: Mutation,
+    _permit: Option<MutationPermit>,
 }
 
 struct PaneGate {
@@ -104,6 +180,7 @@ struct PaneGate {
     next_id: AtomicU64,
     /// The latest judgment, waiting for the send it admits.
     pinned: Mutex<Option<Judged>>,
+    fence: Arc<ExecutionFence>,
 }
 
 /// A recorded Herdr pane on this node's registered endpoint; every input to it passes the gate.
@@ -161,6 +238,7 @@ impl HerdrTarget {
             return None;
         }
         Some(Self(Arc::new(PaneGate {
+            fence: execution_fence(&endpoint, &location.pane_id, &stored.execution_nonce),
             endpoint,
             transport,
             pane: location.pane_id.clone(),
@@ -188,14 +266,48 @@ impl HerdrTarget {
         }))
     }
 
+    /// Keeps this nonce closed and excludes all pane writes through settlement.
+    pub(crate) fn termination_fence(&self) -> Result<TerminationFence, HerdrGateRefusal> {
+        let permit = self.0.fence.acquire(Mutation::Terminate)?;
+        let mut state = self
+            .0
+            .fence
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let was_closing = state.1;
+        state.1 = true;
+        Ok(TerminationFence(permit, was_closing))
+    }
+
+    pub(crate) fn revalidate_termination_reads(&self) -> Result<(), HerdrGateRefusal> {
+        self.0.restore_witness(Mutation::Terminate).map(|_| ())
+    }
+
+    pub(crate) fn provider_absent(&self) -> Result<bool, String> {
+        match pane_probe::recorded_process(self.0.os.as_ref(), &self.0.expected.provider_process) {
+            pane_probe::RecordedProcess::ExactAlive => Ok(false),
+            pane_probe::RecordedProcess::ProvenAbsent | pane_probe::RecordedProcess::Replaced => {
+                Ok(true)
+            }
+            pane_probe::RecordedProcess::Unreadable => Err("provider unreadable".into()),
+        }
+    }
+
     pub(crate) fn pane_id(&self) -> &str {
         &self.0.pane
     }
 
     /// Judges the next input and keeps the judgment for the send that follows it.
     pub(crate) fn pin(&self, mutation: Mutation) -> Result<(), HerdrGateRefusal> {
-        let judged = self.0.judge(mutation);
         let mut pinned = self.0.pinned.lock().unwrap_or_else(PoisonError::into_inner);
+        *pinned = None;
+        let judged = self.0.fence.acquire(mutation).and_then(|permit| {
+            self.0.judge(mutation).map(|mut judged| {
+                judged._permit = Some(permit);
+                judged
+            })
+        });
         // A refusal also drops an older judgment, so no later send can use it.
         match judged {
             Ok(judged) => {
@@ -207,6 +319,62 @@ impl HerdrTarget {
                 Err(refusal)
             }
         }
+    }
+
+    pub(crate) fn pin_terminate_fenced(
+        &self,
+        fence: &TerminationFence,
+    ) -> Result<(), HerdrGateRefusal> {
+        if !Arc::ptr_eq(&self.0.fence, &fence.0.fence) {
+            return Err(HerdrGateRefusal::OtherNonce);
+        }
+        let judged = self.0.judge(Mutation::Terminate)?;
+        *self.0.pinned.lock().unwrap_or_else(PoisonError::into_inner) = Some(judged);
+        Ok(())
+    }
+
+    /// Pins only a termination judgment; ordinary stop verdicts grant no close authority.
+    pub(crate) fn pin_terminate(&self) -> Result<(), HerdrGateRefusal> {
+        self.pin(Mutation::Terminate)
+    }
+
+    /// Consumes a termination judgment, reading the live switch immediately before the write.
+    pub(crate) fn send_close_pinned(&self) -> CloseEffect {
+        let judged = self
+            .0
+            .pinned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let Some(judged) = judged else {
+            return CloseEffect::NotSent("herdr_close_without_gate_judgment".into());
+        };
+        let request = HerdrRequest::PaneClose {
+            pane_id: self.0.pane.clone(),
+        };
+        if !request_matches(judged.mutation, &request) {
+            return CloseEffect::NotSent("herdr_close_without_terminate_judgment".into());
+        }
+        let call = self.0.call(request);
+        if !crate::config_live_reload::current()
+            .is_some_and(|config| config.runtime.herdr_terminate_enabled == Some(true))
+        {
+            return CloseEffect::NotSent("herdr_terminate_disabled".into());
+        }
+        let outcome = self.0.transport.call_with_witness(&call, &judged.witness);
+        let result = contract::close_result(&call, outcome);
+        if matches!(
+            result,
+            CloseEffect::Acknowledged | CloseEffect::Indeterminate(_)
+        ) {
+            self.0
+                .fence
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .1 = true;
+        }
+        result
     }
 
     /// Drops a judgment no send will use, so a later send without its own judgment writes nothing.
@@ -440,7 +608,8 @@ fn pane_of(request: &HerdrRequest) -> Option<&str> {
     match request {
         HerdrRequest::PaneSendText { pane_id, .. }
         | HerdrRequest::PaneSendKeys { pane_id, .. }
-        | HerdrRequest::PaneSendInput { pane_id, .. } => Some(pane_id),
+        | HerdrRequest::PaneSendInput { pane_id, .. }
+        | HerdrRequest::PaneClose { pane_id } => Some(pane_id),
         _ => None,
     }
 }
@@ -448,6 +617,12 @@ fn pane_of(request: &HerdrRequest) -> Option<&str> {
 fn cancel_only(request: &HerdrRequest) -> bool {
     matches!(request, HerdrRequest::PaneSendKeys { keys, .. }
         if !keys.is_empty() && keys.iter().all(|key| CANCEL_KEYS.contains(&key.as_str())))
+}
+
+fn request_matches(mutation: Mutation, request: &HerdrRequest) -> bool {
+    let close = matches!(request, HerdrRequest::PaneClose { .. });
+    (mutation == Mutation::Terminate) == close
+        && (mutation != Mutation::Cancel || cancel_only(request))
 }
 
 impl PaneGate {
@@ -461,6 +636,17 @@ impl PaneGate {
         if mutation == Mutation::Input {
             herdr_admission::check().map_err(HerdrGateRefusal::AdmissionStopped)?;
         }
+        let witness = self.restore_witness(mutation)?;
+        self.verify_pane(&witness)?;
+        Ok(Judged {
+            witness,
+            mutation,
+            _permit: None,
+        })
+    }
+
+    /// The `.host_kind` marker, then E7: the server every later read and write must reach.
+    fn restore_witness(&self, mutation: Mutation) -> Result<ServerWitness, HerdrGateRefusal> {
         match read_host_kind_marker(&self.logical_key) {
             HostKindMarker::Known(HostKind::Herdr) => {}
             HostKindMarker::Known(_) => return Err(HerdrGateRefusal::MarkerOtherHost),
@@ -469,10 +655,14 @@ impl PaneGate {
         let witness = match (self.read_restore)(self.transport.as_ref(), &self.endpoint) {
             RestoreResume::Off { witness } => witness,
             RestoreResume::On => return Err(HerdrGateRefusal::RestoreOn),
+            RestoreResume::Unverified(RestoreUnverified::VersionNotVerified)
+                if mutation == Mutation::Terminate =>
+            {
+                return Err(HerdrGateRefusal::TerminateUnsupportedServer);
+            }
             RestoreResume::Unverified(why) => return Err(HerdrGateRefusal::RestoreUnverified(why)),
         };
-        self.verify_pane(&witness)?;
-        Ok(Judged { witness, mutation })
+        Ok(witness)
     }
 
     /// The launch's provenance rule read once more on `witness`'s server.
@@ -517,12 +707,26 @@ impl PaneGate {
         if pane_of(&request) != Some(self.pane.as_str()) {
             return Ok(refused("herdr_input_for_another_pane"));
         }
-        if judged.mutation == Mutation::Cancel && !cancel_only(&request) {
-            return Ok(refused("herdr_cancel_judgment_for_input"));
+        if !request_matches(judged.mutation, &request) || judged.mutation == Mutation::Terminate {
+            return Ok(refused("herdr_judgment_request_mismatch"));
         }
         let call = self.call(request);
         let outcome = self.transport.call_with_witness(&call, &judged.witness);
         contract::mutation_result(&call, outcome, &self.pane)
+    }
+}
+
+#[cfg(test)]
+impl From<CloseEffect>
+    for crate::services::termination_audit::host_terminate::herdr_terminate::HerdrTerminateResult
+{
+    fn from(effect: CloseEffect) -> Self {
+        match effect {
+            CloseEffect::Acknowledged => Self::Acknowledged,
+            CloseEffect::NotSent(why) => Self::NotSent(why),
+            CloseEffect::Indeterminate(why) => Self::Indeterminate(why),
+            CloseEffect::ConfirmationRequired => Self::ConfirmationRequired,
+        }
     }
 }
 

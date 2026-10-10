@@ -381,3 +381,6 @@ fn a_renumbered_pin_reads_unchanged_until_its_file_moves() {
     append(&channel.source.path, &turn("second"));
     assert!(!snapshot.unchanged(&channel.legacy, channel.channel));
 }
+
+#[path = "adoption_past_stall_tests.rs"]
+mod past_stall;
