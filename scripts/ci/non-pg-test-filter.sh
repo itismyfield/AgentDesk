@@ -87,6 +87,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::intake_worker::replay_hold_tests
   --skip services::cluster::machine_resources::store::tests
   --skip services::discord::admin_host_guard::tests
+  --skip services::discord::commands::cancel_backstop_tests
   --skip services::discord::commands::control::clear_persist_failure_tests
   --skip services::discord::commands::control::home_fence::tests
   --skip services::discord::commands::control::input_clear::tests
@@ -150,6 +151,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::herdr_source::tests
   --skip services::discord::tui_prompt_relay::rehydration::tests::host_defer
   --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
@@ -589,6 +592,14 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rowless_turn_with_a_mid_stream_resume_baseline
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::soft_terminal_read_ending_in_a_split_scalar_baseline
   services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::configured_channel_binding_is_last_resort_and_provider_scoped
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::active_q_reinsert_and_real_kick_leave_one_provider_input_and_answer
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::autoheal::periodic_orphan_token_refusal_preserves_q_then_cancel_backstop_runs_it_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::bang_stop_with_dead_bridge_parks_then_owner_runs_q_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::live_foreign_row_survives_sweep_and_backstop
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::reclaimable_foreign_row_is_swept_then_backstop_runs_q_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::released_anchor_preserves_prior_tail_and_runs_q_exactly_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::restart_restores_q_and_inflight_then_runs_q_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::session_bound_row_keeps_its_anchor_despite_dead_pane
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_preserves_legacy_error_shape
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_uses_auth_token_expired_code
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::post_commit_failure_emits_result_and_quality_observability
@@ -805,6 +816,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::cluster::intake_worker::replay_hold_tests
   services::cluster::machine_resources::store::tests
   services::discord::admin_host_guard::tests
+  services::discord::commands::cancel_backstop_tests
   services::discord::commands::control::clear_persist_failure_tests
   services::discord::commands::control::home_fence::tests
   services::discord::commands::control::input_clear::tests
@@ -868,6 +880,8 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tui_prompt_relay::herdr_source::tests
   services::discord::tui_prompt_relay::rehydration::tests::host_defer
   services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
+  services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
   services::discord::turn_bridge::headless_delivery::production_seam_tests
