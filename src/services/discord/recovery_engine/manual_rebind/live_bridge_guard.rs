@@ -24,21 +24,23 @@ pub(crate) async fn rebind_inflight_for_channel(
     let permit = admit_input(provider, channel_id)?;
     let recovery = super::super::live_bridge::try_recovery(provider, channel_id)
         .map_err(|()| RebindError::InflightAlreadyExists)?;
-    recovery
-        .run(fence::effect::scope(permit, async {
-            rebind_inflight_for_channel_inner(
-                http,
-                shared,
-                provider,
-                channel_id,
-                tmux_session_override,
-                overrides,
-                None,
-                expected_episode,
-            )
-            .await
-        }))
-        .await
+    let (http, shared, provider) = (http.clone(), shared.clone(), provider.clone());
+    let expected_episode = expected_episode.cloned();
+    // An admitted rebind runs on the input worker, where its row writers are allowed.
+    fence::effect::run(permit, async move {
+        let rebind = rebind_inflight_for_channel_inner(
+            &http,
+            &shared,
+            &provider,
+            channel_id,
+            tmux_session_override,
+            overrides,
+            None,
+            expected_episode.as_ref(),
+        );
+        recovery.run(rebind).await
+    })
+    .await
 }
 
 pub(crate) async fn rebind_inflight_for_channel_with_minimum_start_offset(
@@ -53,21 +55,22 @@ pub(crate) async fn rebind_inflight_for_channel_with_minimum_start_offset(
     let permit = admit_input(provider, channel_id)?;
     let recovery = super::super::live_bridge::try_recovery(provider, channel_id)
         .map_err(|()| RebindError::InflightAlreadyExists)?;
-    recovery
-        .run(fence::effect::scope(permit, async {
-            rebind_inflight_for_channel_inner(
-                http,
-                shared,
-                provider,
-                channel_id,
-                tmux_session_override,
-                ManualRebindOverrides::default(),
-                minimum_initial_offset,
-                expected_episode,
-            )
-            .await
-        }))
-        .await
+    let (http, shared, provider) = (http.clone(), shared.clone(), provider.clone());
+    let expected_episode = expected_episode.cloned();
+    fence::effect::run(permit, async move {
+        let rebind = rebind_inflight_for_channel_inner(
+            &http,
+            &shared,
+            &provider,
+            channel_id,
+            tmux_session_override,
+            ManualRebindOverrides::default(),
+            minimum_initial_offset,
+            expected_episode.as_ref(),
+        );
+        recovery.run(rebind).await
+    })
+    .await
 }
 
 #[cfg(test)]

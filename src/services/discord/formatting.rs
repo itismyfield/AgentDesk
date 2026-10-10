@@ -241,7 +241,6 @@ mod status_panel_v2_formatter_tests;
 #[path = "formatting/replace_long_message.rs"]
 mod replace_long_message;
 
-#[cfg(test)]
 pub(in crate::services::discord) use self::replace_long_message::ReplaceLastChunkAnchor;
 // #5071 T1 S3a: the deferred receipt variant gained a production consumer — the
 // watcher's cutover short-replace arm, which needs the tail-continuation receipt
