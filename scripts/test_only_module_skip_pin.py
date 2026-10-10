@@ -53,6 +53,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/health/watcher_respawn/input_fence_tests.rs",
         "src/services/discord/recovery_engine/manual_rebind/live_bridge_guard_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_recovery_fence_tests.rs",
+        "src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs",
+        "src/services/discord/tmux_session_files/input_fence_tests.rs",
         "src/services/discord/runtime_bootstrap/shutdown_input_fence_tests.rs",
         "src/services/discord/tui_direct_pending_start/tests/input_effect_tests.rs",
         "src/services/claude_tui/hook_server/native_clear_fence_tests.rs",
@@ -99,6 +101,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/input_facts/resume_tests.rs",
         "src/services/discord/turn_presence/activity_tests.rs",
         "src/services/discord/turn_presence/admission_tests.rs",
+        "src/services/tui_o/writer/codex_adoption/judge_tests.rs",
+        "src/services/tui_o/writer/codex_adoption/plan_tests.rs",
+        "src/services/tui_o/writer/codex_adoption/probe_tests.rs",
         "src/services/discord/turn_presence/supervisor_tests.rs",
         "src/services/claude_tui/input/final_ready_tests.rs",
         "src/services/claude_tui/hook_server/codex_ingress_tests.rs",
@@ -499,6 +504,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/store/rotation/provenance_tests.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/provenance_tests.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/permission_tests.rs",
         "src/services/session_forwarding/home_stop_tests.rs",
         "src/server/routes/queue_api_home_stop_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs",
@@ -567,6 +573,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/turn_presence/admission.rs",
         "src/services/tmux_turn_liveness/tests_pg.rs",
         "src/test_env_panic_probe.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/permission.rs",
     }
 )
 

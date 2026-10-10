@@ -5,6 +5,7 @@ pub mod activation;
 pub mod actor;
 pub mod adoption;
 pub mod binding;
+pub mod codex_adoption;
 pub mod confirm;
 mod deferred;
 pub mod deliver;

@@ -1386,6 +1386,7 @@ src/
 │   │   │   ├── intake_delivery_sweep.rs
 │   │   │   ├── o_writer_host.rs
 │   │   │   ├── orphan_recovery.rs
+│   │   │   ├── orphan_recovery_fence_tests.rs
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   ├── queued_recovery_fence_tests.rs
@@ -1482,6 +1483,8 @@ src/
 │   │   │   ├── host_guard.rs
 │   │   │   ├── host_guard_tests.rs
 │   │   │   └── retirement_await_tests.rs
+│   │   ├── tmux_session_files/
+│   │   │   └── input_fence_tests.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── cancel_handoff/
 │   │   │   │   ├── completion.rs
@@ -2399,6 +2402,16 @@ src/
 │   │   │   ├── rotation_tests.rs
 │   │   │   └── spool.rs
 │   │   ├── writer/
+│   │   │   ├── codex_adoption/
+│   │   │   │   ├── coord.rs
+│   │   │   │   ├── fold.rs
+│   │   │   │   ├── judge.rs
+│   │   │   │   ├── judge_tests.rs
+│   │   │   │   ├── plan.rs
+│   │   │   │   ├── plan_tests.rs
+│   │   │   │   ├── probe.rs
+│   │   │   │   ├── probe_tests.rs
+│   │   │   │   └── scan.rs
 │   │   │   ├── input_facts/
 │   │   │   │   ├── reactions.rs
 │   │   │   │   ├── resume_tests.rs
@@ -2413,6 +2426,7 @@ src/
 │   │   │   ├── binding.rs
 │   │   │   ├── canary_policy_tests.rs
 │   │   │   ├── clear_launch_tests.rs
+│   │   │   ├── codex_adoption.rs
 │   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deferred.rs
@@ -2456,6 +2470,7 @@ src/
 │   │   ├── exact_episode_tests.rs
 │   │   ├── exact_pg.rs
 │   │   ├── exact_pg_tests.rs
+│   │   ├── exact_submission.rs
 │   │   ├── ownership.rs
 │   │   ├── shadow_host.rs
 │   │   ├── topology.rs
@@ -2473,7 +2488,9 @@ src/
 │   │   │   ├── codex_verified/
 │   │   │   │   ├── provenance/
 │   │   │   │   │   ├── dormant.rs
-│   │   │   │   │   └── dormant_tests.rs
+│   │   │   │   │   ├── dormant_tests.rs
+│   │   │   │   │   ├── permission.rs
+│   │   │   │   │   └── permission_tests.rs
 │   │   │   │   └── provenance.rs
 │   │   │   ├── adopt_skip.rs
 │   │   │   ├── binding_access.rs

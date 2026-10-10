@@ -217,6 +217,11 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             continue;
         }
 
+        if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
+            owned_sessions.insert(*channel_id, channel_name.clone()); // protected: owner only
+            continue;
+        }
+
         if let Some(started) = super::super::super::mailbox_snapshot(&shared, *channel_id)
             .await
             .recovery_started_at
@@ -654,6 +659,9 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             );
             continue;
         }
+        if boot_skip(BootTarget::Channel(&provider, pw.channel_id.get())) {
+            continue;
+        }
 
         if pw.restored_turn.is_none() {
             reconcile_orphan_suppressed_placeholder_for_restored_watcher(
@@ -879,6 +887,9 @@ async fn clean_dead_startup_session(
     dc: &DeadSessionCleanup,
     effects: &impl DeadSessionEffects,
 ) -> bool {
+    if boot_skip(BootTarget::Channel(provider, dc.channel_id)) {
+        return false;
+    }
     let tmux_name = provider.build_tmux_session_name(&dc.channel_name);
     let session_key = super::super::super::adk_session::build_namespaced_session_key(
         token_hash, provider, &tmux_name,
@@ -1080,6 +1091,43 @@ mod keyed_teardown_tests {
                 crate::services::tmux_common::session_temp_path(&session_name, "exit_reason");
             let killed = std::path::Path::new(&exit_reason).exists();
             assert_eq!(killed, cleaned, "{channel_name}");
+        }
+        pool.close().await;
+        db.drop().await;
+    }
+
+    // A protected channel's dead session waits for its move or handback even when the
+    // guard admits its row; an unprotected sibling with the same row is cleaned.
+    #[tokio::test]
+    async fn c2b_startup_cleanup_leaves_a_protected_channel_alone_pg() {
+        use crate::services::discord::input_runtime::fence::{Gate, test_health};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let claude = ProviderKind::Claude;
+        let (protected, legacy) = (6_325_573_001u64, 6_325_573_002u64);
+        let gate = Gate::protect(claude.clone(), protected).unwrap();
+        let _health = test_health::Clear::new(&gate);
+        for (channel, cleaned) in [(protected, false), (legacy, true)] {
+            let channel_name = format!("c2b2a-start-{channel}");
+            let session_name = claude.build_tmux_session_name(&channel_name);
+            let key = build_namespaced_session_key(TOKEN, &claude, &session_name);
+            seed_session_row_keyed(&pool, &key, channel, None).await;
+            let _pane = PaneLivenessOverrideGuard::set(&session_name, DeadOrAbsent);
+            let dc = DeadSessionCleanup::probe(channel, &channel_name, &session_name);
+            let dc = dc.await.expect("a dead pane is a candidate");
+            let effects = Recorded::default();
+            let done = clean_dead_startup_session(Some(&pool), TOKEN, &claude, &dc, &effects);
+            assert_eq!(done.await, cleaned, "{channel_name}");
+            let changed: &[&str] = if cleaned {
+                &["fail_dispatch", "idle"]
+            } else {
+                &[]
+            };
+            assert_eq!(*effects.0.lock().unwrap(), changed, "{channel_name}");
+            let exit_reason =
+                crate::services::tmux_common::session_temp_path(&session_name, "exit_reason");
+            assert_eq!(std::path::Path::new(&exit_reason).exists(), cleaned);
         }
         pool.close().await;
         db.drop().await;
