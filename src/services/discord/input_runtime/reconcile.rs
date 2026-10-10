@@ -7,6 +7,8 @@ use super::fence::modes::TRANSITION_HELD;
 pub(crate) enum HoldCause {
     BindingUnreadable,
     LedgerUnreadable,
+    MappedThread,
+    MappingUnavailable,
     ModeRefused(&'static str),
     TransitionHeld(&'static str),
     Unbound(Vec<u64>),
@@ -20,6 +22,8 @@ impl HoldCause {
         match self {
             Self::BindingUnreadable => "binding",
             Self::LedgerUnreadable => "ledger",
+            Self::MappedThread => "mapped_thread",
+            Self::MappingUnavailable => "mapping_unavailable",
             Self::ModeRefused(_) => "mode",
             Self::TransitionHeld(_) => "transition",
             Self::Unbound(_) => "unbound",
@@ -34,6 +38,10 @@ impl HoldCause {
                 format!("input_reconcile_required {at} reason=binding_unreadable")
             }
             Self::LedgerUnreadable => format!("ledger_unreadable {at}"),
+            Self::MappedThread => format!("{TRANSITION_HELD} {at} reason=mapped_thread"),
+            Self::MappingUnavailable => {
+                format!("{TRANSITION_HELD} {at} reason=mapping_unavailable")
+            }
             Self::ModeRefused(reason) => format!("turn_mode_refused {at} reason={reason}"),
             Self::InputHeld(reason, head, held) => {
                 format!("input_reconcile_required {at} reason={reason} head={head} held={held}")

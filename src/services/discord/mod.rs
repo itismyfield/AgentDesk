@@ -6,6 +6,8 @@ pub(crate) mod agentdesk_config;
 mod answer_flush_barrier;
 pub(crate) mod bot_role;
 mod busy_followup_retry_store;
+#[cfg(unix)]
+pub(crate) mod herdr_terminate;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;
 mod commands;
@@ -58,6 +60,7 @@ mod queue_dispatch;
 mod queue_io;
 mod queue_marker;
 mod queue_overflow_dlq;
+mod queue_park_ledger;
 mod queue_reactions;
 // #5191: catch-up recovery dedup identity set (queue + active + reservation).
 mod queued_placeholders_store;
@@ -95,9 +98,13 @@ mod role_map;
 mod role_map_enrichment;
 mod router;
 mod runtime_bootstrap;
+#[cfg(test)]
+pub use runtime_bootstrap::boot_retirement;
 pub(in crate::services::discord) mod semantic_boundaries;
 mod skills_scan;
 mod turn_presence;
+#[cfg(all(test, unix))]
+pub(crate) use turn_presence::lifecycle::Runtime as PresenceRuntime;
 mod turn_teardown_clearance;
 // #1446 stall-deadlock recovery: shared post-clear bookkeeping for the THREAD-GUARD
 // + stall-watchdog cleanup paths so neither leaks `global_active` / cancel tokens.
@@ -181,6 +188,8 @@ pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
 mod tui_task_card;
 mod turn_bridge;
+#[cfg(test)]
+pub(crate) use turn_bridge::replay_policy;
 #[allow(clippy::too_many_arguments)]
 mod turn_finalizer;
 pub(crate) mod turn_lease;
@@ -223,11 +232,13 @@ pub(in crate::services::discord) use catch_up::{
     CatchUpRetryState, catch_up_missed_messages, catch_up_missed_messages_for_retry,
     should_trigger_catch_up_retry, take_catch_up_retry_checkpoint_after_queue_drain,
 };
+#[cfg(test)]
+pub(in crate::services::discord) use mailbox_finish::mailbox_finish_cancelled_turn;
 pub(in crate::services::discord) use mailbox_finish::{
     MailboxLookup, mailbox_clear_channel, mailbox_clear_recovery_marker,
-    mailbox_finish_cancelled_turn, mailbox_finish_cancelled_turn_on, mailbox_finish_judged_turn,
-    mailbox_finish_turn, mailbox_finish_turn_if_matches,
-    mailbox_finish_turn_if_matches_episode_started_before, unavailable_finish_turn_result,
+    mailbox_finish_cancelled_turn_on, mailbox_finish_judged_turn, mailbox_finish_turn,
+    mailbox_finish_turn_if_matches, mailbox_finish_turn_if_matches_episode_started_before,
+    unavailable_finish_turn_result,
 };
 #[cfg(unix)]
 pub(in crate::services::discord) use mailbox_probe::{
@@ -935,6 +946,7 @@ pub(crate) struct SharedData {
     pub(super) core: Mutex<CoreState>,
     /// Per-channel request lifecycle actor registry.
     mailboxes: ChannelMailboxRegistry,
+    queue_park_ledger: queue_park_ledger::QueueParkLedger,
     /// Serializes `/resume` rebinds with intake session selection for each channel.
     /// Weak entries let inactive channels disappear once the final intake/resume
     /// guard drops; the map is opportunistically pruned on each lookup, so channel
@@ -1271,6 +1283,7 @@ fn make_shared_data_for_tests_with_storage_and_intake_capabilities(
             active_meetings: std::collections::HashMap::new(),
         }),
         mailboxes: ChannelMailboxRegistry::default(),
+        queue_park_ledger: Default::default(),
         session_transition_locks: dashmap::DashMap::new(),
         settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
         api_timestamps: dashmap::DashMap::new(),
@@ -1893,6 +1906,7 @@ async fn apply_queue_exit_feedback(
     channel_id: ChannelId,
     queue_exit_events: &[QueueExitEvent],
 ) {
+    shared.queue_park_ledger.exit(channel_id, queue_exit_events);
     let queue_exit_events: Vec<&QueueExitEvent> = queue_exit_events
         .iter()
         .filter(|event| event.intervention.author_id.get() > 1)

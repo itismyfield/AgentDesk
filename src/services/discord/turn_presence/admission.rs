@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use super::activity::Reading;
+use super::lifecycle::Ticket;
 use crate::services::cluster::channel_home::{self, HomeGate, HomeOwnership};
 use crate::services::tui_o::ownership::{self, GatewayOwnership, OwnershipGate};
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
@@ -27,6 +28,14 @@ enum Owner {
 }
 
 impl Owner {
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Home(a, x), Self::Home(b, y)) => Arc::ptr_eq(a, b) && x == y,
+            (Self::Gateway(a, x), Self::Gateway(b, y)) => Arc::ptr_eq(a, b) && x == y,
+            _ => false,
+        }
+    }
+
     fn current(identity: &Identity) -> Option<Self> {
         if let Some(home) = channel_home::registered_channel(identity.channel) {
             return match home.ownership() {
@@ -73,25 +82,48 @@ impl Incarnation {
         *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    pub(super) fn replace(&self, identity: Identity) -> bool {
+    pub(super) fn replace(&self, ticket: &Ticket, identity: Identity) -> bool {
         let owner = (identity.channel != 0 && identity.bot_id != 0)
             .then(|| Owner::current(&identity))
             .flatten();
-        let mut current = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        *current = owner.map(|owner| Current {
-            token: Arc::new(()),
-            identity,
-            owner,
-        });
-        current.is_some()
+        ticket
+            .with_current(|registration| {
+                if ticket.channel() != identity.channel
+                    || !std::ptr::eq(self, registration.incarnation.as_ref())
+                {
+                    return false;
+                }
+                let mut current = self.0.lock().unwrap_or_else(|e| e.into_inner());
+                if let (Some(current), Some(owner)) = (current.as_ref(), owner.as_ref())
+                    && current.identity == identity
+                    && current.owner.same(owner)
+                {
+                    return true;
+                }
+                registration.advance_ticket();
+                *current = owner.map(|owner| Current {
+                    token: Arc::new(()),
+                    identity,
+                    owner,
+                });
+                current.is_some()
+            })
+            .unwrap_or(false)
     }
 
-    pub(super) fn approve(self: &Arc<Self>, reading: Reading) -> Option<Approval> {
+    pub(super) fn approve(self: &Arc<Self>, ticket: &Ticket, reading: Reading) -> Option<Approval> {
+        ticket
+            .admit(self, || self.approve_current(ticket, reading))
+            .flatten()
+    }
+
+    fn approve_current(self: &Arc<Self>, ticket: &Ticket, reading: Reading) -> Option<Approval> {
         let current = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let current = current.as_ref()?;
         let token = reading.with_busy(&current.identity, || current.token.clone())?;
         Some(Approval {
             incarnation: self.clone(),
+            ticket: ticket.clone(),
             token,
             reading,
         })
@@ -101,6 +133,7 @@ impl Incarnation {
 /// Never serialized or restored: a receiving process approves its own fresh Reading.
 pub(super) struct Approval {
     incarnation: Arc<Incarnation>,
+    ticket: Ticket,
     token: Arc<()>,
     reading: Reading,
 }
@@ -120,7 +153,7 @@ impl<F: Future> Started<F> {
 }
 
 impl Approval {
-    /// First poll occurs under mode, incarnation, Reading and owner locks; responses await outside.
+    /// First poll holds mode, lifecycle, incarnation, source-log, Reading and owner fences.
     pub(super) async fn start<F: Future>(
         self,
         bot_id: u64,
@@ -131,24 +164,38 @@ impl Approval {
         poll_fn(|cx| {
             Poll::Ready(
                 turn_mode::admit_effect(actual_channel, true, || {
-                    let current = self.incarnation.0.lock().unwrap_or_else(|e| e.into_inner());
-                    let current = current.as_ref()?;
-                    if !Arc::ptr_eq(&current.token, &self.token)
-                        || bot_id != current.identity.bot_id
-                        || actual_channel != current.identity.channel
-                    {
-                        return None;
-                    }
-                    let request = request.take()?;
-                    self.reading
-                        .with_busy(&current.identity, || {
-                            current.owner.admit(current.identity.channel, || {
-                                let mut future = Box::pin(request());
-                                match future.as_mut().poll(cx) {
-                                    Poll::Ready(output) => Started::Ready(output),
-                                    Poll::Pending => Started::Pending(future),
-                                }
-                            })
+                    self.ticket
+                        .admit(&self.incarnation, || {
+                            let current =
+                                self.incarnation.0.lock().unwrap_or_else(|e| e.into_inner());
+                            let current = current.as_ref()?;
+                            if !Arc::ptr_eq(&current.token, &self.token)
+                                || bot_id != current.identity.bot_id
+                                || actual_channel != current.identity.channel
+                            {
+                                return None;
+                            }
+                            let request = request.take()?;
+                            crate::services::tui_prompt_dedupe::binding_events::admit_committed_seq(
+                                current.identity.channel,
+                                current.identity.binding_seq,
+                                || {
+                                    self.reading
+                                        .with_busy(&current.identity, || {
+                                            current.owner.admit(current.identity.channel, || {
+                                                let mut future = Box::pin(request());
+                                                match future.as_mut().poll(cx) {
+                                                    Poll::Ready(output) => Started::Ready(output),
+                                                    Poll::Pending => Started::Pending(future),
+                                                }
+                                            })
+                                        })
+                                        .flatten()
+                                },
+                            )
+                            .ok()
+                            .flatten()
+                            .flatten()
                         })
                         .flatten()
                 })

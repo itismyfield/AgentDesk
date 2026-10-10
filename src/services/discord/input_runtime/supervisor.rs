@@ -10,6 +10,9 @@ use std::time::Duration;
 
 use tokio::sync::{OwnedMutexGuard, watch};
 
+use self::command::{ScanCommit, SupervisorCmd};
+use self::ordering::AdmissionOrder;
+use self::receipt::{Deferred, Receipt};
 use super::clear::{self, ClearHost, Step, Unresolved};
 use super::fence::{self, Closing, Failure, Gate, Mode};
 use super::reconcile::{self, HoldCause};
@@ -18,6 +21,24 @@ use crate::services::tui_input::ledger::{Ledger, LedgerLease, LedgerSlot, Presen
 use crate::services::tui_input::transition::{self, Host, Move, Outcome};
 use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents};
 
+#[path = "admission.rs"]
+pub(crate) mod admission;
+#[path = "command.rs"]
+pub(crate) mod command;
+#[path = "external.rs"]
+pub(crate) mod external;
+#[path = "mapping.rs"]
+pub(crate) mod mapping;
+#[path = "ordering.rs"]
+pub(crate) mod ordering;
+#[path = "receipt.rs"]
+pub(crate) mod receipt;
+#[path = "source.rs"]
+pub(crate) mod source;
+#[cfg(test)]
+pub(crate) fn mutant(name: &str) -> bool {
+    std::env::var("ADK_TEST_INPUT_G1A_MUTANT").is_ok_and(|value| value == name)
+}
 pub(crate) mod drive;
 
 /// Retries per boot for a held stage; an exhausted stage stays held until the next boot.
@@ -129,13 +150,33 @@ impl Registration {
     }
 
     pub(crate) fn report(&self, cause: &HoldCause, held: bool) {
+        // Receipt success clears only its own marker, preserving other held stages.
+        let slot = match cause {
+            HoldCause::TransitionHeld(reason)
+                if matches!(
+                    *reason,
+                    "ledger_receipt_identity_missing"
+                        | "ledger_receipt_unconfirmed"
+                        | "ledger_close_flush_unconfirmed"
+                ) =>
+            {
+                *reason
+            }
+            _ => cause.slot(),
+        };
+        #[cfg(test)]
+        let slot = if mutant("receipt_health_slot") {
+            cause.slot()
+        } else {
+            slot
+        };
         let mut entries = (self.registry.entries.lock()).unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = entries.get_mut(&self.key).filter(|e| !e.poisoned) {
             match held {
                 true => entry
                     .health
-                    .insert(cause.slot(), cause.health(&self.key.0, self.key.1)),
-                false => entry.health.remove(cause.slot()),
+                    .insert(slot, cause.health(&self.key.0, self.key.1)),
+                false => entry.health.remove(slot),
             };
         }
     }
@@ -300,6 +341,9 @@ pub(crate) enum Landing {
 pub(crate) trait Ports: Send + 'static {
     type Clear: ClearHost;
     type Move: Host + Send + 'static;
+    /// Reads the actual writer map synchronously; unverified registration/provider coverage
+    /// returns Unavailable. No map reference may escape this call.
+    fn mapping(&self, channel: u64) -> mapping::Check;
     /// Freezes the drained channel's Legacy queue.
     fn freeze(&mut self, closing: Arc<Closing>) -> Step<'_, Result<(), Failure>>;
     /// A clear host with the session transition guard its resume runs under.
@@ -331,6 +375,11 @@ pub(crate) struct Supervisor<P: Ports> {
     movement: Option<Move>,
     sent: BTreeSet<(Option<u64>, &'static str)>,
     admitted: bool,
+    order: AdmissionOrder,
+    admission_gen: u64,
+    closed: bool,
+    #[cfg(test)]
+    pub(crate) after_receipt_io: Option<ordering::PendingOverflow>,
     #[cfg(test)]
     pub(crate) handbacks: usize,
 }
@@ -348,6 +397,7 @@ impl<P: Ports> Supervisor<P> {
     ) -> Result<Self, Refused> {
         let mut registration = registry.register(&config.provider, config.channel, &config.root)?;
         let slot = registration.slot().ok_or(Refused::Duplicate)?;
+        let order = AdmissionOrder::new(config.provider.clone(), config.channel, 1, 0);
         Ok(Self {
             config,
             ports,
@@ -359,6 +409,11 @@ impl<P: Ports> Supervisor<P> {
             movement: None,
             sent: BTreeSet::new(),
             admitted: false,
+            order,
+            admission_gen: 1,
+            closed: false,
+            #[cfg(test)]
+            after_receipt_io: None,
             #[cfg(test)]
             handbacks: 0,
         })
@@ -366,7 +421,18 @@ impl<P: Ports> Supervisor<P> {
 
     /// The ledger owns the channel and no clear, loan or close is outstanding.
     pub(crate) fn admission_open(&self) -> bool {
-        self.admitted && !self.slot.loaned()
+        let closed = self.closed;
+        #[cfg(test)]
+        let closed = closed && !mutant("close_allows_commit");
+        self.admitted && !closed && !self.slot.loaned()
+    }
+
+    pub(crate) fn pending_overflow(&self) -> ordering::PendingOverflow {
+        self.order.pending_overflow()
+    }
+
+    pub(crate) fn pending_snapshot(&self) -> ordering::PendingSource {
+        self.order.pending_snapshot()
     }
 
     pub(crate) fn cursor(&mut self) -> Option<&mut Cursor> {
@@ -385,11 +451,208 @@ impl<P: Ports> Supervisor<P> {
     pub(crate) async fn boot(&mut self) -> Landing {
         // Each boot must pass every stage again, so an earlier admission never outlives it.
         self.admitted = false;
+        self.invalidate_order();
         match self.stages().await {
             Ok(landing) => landing,
             Err(cause) => {
                 self.registration.report(&cause, true);
                 Landing::Held(cause)
+            }
+        }
+    }
+
+    fn invalidate_order(&mut self) {
+        match self.admission_gen.checked_add(1) {
+            Some(epoch) => {
+                self.admission_gen = epoch;
+                self.order.invalidate(epoch);
+            }
+            None => self.admitted = false,
+        }
+    }
+
+    /// All receipt work borrows the existing slot; readiness for Enter is a separate decision.
+    async fn input_command(&mut self, command: SupervisorCmd, receipt_open: bool) {
+        use crate::services::tui_input::rows::receipt_identity::Responsibility;
+        match command {
+            SupervisorCmd::Clear => {}
+            SupervisorCmd::Close { ack } => {
+                self.closed = true;
+                self.invalidate_order();
+                let result = loan(&mut self.slot, |lease| {
+                    let result = lease.get().and_then(|ledger| ledger.rows()).map(|_| ());
+                    lease.needs_reopen |= result.is_err();
+                    result
+                })
+                .await
+                .ok_or(Deferred::SupervisorLost)
+                .and_then(|result| result.map_err(|_| Deferred::Persistence));
+                self.registration
+                    .report(&held("ledger_close_flush_unconfirmed"), result.is_err());
+                let _ = ack.send(result);
+            }
+            SupervisorCmd::FetchTicket { reply } => {
+                let _ = reply.send(self.order.fetch_ticket(self.admission_gen));
+            }
+            SupervisorCmd::PendingSource { sources, reply } => {
+                let _ = reply.send(self.order.admit_pending(&sources));
+            }
+            SupervisorCmd::SubmitExternal { source, reply } => {
+                // Captured before the loan, which itself closes admission while it lasts.
+                let admit_new = receipt_open
+                    && self.admission_open()
+                    && !ordering::order_barrier(&self.config.provider, self.config.channel);
+                let result = if source.identity().execution_channel_id != self.config.channel {
+                    external::ExternalReceipt::Deferred(Deferred::Conflict)
+                } else {
+                    loan(&mut self.slot, move |lease| {
+                        external::submit(lease, *source, admit_new)
+                    })
+                    .await
+                    .unwrap_or(external::ExternalReceipt::Deferred(
+                        Deferred::SupervisorLost,
+                    ))
+                };
+                let persistence = external::ExternalReceipt::Deferred(Deferred::Persistence);
+                self.registration
+                    .report(&held("ledger_receipt_unconfirmed"), result == persistence);
+                let _ = reply.send(result);
+            }
+            SupervisorCmd::LookupResponsibility { identity, reply } => {
+                let result = if identity.execution_channel_id != self.config.channel {
+                    Responsibility::Conflict
+                } else {
+                    loan(&mut self.slot, move |lease| {
+                        lease
+                            .get()
+                            .and_then(|ledger| ledger.rows())
+                            .map(|rows| rows.responsibility(&identity))
+                            .unwrap_or(Responsibility::Unknown)
+                    })
+                    .await
+                    .unwrap_or(Responsibility::Unknown)
+                };
+                let _ = reply.send(result);
+            }
+            SupervisorCmd::BeginScan {
+                ticket,
+                sources,
+                horizon,
+                complete_fetch,
+                reply,
+            } => {
+                let result = self.order.begin_scan(
+                    ticket,
+                    self.admission_gen,
+                    sources,
+                    horizon,
+                    complete_fetch,
+                );
+                let _ = reply.send(result);
+            }
+            SupervisorCmd::CommitFromScan {
+                source,
+                mut capability,
+                reply,
+            } => {
+                let key = source.key();
+                let sources = source.identity().source_ids.clone();
+                let permits_new = self
+                    .order
+                    .permits_sources(&capability, self.admission_gen, &sources)
+                    .is_ok();
+                let mut attempted = false;
+                let result = if !receipt_open || !self.admission_open() {
+                    Receipt::Deferred(Deferred::Closed)
+                } else if source.identity().execution_channel_id != self.config.channel
+                    || (!permits_new
+                        && self
+                            .order
+                            .permits(&capability, self.admission_gen, key)
+                            .is_err())
+                {
+                    Receipt::Deferred(Deferred::Order)
+                } else {
+                    attempted = true;
+                    loan(&mut self.slot, move |lease| {
+                        receipt::commit(lease, *source, permits_new)
+                    })
+                    .await
+                    .unwrap_or(Receipt::Deferred(Deferred::SupervisorLost))
+                };
+                self.registration.report(
+                    &held("ledger_receipt_unconfirmed"),
+                    result == Receipt::Deferred(Deferred::Persistence),
+                );
+                let durable = matches!(
+                    &result,
+                    Receipt::Accepted(_)
+                        | Receipt::DuplicateQueued(_)
+                        | Receipt::LegacyResponsibility(_)
+                );
+                #[cfg(test)]
+                if attempted && let Some(overflow) = self.after_receipt_io.take() {
+                    overflow.mark_dirty();
+                }
+                let settlement = match &result {
+                    Receipt::Accepted(_) => {
+                        self.order
+                            .settle_sources(&mut capability, self.admission_gen, &sources)
+                    }
+                    Receipt::DuplicateQueued(_) | Receipt::LegacyResponsibility(_) => {
+                        let whole_prefix = permits_new;
+                        #[cfg(test)]
+                        let whole_prefix = whole_prefix && !mutant("primary_key_only_settle");
+                        if whole_prefix {
+                            self.order
+                                .settle_sources(&mut capability, self.admission_gen, &sources)
+                        } else {
+                            self.order.settle(&mut capability, self.admission_gen, key)
+                        }
+                    }
+                    Receipt::Deferred(_) => {
+                        let whole_prefix = permits_new;
+                        #[cfg(test)]
+                        let whole_prefix = whole_prefix && !mutant("primary_key_only_defer");
+                        let head = if whole_prefix { sources[0] } else { key };
+                        self.order.defer(&capability, self.admission_gen, head)
+                    }
+                };
+                let unresolved = attempted && matches!(&result, Receipt::Deferred(_));
+                #[cfg(test)]
+                let unresolved = unresolved && !mutant("drop_uncertain_retry");
+                let retain = (durable || unresolved) && settlement.is_err();
+                #[cfg(test)]
+                let retain = retain && !mutant("drop_settlement_retry");
+                if retain {
+                    // Only the scope checked before the loan becomes a retry obligation.
+                    if permits_new {
+                        self.order.pending(&sources);
+                    } else {
+                        self.order.pending(&[key]);
+                    }
+                }
+                let _ = reply.send(ScanCommit {
+                    receipt: result,
+                    settlement,
+                    capability,
+                });
+            }
+            SupervisorCmd::SettleFromScan {
+                source,
+                disposition: _,
+                mut capability,
+                reply,
+            } => {
+                let result = self
+                    .order
+                    .settle(&mut capability, self.admission_gen, source)
+                    .map(|()| capability);
+                let _ = reply.send(result);
+            }
+            SupervisorCmd::CompleteScan { capability, reply } => {
+                let result = self.order.complete(capability, self.admission_gen);
+                let _ = reply.send(result);
             }
         }
     }
@@ -425,6 +688,9 @@ impl<P: Ports> Supervisor<P> {
             }
             tokio::time::sleep(transition::backoff(attempt - 1)).await;
         }
+        if self.config.request == Request::Ledger {
+            self.check_mapping()?;
+        }
         if gate.mode() == Mode::Closing {
             (self.ports.freeze(closing.clone()).await).map_err(|_| held("freeze"))?;
         }
@@ -446,6 +712,22 @@ impl<P: Ports> Supervisor<P> {
         }
         self.resume_clear().await?;
         self.transition(&closing, history).await
+    }
+
+    // An unavailable lookup preserves the last mapping hold; only a fresh empty scan clears it.
+    fn check_mapping(&mut self) -> Result<(), HoldCause> {
+        let mapped = match self.ports.mapping(self.config.channel) {
+            mapping::Check::Empty => false,
+            mapping::Check::MappedThread => true,
+            mapping::Check::Unavailable => return Err(HoldCause::MappingUnavailable),
+        };
+        self.registration
+            .report(&HoldCause::MappingUnavailable, false);
+        if mapped {
+            return Err(HoldCause::MappedThread);
+        }
+        self.registration.report(&HoldCause::MappedThread, false);
+        Ok(())
     }
 
     /// S5: settles a clear cutoff a crash left behind before anything else touches the ledger.

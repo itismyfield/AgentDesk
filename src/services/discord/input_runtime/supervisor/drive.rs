@@ -6,6 +6,9 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{OwnedMutexGuard, mpsc};
 
+use crate::services::discord::input_runtime::supervisor::admission::Admission;
+pub(crate) use crate::services::discord::input_runtime::supervisor::command::SupervisorCmd;
+
 use super::{BUDGET, Cursor, Ports, Supervisor, clear_loan, held, loan};
 use crate::services::discord::input_runtime::clear::{self, ClearHost, Outcome, Unresolved};
 use crate::services::discord::input_runtime::fence::{self, Closing};
@@ -226,10 +229,6 @@ pub(crate) const HOLD_GRACE: Duration = READY_WINDOW;
 pub(crate) const TICK: Duration = Duration::from_secs(1);
 const POLL_BYTES: u64 = 1 << 20;
 
-pub(crate) enum SupervisorCmd {
-    Clear,
-}
-
 /// What the drive needs beyond the supervisor's ports; production builds them in G2.
 pub(crate) trait DrivePorts: Send + 'static {
     type Pane: Pane + Send + 'static;
@@ -246,7 +245,7 @@ pub(crate) struct Built<Pn> {
 }
 
 #[derive(Default)]
-struct Clearing {
+pub(super) struct Clearing {
     retries: u32,
     at: Option<Instant>,
     reset: bool,
@@ -269,7 +268,7 @@ pub(crate) struct ChannelDrive<D: DrivePorts> {
     ready: bool,
     unreadable: bool,
     lost: bool,
-    clearing: Option<Clearing>,
+    pub(super) clearing: Option<Clearing>,
     hold: Option<(&'static str, Instant)>,
     #[cfg(test)]
     pub(crate) counts: Counts,
@@ -400,14 +399,59 @@ impl<P: Ports> Supervisor<P> {
             };
             match command {
                 Some(SupervisorCmd::Clear) => self.clear(&mut drive, Instant::now()).await,
+                Some(SupervisorCmd::Close { ack }) => {
+                    self.gate(&mut drive, false);
+                    self.input_command(SupervisorCmd::Close { ack }, false)
+                        .await;
+                }
+                Some(command) => {
+                    let latest = self.cursor.as_mut().map_or(Ok(Vec::new()), |cursor| {
+                        if drive.unreadable {
+                            cursor.recover()
+                        } else {
+                            cursor.read()
+                        }
+                    });
+                    if drive.unreadable || !latest.as_ref().is_ok_and(|events| events.is_empty()) {
+                        self.tick(&mut drive, latest, Instant::now()).await;
+                    }
+                    let mode =
+                        fence::lookup(&self.config.provider, self.config.channel).map(|g| g.mode());
+                    let admission = self.receipt_admission(&drive, mode);
+                    self.input_command(command, admission.receipt_open).await;
+                }
                 None => return self.stop_drive(drive),
             }
             woke = (self.cursor.as_mut()).map_or(Ok(Vec::new()), |c| c.reread(unreadable));
         }
     }
 
+    pub(super) fn receipt_admission<D: DrivePorts>(
+        &self,
+        drive: &ChannelDrive<D>,
+        mode: Option<fence::Mode>,
+    ) -> Admission {
+        let clear = drive.clearing.is_none();
+        #[cfg(test)]
+        let clear = clear || super::mutant("drop_clear_check");
+        Admission::new(
+            self.admission_open()
+                && drive.ready
+                && clear
+                && !drive.lost
+                && !drive.unreadable
+                && matches!(
+                    mode,
+                    Some(fence::Mode::Frozen | fence::Mode::Held | fence::Mode::LedgerOpen)
+                ),
+            // Fresh pane and facts proof belongs to the actor's step.
+            false,
+        )
+    }
+
     /// Ends the drive; a ready gate is held, so nothing submits until a later S8 opens it.
     pub(crate) fn stop_drive<D: DrivePorts>(&mut self, mut drive: ChannelDrive<D>) {
+        self.invalidate_order();
         self.gate(&mut drive, false);
     }
 
@@ -419,6 +463,9 @@ impl<P: Ports> Supervisor<P> {
         woke: Result<Vec<BindingEvent>, String>,
         now: Instant,
     ) {
+        if woke.is_err() || woke.as_ref().is_ok_and(|events| !events.is_empty()) {
+            self.invalidate_order();
+        }
         drive.unreadable = woke.is_err();
         let events = woke.unwrap_or_default();
         let advanced = !events.is_empty();
@@ -447,11 +494,20 @@ impl<P: Ports> Supervisor<P> {
         let rows = rows.and_then(Result::ok);
         self.registration
             .report(&HoldCause::LedgerUnreadable, rows.is_none());
-        let ready = self.admission_open() && drive.clearing.is_none() && !drive.lost;
+        let missing_identity = rows
+            .as_ref()
+            .is_some_and(|rows| rows.receipt_identity_missing());
+        self.registration
+            .report(&held("ledger_receipt_identity_missing"), missing_identity);
+        let ready =
+            self.admission_open() && drive.clearing.is_none() && !drive.lost && !missing_identity;
         self.gate(drive, ready && rows.is_some());
         let (Some(rows), true, false) = (rows, drive.ready, drive.unreadable) else {
             return;
         };
+        if !self.order.offer_ready() {
+            return;
+        }
         let Some((key, row)) = actor::head(&rows) else {
             return self.hold(drive, None, now).await;
         };
@@ -531,6 +587,7 @@ impl<P: Ports> Supervisor<P> {
 
     /// A user clear while driving: submission stops at once and resumes only once it settles.
     pub(crate) async fn clear<D: DrivePorts>(&mut self, drive: &mut ChannelDrive<D>, now: Instant) {
+        self.invalidate_order();
         drive.clearing = Some(Clearing::default());
         self.gate(drive, false);
         let outcome = match self.ports.clear().await {
@@ -561,7 +618,10 @@ impl<P: Ports> Supervisor<P> {
             ))
         );
         match outcome {
-            Some(Outcome::Cleared | Outcome::Idle | Outcome::Refused(_)) => drive.clearing = None,
+            Some(Outcome::Cleared | Outcome::Idle | Outcome::Refused(_)) => {
+                drive.clearing = None;
+                self.invalidate_order();
+            }
             _ if retry && clearing.retries < BUDGET => {
                 clearing.reset = outcome == Some(Outcome::Held(Unresolved::ResetUnconfirmed));
                 clearing.at = Some(now + transition::backoff(clearing.retries));
@@ -581,8 +641,10 @@ impl<P: Ports> Supervisor<P> {
     }
 
     /// Opens the gate once when submission becomes ready and holds it once when it stops.
-    fn gate<D: DrivePorts>(&mut self, drive: &mut ChannelDrive<D>, ready: bool) {
-        if ready == drive.ready {
+    pub(super) fn gate<D: DrivePorts>(&mut self, drive: &mut ChannelDrive<D>, ready: bool) {
+        let frozen = fence::lookup(&self.config.provider, self.config.channel)
+            .is_some_and(|gate| gate.mode() == fence::Mode::Frozen);
+        if ready == drive.ready && (ready || !frozen) {
             return;
         }
         #[cfg(test)]
@@ -597,6 +659,12 @@ impl<P: Ports> Supervisor<P> {
         // The slot is shared with other transition holds, so only an opened gate clears it.
         if moved.is_err() || ready {
             self.registration.report(&held("gate_mode"), moved.is_err());
+        }
+        let advance = moved.is_ok();
+        #[cfg(test)]
+        let advance = advance && !super::mutant("drop_gate_generation");
+        if advance {
+            self.invalidate_order();
         }
         drive.ready = ready && moved.is_ok();
     }
