@@ -155,10 +155,10 @@ pub(super) use watcher_orphan_cleanup::{
 pub(crate) use tmux_runtime::tmux_runtime_paths;
 
 // Items used by spawn_turn_bridge from submodules
-use super::mailbox_finish::unwind_unstarted_turn;
 use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
 use bridge_entry_persist::bridge_stream_relay_suppressed;
+use bridge_entry_persist::unwind_and_notify;
 use completion_guard::complete_work_dispatch_on_turn_end;
 use context_window::{
     apply_context_token_update, compact_lower_bound, persisted_context_tokens,
@@ -454,7 +454,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut entry_was_rowless = false;
 
         let anchor_text = super::formatting::build_processing_status_block(SPINNER[0]).to_string();
-        if !bridge_entry_persist::establish_bridge_entry_authority(
+        if let Err(notice) = bridge_entry_persist::establish_bridge_entry_authority(
             bridge_entry_persist::BridgeEntryAuthorityContext {
                 entry_was_rowless: &mut entry_was_rowless,
                 bridge: &mut bridge,
@@ -490,7 +490,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         )
         .await
         {
-            return unwind_unstarted_turn(&shared_owned, channel_id, &cancel_token).await;
+            return unwind_and_notify(&shared_owned, channel_id, &cancel_token, notice).await;
         }
         let mut bridge_entry_watcher_owner_epoch_current = inflight_state
             .effective_relay_owner_kind()

@@ -39168,7 +39168,25 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:7dec4d454d60d5de620c7c6df9d822ac30e3c04221cc046f0b004dca92197788"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/repost/runner_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:de399ba018962025a7680dee91ad26a7ba77fc247725289d587c5c6546fee24c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/repost/runner_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:8d8aaabf846afd4aa31d69d9b89b760285d70ecb014388b0e9fc3657466d6d5d"
     },
     {
       "root": "src",
