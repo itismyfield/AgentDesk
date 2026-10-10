@@ -852,19 +852,29 @@ fn names_the_probe(path: &str, line: &str) -> bool {
         .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
         .collect();
     let in_repost = path.contains("tui_o/repost/");
-    // A grouped import of the re-post module or its siblings: `io` in it, or not on one line.
+    // A grouped import of the re-post module or its siblings: a dormant member in it, or not on
+    // one line.
     let grouped = line.contains("repost::{") || (in_repost && line.contains("super::{"));
-    let group_names_io = grouped
-        && (!line.contains('}')
-            || line
-                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                .any(|word| word == "io"));
+    let group_names_io = grouped && (!line.contains('}') || names_a_member(line));
     entries.iter().any(|entry| line.contains(entry))
         || words.iter().any(|word| word.starts_with("probe::"))
         || (in_repost && words.iter().any(|word| word.starts_with("super::io")))
         || group_names_io
         || line.contains("repost as ")
         || (path == ADAPTER && line.contains("probe"))
+}
+
+/// Whether a line names a dormant re-post module as a bare word, as a group member does.
+fn names_a_member(line: &str) -> bool {
+    line.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|word| ["io", "probe", "runner", "dispatch"].contains(&word))
+}
+
+/// Whether `line` opens a grouped import of the re-post module that it does not also close.
+fn opens_a_group(path: &str, line: &str) -> bool {
+    let in_repost = path.contains("tui_o/repost/");
+    let opens = line.contains("repost::{") || (in_repost && line.contains("super::{"));
+    opens && !line.contains('}')
 }
 
 /// The dormant runner and dispatch: they read the probe, and nothing operational reads them.
@@ -963,7 +973,15 @@ fn probe_edges(root: &std::path::Path) -> Vec<String> {
             }
             let definition = PROBE_FILES.contains(&relative.as_str());
             let text = std::fs::read_to_string(&path).unwrap();
+            // Inside a multi-line re-post import group, every member line is read as part of it.
+            let mut in_group = false;
             for (number, line) in text.lines().enumerate() {
+                let member = in_group && names_a_member(line);
+                if in_group && line.contains('}') {
+                    in_group = false;
+                } else if !in_group {
+                    in_group = opens_a_group(&relative, line);
+                }
                 let allowed = relative == ADAPTER
                     && (ADAPTER_LINES.contains(&line.trim()) || line.trim() == ADAPTER_PATH);
                 let edge = if definition {
@@ -971,8 +989,9 @@ fn probe_edges(root: &std::path::Path) -> Vec<String> {
                 } else if CONSUMERS.contains(&relative.as_str()) {
                     consumer_escapes(&relative, line)
                 } else {
-                    (names_the_probe(&relative, line) || names_the_runner(&relative, line))
-                        && !allowed
+                    let named =
+                        names_the_probe(&relative, line) || names_the_runner(&relative, line);
+                    (named || member) && !allowed
                 };
                 if edge {
                     found.push(format!("{relative}:{}", number + 1));
@@ -1528,6 +1547,36 @@ fn f5_has_no_operational_edges() {
             "src/services/tui_o/repost/dispatch.rs:2",
             "src/services/tui_o/writer/host.rs:1",
             "src/services/tui_o/writer/host.rs:2",
+        ]
+    );
+}
+
+#[test]
+fn f5r4_the_dormancy_scan_reads_every_member_of_a_grouped_alias() {
+    let write = |root: &std::path::Path, relative: &str, text: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let tree = tempfile::tempdir().unwrap();
+    let root = tree.path();
+    let split = "use crate::services::tui_o::repost::{\n    config,\n    runner as rr,\n    dispatch as dd,\n};\nfn go() { rr::tick(); }\n";
+    write(root, "src/services/tui_o/writer/host.rs", split);
+    let sibling =
+        "use super::{\n    runner as rr, dispatch as dd,\n};\nuse super::{config, runner as r2};\n";
+    write(root, "src/services/tui_o/repost/host.rs", sibling);
+    let nested = "use crate::services::tui_o::{\n    repost::{runner as rr, dispatch as dd},\n};\n";
+    write(root, "src/services/tui_o/writer/actor.rs", nested);
+    assert_eq!(
+        probe_edges(root),
+        [
+            "src/services/tui_o/repost/host.rs:1",
+            "src/services/tui_o/repost/host.rs:2",
+            "src/services/tui_o/repost/host.rs:4",
+            "src/services/tui_o/writer/actor.rs:2",
+            "src/services/tui_o/writer/host.rs:1",
+            "src/services/tui_o/writer/host.rs:3",
+            "src/services/tui_o/writer/host.rs:4",
         ]
     );
 }

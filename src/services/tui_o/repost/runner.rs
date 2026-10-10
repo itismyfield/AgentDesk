@@ -241,7 +241,8 @@ impl Runner {
             DispatchIntent::Auto(evidence) => {
                 let key = &evidence.scope().key;
                 let Some(row) = o_piece_delivery::load(&self.pool, key).await? else {
-                    return Ok(Admission::LegacyOff);
+                    // A row gone since the evidence proves nothing; never the legacy path.
+                    return Ok(Admission::ObserveOnly);
                 };
                 let attempts = o_piece_attempts::attempts(&self.pool, key).await?;
                 // The evidence keeps its own revision; the grant's CAS refuses any later row.

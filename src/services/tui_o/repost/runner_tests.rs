@@ -862,3 +862,26 @@ async fn f5_aborting_the_owning_task_ends_the_request_without_a_retry() {
         assert_eq!(wire.posts(), 1, "{answer:?}");
     }
 }
+
+/// Evidence for a piece whose row is gone: the turn observes, it never falls back to the legacy
+/// send, and nothing is granted or posted.
+#[tokio::test]
+async fn auto_missing_row_is_observe_only_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let run = super::io::probe::tests::run("run-1");
+    let mut runner = runner(&pool, true, &run);
+    let mut writer = TestWriter::new();
+    let gone = absent_evidence(super::io::probe::tests::scope(&[0]), run.clone());
+    let key = gone.scope().key.clone();
+    assert!(load(&pool, &key).await.unwrap().is_none());
+    let intent = DispatchIntent::Auto(Box::new(gone));
+    let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+    let admission = admission.await.unwrap();
+    assert!(matches!(admission, Admission::ObserveOnly), "{admission:?}");
+    assert_eq!(turn_step(&admission), TurnStep::Wait);
+    assert_eq!(writer.prepared().len(), 0);
+    assert!(attempts(&pool, &key).await.unwrap().is_empty());
+    pool.close().await;
+    db.drop().await;
+}
