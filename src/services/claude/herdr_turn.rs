@@ -139,19 +139,28 @@ pub(crate) fn execute(
             },
         );
     }
-    let attached = match turn.row {
-        Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {
-            not_held(&record.execution_nonce)?;
-            bound_source(&turn, ports, record)?
-        }
-        Some(HostedRecord::Known(record)) if record.state == HostedState::Pending => {
-            not_held(&record.execution_nonce)?;
-            pending_source(&turn, &runtime, ports, record)?
-        }
-        Some(HostedRecord::Unknown(_)) => return Err("herdr turn: unreadable hosted record".into()),
-        _ => launched_source(&turn, &runtime, ports)?,
-    };
-    prompt_and_read(&turn, &runtime, attached, sender)
+    if crate::services::provider::herdr_before_start::prelaunch_closed(turn.cancel.as_deref())? {
+        return Ok(());
+    }
+    let result = (|| {
+        let attached = match turn.row {
+            Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {
+                not_held(&record.execution_nonce)?;
+                bound_source(&turn, ports, record)?
+            }
+            Some(HostedRecord::Known(record)) if record.state == HostedState::Pending => {
+                not_held(&record.execution_nonce)?;
+                pending_source(&turn, &runtime, ports, record)?
+            }
+            Some(HostedRecord::Unknown(_)) => {
+                return Err("herdr turn: unreadable hosted record".into());
+            }
+            _ => launched_source(&turn, &runtime, ports)?,
+        };
+        prompt_and_read(&turn, &runtime, attached, sender)
+    })();
+    crate::services::provider::herdr_before_start::finish_execution(turn.cancel.as_deref());
+    result
 }
 
 /// A Bound execution keeps the source attached when it launched, or takes the session its own
@@ -600,32 +609,27 @@ fn prompt_and_read(
     ];
     let cancel = turn.cancel.as_deref();
     let held = hold(&attached.nonce)?;
-    crate::services::tui_o::exact_submission::begin_input()?;
-    let run = if (herdr_stop_settlement_available()
-        || crate::services::tui_o::exact_submission::logical_key().is_some())
-        && let Some(state) = cancel.and_then(CancelToken::herdr_interrupt_state)
-    {
-        use crate::services::provider::cancel_token_claude_interrupt::{
-            HerdrSubmission, HerdrTurnStart,
-        };
-        let mut submitted = state.submission.lock().unwrap_or_else(|e| e.into_inner());
-        let mut start = HerdrTurnStart::at_end_of(&attached.nonce, path, Some(started_at));
-        start.offset = before;
-        if !state.record_turn_start(start) {
-            return Err("herdr turn: the token already began another turn".into());
+    use crate::services::provider::herdr_before_start::InputRun as HerdrInputRun;
+    let run = observed_input(
+        cancel,
+        || {
+            let mut start =
+                crate::services::provider::cancel_token_claude_interrupt::HerdrTurnStart::at_end_of(
+                    &attached.nonce,
+                    path,
+                    Some(started_at),
+                );
+            start.offset = before;
+            start
+        },
+        || run_herdr(&attached.target, &plan, cancel),
+    )?;
+    let run = match run {
+        HerdrInputRun::Ran(run) => run,
+        HerdrInputRun::Closed => {
+            release_closed_hold(&turn.owner.logical_key, &held);
+            return Ok(());
         }
-        let run = run_herdr(&attached.target, &plan, cancel);
-        *submitted = match &run {
-            InputRun::Applied => HerdrSubmission::Submitted,
-            InputRun::Indeterminate {
-                confirmed: 1,
-                cause: crate::services::claude_tui::host_input::StopCause::Send(_),
-            } => HerdrSubmission::Unknown,
-            _ => HerdrSubmission::Unsubmitted,
-        };
-        run
-    } else {
-        run_herdr(&attached.target, &plan, cancel)
     };
     crate::services::tui_o::exact_submission::observe_untouched(matches!(
         run,
@@ -996,3 +1000,154 @@ async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
 
 #[cfg(test)]
 mod provider_terminal_tests;
+
+fn release_closed_hold(logical: &str, held: &Path) {
+    if !crate::services::provider::herdr_before_start::mutant("closed_keeps_input_hold")
+        && let Err(error) = std::fs::remove_file(held)
+    {
+        tracing::warn!(logical, %error, "herdr turn: input hold kept");
+    }
+}
+
+fn observed_input(
+    cancel: Option<&CancelToken>,
+    start: impl FnOnce() -> crate::services::provider::cancel_token_claude_interrupt::HerdrTurnStart,
+    write: impl FnOnce() -> InputRun,
+) -> Result<crate::services::provider::herdr_before_start::InputRun<InputRun>, String> {
+    use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
+    use crate::services::provider::herdr_before_start::InputRun as HerdrInputRun;
+    let state = cancel
+        .filter(|_| {
+            herdr_stop_settlement_available()
+                || crate::services::tui_o::exact_submission::logical_key().is_some()
+        })
+        .and_then(CancelToken::herdr_interrupt_state);
+    let run = if let Some(state) = state {
+        let mut input = state.submission.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.prepare_input(&mut input) {
+            return Ok(HerdrInputRun::Closed);
+        }
+        crate::services::tui_o::exact_submission::begin_input()?;
+        if !state.record_turn_start(start()) {
+            return Err("herdr turn: the token already began another turn".into());
+        }
+        let run = write();
+        let observation = match &run {
+            InputRun::Applied => HerdrSubmission::Submitted,
+            InputRun::Indeterminate {
+                confirmed: 1,
+                cause: crate::services::claude_tui::host_input::StopCause::Send(_),
+            } => HerdrSubmission::Unknown,
+            _ => HerdrSubmission::Unsubmitted,
+        };
+        state.finish_input(
+            &mut input,
+            observation,
+            matches!(
+                run,
+                InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }
+            ),
+        );
+        run
+    } else {
+        crate::services::tui_o::exact_submission::begin_input()?;
+        write()
+    };
+    Ok(HerdrInputRun::Ran(run))
+}
+
+#[cfg(all(test, unix))]
+mod coldstop_input_tests {
+    use super::*;
+    use crate::services::provider::cancel_token_claude_interrupt::{
+        HERDR_SETTLEMENT_OVERRIDE, HerdrTurnStart,
+    };
+    use crate::services::provider::herdr_before_start::{InputPhase, InputRun as HerdrInputRun};
+    #[test]
+    fn coldstop_claude_closed_never_begins_input_or_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let owner = HostedOwner {
+            provider: "claude".into(),
+            discord_token_hash: "hash".into(),
+            channel_id: "911".into(),
+            logical_key: "AgentDesk-claude-coldinput".into(),
+            owner_node: "node".into(),
+            runtime_root: "root".into(),
+        };
+        for kind in ["fresh", "pending", "bound"] {
+            let token = CancelToken::new();
+            let state = token.prepare_herdr_interrupt(ProviderKind::Claude, &owner);
+            state
+                .user_stop
+                .store(true, std::sync::atomic::Ordering::Release);
+            let held = hold(kind).unwrap();
+            let calls = std::cell::Cell::new(0);
+            let run = observed_input(
+                Some(&token),
+                || {
+                    calls.set(calls.get() + 1);
+                    HerdrTurnStart::at_end_of(kind, Path::new("missing"), None)
+                },
+                || {
+                    calls.set(calls.get() + 1);
+                    InputRun::Applied
+                },
+            )
+            .unwrap();
+            assert!(matches!(run, HerdrInputRun::Closed));
+            assert_eq!(calls.get(), 0);
+            release_closed_hold(&owner.logical_key, &held);
+            assert!(not_held(kind).is_ok());
+        }
+        for (run, untouched) in [
+            (
+                InputRun::Refused(crate::services::claude_tui::host_input::InputRefusal::Unknown),
+                true,
+            ),
+            (InputRun::Cancelled { confirmed: 0 }, true),
+            (
+                InputRun::Indeterminate {
+                    confirmed: 0,
+                    cause: crate::services::claude_tui::host_input::StopCause::Send(
+                        "unclear paste".into(),
+                    ),
+                },
+                false,
+            ),
+        ] {
+            let token = CancelToken::new();
+            let state = token.prepare_herdr_interrupt(ProviderKind::Claude, &owner);
+            observed_input(
+                Some(&token),
+                || HerdrTurnStart::at_end_of("nonce", Path::new("missing"), None),
+                || run,
+            )
+            .unwrap();
+            assert_eq!(
+                state.submission.lock().unwrap().phase,
+                if untouched {
+                    InputPhase::FinishedUntouched
+                } else {
+                    InputPhase::MayHaveWritten
+                }
+            );
+        }
+        HERDR_SETTLEMENT_OVERRIDE.set(false);
+        let token = CancelToken::new();
+        let state = token.prepare_herdr_interrupt(ProviderKind::Claude, &owner);
+        state
+            .user_stop
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(matches!(
+            observed_input(
+                Some(&token),
+                || panic!("off does not record start"),
+                || InputRun::Applied
+            )
+            .unwrap(),
+            HerdrInputRun::Ran(InputRun::Applied)
+        ));
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+    }
+}

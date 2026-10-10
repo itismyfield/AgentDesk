@@ -1148,7 +1148,7 @@ fn a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg() {
         .expect("the turn holds its stop state");
     use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
     assert_eq!(
-        *state.submission.lock().unwrap(),
+        state.submission.lock().unwrap().submission,
         HerdrSubmission::Submitted
     );
     assert!(!state.user_stop.load(Ordering::SeqCst));

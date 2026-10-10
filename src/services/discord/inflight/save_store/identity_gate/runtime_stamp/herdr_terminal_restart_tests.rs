@@ -271,7 +271,7 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
                 runtime_root: phase.root.display().to_string(),
             };
             let intent = token.prepare_herdr_interrupt(phase.provider.clone(), &owner);
-            *intent.submission.lock().unwrap() = if n == 2 {
+            intent.submission.lock().unwrap().submission = if n == 2 {
                 HerdrSubmission::Unknown
             } else {
                 HerdrSubmission::Submitted

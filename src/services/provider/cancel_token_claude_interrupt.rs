@@ -15,7 +15,7 @@ pub(crate) enum HerdrSubmission {
 
 pub(crate) struct HerdrInterruptState {
     pub(crate) owner: crate::db::dispatched_sessions::hosted_execution::HostedOwner,
-    pub(crate) submission: Mutex<HerdrSubmission>,
+    pub(crate) submission: Mutex<super::herdr_before_start::HerdrInputState>,
     pub(crate) user_stop: AtomicBool,
     /// Where this token's own input began; terminal admission reads its turn from here only.
     pub(crate) turn_start: std::sync::OnceLock<HerdrTurnStart>,
@@ -454,7 +454,7 @@ impl CancelToken {
         }
         let state = Arc::new(HerdrInterruptState {
             owner: owner.clone(),
-            submission: Mutex::new(HerdrSubmission::Unsubmitted),
+            submission: Mutex::new(super::herdr_before_start::HerdrInputState::default()),
             user_stop: AtomicBool::new(false),
             turn_start: std::sync::OnceLock::new(),
             own_start: Mutex::new(OwnStart::Unseen(None)),

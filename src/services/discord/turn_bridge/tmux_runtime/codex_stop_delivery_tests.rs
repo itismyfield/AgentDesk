@@ -187,7 +187,7 @@ impl Case {
         );
         let token = Arc::new(CancelToken::new());
         let observation = token.prepare_herdr_interrupt(provider.clone(), &owner);
-        *observation.submission.lock().unwrap() = HerdrSubmission::Submitted;
+        observation.submission.lock().unwrap().submission = HerdrSubmission::Submitted;
         if provider == ProviderKind::Codex {
             assert!(observation.record_turn_start(HerdrTurnStart {
                 execution_nonce: record.execution_nonce.clone(),
@@ -403,12 +403,12 @@ fn herdr_typed_refusals_have_no_escape_effects() {
             HerdrDelivery::NotSent(HerdrNotSent::Idle)
         );
         let state = case.token.herdr_interrupt_state().unwrap();
-        *state.submission.lock().unwrap() = HerdrSubmission::Unsubmitted;
+        state.submission.lock().unwrap().submission = HerdrSubmission::Unsubmitted;
         assert_eq!(
             runtime.block_on(interrupt_herdr(pool, &case.token, &case.provider)),
             HerdrDelivery::NotSent(HerdrNotSent::Pending)
         );
-        *state.submission.lock().unwrap() = HerdrSubmission::Submitted;
+        state.submission.lock().unwrap().submission = HerdrSubmission::Submitted;
         dedupe::clear_tmux_runtime_binding(&case.owner.logical_key);
         assert_eq!(
             runtime.block_on(interrupt_herdr(pool, &case.token, &case.provider)),
@@ -844,13 +844,13 @@ fn a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token() {
             return;
         }
         let state = case.token.herdr_interrupt_state().unwrap();
-        *state.submission.lock().unwrap() = HerdrSubmission::Unsubmitted;
+        state.submission.lock().unwrap().submission = HerdrSubmission::Unsubmitted;
         state.own_start_observed(0, "turn-a");
         let (shared, channel, provider) =
             (case.shared.clone(), case.channel, case.provider.clone());
         // The turn is submitted and the channel takes another token before the stop runs again.
         *BEFORE_LATE_STOP.lock().unwrap() = Some(Box::pin(async move {
-            *state.submission.lock().unwrap() = HerdrSubmission::Submitted;
+            state.submission.lock().unwrap().submission = HerdrSubmission::Submitted;
             crate::services::discord::mailbox_finish_turn(&shared, &provider, channel).await;
             let (next, user) = (Arc::new(CancelToken::new()), UserId::new(7));
             let message = MessageId::new(channel.get() + 2);
@@ -874,14 +874,14 @@ fn a_rollout_rewritten_in_place_never_retargets_a_late_stop() {
             return;
         }
         let state = case.token.herdr_interrupt_state().unwrap();
-        *state.submission.lock().unwrap() = HerdrSubmission::Unsubmitted;
+        state.submission.lock().unwrap().submission = HerdrSubmission::Unsubmitted;
         state.own_start_observed(0, "turn-a");
         let (path, observation) = (case.path.clone(), state.clone());
         *BEFORE_LATE_STOP.lock().unwrap() = Some(Box::pin(async move {
             let next =
                 json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-b"}});
             std::fs::write(&path, format!("{next}\n")).unwrap();
-            *observation.submission.lock().unwrap() = HerdrSubmission::Submitted;
+            observation.submission.lock().unwrap().submission = HerdrSubmission::Submitted;
         }));
         let inode = |path: &Path| {
             crate::services::tui_o::shadow::capture::file_identity(

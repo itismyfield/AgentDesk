@@ -132,20 +132,29 @@ pub(crate) fn execute(
             },
         );
     }
-    let nonce = match turn.row {
-        Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {
-            not_held(&record.execution_nonce)?;
-            return followup(&turn, ports, record, sender);
-        }
-        Some(HostedRecord::Known(record)) if record.state == HostedState::Pending => {
-            not_held(&record.execution_nonce)?;
-            options_kept(&turn, &record.execution_nonce)?;
-            pending_launch(&turn, &runtime, ports, record)?
-        }
-        Some(HostedRecord::Unknown(_)) => return Err("herdr turn: unreadable hosted record".into()),
-        _ => fresh_launch(&turn, &runtime, ports)?,
-    };
-    first_prompt(&turn, &runtime, ports, &nonce, sender)
+    if crate::services::provider::herdr_before_start::prelaunch_closed(turn.cancel.as_deref())? {
+        return Ok(());
+    }
+    let result = (|| {
+        let nonce = match turn.row {
+            Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {
+                not_held(&record.execution_nonce)?;
+                return followup(&turn, ports, record, sender);
+            }
+            Some(HostedRecord::Known(record)) if record.state == HostedState::Pending => {
+                not_held(&record.execution_nonce)?;
+                options_kept(&turn, &record.execution_nonce)?;
+                pending_launch(&turn, &runtime, ports, record)?
+            }
+            Some(HostedRecord::Unknown(_)) => {
+                return Err("herdr turn: unreadable hosted record".into());
+            }
+            _ => fresh_launch(&turn, &runtime, ports)?,
+        };
+        first_prompt(&turn, &runtime, ports, &nonce, sender)
+    })();
+    crate::services::provider::herdr_before_start::finish_execution(turn.cancel.as_deref());
+    result
 }
 
 fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
@@ -342,6 +351,12 @@ fn warn_release(logical: &str, released: HoldRelease) {
     }
 }
 
+fn release_closed_hold(logical: &str, nonce: &str) {
+    if !crate::services::provider::herdr_before_start::mutant("closed_keeps_input_hold") {
+        warn_release(logical, release_hold(nonce));
+    }
+}
+
 /// The first prompt of execution `nonce`: one gated write on a ready composer, then its own hook
 /// Source, the attach, the hold's end and the new rollout from its start.
 fn first_prompt(
@@ -366,6 +381,13 @@ fn first_prompt(
         || None,
         || run_herdr(&target, &plan, turn.cancel.as_deref()),
     )?;
+    let run = match run {
+        crate::services::provider::herdr_before_start::InputRun::Ran(run) => run,
+        crate::services::provider::herdr_before_start::InputRun::Closed => {
+            release_closed_hold(logical, nonce);
+            return Ok(());
+        }
+    };
     if run.run != InputRun::Applied {
         if composer_untouched(&run) {
             warn_release(logical, release_hold(nonce));
@@ -417,18 +439,23 @@ fn observed_input(
     cancel: Option<&CancelToken>,
     start: impl FnOnce() -> Option<HerdrTurnStart>,
     write: impl FnOnce() -> PlanRun,
-) -> Result<PlanRun, String> {
-    crate::services::tui_o::exact_submission::begin_input()?;
+) -> Result<crate::services::provider::herdr_before_start::InputRun<PlanRun>, String> {
+    use crate::services::provider::herdr_before_start::InputRun as HerdrInputRun;
     let state = cancel.filter(|_| {
         herdr_stop_settlement_available()
             || crate::services::tui_o::exact_submission::logical_key().is_some()
     });
     let Some(state) = state.and_then(CancelToken::herdr_interrupt_state) else {
+        crate::services::tui_o::exact_submission::begin_input()?;
         let run = write();
         crate::services::tui_o::exact_submission::observe_untouched(composer_untouched(&run));
-        return Ok(run);
+        return Ok(HerdrInputRun::Ran(run));
     };
     let mut submitted = state.submission.lock().unwrap_or_else(|e| e.into_inner());
+    if !state.prepare_input(&mut submitted) {
+        return Ok(HerdrInputRun::Closed);
+    }
+    crate::services::tui_o::exact_submission::begin_input()?;
     if let Some(start) = start()
         && !state.record_turn_start(start)
     {
@@ -436,12 +463,13 @@ fn observed_input(
     }
     let run = write();
     crate::services::tui_o::exact_submission::observe_untouched(composer_untouched(&run));
-    *submitted = match &run.run {
+    let observation = match &run.run {
         InputRun::Applied => HerdrSubmission::Submitted,
         InputRun::Indeterminate { .. } if run.enter_attempted => HerdrSubmission::Unknown,
         _ => HerdrSubmission::Unsubmitted,
     };
-    Ok(run)
+    state.finish_input(&mut submitted, observation, composer_untouched(&run));
+    Ok(HerdrInputRun::Ran(run))
 }
 
 /// Records where this token's turn began, under settlement only; a second, different start refuses.
@@ -495,6 +523,13 @@ fn followup(
     let run = observed_input(turn.cancel.as_deref(), start, || {
         run_herdr(&target, &plan, turn.cancel.as_deref())
     })?;
+    let run = match run {
+        crate::services::provider::herdr_before_start::InputRun::Ran(run) => run,
+        crate::services::provider::herdr_before_start::InputRun::Closed => {
+            release_closed_hold(logical, nonce);
+            return Ok(());
+        }
+    };
     if run.run == InputRun::Applied || composer_untouched(&run) {
         warn_release(logical, release_hold(nonce));
     }
@@ -577,5 +612,106 @@ mod observed_input_tests {
         }
         HERDR_SETTLEMENT_OVERRIDE.set(true);
         assert_eq!(seen, [vec!["write"], vec!["start", "write"]]);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod coldstop_input_tests {
+    use super::*;
+    use crate::services::provider::herdr_before_start::{InputPhase, InputRun as HerdrInputRun};
+
+    #[test]
+    fn coldstop_input_boundary_never_calls_write_or_start() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let owner = HostedOwner {
+            provider: "codex".into(),
+            discord_token_hash: "hash".into(),
+            channel_id: "908".into(),
+            logical_key: "AgentDesk-codex-coldinput".into(),
+            owner_node: "node".into(),
+            runtime_root: "root".into(),
+        };
+        for row_kind in ["fresh", "pending", "bound"] {
+            let token = CancelToken::new();
+            let state = token.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+            state
+                .user_stop
+                .store(true, std::sync::atomic::Ordering::Release);
+            let nonce = format!("cold-{row_kind}");
+            hold(&nonce).unwrap();
+            let calls = std::cell::Cell::new(0);
+            let run = observed_input(
+                Some(&token),
+                || {
+                    calls.set(calls.get() + 1);
+                    None
+                },
+                || {
+                    calls.set(calls.get() + 1);
+                    PlanRun {
+                        run: InputRun::Applied,
+                        enter_attempted: true,
+                        composer_mutated: true,
+                    }
+                },
+            )
+            .unwrap();
+            assert!(matches!(run, HerdrInputRun::Closed));
+            assert_eq!(calls.get(), 0);
+            assert_eq!(state.submission.lock().unwrap().phase, InputPhase::Closed);
+            assert!(not_held(&nonce).is_err());
+            release_closed_hold(&owner.logical_key, &nonce);
+            assert!(not_held(&nonce).is_ok());
+        }
+    }
+
+    #[test]
+    fn coldstop_actual_typed_outcomes_keep_indeterminate_unsubmitted_held() {
+        let owner = HostedOwner {
+            provider: "codex".into(),
+            discord_token_hash: "hash".into(),
+            channel_id: "909".into(),
+            logical_key: "AgentDesk-codex-coldtyped".into(),
+            owner_node: "node".into(),
+            runtime_root: "root".into(),
+        };
+        for (run, untouched) in [
+            (
+                InputRun::Refused(crate::services::codex_tui::host_input::InputRefusal::Unknown),
+                true,
+            ),
+            (InputRun::Cancelled { confirmed: 0 }, true),
+            (
+                InputRun::Indeterminate {
+                    confirmed: 0,
+                    cause: crate::services::codex_tui::host_input::StopCause::Send(
+                        "unclear paste".into(),
+                    ),
+                },
+                false,
+            ),
+        ] {
+            let token = CancelToken::new();
+            let state = token.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+            let _ = observed_input(
+                Some(&token),
+                || None,
+                || PlanRun {
+                    run,
+                    composer_mutated: false,
+                    enter_attempted: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                state.submission.lock().unwrap().phase,
+                if untouched {
+                    InputPhase::FinishedUntouched
+                } else {
+                    InputPhase::MayHaveWritten
+                }
+            );
+        }
     }
 }

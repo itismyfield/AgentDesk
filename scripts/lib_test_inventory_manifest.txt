@@ -1678,6 +1678,7 @@ services::claude::claude_tui_session_resolution_tests::stranded_followup_user_dr
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_quiescent_draft_can_recreate_hosted_tui
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_with_prompt_marker_and_draft_reaches_recovery
 services::claude::claude_tui_session_resolution_tests::warm_followup_continues_after_prompt_draft_clear
+services::claude::herdr_turn::coldstop_input_tests::coldstop_claude_closed_never_begins_input_or_mutation
 services::claude::herdr_turn::provider_terminal_tests::a_compact_summary_neither_starts_nor_splits_a_herdr_claude_turn
 services::claude::herdr_turn::provider_terminal_tests::a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal
 services::claude::host_gate::tests::a_failed_pane_probe_never_reads_as_a_stale_session
@@ -2548,6 +2549,8 @@ services::codex::c1_teardown_tests::an_existing_session_is_recreated_only_under_
 services::codex::codex_fifo_followup_transport_tests::reused_fifo_wrapper_buffer_keeps_protocol_line_terminated
 services::codex::codex_fifo_followup_transport_tests::send_codex_pipe_prompt_writes_sentinel_to_fifo
 services::codex::herdr_guard_tests::both_codex_tmux_entries_refuse_a_herdr_channel_before_any_tmux_call_or_cleanup
+services::codex::herdr_turn::coldstop_input_tests::coldstop_actual_typed_outcomes_keep_indeterminate_unsubmitted_held
+services::codex::herdr_turn::coldstop_input_tests::coldstop_input_boundary_never_calls_write_or_start
 services::codex::herdr_turn::observed_input_tests::a_followup_builds_its_turn_start_only_under_settlement
 services::codex::relay_separator_tests::codex_second_agent_message_carries_paragraph_separator_3431
 services::codex::remote_dispatch_gate_tests::remote_direct_is_refused_when_gate_off
@@ -8709,6 +8712,7 @@ services::discord::turn_bridge::stream_loop::expected_identity_tests::identity_m
 services::discord::turn_bridge::stream_loop::expected_identity_tests::no_handoff_keeps_original_expected_identity_and_stream_tick_behavior
 services::discord::turn_bridge::stream_loop::expected_identity_tests::retained_retry_policies_are_wired_to_both_cancel_boundaries_and_backoff
 services::discord::turn_bridge::stream_loop::expected_identity_tests::saved_tmux_ready_first_fill_recaptures_and_allows_next_stream_tick_flush
+services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_on_error_blocks_profile_and_takeover_before_any_recovery
 services::discord::turn_bridge::stream_loop::provider_recovery::profile_tests::only_unprocessed_anchored_classified_failures_are_replayed
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::a_vanished_row_suppresses_the_restart_fence_without_ending_the_arm
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::an_unchanged_tool_arm_adoption_records_nothing
@@ -8918,6 +8922,12 @@ services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::turn_
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::turn_identity_without_uuid_still_detects_replaced_turn
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::wrapper_interrupt_is_fenced_but_can_cancel_submitted_generation
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::wrapper_submit_pending_overrides_prior_idle_state
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::before_start_stop::tests::coldstop_closed_drops_callback_and_own_start_is_negative_evidence
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::before_start_stop::tests::coldstop_mailbox_writer_and_snapshot_do_not_wait_for_input_lock
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::before_start_stop::tests::coldstop_off_keeps_phase_submission_and_intent_bytes
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::before_start_stop::tests::coldstop_phases_require_positive_untouched_and_preserve_base_hold
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::before_start_stop::tests::coldstop_proof_exact_actor_row_notice_and_accounting
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::before_start_stop::tests::coldstop_typed_untouched_not_indeterminate_and_late_exit_is_sealed
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_codex_stop_never_takes_a_later_native_turn_for_its_own
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_rollout_rewritten_in_place_never_retargets_a_late_stop
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token
