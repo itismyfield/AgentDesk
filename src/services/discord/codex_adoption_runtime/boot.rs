@@ -155,7 +155,7 @@ impl AdoptionRuntime {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl AdoptionRuntime {
     /// Stands in for the recovery producers.
     pub(in crate::services::discord) fn record_recovery_for_tests(&self) {
@@ -165,7 +165,7 @@ impl AdoptionRuntime {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl CodexBootWitness {
     pub(in crate::services::discord) fn pass_for_tests(&self) -> u64 {
         self.pass
@@ -210,6 +210,6 @@ pub(in crate::services::discord) fn record_role(
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "boot_tests.rs"]
 mod tests;
