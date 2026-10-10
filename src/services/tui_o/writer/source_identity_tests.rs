@@ -7,6 +7,7 @@ use super::*;
 use crate::services::tui_o::shadow::capture::renumber;
 use crate::services::tui_o::store::rotation::{Boundary, ResolveFrom, SourceLink};
 use crate::services::tui_o::store::spool::source_key;
+use crate::services::tui_o::writer::rotation::{Sources, probe};
 
 const REBOOT: u64 = 1 << 40;
 const SECOND_REBOOT: u64 = 1 << 41;
@@ -607,4 +608,55 @@ async fn a_source_bound_again_waits_its_own_quiet_in_its_next_rotation() {
     assert!(!task.is_finished());
     assert_eq!(harness.port.posts(), ["x one", "y one"]);
     halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_filled_return_takes_its_reader_out_of_rotation_and_restarts_keep_it_out() {
+    let (harness, path, w, bindings) = started_empty(&row("m0", "before the switch"));
+    let (_, x) = transcript(&path, "x.jsonl", "x", &row("x1", "x one"));
+    let target = BindingTarget::Source(x.clone());
+    bindings.commit(bound(2, Some(&w), target, BindingCause::Clear, None));
+    let start = || {
+        let mut writer = harness.writer();
+        let mut sources = Sources::new(CHANNEL, ShadowProvider::Claude, bindings.clone());
+        let mut deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
+        let mut owed = VecDeque::new();
+        sources
+            .resume(&mut writer, &mut deriver, &mut owed)
+            .unwrap();
+        sources.follow(&mut writer).unwrap();
+        (writer, sources)
+    };
+    drop(start());
+    // A restart inside the W→X rotation puts W's reader back into it.
+    let (mut writer, mut sources) = start();
+    assert!(probe::rotated_at(&sources, &w).unwrap().is_some());
+    let _reboot = renumber::shift(&path, REBOOT);
+    bindings.commit(resume(3, &x, &named(&w, "A")));
+    sources.follow(&mut writer).unwrap();
+    assert_eq!(
+        probe::rotated_at(&sources, &w),
+        Some(None),
+        "right after the return"
+    );
+    drop((writer, sources));
+    for round in 0..2 {
+        let (_writer, sources) = start();
+        assert_eq!(
+            probe::rotated_at(&sources, &w),
+            Some(None),
+            "restart {round}"
+        );
+        let rotation = harness.channel().rotation().unwrap();
+        assert!(!rotation.successors.contains_key(&source_key(&w)));
+        let back = rotation
+            .successors
+            .get(&source_key(&x))
+            .map(|next| &next.source);
+        assert_eq!(back, Some(&w));
+        assert_eq!(harness.channel().cursors().count(), 2);
+        let pending = |link: &SourceLink| matches!(link.boundary, Boundary::Pending { .. });
+        assert!(!rotation.links.values().any(pending));
+        assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(3));
+    }
 }

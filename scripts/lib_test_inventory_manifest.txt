@@ -11187,6 +11187,7 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::a_tail_without_it
 services::tui_o::writer::tests::actor::rotation::retire_tests::an_old_source_is_not_retired_without_provider_evidence_however_long_it_stays_quiet
 services::tui_o::writer::tests::actor::rotation::source_identity_tests::a_codex_filled_rebind_keeps_its_own_source
 services::tui_o::writer::tests::actor::rotation::source_identity_tests::a_filled_rebind_onto_a_stored_source_whose_bytes_changed_halts_without_attaching
+services::tui_o::writer::tests::actor::rotation::source_identity_tests::a_filled_return_takes_its_reader_out_of_rotation_and_restarts_keep_it_out
 services::tui_o::writer::tests::actor::rotation::source_identity_tests::a_filled_return_to_an_empty_session_source_survives_restarts_without_reviving_its_old_hop
 services::tui_o::writer::tests::actor::rotation::source_identity_tests::a_filled_session_rebind_after_a_renumber_reads_the_stored_empty_session_source
 services::tui_o::writer::tests::actor::rotation::source_identity_tests::a_first_start_halts_rather_than_take_a_changed_source_as_its_baseline

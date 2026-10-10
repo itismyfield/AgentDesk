@@ -997,3 +997,16 @@ impl<B: BindingEvents> Sources<B> {
         readers.map(|r| (r.source.clone(), keep(r))).collect()
     }
 }
+#[cfg(test)]
+pub(crate) mod probe {
+    //! Reads a live reader's rotation start, which no store row or alarm shows.
+    use super::{Instant, SourceId, Sources};
+
+    pub(crate) fn rotated_at<B>(
+        sources: &Sources<B>,
+        source: &SourceId,
+    ) -> Option<Option<Instant>> {
+        let reader = sources.readers.iter().find(|r| r.source == *source);
+        reader.map(|r| r.rotated_at)
+    }
+}
