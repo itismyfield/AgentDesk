@@ -96,6 +96,8 @@ mod role_map;
 mod role_map_enrichment;
 mod router;
 mod runtime_bootstrap;
+#[cfg(test)]
+pub use runtime_bootstrap::boot_retirement;
 pub(in crate::services::discord) mod semantic_boundaries;
 mod skills_scan;
 mod turn_presence;
