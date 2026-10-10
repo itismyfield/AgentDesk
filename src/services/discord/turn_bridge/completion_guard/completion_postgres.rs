@@ -43,6 +43,7 @@ fn runtime_postgres_reconcile_key(dispatch_id: &str) -> String {
 pub(super) enum DispatchFailureWriteOutcome {
     Updated,
     AlreadyTerminal,
+    ReplayHeld,
     Missing,
     HardError(String),
 }
@@ -339,7 +340,8 @@ async fn fail_runtime_dispatch_on_pg_tx(
 > {
     let current = sqlx::query(
         "SELECT status, kanban_card_id, to_agent_id, dispatch_type,
-                context::TEXT AS context_text
+                context::TEXT AS context_text,
+                replay_disposition_blocks_rerun(replay_disposition) AS replay_held
          FROM task_dispatches
          WHERE id = $1
          FOR UPDATE",
@@ -358,6 +360,11 @@ async fn fail_runtime_dispatch_on_pg_tx(
         .unwrap_or_default();
     if !matches!(current_status.as_str(), "pending" | "dispatched") {
         return Ok((DispatchFailureWriteOutcome::AlreadyTerminal, None));
+    }
+    // A started, unclassified or withheld attempt is not failed into a retry: its entry, slot,
+    // session link and partial result stay for the delivery owner instead of a fresh run.
+    if current.try_get::<bool, _>("replay_held").unwrap_or(true) {
+        return Ok((DispatchFailureWriteOutcome::ReplayHeld, None));
     }
     let retry_limit = if retryable {
         runtime_max_entry_retries_pg(tx).await?
@@ -1409,3 +1416,7 @@ mod runtime_completion_policy_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "replay_hold_tests.rs"]
+mod replay_hold_tests;

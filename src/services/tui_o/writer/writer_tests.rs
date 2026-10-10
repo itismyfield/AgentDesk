@@ -184,6 +184,8 @@ impl DeliveryLease for Arc<FakeLease> {
 struct Alarms {
     channel: u64,
     raised: Arc<Mutex<Vec<WriterAlarm>>>,
+    /// The reader count the writer last reported.
+    readers: Arc<Mutex<Option<usize>>>,
 }
 
 impl AlarmSink for Alarms {
@@ -191,11 +193,20 @@ impl AlarmSink for Alarms {
         assert_eq!(channel, self.channel);
         self.raised.lock().unwrap().push(alarm);
     }
+
+    fn reconcile_reader_count(&self, channel: u64, count: usize) {
+        assert_eq!(channel, self.channel);
+        *self.readers.lock().unwrap() = Some(count);
+    }
 }
 
 impl Alarms {
     fn taken(&self) -> Vec<WriterAlarm> {
         std::mem::take(&mut self.raised.lock().unwrap())
+    }
+
+    fn readers(&self) -> Option<usize> {
+        *self.readers.lock().unwrap()
     }
 }
 
@@ -262,6 +273,7 @@ impl Harness {
             alarms: Alarms {
                 channel: channel_id,
                 raised: Arc::default(),
+                readers: Arc::default(),
             },
         }
     }

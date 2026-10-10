@@ -178,6 +178,9 @@ fn resolve_cancel_force(query_force: bool, body: &Bytes) -> bool {
     }
 }
 
+#[cfg(test)]
+thread_local! { pub(crate) static CANCEL_SERVICE_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 /// Cancel the active turn in a channel.
 ///
 /// Default (`force=false`): preserves the live provider session and watcher;
@@ -207,6 +210,8 @@ pub async fn cancel_turn(
                 .with_context("code", "home_stop_envelope_on_cancel"),
         );
     }
+    #[cfg(test)]
+    CANCEL_SERVICE_ENTRIES.with(|count| count.set(count.get() + 1));
     let force = resolve_cancel_force(query.force, &body);
     let forward_context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
     let response = state
@@ -231,6 +236,14 @@ pub async fn home_stop_v1(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
     let registry = state.health_registry.clone();
+    #[cfg(test)]
+    let registry = if crate::services::cluster::channel_home::command_mutant(
+        "home_stop_runtime_binding_removed",
+    ) {
+        None
+    } else {
+        registry
+    };
     let run = |provider, channel| async move {
         let stop = crate::services::discord::zombie_foreground_release::run_holder_stop;
         stop(registry.as_deref(), &provider, channel).await
@@ -1110,4 +1123,4 @@ mod cancel_queue_preserve_pg_tests {
 
 #[cfg(test)]
 #[path = "queue_api_home_stop_tests.rs"]
-mod home_stop_tests;
+pub(crate) mod home_stop_tests;

@@ -130,7 +130,11 @@ pub(super) fn execute(
         TurnHost::Tmux => {}
         TurnHost::Refused(refusal) => return Err(refusal.to_string()),
         // A Herdr turn never falls back to another driver.
-        TurnHost::Herdr(plan) => return herdr_turn(&turn, plan, sender),
+        TurnHost::Herdr(plan) => {
+            return crate::services::tui_o::exact_submission::dispatch(|| {
+                herdr_turn(&turn, plan, sender)
+            });
+        }
     }
     #[cfg(test)]
     {

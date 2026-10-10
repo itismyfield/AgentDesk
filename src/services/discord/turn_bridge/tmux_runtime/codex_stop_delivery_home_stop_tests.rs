@@ -157,30 +157,39 @@ fn t9_f1_holder_runs_only_a_trusted_fresh_request_and_refusals_send_nothing() {
 
         // The gateway on its own thread, registry, runtime and pool reaches the holder over HTTP.
         let shared = Arc::clone(&case.shared);
-        let context = holder_context(case);
         let (origin, server) = runtime.block_on(async move {
+            let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+            registry.register(provider.into(), shared.clone()).await;
+            let mut config = crate::config::Config::default();
+            config.server.auth_token = Some("home-stop-test-token".into());
+            let app = crate::server::routes::home_stop_test_app(
+                config,
+                shared.pg_pool.clone(),
+                Some(registry),
+                HOLDER,
+            );
+            let request =
+                String::from_utf8(home_stop::tests::request_body(channel, HOLDER, 1, provider))
+                    .unwrap();
+            let (status, _) = crate::server::routes::home_stop_test_post(
+                &app,
+                "/internal/home-stop/v1",
+                &[("authorization", "Bearer home-stop-test-token")],
+                &request,
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let origin = format!("http://{}/", listener.local_addr().unwrap());
-            let app = axum::Router::new().route(
-                "/api/internal/home-stop/v1",
-                axum::routing::post(move |headers: HeaderMap, body: axum::body::Bytes| {
-                    let (shared, context) = (Arc::clone(&shared), context.clone());
-                    async move {
-                        let run = |provider: ProviderKind, channel: u64| async move {
-                            Some(
-                                run_holder_stop_on(&shared, &provider, ChannelId::new(channel))
-                                    .await,
-                            )
-                        };
-                        let (status, answer) =
-                            home_stop::receive(&context, &headers, &body, run).await;
-                        (status, axum::Json(answer))
-                    }
-                }),
-            );
+            let app = axum::Router::new().nest("/api", app);
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             (origin, server)
         });
+        assert_eq!(
+            case.escapes(),
+            0,
+            "missing trusted headers must send no Escape"
+        );
         let options = (*pool.connect_options()).clone();
         let provider_name = provider.to_owned();
         let gateway = std::thread::spawn(move || {
@@ -199,7 +208,11 @@ fn t9_f1_holder_runs_only_a_trusted_fresh_request_and_refusals_send_nothing() {
                 let pool = sqlx::PgPool::connect_with(options).await.unwrap();
                 let context = ForwardCallerContext {
                     pg_pool: Some(pool.clone()),
-                    config: Arc::new(crate::config::Config::default()),
+                    config: Arc::new({
+                        let mut config = crate::config::Config::default();
+                        config.server.auth_token = Some("home-stop-test-token".into());
+                        config
+                    }),
                     cluster_instance_id: Some("gw".into()),
                 };
                 let stopped = home_stop::gateway_stop(&context, channel, &provider_name).await;
@@ -217,6 +230,11 @@ fn t9_f1_holder_runs_only_a_trusted_fresh_request_and_refusals_send_nothing() {
         let GatewayStop::Confirmed(answer) = stopped else {
             panic!("gateway result: {stopped:?}");
         };
+        assert_eq!(
+            case.escapes(),
+            1,
+            "the actual HTTP handler must reach the runtime and send Escape"
+        );
         assert_eq!(answer["outcome"], "herdr", "{answer}");
         assert_eq!(answer["delivery"], "sent", "{answer}");
         assert_eq!(answer["holder"], HOLDER);
@@ -246,4 +264,46 @@ fn slash_stop_asks_the_home_before_the_legacy_owner_forward_and_ends_there() {
     assert!(home < body.find("forward_remote_cancel_if_needed(").unwrap());
     let answered = &body[home..body.find("forward_remote_cancel_if_needed(").unwrap()];
     assert!(answered.contains("ctx.say(reply)") && answered.contains("return Ok(());"));
+}
+
+#[test]
+fn t9_row_read_race_rechecks_the_admitted_gate_epoch_before_escape() {
+    with_home_cases(|case, runtime| {
+        let _on = runtime.block_on(hold(case));
+        let gate = channel_home::registered(&case.channel.to_string()).unwrap();
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        home_stop::AFTER_ROW
+            .with(|barrier| *barrier.borrow_mut() = Some((arrived.clone(), resume.clone())));
+        let headers = trusted(HOLDER);
+        let request = body(case, case.channel.get(), HOLDER, 1, case.provider.as_str());
+        let result = runtime.block_on(async {
+            let advance = async {
+                arrived.notified().await;
+                sqlx::query("UPDATE o_channel_homes SET epoch = 2 WHERE channel_id = $1")
+                    .bind(case.channel.to_string())
+                    .execute(case.shared.pg_pool.as_ref().unwrap())
+                    .await
+                    .unwrap();
+                gate.confirm(
+                    &crate::db::o_channel_homes::HeldHome::for_test(
+                        &case.channel.to_string(),
+                        HOLDER,
+                        2,
+                        HomeState::Worker,
+                    ),
+                    tokio::time::Instant::now(),
+                )
+                .unwrap();
+                resume.notify_one();
+            };
+            let (result, ()) = tokio::join!(receive(case, &headers, &request), advance);
+            result
+        });
+        assert_eq!(case.escapes(), 0, "the epoch race must send no Escape");
+        assert!(!case.token.cancelled.load(Ordering::SeqCst));
+        assert_eq!(gate.commands_in_flight(), 0);
+        assert_eq!(result.0, StatusCode::OK);
+        assert_eq!(result.1["reason"], "epoch_mismatch");
+    });
 }

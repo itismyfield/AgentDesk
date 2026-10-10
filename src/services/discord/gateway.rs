@@ -759,7 +759,8 @@ impl TurnGateway for DiscordGateway {
             {
                 router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
                 router::QueuedAdmissionDisposition::Deferred
-                | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment => {
+                | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment
+                | router::QueuedAdmissionDisposition::ConsumedToHold => {
                     return Ok(());
                 }
                 router::QueuedAdmissionDisposition::RejectedRestore => {
