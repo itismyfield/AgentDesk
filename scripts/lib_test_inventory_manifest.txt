@@ -10999,6 +10999,11 @@ services::tui_o::exact_pg::tests::exact_off_pg_statement_trace_and_files_zero
 services::tui_o::exact_pg::tests::exact_pg_process_reader_uses_only_metadata
 services::tui_o::exact_pg::tests::exact_settled_ack_names_normalized_pg_payload
 services::tui_o::exact_pg::tests::exact_snapshot_sibling_construction_is_compile_rejected
+services::tui_o::exact_submission::tests::exact_submission_none_preserves_result_without_runtime
+services::tui_o::exact_submission::tests::exact_submission_pg_attempt_before_closure_never_becomes_no_attempt
+services::tui_o::exact_submission::tests::exact_submission_pg_closed_admission_rejects_late_attempt
+services::tui_o::exact_submission::tests::exact_submission_pg_executor_classifies_no_attempt_and_typed_refusal
+services::tui_o::exact_submission::tests::exact_submission_pg_reopen_process_resolves_policy_without_source
 services::tui_o::gates_m1::compact_tests::g2_gate_same_source_auto_compact_preserves_input_attempt_and_output_identity
 services::tui_o::gates_m1::spool_tests::g2_gate_v2_to_v3_rollover_crash_matrix
 services::tui_o::gates_m1::spool_tests::g2_gate_v2_v3_rederive_same_unitkey_body_frontier
