@@ -22,7 +22,8 @@ pub(crate) use codex_policy::{
 mod codex_hook;
 pub use binding_access::register_provider_session;
 pub(crate) use binding_access::{
-    advance_tmux_runtime_binding_checkpoint, runtime_binding_resume_checkpoint,
+    advance_tmux_runtime_binding_checkpoint, boot_read_start, record_boot_read_start,
+    runtime_binding_resume_checkpoint,
 };
 pub(crate) use binding_access::{
     codex_verified_marker_metadata, codex_verified_publication_allowed,

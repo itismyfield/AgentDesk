@@ -107,13 +107,16 @@ pub(super) fn claude_tui_rehydrated_binding(
     session_id: &str,
     transcript_path: &Path,
 ) -> crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+    let output_path = transcript_path.display().to_string();
+    let last_offset = claude_tui_rehydrate_start_offset(transcript_path);
+    crate::services::tui_prompt_dedupe::record_boot_read_start(&output_path, last_offset);
     crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
         runtime_kind: RuntimeHandoffKind::ClaudeTui,
-        output_path: transcript_path.display().to_string(),
+        output_path,
         relay_output_path: None,
         input_fifo_path: None,
         session_id: Some(session_id.to_owned()),
-        last_offset: claude_tui_rehydrate_start_offset(transcript_path),
+        last_offset,
         relay_last_offset: None,
     }
 }

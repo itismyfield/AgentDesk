@@ -11,6 +11,7 @@ const OLD: [&str; 3] = [
 ];
 const SESSION_ID: &str = "62840000-0000-4000-8000-000000000001";
 const PENDING: &str = "ADKRR0 the current turn written before the restart";
+const BOOTED: &str = "ADKRR0 the current turn written while the restart was booting";
 
 fn old_turn(body: &str) -> String {
     format!("{}{}{}", user("old"), said(body), stop())
@@ -90,6 +91,34 @@ async fn restore(h: &Harness) -> u64 {
     at.split(')').next().unwrap().parse().unwrap()
 }
 
+/// The boot rehydrate's binding for this pane, registered, as the registry then holds it.
+fn boot_rehydrate(h: &Harness) -> (String, u64) {
+    let rehydrated =
+        crate::services::discord::tui_prompt_relay::rehydrated_claude_binding_for_tests;
+    let seed = rehydrated(&h.tmux).expect("the boot rehydrate binding");
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&h.tmux, seed);
+    let registered = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&h.tmux)
+        .expect("the registered binding");
+    (registered.output_path, registered.last_offset)
+}
+
+/// Lets the restored watcher read through `end` and go quiet, then returns its relay frames.
+async fn read_through(h: &Harness, end: u64) -> Vec<(u64, u64, String)> {
+    // The pane stays busy past a few soft-terminal debounces, then goes idle.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    h.pane("idle");
+    h.until("read through", |h| h.read_ends().iter().any(|&r| r >= end))
+        .await;
+    h.settle().await;
+    h.frames()
+}
+
+/// Whether `body` ends up shown, and in how many messages.
+fn shown(h: &Harness, body: &str) -> (usize, usize) {
+    let seen = h.observe(&[body]);
+    (seen.missing_bytes, seen.copies[0].len())
+}
+
 fn shown_old_bodies(h: &Harness) -> Vec<&'static str> {
     let discord = h.discord.lock().unwrap();
     let shown = |body: &&str| discord.shown.iter().any(|c| c.contains(*body));
@@ -116,14 +145,7 @@ async fn a_row_with_no_transcript_offset_restores_past_older_turns() {
     let old_end = h.len();
     let offset = restore(&h).await;
     h.append(old_turn("ADKRR0 the queued turn after the restart").as_bytes());
-    let end = h.len();
-    // The pane stays busy past a few soft-terminal debounces, then goes idle.
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    h.pane("idle");
-    h.until("read through", |h| h.read_ends().iter().any(|&r| r >= end))
-        .await;
-    h.settle().await;
-    let frames = h.frames();
+    let frames = read_through(&h, h.len()).await;
     assert_eq!(shown_old_bodies(&h), Vec::<&str>::new(), "{frames:?}");
     let replayed: Vec<_> = frames.into_iter().filter(|f| f.0 < old_end).collect();
     assert_eq!(replayed, Vec::new(), "no relay frame over the older turns");
@@ -131,7 +153,8 @@ async fn a_row_with_no_transcript_offset_restores_past_older_turns() {
 }
 
 // The current turn's tail written before the restart is still read: the boot rehydrate seeds
-// the binding at that EOF, but only the delivered frontier says where the watcher resumes.
+// the binding at that EOF, but only the delivered frontier says where the watcher resumes. A
+// watcher-owned row whose turn started at the frontier then shows that tail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_undelivered_tail_before_the_restart_is_read_from_the_frontier() {
     let test = "an_undelivered_tail_before_the_restart_is_read_from_the_frontier";
@@ -139,31 +162,66 @@ async fn an_undelivered_tail_before_the_restart_is_read_from_the_frontier() {
     if !isolated_in(MODULE, test, &[("CLAUDE_CONFIG_DIR", &home)]) {
         return;
     }
-    let h = restart_pane(4, false).await;
-    let delivered = h.len();
-    h.commit(0, delivered);
-    h.append(old_turn(PENDING).as_bytes());
-    let end = h.len();
-    let rehydrated =
-        crate::services::discord::tui_prompt_relay::rehydrated_claude_binding_for_tests;
-    let seed = rehydrated(&h.tmux).expect("the boot rehydrate binding");
-    assert_eq!(
-        (seed.output_path.as_str(), seed.last_offset),
-        (h.path.as_str(), end)
-    );
-    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&h.tmux, seed);
-    save_bridge_row(&h, |_| {}).await;
-    assert_eq!(restore(&h).await, delivered);
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    h.pane("idle");
-    h.until("read through", |h| h.read_ends().iter().any(|&r| r >= end))
+    for (case, starts_at_frontier) in [(4, false), (6, true)] {
+        let h = restart_pane(case, false).await;
+        let delivered = h.len();
+        h.commit(0, delivered);
+        h.append(old_turn(PENDING).as_bytes());
+        let end = h.len();
+        assert_eq!(boot_rehydrate(&h), (h.path.clone(), end));
+        let turn_start = if starts_at_frontier { delivered } else { 0 };
+        save_bridge_row(&h, |row| {
+            row.turn_start_offset = Some(turn_start);
+            if starts_at_frontier {
+                row.set_relay_owner_kind(
+                    crate::services::discord::inflight::RelayOwnerKind::Watcher,
+                );
+            }
+        })
         .await;
-    h.settle().await;
-    let frames = h.frames();
+        assert_eq!(restore(&h).await, delivered, "{case}");
+        let frames = read_through(&h, end).await;
+        assert_eq!(shown_old_bodies(&h), Vec::<&str>::new(), "{frames:?}");
+        assert!(frames.iter().all(|f| f.0 >= delivered), "{frames:?}");
+        assert!(
+            frames.iter().any(|f| f.0 == delivered && f.1 >= end),
+            "{frames:?}"
+        );
+        if starts_at_frontier {
+            assert_eq!(shown(&h, PENDING), (0, 1), "{frames:?}");
+        }
+    }
+}
+
+// With no delivery evidence, output the pane wrote after the boot rehydrate first saw its
+// transcript is read from where it saw it, not skipped to the transcript's end at restore.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn output_written_after_the_boot_rehydrate_is_read_from_where_it_saw_the_transcript() {
+    let test = "output_written_after_the_boot_rehydrate_is_read_from_where_it_saw_the_transcript";
+    let (_home, home) = claude_home();
+    if !isolated_in(MODULE, test, &[("CLAUDE_CONFIG_DIR", &home)]) {
+        return;
+    }
+    let h = restart_pane(5, false).await;
+    let boot = h.len();
+    assert_eq!(boot_rehydrate(&h), (h.path.clone(), boot));
+    save_bridge_row(&h, |_| {}).await;
+    let frontier = delivered_frontier_current_generation(&CLAUDE, h.channel, &h.tmux, None);
+    let checkpoint =
+        crate::services::tui_prompt_dedupe::runtime_binding_resume_checkpoint(&h.tmux, &h.path);
+    let turn_start = h.row().and_then(|row| row.turn_start_offset);
+    assert_eq!(
+        (frontier.is_some(), checkpoint, turn_start),
+        (false, None, Some(0))
+    );
+    h.append(old_turn(BOOTED).as_bytes());
+    let end = h.len();
+    assert_eq!(restore(&h).await, boot);
+    let frames = read_through(&h, end).await;
     assert_eq!(shown_old_bodies(&h), Vec::<&str>::new(), "{frames:?}");
-    assert!(frames.iter().all(|f| f.0 >= delivered), "{frames:?}");
+    assert!(frames.iter().all(|f| f.0 >= boot), "{frames:?}");
     assert!(
-        frames.iter().any(|f| f.0 == delivered && f.1 >= end),
+        frames.iter().any(|f| f.0 == boot && f.1 >= end),
         "{frames:?}"
     );
 }
@@ -267,11 +325,18 @@ async fn a_row_at_a_recorded_zero_keeps_it() {
         .join(format!("rollout-2026-10-10T00-00-00-{codex_session}.jsonl"))
         .display()
         .to_string();
-    std::fs::write(
-        &h.path,
-        OLD.iter().map(|body| old_turn(body)).collect::<String>(),
-    )
-    .unwrap();
+    let rollout = [
+        serde_json::json!({"type": "session_meta", "payload": {"id": codex_session, "cwd": root}}),
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "queued prompt"}]}}),
+        serde_json::json!({"type": "response_item", "payload": {"type": "message",
+            "role": "assistant", "phase": "final_answer", "channel": "final",
+            "content": [{"type": "output_text", "text": "ADKRR0 codex answer"}]}}),
+        serde_json::json!({"type": "event_msg", "payload": {"type": "task_complete",
+            "last_agent_message": "ADKRR0 codex answer"}}),
+    ];
+    let rollout: String = rollout.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(&h.path, &rollout).unwrap();
     h.shared.settings.write().await.provider = codex_provider.clone();
     let send =
         |text| crate::services::discord::http::send_channel_message(&h.http, h.channel, text);
@@ -292,6 +357,8 @@ async fn a_row_at_a_recorded_zero_keeps_it() {
     );
     row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
     h.save(&row);
+    let reads = &super::super::super::utf8_chunk_decoder::SOURCE_READS;
+    *reads.lock().unwrap() = Some(Vec::new());
     assert_eq!(restore(&h).await, 0, "the Codex rollout");
     let fallback = format!("{} — codex rollout fallback {}", h.tmux, h.path);
     assert_eq!(
@@ -299,6 +366,21 @@ async fn a_row_at_a_recorded_zero_keeps_it() {
         1,
         "restored over the rollout"
     );
+    let first_read = || {
+        let reads = reads.lock().unwrap();
+        reads
+            .iter()
+            .flatten()
+            .find(|read| read.0 == h.path)
+            .cloned()
+    };
+    h.until("the restored watcher's first read", |_| {
+        first_read().is_some()
+    })
+    .await;
+    let (_, start, bytes) = first_read().unwrap();
+    assert_eq!((start, bytes.len()), (0, rollout.len()), "the first read");
+    assert_eq!(bytes, rollout.as_bytes());
 }
 
 // A watcher streaming a turn the bridge delivered, reading in chunks below a frontier that

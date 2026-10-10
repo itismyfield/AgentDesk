@@ -53,11 +53,27 @@ impl WatcherReadBatch {
     }
 }
 
+/// Test-only `(path, offset, bytes)` of every non-empty source read, once a test enables it.
+#[cfg(test)]
+pub(super) static SOURCE_READS: std::sync::Mutex<Option<Vec<(String, u64, Vec<u8>)>>> =
+    std::sync::Mutex::new(None);
+
 pub(super) fn read_watcher_source_chunk(path: &str, offset: u64) -> SourceChunk {
-    read_watcher_source_chunk_from_file(
-        std::fs::File::open(path).map_err(|error| format!("open: {error}"))?,
-        offset,
-    )
+    let file = std::fs::File::open(path).map_err(|error| format!("open: {error}"))?;
+    let chunk = read_watcher_source_chunk_from_file(file, offset);
+    #[cfg(test)]
+    if let (Ok(batch), Some(reads)) = (
+        &chunk,
+        SOURCE_READS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut(),
+    ) {
+        if !batch.bytes.is_empty() {
+            reads.push((path.to_owned(), offset, batch.bytes.clone()));
+        }
+    }
+    chunk
 }
 
 pub(super) async fn read_watcher_source_chunk_with_witness(

@@ -88,6 +88,26 @@ pub(crate) fn runtime_binding_resume_checkpoint(
     (path == output_path).then_some(*offset)
 }
 
+/// Per transcript, its length when a rehydrate first observed it in this process. Not delivery
+/// evidence: it only marks where output written after that observation begins.
+static BOOT_READ_STARTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, u64>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Keeps the first observed length of `output_path`; later observations never move it.
+pub(crate) fn record_boot_read_start(output_path: &str, offset: u64) {
+    if !output_path.trim().is_empty() {
+        let mut starts = BOOT_READ_STARTS.lock().unwrap_or_else(|e| e.into_inner());
+        starts.entry(output_path.to_owned()).or_insert(offset);
+    }
+}
+
+/// The length a rehydrate first observed `output_path` at in this process, if any.
+pub(crate) fn boot_read_start(output_path: &str) -> Option<u64> {
+    let starts = BOOT_READ_STARTS.lock().unwrap_or_else(|e| e.into_inner());
+    starts.get(output_path).copied()
+}
+
 pub(crate) fn runtime_binding_for_tmux_session(
     tmux_session_name: &str,
 ) -> Option<TuiRuntimeBinding> {
