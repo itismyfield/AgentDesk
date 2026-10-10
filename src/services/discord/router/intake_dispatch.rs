@@ -15,6 +15,10 @@ mod home_order_tests;
 mod notice;
 mod policy_channel;
 mod queued;
+#[cfg(test)]
+pub(crate) mod replay_admission;
+#[cfg(test)]
+mod replay_admission_tests;
 mod skill;
 #[cfg(test)]
 mod tests;
