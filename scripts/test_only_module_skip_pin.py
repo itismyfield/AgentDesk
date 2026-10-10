@@ -53,6 +53,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/health/watcher_respawn/input_fence_tests.rs",
         "src/services/discord/recovery_engine/manual_rebind/live_bridge_guard_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_recovery_fence_tests.rs",
+        "src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs",
+        "src/services/discord/tmux_session_files/input_fence_tests.rs",
         "src/services/discord/runtime_bootstrap/shutdown_input_fence_tests.rs",
         "src/services/discord/tui_direct_pending_start/tests/input_effect_tests.rs",
         "src/services/claude_tui/hook_server/native_clear_fence_tests.rs",
