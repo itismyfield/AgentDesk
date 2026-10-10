@@ -32193,6 +32193,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:a956d913d2e30a4a7d780bd5fe2ab9f81633681140618620e3eba0e7fb38d2da"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:dc4a17176ff91d9eebb57dbe2f62f60575d2e596501834dcca6f167e550d013d"
     },
     {
@@ -37369,6 +37378,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:5889a7f12a892fb340ff7ef3335649c716cd232bcd36bb5574bd33496c31d6f6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_forwarding/home_stop_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:be8a4e0958c009d795203aaaca50dca67a90b2396f9f6ef5f358d437d079f06c"
     },
     {
       "root": "src",
