@@ -35,7 +35,8 @@ async fn register_compares_the_whole_request_identity_pg() {
         .await
         .unwrap()
         .id;
-    let variants: [(&str, fn(&mut CanonicalInput)); 8] = [
+    type Change = fn(&mut CanonicalInput);
+    let variants: [(&str, Change); 8] = [
         ("provider", |i| i.provider = "codex".into()),
         ("channel", |i| i.channel = "other".into()),
         ("sources", |i| i.sources = vec!["s1".into()]),
