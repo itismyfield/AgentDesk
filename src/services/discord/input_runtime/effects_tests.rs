@@ -625,3 +625,31 @@ fn unbound_key_holds_the_move_before_its_only_legacy_copy_is_retired() {
         vec![(Some(unbound), "move_unbound")]
     );
 }
+
+#[test]
+fn prod_enqueue_rejects_external_before_materialization() {
+    let rt = runtime();
+    let root = sandbox();
+    let key = crate::services::tui_input::input_key::EXTERNAL_KEY_BASE + 8;
+    let ledger = Ledger::open(root.path(), CHANNEL).unwrap();
+    let pin = ledger
+        .pin_blob(&key.to_string(), 0, "sample.txt", b"attachment")
+        .unwrap();
+    let mut input = item(key);
+    input["pending_uploads"] = json!(["[File uploaded] sample.txt → pinned (10 bytes)"]);
+    input["blob_pins"] = json!([pin]);
+    drop(ledger);
+    let closing = frozen();
+    closing.begin_handback().unwrap();
+    let mut effects = effects(root.path(), closing, &rt);
+    let before = legacy_files(root.path());
+    assert!(matches!(
+        effects.enqueue(key, &input).unwrap(),
+        EnqueueOutcome::Rejected
+    ));
+    assert_eq!(
+        legacy_files(root.path()),
+        before,
+        "no pin copy or Legacy queue write"
+    );
+}

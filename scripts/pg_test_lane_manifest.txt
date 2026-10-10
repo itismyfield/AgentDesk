@@ -23,12 +23,14 @@ src/db/intake_outbox_dispatch_stamp/tests.rs
 src/db/intake_outbox_dispatched_audit.rs
 src/db/intake_outbox_home_tests.rs
 src/db/o_channel_activation.rs
+src/db/o_channel_activation_fence_tests.rs
 src/db/o_channel_homes_tests.rs
 src/db/postgres.rs
 src/db/postgres/advisory_lock_tests.rs
 src/db/postgres/test_db_reclaim.rs
 src/db/prompt_manifests/tests.rs
 src/db/relay_dead_letter.rs
+src/db/replay_disposition/write_tests.rs
 src/db/replay_disposition_tests.rs
 src/db/replay_disposition_tests/compatibility_tests.rs
 src/db/replay_disposition_tests/concurrency_tests.rs
@@ -154,6 +156,7 @@ src/services/discord/relay_recovery/tests/host_deferred.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
 src/services/discord/router/intake_dispatch/home_order_tests.rs
+src/services/discord/router/intake_dispatch/replay_admission_tests.rs
 src/services/discord/router/intake_dispatch/tests.rs
 src/services/discord/router/intake_dispatch/tests/replay_hold.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
@@ -175,6 +178,7 @@ src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
+src/services/discord/runtime_bootstrap/o_writer_host.rs
 src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs
 src/services/discord/session_idle_cleanup_tests.rs
 src/services/discord/session_runtime.rs
@@ -201,6 +205,8 @@ src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs
 src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs
 src/services/discord/turn_bridge/intake_settlement/tests.rs
 src/services/discord/turn_bridge/recovery_text.rs
+src/services/discord/turn_bridge/replay_policy/permit_tests.rs
+src/services/discord/turn_bridge/replay_policy/policy_tests.rs
 src/services/discord/turn_bridge/resume_pin_tests.rs
 src/services/discord/turn_bridge/stream_loop/provider_recovery.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs
@@ -246,6 +252,7 @@ src/services/tmux_turn_liveness/tests_pg.rs
 src/services/tui_o/alarm.rs
 src/services/tui_o/exact_pg_tests.rs
 src/services/tui_o/exact_submission.rs
+src/services/tui_o/writer/deferred_pg_tests.rs
 src/services/turn_host_tests.rs
 src/services/turn_lifecycle.rs
 src/voice/announce_meta.rs
@@ -276,6 +283,7 @@ db::intake_outbox::postgres_tests
 db::intake_outbox_delivery_proof::tests
 db::intake_outbox_dispatch_stamp::tests
 db::intake_outbox_dispatched_audit::postgres_tests
+db::o_channel_activation::fence_tests
 db::o_channel_activation::postgres_tests
 db::o_channel_homes::tests
 db::postgres::advisory_lock::tests
@@ -287,6 +295,7 @@ db::replay_disposition::tests
 db::replay_disposition::tests::compatibility_tests
 db::replay_disposition::tests::concurrency_tests
 db::replay_disposition::tests::consumer_tests
+db::replay_disposition::write_tests
 db::scheduled_messages::postgres_tests
 db::session_observability::tests_pg
 db::session_transcripts::clear_fence_pg_tests
@@ -415,6 +424,7 @@ services::discord::relay_recovery::apply::host_deferred_tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::router::intake_dispatch::home_order_tests
+services::discord::router::intake_dispatch::replay_admission_tests
 services::discord::router::intake_dispatch::tests
 services::discord::router::intake_dispatch::tests::replay_hold
 services::discord::router::intake_gate::stale_turn::host_tests
@@ -436,6 +446,7 @@ services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+services::discord::runtime_bootstrap::o_writer_host::fence_tests
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests
 services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
@@ -465,6 +476,8 @@ services::discord::turn_bridge::completion_guard::completion_postgres::replay_ho
 services::discord::turn_bridge::headless_delivery::production_seam_tests
 services::discord::turn_bridge::intake_settlement::tests
 services::discord::turn_bridge::recovery_text::tests
+services::discord::turn_bridge::replay_policy::permit_tests
+services::discord::turn_bridge::replay_policy::policy_tests
 services::discord::turn_bridge::resume_pin_tests
 services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
@@ -510,6 +523,7 @@ services::tmux_turn_liveness::tests_pg
 services::tui_o::alarm::postgres_tests
 services::tui_o::exact_pg::tests
 services::tui_o::exact_submission::tests
+services::tui_o::writer::tests::actor::host_start::deferred::pg
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
 voice::announce_meta::tests
@@ -754,6 +768,11 @@ db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_includ
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_marks_empty_provider_false_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_empty_when_no_rows_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_only_dispatched_rows_pg
+db::o_channel_activation::fence_tests::fence_blocks_actual_sweep_backend_until_release_or_drop_pg
+db::o_channel_activation::fence_tests::fenced_rows_count_pending_and_processing_headless_bodies_only_pg
+db::o_channel_activation::fence_tests::fenced_rows_preserve_all_open_status_and_legacy_session_predicates_pg
+db::o_channel_activation::fence_tests::intake_fence_uses_app_role_update_privilege_and_rejects_select_only_pg
+db::o_channel_activation::fence_tests::sweep_committed_before_fence_is_visible_in_fresh_facts_pg
 db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
 db::o_channel_homes::tests::a_delegate_naming_an_unknown_provider_writes_nothing_pg
 db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_win_pg
@@ -809,6 +828,13 @@ db::replay_disposition::tests::consumer_tests::held_session_canonical_identity_r
 db::replay_disposition::tests::consumer_tests::legacy_null_link_cannot_requeue_via_held_history_pg
 db::replay_disposition::tests::consumer_tests::normal_retry_parent_absorbed_sources_survive_sweep_and_old_writer_child_pg
 db::replay_disposition::tests::receipt_transitions_old_writers_and_delivery_settlement_preserve_authority_pg
+db::replay_disposition::write_tests::begin_commit_failure_reports_ack_unknown_not_a_start_pg
+db::replay_disposition::write_tests::begin_commits_one_start_per_registered_attempt_pg
+db::replay_disposition::write_tests::classification_commits_only_for_its_exact_attempt_pg
+db::replay_disposition::write_tests::database_refuses_inexact_attempt_transitions_pg
+db::replay_disposition::write_tests::exact_attempt_migration_preserves_0136_rows_and_reapplies_pg
+db::replay_disposition::write_tests::exact_retry_moves_session_off_stale_resume_once_pg
+db::replay_disposition::write_tests::live_evidence_requires_a_complete_observation_and_one_provider_terminal_pg
 db::scheduled_messages::postgres_tests::postgres_agent_claim_waits_for_runtime_and_cancel_fences_turn_start
 db::scheduled_messages::postgres_tests::postgres_agent_launch_intent_crash_rearms_without_phantom_lease_renewal
 db::scheduled_messages::postgres_tests::postgres_agent_turn_start_waits_for_parent_lock_and_observes_cancel
@@ -1360,6 +1386,10 @@ services::discord::relay_recovery::circuit_breaker::tests::progress_during_pg_st
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::enqueue_default_off_leaves_all_circuit_columns_null_pg
 services::discord::router::intake_dispatch::home_order_tests::only_a_registered_delegated_channel_skips_the_placement_hold_and_reaches_its_holder_pg
+services::discord::router::intake_dispatch::replay_admission_tests::dormant_production_context_creates_no_receipt_even_with_producers_env_on_pg
+services::discord::router::intake_dispatch::replay_admission_tests::exact_retry_reenters_only_through_its_own_continuation_pg
+services::discord::router::intake_dispatch::replay_admission_tests::preflight_sends_every_blocking_state_to_protected_consumption_pg
+services::discord::router::intake_dispatch::replay_admission_tests::prepare_commits_the_receipt_before_the_permit_and_never_reissues_pg
 services::discord::router::intake_dispatch::tests::dispatched_open_route_never_uses_stale_local_recovery_pg
 services::discord::router::intake_dispatch::tests::distinct_open_route_requeues_queued_successor_pg
 services::discord::router::intake_dispatch::tests::live_and_skill_producers_forward_to_foreign_owner_pg
@@ -1474,6 +1504,7 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settle
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settles_stale_spawned_as_unknown_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_live_interactive_turn_without_dispatch_binding_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
@@ -1631,6 +1662,8 @@ services::discord::turn_bridge::recovery_text::tests::session_retry_context_rest
 services::discord::turn_bridge::recovery_text::tests::turn_end_wip_warning_stash_take_and_put_back_round_trips_pg
 services::discord::turn_bridge::recovery_text::tests::voluntary_feedback_reminder_is_not_consumed_by_other_provider_pg
 services::discord::turn_bridge::recovery_text::tests::voluntary_feedback_reminder_stash_take_and_put_back_round_trips_pg
+services::discord::turn_bridge::replay_policy::permit_tests::start_permit_runs_one_effect_only_on_its_own_target_pg
+services::discord::turn_bridge::replay_policy::policy_tests::stale_attempt_retries_only_on_committed_no_effect_evidence_pg
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_cancelled_pg
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_foreign_or_stale_pg
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_to_executor_pg
@@ -1868,6 +1901,13 @@ services::tui_o::exact_submission::tests::exact_submission_pg_attempt_before_clo
 services::tui_o::exact_submission::tests::exact_submission_pg_closed_admission_rejects_late_attempt
 services::tui_o::exact_submission::tests::exact_submission_pg_executor_classifies_no_attempt_and_typed_refusal
 services::tui_o::exact_submission::tests::exact_submission_pg_reopen_process_resolves_policy_without_source
+services::tui_o::writer::tests::actor::host_start::deferred::pg::expired_handoff_fence_blocks_actual_sweep_until_init_published_pg
+services::tui_o::writer::tests::actor::host_start::deferred::pg::normal_deferred_fence_blocks_actual_sweep_until_init_published_pg
+services::tui_o::writer::tests::actor::host_start::deferred::pg::normal_deferred_rejects_headless_enqueue_completed_after_fence_from_a_preexisting_reservation_pg
+services::tui_o::writer::tests::actor::host_start::deferred::pg::normal_deferred_rejects_headless_enqueue_completed_after_fence_pg
+services::tui_o::writer::tests::actor::host_start::deferred::pg::queued_headless_pending_and_processing_block_expired_handoff_until_worker_sent_pg
+services::tui_o::writer::tests::actor::host_start::deferred::pg::sweep_before_expired_handoff_fence_observes_fresh_child_pg
+services::tui_o::writer::tests::actor::host_start::deferred::pg::sweep_before_normal_deferred_fence_observes_fresh_child_pg
 services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg
 services::turn_lifecycle::host_guard_tests::force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg
