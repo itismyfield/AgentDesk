@@ -84,7 +84,7 @@ impl Incarnation {
 
     /// Adopts a strict reading's identity only while the ticket it was observed under is current;
     /// the reading then carries the advanced ticket, so no other reading can borrow it.
-    pub(super) fn adopt(&self, reading: &mut Reading, bot_id: u64) -> bool {
+    pub(super) fn adopt_reading(&self, reading: &mut Reading, bot_id: u64) -> bool {
         let ticket = reading.observed_under().cloned();
         let (Some(ticket), Some(identity)) = (ticket, reading.identity(bot_id)) else {
             return false;

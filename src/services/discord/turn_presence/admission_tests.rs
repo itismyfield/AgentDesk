@@ -802,7 +802,7 @@ async fn b2b1_reading_kept_across_resume_cannot_seed_or_approve_the_new_ticket()
     let ticket = fixture.ticket();
     let incarnation = ticket.incarnation().unwrap();
     assert!(
-        !incarnation.adopt(&mut kept, 42),
+        !incarnation.adopt_reading(&mut kept, 42),
         "a reading from before the resume"
     );
     assert!(
@@ -810,7 +810,7 @@ async fn b2b1_reading_kept_across_resume_cannot_seed_or_approve_the_new_ticket()
         "nothing was seeded"
     );
     let mut fresh = fixture.read().await;
-    assert!(incarnation.adopt(&mut fresh, 42));
+    assert!(incarnation.adopt_reading(&mut fresh, 42));
     let polls = AtomicUsize::new(0);
     let started = incarnation
         .approve(fresh)
