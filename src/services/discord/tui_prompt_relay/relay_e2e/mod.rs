@@ -21,6 +21,8 @@ mod cancel_backstop_e2e;
 mod catch_up_pagination_e2e;
 mod consumed_command_guard_e2e;
 pub(in crate::services::discord) mod discord_mock;
+// The literal test gate keeps the source censuses from reading this file as production.
+#[cfg(test)]
 #[cfg(unix)]
 #[path = "herdr_terminate_e2e_tests.rs"]
 mod herdr_terminate_e2e;
