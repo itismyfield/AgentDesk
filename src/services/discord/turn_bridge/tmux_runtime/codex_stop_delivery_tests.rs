@@ -1096,9 +1096,8 @@ fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
     assert!(!body.contains("begin_command_stop(") && !body.contains("begin_user_stop("));
 }
 
-/// Formerly a known defect: a cold stop survived an unsubmitted failure with no terminal. The
-/// stop alone is still no proof and holds; the executor's no-attempt exit makes the proof that
-/// the bridge exit seals as a policy close, with no Escape and no provider call.
+/// A cold stop alone is no proof and holds; after the executor's no-attempt exit the exit seal
+/// is a policy close, with no Escape and no provider call.
 #[test]
 fn cold_unsubmitted_stop_closes_only_after_a_no_attempt_exit() {
     use crate::services::provider::herdr_before_start::{

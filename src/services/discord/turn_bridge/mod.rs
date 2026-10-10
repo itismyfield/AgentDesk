@@ -709,9 +709,8 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             before_start_stop::run_policy_close(&shared_owned, gateway, &cancel_token, &inflight_state, current_msg_id, proof).await;
         }
         if exit != ExitDecision::Normal {
-            // No admitted terminal frame: keep the row for recovery (a held prompt stays Waiting),
-            // or a stopped Herdr turn for its provider (a settled policy close was already
-            // finalized; a refused one stays held); a partial stream is not a terminal.
+            // No admitted terminal: keep the row (a held prompt stays Waiting) or a stopped Herdr
+            // turn, unless its policy close already finalized; a partial stream is not a terminal.
             completion_guard.relinquish_bridge_authority();
             inflight_guard.defuse();
             return;
