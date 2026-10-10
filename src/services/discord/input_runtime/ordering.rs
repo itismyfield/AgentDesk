@@ -1,6 +1,7 @@
 //! Supervisor and post-handback scan authority; fetch tickets precede all external IO.
 use crate::services::discord::input_runtime::fence::Failure;
 use crate::services::provider::ProviderKind;
+use crate::services::tui_input::input_key::is_discord_key;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -140,7 +141,17 @@ impl AdmissionOrder {
         }
     }
 
+    /// The entry for a live notice: one non-Discord key refuses the whole notice before any change.
+    pub(crate) fn admit_pending(&mut self, sources: &[u64]) -> Result<PendingSource, Failure> {
+        if !discord_sources(sources) {
+            return Err(Failure::StalePermit);
+        }
+        Ok(self.pending(sources))
+    }
+
+    /// Retries re-record sources this order already checked, so they cannot fail.
     pub(crate) fn pending(&mut self, sources: &[u64]) -> PendingSource {
+        debug_assert!(discord_sources(sources));
         let sources: Vec<_> = sources
             .iter()
             .copied()
@@ -181,7 +192,9 @@ impl AdmissionOrder {
         let current = self.current(&ticket.stamp, epoch);
         #[cfg(test)]
         let current = current || mutant("drop_ticket_validation");
+        // Sources are sorted and bounded by the horizon, so a Discord horizon bounds them all.
         if !current
+            || (horizon != 0 && !is_discord_key(horizon))
             || horizon < self.stamp.frontier
             || sources.first().is_some_and(|s| *s <= self.stamp.frontier)
             || sources.windows(2).any(|p| p[0] >= p[1])
@@ -329,6 +342,11 @@ impl AdmissionOrder {
     }
 }
 
+/// Only Discord snowflakes order a scan; external and synthetic keys never enter it.
+fn discord_sources(sources: &[u64]) -> bool {
+    sources.iter().all(|source| is_discord_key(*source))
+}
+
 pub(crate) fn order_barrier(provider: &ProviderKind, channel: u64) -> bool {
     BARRIERS
         .lock()
@@ -359,7 +377,10 @@ pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
     snapshot: &PendingSource,
     release: impl FnOnce() -> Result<u64, Failure>,
 ) -> Result<(), Failure> {
-    if snapshot.overflow.provider != provider || snapshot.overflow.channel != channel {
+    if snapshot.overflow.provider != provider
+        || snapshot.overflow.channel != channel
+        || !discord_sources(&snapshot.sources)
+    {
         return Err(Failure::StalePermit);
     }
     let mut entries = BARRIERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -401,7 +422,11 @@ pub(crate) fn handback_pending(
     channel: u64,
     sources: &[u64],
 ) -> Result<PendingSource, Failure> {
-    with_handback(provider, channel, |order, _| Ok(order.pending(sources)))
+    // Refused before the entry is touched, so a settled barrier stays settled.
+    if !discord_sources(sources) {
+        return Err(Failure::StalePermit);
+    }
+    with_handback(provider, channel, |order, _| order.admit_pending(sources))
 }
 
 pub(crate) fn handback_fetch_ticket(

@@ -25,6 +25,8 @@ use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents};
 pub(crate) mod admission;
 #[path = "command.rs"]
 pub(crate) mod command;
+#[path = "external.rs"]
+pub(crate) mod external;
 #[path = "ordering.rs"]
 pub(crate) mod ordering;
 #[path = "receipt.rs"]
@@ -488,7 +490,28 @@ impl<P: Ports> Supervisor<P> {
                 let _ = reply.send(self.order.fetch_ticket(self.admission_gen));
             }
             SupervisorCmd::PendingSource { sources, reply } => {
-                let _ = reply.send(self.order.pending(&sources));
+                let _ = reply.send(self.order.admit_pending(&sources));
+            }
+            SupervisorCmd::SubmitExternal { source, reply } => {
+                // Captured before the loan, which itself closes admission while it lasts.
+                let admit_new = receipt_open
+                    && self.admission_open()
+                    && !ordering::order_barrier(&self.config.provider, self.config.channel);
+                let result = if source.identity().execution_channel_id != self.config.channel {
+                    external::ExternalReceipt::Deferred(Deferred::Conflict)
+                } else {
+                    loan(&mut self.slot, move |lease| {
+                        external::submit(lease, *source, admit_new)
+                    })
+                    .await
+                    .unwrap_or(external::ExternalReceipt::Deferred(
+                        Deferred::SupervisorLost,
+                    ))
+                };
+                let persistence = external::ExternalReceipt::Deferred(Deferred::Persistence);
+                self.registration
+                    .report(&held("ledger_receipt_unconfirmed"), result == persistence);
+                let _ = reply.send(result);
             }
             SupervisorCmd::LookupResponsibility { identity, reply } => {
                 let result = if identity.execution_channel_id != self.config.channel {
