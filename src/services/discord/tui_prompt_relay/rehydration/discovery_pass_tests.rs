@@ -4,7 +4,7 @@
 use super::super::codex_idle_rollout::codex_discovery_pass;
 use super::*;
 use crate::services::discord::codex_adoption_runtime::boot::{
-    BootReadError, BootRole, LiveSource, record_role,
+    BootReadError, BootRole, DiscoveryPass, LiveSource, record_role,
 };
 use crate::services::discord::codex_adoption_runtime::{AdoptionRuntime, install, installed};
 use crate::services::tui_o::shadow::tap::TuiOConfig;

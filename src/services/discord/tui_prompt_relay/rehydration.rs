@@ -11,8 +11,6 @@
 //! sites (and the `#[cfg(test)] mod tests` block) stay byte-identical via the
 //! `use self::rehydration::{...}` re-import.
 
-#[cfg(unix)]
-use super::super::codex_adoption_runtime::boot::{DiscoveryPass, LiveSource};
 use super::super::host_defer_gate::mirror_evict_admitted as host_admits;
 use super::super::recovery_engine::host_reconcile::names_another_host;
 #[cfg(unix)]
@@ -30,6 +28,8 @@ use std::collections::HashMap;
 mod codex_marker;
 #[cfg(unix)]
 use codex_marker::{CodexTuiMarkerRehydrateDecision, codex_tui_marker_rehydrate_decision};
+#[cfg(unix)]
+use codex_marker::{codex_rollout_session_id, codex_tui_launch_modified_since};
 
 #[cfg(any(not(test), not(unix)))]
 use super::resolve_rehydrated_claude_tmux_channel_id as claude_channel;
@@ -451,7 +451,7 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
 pub(super) fn rehydrate_existing_codex_tui_bindings(
     shared: &Arc<SharedData>,
     observe: bool,
-) -> DiscoveryPass {
+) -> super::super::codex_adoption_runtime::boot::DiscoveryPass {
     evict_dead_orphaned_codex_tui_mirrors(shared);
     // Codex Herdr rows, read whether or not tmux answers; off Herdr this reads nothing.
     let herdr = super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_panes(
@@ -492,14 +492,10 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(
         let Some(channel_id) = authoritative_channel.or_else(|| {
             crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux_session_name)
         }) else {
-            // An unplaced live pane may be any channel's source.
-            if observe && codex_pass_pane_is_live(&tmux_session_name) {
-                live.push(LiveSource {
-                    key: tmux_session_name,
-                    channel: None,
-                    bound: false,
-                });
-            }
+            live.extend(codex_marker::unplaced_live_source(
+                tmux_session_name,
+                observe,
+            ));
             continue;
         };
 
@@ -530,12 +526,7 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(
             continue;
         }
 
-        // A live pane of `channel_id`: bound only on what the pass leaves registered.
-        let source = |tmux: &str| LiveSource {
-            key: tmux.to_owned(),
-            channel: Some(channel_id),
-            bound: observe && codex_source_bound(shared, tmux, channel_id),
-        };
+        let source = |tmux: &str| codex_marker::live_source(shared, tmux, channel_id, observe);
         if let Some(authoritative_channel) = authoritative_channel {
             let Some(repaired) = codex_marker::restore_codex_owner_channel(
                 shared,
@@ -584,20 +575,6 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(
         sources.extend(live);
         sources
     })
-}
-
-/// Whether the pass left `tmux` routed to `channel` by the watcher registry, the relay's
-/// authority, with a Codex binding on an existing rollout.
-#[cfg(unix)]
-fn codex_source_bound(shared: &Arc<SharedData>, tmux: &str, channel: u64) -> bool {
-    let routed = shared.tmux_watchers.owner_channel_for_tmux_session(tmux);
-    routed == Some(ChannelId::new(channel))
-        && crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).is_some_and(
-            |binding| {
-                binding.runtime_kind == RuntimeHandoffKind::CodexTui
-                    && Path::new(&binding.output_path).exists()
-            },
-        )
 }
 
 #[cfg(unix)]
@@ -735,36 +712,6 @@ fn tmux_session_is_codex_tui(tmux_session_name: &str) -> bool {
     }
     crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
         .is_some_and(|binding| binding.runtime_kind == RuntimeHandoffKind::CodexTui)
-}
-
-#[cfg(unix)]
-fn codex_rollout_session_id(rollout_path: &Path) -> Option<String> {
-    let file = std::fs::File::open(rollout_path).ok()?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut first_line = String::new();
-    std::io::BufRead::read_line(&mut reader, &mut first_line).ok()?;
-    let value: serde_json::Value = serde_json::from_str(first_line.trim()).ok()?;
-    if value.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
-        return None;
-    }
-    value
-        .get("payload")
-        .and_then(|payload| payload.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
-#[cfg(unix)]
-fn codex_tui_launch_modified_since(tmux_session_name: &str) -> std::time::SystemTime {
-    crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "sh")
-        .and_then(|path| {
-            std::fs::metadata(path)
-                .and_then(|meta| meta.modified())
-                .ok()
-        })
-        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
 }
 
 #[cfg(unix)]
