@@ -66,7 +66,157 @@ fn t0a_no_submit_opener_has_no_attribution() {
     fixture.event("task_started", None);
     assert_eq!(
         scan_anchor(&fixture.source, fixture.header_end, fixture.len()),
-        Ok(None)
+        Err("anonymous_native_opener")
+    );
+}
+
+#[test]
+fn anonymous_opener_mixed_with_named_opener_is_unknown() {
+    for anonymous_first in [false, true] {
+        let fixture = Fixture::new();
+        for id in if anonymous_first {
+            [None, Some("old")]
+        } else {
+            [Some("old"), None]
+        } {
+            fixture.event("task_started", id);
+        }
+        assert_eq!(
+            scan_anchor(&fixture.source, fixture.header_end, fixture.len()),
+            Err("anonymous_native_opener")
+        );
+    }
+}
+
+#[test]
+fn codex_0162_confirmed_metadata_reaches_native_anchor_and_terminal() {
+    let fixture = Fixture::new();
+    for line in
+        include_str!("../../../../tests/fixtures/codex_provenance/0162_metadata_turn.jsonl").lines()
+    {
+        fixture.append(serde_json::from_str(line).unwrap());
+    }
+    let anchor = fixture.anchor();
+    assert_eq!(anchor.native_turn_id, "old");
+    assert_eq!(anchor.start, fixture.header_end);
+    assert_eq!(
+        terminal_end(&fixture.source, &anchor, fixture.len()),
+        Ok(Some(fixture.len()))
+    );
+}
+
+#[test]
+fn confirmed_metadata_rejects_malformed_unknown_agent_trigger_and_foreign_turn() {
+    for (kind, payload, reason) in [
+        (
+            "future_metadata",
+            serde_json::json!({}),
+            "unknown_native_schema",
+        ),
+        (
+            "token_usage_record",
+            serde_json::json!({}),
+            "unknown_native_schema",
+        ),
+        (
+            "token_usage_record",
+            serde_json::json!({"turn_id":" "}),
+            "unknown_native_schema",
+        ),
+        (
+            "token_usage_record",
+            serde_json::json!({"turn_id":4}),
+            "unknown_native_schema",
+        ),
+        (
+            "token_usage_record",
+            serde_json::json!({"turn_id":"foreign"}),
+            "foreign_native_record",
+        ),
+        (
+            "world_state",
+            serde_json::json!([]),
+            "unknown_native_schema",
+        ),
+        (
+            "world_state",
+            serde_json::json!({"turn_id":null}),
+            "unknown_native_schema",
+        ),
+        (
+            "world_state",
+            serde_json::json!({"full":"true"}),
+            "unknown_native_schema",
+        ),
+        (
+            "inter_agent_communication_metadata",
+            serde_json::json!({}),
+            "unknown_native_schema",
+        ),
+        (
+            "inter_agent_communication_metadata",
+            serde_json::json!({"trigger_turn":1}),
+            "unknown_native_schema",
+        ),
+        (
+            "inter_agent_communication_metadata",
+            serde_json::json!({"trigger_turn":true}),
+            "agent_triggered_native_turn",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        fixture.event("task_started", Some("old"));
+        let anchor = fixture.anchor();
+        fixture.append(serde_json::json!({"type":kind,"payload":payload}));
+        fixture.event("task_complete", Some("old"));
+        assert_eq!(
+            terminal_end(&fixture.source, &anchor, fixture.len()),
+            Err(reason),
+            "{kind}"
+        );
+        assert_eq!(
+            scan_anchor(&fixture.source, fixture.header_end, fixture.len()),
+            Err(reason),
+            "{kind}"
+        );
+    }
+}
+
+#[test]
+fn compact_fixture_second_turn_passes_and_child_review_turn_has_explicit_reason() {
+    let fixture = Fixture::new();
+    let mut second_start = 0;
+    for (index, line) in
+        include_str!("../../../../tests/fixtures/codex_busy_inject/compact_turn.jsonl")
+            .lines()
+            .enumerate()
+    {
+        let (start, _) = fixture.append(serde_json::from_str(line).unwrap());
+        if index == 8 {
+            second_start = start;
+        }
+    }
+    assert_eq!(
+        scan_anchor(&fixture.source, fixture.header_end, fixture.len()),
+        Err("multiple_native_openers")
+    );
+    let anchor = scan_anchor(&fixture.source, second_start, fixture.len())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        terminal_end(&fixture.source, &anchor, fixture.len()),
+        Ok(Some(fixture.len()))
+    );
+    let fixture = Fixture::new();
+    for line in include_str!("../../../../tests/fixtures/codex_busy_inject/review_turn.jsonl")
+        .lines()
+        .take(10)
+    {
+        fixture.append(serde_json::from_str(line).unwrap());
+    }
+    assert_eq!(
+        scan_anchor(&fixture.source, fixture.header_end, fixture.len()),
+        Err("child_native_turn")
     );
 }
 

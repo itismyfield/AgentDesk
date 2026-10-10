@@ -23,14 +23,21 @@ pub(crate) fn scan_anchor(
 ) -> Result<Option<NativeTurnAnchor>, &'static str> {
     let mut anchor = None;
     for record in records(source, turn_start_offset, boot_eof)? {
-        if let Fact::Opened(Some(id)) = fact(&record, source)? {
-            if anchor.is_some() {
-                return Err("multiple_native_openers");
+        match fact(&record, source)? {
+            Fact::Opened(None) => return Err("anonymous_native_opener"),
+            Fact::Opened(Some(id)) => {
+                if anchor.is_some() {
+                    return Err("multiple_native_openers");
+                }
+                anchor = Some(NativeTurnAnchor {
+                    native_turn_id: id,
+                    start: record.start,
+                });
             }
-            anchor = Some(NativeTurnAnchor {
-                native_turn_id: id,
-                start: record.start,
-            });
+            Fact::TurnRecord(id) if anchor.as_ref().is_some_and(|a| a.native_turn_id != id) => {
+                return Err("foreign_native_record");
+            }
+            _ => {}
         }
     }
     Ok(anchor)
@@ -59,7 +66,10 @@ pub(crate) fn terminal_end(
                 return Ok(Some(record.end));
             }
             Fact::Terminal(_) => return Err("unnamed_or_foreign_terminal"),
-            Fact::Other => {}
+            Fact::TurnRecord(id) if id != anchor.native_turn_id => {
+                return Err("foreign_native_record");
+            }
+            Fact::Other | Fact::TurnRecord(_) => {}
         }
     }
     Ok(None)
@@ -69,6 +79,7 @@ pub(crate) fn terminal_end(
 enum Fact {
     Opened(Option<String>),
     Terminal(Option<String>),
+    TurnRecord(String),
     Other,
 }
 
@@ -83,6 +94,24 @@ fn fact(record: &CapturedRecord, source: &SourceId) -> Result<Fact, &'static str
             Ok(Fact::Other)
         }
         Some("turn_context" | "compacted") if payload.is_object() => Ok(Fact::Other),
+        // Metadata stays neutral only for the confirmed shape and native turn relationship.
+        Some("token_usage_record") if payload.is_object() && named().is_some() => {
+            Ok(Fact::TurnRecord(named().unwrap()))
+        }
+        Some("world_state")
+            if payload.is_object()
+                && payload.get("turn_id").is_none()
+                && payload.get("full").is_none_or(Value::is_boolean) =>
+        {
+            Ok(Fact::Other)
+        }
+        Some("inter_agent_communication_metadata") => {
+            match payload.get("trigger_turn").and_then(Value::as_bool) {
+                Some(false) => Ok(Fact::Other),
+                Some(true) => Err("agent_triggered_native_turn"),
+                None => Err("unknown_native_schema"),
+            }
+        }
         Some("response_item") => match payload.get("type").and_then(Value::as_str) {
             Some(
                 "message"
@@ -98,7 +127,14 @@ fn fact(record: &CapturedRecord, source: &SourceId) -> Result<Fact, &'static str
             _ => Err("unknown_native_schema"),
         },
         Some("event_msg") => match payload.get("type").and_then(Value::as_str) {
-            Some("task_started") => Ok(Fact::Opened(named())),
+            Some("task_started") => {
+                if payload.get("root_turn_id").is_some_and(|root| {
+                    root.as_str() != payload.get("turn_id").and_then(Value::as_str)
+                }) {
+                    return Err("child_native_turn");
+                }
+                Ok(Fact::Opened(named()))
+            }
             Some("task_complete" | "turn_aborted")
                 if payload.get("synthetic") != Some(&Value::Bool(true)) =>
             {
