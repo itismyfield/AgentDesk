@@ -34,9 +34,17 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/tui_o/writer/adoption_past_stall_tests.rs",
+        "src/services/tui_o/writer/stall_handoff_tests.rs",
+        "src/services/tui_o/writer/deferred_pg_tests.rs",
+        "src/db/o_channel_activation_fence_tests.rs",
         "src/services/tui_o/n1_observation/sink_tests.rs",
         "src/services/tui_o/n1_observation_tests.rs",
         "src/db/replay_disposition_tests.rs",
+        "src/db/replay_disposition/write_tests.rs",
+        "src/services/discord/turn_bridge/replay_policy/permit_tests.rs",
+        "src/services/discord/turn_bridge/replay_policy/policy_tests.rs",
+        "src/services/discord/router/intake_dispatch/replay_admission_tests.rs",
         "src/db/replay_disposition_tests/compatibility_tests.rs",
         "src/db/replay_disposition_tests/concurrency_tests.rs",
         "src/db/replay_disposition_tests/consumer_tests.rs",
@@ -101,9 +109,11 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/input_runtime/supervisor/drive_tests.rs",
         "src/services/discord/input_runtime/supervisor/drive_entry_tests.rs",
         "src/services/discord/input_runtime/supervisor/receipt_entry_tests.rs",
+        "src/services/discord/input_runtime/external_tests.rs",
         "src/services/turn_orchestrator/input_fence_tests.rs",
         "src/services/tui_input/transition_fixture_tests.rs",
         "src/services/tui_input/transition_tests.rs",
+        "src/services/tui_input/input_key_tests.rs",
         "src/services/discord/live_bridge/guard_tests.rs",
         "src/services/discord/runtime_store_checkpoint_lock_tests.rs",
         "src/services/routines/reliability_pg_tests.rs",
@@ -321,6 +331,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/outbound/turn_output_controller/fresh_send_tests.rs",
         "src/services/discord/outbound/source_registry_scan_tests.rs",
         "src/services/discord/outbound/o_writer_repost_io_tests.rs",
+        "src/db/o_piece_ledger_tests.rs",
+        "src/services/tui_o/repost/admission_tests.rs",
+        "src/services/tui_o/repost/probe_tests.rs",
         "src/services/discord/placeholder_controller/queued_card_gate/tests.rs",
         "src/services/discord/placeholder_live_events/probe_fixtures_tests.rs",
         "src/services/discord/placeholder_live_events/tests.rs",
@@ -546,15 +559,24 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/session_forwarding/home_stop_tests.rs",
         "src/server/routes/queue_api_home_stop_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs",
+        "src/services/discord/inflight/managed_submission_tests.rs",
+        "src/services/discord/router/message_handler/provider_dispatch_submission_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/cohort_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/completion_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/publication_tests.rs",
+        "src/cli/o_tests.rs",
     }
 )
 
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/db/replay_disposition/receipt.rs",
+        "src/db/replay_disposition/write.rs",
+        "src/services/discord/turn_bridge/replay_policy.rs",
+        "src/services/discord/turn_bridge/replay_policy/live.rs",
+        "src/services/discord/turn_bridge/replay_policy/permit.rs",
+        "src/services/discord/router/intake_dispatch/replay_admission.rs",
         "src/services/discord/turn_bridge/before_start_stop.rs",
         "src/services/discord/input_runtime/activation.rs",
         "src/services/discord/input_runtime/activation/plan.rs",

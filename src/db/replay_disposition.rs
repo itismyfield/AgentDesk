@@ -72,5 +72,12 @@ pub(crate) async fn dispatch_blocked_on_tx(
 }
 
 #[cfg(test)]
+pub(crate) mod receipt;
+#[cfg(test)]
+pub(crate) mod write;
+#[cfg(test)]
+mod write_tests;
+
+#[cfg(test)]
 #[path = "replay_disposition_tests.rs"]
 pub(crate) mod tests;

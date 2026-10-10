@@ -567,3 +567,6 @@ async fn a_binding_log_that_moves_under_the_lock_is_retried_once_it_moved() {
 
 #[path = "stall_tests.rs"]
 mod stall;
+
+#[path = "deferred_pg_tests.rs"]
+mod pg;

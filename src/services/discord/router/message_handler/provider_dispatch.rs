@@ -5,6 +5,7 @@ use std::sync::{Arc, mpsc::Sender};
 use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
+use crate::services::discord::inflight::{ManagedSubmission, SubmissionFailure};
 use crate::services::provider::{CancelToken, LegacyDispatchKind, ProviderKind};
 use crate::services::provider_teardown::TeardownClearance;
 use crate::services::remote::RemoteProfile;
@@ -12,7 +13,7 @@ use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
 };
 use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan, TurnHost};
-use crate::services::{claude, codex, gemini, opencode, qwen};
+use crate::services::{claude, claude_tui, codex, gemini, opencode, qwen};
 
 pub(super) struct StreamingTurn<'a> {
     pub pool: Option<&'a sqlx::PgPool>,
@@ -39,6 +40,8 @@ pub(super) struct StreamingTurn<'a> {
     pub cache_ttl_minutes: Option<u32>,
     pub dispatch_type: Option<&'a str>,
     pub force_fresh: bool,
+    /// Pre-payload fence of a managed Claude TUI turn; only the Claude legacy driver reads it.
+    pub submission: Option<&'a ManagedSubmission>,
 }
 
 #[cfg(test)]
@@ -122,6 +125,46 @@ pub(super) fn observe_input_effect_completion(channel: u64, task: tokio::task::J
     }
 }
 
+/// Stands in for the Claude driver inside the submission scope, on the real provider thread.
+#[cfg(test)]
+pub(super) type ClaudeLegacyProbe = Box<dyn FnOnce() -> Result<(), String> + Send>;
+#[cfg(test)]
+pub(super) static CLAUDE_LEGACY_PROBE: std::sync::Mutex<Option<(u64, ClaudeLegacyProbe)>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
+fn claude_legacy_probe(channel: u64) -> Option<Result<(), String>> {
+    let mut slot = CLAUDE_LEGACY_PROBE.lock().unwrap();
+    if !slot.as_ref().is_some_and(|(probed, _)| *probed == channel) {
+        return None;
+    }
+    slot.take().map(|(_, probe)| probe())
+}
+
+/// The bridge message for a provider `Err`. A prompt held before submit sends none, so the
+/// bridge keeps the Waiting row instead of finishing the turn as a provider failure.
+pub(super) fn producer_error(
+    submission: Option<&ManagedSubmission>,
+    channel_id: u64,
+    error: String,
+) -> Option<StreamMessage> {
+    match submission.map(ManagedSubmission::classify_failure) {
+        Some(SubmissionFailure::PreSubmitPersistenceRefused(refused)) => {
+            tracing::warn!(channel_id, %refused, "provider held the prompt before submit");
+            return None;
+        }
+        Some(SubmissionFailure::SubmissionIndeterminate) => {
+            tracing::warn!(channel_id, "provider failed after the submission fence");
+        }
+        Some(SubmissionFailure::ProviderExecutionFailed) | None => {}
+    }
+    Some(StreamMessage::Error {
+        message: error,
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: None,
+    })
+}
+
 pub(super) fn execute(
     turn: StreamingTurn<'_>,
     sender: Sender<StreamMessage>,
@@ -172,25 +215,34 @@ pub(super) fn execute(
         ..turn
     };
     match turn.provider.legacy_streaming_dispatch_kind() {
-        LegacyDispatchKind::Claude => claude::execute_command_streaming(
-            turn.prompt,
-            turn.session_id,
-            turn.working_dir,
-            sender,
-            turn.system_prompt,
-            Some(turn.allowed_tools),
-            Some(turn.cancel),
-            turn.remote_profile,
-            turn.tmux_session_name,
-            turn.teardown,
-            Some(turn.channel_id),
-            Some(turn.provider.clone()),
-            turn.model,
-            turn.native_fast_mode,
-            turn.compact_percent,
-            turn.compact_lower_bound_tokens,
-            turn.cache_ttl_minutes,
-            turn.dispatch_type,
+        LegacyDispatchKind::Claude => claude_tui::submission_fence::with_scope(
+            turn.submission.map(ManagedSubmission::fence),
+            || {
+                #[cfg(test)]
+                if let Some(result) = claude_legacy_probe(turn.channel_id) {
+                    return result;
+                }
+                claude::execute_command_streaming(
+                    turn.prompt,
+                    turn.session_id,
+                    turn.working_dir,
+                    sender,
+                    turn.system_prompt,
+                    Some(turn.allowed_tools),
+                    Some(turn.cancel),
+                    turn.remote_profile,
+                    turn.tmux_session_name,
+                    turn.teardown,
+                    Some(turn.channel_id),
+                    Some(turn.provider.clone()),
+                    turn.model,
+                    turn.native_fast_mode,
+                    turn.compact_percent,
+                    turn.compact_lower_bound_tokens,
+                    turn.cache_ttl_minutes,
+                    turn.dispatch_type,
+                )
+            },
         ),
         LegacyDispatchKind::Codex => codex::execute_command_streaming(
             turn.prompt,
@@ -566,6 +618,10 @@ mod herdr_tests;
 mod codex_herdr_tests;
 
 #[cfg(test)]
+#[path = "provider_dispatch_submission_tests.rs"]
+mod submission_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -597,6 +653,7 @@ mod tests {
             cache_ttl_minutes: None,
             dispatch_type: None,
             force_fresh: false,
+            submission: None,
         };
         assert!(matches!(
             provider.legacy_streaming_dispatch_kind(),
@@ -690,6 +747,7 @@ mod tests {
                 cache_ttl_minutes: None,
                 dispatch_type: None,
                 force_fresh: false,
+                submission: None,
             };
             tokio::task::block_in_place(|| execute(turn, sender))
         };
