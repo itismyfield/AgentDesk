@@ -479,6 +479,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/rotation_unsettled_resume_tests.rs",
         "src/services/codex_tui/rollout_tail/parser/herdr_terminal_tests.rs",
         "src/services/claude/herdr_turn/provider_terminal_tests.rs",
+        "src/services/tui_o/gates_m1_compact_tests.rs",
+        "src/services/tui_o/gates_m1_spool_tests.rs",
     }
 )
 
@@ -540,6 +542,8 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/turn_presence/admission.rs",
         "src/services/tmux_turn_liveness/tests_pg.rs",
         "src/test_env_panic_probe.rs",
+        "src/services/tui_o/gates_m1.rs",
+        "src/services/tui_o/gates_m1_support.rs",
     }
 )
 
