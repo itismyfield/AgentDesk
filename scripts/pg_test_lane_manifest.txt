@@ -1757,6 +1757,7 @@ services::tmux_turn_liveness::tests_pg::idle_cleanup_preserves_approval_and_back
 services::tmux_turn_liveness::tests_pg::thread_gc_preserves_resume_rows_when_new_turn_starts_or_kill_failed_pg
 services::tui_o::alarm::postgres_tests::distinct_channels_and_kinds_enqueue_once_pg
 services::tui_o::alarm::postgres_tests::suppression_settles_existing_rows_and_errors_retry_pg
+services::tui_o::alarm::postgres_tests::waiting_incidents_repeat_once_recur_and_replay_independently_pg
 services::tui_o::alarm::postgres_tests::writer_alarm_retries_after_insert_failure_without_another_raise_pg
 services::tui_o::exact_pg::tests::exact_ack_pg_waits_for_commit_barrier
 services::tui_o::exact_pg::tests::exact_child_ack_precedes_terminal_seal_pg
