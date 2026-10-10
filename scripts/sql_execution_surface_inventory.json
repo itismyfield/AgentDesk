@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "520aad9b34f326a9f03cf6d60453387c8101ec60",
+  "measured_at_sha": "21d20b49ee3a6c841fd3be69475cb5d0f913c202",
   "records": [
     {
       "root": "migrations/postgres",
@@ -27883,6 +27883,123 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:b380b5fef7676cd1306f4ec3f73d947b6d1a5039f79e458c324fd1acb73c04ea"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/drain_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:afdfdb86862f57ae6760edc5c65f1c5f5ee230113fef7509bc1baa060b1c5e0d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5c8d2495184a0061b09881b46fdbde7f7f62592f79fbd78751d3e32a87d0fbd5"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:dfe17f1b4b504756a5c1187ebc38a56107d5736cc9045b60fc4404e23bfccecd"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/harness_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4ca3b7300c5705c89e0e7cb293fc90cfab0b3db30c9748f45d2a6d99ce8220be"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/harness_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5edd71600f3ae9cb69884c641136ad24ea3c1a9bf59c24ee88e96001fe777899"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:46050fead091457fe3a44ccaf8b44bf993a210401608950bb238f2662826814f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:51e64f42039756b08dbd7975d6d15820388ae771ba5c292765456087575881b8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:db59e64c8ea885f0bd7f38badd28ecc85ef7673362c1b323a48bb854bccae4cf"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:21a3ae3a3dca87505cc0b9828e9bc32c8c736a938b6f93ac1300db263b594483"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4a342b52d9ce47b45c75e1fe68e312a251a3f8bc02ca2ec09a24d9d72b711bd9"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8778cd3b92fdd02cf54255dc73d15e80530fc15c3738f9af319c631c0e0df25e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:07b507033674bad5df8142f5156b78c364788dd8484867e23d91701a978b60ba"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:aec134538d68da80185b547e68895492f18b20ad9d015ef59e2dfa8329bd2772"
     },
     {
       "root": "src",
