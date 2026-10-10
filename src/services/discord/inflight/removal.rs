@@ -1275,12 +1275,29 @@ mod loader_gate_observation_tests {
             "state: &InflightTurnState,\n    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,\n) -> bool {\n    loader_gate_refuses(state, allocation.generation)\n}"
         );
 
-        // Reads decide without side effects; only the reaper retires, and only
-        // after its lock-held revalidation.
+        // Legacy reads decide without retirement effects; scoped restore has
+        // separate checked mutation bodies outside that read-only contract.
         let owned = source
             .split_once("\nmod loader_gate_observation_tests")
             .unwrap()
             .0;
+        let scoped_invalidation = owned
+            .split_once("async fn invalidate_stale_generation_scoped(")
+            .unwrap()
+            .1
+            .split_once("pub(super) fn load_inflight_states_from_root(")
+            .unwrap()
+            .0;
+        let scoped_backfill = owned
+            .split_once("fn backfill_scoped_restore(")
+            .unwrap()
+            .1
+            .split_once("fn load_inflight_probe_with_scope(")
+            .unwrap()
+            .0;
+        let owned = owned
+            .replace(scoped_invalidation, "")
+            .replace(scoped_backfill, "");
         let reads = owned.split_once("fn classify_inflight_row(").unwrap().1;
         let reads = reads.split_once("\nmod boot_reaper;").unwrap().0;
         let effects = [
