@@ -696,7 +696,7 @@ fn prompt_submission_fits_pane(
         frame
             .split('\n')
             .try_fold(0usize, |total, line| {
-                let cells = line.split_whitespace().collect::<String>().width();
+                let cells = line.replace('\t', "    ").width();
                 total.checked_add(cells.div_ceil(width).max(1))
             })
             .is_some_and(|needed| needed <= rows)
@@ -725,6 +725,11 @@ pub(crate) fn run_prompt_submission_legacy(
             _ => return InputRun::Refused(InputRefusal::Composer(Refusal::InvalidPrompt)),
         }
     }
+    // Paste a one-line frame over 800 chars whole: Claude folds it into the single
+    // B-FOLD placeholder own_draft proves, so typed rows never exceed the pane.
+    let folded = (!frame.contains('\n') && frame.chars().count() > 800)
+        .then(|| [TuiInputAction::PasteBuffer(frame.clone())]);
+    let payload = folded.as_ref().map_or(payload, |paste| &paste[..]);
     with_transport_using(
         &mut crate::services::tui_input::submission_tmux::SubmissionTmux,
         |transport| {
