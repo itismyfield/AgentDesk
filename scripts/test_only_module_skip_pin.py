@@ -563,6 +563,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/runtime_bootstrap/boot_retirement/cohort_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/completion_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/publication_tests.rs",
+        "src/cli/o_tests.rs",
     }
 )
 
