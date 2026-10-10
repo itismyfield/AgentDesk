@@ -202,11 +202,6 @@ async fn scenario(rig: herdr::P11TerminationRig) {
     assert!(!token_a.cancelled.load(Ordering::Relaxed));
 
     assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
-    assert!(
-        listener_first.load(Ordering::SeqCst),
-        "the listener took QueueEligible and handed the no-start to the event backstop before \
-         the transition was released"
-    );
     // The queue consumer starts the queued message on Herdr: one launch, one typed command.
     let started = wait_until(START_WAIT, || {
         let writes = rig.writes();
@@ -261,6 +256,11 @@ async fn scenario(rig: herdr::P11TerminationRig) {
         harness.provider_starts(),
         0,
         "no other driver took the turn"
+    );
+    assert!(
+        listener_first.load(Ordering::SeqCst),
+        "the listener took QueueEligible and handed the no-start to the event backstop before \
+         the transition was released"
     );
     drop(harness);
     pool.close().await;
