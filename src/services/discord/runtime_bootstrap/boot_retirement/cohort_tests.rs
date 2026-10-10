@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::boot_retirement::BootCohort;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     mpsc,
