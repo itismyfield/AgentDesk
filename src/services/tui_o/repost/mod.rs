@@ -3,8 +3,12 @@
 
 pub(crate) mod admission;
 pub(crate) mod config;
+pub(crate) mod dispatch;
 pub(crate) mod identity;
 pub(crate) mod provenance;
+pub(crate) mod runner;
+#[cfg(test)]
+mod runner_tests;
 pub(crate) mod send;
 
 // Discord side of `send`, declared here so it stays dormant until the writer wires it in.

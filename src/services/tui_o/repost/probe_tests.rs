@@ -83,7 +83,7 @@ pub(crate) fn run(name: &str) -> RunScope {
     }
 }
 
-fn scope(slots: &[u8]) -> EvidenceScope {
+pub(crate) fn scope(slots: &[u8]) -> EvidenceScope {
     let settled: Vec<_> = slots
         .iter()
         .map(|slot| (*slot, Some(AttemptResult::Uncertain)))
@@ -144,11 +144,11 @@ impl Fake {
         }
     }
 
-    fn add(&self, message: ObservedMessage) {
+    pub(crate) fn add(&self, message: ObservedMessage) {
         self.channel.lock().unwrap().insert(message.id, message);
     }
 
-    fn reads(&self) -> usize {
+    pub(crate) fn reads(&self) -> usize {
         self.reads.load(Ordering::SeqCst)
     }
 }
@@ -867,6 +867,42 @@ fn names_the_probe(path: &str, line: &str) -> bool {
         || (path == ADAPTER && line.contains("probe"))
 }
 
+/// The dormant runner and dispatch: they read the probe, and nothing operational reads them.
+const CONSUMERS: [&str; 2] = [
+    "src/services/tui_o/repost/runner.rs",
+    "src/services/tui_o/repost/dispatch.rs",
+];
+
+/// Whether a line names the runner or its dispatch.
+fn names_the_runner(path: &str, line: &str) -> bool {
+    let names = [
+        "DispatchIntent",
+        "try_next_dispatch",
+        "RepostWriter",
+        "DispatchPermit",
+    ];
+    let words = line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'));
+    words.into_iter().any(|word| {
+        let segments: Vec<&str> = word.split("::").collect();
+        let module = segments.windows(2).any(|pair| {
+            let parent =
+                pair[0] == "repost" || (pair[0] == "super" && path.contains("tui_o/repost/"));
+            parent && ["runner", "dispatch"].contains(&pair[1])
+        });
+        module || segments.iter().any(|segment| names.contains(segment))
+    })
+}
+
+/// Whether a consumer line reaches `io` other than through its probe, or re-exports anything.
+fn consumer_escapes(path: &str, line: &str) -> bool {
+    let words = line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'));
+    let beside = words
+        .into_iter()
+        .any(|word| word.starts_with("super::io") && !word.starts_with("super::io::probe::"));
+    let reexport = line.trim().starts_with("pub") && line.contains(" use ");
+    beside || reexport || (names_the_probe(path, line) && line.contains("repost::io"))
+}
+
 /// Public functions of the probe files as they stand; a new one, or any re-export, needs review.
 const PROBE_API: [&str; 19] = [
     "covered",
@@ -932,8 +968,11 @@ fn probe_edges(root: &std::path::Path) -> Vec<String> {
                     && (ADAPTER_LINES.contains(&line.trim()) || line.trim() == ADAPTER_PATH);
                 let edge = if definition {
                     widens_the_probe(line)
+                } else if CONSUMERS.contains(&relative.as_str()) {
+                    consumer_escapes(&relative, line)
                 } else {
-                    names_the_probe(&relative, line) && !allowed
+                    (names_the_probe(&relative, line) || names_the_runner(&relative, line))
+                        && !allowed
                 };
                 if edge {
                     found.push(format!("{relative}:{}", number + 1));
@@ -1456,4 +1495,39 @@ async fn f4r3_a_payload_once_matched_stays_without_any_other_evidence() {
     let seen = session.attribution();
     assert!(seen.found.is_empty());
     assert_eq!(seen.damaged.iter().copied().collect::<Vec<_>>(), [450]);
+}
+
+#[test]
+fn f5_has_no_operational_edges() {
+    let write = |root: &std::path::Path, relative: &str, text: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let tree = tempfile::tempdir().unwrap();
+    let root = tree.path();
+    let reads =
+        "use super::dispatch::RepostWriter;\nuse super::io::probe::ProbeRead;\nfn tick() {}\n";
+    write(root, CONSUMERS[0], reads);
+    write(
+        root,
+        "src/services/tui_o/repost/mod.rs",
+        "pub(crate) mod runner;\n",
+    );
+    assert_eq!(probe_edges(root), Vec::<String>::new());
+
+    let escapes = "use super::io;\npub(crate) use super::dispatch::start;\n";
+    write(root, CONSUMERS[1], escapes);
+    let caller =
+        "use crate::services::tui_o::repost::runner::Runner;\nfn go(w: &dyn RepostWriter) {}\n";
+    write(root, "src/services/tui_o/writer/host.rs", caller);
+    assert_eq!(
+        probe_edges(root),
+        [
+            "src/services/tui_o/repost/dispatch.rs:1",
+            "src/services/tui_o/repost/dispatch.rs:2",
+            "src/services/tui_o/writer/host.rs:1",
+            "src/services/tui_o/writer/host.rs:2",
+        ]
+    );
 }

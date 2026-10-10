@@ -30,8 +30,8 @@ use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
 use crate::services::tui_o::store::ledger::{PieceOutcome, PieceRecord};
 
-const CHANNEL: u64 = 6325;
-const BOT: u64 = 900;
+pub(super) const CHANNEL: u64 = 6325;
+pub(super) const BOT: u64 = 900;
 
 fn unit(native_key: &str, kind: UnitKind) -> UnitKey {
     UnitKey {
@@ -54,7 +54,7 @@ fn record(native_key: &str, payload: &str, outcome: Option<PieceOutcome>) -> Pie
     }
 }
 
-fn switch(enabled: bool) -> RepostSwitch {
+pub(super) fn switch(enabled: bool) -> RepostSwitch {
     let boot = TuiOConfig {
         repost: RepostConfig { enabled },
         ..TuiOConfig::default()
@@ -62,7 +62,7 @@ fn switch(enabled: bool) -> RepostSwitch {
     RepostSwitch::new(Some(&boot), watch::channel(None).1)
 }
 
-fn sidecar(dir: &tempfile::TempDir) -> ProvenanceLog {
+pub(super) fn sidecar(dir: &tempfile::TempDir) -> ProvenanceLog {
     ProvenanceLog::open(&dir.path().join("repost-provenance.jsonl")).unwrap()
 }
 
@@ -87,7 +87,7 @@ fn request(key: &PieceKey, revision: i64, intent: Intent) -> GrantRequest<'_> {
 }
 
 /// Consumes the next slot and settles it as an uncertain send; returns its slot.
-async fn send_uncertain(pool: &PgPool, key: &PieceKey, intent: Intent) -> u8 {
+pub(super) async fn send_uncertain(pool: &PgPool, key: &PieceKey, intent: Intent) -> u8 {
     let revision = load(pool, key).await.unwrap().unwrap().revision;
     let granted: SlotGrant = match grant(pool, request(key, revision, intent)).await.unwrap() {
         GrantOutcome::Granted(granted) => granted,
@@ -99,7 +99,7 @@ async fn send_uncertain(pool: &PgPool, key: &PieceKey, intent: Intent) -> u8 {
     granted.slot()
 }
 
-async fn next_grant(pool: &PgPool, key: &PieceKey) -> GrantOutcome {
+pub(super) async fn next_grant(pool: &PgPool, key: &PieceKey) -> GrantOutcome {
     let revision = load(pool, key).await.unwrap().unwrap().revision;
     grant(pool, request(key, revision, Intent::AutoReconfirm))
         .await
@@ -453,7 +453,7 @@ async fn an_operator_retry_and_the_automatic_reconfirm_share_one_three_post_budg
 }
 
 /// Admits each `(serial, native_key)` as an on original of `payload` that went uncertain.
-async fn admit_on(
+pub(super) async fn admit_on(
     pool: &PgPool,
     log: &mut ProvenanceLog,
     pieces: &[(u64, &str)],
