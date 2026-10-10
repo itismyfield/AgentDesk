@@ -8,12 +8,35 @@ use crate::services::discord::turn_finalizer::{
 };
 use crate::services::discord::{self, SharedData};
 use crate::services::provider::CancelToken;
-use crate::services::provider::herdr_before_start::BeforeStartProof;
+use crate::services::provider::herdr_before_start::{BeforeStartProof, ExitDecision};
 use poise::serenity_prelude::{ChannelId, MessageId};
 use std::sync::Arc;
 
-/// Settles one sealed policy close; on false the bridge keeps the turn held as before.
-pub(super) async fn run_policy_close(
+/// The bridge exit; true keeps the turn held. A held row is never sealed or closed by policy.
+pub(super) async fn exit_held(
+    shared: &Arc<SharedData>,
+    gateway: &dyn TurnGateway,
+    actor: &Arc<CancelToken>,
+    row: &InflightTurnState,
+    current_msg_id: MessageId,
+    (cancelled, terminal_admitted, held): (bool, bool, bool),
+) -> bool {
+    if held {
+        return true;
+    }
+    let exit = super::stream_loop::exit_reconcile::herdr_exit_decision(
+        actor,
+        cancelled,
+        terminal_admitted,
+    );
+    if let ExitDecision::PolicyClose(proof) = &exit {
+        run_policy_close(shared, gateway, actor, row, current_msg_id, proof).await;
+    }
+    exit != ExitDecision::Normal
+}
+
+/// Settles one sealed policy close; on false the turn stays held as before.
+async fn run_policy_close(
     shared: &Arc<SharedData>,
     gateway: &dyn TurnGateway,
     actor: &Arc<CancelToken>,
@@ -116,7 +139,7 @@ pub(in crate::services::discord::turn_bridge) mod tests {
     use crate::services::provider::cancel_token_claude_interrupt::{
         HERDR_SETTLEMENT_OVERRIDE, HerdrSubmission,
     };
-    use crate::services::provider::herdr_before_start::{ExitDecision, seal_exit};
+    use crate::services::provider::herdr_before_start::seal_exit;
     use crate::services::provider::herdr_before_start::{
         InputPhase, finish_execution, prelaunch_closed,
     };

@@ -74,7 +74,6 @@ use crate::services::observability::session_inventory::{
     format_child_inventory_progress, load_child_inventory_by_parent_key_pg,
 };
 use crate::services::provider::cancel_requested;
-use crate::services::provider::herdr_before_start::ExitDecision;
 use output_lifecycle::BridgeOutputOwner;
 pub(super) use panel_lifecycle::record_placeholder_live_event;
 use panel_lifecycle::{
@@ -697,18 +696,9 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         }
         #[rustfmt::skip]
         let terminal_admitted = stream_loop_output.codex_tui_terminal_range.is_some() || stream_loop_output.herdr_terminal.is_some();
-        let held = (is_external_input_tui_direct && rx_disconnected)
-            || stream_loop::exit_reconcile::held_before_submit(&bridge.inflight_state, cancelled);
-        // One sealed Herdr exit decision; a held row is never closed by policy.
-        let exit = match held {
-            true => ExitDecision::Hold,
-            false => stream_loop::exit_reconcile::herdr_exit_decision(&cancel_token, cancelled, terminal_admitted),
-        };
-        if let ExitDecision::PolicyClose(proof) = &exit {
-            let gateway = &*gateway;
-            before_start_stop::run_policy_close(&shared_owned, gateway, &cancel_token, &inflight_state, current_msg_id, proof).await;
-        }
-        if exit != ExitDecision::Normal {
+        #[rustfmt::skip]
+        let held = before_start_stop::exit_held(&shared_owned, &*gateway, &cancel_token, &inflight_state, current_msg_id, (cancelled, terminal_admitted, (is_external_input_tui_direct && rx_disconnected) || stream_loop::exit_reconcile::held_before_submit(&bridge.inflight_state, cancelled))).await;
+        if held {
             // No admitted terminal: keep the row (a held prompt stays Waiting) or a stopped Herdr
             // turn, unless its policy close already finalized; a partial stream is not a terminal.
             completion_guard.relinquish_bridge_authority();
