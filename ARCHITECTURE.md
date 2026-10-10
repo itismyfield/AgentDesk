@@ -895,6 +895,7 @@ src/
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
 │   │   │   ├── legacy_supervision/
+│   │   │   │   ├── boot_status.rs
 │   │   │   │   └── test_support.rs
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
@@ -1067,6 +1068,8 @@ src/
 │   │   │   ├── effects_tests.rs
 │   │   │   ├── fence.rs
 │   │   │   ├── fence_tests.rs
+│   │   │   ├── mapping.rs
+│   │   │   ├── mapping_guard_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── offer.rs
 │   │   │   ├── ordering.rs
@@ -1380,6 +1383,13 @@ src/
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
+│   │   │   ├── boot_retirement/
+│   │   │   │   ├── cohort.rs
+│   │   │   │   ├── cohort_tests.rs
+│   │   │   │   ├── completion.rs
+│   │   │   │   ├── completion_tests.rs
+│   │   │   │   ├── publication.rs
+│   │   │   │   └── publication_tests.rs
 │   │   │   ├── intake_delivery_capability/
 │   │   │   │   ├── cache.rs
 │   │   │   │   └── tests.rs
@@ -1389,6 +1399,7 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── relay_dlq_redelivery/
 │   │   │   │   └── tests.rs
+│   │   │   ├── boot_retirement.rs
 │   │   │   ├── channel_homes_tests.rs
 │   │   │   ├── deferred_restart.rs
 │   │   │   ├── framework_setup.rs
@@ -1802,6 +1813,7 @@ src/
 │   │   │   │   ├── stop_host.rs
 │   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs
+│   │   │   ├── before_start_stop.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
 │   │   │   ├── bridge_entry_persist.rs
@@ -1877,6 +1889,8 @@ src/
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── admission.rs
 │   │   │   ├── admission_tests.rs
+│   │   │   ├── lifecycle.rs
+│   │   │   ├── lifecycle_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
@@ -2228,6 +2242,7 @@ src/
 │   │   ├── cancel_token_cleanup.rs
 │   │   ├── cancel_watchdog.rs
 │   │   ├── channel_rules.rs
+│   │   ├── herdr_before_start.rs
 │   │   ├── output_reader.rs
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
@@ -2369,8 +2384,12 @@ src/
 │   │   │   ├── pane/
 │   │   │   │   ├── ownership.rs
 │   │   │   │   └── ownership_tests.rs
+│   │   │   ├── busy_tests.rs
+│   │   │   ├── capability.rs
 │   │   │   ├── gate.rs
 │   │   │   ├── pane.rs
+│   │   │   ├── resume.rs
+│   │   │   ├── resume_actor_tests.rs
 │   │   │   ├── token.rs
 │   │   │   └── witness.rs
 │   │   ├── actor.rs
@@ -2403,6 +2422,9 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── channel_gate.rs
 │   │   │   └── intake_route.rs
+│   │   ├── n1_observation/
+│   │   │   ├── sink.rs
+│   │   │   └── sink_tests.rs
 │   │   ├── repost/
 │   │   │   ├── config.rs
 │   │   │   ├── mod.rs
@@ -2428,6 +2450,9 @@ src/
 │   │   │   ├── ledger.rs
 │   │   │   ├── ledger_lock_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── operator_resume.rs
+│   │   │   ├── operator_resume_ledger_tests.rs
+│   │   │   ├── operator_resume_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
 │   │   │   └── spool.rs
@@ -2476,6 +2501,10 @@ src/
 │   │   │   ├── host_tests.rs
 │   │   │   ├── input_facts.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── operator_resume_actor_tests.rs
+│   │   │   ├── operator_resume_delivery_tests.rs
+│   │   │   ├── operator_resume_source_tests.rs
+│   │   │   ├── operator_resume_tests.rs
 │   │   │   ├── pieces.rs
 │   │   │   ├── reclaim_tests.rs
 │   │   │   ├── recovery_tests.rs
@@ -2506,12 +2535,15 @@ src/
 │   │   ├── gates_m1_compact_tests.rs
 │   │   ├── gates_m1_spool_tests.rs
 │   │   ├── gates_m1_support.rs
+│   │   ├── n1_observation.rs
+│   │   ├── n1_observation_tests.rs
 │   │   ├── ownership.rs
 │   │   ├── shadow_host.rs
 │   │   ├── topology.rs
 │   │   └── turn_mode.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_events/
+│   │   │   ├── admission_tests.rs
 │   │   │   ├── claude_fold.rs
 │   │   │   ├── codex.rs
 │   │   │   ├── codex_claim_tests.rs

@@ -3,6 +3,7 @@
 
 mod durable;
 pub mod ledger;
+mod operator_resume;
 pub mod rotation;
 pub mod spool;
 
@@ -336,10 +337,15 @@ impl ChannelStore {
         self.failed
     }
 
-    /// Delivery entries only; `SpoolGc` is written solely by the GC path that deletes the segment.
+    /// Delivery entries only; GC and operator approvals require their dedicated guarded writers.
     pub fn append_ledger(&mut self, entry: LedgerEntry) -> Result<(), StoreError> {
-        if matches!(entry, LedgerEntry::SpoolGc { .. }) {
-            return Err(StoreError::Rejected("SpoolGc is written by GC only".into()));
+        if matches!(
+            entry,
+            LedgerEntry::SpoolGc { .. } | LedgerEntry::OperatorResume { .. }
+        ) {
+            return Err(StoreError::Rejected(
+                "entry requires its dedicated writer".into(),
+            ));
         }
         self.mutate(|store| store.write_ledger(entry))
     }
@@ -367,6 +373,9 @@ impl ChannelStore {
         result
     }
 }
+
+#[cfg(test)]
+mod operator_resume_tests;
 
 #[cfg(test)]
 #[cfg(windows)]

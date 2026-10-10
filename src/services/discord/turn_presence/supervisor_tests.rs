@@ -421,6 +421,7 @@ async fn only_confirmed_channels_are_supervised_and_reported() {
         "activity_since",
         "generation",
         "kickoffs_total",
+        "n1_observation",
         "observed_at",
         "process_started_at",
         "queue_held",
@@ -431,6 +432,7 @@ async fn only_confirmed_channels_are_supervised_and_reported() {
         "unknown_notice",
     ];
     assert_eq!(keys, expected);
+    assert_eq!(json["n1_observation"]["status"], "unavailable");
     assert_eq!(
         (json["session"].as_str(), json["source_id"].as_str()),
         (Some("pane"), Some("/t.jsonl"))
