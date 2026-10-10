@@ -121,6 +121,7 @@ src/services/discord/health/recovery/live_agent_recovery.rs
 src/services/discord/health/recovery/stall_alert.rs
 src/services/discord/health/turn_deliver/inject_codex_tests.rs
 src/services/discord/health/turn_deliver/inject_tests.rs
+src/services/discord/herdr_terminate.rs
 src/services/discord/host_defer_gate_tests.rs
 src/services/discord/host_key_derivation_tests.rs
 src/services/discord/idle_recap_interaction.rs
@@ -361,6 +362,7 @@ services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::health::turn_deliver::inject_codex_tests
 services::discord::health::turn_deliver::inject_tests
+services::discord::herdr_terminate::tests
 services::discord::host_defer_gate::tests
 services::discord::host_key_derivation::tests
 services::discord::idle_cleanup_selector_tests
@@ -1237,6 +1239,7 @@ services::discord::health::turn_deliver::inject_tests::an_injection_without_a_di
 services::discord::health::turn_deliver::inject_tests::input_left_on_disk_for_an_unloaded_mailbox_stays_ahead_of_a_deliver_pg
 services::discord::health::turn_deliver::inject_tests::input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg
 services::discord::health::turn_deliver::inject_tests::input_queued_reserved_or_claimed_before_a_deliver_stays_ahead_of_it_pg
+services::discord::herdr_terminate::tests::m1_retire_cas_failure_preserves_successor_pg
 services::discord::host_defer_gate::tests::the_promote_gate_holds_only_what_the_host_guard_keeps_pg
 services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_under_another_name_pg
 services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_with_no_channel_name_pg

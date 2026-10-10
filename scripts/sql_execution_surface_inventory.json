@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "8bab58f86ac79f06647718e0361ba558749811cb",
+  "measured_at_sha": "13ce2a9945c480a9473ef876fc9af7d32b16a6e7",
   "records": [
     {
       "root": "migrations/postgres",
@@ -27104,6 +27104,24 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/herdr_terminate.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a256f24dfaf2bb2fbb19604e0e88fc22b43af6a5922c438f40249a3c143eabe4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/herdr_terminate.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e7cc1d7b4dc99af74fc279596246d9dcd149c62f626527b756126cc6fa55ca9b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/host_key_derivation_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -35983,6 +36001,33 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:52b1efa6b9e2eb90854a9717c6207b2ee4ea03e68a8d7a4721b3af02ec996478"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_host/herdr_gate_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:71d2560dfdd13db40c4b683994e7ead366dd841ff733e6ee01fbfa75fcae9884"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_host/herdr_gate_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9efe00d45528953e7edac885f5cc523ec3028c5f9b608c408e7127e9ba7e0e69"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_host/herdr_gate_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4fa5adfd73f12b69cbe1b5b42f99bbd6c699cf3f0137fc34dfb10ca041d31750"
     },
     {
       "root": "src",

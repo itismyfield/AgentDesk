@@ -6,7 +6,7 @@ pub(crate) mod agentdesk_config;
 mod answer_flush_barrier;
 pub(crate) mod bot_role;
 mod busy_followup_retry_store;
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) mod herdr_terminate;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;

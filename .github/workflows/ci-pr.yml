@@ -327,6 +327,7 @@ jobs:
               - 'src/services/discord/health/recovery/stall_alert.rs'
               - 'src/services/discord/health/turn_deliver/inject_codex_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_tests.rs'
+              - 'src/services/discord/herdr_terminate.rs'
               - 'src/services/discord/host_defer_gate_tests.rs'
               - 'src/services/discord/host_key_derivation_tests.rs'
               - 'src/services/discord/idle_recap_interaction.rs'

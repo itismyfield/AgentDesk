@@ -1,4 +1,6 @@
 //! Explicit operator termination, dormant until an operator entry owns activation.
+// Test-only until the operator entry lands; writer gates still scan this file as production.
+#![cfg(test)]
 use super::turn_finalizer::cleanup::SyntheticClaimSnapshot;
 use super::turn_finalizer::{FinalizeContext, FinalizeOutcome, TerminalEvent, TurnKey};
 use super::{ChannelId, SharedData};
