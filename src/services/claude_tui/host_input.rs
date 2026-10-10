@@ -985,6 +985,8 @@ mod spy {
     pub(crate) struct SpyState {
         pub calls: Vec<String>,
         pub pane_size: Option<(usize, usize)>,
+        /// Geometry read once a payload send happened, as when the pane resizes mid-submit.
+        pub pane_size_after_send: Option<Option<(usize, usize)>>,
         /// Answer for the n-th send (load, literal, paste or keys), counted from 0.
         pub fail_send: Option<(usize, Result<Output, String>)>,
         pub captures: VecDeque<Option<String>>,
@@ -1003,6 +1005,7 @@ mod spy {
             Self {
                 calls: Vec::new(),
                 pane_size: Some((80, 24)),
+                pane_size_after_send: None,
                 fail_send: None,
                 captures: VecDeque::new(),
                 captures_after_send: None,
@@ -1120,7 +1123,10 @@ mod spy {
         fn pane_size(&mut self, _session: &str) -> Option<(usize, usize)> {
             let mut state = self.0.borrow_mut();
             state.record("size".to_string());
-            state.pane_size
+            match state.pane_size_after_send {
+                Some(after) if state.sends > 0 => after,
+                _ => state.pane_size,
+            }
         }
 
         fn pane_alive(&mut self, _session: &str) -> bool {
@@ -1588,21 +1594,29 @@ mod tests {
         );
         drop(guard);
 
-        // This literal cannot fit the known pane, so none of its planned chunks may be sent.
+        // A line too long for typed rows is pasted whole, never as literal chunks, then Enter.
         let line = "가".repeat(2000);
-        let mut setup = state(&[Some(EMPTY_COMPOSER), Some(EMPTY_COMPOSER), Some(BUSY)]);
-        setup.pane_size = Some((80, 24));
-        let guard = SpyGuard::install(setup);
+        let folded = "────────────────────\n❯ [Pasted text #9]\n────────────────────\n";
+        let guard = SpyGuard::install(state(&[
+            Some(EMPTY_COMPOSER),
+            Some(EMPTY_COMPOSER),
+            Some(folded),
+            Some(BUSY),
+        ]));
+        assert_eq!(inject_steering_prompt(name, &line), Ok(()));
+        let calls = guard.calls();
         assert_eq!(
-            inject_steering_prompt(name, &line),
-            InputRun::Refused(InputRefusal::Composer(
-                crate::services::tui_input::submission::Refusal::UnpredictableRender,
-            ))
-            .into_legacy(),
+            calls[4..7],
+            [
+                "size".to_string(),
+                format!("load:{line}"),
+                "paste:delete=true".to_string()
+            ]
         );
-        assert_eq!(
-            guard.calls(),
-            ["capture", "alive", "capture:draft", "alive", "size"]
+        assert_eq!(calls.iter().filter(|c| *c == "keys:Enter").count(), 1);
+        assert!(
+            !calls.iter().any(|c| c.starts_with("literal:")),
+            "{calls:?}"
         );
     }
 
@@ -1913,26 +1927,29 @@ mod tests {
         }
     }
     #[test]
-    fn prompt_helper_refuses_known_literal_overflow_with_typed_pre_effect_result() {
+    fn prompt_helper_refuses_unfoldable_overflow_with_typed_pre_effect_result() {
         let rule = "─".repeat(80);
         let empty = format!(
             "⏺ Done.\n\n\n{rule}\n❯ \n{rule}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
         );
-        let prompt = "가".repeat(1200);
-        let actions = crate::services::claude_tui::input::plan_prompt_submit(&prompt).unwrap();
-        let mut setup = state(&[Some(&empty)]);
-        setup.pane_size = Some((80, 24));
-        let spy = SpyGuard::install(setup);
-        assert_eq!(
-            run_prompt_submission_legacy("claude-r3-helper-capacity", &actions, None),
-            InputRun::Refused(InputRefusal::Composer(
-                crate::services::tui_input::submission::Refusal::UnpredictableRender,
-            )),
-        );
-        assert!(!spy.calls().iter().any(|call| call.starts_with("literal:")
-            || call.starts_with("load:")
-            || call.starts_with("paste:")
-            || call.starts_with("keys:")
-            || call.starts_with("retire:")),);
+        // Neither folds (800 chars or fewer); at 76 cells a row they need 22 and 16 of 14 rows.
+        for prompt in ["가".repeat(800), format!("{}가", "가 ".repeat(399))] {
+            let actions = crate::services::claude_tui::input::plan_prompt_submit(&prompt).unwrap();
+            let mut setup = state(&[Some(&empty)]);
+            setup.pane_size = Some((80, 24));
+            let spy = SpyGuard::install(setup);
+            assert_eq!(
+                run_prompt_submission_legacy("claude-r4-helper-capacity", &actions, None),
+                InputRun::Refused(InputRefusal::Composer(
+                    crate::services::tui_input::submission::Refusal::UnpredictableRender,
+                )),
+                "{prompt}",
+            );
+            assert!(!spy.calls().iter().any(|call| call.starts_with("literal:")
+                || call.starts_with("load:")
+                || call.starts_with("paste:")
+                || call.starts_with("keys:")
+                || call.starts_with("retire:")),);
+        }
     }
 }

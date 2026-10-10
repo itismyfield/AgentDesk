@@ -764,6 +764,8 @@ pub(super) mod spy {
         pub dead: bool,
         pub dead_after_send: Option<usize>,
         pub pane_size: Option<(usize, usize)>,
+        /// Geometry read once a payload send happened, as when the pane resizes mid-submit.
+        pub pane_size_after_send: Option<Option<(usize, usize)>>,
         pub cancel_after_size: Option<Arc<CancelToken>>,
         pub pane_pid: Option<u32>,
         pub sends: usize,
@@ -782,6 +784,7 @@ pub(super) mod spy {
                 dead: false,
                 dead_after_send: None,
                 pane_size: Some((80, 24)),
+                pane_size_after_send: None,
                 cancel_after_size: None,
                 pane_pid: None,
                 sends: 0,
@@ -887,7 +890,10 @@ pub(super) mod spy {
             if let Some(token) = &state.cancel_after_size {
                 token.cancelled.store(true, Ordering::Relaxed);
             }
-            state.pane_size
+            match state.pane_size_after_send {
+                Some(after) if state.sends > 0 => after,
+                _ => state.pane_size,
+            }
         }
 
         fn capture_ansi(&mut self, _session: &str, _scroll_back: i32) -> Option<String> {

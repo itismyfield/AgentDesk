@@ -620,6 +620,57 @@ mod tests {
     }
 
     #[test]
+    fn idle_entry_withholds_enter_when_geometry_changes_after_payload() {
+        for after_send in [None, Some(Some((46, 37))), Some(None)] {
+            let spy = SpyGuard::install(SpyState {
+                pane_size_after_send: after_send,
+                captures: [
+                    Some(COMPACT_READY.into()),
+                    Some(compact_rows(&["echo"])),
+                    Some(COMPACT_READY.into()),
+                ]
+                .into(),
+                ..SpyState::default()
+            });
+            let outcome = submit_codex_followup_prompt("idle-resized-fixture", "echo", None);
+            let calls = spy.calls();
+            assert_eq!(
+                calls.iter().filter(|call| *call == "literal:echo").count(),
+                1,
+                "{calls:?}"
+            );
+            if after_send.is_none() {
+                assert!(
+                    matches!(outcome, CodexFollowupPromptSubmitOutcome::Submitted),
+                    "{outcome:?}"
+                );
+                assert_one_enter_without_cleanup(&calls);
+                continue;
+            }
+            // A capture from a resized or vanished geometry cannot prove the measured draft.
+            assert!(
+                matches!(
+                    &outcome,
+                    CodexFollowupPromptSubmitOutcome::Refused {
+                        run: crate::services::claude_tui::host_input::InputRun::Indeterminate {
+                            confirmed: 1,
+                            ..
+                        }
+                    }
+                ),
+                "{after_send:?}: {outcome:?}"
+            );
+            assert!(
+                !calls.iter().any(|call| call.starts_with("keys:")
+                    || call.starts_with("load:")
+                    || call.starts_with("kill")
+                    || call.starts_with("retire")),
+                "{calls:?}"
+            );
+        }
+    }
+
+    #[test]
     fn idle_entry_accepts_historical_modal_prose_and_lists() {
         for history in [
             "Sign in to continue",

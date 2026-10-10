@@ -824,28 +824,55 @@ fn claude_actual_entries_submit_large_multiline_native_bfold_with_exact_lf_count
 }
 
 #[test]
-fn claude_actual_entries_refuse_literal_overflow_before_any_payload_write() {
+fn claude_actual_entries_deliver_long_single_line_as_one_folded_paste() {
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    let prompt = "가".repeat(1200);
-    assert!(prompt.len() < 64 * 1024);
-    assert!(prompt.chars().count() * 2 > (80 - 4) * 24);
     let empty = constructed_composer(80, "");
-    assert_eq!(
-        crate::services::tui_input::actor::gate::judge_pane(
-            crate::services::tui_o::shadow::ShadowProvider::Claude,
-            &empty,
-        ),
-        crate::services::tui_input::actor::gate::PaneVerdict::Ready,
-    );
+    let folded = constructed_composer(80, "[Pasted text #3]");
+    let wrong_lf_count = constructed_composer(80, "[Pasted text #3 +1 lines]");
+    for prompt in ["가".repeat(1200), format!("{}x", "x ".repeat(999))] {
+        // Typed as rows, either line needs more than the 14 composer rows of 80x24.
+        assert!(prompt.chars().count() > 800 && !prompt.contains('\n'));
+        for entry in ENTRIES {
+            for after in [&folded, &wrong_lf_count] {
+                let session = format!("claude-r4-long-line-{}", uuid::Uuid::new_v4());
+                let mut setup = state(&[Some(after), Some(BUSY)]);
+                setup.captures = std::iter::repeat_n(Some(empty.clone()), 16).collect();
+                setup.pane_size = Some((80, 24));
+                let spy = SpyGuard::install(setup);
+                let result = submit_text(entry, &session, &prompt, None);
+                let calls = spy.calls();
+                let count = |name: &str| calls.iter().filter(|c| *c == name).count();
+                assert_eq!(count(&format!("load:{prompt}")), 1, "{entry:?}: {calls:?}");
+                assert_eq!(count("paste:delete=true"), 1, "{entry:?}: {calls:?}");
+                assert!(
+                    !calls.iter().any(|c| c.starts_with("literal:")),
+                    "{calls:?}"
+                );
+                assert_eq!(
+                    count("keys:Enter"),
+                    usize::from(after == &folded),
+                    "{entry:?}: {result:?}: {calls:?}",
+                );
+                if after == &folded {
+                    assert_eq!(result, Ok(()), "{entry:?}");
+                } else {
+                    assert_late_hold(&result.unwrap_err());
+                }
+                assert_no_cleanup(&calls);
+            }
+        }
+    }
+    // At 800 chars Claude does not fold, so the overflowing rows stay a typed pre-effect refusal.
+    let unfoldable = "가".repeat(800);
     for entry in ENTRIES {
-        let session = format!("claude-r3-literal-capacity-{}", uuid::Uuid::new_v4());
+        let session = format!("claude-r4-unfoldable-{}", uuid::Uuid::new_v4());
         let mut setup = state(&[Some(BUSY)]);
         setup.captures = std::iter::repeat_n(Some(empty.clone()), 16).collect();
         setup.pane_size = Some((80, 24));
         let spy = SpyGuard::install(setup);
-        let result = submit_text(entry, &session, &prompt, None);
+        let result = submit_text(entry, &session, &unfoldable, None);
         let calls = spy.calls();
         assert!(
             !calls.iter().any(|c| c.starts_with("literal:")
@@ -862,5 +889,38 @@ fn claude_actual_entries_refuse_literal_overflow_before_any_payload_write() {
         assert!(error.contains("Composer(UnpredictableRender)"), "{error}");
         assert!(!is_prompt_ready_timeout_error(&error), "{error}");
         assert_no_cleanup(&calls);
+    }
+}
+
+#[test]
+fn claude_actual_entries_withhold_enter_when_geometry_changes_after_payload() {
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    for entry in ENTRIES {
+        for after_send in [None, Some(Some((46, 37))), Some(None)] {
+            let session = format!("claude-r4-resized-{}", uuid::Uuid::new_v4());
+            let mut setup = state(&[Some(OWN), Some(BUSY)]);
+            setup.pane_size_after_send = after_send;
+            let spy = SpyGuard::install(setup);
+            let result = submit(entry, &session, None);
+            let calls = spy.calls();
+            assert_eq!(
+                calls.iter().filter(|c| *c == "paste:delete=true").count(),
+                1
+            );
+            assert_eq!(
+                calls.iter().filter(|c| *c == "keys:Enter").count(),
+                usize::from(after_send.is_none()),
+                "{entry:?}: {after_send:?}: {result:?}: {calls:?}",
+            );
+            if after_send.is_none() {
+                assert_eq!(result, Ok(()), "{entry:?}");
+            } else {
+                // The own draft captured from another geometry cannot prove the preflight fit.
+                assert_late_hold(&result.unwrap_err());
+            }
+            assert_no_cleanup(&calls);
+        }
     }
 }
