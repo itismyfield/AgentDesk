@@ -432,6 +432,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/queue_io/turn_admission_tests.rs",
         "src/services/discord/queue_io/ledger_settlement_tests.rs",
         "src/services/discord/health/relay_auto_heal/orphan_token_tests.rs",
+        "src/services/discord/health/relay_auto_heal/retired_redrive_tests.rs",
         "src/services/discord/health/transcript_turn_tests.rs",
         "src/services/discord/placeholder_sweeper/tick_cleanup_tests.rs",
         "src/services/discord/health/recovery/stop_judgement/judged_finish_tests.rs",
