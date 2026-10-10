@@ -701,8 +701,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         #[rustfmt::skip]
         let held = before_start_stop::exit_held(&shared_owned, &*gateway, &cancel_token, &inflight_state, current_msg_id, (cancelled, terminal_admitted, (is_external_input_tui_direct && rx_disconnected) || stream_loop::exit_reconcile::held_before_submit(&bridge.inflight_state, cancelled))).await;
         if held {
-            // No admitted terminal: keep the row (a held prompt stays Waiting) or a stopped Herdr
-            // turn, unless its policy close already finalized; a partial stream is not a terminal.
+            // No admitted terminal frame: leave the row (Waiting if held) to recovery or Herdr.
             completion_guard.relinquish_bridge_authority();
             inflight_guard.defuse();
             return;
