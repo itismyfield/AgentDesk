@@ -359,6 +359,11 @@ pub(super) async fn resolve_tui_direct_synthetic_lifecycle_anchor(
         channel_id,
         Some((channel_id, notification_anchor_message_id)),
         false,
+        crate::services::tui_o::n1_observation::Context {
+            provider: &prompt.provider,
+            origin: "tui_direct_synthetic",
+            input_message_id: None,
+        },
     )
     .await;
     let anchor = synthetic_lifecycle_anchor_from_placeholder_result(

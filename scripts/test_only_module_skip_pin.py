@@ -34,6 +34,8 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/tui_o/n1_observation/sink_tests.rs",
+        "src/services/tui_o/n1_observation_tests.rs",
         "src/db/replay_disposition_tests.rs",
         "src/db/replay_disposition_tests/compatibility_tests.rs",
         "src/db/replay_disposition_tests/concurrency_tests.rs",
@@ -111,6 +113,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/input_facts/resume_tests.rs",
         "src/services/discord/turn_presence/activity_tests.rs",
         "src/services/discord/turn_presence/admission_tests.rs",
+        "src/services/discord/turn_presence/lifecycle_tests.rs",
+        "src/services/tui_prompt_dedupe/binding_events/admission_tests.rs",
         "src/services/tui_o/writer/codex_adoption/judge_tests.rs",
         "src/services/tui_o/writer/codex_adoption/plan_tests.rs",
         "src/services/tui_o/writer/codex_adoption/probe_tests.rs",
@@ -600,6 +604,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/host_teardown_gate/test_support.rs",
         "src/services/discord/health/legacy_supervision/test_support.rs",
         "src/services/discord/turn_presence/admission.rs",
+        "src/services/discord/turn_presence/lifecycle.rs",
         "src/services/tmux_turn_liveness/tests_pg.rs",
         "src/test_env_panic_probe.rs",
         "src/services/tui_o/gates_m1.rs",
