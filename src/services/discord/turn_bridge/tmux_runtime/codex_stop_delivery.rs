@@ -757,7 +757,7 @@ fn deliver(
         }
         let write = || {
             let submission = state.submission.lock().unwrap_or_else(|e| e.into_inner());
-            if *submission == HerdrSubmission::Unsubmitted {
+            if submission.submission == HerdrSubmission::Unsubmitted {
                 return Err(Pending);
             }
             if !held() {
@@ -859,3 +859,7 @@ fn deliver(
     };
     attempt().unwrap_or_else(HerdrDelivery::NotSent)
 }
+
+#[cfg(all(test, unix))]
+#[path = "../before_start_stop.rs"]
+mod before_start_stop;

@@ -20,6 +20,8 @@ mod panel_lifecycle;
 mod post_loop_finalize;
 mod recall_feedback;
 pub(in crate::services::discord) mod recovery_text;
+#[cfg(test)]
+pub(crate) mod replay_policy;
 mod response_delivery;
 mod retry_state;
 mod runtime_handoff_loop;
@@ -153,10 +155,10 @@ pub(super) use watcher_orphan_cleanup::{
 pub(crate) use tmux_runtime::tmux_runtime_paths;
 
 // Items used by spawn_turn_bridge from submodules
-use super::mailbox_finish::unwind_unstarted_turn;
 use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
 use bridge_entry_persist::bridge_stream_relay_suppressed;
+use bridge_entry_persist::unwind_and_notify;
 use completion_guard::complete_work_dispatch_on_turn_end;
 use context_window::{
     apply_context_token_update, compact_lower_bound, persisted_context_tokens,
@@ -226,18 +228,9 @@ use voice_completion::{
 use watcher_handoff::{live_watcher_registered_for_relay, should_delegate_bridge_relay_to_watcher};
 mod context;
 use super::tmux_watcher_registry::WatcherClaimIncarnation;
-pub(super) use context::{BridgeCompletionSignal, TurnBridgeContext};
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WatcherHandoffClaimOutcome {
-    None,
-    ReusedExisting,
-    Spawned,
-}
-// Shared by the bridge task body below and the extracted stream_loop.rs
-// (#4230 S6) — must live at module scope so both resolve them.
-const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 pub(super) use bridge_entry_persist::spawn_turn_bridge;
+pub(super) use context::{BridgeCompletionSignal, TurnBridgeContext, WatcherHandoffClaimOutcome};
+use context::{LIVE_LONG_RUN_HEARTBEAT_INTERVAL, SPINNER};
 pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
@@ -276,6 +269,9 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     let probe_channel = bridge.channel_id;
     let _bridge_task = super::task_supervisor::spawn_observed("discord_turn_bridge", super::input_runtime::fence::effect::detached(super::input_runtime::fence::effect::current(), async move {
         let _original_registration = original_registration;
+        #[cfg(test)]
+        #[cfg(unix)]
+        cancel_backstop_test_support::pause(bridge.channel_id).await;
         let channel_id = bridge.channel_id;
         let provider = bridge.provider.clone();
         let gateway = bridge.gateway.clone();
@@ -458,7 +454,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut entry_was_rowless = false;
 
         let anchor_text = super::formatting::build_processing_status_block(SPINNER[0]).to_string();
-        if !bridge_entry_persist::establish_bridge_entry_authority(
+        if let Err(notice) = bridge_entry_persist::establish_bridge_entry_authority(
             bridge_entry_persist::BridgeEntryAuthorityContext {
                 entry_was_rowless: &mut entry_was_rowless,
                 bridge: &mut bridge,
@@ -494,7 +490,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         )
         .await
         {
-            return unwind_unstarted_turn(&shared_owned, channel_id, &cancel_token).await;
+            return unwind_and_notify(&shared_owned, channel_id, &cancel_token, notice).await;
         }
         let mut bridge_entry_watcher_owner_epoch_current = inflight_state
             .effective_relay_owner_kind()
@@ -704,9 +700,9 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let unconfirmed = stream_loop::exit_reconcile::herdr_stop_unconfirmed;
         if (is_external_input_tui_direct && rx_disconnected)
             || unconfirmed(&cancel_token, cancelled, terminal_admitted)
+            || stream_loop::exit_reconcile::held_before_submit(&bridge.inflight_state, cancelled)
         {
-            // No admitted terminal frame: keep the source/row for recovery, or a stopped
-            // Herdr turn for its provider; a partial stream is not a terminal response.
+            // No admitted terminal frame: leave the row (Waiting if held) to recovery or Herdr.
             completion_guard.relinquish_bridge_authority();
             inflight_guard.defuse();
             return;
@@ -985,9 +981,16 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
 
         // completion_tx is sent automatically by CompletionGuard on drop
     }.instrument(bridge_span)));
+    #[cfg(test)]
+    #[cfg(unix)]
+    cancel_backstop_test_support::record(probe_channel, _bridge_task.abort_handle());
     #[cfg(all(test, unix))]
     resume_pin_tests::observe_bridge_completion(probe_channel, _bridge_task);
 }
+
+#[cfg(test)]
+#[cfg(unix)]
+pub(in crate::services::discord) mod cancel_backstop_test_support;
 
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) mod resume_pin_tests;

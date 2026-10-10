@@ -1,6 +1,186 @@
 //! Canonical outbound-v3 message helpers extracted from the gateway root.
 
 use super::*;
+use crate::services::tui_o::n1_observation::{self as observation, Context};
+
+#[cfg(test)]
+mod n1_placeholder_tests {
+    use super::*;
+    use crate::services::tui_o::n1_observation::tests as harness;
+    use axum::{
+        Json, Router,
+        body::Bytes,
+        http::{Method, StatusCode, Uri},
+        routing::any,
+    };
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    async fn exercise(fail: bool) -> (Vec<String>, Vec<(String, String, String)>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let app = Router::new().route("/{*path}", any(move |method: Method, uri: Uri, body: Bytes| {
+            let recorded = recorded.clone();
+            async move {
+                recorded.lock().unwrap_or_else(|e| e.into_inner())
+                    .push((method.to_string(), uri.path().to_string(), String::from_utf8(body.to_vec()).unwrap()));
+                if fail {
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"code":50035,"message":"injected failure after effect"})));
+                }
+                (StatusCode::OK, Json(serde_json::json!({
+                    "id":"99","channel_id":"7","content":"...",
+                    "author":{"id":"1","username":"bot","discriminator":"0001","avatar":null},
+                    "timestamp":"2026-10-10T00:00:00+00:00","edited_timestamp":null,
+                    "tts":false,"mention_everyone":false,"mentions":[],"mention_roles":[],
+                    "attachments":[],"embeds":[],"pinned":false,"type":0
+                })))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http = Arc::new(
+            serenity::HttpBuilder::new("test-token")
+                .proxy(format!("http://{}", listener.local_addr().unwrap()))
+                .ratelimiter_disabled(true)
+                .build(),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let context = || Context {
+            provider: "codex",
+            origin: "tui_direct_synthetic",
+            input_message_id: None,
+        };
+        let post = send_intake_placeholder(
+            http.clone(),
+            shared.clone(),
+            ChannelId::new(7),
+            Some((ChannelId::new(7), MessageId::new(8))),
+            false,
+            context(),
+        )
+        .await;
+        let patch = edit_intake_placeholder(
+            http,
+            shared,
+            ChannelId::new(7),
+            MessageId::new(99),
+            context(),
+        )
+        .await;
+        server.abort();
+        let result = vec![format!("{post:?}"), format!("{}", patch.is_ok())];
+        let calls = calls.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        (result, calls)
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn n1_real_post_patch_effects_and_results_unchanged_for_all_observer_failures() {
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            dir.path().as_os_str(),
+        );
+        for fail in [false, true] {
+            let off = harness::scoped(None, || runtime().block_on(exercise(fail)));
+            assert_eq!(off.1.len(), 2);
+            assert_eq!(off.1[0].0, "POST");
+            assert_eq!(off.1[1].0, "PATCH");
+            for failure in ["full", "closed", "lock", "sink"] {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    harness::faulted(failure, |_| {
+                        tx.send(runtime().block_on(exercise(fail))).unwrap();
+                    })
+                });
+                let on = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                worker.join().unwrap();
+                assert_eq!(on, off, "{failure}, effect_error={fail}");
+            }
+            let (observer, events) = harness::fixture(16);
+            harness::scoped(Some(observer.clone()), || {
+                runtime().block_on(exercise(fail))
+            });
+            let events: Vec<_> = events
+                .try_iter()
+                .map(|e| serde_json::to_value(e).unwrap())
+                .collect();
+            assert_eq!(events.len(), 4);
+            assert_eq!(events[0]["phase"], "attempt");
+            assert_eq!(events[2]["phase"], "attempt");
+            assert_eq!(
+                events[1]["phase"],
+                if fail {
+                    "failed_or_uncertain"
+                } else {
+                    "succeeded"
+                }
+            );
+            assert_eq!(
+                events[3]["phase"],
+                if fail {
+                    "failed_or_uncertain"
+                } else {
+                    "succeeded"
+                }
+            );
+            assert_eq!(events[0]["op_id"], events[1]["op_id"]);
+            assert_eq!(events[2]["op_id"], events[3]["op_id"]);
+        }
+    }
+
+    #[test]
+    fn n1_queued_barrier_cancellation_leaves_attempt_before_any_http() {
+        let (observer, rx) = harness::fixture(16);
+        harness::scoped(Some(observer.clone()), || {
+            runtime().block_on(async {
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                let channel = ChannelId::new(7);
+                let _flush = shared.answer_flush_barrier.begin_flush(channel);
+                let http = Arc::new(
+                    serenity::HttpBuilder::new("test-token")
+                        .proxy("http://127.0.0.1:1")
+                        .ratelimiter_disabled(true)
+                        .build(),
+                );
+                let mut send = Box::pin(send_intake_placeholder(
+                    http,
+                    shared,
+                    channel,
+                    None,
+                    true,
+                    Context {
+                        provider: "codex",
+                        origin: "discord_queued",
+                        input_message_id: Some(8),
+                    },
+                ));
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(10), &mut send)
+                        .await
+                        .is_err()
+                );
+                drop(send);
+            })
+        });
+        let events: Vec<_> = rx
+            .try_iter()
+            .map(|e| serde_json::to_value(e).unwrap())
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["phase"], "attempt");
+        assert_eq!(harness::snapshot_value(&observer, 7)["open_attempts"], 1);
+    }
+}
 
 /// #3082 part B: only queued-turn notices wait behind an in-flight answer
 /// flush. The bounded barrier is shared by the intake placeholder helper.
@@ -33,8 +213,26 @@ pub(in crate::services::discord) async fn edit_intake_placeholder(
     shared: Arc<SharedData>,
     channel_id: ChannelId,
     message_id: MessageId,
+    context: Context<'_>,
 ) -> Result<(), ClassifiedOutboundEditError> {
-    edit_outbound_message_classified(http, shared, channel_id, message_id, "...").await
+    let attempt = observation::placeholder_attempt(
+        context,
+        channel_id.get(),
+        "patch_placeholder",
+        None,
+        Some(message_id.get()),
+    );
+    let result =
+        edit_outbound_message_classified(http, shared, channel_id, message_id, "...").await;
+    observation::placeholder_result(
+        attempt,
+        match &result {
+            Ok(()) => Ok(message_id.get()),
+            Err(ClassifiedOutboundEditError::ConfirmedMissing(_)) => Err("confirmed_missing"),
+            Err(ClassifiedOutboundEditError::Other(_)) => Err("other_or_uncertain"),
+        },
+    );
+    result
 }
 
 pub(in crate::services::discord) async fn send_intake_placeholder(
@@ -44,7 +242,15 @@ pub(in crate::services::discord) async fn send_intake_placeholder(
     reference: Option<(ChannelId, MessageId)>,
     // Only the queued-turn "📬" notice waits. Active placeholders pass false.
     is_queued_notice: bool,
+    context: Context<'_>,
 ) -> Result<MessageId, String> {
+    let attempt = observation::placeholder_attempt(
+        context,
+        channel_id.get(),
+        "post_placeholder",
+        reference.map(|(c, m)| (c.get(), m.get())),
+        None,
+    );
     await_answer_flush_if_queued_notice(&shared.answer_flush_barrier, channel_id, is_queued_notice)
         .await;
 
@@ -56,8 +262,18 @@ pub(in crate::services::discord) async fn send_intake_placeholder(
             reference_message,
         ));
     }
-    outbound_delivery_error(deliver_outbound(&client, shared_outbound_deduper(), msg, None).await)?
-        .ok_or_else(|| "intake placeholder delivery was skipped".to_string())
+    let result = outbound_delivery_error(
+        deliver_outbound(&client, shared_outbound_deduper(), msg, None).await,
+    )
+    .and_then(|id| id.ok_or_else(|| "intake placeholder delivery was skipped".to_string()));
+    observation::placeholder_result(
+        attempt,
+        result
+            .as_ref()
+            .map(|id| id.get())
+            .map_err(|_| "post_failed_or_uncertain"),
+    );
+    result
 }
 
 pub(in crate::services::discord) async fn send_outbound_message(

@@ -328,8 +328,13 @@ pub(super) async fn presence_reading_now(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
-) -> Reading {
-    read_now(shared, provider, channel, true).await
+    ticket: &super::lifecycle::Ticket,
+) -> Option<Reading> {
+    if ticket.channel() != channel.get() || ticket.incarnation().is_none() {
+        return None;
+    }
+    let reading = read_now(shared, provider, channel, true).await;
+    ticket.with_current(|_| reading)
 }
 
 async fn read_now(
@@ -414,6 +419,17 @@ fn judge(
     channel: u64,
     target: Target,
 ) -> Answer {
+    judge_with_policy(watch, ports, provider, channel, target, false)
+}
+
+fn judge_with_policy(
+    watch: &Arc<Mutex<Watch>>,
+    ports: &Arc<dyn Ports>,
+    provider: ShadowProvider,
+    channel: u64,
+    target: Target,
+    strict: bool,
+) -> Answer {
     let session = match target {
         Target::Bound(session) => session,
         Target::Unbound(Some(session)) if ports.session_present(&session) => {
@@ -442,7 +458,7 @@ fn judge(
     let (facts, from_start) = match &mut guard.outcome {
         Outcome::Rebuilding => return at(&guard, stored("catching_up")),
         Outcome::NoSource => {
-            return ask_pane(watch, guard, &key, || {
+            return ask_pane(watch, guard, &key, strict, || {
                 no_turn_evidence(ports.as_ref(), &key)
             });
         }
@@ -490,16 +506,20 @@ fn judge(
             at(&guard, observed(Activity::Busy, "open"))
         }
         TurnState::Open { .. } if provider == ShadowProvider::Claude => {
-            ask_pane(watch, guard, &key, || match ports.pane_busy(&key.session) {
-                true => observed(Activity::Busy, "open_pane_busy"),
-                false => observed(Activity::Unknown, "open_without_progress"),
+            ask_pane(watch, guard, &key, strict, || {
+                match ports.pane_busy(&key.session) {
+                    true => observed(Activity::Busy, "open_pane_busy"),
+                    false => observed(Activity::Unknown, "open_without_progress"),
+                }
             })
         }
         TurnState::Open { .. } => at(&guard, observed(Activity::Unknown, "open_without_progress")),
         TurnState::Unknown if awaiting => at(&guard, observed(Activity::Unknown, "facts_resumed")),
-        TurnState::Unknown if from_start && !evidence => ask_pane(watch, guard, &key, || {
-            no_turn_evidence(ports.as_ref(), &key)
-        }),
+        TurnState::Unknown if from_start && !evidence => {
+            ask_pane(watch, guard, &key, strict, || {
+                no_turn_evidence(ports.as_ref(), &key)
+            })
+        }
         TurnState::Unknown => at(&guard, observed(Activity::Unknown, "no_turn_boundary")),
     }
 }
@@ -511,20 +531,27 @@ fn judge_presence(
     channel: u64,
     target: Target,
 ) -> Answer {
-    let (answer, stamp) = judge(watch, ports, provider, channel, target);
+    let (answer, stamp) = judge_with_policy(watch, ports, provider, channel, target, true);
     let Some(stamp) = stamp else {
         supersede_unstamped(watch);
         return (answer, None);
     };
     if answer.activity == Activity::Unknown {
-        return (answer, Some(stamp));
+        let mut guard = lock(watch);
+        if guard.key.as_ref() == Some(&stamp.key)
+            && (guard.generation, guard.revision) == (stamp.generation, stamp.revision)
+        {
+            guard.revision += 1;
+            return at(&guard, answer);
+        }
+        return (observed(Activity::Unknown, "superseded"), Some(stamp));
     }
     let liveness = ports.liveness(provider, channel, &stamp.key.session);
     let mut guard = lock(watch);
     if guard.key.as_ref() != Some(&stamp.key)
         || (guard.generation, guard.revision) != (stamp.generation, stamp.revision)
     {
-        return at(&guard, observed(Activity::Unknown, "superseded"));
+        return (observed(Activity::Unknown, "superseded"), Some(stamp));
     }
     let answer = match liveness {
         SessionLiveness::Alive => answer,
@@ -545,15 +572,17 @@ fn ask_pane(
     watch: &Mutex<Watch>,
     guard: MutexGuard<'_, Watch>,
     key: &Key,
+    strict: bool,
     ask: impl FnOnce() -> Observed,
 ) -> Answer {
     let read = (guard.generation, guard.revision);
+    let original = strict.then(|| at(&guard, observed(Activity::Unknown, "superseded")));
     drop(guard);
     let answer = ask();
     let guard = lock(watch);
     match guard.key.as_ref() == Some(key) && (guard.generation, guard.revision) == read {
         true => at(&guard, answer),
-        false => at(&guard, observed(Activity::Unknown, "superseded")),
+        false => original.unwrap_or_else(|| at(&guard, observed(Activity::Unknown, "superseded"))),
     }
 }
 

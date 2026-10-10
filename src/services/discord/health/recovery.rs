@@ -53,6 +53,9 @@ pub(crate) use watchdog_decisions::{
     stall_watchdog_should_force_clean_orphan_explicit_background_work,
 };
 
+mod zombie_reclaim;
+pub(crate) use zombie_reclaim::release_zombie_foreground_turn_by_tmux_name;
+
 mod stop_judgement;
 mod stop_result;
 use stop_judgement::host_guard_preserved;
@@ -1236,39 +1239,6 @@ pub async fn stop_providerless_runtime_turn_preserving_watcher_strict_ownership(
     stop_source: &'static str,
 ) -> HardStopRuntimeResult {
     runtime_turn_cleanup_by_lookup(registry, None, Some(channel_id), None, stop_source, false).await
-}
-
-/// #5176 — release a zombie foreground anchor identified by tmux session name.
-///
-/// `POST /api/sessions/{session_key}/reconcile-stale-turn` owns the Postgres
-/// session row, but the row was never the thing blocking the channel: the
-/// in-memory mailbox anchor was. Flipping the row to `idle` while the mailbox
-/// still owns the foreground slot would leave the operator with a "reconciled"
-/// response and a channel that is still unusable — the same false success this
-/// issue is about. Session keys carry a tmux name rather than a channel id, so
-/// the runtime is resolved by tmux name here.
-///
-/// The release itself goes through the single guarded authority, so this cannot
-/// take a live turn's anchor even if the caller's own guard was wrong.
-pub(crate) async fn release_zombie_foreground_turn_by_tmux_name(
-    registry: Option<&HealthRegistry>,
-    tmux_name: &str,
-    stop_source: &'static str,
-) -> discord::zombie_foreground_release::ZombieForegroundReleaseOutcome {
-    let Some(registry) = registry else {
-        return discord::zombie_foreground_release::ZombieForegroundReleaseOutcome::default();
-    };
-    let Some(runtime) = find_runtime_channel_match(registry, None, None, Some(tmux_name)).await
-    else {
-        return discord::zombie_foreground_release::ZombieForegroundReleaseOutcome::default();
-    };
-    discord::zombie_foreground_release::release_zombie_foreground_turn(
-        &runtime.shared,
-        &runtime.provider,
-        runtime.channel_id,
-        stop_source,
-    )
-    .await
 }
 
 /// `expected_actor` binds the finish to the mailbox incarnation that accepted

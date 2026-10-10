@@ -156,6 +156,7 @@ pub(crate) mod tui_o {
     pub(crate) mod exact_submission;
     #[cfg(all(test, unix))]
     mod gates_m1;
+    pub(crate) mod n1_observation;
     pub(crate) mod ownership;
     pub(crate) mod repost;
     pub(crate) mod shadow;

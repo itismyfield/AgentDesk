@@ -1,6 +1,10 @@
 //! Shared queue dispatch for Gateway and REST runtimes.
 use super::super::*;
 
+#[cfg(test)]
+#[path = "cancel_backstop_race_support_tests.rs"]
+pub(in crate::services::discord) mod cancel_backstop_test_support;
+
 pub(in crate::services::discord) async fn kickoff_idle_queue_channel(
     deps: &router::IntakeDeps<'_>,
     provider: &ProviderKind,
@@ -64,6 +68,9 @@ async fn kickoff_admitted_queue_channel(
     if router::hosted_tui_promote_readiness_blocked(shared, provider, channel_id).await {
         return IdleQueueKickoffChannelOutcome::default();
     }
+
+    #[cfg(test)]
+    let _cancel_backstop_race = cancel_backstop_test_support::pause(channel_id).await;
 
     let take_next = idle_queue_take_next_soft_if_ready(shared, provider, channel_id).await;
     if let Some(error) = take_next.persistence_error.as_ref() {

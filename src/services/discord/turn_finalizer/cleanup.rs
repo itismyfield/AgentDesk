@@ -271,6 +271,8 @@ pub(super) fn enqueue_terminal_status_panel_reconcile(
     }
     let terminal_status = match event {
         TerminalEvent::OperatorRelease(_) => return,
+        #[cfg(test)]
+        TerminalEvent::HostTerminated => return,
         TerminalEvent::Complete => {
             crate::services::discord::abandon_request_store::TerminalCardStatus::Completed
         }

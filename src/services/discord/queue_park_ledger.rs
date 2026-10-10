@@ -448,3 +448,27 @@ pub(super) async fn evaluate_provider(registry: &HealthRegistry, provider: &Prov
 #[cfg(test)]
 #[path = "queue_park_ledger/cancel_park_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+impl QueueParkLedger {
+    pub(in crate::services::discord) fn age_sources_for_tests(
+        &self,
+        channel: ChannelId,
+        age: std::time::Duration,
+    ) {
+        let mut channels = self
+            .channels
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let sources = channels
+            .sources
+            .get_mut(&channel)
+            .expect("already observed sources");
+        for source in sources.values_mut() {
+            source.first_seen = source
+                .first_seen
+                .checked_sub(age)
+                .expect("fixture source age");
+        }
+    }
+}

@@ -19,7 +19,9 @@ use super::{AlarmSink, DeliveryLease, DiscordPort, PostOutcome, WriterAlarm};
 use crate::services::cluster::channel_home;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::store::ChannelStore;
-use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState, PieceOutcome, Unsent};
+use crate::services::tui_o::store::ledger::{
+    LedgerEntry, LedgerState, PieceDisposition, PieceOutcome, Unsent,
+};
 
 /// A POST still unanswered by then is treated as uncertain and settled from history.
 pub const POST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -195,7 +197,7 @@ pub struct ChannelWriter<P, L, A> {
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
-    /// A recovered ledger with a violation or a refused POST stops the channel before any POST.
+    /// A violation or an unapproved latest refusal stops the recovered channel before any POST.
     pub fn new(
         store: ChannelStore,
         gate: Arc<OwnershipGate>,
@@ -223,14 +225,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         };
         let ledger = writer.store.ledger();
         seed_last_posted(channel, ledger);
-        let refused =
-            (0..ledger.next_serial()).find_map(|serial| match ledger.piece(serial)?.outcome {
-                Some(PieceOutcome::Rejected(status)) => Some(status),
-                _ => None,
-            });
+        let refused = ledger.blocked();
         if let Some(detail) = ledger.violation().map(str::to_string) {
             writer.stop(WriterAlarm::LedgerViolation { detail });
-        } else if let Some(status) = refused {
+        } else if let Some((serial, status)) = refused {
+            tracing::warn!(
+                channel,
+                serial,
+                status,
+                "[tui_o] latest rejected piece needs operator approval"
+            );
             writer.stop(WriterAlarm::Blocked { status });
         }
         writer
@@ -335,16 +339,39 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         if ledger.excluded(&piece.unit_key).is_some() {
             return Step::Done;
         }
-        let earlier = ledger.latest_piece(&piece.unit_key, piece.index);
-        if let Some(outcome) = earlier.map(|(_, earlier)| earlier.outcome.clone()) {
-            return match outcome {
-                Some(PieceOutcome::Rejected(status)) => self.stop(WriterAlarm::Blocked { status }),
-                Some(_) => Step::Done,
-                None => self.stop(WriterAlarm::LedgerViolation {
+        let (piece, approved) = match ledger.disposition(&piece.unit_key, piece.index) {
+            PieceDisposition::Blocked { serial, status } => {
+                tracing::warn!(channel = self.channel, serial, status, unit_key = ?piece.unit_key,
+                    "[tui_o] latest rejected piece needs operator approval");
+                return self.stop(WriterAlarm::Blocked { status });
+            }
+            PieceDisposition::Settled => return Step::Done,
+            PieceDisposition::Open { .. } => {
+                return self.stop(WriterAlarm::LedgerViolation {
                     detail: "open piece after settling".into(),
-                }),
-            };
-        }
+                });
+            }
+            PieceDisposition::Authorized { rejected_serial } => {
+                let Some(original) = ledger.piece(rejected_serial) else {
+                    return self.stop(WriterAlarm::LedgerViolation {
+                        detail: "approved piece missing".into(),
+                    });
+                };
+                if original.payload != piece.payload {
+                    tracing::warn!(channel = self.channel, rejected_serial, unit_key = ?piece.unit_key,
+                        "[tui_o] rederived payload differs; sending ledger payload");
+                }
+                (
+                    PieceWork {
+                        unit_key: original.unit_key.clone(),
+                        index: original.piece_index,
+                        payload: original.payload.clone(),
+                    },
+                    Some(rejected_serial),
+                )
+            }
+            PieceDisposition::Fresh => (piece.clone(), None),
+        };
         let (serial, anchor_id) = (ledger.next_serial(), ledger.anchor());
         let Some(held) = self.lease.try_acquire(self.channel, serial) else {
             return Step::LeaseBusy;
@@ -373,6 +400,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                     })?;
                 if let Some(detail) = store.ledger().violation() {
                     return Err(Refusal::Violation(detail.to_string()));
+                }
+                if let Some(rejected_serial) = approved {
+                    tracing::info!(channel, rejected_serial, serial, unit_key = ?piece.unit_key,
+                        "[tui_o] operator approval consumed by Prepared");
                 }
                 let running = posts.take().map(Running::start);
                 let post = port.post(channel, piece.payload.clone());
@@ -451,6 +482,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 }
             }
             PostOutcome::Refused(status) => {
+                tracing::warn!(
+                    channel = self.channel,
+                    serial,
+                    status,
+                    "[tui_o] POST rejected; this serial needs a new operator approval"
+                );
                 if let Err(step) = self.record(LedgerEntry::Rejected { serial, status }) {
                     return step;
                 }

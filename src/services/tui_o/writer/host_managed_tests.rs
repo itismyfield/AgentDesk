@@ -7,6 +7,153 @@ use crate::services::cluster::home_supervisor::{
 };
 use crate::services::tui_o::writer::host::{ManagedWriterHandle, WriterStopped, start_managed};
 
+#[tokio::test(start_paused = true)]
+async fn operator_resume_managed_restart_joins_old_generation_and_runs_approved_retry() {
+    let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
+    let (harness, path) = fresh(startup);
+    harness.gate.acquired();
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    harness
+        .port
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(Reply::Refused(403));
+    let mut handles = managed(&harness, &io, &ready);
+    assert_eq!(handles.len(), 1);
+    polls(3).await;
+    append(&path, &row("refused", "original bytes"));
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["original bytes"]);
+    assert!(
+        io.alarms
+            .has(CHANNEL, &WriterAlarm::Blocked { status: 403 })
+    );
+    let old = handles.pop().unwrap();
+    let generation = old.generation();
+    old.stop_and_join().await.unwrap();
+    assert!(!ready.is_hosted(CHANNEL) && !ready.accepts(CHANNEL));
+    let mut unapproved = managed(&harness, &io, &ready);
+    assert_eq!(
+        unapproved.len(),
+        1,
+        "the negative restart really created a host"
+    );
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["original bytes"]);
+    unapproved.pop().unwrap().stop_and_join().await.unwrap();
+    harness
+        .store
+        .record_operator_resume(CHANNEL, 0, "operator", "restored")
+        .unwrap();
+    let ledger = ledger_path(&harness);
+    let before = std::fs::read(&ledger).unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(&ledger)
+        .unwrap();
+    held.try_lock().unwrap();
+    let mut locked = managed(&harness, &io, &ready);
+    assert_eq!(
+        locked.len(),
+        1,
+        "a host really attempts recovery under the CLI lock"
+    );
+    polls(3).await;
+    assert!(io.alarms.0.lock().unwrap().iter().any(|(_, alarm)|
+        matches!(alarm, WriterAlarm::Halted { detail } if detail.contains("WouldBlock"))));
+    assert_eq!(std::fs::read(&ledger).unwrap(), before);
+    assert_eq!(harness.port.posts(), ["original bytes"]);
+    assert!(!ready.accepts(CHANNEL));
+    locked.pop().unwrap().stop_and_join().await.unwrap();
+    drop(held);
+    let mut approved = managed(&harness, &io, &ready);
+    assert_eq!(approved.len(), 1);
+    assert_ne!(approved[0].generation(), generation);
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["original bytes", "original bytes"]);
+    let channel = harness.channel();
+    assert_eq!(
+        channel.ledger().approval(0).unwrap().consumed_serial,
+        Some(1)
+    );
+    assert_eq!(
+        channel.ledger().blocked(),
+        None,
+        "F4 oracle: the old rejection no longer holds"
+    );
+    assert!(matches!(
+        channel.ledger().piece(1).unwrap().outcome,
+        Some(PieceOutcome::Posted(_))
+    ));
+    assert!(ready.accepts(CHANNEL));
+    append(&path, &row("following", "later"));
+    polls(3).await;
+    assert_eq!(
+        harness.port.posts(),
+        ["original bytes", "original bytes", "later"]
+    );
+    approved.pop().unwrap().stop_and_join().await.unwrap();
+    assert!(!ready.accepts(CHANNEL));
+}
+
+// `agentdesk o resume` only records the approval; the next managed writer sends the refused piece
+// once, then later output, and a repeated command reports the consumed approval.
+#[tokio::test(start_paused = true)]
+async fn operator_resume_cli_approval_is_sent_once_by_the_next_managed_writer() {
+    let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
+    let (harness, path) = fresh(startup);
+    harness.gate.acquired();
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let refusal = Reply::Refused(403);
+    harness.port.replies.lock().unwrap().push_back(refusal);
+    let mut refused = managed(&harness, &io, &ready);
+    assert_eq!(refused.len(), 1);
+    polls(3).await;
+    append(&path, &row("refused", "original bytes"));
+    polls(3).await;
+    refused.pop().unwrap().stop_and_join().await.unwrap();
+    let (root, channel) = (root(&harness), CHANNEL.to_string());
+    let status = ["o", "status", "--channel", &channel];
+    let (code, shown, _) = crate::cli::o::tests::run_cli(&root, &status);
+    assert_eq!(code, Some(0));
+    assert!(shown.contains("approval absent"), "{shown}");
+    let resume = [
+        "o",
+        "resume",
+        "--channel",
+        &channel,
+        "--rejected-serial",
+        "0",
+    ];
+    let approve = |reason| [&resume[..], &["--reason", reason]].concat();
+    let (code, _, error) = crate::cli::o::tests::run_cli(&root, &approve("restored"));
+    assert_eq!(code, Some(0), "{error}");
+    assert_eq!(
+        harness.port.posts(),
+        ["original bytes"],
+        "the CLI posts nothing"
+    );
+    let mut approved = managed(&harness, &io, &ready);
+    assert_eq!(approved.len(), 1, "a writer really started after the CLI");
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["original bytes", "original bytes"]);
+    append(&path, &row("following", "later"));
+    polls(3).await;
+    let sent = ["original bytes", "original bytes", "later"];
+    assert_eq!(harness.port.posts(), sent);
+    approved.pop().unwrap().stop_and_join().await.unwrap();
+    let (code, _, error) = crate::cli::o::tests::run_cli(&root, &approve("again"));
+    assert_eq!(code, Some(3), "{error}");
+    assert!(error.contains("(consumed by serial 1)"), "{error}");
+    let (_, shown, _) = crate::cli::o::tests::run_cli(&root, &status);
+    assert!(
+        shown.contains("approval consumed by serial 1 Posted("),
+        "{shown}"
+    );
+}
+
 fn managed(
     harness: &Harness,
     io: &Arc<TestIo>,

@@ -2,6 +2,8 @@ use super::*;
 use crate::services::cluster::{home_availability, node_registry::GatewayWaiterGuard};
 
 #[cfg(test)]
+pub mod boot_retirement;
+#[cfg(test)]
 mod channel_homes_tests;
 mod deferred_restart;
 mod framework_setup;
@@ -22,6 +24,16 @@ mod o_writer_host;
 mod orphan_recovery;
 mod queued_placeholders;
 mod queued_recovery;
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) async fn restore_queued_and_inflight_for_tests(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+) -> Vec<(ChannelId, MessageId, MessageId)> {
+    queued_recovery::restore_queued_and_inflight_work(http, shared, provider).await
+}
+
 mod recovery_flush;
 mod relay_dlq_redelivery;
 mod restored_state;

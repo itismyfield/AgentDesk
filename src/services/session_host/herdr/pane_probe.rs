@@ -56,6 +56,9 @@ pub(crate) type PaneProcesses = (
 
 /// OS reads of another process; tests inject a fake.
 pub(crate) trait ProcessOs: Send + Sync {
+    fn exists(&self, _pid: u32) -> Result<bool, RestoreUnverified> {
+        Err(RestoreUnverified::ProcessUnreadable)
+    }
     fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified>;
     fn start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified>;
     fn environ(&self, pid: u32) -> Result<Vec<String>, RestoreUnverified>;
@@ -63,9 +66,54 @@ pub(crate) trait ProcessOs: Send + Sync {
     fn exec_path(&self, pid: u32) -> Option<String>;
 }
 
+/// Absence is separate evidence from failure to read a process start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordedProcess {
+    ExactAlive,
+    ProvenAbsent,
+    Replaced,
+    Unreadable,
+}
+
+pub(crate) fn recorded_process(os: &dyn ProcessOs, stamp: &ProcessStamp) -> RecordedProcess {
+    match os.exists(stamp.pid) {
+        Ok(false) => RecordedProcess::ProvenAbsent,
+        Ok(true) => match os.start(stamp.pid) {
+            Ok(start) if start_text(start.identity) == stamp.start => RecordedProcess::ExactAlive,
+            Ok(_) => RecordedProcess::Replaced,
+            Err(_) => RecordedProcess::Unreadable,
+        },
+        Err(_) => RecordedProcess::Unreadable,
+    }
+}
+
 pub(crate) struct HostOs;
 
 impl ProcessOs for HostOs {
+    fn exists(&self, pid: u32) -> Result<bool, RestoreUnverified> {
+        #[cfg(unix)]
+        {
+            let pid = i32::try_from(pid)
+                .ok()
+                .filter(|pid| *pid > 0)
+                .ok_or(RestoreUnverified::ProcessUnreadable)?;
+            // Signal zero tests existence and permissions; it never sends a termination signal.
+            let result = unsafe { libc::kill(pid, 0) };
+            if result == 0 {
+                return Ok(true);
+            }
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::ESRCH) => Ok(false),
+                _ => Err(RestoreUnverified::ProcessUnreadable),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            Err(RestoreUnverified::PlatformUnsupported)
+        }
+    }
+
     fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified> {
         provenance::process_parent(pid)
     }
@@ -251,3 +299,97 @@ fn check_environment(
 #[cfg(test)]
 #[path = "pane_probe_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod recorded_process_tests {
+    use super::*;
+    struct Os {
+        exists: Result<bool, RestoreUnverified>,
+        start: Result<ProcessStart, RestoreUnverified>,
+    }
+    impl ProcessOs for Os {
+        fn exists(&self, _: u32) -> Result<bool, RestoreUnverified> {
+            self.exists
+        }
+        fn start(&self, _: u32) -> Result<ProcessStart, RestoreUnverified> {
+            self.start.clone()
+        }
+        fn parent(&self, _: u32) -> Result<u32, RestoreUnverified> {
+            unreachable!()
+        }
+        fn environ(&self, _: u32) -> Result<Vec<String>, RestoreUnverified> {
+            unreachable!()
+        }
+        fn exec_path(&self, _: u32) -> Option<String> {
+            unreachable!()
+        }
+    }
+    #[test]
+    fn m1_recorded_provider_four_states_are_distinct() {
+        let start = ProcessStart {
+            identity: StartIdentity::Darwin {
+                seconds: 1000,
+                micros: 0,
+            },
+            wall_clock: SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
+        };
+        let stamp = ProcessStamp {
+            pid: 20,
+            start: start_text(start.identity),
+        };
+        assert_eq!(
+            recorded_process(
+                &Os {
+                    exists: Ok(true),
+                    start: Ok(start.clone())
+                },
+                &stamp
+            ),
+            RecordedProcess::ExactAlive
+        );
+        assert_eq!(
+            recorded_process(
+                &Os {
+                    exists: Ok(false),
+                    start: Err(RestoreUnverified::ProcessUnreadable)
+                },
+                &stamp
+            ),
+            RecordedProcess::ProvenAbsent
+        );
+        let replacement = ProcessStamp {
+            start: "another-start".into(),
+            ..stamp.clone()
+        };
+        assert_eq!(
+            recorded_process(
+                &Os {
+                    exists: Ok(true),
+                    start: Ok(start)
+                },
+                &replacement
+            ),
+            RecordedProcess::Replaced
+        );
+        assert_eq!(
+            recorded_process(
+                &Os {
+                    exists: Ok(true),
+                    start: Err(RestoreUnverified::ProcessUnreadable)
+                },
+                &stamp
+            ),
+            RecordedProcess::Unreadable
+        );
+        assert_eq!(
+            recorded_process(
+                &Os {
+                    exists: Err(RestoreUnverified::ProcessUnreadable),
+                    start: Err(RestoreUnverified::ProcessUnreadable)
+                },
+                &stamp
+            ),
+            RecordedProcess::Unreadable
+        );
+    }
+}
