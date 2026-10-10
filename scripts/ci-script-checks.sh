@@ -341,6 +341,11 @@ if run_check guards "TUI O writer census: Legacy send sites and cutover gates"; 
 "$PYTHON" -m unittest tests.test_check_tui_o_writer_census
 fi
 
+if run_check guards "Dormant boot retirement census"; then
+"$PYTHON" scripts/check_legacy_supervision_census.py
+"$PYTHON" -m unittest tests.test_check_legacy_supervision_census
+fi
+
 if run_check guards "Intake-outbox done writer per-file call-site allowlist (#5071 T2)"; then
 # Pins the pre-T2 `mark_done` owner by exact per-file textual count over src/;
 # the script docstring declares the lexical forms and semantic facts it cannot see.
