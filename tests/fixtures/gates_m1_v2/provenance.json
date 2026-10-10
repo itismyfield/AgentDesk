@@ -1,0 +1,240 @@
+{
+  "oracle_commit": "5806d1e6038040218ec48b51bf3105fe36992a23",
+  "entries": [
+    {
+      "source": "src/services/tui_o/store/mod.rs",
+      "git_blob": "e4aac33ab28e7cf341c5e9230317efb551d715be",
+      "sha256": "9c149ed8c24732e44d53390630c57b725c92c09b85ef7ac750355b3a2d90cc4d"
+    },
+    {
+      "extracted": "src/services/tui_o/store/mod.rs",
+      "from": "src/services/tui_o/store/mod.rs",
+      "selection": "entire unmodified blob",
+      "sha256": "9c149ed8c24732e44d53390630c57b725c92c09b85ef7ac750355b3a2d90cc4d"
+    },
+    {
+      "source": "src/services/tui_o/store/durable.rs",
+      "git_blob": "c5f9752374cb60b1c5bef35ebaa4c88737f94cf5",
+      "sha256": "60023eebbbfb37414162ce7778834ce01f4a8bcb04deb595581a74e37a1e8c58"
+    },
+    {
+      "extracted": "src/services/tui_o/store/durable.rs",
+      "from": "src/services/tui_o/store/durable.rs",
+      "selection": "entire unmodified blob",
+      "sha256": "60023eebbbfb37414162ce7778834ce01f4a8bcb04deb595581a74e37a1e8c58"
+    },
+    {
+      "source": "src/services/tui_o/store/ledger.rs",
+      "git_blob": "48bea93d8985c5c1f0b6ded281f7d4e41d965a19",
+      "sha256": "1ab13f86e0a65fa99e69c7559fe3b84c6fee558829340cc4bb5b2b704b348bae"
+    },
+    {
+      "extracted": "src/services/tui_o/store/ledger.rs",
+      "from": "src/services/tui_o/store/ledger.rs",
+      "selection": "entire unmodified blob",
+      "sha256": "1ab13f86e0a65fa99e69c7559fe3b84c6fee558829340cc4bb5b2b704b348bae"
+    },
+    {
+      "source": "src/services/tui_o/store/rotation.rs",
+      "git_blob": "306b1bd478b4a11d948a6d7544a784aae4a9da93",
+      "sha256": "41a7e7d4135dfb467ae411eeeadf0a2e3170eb4f611e3c4fb3ef6d7efbd66c4b"
+    },
+    {
+      "extracted": "src/services/tui_o/store/rotation.rs",
+      "from": "src/services/tui_o/store/rotation.rs",
+      "selection": "entire unmodified blob",
+      "sha256": "41a7e7d4135dfb467ae411eeeadf0a2e3170eb4f611e3c4fb3ef6d7efbd66c4b"
+    },
+    {
+      "source": "src/services/tui_o/store/spool.rs",
+      "git_blob": "bc0733ecd2af33035689babaaec1e8ae00c66356",
+      "sha256": "1cd89319f85ef85dafec37fcc927682bde68159917ea641e25998f38b07c52a7"
+    },
+    {
+      "extracted": "src/services/tui_o/store/spool.rs",
+      "from": "src/services/tui_o/store/spool.rs",
+      "selection": "entire unmodified blob",
+      "sha256": "1cd89319f85ef85dafec37fcc927682bde68159917ea641e25998f38b07c52a7"
+    },
+    {
+      "source": "src/services/tui_o/shadow/capture.rs",
+      "git_blob": "579d5ab3340721bc858e193360f89b757b627afd",
+      "sha256": "66ec60438f4e8470ceae9e896f9a0e1e15ce9a420633040468d623714717e1ec"
+    },
+    {
+      "extracted": "src/services/tui_o/shadow/capture.rs",
+      "from": "src/services/tui_o/shadow/capture.rs",
+      "selection": "entire unmodified blob",
+      "sha256": "66ec60438f4e8470ceae9e896f9a0e1e15ce9a420633040468d623714717e1ec"
+    },
+    {
+      "source": "src/services/tui_o/shadow/identity.rs",
+      "git_blob": "fac8e669c16792aaf523f9eef139283acf3b7bde",
+      "sha256": "1dbf72da13a8f689ad98072ea20b0f6982be40a7ff991bb931cec5db7d63eea9"
+    },
+    {
+      "extracted": "src/services/tui_o/shadow/identity.rs",
+      "from": "src/services/tui_o/shadow/identity.rs",
+      "selection": "entire unmodified blob",
+      "sha256": "1dbf72da13a8f689ad98072ea20b0f6982be40a7ff991bb931cec5db7d63eea9"
+    },
+    {
+      "source": "src/services/tui_o/shadow/seal.rs",
+      "git_blob": "157e57646a816319f91073ddf37965c7e2a00e8d",
+      "sha256": "885151e394cdc1c5359fa416d7fa824679c8c6c3ad697907771d0d6d93f28603"
+    },
+    {
+      "extracted": "src/services/tui_o/shadow/seal.rs",
+      "from": "src/services/tui_o/shadow/seal.rs",
+      "selection": "entire unmodified blob",
+      "sha256": "885151e394cdc1c5359fa416d7fa824679c8c6c3ad697907771d0d6d93f28603"
+    },
+    {
+      "source": "src/services/tui_o/shadow/unit_plan.rs",
+      "git_blob": "b5d57eecd9d6d319ac53b168bbe93f111e0e422f",
+      "sha256": "77c4a93cd05d060501ff85dbf67d1ef7e2f36b3a50051fd38d02896eab35a834"
+    },
+    {
+      "extracted": "src/services/tui_o/shadow/unit_plan.rs",
+      "from": "src/services/tui_o/shadow/unit_plan.rs",
+      "selection": "entire unmodified blob",
+      "sha256": "77c4a93cd05d060501ff85dbf67d1ef7e2f36b3a50051fd38d02896eab35a834"
+    },
+    {
+      "source": "src/services/tui_o/writer/pieces.rs",
+      "git_blob": "31373f6ae78f0f2d554a0a37ebe4695e9fab7f2e",
+      "sha256": "751a00dddd223ab90f2c1e2d07368c4f457da5053f028ee0ecc22ce787f8d326"
+    },
+    {
+      "extracted": "src/services/tui_o/writer/pieces.rs",
+      "from": "src/services/tui_o/writer/pieces.rs",
+      "selection": "entire unmodified blob",
+      "sha256": "751a00dddd223ab90f2c1e2d07368c4f457da5053f028ee0ecc22ce787f8d326"
+    },
+    {
+      "source": "src/services/tui_o/shadow/mod.rs",
+      "git_blob": "52b832abae75412db8a999d308392f0d3b6acccc",
+      "sha256": "eb029c3fd422b09d74d4ef5a17086e7d81f7b7aeec97fb8761413eacd72ebcde"
+    },
+    {
+      "extracted": "src/services/tui_o/shadow/mod.rs",
+      "from": "src/services/tui_o/shadow/mod.rs",
+      "selection": "exact types/constants/traits from use std::path::PathBuf through ShadowSink; module declarations narrowed to included blobs",
+      "sha256": "3aaf5586e06c54f2cd39d21c143728644db58028360169fd5eb75e765b7fa50f"
+    },
+    {
+      "source": "src/services/discord/semantic_boundaries.rs",
+      "git_blob": "d59b0be77095112d5b689177f1c626359bf9a786",
+      "sha256": "e38d8e086a8cf1fa5bf2b882a83d581dc82cdf2d0d00575253844ecf4b55e3f1"
+    },
+    {
+      "extracted": "src/services/discord/semantic_boundaries.rs",
+      "from": "src/services/discord/semantic_boundaries.rs",
+      "selection": "entire unmodified blob",
+      "sha256": "e38d8e086a8cf1fa5bf2b882a83d581dc82cdf2d0d00575253844ecf4b55e3f1"
+    },
+    {
+      "source": "src/services/discord/formatting.rs",
+      "git_blob": "d4fe4dff9da61ba3cd26978b960e7c9cf593e2dc",
+      "sha256": "0b63caad4c23f0cf650306cff4fea465bd7908e20b67d9b96c2ce93484f0dc15"
+    },
+    {
+      "extracted": "src/services/discord/formatting/mod.rs",
+      "from": "src/services/discord/formatting.rs",
+      "selection": "exact split_for_shadow body; explicit imports replace unrelated module imports",
+      "sha256": "27669c55cff98e49012eb72b39551956aa5d9af1e12535f0ea795f1e7841c743"
+    },
+    {
+      "source": "src/services/discord/formatting/delivery.rs",
+      "git_blob": "b80c4a2ce65d131fa43dcf32ff2f2687372c05ba",
+      "sha256": "fdbb4353cf030bcc790c1ff411161596ab980a672fcc560525fe346c47ddad7b"
+    },
+    {
+      "extracted": "src/services/discord/formatting/delivery.rs",
+      "from": "src/services/discord/formatting/delivery.rs",
+      "selection": "exact split_message function, unmodified",
+      "sha256": "1925c03d7a281865ddf5a15ee84f4f69d9569e3b962e3ee83192ae693708ec0d"
+    },
+    {
+      "source": "src/services/discord/formatting/streaming_status.rs",
+      "git_blob": "94044b8cf05dc8df37b78eb14382d6ab890e7ec4",
+      "sha256": "d4e9e9895d105b573b1dc5dd17895f280b6a00773c5e2eedca589a7a26736bdd"
+    },
+    {
+      "extracted": "src/services/discord/formatting/streaming_status.rs",
+      "from": "src/services/discord/formatting/streaming_status.rs",
+      "selection": "exact discord_message_units and byte_index_at_discord_message_units functions",
+      "sha256": "80a48b39a5129d68c63529df65c5829a08aa4dd71eb006aea7df6b3c194890e3"
+    },
+    {
+      "source": "src/services/tui_turn_state/completion_scan.rs",
+      "git_blob": "8cb0f3fe5978653d55ac5036b63ef7e76eaea068",
+      "sha256": "d6323d3738ee7a30da04db9bb04733f3183ae2ec7eea1f58f808c48fc23ff27f"
+    },
+    {
+      "source": "src/services/tui_turn_state.rs",
+      "git_blob": "b0e0b54bc0d0fb1d975531e2c52b946b0fa48d07",
+      "sha256": "93c6e3c7d6344124f8710567cd7e2b8fc07d57bd733f13e0a4f36e185c8c4a91"
+    },
+    {
+      "extracted": "src/services/tui_turn_state.rs",
+      "from": [
+        "src/services/tui_turn_state/completion_scan.rs",
+        "src/services/tui_turn_state.rs"
+      ],
+      "selection": "exact terminator function, interrupt constants and predicate; explicit imports only",
+      "sha256": "589a56260ad4dc97e869f9aec1bcc17852eb370d8917b4efb358b26d44cb7f67"
+    },
+    {
+      "source": "src/services/discord/runtime_store.rs",
+      "git_blob": "77686cf31efb33395ef53364434e2998fca7c369",
+      "sha256": "aa5c863b6918ea6b4b5fcf8a607738fab5caaff88216a1b6b3fae3ffb48da049"
+    },
+    {
+      "extracted": "src/services/discord/runtime_store.rs",
+      "from": "src/services/discord/runtime_store.rs",
+      "selection": "exact fsync_parent_dir implementations and PARENT_DIR_FSYNC_FLUSHES",
+      "sha256": "72fa00469aed7540cc1fda611fcd8e83a7edaf067e5f692607758683f1db89ba"
+    },
+    {
+      "source": "src/services/provider.rs",
+      "git_blob": "d5bd4ae9a1295f2b2419b39715e92ab7ce85a476",
+      "sha256": "b0030c45da0a7f09b6eb235bfc8931f280c5506c120303b5a723b684b4e842a6"
+    },
+    {
+      "extracted": "src/services/provider.rs",
+      "from": "src/services/provider.rs",
+      "selection": "exact ProviderKind enum and derive attribute",
+      "sha256": "dc3c749dba7327fd9b49c0d4444305c94239afcde41df397ed6b10550bc253f5"
+    },
+    {
+      "source": "src/services/discord/mod.rs",
+      "git_blob": "f3f070893d8dec9f12a8903d809fe5be81572471",
+      "sha256": "4a32ab54421c073410365dc2ad61d0d1b7e654876fd8a0dec5983d9dafdfe3e4"
+    },
+    {
+      "extracted": "src/services/discord/mod.rs",
+      "from": "src/services/discord/mod.rs",
+      "selection": "exact DISCORD_MSG_LIMIT declaration; module declarations narrowed to included blobs",
+      "sha256": "005b2eea03c5a5940e0f491423ade491223a64d088e4aac24401eb9e30f5818b"
+    }
+  ],
+  "generator_recipe": {
+    "api_calls": [
+      "SourceCapture::open/poll",
+      "OStore::begin_era/open_channel",
+      "ChannelStore::append_spool",
+      "UnitDeriver::derive",
+      "ChannelStore::append_ledger(Prepared/Posted)"
+    ],
+    "fixture_inputs": "src/main.rs::records/long_body",
+    "files": {
+      "extract.py": "9ecbd756da60d169149901578a0b802cfb082c30ff7bee70c679e46d9ae02acb",
+      "Cargo.toml": "373710b3c456699afec99d58985f37212700e02183aba2b6410e276999d1615b",
+      "src/main.rs": "974efae3f6cee7bcab4551a3235cef69f241672704475e2107c6cbb4f852f898",
+      "src/services/mod.rs": "1693b56a98d7e39b47ae8b67dd6a8e0468bed69fdeb7a880091251f20772cc07",
+      "src/services/tui_o/mod.rs": "342d0bb7c20bd320a84b9e6d55a79a2d5bb7e74b34b714a2810f6f9a0b323d13",
+      "Cargo.lock": "1622166119b375477bdcf74d954de54c038b9e50dd72a994ae9887981df63ec5"
+    }
+  }
+}

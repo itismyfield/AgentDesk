@@ -54,14 +54,13 @@ const CODEX_READY: &str = "\
 
   gpt-5.5 · gpt-5.5 xhigh · ~/.adk/release/workspaces/agentdesk · agentdesk · main";
 
-// Approval wording that does not adjoin the composer, so readiness alone accepts it.
+// Current approval controls directly adjoin the composer.
 const CODEX_APPROVAL: &str = "\
 • previous response
 
 Approval required
   rm -rf build
   [y] yes  [n] no
-
 ›
 
   gpt-5.5 · gpt-5.5 xhigh · ~/.adk/release/workspaces/agentdesk · agentdesk · main";
@@ -453,6 +452,38 @@ async fn modal_and_unknown_screens_never_receive_input() {
     );
 }
 
+#[tokio::test]
+async fn codex_busy_and_unknown_without_controls_wait_before_being_held() {
+    for screen in [
+        "unrecognized screen",
+        "• Working (1s • esc to interrupt)
+
+›
+
+  gpt-5.5 · gpt-5.5 xhigh · /tmp · repo · main",
+    ] {
+        assert_eq!(
+            judge_pane(ShadowProvider::Codex, screen),
+            PaneVerdict::NotReady
+        );
+        let world = World::new(ShadowProvider::Codex);
+        let mut ledger = world.ledger(&[(1, "hello")]);
+        let mut actor = InputActor::new(world.binding.clone(), FakePane::new(screen));
+        let t0 = Instant::now();
+        for at in [t0, t0 + READY_WINDOW / 2] {
+            assert_eq!(
+                idle_step(&mut actor, &mut ledger, &world, at).await,
+                Step::Wait("pane_not_ready")
+            );
+        }
+        assert_eq!(
+            idle_step(&mut actor, &mut ledger, &world, t0 + READY_WINDOW).await,
+            Step::Moved(1, RowState::Held(HeldReason::NotReady))
+        );
+        assert!(actor.pane_submitted().is_empty());
+    }
+}
+
 struct FakeTmux {
     dir: TempDir,
 }
@@ -736,6 +767,8 @@ fn a_flat_claude_paste_is_owned_only_as_drawn() {
     assert!(owns(&ansi, frame));
     let row = "\n  응답에 정확히 한 줄로 [E2E:PR1:pb1-c-s5d-pr1-074645] 만 출력해줘.";
     let second = |with: &str| CLAUDE_TWO_ROW_PASTE.replace(row, with);
+    // A complete body differing only in whitespace uses the same wrap ownership proof.
+    assert!(owns(&second(&row.replace("\n  ", "\n   ")), frame));
     let scrollback_only = CLAUDE_TWO_ROW_PASTE
         .replace(
             "❯\u{00a0}[📱 adk-e2e-phase-b · 343742347365974026 · b9bf9a71]",
@@ -754,7 +787,6 @@ fn a_flat_claude_paste_is_owned_only_as_drawn() {
         ("typed after", second(&format!("{row}x"))),
         ("typed row", second(&format!("{row}\n  x"))),
         ("one-column indent", second(&row.replace("\n  ", "\n "))),
-        ("three-column indent", second(&row.replace("\n  ", "\n   "))),
         ("unindented", second(&row.replace("\n  ", "\n"))),
         ("one row", second("")),
         ("scrollback only", scrollback_only),
@@ -795,8 +827,8 @@ fn a_flat_claude_paste_is_owned_only_as_drawn() {
         assert!(owns(&drawn(&rows), &frame), "{frame}");
     }
     let lead = format!("{header}\nthree leading spaces");
-    assert!(!owns(&drawn(&["     three leading spaces"]), &lead));
-    // A line wider than the box wraps onto another indented row; one line is not proven by two.
+    assert!(owns(&drawn(&["     three leading spaces"]), &lead));
+    // Whole-body proof tolerates visual wrap boundaries while rejecting extra nonwhite text.
     for (first, rest, gap) in [
         (
             format!("{}abcdef", "abcdefghij".repeat(7)),
@@ -817,7 +849,9 @@ fn a_flat_claude_paste_is_owned_only_as_drawn() {
     ] {
         let frame = format!("{header}\n{first}{gap}{rest}");
         let rows = [format!("  {first}"), format!("  {rest}")];
-        assert!(!owns(&drawn(&[&rows[0], &rows[1]]), &frame), "{frame}");
+        assert!(owns(&drawn(&[&rows[0], &rows[1]]), &frame), "{frame}");
+        let foreign = format!("{}x", rows[1]);
+        assert!(!owns(&drawn(&[&rows[0], &foreign]), &frame), "{frame}");
     }
 }
 
