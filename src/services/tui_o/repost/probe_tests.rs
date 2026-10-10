@@ -869,7 +869,8 @@ fn names_the_probe(path: &str, line: &str) -> bool {
 /// path split before its group. Reported, never skipped.
 fn escapes_by_path(path: &str, line: &str) -> bool {
     let in_repost = path.contains("tui_o/repost/");
-    let glob = line.contains("repost::*") || (in_repost && line.contains("super::*"));
+    // `super::*` stays allowed: in-file test modules glob their own parent.
+    let glob = line.contains("repost::*");
     let words = line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'));
     let selfish = in_repost
         && (line.contains("self::{")
