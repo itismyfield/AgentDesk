@@ -30,6 +30,14 @@ pub enum Derived {
     },
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OwedWork {
+    pub derived: Derived,
+    pub origin:
+        Option<crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::OwedOrigin>,
+}
+
 pub struct UnitDeriver {
     channel: u64,
     provider: ShadowProvider,
