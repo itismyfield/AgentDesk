@@ -3873,6 +3873,10 @@ services::discord::health::watcher_respawn::tests::the_sweep_arms_the_registry_d
 services::discord::health::watcher_respawn::tests::unwatched_candidates_exclude_a_channel_served_by_a_sibling_runtime
 services::discord::health::watcher_respawn::tests::unwatched_candidates_include_a_mailbox_channel_whose_watcher_was_cancelled
 services::discord::health::watcher_respawn::tests::watcher_absence_feeds_the_retry_queue_for_the_whole_5h_gap
+services::discord::herdr_terminate::tests::m1_disabled_service_has_zero_io
+services::discord::herdr_terminate::tests::m1_hold_release_window_preserves_input_until_settlement
+services::discord::herdr_terminate::tests::m1_host_terminated_settles_exact_turn_and_publishes_queue_once
+services::discord::herdr_terminate::tests::m1_retire_cas_failure_preserves_successor_pg
 services::discord::host_defer_gate::tests::the_promote_gate_holds_only_what_the_host_guard_keeps_pg
 services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_under_another_name_pg
 services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_with_no_channel_name_pg
@@ -9038,6 +9042,8 @@ services::discord::turn_finalizer::delivery_lease::tests::release_compare_and_re
 services::discord::turn_finalizer::delivery_lease::tests::same_key_range_stale_bridge_attempt_cannot_touch_successor
 services::discord::turn_finalizer::delivery_lease::tests::same_turn_stale_range_release_is_noop_after_reacquire
 services::discord::turn_finalizer::delivery_lease::tests::stale_turn_commit_and_release_are_noops_after_reacquire
+services::discord::turn_finalizer::episode::host_terminated_tests::m1_host_terminated_enqueues_no_abandoned_card
+services::discord::turn_finalizer::episode::host_terminated_tests::m1_natural_terminal_wins_preserves_successor
 services::discord::turn_finalizer::episode::tests::missing_snapshot_is_not_an_observed_legacy_episode
 services::discord::turn_finalizer::episode::tests::normal_successor_keeps_admission_and_cleanup_for_modern_and_legacy_episode
 services::discord::turn_finalizer::episode::tests::recovery_retains_captured_nonce_and_refuses_same_id_successor
@@ -10519,6 +10525,7 @@ services::session_host::herdr::launch_host::tests::launch_evidence_probes_the_lo
 services::session_host::herdr::launch_host::tests::socket_launch_refuses_unknown_endpoints_and_bad_requests_before_any_call
 services::session_host::herdr::launch_host::tests::socket_launch_types_nothing_into_a_replaced_server_and_keeps_the_pane
 services::session_host::herdr::launch_host::tests::socket_launch_types_the_command_into_the_server_that_created_the_pane
+services::session_host::herdr::pane_probe::recorded_process_tests::m1_recorded_provider_four_states_are_distinct
 services::session_host::herdr::pane_probe::tests::probe_ends_at_the_first_ambiguous_reading
 services::session_host::herdr::pane_probe::tests::probe_refuses_a_context_of_another_nonce
 services::session_host::herdr::pane_probe::tests::probe_refuses_a_process_whose_start_changed_between_readings
@@ -10572,6 +10579,18 @@ services::session_host::herdr_gate::tests::m0_confirmation_required_no_escalatio
 services::session_host::herdr_gate::tests::m0_terminate_admission_off_still_judges
 services::session_host::herdr_gate::tests::m0_terminate_off_has_zero_effect
 services::session_host::herdr_gate::tests::m0_terminate_request_pair_is_exact
+services::session_host::herdr_gate::tests::m1_afterwrite_never_auto_retries_pg
+services::session_host::herdr_gate::tests::m1_confirmation_required_stops_pg
+services::session_host::herdr_gate::tests::m1_input_pin_races_terminate_across_fresh_targets
+services::session_host::herdr_gate::tests::m1_last_pane_is_allowed_pg
+services::session_host::herdr_gate::tests::m1_production_e7_accepts_audited_version
+services::session_host::herdr_gate::tests::m1_production_e7_rejects_unaudited_version_before_provenance
+services::session_host::herdr_gate::tests::m1_provider_survived_close_keeps_bound_pg
+services::session_host::herdr_gate::tests::m1_replaced_root_refuses_before_send_pg
+services::session_host::herdr_gate::tests::m1_retire_cas_failure_keeps_hold_pg
+services::session_host::herdr_gate::tests::m1_service_missing_pane_absent_provider_retires_pg
+services::session_host::herdr_gate::tests::m1_stale_a_never_releases_b_pg
+services::session_host::herdr_gate::tests::m1_unreadable_process_never_means_absent_pg
 services::session_host::herdr_gate::tests::only_a_registered_local_endpoint_makes_a_herdr_target
 services::session_host::herdr_gate::tests::stopped_admission_refuses_input_but_lets_a_cancel_key_through
 services::session_host::herdr_gate::tests::the_boot_registry_holds_only_this_nodes_endpoints
