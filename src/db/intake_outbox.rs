@@ -277,6 +277,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
                  WHERE open_row.channel_id = parent.channel_id
                    AND open_row.status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
            )
+           AND NOT replay_sources_blocked(parent.provider, parent.channel_id, COALESCE(parent.replay_source_message_ids, ARRAY[parent.user_msg_id]))
            AND EXISTS (
                 SELECT 1 FROM worker_nodes worker
                  WHERE worker.status = 'online'
@@ -353,6 +354,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
                      WHERE open_row.channel_id = parent.channel_id
                        AND open_row.status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
                )
+               AND NOT replay_sources_blocked(parent.provider, parent.channel_id, COALESCE(parent.replay_source_message_ids, ARRAY[parent.user_msg_id]))
              ORDER BY parent.updated_at ASC, parent.id ASC
              LIMIT 1
              FOR UPDATE OF parent SKIP LOCKED
@@ -598,7 +600,7 @@ pub(crate) async fn claim_pending_for_target_except(
              WHERE io.target_instance_id = $1
                AND io.status = 'pending'
                AND io.provider = $2
-               AND {HOME_CLAIM_FENCE}
+               AND {HOME_CLAIM_FENCE} AND {REPLAY_CLAIM_FENCE}
              ORDER BY io.created_at ASC
              LIMIT 1
              FOR UPDATE OF io SKIP LOCKED"
@@ -614,7 +616,7 @@ pub(crate) async fn claim_pending_for_target_except(
                AND io.status = 'pending'
                AND io.provider = $2
                AND NOT (io.channel_id = ANY($3::TEXT[]))
-               AND {HOME_CLAIM_FENCE}
+               AND {HOME_CLAIM_FENCE} AND {REPLAY_CLAIM_FENCE}
              ORDER BY io.created_at ASC
              LIMIT 1
              FOR UPDATE OF io SKIP LOCKED"
@@ -655,7 +657,7 @@ async fn confirm_claim(
          SET status = $3,
              claim_owner = $2,
              claimed_at = NOW()
-         WHERE io.id = $1 AND {HOME_CLAIM_FENCE}
+         WHERE io.id = $1 AND {HOME_CLAIM_FENCE} AND {REPLAY_CLAIM_FENCE}
          RETURNING *"
     ))
     .bind(id)
@@ -675,6 +677,9 @@ const HOME_CLAIM_FENCE: &str = "(
          WHERE h.channel_id = io.channel_id AND h.provider = io.provider
            AND h.state = 'worker' AND h.holder = io.target_instance_id
            AND h.epoch = io.home_epoch))";
+
+/// A request whose source already started elsewhere is never claimed or accepted as new work.
+const REPLAY_CLAIM_FENCE: &str = "NOT replay_sources_blocked(io.provider, io.channel_id, COALESCE(io.replay_source_message_ids, ARRAY[io.user_msg_id]))";
 
 /// The claim with no held channel.
 #[cfg(test)]
@@ -705,7 +710,9 @@ pub(crate) async fn return_claimed_to_pending(
          SET status = $3,
              claim_owner = NULL,
              claimed_at = NULL
-         WHERE id = $1 AND status = $4 AND claim_owner = $2",
+         WHERE id = $1 AND status = $4 AND claim_owner = $2
+           AND NOT replay_sources_blocked(provider, channel_id,
+                   COALESCE(replay_source_message_ids, ARRAY[user_msg_id]))",
     )
     .bind(id)
     .bind(claim_owner)
@@ -736,7 +743,7 @@ pub(crate) async fn mark_accepted(
         "UPDATE intake_outbox io
          SET status = $3, accepted_at = NOW()
          WHERE io.id = $1 AND io.status = $4 AND io.claim_owner = $2
-           AND {HOME_CLAIM_FENCE}"
+           AND {HOME_CLAIM_FENCE} AND {REPLAY_CLAIM_FENCE}"
     ))
     .bind(id)
     .bind(claim_owner)
@@ -885,7 +892,9 @@ pub(crate) async fn sweep_stale_pre_accept_claims(
              claim_owner = NULL,
              claimed_at = NULL
          WHERE status = 'claimed'
-           AND claimed_at < NOW() - ($1::BIGINT * INTERVAL '1 second')",
+           AND claimed_at < NOW() - ($1::BIGINT * INTERVAL '1 second')
+           AND NOT replay_sources_blocked(provider, channel_id,
+                   COALESCE(replay_source_message_ids, ARRAY[user_msg_id]))",
     )
     .bind(stale_after_secs.max(1))
     .bind(IntakeOutboxStatus::Pending)
