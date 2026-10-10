@@ -34,6 +34,8 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/tui_o/n1_observation/sink_tests.rs",
+        "src/services/tui_o/n1_observation_tests.rs",
         "src/services/tui_o/exact_episode_tests.rs",
         "src/services/tui_o/exact_pg_tests.rs",
         "src/services/discord/health/recovery/legacy_send_tests.rs",
