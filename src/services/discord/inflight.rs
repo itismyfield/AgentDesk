@@ -99,6 +99,10 @@ use self::rebind_reap::{
     should_reap_dead_watcher_rebind_origin,
 };
 mod removal;
+#[cfg(test)]
+pub(in crate::services::discord) use removal::{
+    invalidate_stale_generation_scoped, load_inflight_probe_scoped, scoped_restore_mutant,
+};
 mod restart_mark;
 #[cfg(test)]
 pub(in crate::services::discord) use self::removal::custody_notice_text;

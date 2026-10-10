@@ -280,3 +280,60 @@ pub(in crate::services::discord) async fn install_restored_queued_placeholders(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::services::discord) async fn install_channel_queued_placeholders_checked(
+    shared: &SharedData,
+    channel: ChannelId,
+    loaded: std::collections::HashMap<(ChannelId, MessageId), MessageId>,
+) -> Result<Vec<(ChannelId, MessageId, MessageId)>, String> {
+    if loaded.keys().any(|(id, _)| *id != channel)
+        || boot_skip(BootTarget::Channel(&shared.provider, channel.get()))
+    {
+        return Err("placeholder restore outside the admitted scope".into());
+    }
+    let _guard = shared
+        .queued_placeholders_persist_lock(channel)
+        .lock_owned()
+        .await;
+    let snapshot = shared
+        .mailbox(channel)
+        .try_snapshot()
+        .await
+        .map_err(|error| format!("placeholder mailbox unavailable: {error:?}"))?;
+    let queued = queued_message_ids(&snapshot);
+    let map = &shared.queued.queued_placeholders;
+    let mut inserted = Vec::new();
+    let mut stale = Vec::new();
+    for ((id, owner), card) in loaded {
+        let current = map.get(&(id, owner)).map(|entry| *entry);
+        if !queued.contains(&owner.get())
+            || current.is_some_and(|current| current != card)
+            || (current.is_none()
+                && map
+                    .iter()
+                    .any(|entry| entry.key().0 == id && *entry.value() == card))
+        {
+            stale.push((id, owner, card));
+        } else if current.is_none() {
+            map.insert((id, owner), card);
+            inserted.push((id, owner));
+        }
+    }
+    // A failed required save leaves installation unacknowledged and rolls back only our inserts.
+    if let Err(error) = queued_placeholders_store::persist_channel_from_map_checked(
+        map,
+        &shared.provider,
+        &shared.token_hash,
+        channel,
+    ) {
+        for key in inserted {
+            map.remove(&key);
+        }
+        return Err(error);
+    }
+    Ok(stale)
+}
+
+#[cfg(test)]
+mod scoped_recovery_tests;

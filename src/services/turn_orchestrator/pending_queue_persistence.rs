@@ -788,7 +788,7 @@ pub(crate) fn load_channel_pending_dispatch_marker(
 
 /// Like `load_channel_pending_dispatch_marker`, but only a missing marker reads as none; a root,
 /// read or parse failure is an error.
-pub(super) fn load_channel_pending_dispatch_marker_checked(
+pub(crate) fn load_channel_pending_dispatch_marker_checked(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: ChannelId,
@@ -921,7 +921,7 @@ pub(super) fn load_channel_pending_queue(
 
 /// Like `load_channel_pending_queue`, but only a missing file reads as empty; a root, read or
 /// parse failure is an error, so a caller never rewrites a queue it could not read.
-pub(super) fn load_channel_pending_queue_checked(
+pub(crate) fn load_channel_pending_queue_checked(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: ChannelId,

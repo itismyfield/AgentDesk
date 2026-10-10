@@ -603,6 +603,15 @@ fn classify_inflight_row(
     provider: &ProviderKind,
     allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
 ) -> RowVerdict {
+    classify_inflight_row_for_restore(path, provider, allocation, false)
+}
+
+fn classify_inflight_row_for_restore(
+    path: &Path,
+    provider: &ProviderKind,
+    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
+    retain_for_restore: bool,
+) -> RowVerdict {
     let generation = allocation.generation;
     let verdict = || -> Result<RowVerdict, Box<RowVerdict>> {
         let Ok(content) = fs::read_to_string(path) else {
@@ -627,7 +636,7 @@ fn classify_inflight_row(
             }
             (state, backfill) = (locked, false);
         }
-        if stale_removal_reason_for_path(path, &state, generation).is_none() {
+        if retain_for_restore || stale_removal_reason_for_path(path, &state, generation).is_none() {
             return Ok(RowVerdict::Keep(state, backfill));
         }
         let (locked, lock) = relock(path, &content)?;
@@ -651,6 +660,121 @@ fn classify_inflight_row(
 pub(in crate::services::discord) struct InflightProbeLoad {
     pub(in crate::services::discord) states: Vec<InflightTurnState>,
     pub(in crate::services::discord) complete: bool,
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn scoped_restore_mutant(name: &str) -> bool {
+    std::env::var("ADK_S3ACT_B1_MUTANT").ok().as_deref() == Some(name)
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn load_inflight_probe_scoped(
+    provider: &ProviderKind,
+    channel: u64,
+) -> InflightProbeLoad {
+    let Some(root) = inflight_runtime_root() else {
+        return InflightProbeLoad {
+            states: Vec::new(),
+            complete: false,
+        };
+    };
+    if channel == 0
+        || crate::services::discord::input_runtime::fence::lookup(provider, channel).is_some()
+    {
+        return InflightProbeLoad {
+            states: Vec::new(),
+            complete: false,
+        };
+    }
+    let mut loaded = if scoped_restore_mutant("scope") {
+        load_inflight_probe_with_scope(&root, provider, |_| false, None)
+    } else {
+        load_inflight_probe_with_scope(&root, provider, |id| id != channel, Some(channel))
+    };
+    if scoped_restore_mutant("complete") {
+        loaded.complete = true;
+    }
+    loaded
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) async fn invalidate_stale_generation_scoped(
+    pool: Option<&sqlx::PgPool>,
+    provider: &ProviderKind,
+    generation: u64,
+    expected: &InflightTurnState,
+) -> Result<bool, String> {
+    let protected = |row: &InflightTurnState| {
+        row.restart_mode.is_some()
+            || row.rebind_origin
+            || (!scoped_restore_mutant("replay-front")
+                && (row.replay_rerun_blocked() || row.replay_receipt_id.is_some()))
+    };
+    if protected(expected)
+        || expected
+            .restart_generation
+            .is_none_or(|old| old == generation)
+    {
+        return Ok(false);
+    }
+    let channel = expected.channel_id;
+    let input_held =
+        || crate::services::discord::input_runtime::fence::lookup(provider, channel).is_some();
+    if channel == 0 || input_held() || expected.provider_kind().as_ref() != Some(provider) {
+        return Err("generation restore scope/input mismatch".into());
+    }
+    let root = inflight_runtime_root().ok_or("inflight root unavailable")?;
+    let path = inflight_state_path(&root, provider, channel);
+    let _guard = try_lock_inflight_state_path(&path)?;
+    let bytes = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let fresh = parse_inflight_state_content(&bytes).map_err(|error| error.to_string())?;
+    if !scoped_restore_mutant("snapshot")
+        && serde_json::to_value(&fresh).map_err(|error| error.to_string())?
+            != serde_json::to_value(expected).map_err(|error| error.to_string())?
+    {
+        return Err("generation restore snapshot changed".into());
+    }
+    if protected(&fresh) {
+        return Ok(false);
+    }
+    let pool = pool.ok_or("generation replay receipt unavailable")?;
+    let sources: Vec<String> = fresh
+        .source_message_ids
+        .iter()
+        .chain([&fresh.user_msg_id])
+        .filter(|&&id| id != 0)
+        .map(u64::to_string)
+        .collect();
+    // Canonical source holds without a local projection also fence this cleanup.
+    if crate::db::replay_disposition::blocked_receipt_for_sources(
+        pool,
+        provider.as_str(),
+        &channel.to_string(),
+        &sources,
+    )
+    .await
+    .map_err(|error| error.to_string())?
+    .is_some()
+        && !scoped_restore_mutant("canonical-replay")
+    {
+        return Ok(false);
+    }
+    crate::services::discord::input_runtime::fence::write(provider, channel, || {
+        if input_held() {
+            return Err("input-protected generation restore".into());
+        }
+        log_inflight_remove(
+            provider,
+            channel,
+            fresh.user_msg_id,
+            "invalidate_stale_generation_scoped",
+            &path,
+        );
+        fs::remove_file(&path).map_err(|error| error.to_string())?;
+        crate::services::discord::runtime_store::fsync_parent_dir(&path)
+            .map_err(|error| error.to_string())
+    })?;
+    Ok(true)
 }
 
 pub(super) fn load_inflight_states_from_root(
@@ -696,6 +820,50 @@ fn load_inflight_states_for_probe_from_root_excluding(
     provider: &ProviderKind,
     exclude_channel: impl Fn(u64) -> bool,
 ) -> InflightProbeLoad {
+    load_inflight_probe_with_scope(root, provider, exclude_channel, None)
+}
+
+fn backfill_scoped_restore(
+    root: &Path,
+    path: &Path,
+    provider: &ProviderKind,
+) -> Option<InflightTurnState> {
+    let _guard = try_lock_inflight_state_path(path).ok()?;
+    let bytes = fs::read_to_string(path).ok()?;
+    let (state, needs_backfill) =
+        parse_inflight_state_content_with_finalizer_backfill(&bytes).ok()?;
+    if state.provider_kind().as_ref() != Some(provider)
+        || state.channel_id != channel_id_from_path(path)
+        || state.runtime_kind_unknown_on_disk
+        || state.version > inflight_state_version()
+    {
+        return None;
+    }
+    if needs_backfill {
+        let outcome = super::store::persist_under_lock_with_snapshot(
+            root,
+            path,
+            &state,
+            "scoped_restore_backfill",
+        );
+        #[cfg(test)]
+        if scoped_restore_mutant("backfill-ack") && outcome.is_err() {
+            return Some(state);
+        }
+        let saved = outcome.ok()??;
+        crate::services::discord::runtime_store::fsync_parent_dir(path).ok()?;
+        Some(saved)
+    } else {
+        Some(state)
+    }
+}
+
+fn load_inflight_probe_with_scope(
+    root: &Path,
+    provider: &ProviderKind,
+    exclude_channel: impl Fn(u64) -> bool,
+    scope: Option<u64>,
+) -> InflightProbeLoad {
     let dir = inflight_provider_dir(root, provider);
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -721,6 +889,9 @@ fn load_inflight_states_for_probe_from_root_excluding(
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
+        if scope.is_some_and(|channel| channel_id_from_path(&path) != channel) {
+            continue;
+        }
         // Exclude by canonical filename before classification can lock or backfill an old row.
         if let Some(channel) = path
             .file_stem()
@@ -730,9 +901,18 @@ fn load_inflight_states_for_probe_from_root_excluding(
         {
             continue;
         }
-        let state = match classify_inflight_row(&path, provider, allocation) {
+        let verdict = if scope.is_some() {
+            classify_inflight_row_for_restore(&path, provider, allocation, true)
+        } else {
+            classify_inflight_row(&path, provider, allocation)
+        };
+        let state = match verdict {
             RowVerdict::Keep(state, true) => {
-                let backfilled = backfill_finalizer_turn_id_under_lock(root, &path, provider);
+                let backfilled = if scope.is_some() {
+                    backfill_scoped_restore(root, &path, provider)
+                } else {
+                    backfill_finalizer_turn_id_under_lock(root, &path, provider)
+                };
                 complete &= backfilled.is_some();
                 backfilled.unwrap_or(state)
             }
@@ -744,9 +924,14 @@ fn load_inflight_states_for_probe_from_root_excluding(
             RowVerdict::HideStale(..)
             | RowVerdict::HideForeign(..)
             | RowVerdict::HideMalformed(..) => {
+                complete &= scope.is_none();
                 continue;
             }
         };
+        if scope.is_some_and(|channel| state.channel_id != channel) {
+            complete = false;
+            continue;
+        }
         if let Some(tmux_session_name) = state
             .tmux_session_name
             .as_deref()
