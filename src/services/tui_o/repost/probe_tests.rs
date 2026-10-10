@@ -1252,7 +1252,7 @@ async fn f4r2_an_intact_marker_read_by_id_outlives_a_truncated_listing() {
     assert_eq!(found.receipt.method, ReceiptMethod::Marker);
 }
 
-/// What F3/F4 derived for `key("f4")` before the marker named its channel, fixed as data.
+/// The marker and nonce `key("f4")` had before the marker named its channel, fixed as data.
 const OLD_MARKER: &str = "o:claude:body:f4#0";
 const OLD_NONCE: &str = "r983159e99d7b1b1c01cd382d";
 
