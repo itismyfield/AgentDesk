@@ -724,7 +724,7 @@ impl TurnFinalizer {
         };
         if matches!(out, FinalizeOutcome::AlreadyFinalized)
             && !(key.episode.is_none() && key.generation != shared.restart.current_generation)
-            && !matches!(event, TerminalEvent::OperatorRelease(_))
+            && !event.is_mute_settlement()
         {
             cleanup::already_finalized_active_state(
                 key,
@@ -737,5 +737,137 @@ impl TurnFinalizer {
             .await;
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod host_terminated_tests {
+    use super::*;
+    use serenity::model::id::{MessageId, UserId};
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn m1_natural_terminal_wins_preserves_successor() {
+        let _lock = crate::config::shared_test_env_lock();
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let shared = super::super::super::make_shared_data_for_tests();
+                let channel = ChannelId::new(5_340_111);
+                let key = TurnKey::new(channel, 41, shared.restart.current_generation);
+                let fin = &shared.turn_finalizer;
+                fin.register_start(key, ProviderKind::Claude, RelayOwnerKind::None, &shared);
+                let first = fin
+                    .submit_terminal(
+                        key,
+                        ProviderKind::Claude,
+                        TerminalEvent::Complete,
+                        FinalizeContext::watcher(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(matches!(first, FinalizeOutcome::Finalized { .. }));
+                let successor = Arc::new(CancelToken::new());
+                shared
+                    .mailbox(channel)
+                    .restore_active_turn(successor.clone(), UserId::new(7), MessageId::new(41))
+                    .await;
+                shared
+                    .dispatch
+                    .thread_parents
+                    .insert(ChannelId::new(99), channel);
+                shared.restart.global_active.store(1, Ordering::Relaxed);
+                let late = fin
+                    .submit_terminal(
+                        key,
+                        ProviderKind::Claude,
+                        TerminalEvent::HostTerminated,
+                        FinalizeContext::host_terminated(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
+                let active = shared
+                    .mailbox(channel)
+                    .snapshot()
+                    .await
+                    .cancel_token
+                    .unwrap();
+                assert!(Arc::ptr_eq(&active, &successor));
+                assert!(!successor.cancelled.load(Ordering::Relaxed));
+                assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+                assert_eq!(
+                    shared
+                        .dispatch
+                        .thread_parents
+                        .get(&ChannelId::new(99))
+                        .map(|v| *v),
+                    Some(channel)
+                );
+            });
+    }
+
+    #[test]
+    fn m1_host_terminated_enqueues_no_abandoned_card() {
+        let _lock = crate::config::shared_test_env_lock();
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let shared = super::super::super::make_shared_data_for_tests();
+        let channel = ChannelId::new(5_340_112);
+        let key = TurnKey::new(channel, 42, shared.restart.current_generation);
+        let snapshot = super::super::cleanup::SyntheticClaimSnapshot {
+            recovery_actor: None,
+            user_msg_id: 42,
+            turn_nonce: None,
+            turn_source_external: false,
+            relay_owner_watcher: false,
+            injected_prompt_message_id: None,
+            tmux_session_name: None,
+            started_at: "2026-10-10T00:00:00Z".into(),
+            status_message_id: Some(43),
+            status_panel_generation: 1,
+            save_generation: 1,
+            current_tool_line: None,
+            turn_start_offset: None,
+            relay_ownership_only: false,
+            relay_owner_kind: RelayOwnerKind::None,
+        };
+        super::super::cleanup::enqueue_terminal_status_panel_reconcile(
+            key,
+            &ProviderKind::Claude,
+            &TerminalEvent::HostTerminated,
+            Some(&snapshot),
+            &shared,
+        );
+        assert!(
+            super::super::super::abandon_request_store::load_pending(
+                &ProviderKind::Claude,
+                &shared.token_hash
+            )
+            .is_empty()
+        );
+        super::super::cleanup::enqueue_terminal_status_panel_reconcile(
+            key,
+            &ProviderKind::Claude,
+            &TerminalEvent::Complete,
+            Some(&snapshot),
+            &shared,
+        );
+        assert_eq!(
+            super::super::super::abandon_request_store::load_pending(
+                &ProviderKind::Claude,
+                &shared.token_hash
+            )
+            .len(),
+            1,
+            "positive control must really enqueue the card"
+        );
     }
 }

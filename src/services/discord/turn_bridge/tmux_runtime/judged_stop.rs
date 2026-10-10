@@ -332,6 +332,16 @@ async fn begin_stop(
         return super::SessionStop::judge(shared, provider, channel).await;
     }
     if keeps_turn(&judgement) {
+        // A dormant stop must not acquire legacy tombstone effects.
+        #[cfg(all(test, unix))]
+        if reason.is_some()
+            && !crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
+            && crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
+                "dormant_records_tombstone",
+            )
+        {
+            crate::services::discord::tmux::record_recent_turn_stop(channel, None, "/stop").await;
+        }
         return CommandStop::HostRefused;
     }
     let Ok(Some(stop)) = judgement else {

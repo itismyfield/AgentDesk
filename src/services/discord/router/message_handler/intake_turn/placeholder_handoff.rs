@@ -68,6 +68,11 @@ pub(super) async fn reuse_bound_busy_notice(
             shared.clone(),
             channel_id,
             existing,
+            crate::services::tui_o::n1_observation::Context {
+                provider: provider.as_str(),
+                origin: "discord_active",
+                input_message_id: Some(user_msg_id.get()),
+            },
         )
         .await,
     ) {

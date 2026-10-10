@@ -758,7 +758,7 @@ mod herdr_settlement {
             offset: 0,
             submitted_at: None,
         }));
-        *state.submission.lock().unwrap() = HerdrSubmission::Submitted;
+        state.submission.lock().unwrap().submission = HerdrSubmission::Submitted;
         let mut row = InflightTurnState::new(
             ProviderKind::Codex,
             channel_id,
