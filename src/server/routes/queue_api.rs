@@ -196,6 +196,17 @@ pub async fn cancel_turn(
     Query(query): Query<CancelTurnQuery>,
     body: Bytes,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    // A home-stop envelope is a holder's request, never a direct cancel: refused before any effect.
+    let envelope = crate::services::session_forwarding::home_stop::names_envelope(&body);
+    #[cfg(test)]
+    let envelope = envelope
+        && !crate::services::cluster::channel_home::command_mutant("cancel_endpoint_accepts_v1");
+    if envelope {
+        return Err(
+            AppError::bad_request("home stop envelope on a direct cancel")
+                .with_context("code", "home_stop_envelope_on_cancel"),
+        );
+    }
     let force = resolve_cancel_force(query.force, &body);
     let forward_context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
     let response = state
@@ -209,6 +220,24 @@ pub async fn cancel_turn(
         )
         .await?;
     Ok((StatusCode::OK, Json(response)))
+}
+
+/// POST /api/internal/home-stop/v1 — a gateway's user stop forwarded to a delegated channel's
+/// holder; it runs only through the trusted forward and this node's own `/stop`.
+pub async fn home_stop_v1(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
+    let registry = state.health_registry.clone();
+    let run = |provider, channel| async move {
+        let stop = crate::services::discord::zombie_foreground_release::run_holder_stop;
+        stop(registry.as_deref(), &provider, channel).await
+    };
+    let receive = crate::services::session_forwarding::home_stop::receive;
+    let (status, answer) = receive(&context, &headers, &body, run).await;
+    (status, Json(answer))
 }
 
 // ── GET /api/channels/:id/watcher-state ─────────────────────────
@@ -1078,3 +1107,7 @@ mod cancel_queue_preserve_pg_tests {
         pg_db.drop().await;
     }
 }
+
+#[cfg(test)]
+#[path = "queue_api_home_stop_tests.rs"]
+mod home_stop_tests;
