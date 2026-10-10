@@ -675,6 +675,12 @@ src/
 │   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
+│   │   │   ├── s3_real_tests/
+│   │   │   │   ├── drain_pg_tests.rs
+│   │   │   │   ├── force_pg_tests.rs
+│   │   │   │   ├── harness_tests.rs
+│   │   │   │   ├── mod.rs
+│   │   │   │   └── route_pg_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
 │   │   │   ├── home_accept_tests.rs
