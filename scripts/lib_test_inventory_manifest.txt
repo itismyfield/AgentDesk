@@ -10916,6 +10916,10 @@ services::tui_o::repost::io::probe::tests::f4r2_a_known_damage_outlives_a_later_
 services::tui_o::repost::io::probe::tests::f4r2_an_intact_marker_read_by_id_outlives_a_truncated_listing
 services::tui_o::repost::io::probe::tests::f4r2_an_older_or_unreadable_identifier_is_never_absence
 services::tui_o::repost::io::probe::tests::f4r2_the_dormancy_scan_reports_a_wrapper_in_the_adapter_and_its_caller
+services::tui_o::repost::io::probe::tests::f4r3_a_nonce_once_read_stays_without_any_other_evidence
+services::tui_o::repost::io::probe::tests::f4r3_a_note_whose_marker_was_cut_off_is_never_absence
+services::tui_o::repost::io::probe::tests::f4r3_a_payload_once_matched_stays_without_any_other_evidence
+services::tui_o::repost::io::probe::tests::f4r3_the_dormancy_scan_reads_aliases_groups_and_new_probe_api
 services::tui_o::repost::io::probe::tests::f4r_a_damaged_identifier_is_kept_apart_from_success_and_absence
 services::tui_o::repost::io::probe::tests::f4r_a_proof_read_of_the_piece_is_an_observation
 services::tui_o::repost::io::probe::tests::f4r_an_unknown_receipt_index_never_yields_absence
