@@ -1,239 +1,181 @@
-use super::completion::receive;
-use super::publication::{Observations, SealReceipt};
+use super::BootPhase::{Confirming, Held, Released};
+use super::BootSlotState::{ExcludedNoRuntime, Failed, Preparing, Reaped};
+use super::BootWorkFailure::Invalid;
 use super::{
-    BootPhase, BootPublication, BootRetirementHealth, BootRoster, BootSlotState, BootWorkFailure,
+    BootPublication, BootResult, BootRetirementHealth, BootRoster, BootSlotState, BootWorkFailure,
     BootWorkOnce, Completed,
 };
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
-};
+use std::{collections::BTreeMap, sync::Arc};
 use tokio::{
     sync::watch,
     time::{Duration, Instant},
 };
 
-static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
-
-struct State {
-    slots: BTreeMap<String, BootSlotState>,
-    claimed: BTreeSet<String>,
+#[derive(Default)]
+pub(super) struct State {
+    slots: Vec<(bool, BootSlotState)>,
     started: Option<Instant>,
-    phase: BootPhase,
     confirming: bool,
-    timed_out: bool,
     failure: Option<BootWorkFailure>,
+    pub(super) health: BootRetirementHealth,
 }
-
-pub struct BootCohort {
+pub struct BootCohort<T> {
     pub(super) epoch: u64,
-    roster: BootRoster,
-    state: Mutex<State>,
-    changes: watch::Sender<()>,
-    observations: Arc<Mutex<Observations>>,
-    confirmation: BootWorkOnce<Result<SealReceipt, BootWorkFailure>>,
+    pub(super) roster: BootRoster,
+    workers: BTreeMap<String, BootWorkOnce<T>>,
+    pub(super) state: watch::Sender<State>,
 }
-
-pub struct BootSlot {
-    pub(super) cohort: Arc<BootCohort>,
-    id: String,
+pub struct BootSlot<T> {
+    cohort: Arc<BootCohort<T>>,
+    index: usize,
 }
-
-impl BootCohort {
-    pub(super) fn new(roster: BootRoster) -> Self {
-        let empty = roster
-            .providers
-            .values()
-            .all(|selection| selection.turn_channels.is_empty());
-        let slots = roster
-            .bots
+impl<T: Send + Sync + 'static> BootCohort<T> {
+    pub(super) fn new(epoch: u64, roster: BootRoster) -> Self {
+        let providers = &roster.providers;
+        let empty = providers.values().all(|s| s.turn_channels.is_empty());
+        let workers = providers
             .keys()
-            .map(|id| (id.clone(), BootSlotState::Preparing))
+            .map(|p| (p.clone(), BootWorkOnce::new(epoch, p)))
             .collect();
+        let mut state = State {
+            slots: vec![(false, Preparing); roster.bots.len()],
+            confirming: empty,
+            ..Default::default()
+        };
+        if empty {
+            state.health.phase = Released;
+        }
         Self {
-            epoch: NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
+            epoch,
             roster,
-            state: Mutex::new(State {
-                slots,
-                claimed: BTreeSet::new(),
-                started: None,
-                phase: if empty {
-                    BootPhase::Released
-                } else {
-                    BootPhase::Collecting
-                },
-                confirming: empty,
-                timed_out: false,
-                failure: None,
-            }),
-            changes: watch::channel(()).0,
-            observations: Arc::new(Mutex::new(Observations::default())),
-            confirmation: BootWorkOnce::default(),
+            workers,
+            state: watch::channel(state).0,
         }
     }
-
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
-
+    fn update<R>(&self, update: impl FnOnce(&mut State) -> R) -> R {
+        let mut result = None;
+        self.state.send_modify(|state| result = Some(update(state)));
+        result.unwrap()
+    }
     pub fn try_start_confirmation(
         self: &Arc<Self>,
-        mut callback: impl FnMut(&str, &mut BootPublication) -> Result<(), BootWorkFailure>
-        + Send
-        + 'static,
+        mut callback: impl FnMut(&str, &mut BootPublication<'_>) -> BootResult<()> + Send + 'static,
     ) -> bool {
-        {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.confirming
-                || state.failure.is_some()
-                || !state
-                    .slots
-                    .values()
-                    .all(|s| matches!(s, BootSlotState::Reaped | BootSlotState::ExcludedNoRuntime))
-            {
+        if !self.update(|state| {
+            let ready = state
+                .slots
+                .iter()
+                .all(|(_, s)| matches!(s, Reaped | ExcludedNoRuntime));
+            if state.confirming || state.failure.is_some() || !ready {
                 return false;
             }
             state.confirming = true;
-            state.phase = BootPhase::Confirming;
+            state.health.phase = Confirming;
+            true
+        }) {
+            return false;
         }
-        self.changes.send_replace(());
         let cohort = self.clone();
-        let worker = self.clone();
-        let receiver = self
-            .confirmation
-            .start(self.epoch, "confirmation", move || {
-                let mut publication = BootPublication::new(
-                    worker.epoch,
-                    worker.roster.providers.clone(),
-                    worker.observations.clone(),
-                );
+        tokio::spawn(async move {
+            let worker = cohort.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let mut publication = BootPublication::new(&worker);
                 for provider in worker.roster.providers.keys() {
                     publication.confirm(provider, &mut callback)?;
                 }
                 publication.seal()
+            })
+            .await;
+            let result = result
+                .map_err(|error| BootWorkFailure::Worker(error.to_string()))
+                .and_then(|report| report)
+                .map(|seal| seal.matches(cohort.epoch));
+            cohort.update(|s| {
+                s.health.phase = if result == Ok(true) && s.failure.is_none() {
+                    Released
+                } else {
+                    s.failure
+                        .get_or_insert(result.err().unwrap_or(Invalid("invalid seal")));
+                    Held
+                };
             });
-        tokio::spawn(async move {
-            let result = receive(receiver).await;
-            let mut state = cohort.state.lock().unwrap_or_else(|e| e.into_inner());
-            match result {
-                Ok(completed)
-                    if completed
-                        .value()
-                        .as_ref()
-                        .is_ok_and(|receipt| receipt.matches(cohort.epoch))
-                        && state.failure.is_none() =>
-                {
-                    state.phase = BootPhase::Released
-                }
-                _ => {
-                    state.phase = BootPhase::Held;
-                    state
-                        .failure
-                        .get_or_insert(BootWorkFailure::Invalid("confirmation failed"));
-                }
-            }
-            cohort.changes.send_replace(());
         });
         true
     }
-
     fn mark_timed_out(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.phase != BootPhase::Released {
-            state.timed_out = true;
-            state.phase = BootPhase::Held;
-        }
-        self.changes.send_replace(());
+        self.update(|state| {
+            if state.health.phase != Released {
+                state.health.timed_out = true;
+                state.health.phase = Held;
+            }
+        });
     }
-
-    pub async fn wait_released(&self) -> Result<(), BootWorkFailure> {
-        let mut receiver = self.changes.subscribe();
+    pub async fn wait_released(&self) -> BootResult<()> {
+        let mut rx = self.state.subscribe();
         loop {
             {
-                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                let state = rx.borrow_and_update();
                 if let Some(error) = &state.failure {
                     return Err(error.clone());
                 }
-                if state.phase == BootPhase::Released {
+                if state.health.phase == Released {
                     return Ok(());
                 }
             }
-            receiver
-                .changed()
-                .await
-                .map_err(|_| BootWorkFailure::Closed)?;
+            rx.changed().await.map_err(|_| BootWorkFailure::Closed)?;
         }
     }
-
     pub fn snapshot(&self) -> BootRetirementHealth {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let observations = self
-            .observations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let waiting_bots: Vec<_> = state
-            .slots
-            .iter()
-            .filter(|(_, s)| matches!(s, BootSlotState::Preparing | BootSlotState::Failed))
-            .map(|(id, _)| id.clone())
-            .collect();
-        let waiting_providers = waiting_bots
-            .iter()
-            .map(|id| self.roster.bots[id].provider.clone())
-            .chain(
-                self.roster
-                    .providers
-                    .keys()
-                    .filter(|p| !observations.completed.contains(p))
-                    .cloned(),
-            )
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        BootRetirementHealth {
-            phase: state.phase,
-            elapsed_ms: state
-                .started
-                .map_or(0, |start| start.elapsed().as_millis() as u64),
-            timed_out: state.timed_out,
-            expected: state.slots.len(),
-            reaped: state
-                .slots
-                .values()
-                .filter(|s| **s == BootSlotState::Reaped)
-                .count(),
-            excluded: state
-                .slots
-                .values()
-                .filter(|s| **s == BootSlotState::ExcludedNoRuntime)
-                .count(),
-            failed: state
-                .slots
-                .values()
-                .filter(|s| **s == BootSlotState::Failed)
-                .count(),
-            waiting_bots,
-            waiting_providers,
-            completed_providers: observations.completed,
-            published_keys: observations.published,
-            refused_keys: observations.refused,
-            failure: state.failure.as_ref().map(|e| format!("{e:?}")),
-            supervisors_released: state.phase == BootPhase::Released,
+        let s = self.state.borrow();
+        let mut h = s.health.clone();
+        h.expected = s.slots.len();
+        h.elapsed_ms = s
+            .started
+            .map_or(0, |start| start.elapsed().as_millis() as u64);
+        for ((_, status), bot) in s.slots.iter().zip(&self.roster.bots) {
+            match status {
+                Reaped => h.reaped += 1,
+                ExcludedNoRuntime => h.excluded += 1,
+                Failed => h.failed += 1,
+                Preparing => {}
+            }
+            if matches!(status, Preparing | Failed) {
+                h.waiting_bots.push(bot.slot.clone());
+            }
         }
+        let providers = &self.roster.providers;
+        h.waiting_providers = providers
+            .keys()
+            .filter(|p| !h.completed_providers.contains(p))
+            .cloned()
+            .collect();
+        h.failure = s.failure.as_ref().map(|e| format!("{e:?}"));
+        h.supervisors_released = h.phase == Released;
+        h
     }
 }
-
-impl BootSlot {
-    pub fn begin(cohort: &Arc<BootCohort>, id: &str) -> Result<Self, BootWorkFailure> {
-        let mut state = cohort.state.lock().unwrap_or_else(|e| e.into_inner());
-        if !state.slots.contains_key(id) || !state.claimed.insert(id.to_owned()) {
-            return Err(BootWorkFailure::Invalid("unknown or claimed slot"));
-        }
-        if state.started.is_none() {
-            let start = Instant::now();
-            state.started = Some(start);
+impl<T: Send + Sync + 'static> BootSlot<T> {
+    pub fn begin(cohort: &Arc<BootCohort<T>>, id: &str) -> BootResult<Self> {
+        let bots = &cohort.roster.bots;
+        let index = bots
+            .iter()
+            .position(|bot| bot.slot == id)
+            .ok_or(Invalid("unknown slot"))?;
+        let start = cohort.update(|state| {
+            if state.slots[index].0 {
+                return Err(Invalid("claimed slot"));
+            }
+            state.slots[index].0 = true;
+            let start = state.started.is_none().then(Instant::now);
+            if let Some(start) = start {
+                state.started = Some(start);
+            }
+            Ok(start)
+        })?;
+        if let Some(start) = start {
             let cohort = cohort.clone();
             tokio::spawn(async move {
                 tokio::time::sleep_until(start + Duration::from_secs(120)).await;
@@ -242,53 +184,49 @@ impl BootSlot {
         }
         Ok(Self {
             cohort: cohort.clone(),
-            id: id.to_owned(),
+            index,
         })
     }
-
-    pub(super) fn provider(&self) -> &str {
-        &self.cohort.roster.bots[&self.id].provider
+    pub fn work_once(&self) -> Option<&BootWorkOnce<T>> {
+        let bot = &self.cohort.roster.bots[self.index];
+        self.cohort.workers.get(&bot.provider)
     }
-
-    pub fn arrive_reaped<T>(&self, completed: &Completed<T>) -> Result<(), BootWorkFailure> {
-        if !completed.matches(self.cohort.epoch, self.provider()) {
-            return Err(BootWorkFailure::Invalid("foreign completion receipt"));
+    pub fn arrive_reaped(&self, completed: &Completed<T>) -> BootResult<()> {
+        let bot = &self.cohort.roster.bots[self.index];
+        if !completed.matches(self.cohort.epoch, &bot.provider) {
+            return Err(Invalid("foreign completion receipt"));
         }
-        self.transition(BootSlotState::Reaped)
+        self.transition(Reaped)
     }
-
-    pub fn exclude_no_runtime(&self) -> Result<(), BootWorkFailure> {
-        if !self.cohort.roster.bots[&self.id].utility {
-            return Err(BootWorkFailure::Invalid("runtime slot cannot be excluded"));
+    pub fn exclude_no_runtime(&self) -> BootResult<()> {
+        if !self.cohort.roster.bots[self.index].utility {
+            return Err(Invalid("runtime slot cannot be excluded"));
         }
-        self.transition(BootSlotState::ExcludedNoRuntime)
+        self.transition(ExcludedNoRuntime)
     }
-
-    fn transition(&self, next: BootSlotState) -> Result<(), BootWorkFailure> {
-        let mut state = self.cohort.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.slots[&self.id] != BootSlotState::Preparing {
-            return Err(BootWorkFailure::Invalid("slot already arrived"));
-        }
-        state.slots.insert(self.id.clone(), next);
-        self.cohort.changes.send_replace(());
-        Ok(())
-    }
-
-    pub fn fail(&self, error: BootWorkFailure) {
-        let mut state = self.cohort.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.phase != BootPhase::Released {
-            state.slots.insert(self.id.clone(), BootSlotState::Failed);
-            state.failure.get_or_insert(error);
-            state.phase = BootPhase::Held;
-            self.cohort.changes.send_replace(());
-        }
+    fn transition(&self, next: BootSlotState) -> BootResult<()> {
+        self.cohort.update(|state| {
+            if state.slots[self.index].1 != Preparing {
+                return Err(Invalid("slot already arrived"));
+            }
+            state.slots[self.index].1 = next;
+            Ok(())
+        })
     }
 }
-
-impl Drop for BootSlot {
+impl<T> BootSlot<T> {
+    pub fn fail(&self, error: BootWorkFailure) {
+        self.cohort.state.send_modify(|s| {
+            if s.health.phase != Released {
+                s.slots[self.index].1 = Failed;
+                s.failure.get_or_insert(error);
+                s.health.phase = Held;
+            }
+        });
+    }
+}
+impl<T> Drop for BootSlot<T> {
     fn drop(&mut self) {
-        self.fail(BootWorkFailure::Invalid(
-            "slot guard dropped before release",
-        ));
+        self.fail(Invalid("slot dropped"));
     }
 }

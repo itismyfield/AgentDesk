@@ -1,6 +1,4 @@
-use super::BootSlot;
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, OnceLock};
 use tokio::sync::watch;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -9,87 +7,68 @@ pub enum BootWorkFailure {
     Worker(String),
     Closed,
 }
-
 pub struct Completed<T> {
-    epoch: u64,
-    provider: String,
+    scope: (u64, String),
     value: T,
 }
-
 impl<T> Completed<T> {
     pub fn value(&self) -> &T {
         &self.value
     }
     pub(super) fn matches(&self, epoch: u64, provider: &str) -> bool {
-        self.epoch == epoch && self.provider == provider
+        self.scope.0 == epoch && self.scope.1 == provider
     }
 }
-
-type Outcome<T> = Result<Arc<Completed<T>>, BootWorkFailure>;
+pub type BootResult<T> = Result<T, BootWorkFailure>;
+type Outcome<T> = BootResult<Arc<Completed<T>>>;
 type Sender<T> = watch::Sender<Option<Outcome<T>>>;
-
 pub struct BootWorkOnce<T> {
-    jobs: Mutex<BTreeMap<(u64, String), Sender<T>>>,
+    scope: (u64, String),
+    sender: OnceLock<Sender<T>>,
 }
-
-impl<T: Send + Sync + 'static> Default for BootWorkOnce<T> {
-    fn default() -> Self {
+impl<T: Send + Sync + 'static> BootWorkOnce<T> {
+    pub(super) fn new(epoch: u64, provider: &str) -> Self {
         Self {
-            jobs: Mutex::new(BTreeMap::new()),
+            scope: (epoch, provider.into()),
+            sender: OnceLock::new(),
         }
     }
-}
-
-impl<T: Send + Sync + 'static> BootWorkOnce<T> {
-    pub async fn run_once(
-        &self,
-        slot: &BootSlot,
-        work: impl FnOnce() -> T + Send + 'static,
-    ) -> Outcome<T> {
-        receive(self.start(slot.cohort.epoch, slot.provider(), work)).await
+    pub async fn run_once(&self, work: impl FnOnce() -> T + Send + 'static) -> Outcome<T> {
+        receive(self.start(work)).await
     }
-
     pub(super) fn start(
         &self,
-        epoch: u64,
-        provider: &str,
         work: impl FnOnce() -> T + Send + 'static,
     ) -> watch::Receiver<Option<Outcome<T>>> {
-        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
-        let key = (epoch, provider.to_owned());
-        if let Some(sender) = jobs.get(&key) {
-            return sender.subscribe();
-        }
-        let (sender, receiver) = watch::channel(None);
-        jobs.insert(key, sender.clone());
-        drop(jobs);
-        let provider = provider.to_owned();
-        // The observer owns the join even when the requesting future is dropped.
-        tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(work)
-                .await
-                .map(|value| {
-                    Arc::new(Completed {
-                        epoch,
-                        provider,
-                        value,
-                    })
-                })
-                .map_err(|error| BootWorkFailure::Worker(error.to_string()));
-            sender.send_replace(Some(result));
-        });
-        receiver
+        self.sender
+            .get_or_init(|| {
+                let sender = watch::channel(None).0;
+                let observer = sender.clone();
+                let scope = self.scope.clone();
+                // The observer retains the join when a requesting future disappears.
+                let worker = tokio::task::spawn_blocking(work);
+                tokio::spawn(async move {
+                    observer.send_replace(Some(join_work(scope, worker).await));
+                });
+                sender
+            })
+            .subscribe()
     }
 }
-
-pub(super) async fn receive<T>(mut receiver: watch::Receiver<Option<Outcome<T>>>) -> Outcome<T> {
+pub(super) async fn join_work<T: Send + Sync + 'static>(
+    scope: (u64, String),
+    worker: tokio::task::JoinHandle<T>,
+) -> Outcome<T> {
+    worker
+        .await
+        .map(|value| Arc::new(Completed { scope, value }))
+        .map_err(|error| BootWorkFailure::Worker(error.to_string()))
+}
+pub(super) async fn receive<T>(mut rx: watch::Receiver<Option<Outcome<T>>>) -> Outcome<T> {
     loop {
-        if let Some(result) = receiver.borrow_and_update().as_ref() {
+        if let Some(result) = rx.borrow_and_update().as_ref() {
             return result.clone();
         }
-        receiver
-            .changed()
-            .await
-            .map_err(|_| BootWorkFailure::Closed)?;
+        rx.changed().await.map_err(|_| BootWorkFailure::Closed)?;
     }
 }

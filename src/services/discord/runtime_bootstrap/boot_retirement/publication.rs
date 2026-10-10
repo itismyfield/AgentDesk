@@ -1,126 +1,83 @@
-use super::{BootSelection, BootWorkFailure};
+use super::BootWorkFailure::Invalid;
+use super::cohort::State;
+use super::{BootCohort, BootResult, BootSelection};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-
-#[derive(Clone, Default)]
-pub(super) struct Observations {
-    pub completed: Vec<String>,
-    pub published: Vec<(String, u64)>,
-    pub refused: Vec<((String, u64), String)>,
-}
+use tokio::sync::watch;
 
 pub(super) struct SealReceipt {
     epoch: u64,
 }
-
 impl SealReceipt {
     pub(super) fn matches(&self, epoch: u64) -> bool {
         self.epoch == epoch
     }
 }
-
-pub struct BootPublication {
+pub struct BootPublication<'a> {
     epoch: u64,
-    providers: BTreeMap<String, BootSelection>,
-    current: Option<String>,
+    providers: &'a BTreeMap<String, BootSelection>,
+    state: &'a watch::Sender<State>,
+    current: Option<&'a str>,
     sealed: bool,
-    observations: Arc<Mutex<Observations>>,
 }
-
-impl BootPublication {
-    pub(super) fn new(
-        epoch: u64,
-        providers: BTreeMap<String, BootSelection>,
-        observations: Arc<Mutex<Observations>>,
-    ) -> Self {
+impl<'a> BootPublication<'a> {
+    pub(super) fn new<T>(cohort: &'a BootCohort<T>) -> Self {
         Self {
-            epoch,
-            providers,
+            epoch: cohort.epoch,
+            providers: &cohort.roster.providers,
+            state: &cohort.state,
             current: None,
             sealed: false,
-            observations,
         }
     }
-
     pub(super) fn confirm(
         &mut self,
-        provider: &str,
-        callback: &mut impl FnMut(&str, &mut Self) -> Result<(), BootWorkFailure>,
-    ) -> Result<(), BootWorkFailure> {
-        if self.sealed
-            || !self.providers.contains_key(provider)
-            || self
-                .observations
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .completed
-                .iter()
-                .any(|p| p == provider)
-        {
-            return Err(BootWorkFailure::Invalid("invalid provider confirmation"));
+        provider: &'a str,
+        callback: &mut impl FnMut(&str, &mut Self) -> BootResult<()>,
+    ) -> BootResult<()> {
+        if self.sealed || !self.providers.contains_key(provider) {
+            return Err(Invalid("invalid provider confirmation"));
         }
-        self.current = Some(provider.to_owned());
+        self.current = Some(provider);
         let result = callback(provider, self);
         self.current = None;
         result?;
-        self.observations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .completed
-            .push(provider.to_owned());
+        self.state
+            .send_modify(|state| state.health.completed_providers.push(provider.into()));
         Ok(())
     }
-
     pub fn publish_with(
         &mut self,
         epoch: u64,
         provider: &str,
         channel: u64,
         commit: impl FnOnce() -> Result<(), String>,
-    ) -> Result<(), BootWorkFailure> {
+    ) -> BootResult<()> {
         let provider = provider.to_ascii_lowercase();
+        let selected = self.providers.get(&provider);
         if self.sealed
             || epoch != self.epoch
-            || self.current.as_deref() != Some(&provider)
-            || !self.providers[&provider].turn_channels.contains(&channel)
+            || self.current != Some(provider.as_str())
+            || !selected.is_some_and(|s| s.turn_channels.contains(&channel))
         {
-            return Err(BootWorkFailure::Invalid("publication outside boot scope"));
+            return Err(Invalid("publication outside boot scope"));
         }
-        match commit() {
-            Ok(()) => self
-                .observations
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .published
-                .push((provider, channel)),
-            Err(reason) => self.record_refusal(&provider, channel, reason),
-        }
+        let result = commit();
+        self.state.send_modify(|s| match result {
+            Ok(()) => s.health.published_keys.push((provider, channel)),
+            Err(reason) => s.health.refused_keys.push(((provider, channel), reason)),
+        });
         Ok(())
     }
-
-    fn record_refusal(&mut self, provider: &str, channel: u64, reason: String) {
-        self.observations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .refused
-            .push(((provider.to_ascii_lowercase(), channel), reason));
-    }
-
-    pub(super) fn seal(&mut self) -> Result<SealReceipt, BootWorkFailure> {
+    pub(super) fn seal(&mut self) -> BootResult<SealReceipt> {
         if self.sealed
-            || self
-                .observations
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .completed
-                .len()
-                != self.providers.len()
+            || self.state.borrow().health.completed_providers.len() != self.providers.len()
         {
-            return Err(BootWorkFailure::Invalid(
-                "providers incomplete or already sealed",
-            ));
+            return Err(Invalid("providers incomplete or already sealed"));
         }
         self.sealed = true;
         Ok(SealReceipt { epoch: self.epoch })
     }
 }
+#[cfg(test)]
+#[path = "publication_tests.rs"]
+mod tests;

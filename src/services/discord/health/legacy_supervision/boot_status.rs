@@ -1,7 +1,8 @@
 use serde::Serialize;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub enum BootPhase {
+    #[default]
     Collecting,
     Confirming,
     Released,
@@ -16,7 +17,7 @@ pub enum BootSlotState {
     Failed,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct BootRetirementHealth {
     pub phase: BootPhase,
     pub elapsed_ms: u64,

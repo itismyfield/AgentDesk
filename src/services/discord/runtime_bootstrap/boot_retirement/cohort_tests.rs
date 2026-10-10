@@ -16,18 +16,18 @@ fn bot(id: &str, provider: &str, utility: bool) -> BootBot {
     }
 }
 
-fn cohort(bots: Vec<BootBot>) -> Arc<BootCohort> {
-    BootCohort::install_in(&OnceLock::new(), BootRoster::new(bots).unwrap()).unwrap()
+fn cohort(bots: Vec<BootBot>) -> Arc<BootCohort<usize>> {
+    BootCohort::<usize>::install_in(&OnceLock::new(), BootRoster::new(bots).unwrap()).unwrap()
 }
 
-async fn reaped(slot: &BootSlot, once: &BootWorkOnce<usize>) -> Arc<Completed<usize>> {
-    let done = once.run_once(slot, || 1).await.unwrap();
+async fn reaped(slot: &BootSlot<usize>) -> Arc<Completed<usize>> {
+    let done = slot.work_once().unwrap().run_once(|| 1).await.unwrap();
     slot.arrive_reaped(&done).unwrap();
     done
 }
 
 fn recording(
-    c: &Arc<BootCohort>,
+    c: &Arc<BootCohort<usize>>,
     calls: &Arc<AtomicUsize>,
 ) -> impl FnMut(&str, &mut BootPublication) -> Result<(), BootWorkFailure> + Send + 'static {
     let epoch = c.epoch();
@@ -46,10 +46,12 @@ async fn all_bots_reap_before_any_confirmation() {
     ]);
     let first = BootSlot::begin(&c, "first").unwrap();
     let second = BootSlot::begin(&c, "second").unwrap();
-    let once = BootWorkOnce::default();
-    let done = reaped(&first, &once).await;
+    let done = reaped(&first).await;
     let calls = Arc::new(AtomicUsize::new(0));
-    assert!(!c.try_start_confirmation(recording(&c, &calls)));
+    let started = c.try_start_confirmation(recording(&c, &calls));
+    if started {
+        c.wait_released().await.unwrap();
+    }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(c.snapshot().published_keys.is_empty());
     second.arrive_reaped(&done).unwrap();
@@ -66,15 +68,18 @@ async fn all_reaper_workers_finish_before_confirmation() {
     ]);
     let first = BootSlot::begin(&c, "first").unwrap();
     let second = Arc::new(BootSlot::begin(&c, "second").unwrap());
-    reaped(&first, &BootWorkOnce::default()).await;
+    reaped(&first).await;
     let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
     let (resume_tx, resume_rx) = mpsc::channel();
     let pending = second.clone();
     let job = tokio::spawn(async move {
-        let done = BootWorkOnce::default()
-            .run_once(&pending, move || {
+        let done = pending
+            .work_once()
+            .unwrap()
+            .run_once(move || {
                 entered_tx.send(()).unwrap();
                 resume_rx.recv().unwrap();
+                1
             })
             .await
             .unwrap();
@@ -82,7 +87,10 @@ async fn all_reaper_workers_finish_before_confirmation() {
     });
     entered_rx.recv().await.unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
-    assert!(!c.try_start_confirmation(recording(&c, &calls)));
+    let started = c.try_start_confirmation(recording(&c, &calls));
+    if started {
+        c.wait_released().await.unwrap();
+    }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(c.snapshot().published_keys.is_empty());
     resume_tx.send(()).unwrap();
@@ -99,8 +107,8 @@ async fn all_confirmations_finish_before_release() {
     ]);
     let first = BootSlot::begin(&c, "first").unwrap();
     let second = BootSlot::begin(&c, "second").unwrap();
-    reaped(&first, &BootWorkOnce::default()).await;
-    reaped(&second, &BootWorkOnce::default()).await;
+    reaped(&first).await;
+    reaped(&second).await;
     let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
     let (resume_tx, resume_rx) = mpsc::channel();
     let epoch = c.epoch();
@@ -134,15 +142,18 @@ async fn same_provider_reaped_and_confirmed_once() {
     let first = BootSlot::begin(&c, "first").unwrap();
     let second = BootSlot::begin(&c, "second").unwrap();
     let runs = Arc::new(AtomicUsize::new(0));
-    let once = BootWorkOnce::default();
     let counter = runs.clone();
-    let a = once
-        .run_once(&first, move || counter.fetch_add(1, Ordering::SeqCst))
+    let a = first
+        .work_once()
+        .unwrap()
+        .run_once(move || counter.fetch_add(1, Ordering::SeqCst))
         .await
         .unwrap();
     let counter = runs.clone();
-    let b = once
-        .run_once(&second, move || counter.fetch_add(1, Ordering::SeqCst))
+    let b = second
+        .work_once()
+        .unwrap()
+        .run_once(move || counter.fetch_add(1, Ordering::SeqCst))
         .await
         .unwrap();
     assert!(Arc::ptr_eq(&a, &b));
@@ -151,9 +162,10 @@ async fn same_provider_reaped_and_confirmed_once() {
     let calls = Arc::new(AtomicUsize::new(0));
     assert!(c.try_start_confirmation(recording(&c, &calls)));
     assert!(!c.try_start_confirmation(recording(&c, &calls)));
-    c.wait_released().await.unwrap();
+    let release = c.wait_released().await;
     assert_eq!(runs.load(Ordering::SeqCst), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    release.unwrap();
 }
 
 #[tokio::test]
@@ -164,9 +176,10 @@ async fn duplicate_slot_does_not_complete_another_slot() {
     ]);
     let first = BootSlot::begin(&c, "first").unwrap();
     assert!(BootSlot::begin(&c, "first").is_err());
-    let done = reaped(&first, &BootWorkOnce::default()).await;
-    assert!(first.arrive_reaped(&done).is_err());
+    let done = reaped(&first).await;
+    let duplicate = first.arrive_reaped(&done);
     assert_eq!(c.snapshot().reaped, 1);
+    assert!(duplicate.is_err());
     assert_eq!(c.snapshot().waiting_bots, ["second"]);
     assert_eq!(c.snapshot().expected, 2);
 }
@@ -183,7 +196,7 @@ async fn utility_exclusion_is_explicit() {
     utility.exclude_no_runtime().unwrap();
     assert_eq!(c.snapshot().excluded, 1);
     assert_eq!(c.snapshot().expected, 2);
-    reaped(&runtime, &BootWorkOnce::default()).await;
+    reaped(&runtime).await;
     assert!(c.try_start_confirmation(|_, _| Ok(())));
     c.wait_released().await.unwrap();
 }
@@ -197,11 +210,11 @@ async fn dropped_slot_holds_without_shrinking_roster() {
         ]);
         let first = BootSlot::begin(&c, "first").unwrap();
         if arrived {
-            reaped(&first, &BootWorkOnce::default()).await;
+            reaped(&first).await;
         }
         drop(first);
-        assert_eq!(c.snapshot().failed, 1);
         assert_eq!(c.snapshot().expected, 2);
+        assert_eq!(c.snapshot().failed, 1);
         assert_eq!(c.snapshot().phase, BootPhase::Held);
         assert!(!c.try_start_confirmation(|_, _| Ok(())));
         assert!(c.wait_released().await.is_err());
@@ -214,22 +227,23 @@ async fn timeout_holds_and_late_completion_can_release() {
     tokio::time::advance(std::time::Duration::from_secs(120)).await;
     assert!(!c.snapshot().timed_out);
     let slot = Arc::new(BootSlot::begin(&c, "first").unwrap());
-    let once = Arc::new(BootWorkOnce::default());
     let runs = Arc::new(AtomicUsize::new(0));
     let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
     let (resume_tx, resume_rx) = mpsc::channel();
     let pending = slot.clone();
-    let work = once.clone();
     let counter = runs.clone();
     let job = tokio::spawn(async move {
-        work.run_once(&pending, move || {
-            counter.fetch_add(1, Ordering::SeqCst);
-            entered_tx.send(()).unwrap();
-            resume_rx.recv().unwrap();
-            1
-        })
-        .await
-        .unwrap()
+        pending
+            .work_once()
+            .unwrap()
+            .run_once(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                entered_tx.send(()).unwrap();
+                resume_rx.recv().unwrap();
+                1
+            })
+            .await
+            .unwrap()
     });
     entered_rx.recv().await.unwrap();
     tokio::time::advance(std::time::Duration::from_secs(120)).await;
@@ -238,13 +252,17 @@ async fn timeout_holds_and_late_completion_can_release() {
     assert_eq!(c.snapshot().phase, BootPhase::Held);
     assert_eq!(c.snapshot().waiting_bots, ["first"]);
     assert_eq!(runs.load(Ordering::SeqCst), 1);
+    tokio::time::resume();
     resume_tx.send(()).unwrap();
-    let done = job.await.unwrap();
+    let done = tokio::time::timeout(std::time::Duration::from_secs(5), job)
+        .await
+        .expect("late Completed must survive timeout")
+        .unwrap();
     slot.arrive_reaped(&done).unwrap();
     assert!(c.try_start_confirmation(|_, _| Ok(())));
     c.wait_released().await.unwrap();
     assert!(c.snapshot().timed_out);
-    let late = once.run_once(&slot, || 999).await.unwrap();
+    let late = slot.work_once().unwrap().run_once(|| 999).await.unwrap();
     assert!(Arc::ptr_eq(&done, &late));
     assert_eq!(runs.load(Ordering::SeqCst), 1);
 }
@@ -259,12 +277,14 @@ async fn receipt_epoch_and_provider_must_match() {
     let foreign = BootSlot::begin(&a, "first").unwrap();
     let target = BootSlot::begin(&b, "first").unwrap();
     let other = BootSlot::begin(&b, "second").unwrap();
-    let once = BootWorkOnce::default();
-    let wrong_epoch = once.run_once(&foreign, || 1).await.unwrap();
-    assert!(target.arrive_reaped(&wrong_epoch).is_err());
-    let wrong_provider = once.run_once(&other, || 1).await.unwrap();
-    assert!(target.arrive_reaped(&wrong_provider).is_err());
+    let wrong_epoch = foreign.work_once().unwrap().run_once(|| 1).await.unwrap();
+    let epoch_result = target.arrive_reaped(&wrong_epoch);
     assert_eq!(b.snapshot().reaped, 0);
+    assert!(epoch_result.is_err());
+    let wrong_provider = other.work_once().unwrap().run_once(|| 1).await.unwrap();
+    let provider_result = target.arrive_reaped(&wrong_provider);
+    assert_eq!(b.snapshot().reaped, 0);
+    assert!(provider_result.is_err());
     assert_eq!(b.snapshot().waiting_bots.len(), 2);
 }
 
@@ -276,8 +296,8 @@ async fn failed_confirmation_keeps_partial_results_held() {
     ]);
     let first = BootSlot::begin(&c, "first").unwrap();
     let second = BootSlot::begin(&c, "second").unwrap();
-    reaped(&first, &BootWorkOnce::default()).await;
-    reaped(&second, &BootWorkOnce::default()).await;
+    reaped(&first).await;
+    reaped(&second).await;
     let epoch = c.epoch();
     assert!(c.try_start_confirmation(move |provider, publication| {
         if provider == "codex" {
@@ -285,12 +305,13 @@ async fn failed_confirmation_keeps_partial_results_held() {
         }
         publication.publish_with(epoch, provider, 7, || Ok(()))
     }));
-    assert!(c.wait_released().await.is_err());
+    let release = c.wait_released().await;
     let h = c.snapshot();
     assert_eq!(h.phase, BootPhase::Held);
     assert_eq!(h.completed_providers, ["claude"]);
     assert_eq!(h.published_keys, [("claude".to_owned(), 7)]);
     assert!(!h.supervisors_released);
+    assert!(release.is_err());
 }
 
 #[tokio::test]
@@ -298,13 +319,13 @@ async fn empty_epoch_is_sealed_without_publication() {
     let mut empty = bot("first", "codex", false);
     empty.selection.turn_channels.clear();
     let cell = OnceLock::new();
-    let c = BootCohort::install_in(&cell, BootRoster::new(vec![empty]).unwrap()).unwrap();
+    let c = BootCohort::<usize>::install_in(&cell, BootRoster::new(vec![empty]).unwrap()).unwrap();
     c.wait_released().await.unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     assert!(!c.try_start_confirmation(recording(&c, &calls)));
     assert!(c.snapshot().published_keys.is_empty());
     assert!(
-        BootCohort::install_in(
+        BootCohort::<usize>::install_in(
             &cell,
             BootRoster::new(vec![bot("second", "codex", false)]).unwrap()
         )
@@ -326,24 +347,37 @@ async fn second_process_epoch_is_rejected() {
         assert!(status.success());
         return;
     }
-    let c =
-        BootCohort::install_process(BootRoster::new(vec![bot("first", "codex", false)]).unwrap())
-            .unwrap();
+    let c = BootCohort::<usize>::install_process(
+        BootRoster::new(vec![bot("first", "codex", false)]).unwrap(),
+    )
+    .unwrap();
     let slot = BootSlot::begin(&c, "first").unwrap();
-    reaped(&slot, &BootWorkOnce::default()).await;
+    reaped(&slot).await;
     assert!(c.try_start_confirmation(|_, _| Ok(())));
     c.wait_released().await.unwrap();
-    assert!(
-        BootCohort::install_process(BootRoster::new(vec![bot("second", "codex", false)]).unwrap())
-            .is_err()
+    let second = BootCohort::<usize>::install_process(
+        BootRoster::new(vec![bot("second", "codex", false)]).unwrap(),
     );
+    let effects = Arc::new(AtomicUsize::new(0));
+    if let Ok(second) = &second {
+        let slot = BootSlot::begin(second, "second").unwrap();
+        reaped(&slot).await;
+        second.try_start_confirmation(recording(second, &effects));
+        second.wait_released().await.unwrap();
+    }
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        0,
+        "sealed process must not issue new publication"
+    );
+    assert!(second.is_err());
 }
 
 #[tokio::test]
 async fn snapshot_remains_readable_while_work_is_blocked() {
     let c = cohort(vec![bot("first", "codex", false)]);
     let slot = BootSlot::begin(&c, "first").unwrap();
-    reaped(&slot, &BootWorkOnce::default()).await;
+    reaped(&slot).await;
     let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
     let (resume_tx, resume_rx) = mpsc::channel();
     assert!(c.try_start_confirmation(move |_, _| {
@@ -380,4 +414,89 @@ fn roster_rejects_duplicates_and_conflicting_snapshots() {
     let mut different = bot("second", "codex", false);
     different.selection.runtime_kind = "claude_tui".into();
     assert!(BootRoster::new(vec![bot("first", "Codex", false), different]).is_err());
+}
+
+#[test]
+fn b1_dormant_census() {
+    let output = std::process::Command::new("python3")
+        .arg("scripts/check_legacy_supervision_census.py")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report = String::from_utf8(output.stdout).unwrap();
+    assert!(report.contains("B1_DORMANT=PASS"));
+    assert!(report.contains("activation_ready=false"));
+    assert_eq!(
+        report.lines().filter(|line| line.ends_with("=0")).count(),
+        6
+    );
+}
+
+#[test]
+fn concurrent_process_install_is_one_shot() {
+    let cell = Arc::new(OnceLock::new());
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let tasks: Vec<_> = (0..2)
+        .map(|i| {
+            let cell = cell.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                BootCohort::<usize>::install_in(
+                    &cell,
+                    BootRoster::new(vec![bot(&i.to_string(), "codex", false)]).unwrap(),
+                )
+                .is_ok()
+            })
+        })
+        .collect();
+    assert_eq!(
+        tasks
+            .into_iter()
+            .filter_map(|task| task.join().unwrap().then_some(()))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_provider_requests_share_worker() {
+    let c = cohort(vec![
+        bot("first", "codex", false),
+        bot("second", "codex", false),
+    ]);
+    let first = Arc::new(BootSlot::begin(&c, "first").unwrap());
+    let second = Arc::new(BootSlot::begin(&c, "second").unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let tasks: Vec<_> = [first.clone(), second.clone()]
+        .into_iter()
+        .map(|slot| {
+            let calls = calls.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                slot.work_once()
+                    .unwrap()
+                    .run_once(move || calls.fetch_add(1, Ordering::SeqCst))
+                    .await
+                    .unwrap()
+            })
+        })
+        .collect();
+    let mut completed = Vec::new();
+    for task in tasks {
+        completed.push(task.await.unwrap());
+    }
+    assert!(Arc::ptr_eq(&completed[0], &completed[1]));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    first.arrive_reaped(&completed[0]).unwrap();
+    second.arrive_reaped(&completed[1]).unwrap();
+    c.try_start_confirmation(|_, _| Ok(()));
+    c.wait_released().await.unwrap();
 }
