@@ -447,6 +447,7 @@ pub struct Snapshot {
     seq: u64,
     tmux: String,
     /// Legacy's cursor on the current source when the pin read it.
+    #[cfg(test)]
     cursor: Option<u64>,
     /// The current source first, then the ones bound before it.
     pinned: Vec<Pinned>,
@@ -569,6 +570,7 @@ pub fn pin_at(
     Ok(Snapshot {
         seq,
         tmux,
+        #[cfg(test)]
         cursor,
         pinned,
         named: named.into_iter().cloned().collect(),
@@ -646,6 +648,26 @@ impl Snapshot {
         bindings: &B,
         channel: u64,
     ) -> Result<Vec<InitSource>, Refused> {
+        self.recheck_sources(legacy, bindings, channel, false)
+    }
+
+    /// The same source checks after the stall, allowing only a stale running tail.
+    pub fn recheck_past_stall<B: BindingEvents>(
+        &self,
+        legacy: &dyn LegacyView,
+        bindings: &B,
+        channel: u64,
+    ) -> Result<Vec<InitSource>, Refused> {
+        self.recheck_sources(legacy, bindings, channel, true)
+    }
+
+    fn recheck_sources<B: BindingEvents>(
+        &self,
+        legacy: &dyn LegacyView,
+        bindings: &B,
+        channel: u64,
+        past_stall: bool,
+    ) -> Result<Vec<InitSource>, Refused> {
         let events = bindings.binding_events_since(channel, 0);
         let events = events.map_err(|error| Refused::retry(format!("binding log: {error}")))?;
         if events.last().map_or(0, |event| event.seq) != self.seq {
@@ -657,7 +679,7 @@ impl Snapshot {
             .split_first()
             .ok_or(Refused::retry("nothing is pinned"))?;
         current.unchanged().map_err(Refused::retry)?;
-        if legacy.tail_running(&self.tmux) {
+        if !past_stall && legacy.tail_running(&self.tmux) {
             return Err(Refused::retry("a Legacy response tail is running"));
         }
         for pinned in past {
@@ -699,12 +721,8 @@ impl Snapshot {
         })
     }
 
-    /// Whether Legacy is behind O's start: its cursor short of it or a record past its frontier.
-    pub fn behind(&self) -> bool {
-        self.undelivered.is_some() || self.cursor != Some(self.start())
-    }
-
     /// Whether the current source and Legacy's cursor and frontier still read as this pin saw them.
+    #[cfg(test)]
     pub fn unchanged(&self, legacy: &dyn LegacyView, channel: u64) -> bool {
         let Some(current) = self.pinned.first() else {
             return false;

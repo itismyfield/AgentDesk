@@ -23,6 +23,7 @@ src/db/intake_outbox_dispatch_stamp/tests.rs
 src/db/intake_outbox_dispatched_audit.rs
 src/db/intake_outbox_home_tests.rs
 src/db/o_channel_activation.rs
+src/db/o_channel_activation_fence_tests.rs
 src/db/o_channel_homes_tests.rs
 src/db/postgres.rs
 src/db/postgres/advisory_lock_tests.rs
@@ -175,6 +176,7 @@ src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
+src/services/discord/runtime_bootstrap/o_writer_host.rs
 src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs
 src/services/discord/session_idle_cleanup_tests.rs
 src/services/discord/session_runtime.rs
@@ -246,6 +248,7 @@ src/services/tmux_turn_liveness/tests_pg.rs
 src/services/tui_o/alarm.rs
 src/services/tui_o/exact_pg_tests.rs
 src/services/tui_o/exact_submission.rs
+src/services/tui_o/writer/deferred_pg_tests.rs
 src/services/turn_host_tests.rs
 src/services/turn_lifecycle.rs
 src/voice/announce_meta.rs
@@ -276,6 +279,7 @@ db::intake_outbox::postgres_tests
 db::intake_outbox_delivery_proof::tests
 db::intake_outbox_dispatch_stamp::tests
 db::intake_outbox_dispatched_audit::postgres_tests
+db::o_channel_activation::fence_tests
 db::o_channel_activation::postgres_tests
 db::o_channel_homes::tests
 db::postgres::advisory_lock::tests
@@ -436,6 +440,7 @@ services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+services::discord::runtime_bootstrap::o_writer_host::fence_tests
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests
 services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
@@ -510,6 +515,7 @@ services::tmux_turn_liveness::tests_pg
 services::tui_o::alarm::postgres_tests
 services::tui_o::exact_pg::tests
 services::tui_o::exact_submission::tests
+services::tui_o::writer::tests::actor::host_start::deferred::pg
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
 voice::announce_meta::tests
@@ -754,6 +760,11 @@ db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_includ
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_marks_empty_provider_false_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_empty_when_no_rows_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_only_dispatched_rows_pg
+db::o_channel_activation::fence_tests::fence_blocks_actual_sweep_backend_until_release_or_drop_pg
+db::o_channel_activation::fence_tests::fenced_rows_count_pending_and_processing_headless_bodies_only_pg
+db::o_channel_activation::fence_tests::fenced_rows_preserve_all_open_status_and_legacy_session_predicates_pg
+db::o_channel_activation::fence_tests::intake_fence_uses_app_role_update_privilege_and_rejects_select_only_pg
+db::o_channel_activation::fence_tests::sweep_committed_before_fence_is_visible_in_fresh_facts_pg
 db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
 db::o_channel_homes::tests::a_delegate_naming_an_unknown_provider_writes_nothing_pg
 db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_win_pg
@@ -1474,6 +1485,7 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settle
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settles_stale_spawned_as_unknown_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_live_interactive_turn_without_dispatch_binding_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
@@ -1868,6 +1880,13 @@ services::tui_o::exact_submission::tests::exact_submission_pg_attempt_before_clo
 services::tui_o::exact_submission::tests::exact_submission_pg_closed_admission_rejects_late_attempt
 services::tui_o::exact_submission::tests::exact_submission_pg_executor_classifies_no_attempt_and_typed_refusal
 services::tui_o::exact_submission::tests::exact_submission_pg_reopen_process_resolves_policy_without_source
+services::tui_o::writer::tests::actor::host_start::deferred::pg::expired_handoff_fence_blocks_actual_sweep_until_init_published_pg
+services::tui_o::writer::tests::actor::host_start::deferred::pg::normal_deferred_fence_blocks_actual_sweep_until_init_published_pg
+services::tui_o::writer::tests::actor::host_start::deferred::pg::normal_deferred_rejects_headless_enqueue_completed_after_fence_from_a_preexisting_reservation_pg
+services::tui_o::writer::tests::actor::host_start::deferred::pg::normal_deferred_rejects_headless_enqueue_completed_after_fence_pg
+services::tui_o::writer::tests::actor::host_start::deferred::pg::queued_headless_pending_and_processing_block_expired_handoff_until_worker_sent_pg
+services::tui_o::writer::tests::actor::host_start::deferred::pg::sweep_before_expired_handoff_fence_observes_fresh_child_pg
+services::tui_o::writer::tests::actor::host_start::deferred::pg::sweep_before_normal_deferred_fence_observes_fresh_child_pg
 services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg
 services::turn_lifecycle::host_guard_tests::force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg

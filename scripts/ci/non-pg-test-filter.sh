@@ -28,6 +28,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::intake_outbox::home_tests
   --skip db::intake_outbox_delivery_proof::tests
   --skip db::intake_outbox_dispatch_stamp::tests
+  --skip db::o_channel_activation::fence_tests
   --skip db::o_channel_homes::tests
   --skip db::prompt_manifests::tests
   --skip db::relay_dead_letter::tests
@@ -138,6 +139,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::runtime_bootstrap::gateway_handback_integration_tests
   --skip services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+  --skip services::discord::runtime_bootstrap::o_writer_host::fence_tests
   --skip services::discord::runtime_bootstrap::orphan_recovery::fence_tests
   --skip services::discord::session_idle_cleanup::tests
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
@@ -185,6 +187,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::settings::tests
   --skip services::stale_turn_reconciler::tests
   --skip services::tui_o::exact_submission::tests
+  --skip services::tui_o::writer::tests::actor::host_start::deferred::pg
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
@@ -541,6 +544,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_cutoffs_do_not_panic_for_extreme_values
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_spawns_exactly_once_per_process
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_task_can_restart_after_task_death
+  services::discord::runtime_bootstrap::o_writer_host::fence_tests::a_host_without_an_intake_fence_refuses_deferred_activation_facts
   services::discord::session_relay_sink::journal::pg_store::mixed_tests::mixed_strict_rows_leave_legacy_fold_frontier_and_shadow_bytes_unchanged
   services::discord::session_relay_sink::journal::pg_store::tests::stored_journal_event_mapping_is_closed_and_fail_closed
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reconcile_noop_when_db_matches_tmux
@@ -770,6 +774,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::intake_outbox::home_tests
   db::intake_outbox_delivery_proof::tests
   db::intake_outbox_dispatch_stamp::tests
+  db::o_channel_activation::fence_tests
   db::o_channel_homes::tests
   db::prompt_manifests::tests
   db::relay_dead_letter::tests
@@ -880,6 +885,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::runtime_bootstrap::gateway_handback_integration_tests
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+  services::discord::runtime_bootstrap::o_writer_host::fence_tests
   services::discord::runtime_bootstrap::orphan_recovery::fence_tests
   services::discord::session_idle_cleanup::tests
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests
@@ -927,6 +933,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::settings::tests
   services::stale_turn_reconciler::tests
   services::tui_o::exact_submission::tests
+  services::tui_o::writer::tests::actor::host_start::deferred::pg
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests
   voice::announce_meta::tests

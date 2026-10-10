@@ -206,6 +206,7 @@ src/
 │   ├── meetings.rs
 │   ├── mod.rs
 │   ├── o_channel_activation.rs
+│   ├── o_channel_activation_fence_tests.rs
 │   ├── o_channel_homes.rs
 │   ├── o_channel_homes_tests.rs
 │   ├── postgres.rs
@@ -2496,6 +2497,7 @@ src/
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
 │   │   │   ├── adoption.rs
+│   │   │   ├── adoption_past_stall_tests.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── canary_policy_tests.rs
@@ -2504,6 +2506,7 @@ src/
 │   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deferred.rs
+│   │   │   ├── deferred_pg_tests.rs
 │   │   │   ├── deferred_tests.rs
 │   │   │   ├── deliver.rs
 │   │   │   ├── deliver_home_tests.rs
@@ -2538,6 +2541,7 @@ src/
 │   │   │   ├── rotation_unsettled_tests.rs
 │   │   │   ├── round_trip.rs
 │   │   │   ├── source_identity_tests.rs
+│   │   │   ├── stall_handoff_tests.rs
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
