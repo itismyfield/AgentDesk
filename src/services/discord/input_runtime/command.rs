@@ -3,6 +3,7 @@
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
+use super::external::ExternalReceipt;
 use super::fence::Failure;
 use super::ordering::{
     FetchTicket, PendingOverflow, PendingSource, ScanCapability, ValidatedOrderCapability,
@@ -34,7 +35,12 @@ pub(crate) enum SupervisorCmd {
     },
     PendingSource {
         sources: Vec<u64>,
-        reply: oneshot::Sender<PendingSource>,
+        reply: oneshot::Sender<Result<PendingSource, Failure>>,
+    },
+    /// Receipt of an external human input; no production path sends it yet.
+    SubmitExternal {
+        source: Box<Source>,
+        reply: oneshot::Sender<ExternalReceipt>,
     },
     LookupResponsibility {
         identity: ReceiptIdentity,
@@ -108,9 +114,14 @@ async fn pending_within(
         return Err(Deferred::SupervisorLost);
     }
     match tokio::time::timeout(limit, response).await {
-        Ok(Ok(pending)) => {
+        Ok(Ok(Ok(pending))) => {
             obligation.armed = false;
             Ok(pending)
+        }
+        // An answered refusal is the order's verdict on these sources, not a lost notice.
+        Ok(Ok(Err(_))) => {
+            obligation.armed = false;
+            Err(Deferred::Order)
         }
         _ => Err(Deferred::SupervisorLost),
     }
@@ -224,7 +235,7 @@ mod tests {
         let service = tokio::spawn(async move {
             if let SupervisorCmd::PendingSource { sources, reply } = receiver.recv().await.unwrap()
             {
-                reply.send(order.pending(&sources)).unwrap();
+                reply.send(order.admit_pending(&sources)).unwrap();
             } else {
                 panic!("wrong command");
             }
@@ -235,6 +246,33 @@ mod tests {
         assert_eq!(pending.overflow.generation(), 0);
         assert_eq!(overflow.generation(), 0);
         service.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_order_error_is_not_supervisor_lost() {
+        let mut order = super::super::ordering::AdmissionOrder::new(
+            crate::services::provider::ProviderKind::Claude,
+            6_325_763,
+            7,
+            0,
+        );
+        let overflow = order.pending_overflow();
+        let (sender, mut receiver) = mpsc::channel(1);
+        let service = tokio::spawn(async move {
+            while let Some(SupervisorCmd::PendingSource { sources, reply }) = receiver.recv().await
+            {
+                reply.send(order.admit_pending(&sources)).unwrap();
+            }
+            order
+        });
+        let external = crate::services::tui_input::input_key::EXTERNAL_KEY_BASE;
+        let refused = pending_source(&sender, &overflow, vec![11, external]).await;
+        assert!(matches!(refused, Err(Deferred::Order)));
+        assert_eq!(overflow.generation(), 0);
+        let pending = pending_source(&sender, &overflow, vec![12]).await.unwrap();
+        assert_eq!(pending.sources, [12]);
+        drop(sender);
+        assert_eq!(service.await.unwrap().pending_snapshot().sources, [12]);
     }
 
     #[tokio::test]

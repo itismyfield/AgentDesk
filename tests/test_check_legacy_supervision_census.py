@@ -64,10 +64,73 @@ class DormantCensusTests(unittest.TestCase):
 
     def test_protected_body_and_helper_manifest_drift_fail(self):
         errors = guard.audit({'primitive.rs': 'fn extra() {}', 'canonical.rs': 'changed'},
-            entries={'primitive.rs': ''}, protected={'canonical.rs': guard.digest('original')})
+            entries={'primitive.rs': ''}, protected={'canonical.rs': {'*': guard.digest('original')}})
         self.assertEqual(len(errors), 2)
         self.assertIn('manifest drift', errors[0])
         self.assertIn('protected boot/RETIRED body', errors[1])
+
+    # Narrowed pins run on the real main sources: what each function pin catches and what it lets pass.
+    TURN = 'src/services/discord/tui_direct_pending_start/turn_retirement.rs'
+    LEGACY = 'src/services/discord/health/legacy_supervision.rs'
+
+    def protected_audit(self, path, edit=lambda code: code):
+        code = edit(guard.classifier._production_text(Path(path)))
+        return guard.audit({path: code}, entries={}, protected={path: guard.PROTECTED[path]})
+
+    def test_main_sources_match_every_pin(self):
+        for path in guard.PROTECTED:
+            with self.subTest(path=path):
+                self.assertEqual(self.protected_audit(path), [])
+
+    def test_call_added_to_protected_function_fails_with_repin_digest(self):
+        errors = self.protected_audit(self.TURN, lambda code: code.replace(
+            'confirm_turn_channels(provider, config.map', 'drop(0);\n    confirm_turn_channels(provider, config.map', 1))
+        self.assertEqual(len(errors), 1)
+        self.assertIn(self.TURN + '::confirm_at_boot: protected boot/RETIRED body changed', errors[0])
+        self.assertRegex(errors[0], r"re-pin 'confirm_at_boot': '[0-9a-f]{64}'")
+
+    def test_edit_outside_protected_functions_passes(self):
+        edited = lambda code: code.replace('let mut boundaries = Vec::new();',
+                                           'let mut boundaries = Vec::with_capacity(4);', 1)
+        self.assertNotEqual(edited(guard.classifier._production_text(Path(self.TURN))),
+                            guard.classifier._production_text(Path(self.TURN)))
+        self.assertEqual(self.protected_audit(self.TURN, edited), [])
+
+    def test_protected_function_renamed_or_deleted_fails(self):
+        for edit in (lambda code: code.replace('fn confirm_at_boot(', 'fn confirm_on_boot(', 1),
+                     lambda code: code[:code.index('pub(in crate::services::discord) fn confirm_at_boot(')]):
+            with self.subTest(edit=edit):
+                errors = self.protected_audit(self.TURN, edit)
+                self.assertEqual(len(errors), 1)
+                self.assertIn('::confirm_at_boot: protected function extraction failed (0 definitions)', errors[0])
+
+    def test_extraction_failure_fails_closed(self):
+        pins = {'f.rs': {'start': guard.digest('fn start() {}')}}
+        for source, reason in (('fn start() {} fn start() {}', '2 definitions'),
+                               ('fn start() { if x {', 'unbalanced body'),
+                               ('fn start();', 'no body')):
+            with self.subTest(source=source):
+                errors = guard.audit({'f.rs': source}, entries={}, protected=pins)
+                self.assertEqual(errors, [f'f.rs::start: protected function extraction failed ({reason})'])
+        errors = guard.audit({}, entries={}, protected=pins)
+        self.assertIn('f.rs: protected file missing or unpinned', errors)
+        self.assertEqual(guard.audit({'f.rs': ''}, entries={}, protected={'f.rs': {}}),
+                         ['f.rs: protected file missing or unpinned'])
+
+    def test_braces_in_strings_and_comments_do_not_end_a_body(self):
+        source = 'fn start(a: [u8; 2]) { let s = "}"; let c = \'}\'; // }\n /* } */ run(); }\nfn later() {}'
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'fixture.rs'
+            path.write_text(source)
+            code = guard.classifier._production_text(path)
+        self.assertTrue(guard.function_text(code, 'start').endswith('run(); }'))
+
+    def test_new_pub_fn_in_legacy_supervision_fails(self):
+        errors = self.protected_audit(self.LEGACY, lambda code: code + (
+            '\npub(in crate::services::discord) fn mark(p: &str, c: u64) '
+            '{ RETIRED.get_or_init(Default::default); }\n'))
+        self.assertEqual(len(errors), 1)
+        self.assertIn(self.LEGACY + '::*: protected boot/RETIRED body changed', errors[0])
 
     def test_new_primitive_macro_or_hidden_file_fails(self):
         entries = {guard.R + '.rs': ''}
