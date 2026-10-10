@@ -220,7 +220,7 @@ fn hop<'a>(
     (old != new).then_some((old, new))
 }
 
-fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
+pub(super) fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
     match &event.record {
         BindingRecord::Bound {
             new: BindingTarget::Source(source),
@@ -280,13 +280,10 @@ impl<B: BindingEvents> Sources<B> {
         self.rotation = writer.store().rotation().map_err(halted("rotation"))?;
         let checkpoint = writer.store().binding_checkpoint();
         self.checkpoint = checkpoint.map_err(halted("binding checkpoint"))?;
-        if let Some((_, events)) = self.read_log(writer, 0)? {
-            let store = writer.store();
-            let checkpoint = self
-                .checkpoint
-                .or_else(|| binding_baseline(&events, |source| store.cursor(source).is_some()));
+        if let Some(logged) = self.read_log(writer, 0)? {
+            let checkpoint = self.names.start(writer.store(), &logged, self.checkpoint)?;
             if let Some(checkpoint) = checkpoint {
-                self.restore_hops(writer, &events, checkpoint)?;
+                self.restore_hops(writer, &logged.1, checkpoint)?;
             }
         }
         let mut cursors: Vec<_> = writer.store().cursors().cloned().collect();
@@ -513,14 +510,13 @@ impl<B: BindingEvents> Sources<B> {
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
     ) -> Result<Option<u64>, WriterAlarm> {
-        let Some((_, events)) = self.read_log(writer, 0)? else {
+        let Some(logged) = self.read_log(writer, 0)? else {
             return Ok(None);
         };
-        let store = writer.store();
-        let seq = binding_baseline(&events, |source| store.cursor(source).is_some()).ok_or_else(
-            || halt("no binding baseline: no event binds a source attached at the switch"),
-        )?;
-        self.restore_hops(writer, &events, seq)?;
+        let seq = self.names.start(writer.store(), &logged, None)?;
+        let no_baseline = "no binding baseline: no event binds a source attached at the switch";
+        let seq = seq.ok_or_else(|| halt(no_baseline))?;
+        self.restore_hops(writer, &logged.1, seq)?;
         for reader in &mut self.readers {
             if let Some(next) = self.rotation.successors.get(&source_key(&reader.source)) {
                 reader.rotated_at.get_or_insert(Instant::now());
@@ -626,6 +622,10 @@ impl<B: BindingEvents> Sources<B> {
             self.rotation.links.insert(key.clone(), link);
         }
         self.rotation.successors.remove(&key);
+        // A source bound again leaves its old rotation, so a next one measures its own quiet.
+        if let Some(r) = self.readers.iter_mut().find(|r| r.source == new) {
+            (r.rotated_at, r.quiet, r.drain_to, r.growth_alarmed) = (None, None, None, false);
+        }
         if let Some(old) = old.filter(|old| **old != new) {
             if writer.store().cursor(old).is_none() {
                 return Err(halt("a bind names an old source this channel never read"));

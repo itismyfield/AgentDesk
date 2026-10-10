@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use super::WriterAlarm;
 use super::binding::{BindingEvent, BindingRecord, BindingTarget};
+use super::rotation::{binding_baseline, bound_source};
 use crate::services::tui_o::shadow::capture::{SourceCapture, same_file};
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::ChannelStore;
@@ -192,8 +193,8 @@ impl Names {
         }
     }
 
-    /// `events` past `after`, raw and by stored name. A whole log first rebuilds, in seq order, the
-    /// sessions taken by events through `applied`, or by every event without a checkpoint.
+    /// `events` past `after`, raw and by stored name; a whole log first rebuilds the sessions taken
+    /// by events through `applied`, or by every event without a checkpoint.
     pub(super) fn read(
         &mut self,
         store: &ChannelStore,
@@ -201,22 +202,14 @@ impl Names {
         after: u64,
         applied: Option<u64>,
     ) -> Result<Option<Logged>, WriterAlarm> {
-        let whole = self.from(after) == 0;
-        if whole {
-            (self.confirmed, self.ready) = (HashMap::new(), true);
+        if self.from(after) == 0 {
+            self.rebuild(store, &events, applied).map_err(halted)?;
         }
         let mut named = events.clone();
         let mut failed = Ok(());
         for event in &mut named {
-            let rebuilt = whole && applied.is_none_or(|applied| event.seq <= applied);
             map_sources(event, |source| match self.stored(store, source) {
-                Ok(Some((cursor, loose))) => {
-                    if loose && rebuilt {
-                        self.confirm(&cursor.source, source);
-                    }
-                    cursor.source.clone()
-                }
-                Ok(None) => source.clone(),
+                Ok(stored) => stored.map_or_else(|| source.clone(), |(c, _)| c.source.clone()),
                 Err(error) => {
                     failed = Err(error);
                     source.clone()
@@ -230,6 +223,78 @@ impl Names {
             named.into_iter().filter(past),
         );
         Ok(Some((events.collect(), named.collect())))
+    }
+
+    /// Takes again, in seq order, the sessions the binds through `applied` took, as `follow` binds:
+    /// a Pending binds the source its Resolved names, and a superseded one binds nothing.
+    fn rebuild(
+        &mut self,
+        store: &ChannelStore,
+        events: &[BindingEvent],
+        applied: Option<u64>,
+    ) -> Result<(), String> {
+        (self.confirmed, self.ready) = (HashMap::new(), true);
+        let resolved: HashMap<u64, &SourceId> = (events.iter())
+            .filter_map(|event| match &event.record {
+                BindingRecord::Resolved {
+                    resolves_seq,
+                    source,
+                } => Some((*resolves_seq, source)),
+                _ => None,
+            })
+            .collect();
+        for event in events
+            .iter()
+            .filter(|e| applied.is_none_or(|seq| e.seq <= seq))
+        {
+            let BindingRecord::Bound {
+                old,
+                new,
+                parent_hint,
+                ..
+            } = &event.record
+            else {
+                continue;
+            };
+            let new = match new {
+                BindingTarget::Source(source) => Some(source),
+                BindingTarget::Pending { .. } => resolved.get(&event.seq).copied(),
+            };
+            let Some(new) = new else {
+                continue;
+            };
+            for source in old.iter().chain(parent_hint).chain([new]) {
+                if let Some((cursor, true)) = self.stored(store, source)? {
+                    self.confirm(&cursor.source, source);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Where a resume or seed starts: the checkpoint, else the last bind of an attached source,
+    /// whose name an empty session leaves compatible must still read as stored to be taken.
+    pub(super) fn start(
+        &self,
+        store: &ChannelStore,
+        (raw, named): &Logged,
+        checkpoint: Option<u64>,
+    ) -> Result<Option<u64>, WriterAlarm> {
+        if checkpoint.is_some() {
+            return Ok(checkpoint);
+        }
+        let Some(seq) = binding_baseline(named, |source| store.cursor(source).is_some()) else {
+            return Ok(None);
+        };
+        let source = raw
+            .iter()
+            .find(|event| event.seq == seq)
+            .and_then(bound_source);
+        let stored = source.map(|source| self.stored(store, source)).transpose();
+        if let Some((cursor, true)) = stored.map_err(halted)?.flatten() {
+            reopen(cursor).map_err(Reopen::halt)?;
+        }
+        Ok(Some(seq))
     }
 
     /// The whole log by stored name, or `None` when it or a name cannot be read, without alarms.

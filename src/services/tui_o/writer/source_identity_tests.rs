@@ -456,14 +456,21 @@ async fn a_codex_filled_rebind_keeps_its_own_source() {
     let (harness, _, w, bindings) = started_empty(&row("m0", "before the switch"));
     let a = named(&w, "A");
     bindings.commit(resume(2, &w, &a));
+    // Both binds come from the Codex hook, as a Codex channel's own log names them.
+    for event in bindings.events.lock().unwrap().iter_mut() {
+        event.provider = ShadowProvider::Codex;
+    }
     let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Codex, bindings);
     polls(3).await;
     assert!(!task.is_finished());
     assert_eq!(copies(&harness, &w), 2);
-    let link = harness.channel().rotation().unwrap().link(&a).cloned();
-    let boundary = link.map(|link| link.boundary);
+    let rotation = harness.channel().rotation().unwrap();
+    let boundary = rotation.link(&a).map(|link| link.boundary.clone());
     let candidates = vec![0];
     assert_eq!(boundary, Some(Boundary::Pending { candidates }));
+    // A Codex resume does not show the old source was left.
+    let hop = rotation.successors.get(&source_key(&w)).cloned().unwrap();
+    assert_eq!((hop.source, hop.proof), (a.clone(), None));
     let pending = WriterAlarm::BoundaryPending { source: a };
     assert_eq!(harness.alarms.taken(), [pending]);
     halt(stop, task).await;
@@ -498,5 +505,106 @@ async fn a_writer_that_started_without_its_log_rebuilds_taken_sessions_before_bi
     };
     assert_eq!(harness.alarms.taken(), [unavailable]);
     assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(3));
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pending_resolved_onto_an_empty_session_source_keeps_its_session_after_a_restart() {
+    for log_down in [false, true] {
+        let (harness, path, w, bindings) = started_empty(&row("m0", "before the switch"));
+        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+        polls(3).await;
+        let pending = BindingTarget::Pending {
+            payload_session_id: "A".into(),
+            payload_transcript_path: path.clone(),
+        };
+        bindings.commit(bound(2, Some(&w), pending, BindingCause::Resume, None));
+        let resolved = BindingRecord::Resolved {
+            resolves_seq: 2,
+            source: named(&w, "A"),
+        };
+        bindings.commit(event(3, resolved, Utc::now()));
+        polls(3).await;
+        assert_eq!(copies(&harness, &w), 1, "log down {log_down}");
+        assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(3));
+        halt(stop, task).await;
+        // Stopped once the Pending's bind was durable, before its Resolved row passed.
+        harness.channel().set_binding_checkpoint(2).unwrap();
+        bindings.fail(log_down.then_some("log down"));
+        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+        polls(1).await;
+        bindings.fail(None);
+        // No old name of this bind says which session the file was taken for.
+        let b = named(&w, "B");
+        let target = BindingTarget::Source(b.clone());
+        bindings.commit(bound(4, None, target, BindingCause::Startup, None));
+        polls(3).await;
+        assert!(!task.is_finished(), "log down {log_down}");
+        assert_eq!(copies(&harness, &w), 2, "log down {log_down}");
+        let boundary = harness.channel().rotation().unwrap().link(&b).cloned();
+        let boundary = boundary.map(|link| link.boundary);
+        assert_eq!(
+            boundary,
+            Some(Boundary::Owed { from: 0 }),
+            "log down {log_down}"
+        );
+        assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(4));
+        halt(stop, task).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_first_start_halts_rather_than_take_a_changed_source_as_its_baseline() {
+    let (harness, path, w, bindings) = started_empty(&row("m0", &"x".repeat(6000)));
+    bindings.commit(resume(2, &w, &named(&w, "A")));
+    bindings.fail(Some("log down"));
+    let (_stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(2).await;
+    // The start reopened the whole prefix; this change sits behind the tail a poll re-reads.
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.seek(SeekFrom::Start(40)).unwrap();
+    file.write_all(b"y").unwrap();
+    bindings.fail(None);
+    polls(3).await;
+    assert!(task.is_finished());
+    let alarms = harness.alarms.taken();
+    let wanted = "source bytes before the cursor changed";
+    assert!(halted_with(&alarms, wanted), "{alarms:?}");
+    let store = harness.channel();
+    assert_eq!(store.binding_checkpoint().unwrap(), None);
+    assert_eq!(store.cursors().count(), 1);
+    let rotation = store.rotation().unwrap();
+    assert!(rotation.links.is_empty() && rotation.successors.is_empty());
+    assert!(harness.port.posts().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_source_bound_again_waits_its_own_quiet_in_its_next_rotation() {
+    let (harness, path, w, bindings) = started_empty(&row("m0", "before the switch"));
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(3).await;
+    // An unproven hop: W stays read, quiet since X was first read, and is never retired.
+    let (_, x) = transcript(&path, "x.jsonl", "x", &row("x1", "x one"));
+    let target = BindingTarget::Source(x.clone());
+    bindings.commit(bound(2, Some(&w), target, BindingCause::Startup, None));
+    polls(15).await;
+    assert!(!retired(&harness, &w));
+    let a = named(&w, "A");
+    bindings.commit(resume(3, &x, &a));
+    polls(3).await;
+    let rotation = harness.channel().rotation().unwrap();
+    assert!(!rotation.successors.contains_key(&source_key(&w)));
+    let (_, y) = transcript(&path, "y.jsonl", "y", &row("y1", "y one"));
+    let target = BindingTarget::Source(y);
+    bindings.commit(bound(4, Some(&a), target, BindingCause::Clear, None));
+    polls(2).await;
+    assert!(
+        !retired(&harness, &w),
+        "the proven hop still waits its own quiet"
+    );
+    polls(13).await;
+    assert!(retired(&harness, &w));
+    assert!(!task.is_finished());
+    assert_eq!(harness.port.posts(), ["x one", "y one"]);
     halt(stop, task).await;
 }
