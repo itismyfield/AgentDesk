@@ -271,6 +271,16 @@ pub struct SelectorNavigation {
     pub target_index: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptSubmitConfirmationDecision {
+    Submitted,
+    RetrySnapshot,
+    RetryEnter,
+    FailedSessionDead,
+    FailedCaptureUnavailable,
+    FailedDraftStuck,
+}
+
 pub fn plan_prompt_submit(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
     let normalized_prompt;
     let prompt = if prompt.contains('\r') {
@@ -450,7 +460,12 @@ fn send_prompt_with_readiness(
             session_name,
             prompt,
         );
-        match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
+        match run_actions_with_submission_confirmation(
+            session_name,
+            &actions,
+            Some(prompt),
+            cancel_token,
+        ) {
             Ok(()) => Ok(()),
             Err(error) => {
                 crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
@@ -625,7 +640,7 @@ pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result
             session_name,
             prompt,
         );
-        match run_actions_with_submission_confirmation(session_name, &actions, None) {
+        match run_actions_with_submission_confirmation(session_name, &actions, None, None) {
             Ok(()) => Ok(()),
             Err(error) => {
                 crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
@@ -924,33 +939,128 @@ fn run_actions(
 fn run_actions_with_submission_confirmation(
     session_name: &str,
     actions: &[TuiInputAction],
+    submitted_prompt: Option<&str>,
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
-    let run = host_input::run_prompt_submission_legacy(session_name, actions, cancel_token);
-    match run {
-        host_input::InputRun::Indeterminate { confirmed, cause } => {
-            return Err(format!(
-                "claude tui input held after mutation: confirmed={confirmed}; cause={cause:?}"
-            ));
-        }
-        run => run.into_legacy()?,
+    let actions_contained_paste = actions_contain_paste_buffer(actions);
+    let run = host_input::run_legacy(session_name, actions, cancel_token);
+    let cleanup_may_follow =
+        host_input::InputTarget::legacy_tmux(session_name).keys_may_follow(&run);
+    let result = run.into_legacy().and_then(|()| {
+        confirm_prompt_submission_left_editor(session_name, submitted_prompt, cancel_token)
+    });
+    if cleanup_may_follow && should_clear_draft_on_error(actions_contained_paste, result.is_err()) {
+        clear_prompt_draft_before_error(session_name);
     }
-    let mut attempt = 0;
+    result
+}
+
+fn actions_contain_paste_buffer(actions: &[TuiInputAction]) -> bool {
+    actions
+        .iter()
+        .any(|action| matches!(action, TuiInputAction::PasteBuffer(_)))
+}
+
+fn should_clear_draft_on_error(actions_contained_paste: bool, result_is_err: bool) -> bool {
+    actions_contained_paste && result_is_err
+}
+
+fn confirm_prompt_submission_left_editor(
+    session_name: &str,
+    submitted_prompt: Option<&str>,
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
+    let mut attempt = 0usize;
     loop {
-        check_prompt_cancel(cancel_token)?;
         std::thread::sleep(prompt_submit_settle_for_attempt(attempt));
         check_prompt_cancel(cancel_token)?;
-        match host_input::confirm_prompt_submission_passively(session_name, cancel_token) {
-            Ok(()) => return Ok(()),
-            Err(error)
-                if is_prompt_ready_cancelled_error(&error)
-                    || attempt >= PROMPT_SUBMIT_CONFIRM_RETRIES =>
-            {
-                return Err(error);
+        let (pane, alive) =
+            host_input::observe_legacy(session_name, PROMPT_READY_CAPTURE_SCROLLBACK);
+        let snapshot = prompt_readiness_snapshot_from_capture(pane.as_deref(), alive);
+        let prompt_left = submitted_prompt
+            .zip(pane.as_deref())
+            .is_some_and(|(prompt, pane)| {
+                crate::services::claude_tui::prompt_readiness::composer_still_holds_prompt(
+                    pane, prompt,
+                )
+            });
+        check_prompt_cancel(cancel_token)?;
+
+        match prompt_submit_confirmation_decision(
+            &snapshot,
+            prompt_left,
+            attempt,
+            PROMPT_SUBMIT_CONFIRM_RETRIES,
+        ) {
+            PromptSubmitConfirmationDecision::Submitted => return Ok(()),
+            PromptSubmitConfirmationDecision::FailedSessionDead => {
+                return Err("claude tui session died after prompt submit".to_string());
             }
-            Err(_) => attempt += 1,
+            PromptSubmitConfirmationDecision::FailedCaptureUnavailable => {
+                log_prompt_submit_capture_unavailable(session_name, attempt, &snapshot);
+                return Err(format!(
+                    "claude tui prompt submit confirmation unavailable after {} retries; capture_available=false",
+                    PROMPT_SUBMIT_CONFIRM_RETRIES
+                ));
+            }
+            PromptSubmitConfirmationDecision::FailedDraftStuck => {
+                log_prompt_submit_left_draft(session_name, &snapshot);
+                return Err(format!(
+                    "claude tui prompt submit left draft after {} enter retries; prompt_marker_detected={}; prompt_draft_detected={}; capture_available={}",
+                    PROMPT_SUBMIT_CONFIRM_RETRIES,
+                    snapshot.prompt_marker_detected,
+                    snapshot.prompt_draft_detected,
+                    snapshot.capture_available
+                ));
+            }
+            PromptSubmitConfirmationDecision::RetrySnapshot => {
+                log_prompt_submit_capture_unavailable(session_name, attempt, &snapshot);
+                attempt += 1;
+            }
+            PromptSubmitConfirmationDecision::RetryEnter => {
+                tracing::warn!(
+                    tmux_session_name = session_name,
+                    retry = attempt + 1,
+                    max_retries = PROMPT_SUBMIT_CONFIRM_RETRIES,
+                    "claude_tui prompt submit left a draft after Enter; retrying Enter"
+                );
+                run_actions(session_name, &[TuiInputAction::Enter], cancel_token)?;
+                attempt += 1;
+            }
         }
     }
+}
+
+fn prompt_submit_needs_enter_retry(snapshot: &PromptReadinessSnapshot) -> bool {
+    snapshot.tmux_pane_alive && snapshot.prompt_marker_detected && snapshot.prompt_draft_detected
+}
+
+fn prompt_submit_confirmation_decision(
+    snapshot: &PromptReadinessSnapshot,
+    prompt_left_in_composer: bool,
+    attempt: usize,
+    max_retries: usize,
+) -> PromptSubmitConfirmationDecision {
+    if !snapshot.tmux_pane_alive {
+        return PromptSubmitConfirmationDecision::FailedSessionDead;
+    }
+    if !snapshot.capture_available {
+        return if attempt >= max_retries {
+            PromptSubmitConfirmationDecision::FailedCaptureUnavailable
+        } else {
+            PromptSubmitConfirmationDecision::RetrySnapshot
+        };
+    }
+    let draft = prompt_submit_needs_enter_retry(snapshot);
+    if draft || prompt_left_in_composer {
+        // Only a probed draft fails; a prompt-text match just earns retries (a repaint can lag).
+        return match (attempt >= max_retries, draft) {
+            (false, _) => PromptSubmitConfirmationDecision::RetryEnter,
+            (true, true) => PromptSubmitConfirmationDecision::FailedDraftStuck,
+            (true, false) => PromptSubmitConfirmationDecision::Submitted,
+        };
+    }
+    PromptSubmitConfirmationDecision::Submitted
 }
 
 fn prompt_submit_settle_for_attempt(attempt: usize) -> Duration {
@@ -968,13 +1078,24 @@ fn clear_prompt_draft_before_error(session_name: &str) {
         tracing::warn!(
             tmux_session_name = session_name,
             error = %error,
-            "failed to clear Claude TUI draft after readiness timeout"
+            "failed to clear Claude TUI draft after prompt submit retries"
         );
     }
 }
 
-/// Serializes readiness-timeout and warm-followup cleanup with composer writes.
-/// Callers must not already hold this mutex; a recovery-held pane skips cleanup.
+/// F1 single authority: run an out-of-turn composer cleanup through the SAME
+/// `with_composer_mutation_lock` that `/compact` steering and every normal
+/// prompt submit hold, so a stranded-draft clear and an auto `/compact` can never
+/// interleave their key sends.
+///
+/// Both out-of-turn stranded-draft clearers funnel here: the readiness-timeout
+/// cleanup below (which runs OUTSIDE the send's composer critical section, unlike
+/// the in-send cleanup in `run_actions_with_submission_confirmation` that is
+/// already lock-held), and the warm-followup stranded-draft clear in
+/// `hosting::followup_support`. Callers MUST NOT already hold the composer lock —
+/// every readiness/warm-followup wait acquires it only AFTER the wait returns,
+/// so this is the outermost composer acquisition on those paths (no re-entry).
+/// A pane held for draft recovery takes no cleanup key; `None` reports the skipped cleanup.
 pub(crate) fn with_composer_cleanup_lock<R>(
     session_name: &str,
     cleanup: impl FnOnce() -> R,
@@ -1089,7 +1210,12 @@ pub fn send_followup_prompt_or_idle_transcript(
             session_name,
             prompt,
         );
-        match run_actions_with_submission_confirmation(session_name, &actions, cancel_token) {
+        match run_actions_with_submission_confirmation(
+            session_name,
+            &actions,
+            Some(prompt),
+            cancel_token,
+        ) {
             Ok(()) => Ok(()),
             Err(error) => {
                 crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
@@ -2105,6 +2231,44 @@ fn log_prompt_ready_mcp_auth_block(
     );
 }
 
+fn log_prompt_submit_left_draft(session_name: &str, snapshot: &PromptReadinessSnapshot) {
+    tracing::warn!(
+        tmux_session_name = session_name,
+        prompt_marker_detected = snapshot.prompt_marker_detected,
+        prompt_draft_detected = snapshot.prompt_draft_detected,
+        tmux_pane_alive = snapshot.tmux_pane_alive,
+        capture_available = snapshot.capture_available,
+        pane_tail = %snapshot.pane_tail,
+        "claude_tui prompt submit still has a draft after Enter retries"
+    );
+    crate::services::claude::debug_log_to(
+        "claude_tui.log",
+        &format!(
+            "prompt submit left draft session={} prompt_marker_detected={} prompt_draft_detected={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
+            session_name,
+            snapshot.prompt_marker_detected,
+            snapshot.prompt_draft_detected,
+            snapshot.tmux_pane_alive,
+            snapshot.capture_available,
+            snapshot.pane_tail
+        ),
+    );
+}
+
+fn log_prompt_submit_capture_unavailable(
+    session_name: &str,
+    attempt: usize,
+    snapshot: &PromptReadinessSnapshot,
+) {
+    tracing::warn!(
+        tmux_session_name = session_name,
+        attempt,
+        tmux_pane_alive = snapshot.tmux_pane_alive,
+        capture_available = snapshot.capture_available,
+        "claude_tui post-submit capture unavailable; cannot confirm Enter took effect"
+    );
+}
+
 fn prompt_ready_debug_tail(pane: &str) -> String {
     let mut lines = pane
         .lines()
@@ -2814,6 +2978,176 @@ mod tests {
         let timeout = format!("{PROMPT_READY_TIMEOUT_ERROR_PREFIX} fresh prompt input readiness");
         assert!(is_prompt_ready_timeout_error(&timeout));
         assert!(!is_mcp_auth_required_error(&timeout));
+    }
+
+    #[test]
+    fn prompt_submit_retries_only_when_live_pane_still_has_draft() {
+        let draft_snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\u{276f} draft".to_string(),
+        };
+        assert!(prompt_submit_needs_enter_retry(&draft_snapshot));
+
+        let active_snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "✳ Architecting...".to_string(),
+        };
+        assert!(!prompt_submit_needs_enter_retry(&active_snapshot));
+
+        let inconsistent_snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "stale draft heuristic without prompt marker".to_string(),
+        };
+        assert!(!prompt_submit_needs_enter_retry(&inconsistent_snapshot));
+
+        let dead_snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: false,
+            capture_available: true,
+            pane_tail: "stale draft".to_string(),
+        };
+        assert!(!prompt_submit_needs_enter_retry(&dead_snapshot));
+    }
+
+    #[test]
+    fn prompt_submit_confirmation_decision_retries_enter_then_fails_stuck_draft() {
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\u{276f} draft".to_string(),
+        };
+
+        assert_eq!(
+            prompt_submit_confirmation_decision(&snapshot, false, 0, 2),
+            PromptSubmitConfirmationDecision::RetryEnter
+        );
+        assert_eq!(
+            prompt_submit_confirmation_decision(&snapshot, false, 2, 2),
+            PromptSubmitConfirmationDecision::FailedDraftStuck
+        );
+    }
+
+    #[test]
+    fn prompt_submit_confirmation_decision_retries_capture_without_enter() {
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: false,
+            pane_tail: "<capture unavailable>".to_string(),
+        };
+
+        assert_eq!(
+            prompt_submit_confirmation_decision(&snapshot, false, 0, 2),
+            PromptSubmitConfirmationDecision::RetrySnapshot
+        );
+        assert_eq!(
+            prompt_submit_confirmation_decision(&snapshot, false, 2, 2),
+            PromptSubmitConfirmationDecision::FailedCaptureUnavailable
+        );
+    }
+
+    #[test]
+    fn prompt_submit_confirmation_decision_handles_submitted_and_dead_pane() {
+        let submitted = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "✳ Architecting...".to_string(),
+        };
+        assert_eq!(
+            prompt_submit_confirmation_decision(&submitted, false, 0, 2),
+            PromptSubmitConfirmationDecision::Submitted
+        );
+
+        let dead = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: false,
+            capture_available: false,
+            pane_tail: "<capture unavailable>".to_string(),
+        };
+        assert_eq!(
+            prompt_submit_confirmation_decision(&dead, false, 0, 2),
+            PromptSubmitConfirmationDecision::FailedSessionDead
+        );
+    }
+
+    #[test]
+    fn fresh_prompt_left_unsubmitted_in_the_composer_gets_enter_again() {
+        use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
+        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let session = format!("fresh-enter-retry-{}", uuid::Uuid::new_v4());
+        let prompt = "[User: 명령봇 (ID: 1479017284805722200)] 응답에 정확히 한 줄로 \
+                      [E2E:E50:run:AFTER_CLEAR] 만 출력해줘.";
+        let rule = "─".repeat(80);
+        let banner = " ▐▛███▛█   Claude Code v2.1.289\n~/.adk/release/workspaces/e2e\n\n";
+        let footer = format!("{rule}\n  ⏱ 0m │ ░░░░░░░░░░ │ 0% │ 0/1.0M │ $0.00\n  MCP: 2");
+        let empty = format!("{banner}{rule}\n\u{276f} \n{footer}");
+        // The swallowed-Enter pane seen in production after `!clear`.
+        let stuck = format!(
+            "{banner}{rule}\n\u{276f} [User: 명령봇 (ID: 1479017284805722200)] 응답에 정확히 한 줄로\n  \
+             [E2E:E50:run:AFTER_CLEAR] 만\n  출력해줘.\n\n{footer}"
+        );
+        let submitted = format!(
+            "{banner}\u{276f} [User: 명령봇 (ID: 1479017284805722200)] 응답에 정확히 한 줄로\n  \
+             [E2E:E50:run:AFTER_CLEAR] 만\n  출력해줘.\n\n\u{2733} Architecting\u{2026} (esc to interrupt)\n\n\
+             {rule}\n\u{276f} \n{footer}"
+        );
+        let token = CancelToken::new();
+        let enters_after = |tail: &[&str]| {
+            let mut captures = vec![Some(empty.clone()); 3];
+            captures.extend(tail.iter().map(|pane| Some(pane.to_string())));
+            let guard = SpyGuard::install(SpyState {
+                captures: captures.into(),
+                ..SpyState::default()
+            });
+            assert_eq!(send_fresh_prompt(&session, prompt, Some(&token)), Ok(()));
+            let calls = guard.calls();
+            assert_eq!(calls[6], format!("literal:{prompt}"), "{calls:?}");
+            calls.iter().filter(|call| *call == "keys:Enter").count()
+        };
+        assert_eq!(enters_after(&[&stuck, &submitted]), 2);
+        assert_eq!(
+            enters_after(&[&submitted]),
+            1,
+            "a landed submit gets no extra Enter"
+        );
+        // A repaint that lags every retry still counts as submitted, as on main.
+        assert_eq!(enters_after(&[&stuck, &stuck, &stuck]), 3);
+    }
+
+    #[test]
+    fn prompt_submit_cleanup_on_error_is_limited_to_paste_actions() {
+        let literal_actions = vec![
+            TuiInputAction::Literal("abc".to_string()),
+            TuiInputAction::Enter,
+        ];
+        assert!(!actions_contain_paste_buffer(&literal_actions));
+        assert!(!should_clear_draft_on_error(false, true));
+
+        let paste_actions = vec![
+            TuiInputAction::PasteBuffer("line1\nline2".to_string()),
+            TuiInputAction::Enter,
+        ];
+        assert!(actions_contain_paste_buffer(&paste_actions));
+        assert!(!should_clear_draft_on_error(true, false));
+        assert!(should_clear_draft_on_error(true, true));
     }
 
     #[test]

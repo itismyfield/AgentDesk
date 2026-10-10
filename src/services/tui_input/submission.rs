@@ -3,7 +3,6 @@
 use super::actor::gate::{PaneVerdict, judge_pane, own_draft};
 use super::actor::pane::MAX_PROMPT_BYTES;
 use crate::services::claude_tui::host_input::{InputRefusal, InputRun, StopCause};
-use crate::services::claude_tui::input::TuiInputAction;
 use crate::services::provider::{CancelToken, cancel_requested};
 use crate::services::tui_o::shadow::ShadowProvider;
 
@@ -99,35 +98,6 @@ pub(crate) fn run_prompt_submission_using(
         },
         InputRun::Applied => InputRun::Applied,
     }
-}
-
-/// A necessary Claude capacity veto; the captured whole draft still proves actual ownership.
-pub(crate) fn claude_prompt_fits_pane(
-    frame: &str,
-    payload: &[TuiInputAction],
-    size: Option<(usize, usize)>,
-) -> bool {
-    use unicode_width::UnicodeWidthStr;
-    size.is_some_and(|(width, height)| {
-        let width = width.saturating_sub(4);
-        let rows = height.saturating_sub(10);
-        if width == 0 || rows == 0 {
-            return false;
-        }
-        let lf = frame.matches('\n').count();
-        let paste =
-            matches!(payload, [TuiInputAction::PasteBuffer(text)] if text.as_str() == frame);
-        if paste && (frame.encode_utf16().count() > 800 || lf > rows.min(2)) {
-            return lf > 0 || frame.chars().count() > 800;
-        }
-        frame
-            .split('\n')
-            .try_fold(0usize, |total, line| {
-                let cells = line.replace('\t', "    ").width();
-                total.checked_add(cells.div_ceil(width).max(1))
-            })
-            .is_some_and(|needed| needed <= rows)
-    })
 }
 
 #[cfg(test)]

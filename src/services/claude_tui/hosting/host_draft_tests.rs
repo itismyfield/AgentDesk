@@ -189,10 +189,7 @@ fn tf2_hosts_without_input_stop_before_any_host_call() {
 
 #[test]
 fn tf2_legacy_tmux_clear_then_submits_once() {
-    let mut scenario = Scenario::tmux(
-        true,
-        vec![DRAFT, DRAFT, DRAFT, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY],
-    );
+    let mut scenario = Scenario::tmux(true, vec![DRAFT, DRAFT, DRAFT, EMPTY, EMPTY, EMPTY, EMPTY]);
     scenario.cancel_on = Some(("literal:", 1));
     let (ended, calls, streamed) = follow_up("p6a2-cleared", scenario);
     let cleared = [read(), owned(), read(), keys(&["C-e+C-u"]), read()].concat();
