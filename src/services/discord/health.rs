@@ -42,6 +42,16 @@ mod rebind_request;
 mod recovery;
 mod redaction;
 mod relay_auto_heal;
+// Await the existing periodic pass without spawning an unowned test task.
+#[cfg(test)]
+#[cfg(unix)]
+pub(crate) async fn run_orphan_token_auto_heal_pass_for_tests(
+    registry: &HealthRegistry,
+    provider: &ProviderKind,
+    runtimes: &[Arc<SharedData>],
+) -> usize {
+    relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, runtimes).await
+}
 pub(in crate::services::discord) use relay_auto_heal::relay_recovery_retry_delay_secs;
 mod relay_dead_reattach;
 mod relay_progress;

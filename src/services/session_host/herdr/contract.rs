@@ -270,6 +270,29 @@ pub(crate) fn mutation_result(
     }
 }
 
+/// A close ACK is not proof of physical exit; confirmation never grants a wider close.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CloseEffect {
+    Acknowledged,
+    NotSent(String),
+    Indeterminate(String),
+    ConfirmationRequired,
+}
+
+pub(crate) fn close_result(call: &HerdrCall, outcome: HerdrOutcome) -> CloseEffect {
+    match reply_result(call, outcome) {
+        Ok(HerdrResult::Ok) => CloseEffect::Acknowledged,
+        Err(Fault::Transport(HerdrTransportError::NotSent(message))) => {
+            CloseEffect::NotSent(message)
+        }
+        Err(Fault::Remote(body)) if body.code == "confirmation_required" => {
+            CloseEffect::ConfirmationRequired
+        }
+        Ok(other) => CloseEffect::Indeterminate(format!("unexpected result {other:?}")),
+        Err(fault) => CloseEffect::Indeterminate(format!("{:?}", HostError::from(fault))),
+    }
+}
+
 /// What a `workspace.create` left behind. Once the request may have reached the server
 /// only a typed root pane counts; anything else may still have made a workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]

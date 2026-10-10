@@ -366,6 +366,16 @@ fn return_rows(lease: &mut LedgerLease, host: &mut impl Host) -> io::Result<Outc
         }
         return Ok(Outcome::Held);
     }
+    // An open external input has no Legacy form, so nothing is handed back while one exists.
+    let external: Vec<u64> = (rows.open_rows().map(|(key, _)| key))
+        .filter(|key| super::input_key::is_external_key(*key))
+        .collect();
+    if !external.is_empty() {
+        for key in external {
+            host.notice(Some(key), "handback_external")?;
+        }
+        return Ok(Outcome::Held);
+    }
     let mut open: Vec<_> = rows.open_rows().collect();
     if open.iter().any(|(_, row)| row.received_seq.is_none()) {
         host.notice(None, "handback_order_unavailable")?;

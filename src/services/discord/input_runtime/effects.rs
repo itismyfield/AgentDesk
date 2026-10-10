@@ -155,8 +155,12 @@ impl Effects for ProdEffects {
 
     // Uploads are copied before the population guard is taken, so no file IO of the copy runs
     // under it; the guard exists only while the channel is in handback.
-    fn enqueue(&mut self, _key: u64, payload: &Value) -> io::Result<EnqueueOutcome> {
+    fn enqueue(&mut self, key: u64, payload: &Value) -> io::Result<EnqueueOutcome> {
         worker()?;
+        // An external input has no Legacy queue form; refused before any pin copy or guard.
+        if crate::services::tui_input::input_key::is_external_key(key) {
+            return Ok(EnqueueOutcome::Rejected);
+        }
         let clean = input_handback::without_pins(&self.root, self.deps.channel, payload)?;
         let guard = self
             .deps

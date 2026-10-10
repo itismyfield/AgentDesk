@@ -98,6 +98,69 @@ class SourceContractTests(unittest.TestCase):
 
 
 class RatchetDiscriminationTests(unittest.TestCase):
+    DECLARED_CLOSE_SITES = {
+        "src/services/session_host/herdr/model.rs": 2,
+        "src/services/session_host/herdr_gate.rs": 3,
+        "src/services/session_host/herdr_gate_tests.rs": 5,
+        "src/services/session_host/herdr_host_tests.rs": 5,
+    }
+
+    def test_declared_close_sites_pass_without_baseline_growth(self) -> None:
+        actual = empty_counts()
+        actual["host_terminate"] = dict(self.DECLARED_CLOSE_SITES)
+        self.assertEqual(ratchet.growth_errors(actual, empty_counts()), [])
+        self.assertEqual(ratchet.owner_only_errors(actual, empty_counts()), [])
+
+    def test_declared_close_sites_round_trip_without_becoming_baseline_owners(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for path, ceiling in self.DECLARED_CLOSE_SITES.items():
+                write(root, path, 'let method = "pane.close";\n' * ceiling)
+            write(root, ratchet.HOST_TERMINATE_OWNER, 'let method = "pane.close";\n')
+            actual, subcounts = ratchet.scan(root)
+            self.assertEqual(
+                actual["host_terminate"],
+                {**self.DECLARED_CLOSE_SITES, ratchet.HOST_TERMINATE_OWNER: 1},
+            )
+            path = root / "baseline.json"
+            ratchet.write_baseline(path, actual, subcounts, "a" * 40)
+            baseline, _ = ratchet.load_baseline(path)
+        self.assertEqual(ratchet.growth_errors(actual, baseline), [])
+        self.assertEqual(ratchet.owner_only_errors(actual, baseline), [])
+        self.assertEqual(baseline["host_terminate"], {ratchet.HOST_TERMINATE_OWNER: 1})
+
+    def test_new_close_site_is_red_at_one_spelling(self) -> None:
+        outside = "src/services/session_host/herdr/new_close.rs"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, outside, "let close = HerdrRequest::PaneClose;\n")
+            actual, _ = ratchet.scan(root)
+        self.assertEqual(actual["host_terminate"], {outside: 1})
+        growth = ratchet.growth_errors(actual, empty_counts())
+        ownership = ratchet.owner_only_errors(actual, empty_counts())
+        self.assertEqual(len(growth), 1)
+        self.assertEqual(len(ownership), 1)
+        self.assertIn("UNLISTED", growth[0])
+        self.assertIn(outside, ownership[0])
+
+    def test_declared_close_site_growth_is_red_even_if_baseline_lists_it(self) -> None:
+        for path, ceiling in self.DECLARED_CLOSE_SITES.items():
+            with self.subTest(path=path):
+                actual = empty_counts()
+                actual["host_terminate"] = {path: ceiling + 1}
+                pinned = empty_counts()
+                pinned["host_terminate"] = {path: ceiling + 1}
+                errors = ratchet.growth_errors(actual, pinned)
+                self.assertEqual(len(errors), 1)
+                self.assertIn(f"GROWTH in {path}", errors[0])
+
+    def test_declared_close_sites_match_real_source_counts(self) -> None:
+        measured = {
+            path: ratchet.host_terminate_count((ROOT / path).read_text(encoding="utf-8"))
+            for path in self.DECLARED_CLOSE_SITES
+        }
+        self.assertEqual(measured, self.DECLARED_CLOSE_SITES)
+
     MUTATIONS = {
         "tmux_kill": (
             "src/t3a4_probe.rs",

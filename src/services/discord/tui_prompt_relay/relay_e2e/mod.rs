@@ -15,6 +15,9 @@
 #[cfg(unix)]
 #[path = "busy_inject_e2e_tests.rs"]
 mod busy_inject_e2e;
+#[cfg(unix)]
+#[path = "cancel_backstop_e2e_tests.rs"]
+mod cancel_backstop_e2e;
 mod catch_up_pagination_e2e;
 mod consumed_command_guard_e2e;
 pub(in crate::services::discord) mod discord_mock;
@@ -23,6 +26,9 @@ mod n1a_turn_mode;
 #[path = "prompt_identity_e2e_tests.rs"]
 mod prompt_identity_e2e;
 mod queue_recovery_e2e;
+#[cfg(unix)]
+#[path = "reconcile_stale_turn_e2e_tests.rs"]
+mod reconcile_stale_turn_e2e;
 mod registered_bootstrap_e2e;
 mod stale_resume_retry_e2e;
 mod stop_command_catch_up_e2e;
@@ -220,6 +226,23 @@ impl RelayE2eHarness {
         let env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        Self::start_inner_with_env_lock(
+            stub,
+            with_health_registry,
+            storage,
+            bind_with_pool,
+            env_lock,
+        )
+        .await
+    }
+
+    pub(super) async fn start_inner_with_env_lock(
+        stub: ProviderStub,
+        with_health_registry: bool,
+        storage: impl std::future::Future<Output = Option<sqlx::PgPool>>,
+        bind_with_pool: bool,
+        env_lock: std::sync::MutexGuard<'static, ()>,
+    ) -> Self {
         let root = tempfile::tempdir().expect("isolated AgentDesk root");
         let root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",
