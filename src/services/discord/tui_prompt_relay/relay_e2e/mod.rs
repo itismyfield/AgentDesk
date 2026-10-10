@@ -226,6 +226,23 @@ impl RelayE2eHarness {
         let env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        Self::start_inner_with_env_lock(
+            stub,
+            with_health_registry,
+            storage,
+            bind_with_pool,
+            env_lock,
+        )
+        .await
+    }
+
+    pub(super) async fn start_inner_with_env_lock(
+        stub: ProviderStub,
+        with_health_registry: bool,
+        storage: impl std::future::Future<Output = Option<sqlx::PgPool>>,
+        bind_with_pool: bool,
+        env_lock: std::sync::MutexGuard<'static, ()>,
+    ) -> Self {
         let root = tempfile::tempdir().expect("isolated AgentDesk root");
         let root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",

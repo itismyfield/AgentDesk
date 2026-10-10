@@ -20,8 +20,29 @@ const HEAD: &str = "i6016 previous turn head already visible";
 const TAIL: &str = "i6016 previous turn undelivered tail";
 const CLAUDE: ProviderKind = ProviderKind::Claude;
 
+fn fixture_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn set_fixture_path(
+    _env_lock: &std::sync::MutexGuard<'static, ()>,
+    key: &'static str,
+    value: &Path,
+) -> crate::config::TestEnvVarGuard {
+    crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(key, value)
+}
+
 async fn harness() -> RelayE2eHarness {
-    let h = RelayE2eHarness::start_with_health_registry().await;
+    let h = RelayE2eHarness::start_inner_with_env_lock(
+        super::ProviderStub::Success,
+        true,
+        std::future::ready(None),
+        false,
+        fixture_env_lock(),
+    )
+    .await;
     h.register_channel_in_role_map();
     h.cache_relay_transport();
     h.shared
@@ -430,10 +451,7 @@ exit 0
             root.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let _path = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "PATH",
-            Path::new(&path),
-        );
+        let _path = set_fixture_path(&h._env_lock, "PATH", Path::new(&path));
         std::fs::write(root.join("pane"), "dead\n").unwrap();
         std::fs::write(root.join("idle-pane"), idle_pane("❯\u{a0}")).unwrap();
         Self { root, _path }
@@ -559,11 +577,9 @@ exit 0
             root.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let path_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "PATH",
-            Path::new(&path),
-        );
-        let interval = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        let path_guard = set_fixture_path(&h._env_lock, "PATH", Path::new(&path));
+        let interval = set_fixture_path(
+            &h._env_lock,
             "AGENTDESK_STATUS_INTERVAL_SECS",
             Path::new("0"),
         );
@@ -1174,12 +1190,18 @@ async fn cancelled_anchor_recovery_keeps_a_person_draft_and_q_until_lift_pg() {
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::claude_tui::{composer_lock, host_input::FakeDraftPane};
     let mut database = None;
-    let h = RelayE2eHarness::start_bound_on(async {
-        let fixture = TestPostgresDb::create().await;
-        let pool = fixture.connect_and_migrate().await;
-        database = Some(fixture);
-        pool
-    })
+    let h = RelayE2eHarness::start_inner_with_env_lock(
+        super::ProviderStub::Success,
+        false,
+        async {
+            let fixture = TestPostgresDb::create().await;
+            let pool = fixture.connect_and_migrate().await;
+            database = Some(fixture);
+            Some(pool)
+        },
+        true,
+        fixture_env_lock(),
+    )
     .await;
     let database = database.expect("an isolated mandatory PostgreSQL fixture");
     let pool = h.shared.pg_pool.clone().expect("actual PG-backed runtime");
@@ -1208,10 +1230,7 @@ async fn cancelled_anchor_recovery_keeps_a_person_draft_and_q_until_lift_pg() {
     let pane = ProbePane::new(&h, &tmux);
     pane.pane("idle");
     let home = h.root.path().join("claude-home");
-    let _home = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "CLAUDE_CONFIG_DIR",
-        &home,
-    );
+    let _home = set_fixture_path(&h._env_lock, "CLAUDE_CONFIG_DIR", &home);
     let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
         h.root.path(),
         super::SESSION_UUID,
