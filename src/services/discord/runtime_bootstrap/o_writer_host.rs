@@ -331,6 +331,60 @@ mod fence_tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::services::tui_o::shadow::ShadowProvider::Claude;
 
+    /// Delegates host facts while retaining HostIo's fail-closed intake fence default.
+    struct Unfenced<I: HostIo>(Arc<I>);
+
+    impl<I: HostIo> HostIo for Unfenced<I> {
+        type Port = I::Port;
+        type Lease = I::Lease;
+        type Alarms = I::Alarms;
+        type Bindings = I::Bindings;
+
+        fn port(&self) -> impl Future<Output = Arc<Self::Port>> + Send {
+            self.0.port()
+        }
+
+        fn lease(&self) -> Self::Lease {
+            self.0.lease()
+        }
+
+        fn alarms(&self) -> Self::Alarms {
+            self.0.alarms()
+        }
+
+        fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Self::Bindings> {
+            self.0.bindings(channel, provider)
+        }
+
+        fn activation_facts(
+            &self,
+            channel: u64,
+            provider: ShadowProvider,
+        ) -> impl Future<Output = Result<ActivationFacts, String>> + Send {
+            self.0.activation_facts(channel, provider)
+        }
+
+        fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<Custody, String> {
+            self.0.local_custody(channel, provider)
+        }
+
+        fn legacy(&self) -> Arc<dyn LegacyView> {
+            self.0.legacy()
+        }
+
+        fn legacy_busy(&self, channel: u64) -> impl Future<Output = bool> + Send {
+            self.0.legacy_busy(channel)
+        }
+
+        fn relaying(&self, channel: u64) -> bool {
+            self.0.relaying(channel)
+        }
+
+        fn adopted(&self, channel: u64, provider: ShadowProvider) {
+            self.0.adopted(channel, provider);
+        }
+    }
+
     #[tokio::test]
     async fn gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg() {
         let fixture = TestPostgresDb::create().await;
@@ -394,7 +448,9 @@ mod fence_tests {
     #[tokio::test]
     async fn a_host_without_an_intake_fence_refuses_deferred_activation_facts() {
         let host = crate::services::tui_o::writer::host::test_io::TestHost::new([]);
-        let result = host.intake_fence(673702, Claude).await;
+        let result = Unfenced(Arc::clone(&host))
+            .intake_fence(673702, Claude)
+            .await;
         assert!(matches!(result, Err(detail) if detail == "this host has no intake fence"));
         assert!(host.posts.to(673702).is_empty());
     }

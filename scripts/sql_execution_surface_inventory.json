@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "8bab58f86ac79f06647718e0361ba558749811cb",
+  "measured_at_sha": "6cb5f7bf9f1ae041909510081de3dc1aed8b279d",
   "records": [
     {
       "root": "migrations/postgres",
@@ -36865,6 +36865,96 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:c9c999b6df6f81794bf5fadfec307e91f7235eb23c19788cda7affe1f9e9c1a1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/writer/deferred_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d1762696412e442bf20d10a5f488feed99adcbed5a2b9fa469630e6fe958d87a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/writer/deferred_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2ab9d7ea96a043f371c859fcf00954ec690a7303b0974b010e07ea881744ea04"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/writer/deferred_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5ae61f25039fdb4819ad7c21eb64c60ec2ce3f17dad4ed0bbbdcbaca305cbd88"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/writer/deferred_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c9ba075ea613b230b2fa269bc6d837a19ebdd4bdf76bec4435db308afea6fe97"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/writer/deferred_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d434546c320b406b78b14a0cec40f317ff109377ea0a4a64dc0a9c727448be36"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/writer/deferred_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:df205f2b800454c507dbd9b083078fd5f99d871106ab5cd36e9fd5917699689d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/writer/deferred_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f6e23070b70c2b7b195b294b3eca057b1d158aa538156e699fd89ad10acb4755"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/writer/deferred_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f70976526e260c7c21644073646f7af1cdfe2090206ae047e716be6ffe6198a9"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/writer/deferred_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:fa300e6e508afa76e6055b3db2177c18caf1545e96f94e1a119c29e91cdf6062"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/writer/deferred_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:facd251a7e550bd54f58bd38c02f9e0396a95201eb90fa109dee180e290378d1"
     },
     {
       "root": "src",

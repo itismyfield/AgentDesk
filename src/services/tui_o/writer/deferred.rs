@@ -1,5 +1,5 @@
 //! A channel whose first adoption met an open turn, a record Legacy owes, its custody or a lagging
-//! cursor: O adopts once an idle Legacy owes nothing before O's start, or after `STALLED` behind.
+//! cursor: O adopts once an idle Legacy owes nothing, or at EOF after delivery stops progressing.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +10,7 @@ use super::AlarmSink;
 use super::activation;
 use super::adoption::{self, At, Hold, LegacyEpoch, LegacyView, ReadVersion, Refused, Snapshot};
 use super::binding::{BindingEvent, BindingEvents};
-use super::host::{Custody, HostIo, release, stop, until_owned};
+use super::host::{Custody, FencedFacts, HostIo, release, stop, until_owned};
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
@@ -22,9 +22,10 @@ const RETRY: Duration = Duration::from_secs(5);
 const QUIET: Duration = Duration::from_secs(10);
 /// How long a refusal with nothing cheaper to watch waits, unless the current source moves.
 const REREAD: Duration = Duration::from_secs(60);
-/// How long Legacy may stay behind a closed, quiet source before O starts past it: longer than
-/// Legacy's first redrive cycle, a threshold for giving up rather than proof Legacy is gone.
+/// No delivery progress for longer than Legacy's first redrive cycle permits an EOF handoff.
 const STALLED: Duration = Duration::from_secs(40 * 60);
+/// Frontier progress alone resets this cap, so failed sends or redrive churn cannot defer forever.
+const STALLED_HARD: Duration = Duration::from_secs(80 * 60);
 
 /// What a deferred channel's host retries with.
 pub(super) struct Waiting<'a, I: HostIo> {
@@ -99,17 +100,113 @@ pub(super) async fn pin(
     pinned.map_err(Refused::retry).and_then(|pinned| pinned)
 }
 
-/// Legacy behind a closed source since `since`, as `snapshot` and `epoch` read it then.
-struct Stall {
-    snapshot: Snapshot,
+/// Delivery progress, independent of transcript growth and Legacy's activity markers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Progress {
+    frontier: Option<u64>,
+    sends: (u64, u64),
     epoch: LegacyEpoch,
-    since: Instant,
 }
 
-impl Stall {
-    fn holds(&self, legacy: &dyn LegacyView, channel: u64) -> bool {
-        self.snapshot.unchanged(legacy, channel) && legacy.epoch(channel) == self.epoch
+impl Progress {
+    fn at<I: HostIo>(waiting: &Waiting<'_, I>, tmux: &str, eof: u64) -> Self {
+        Self {
+            frontier: waiting.legacy.frontier(waiting.channel, tmux, eof),
+            sends: waiting.candidate.sends(),
+            epoch: waiting.legacy.epoch(waiting.channel),
+        }
     }
+
+    fn read<I: HostIo>(
+        waiting: &Waiting<'_, I>,
+        current: Option<&(SourceId, String)>,
+    ) -> Option<Self> {
+        let (source, tmux) = current?;
+        let eof = std::fs::metadata(&source.path).ok()?.len();
+        let _adoption = waiting.candidate.lock();
+        Some(Self::at(waiting, tmux, eof))
+    }
+
+    fn in_flight(&self) -> bool {
+        activation::body_in_flight(self.sends)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StallKind {
+    Soft,
+    Hard,
+}
+
+impl StallKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Soft => "soft",
+            Self::Hard => "hard",
+        }
+    }
+}
+
+struct Clocks {
+    seen: Option<Progress>,
+    soft_since: Instant,
+    hard_since: Instant,
+}
+
+impl Clocks {
+    fn new(at: Instant, seen: Option<Progress>) -> Self {
+        Self {
+            seen,
+            soft_since: at,
+            hard_since: at,
+        }
+    }
+
+    fn observe(&mut self, now: Option<Progress>) {
+        let Some(now) = now else {
+            return;
+        };
+        if let Some(seen) = &self.seen {
+            let at = Instant::now();
+            if seen != &now {
+                self.soft_since = at;
+            }
+            if seen.frontier != now.frontier {
+                self.hard_since = at;
+            }
+        }
+        self.seen = Some(now);
+    }
+
+    fn expired(&self) -> Option<StallKind> {
+        if self.soft_since.elapsed() >= STALLED {
+            Some(StallKind::Soft)
+        } else if self.hard_since.elapsed() >= STALLED_HARD {
+            Some(StallKind::Hard)
+        } else {
+            None
+        }
+    }
+
+    fn elapsed(&self, kind: StallKind) -> Duration {
+        match kind {
+            StallKind::Soft => self.soft_since.elapsed(),
+            StallKind::Hard => self.hard_since.elapsed(),
+        }
+    }
+}
+
+fn events<I: HostIo>(waiting: &Waiting<'_, I>) -> Result<Vec<BindingEvent>, String> {
+    waiting
+        .log
+        .binding_events_since(waiting.channel, 0)
+        .map(super::renumbered::first_named)
+}
+
+fn latest_progress<I: HostIo>(waiting: &Waiting<'_, I>) -> Option<Progress> {
+    let events = events(waiting).ok()?;
+    let current = adoption::current(&events);
+    Progress::read(waiting, current.as_ref())
 }
 
 /// Retries until the channel commits (true) or is left to Legacy for good (false). `refused` is
@@ -118,15 +215,31 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
     let Waiting {
         io,
         channel,
-        provider,
         candidate,
         ..
     } = waiting;
     let alarms = io.alarms();
-    let (mut refused, mut seq, mut pinned_at) = (refused, seq, Instant::now());
+    let started = Instant::now();
+    #[cfg(test)]
+    if let Err(detail) =
+        activation::test_hook::run(channel, activation::test_hook::Step::DeferredStarted)
+    {
+        stop(candidate, &alarms, channel, &detail);
+        return false;
+    }
+    let mut clocks = Clocks::new(started, latest_progress(&waiting));
+    let mut last_logged = Some(refused.to_string());
+    let (mut refused, mut seq, mut pinned_at) = (refused, seq, started);
     let (mut quiet, mut read_at) = (Quiet::default(), None);
-    let mut stall: Option<Stall> = None;
-    'retry: loop {
+    let mut handoff_refused: Option<Refused> = None;
+    loop {
+        #[cfg(test)]
+        if let Err(detail) =
+            activation::test_hook::run(channel, activation::test_hook::Step::DeferredTick)
+        {
+            stop(candidate, &alarms, channel, &detail);
+            return false;
+        }
         tokio::time::sleep(RETRY).await;
         if candidate.peek() != Adoption::Deferred {
             stop(
@@ -138,172 +251,341 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
             return false;
         }
         until_owned(waiting.gate).await;
-        let Ok(events) = waiting.log.binding_events_since(channel, 0) else {
+        let Ok(observed) = events(&waiting) else {
             continue;
         };
-        let events = super::renumbered::first_named(events);
-        let current = adoption::current(&events);
+        let current = adoption::current(&observed);
         let version = current
             .as_ref()
             .and_then(|(source, _)| ReadVersion::of(&source.path));
+        clocks.observe(Progress::read(&waiting, current.as_ref()));
         let settled = quiet.settled(&version);
-        // A running clock is checked every tick so no Legacy activity slips past it; a stopped one
-        // is read again on the next quiet, idle tick, which may start a new one.
-        if let Some(clock) = &stall
-            && !(clock.holds(&*waiting.legacy, channel) && idle(&waiting, current.as_ref()).await)
-        {
-            (stall, read_at) = (None, None);
-            refused = Refused::retry("Legacy moved while O waited past it");
-        }
-        let moved = events.last().map_or(0, |event| event.seq) != seq;
-        let expired = stall
-            .as_ref()
-            .is_some_and(|clock| clock.since.elapsed() >= STALLED);
-        // A running clock needs no reread: it ends by expiring or by being stopped above.
-        let due = expired
-            || stall.is_none()
-                && match refused.hold {
-                    Hold::Retry => version != read_at || pinned_at.elapsed() >= REREAD,
-                    _ => refused.may_pass(&*waiting.legacy, channel),
-                };
-        if !settled || !(moved || due) || !idle(&waiting, current.as_ref()).await {
-            continue;
-        }
-        let facts = io.activation_facts(channel, provider).await;
-        if !matches!(waiting.gate.current(), GatewayOwnership::Owned { .. }) {
-            continue;
-        }
-        match facts
-            .as_ref()
-            .map(|facts| (facts.final_blocker(), facts.transient_blocker()))
-        {
-            Ok((Some(detail), _)) => {
+        let moved = observed.last().map_or(0, |event| event.seq) != seq;
+        let due = match &refused.hold {
+            Hold::Retry => version != read_at || pinned_at.elapsed() >= REREAD,
+            _ => refused.may_pass(&*waiting.legacy, channel),
+        };
+        if settled && (moved || due) && idle(&waiting, current.as_ref()).await {
+            if let Some(detail) = rotation(&waiting, &observed) {
                 release(candidate, &alarms, channel, &detail);
                 return false;
             }
-            Ok((None, None)) => {}
-            Ok((None, Some(_))) | Err(_) => {
-                if stall.take().is_some() {
-                    read_at = None;
-                    refused = Refused::retry("Legacy's intake moved while O waited past it");
-                }
-                continue;
+            seq = observed.last().map_or(0, |event| event.seq);
+            (pinned_at, read_at) = (Instant::now(), version);
+            let pinned = pin(
+                Arc::clone(&waiting.legacy),
+                Ok(observed),
+                channel,
+                At::Cursor,
+            )
+            .await;
+            let again = match pinned {
+                Ok(snapshot) => match snapshot.owed() {
+                    Some(again) => again,
+                    None => match commit(&waiting, &snapshot, None, None).await {
+                        Ok(()) => {
+                            committed(&waiting, &alarms, &snapshot);
+                            return true;
+                        }
+                        Err(again) => {
+                            clocks.observe(latest_progress(&waiting));
+                            again
+                        }
+                    },
+                },
+                Err(again) => again,
+            };
+            if leaves(&waiting, &alarms, &again) {
+                return false;
             }
+            note_wait(
+                channel,
+                &again,
+                &mut last_logged,
+                clocks.expired().is_some(),
+            );
+            refused = again;
         }
-        // Legacy may still owe output read from any other source bound since the deferral.
-        let (source, since) = &waiting.bound;
-        if let Some(rotated) = adoption::rotated(&events, *since, source) {
-            let path = rotated.path.display();
-            let detail = format!("source {path} was bound while the adoption waited");
+        if clocks.expired().is_none() {
+            continue;
+        }
+        // A failed normal commit may have changed a source; EOF handoff still waits for quiet.
+        let Ok(observed) = events(&waiting) else {
+            continue;
+        };
+        let current = adoption::current(&observed);
+        let version = current
+            .as_ref()
+            .and_then(|(source, _)| ReadVersion::of(&source.path));
+        clocks.observe(Progress::read(&waiting, current.as_ref()));
+        let Some(kind) = clocks.expired() else {
+            continue;
+        };
+        if !quiet.settled(&version) {
+            continue;
+        }
+        if handoff_refused.as_ref().is_some_and(|again| {
+            matches!(again.hold, Hold::OpenTurn(_) | Hold::Delivery { .. })
+                && !again.may_pass(&*waiting.legacy, channel)
+        }) {
+            continue;
+        }
+        let Some(token) = clocks.seen.clone() else {
+            continue;
+        };
+        if token.in_flight() {
+            let again = Refused::retry("Legacy body send in flight");
+            note_wait(channel, &again, &mut last_logged, true);
+            continue;
+        }
+        let relaxed = relaxed(&waiting, current.as_ref()).await;
+        if relay_blocks(Some(kind), relaxed.contains(&"relaying")) {
+            let again = Refused::retry("Legacy is relaying at the hard stall limit");
+            note_wait(channel, &again, &mut last_logged, true);
+            continue;
+        }
+        if let Some(detail) = rotation(&waiting, &observed) {
             release(candidate, &alarms, channel, &detail);
             return false;
         }
-        seq = events.last().map_or(0, |event| event.seq);
-        (pinned_at, read_at) = (Instant::now(), version);
-        // A stall that ran out is still checked under the lock, as Legacy may move before it.
-        let (snapshot, ended) = 'read: {
-            if expired && let Some(clock) = stall.take() {
+        let pinned = pin(Arc::clone(&waiting.legacy), Ok(observed), channel, At::End).await;
+        let snapshot = match pinned {
+            Ok(snapshot) => snapshot,
+            Err(again) => {
+                if leaves(&waiting, &alarms, &again) {
+                    return false;
+                }
+                note_wait(channel, &again, &mut last_logged, true);
+                handoff_refused = Some(again);
+                continue;
+            }
+        };
+        // An EOF repin may observe fresh output after this tick's quiet check.
+        let version_after_pin = current
+            .as_ref()
+            .and_then(|(source, _)| ReadVersion::of(&source.path));
+        if !quiet.settled(&version_after_pin) {
+            continue;
+        }
+        let activated = commit(&waiting, &snapshot, Some((&token, kind)), current.as_ref()).await;
+        match activated {
+            Ok(()) => {
                 tracing::info!(
                     channel,
-                    "[tui_o] Legacy stayed behind; O starts at the source's end"
+                    kind = kind.name(),
+                    stalled_secs = clocks.elapsed(kind).as_secs(),
+                    ?relaxed,
+                    "[tui_o] Legacy delivered nothing through the stall; O starts at the source's end"
                 );
-                break 'read (clock.snapshot, Some(clock.epoch));
+                committed(&waiting, &alarms, &snapshot);
+                return true;
             }
-            let legacy = Arc::clone(&waiting.legacy);
-            let pinned = pin(Arc::clone(&legacy), Ok(events.clone()), channel, At::Cursor).await;
-            // Legacy may still send a record past its frontier.
-            let (mut again, end) = match pinned {
-                Ok(snapshot) => match snapshot.owed() {
-                    None => break 'read (snapshot, None),
-                    Some(again) => (again, Some(Ok(snapshot))),
-                },
-                Err(again) if matches!(again.hold, Hold::Cursor { .. }) => {
-                    let end = pin(legacy, Ok(events), channel, At::End).await;
-                    (again, Some(end))
+            Err(again) => {
+                clocks.observe(latest_progress(&waiting));
+                if leaves(&waiting, &alarms, &again) {
+                    return false;
                 }
-                Err(again) => (again, None),
-            };
-            tracing::info!(channel, refused = %again, "[tui_o] deferred adoption still waits");
-            if again.hold == Hold::Final {
-                release(candidate, &alarms, channel, &again.to_string());
-                return false;
+                note_wait(channel, &again, &mut last_logged, true);
+                handoff_refused = Some(again);
             }
-            match end {
-                // Legacy behind a closed source starts the clock; a running one keeps its start.
-                Some(Ok(end)) if stall.is_none() && end.behind() => {
-                    let epoch = waiting.legacy.epoch(channel);
-                    let since = Instant::now();
-                    stall = Some(Stall {
-                        snapshot: end,
-                        epoch,
-                        since,
-                    });
-                }
-                // An open turn at the end is waited on until the source moves.
-                Some(Err(open)) if matches!(open.hold, Hold::OpenTurn(_)) => again = open,
-                _ => {}
-            }
-            refused = again;
-            continue 'retry;
-        };
-        stall = None;
+        }
+    }
+}
+
+/// Fresh facts, ownership and Legacy claims protect the entire synchronous init publication.
+async fn commit<I: HostIo>(
+    waiting: &Waiting<'_, I>,
+    snapshot: &Snapshot,
+    end: Option<(&Progress, StallKind)>,
+    current: Option<&(SourceId, String)>,
+) -> Result<(), Refused> {
+    let (io, channel, provider) = (waiting.io, waiting.channel, waiting.provider);
+    let GatewayOwnership::Owned { epoch: expected } = waiting.gate.current() else {
+        return Err(Refused::retry(
+            "gateway ownership changed before O activation",
+        ));
+    };
+    #[cfg(test)]
+    activation::test_hook::run(channel, activation::test_hook::Step::BeforeFence)
+        .map_err(Refused::retry)?;
+    let fence_sends = {
+        let _adoption = waiting.candidate.lock();
+        waiting.candidate.sends()
+    };
+    let FencedFacts {
+        hold,
+        facts,
+        queued_bodies,
+    } = io
+        .intake_fence(channel, provider)
+        .await
+        .map_err(Refused::retry)?;
+    let activated = (|| {
+        #[cfg(test)]
+        activation::test_hook::run(channel, activation::test_hook::Step::AfterFence)
+            .map_err(Refused::retry)?;
+        if let Some(detail) = facts.final_blocker() {
+            return Err(Refused::new(Hold::Final, detail));
+        }
+        if let Some(detail) = facts.transient_blocker() {
+            return Err(Refused::retry(detail));
+        }
+        if queued_bodies != 0 {
+            return Err(Refused::retry(format!(
+                "{queued_bodies} queued Legacy bodies"
+            )));
+        }
         let mut rechecked = None;
         let sources = || {
-            let legacy = &*waiting.legacy;
-            let moved = ended.as_ref().is_some_and(|epoch| {
-                !snapshot.unchanged(legacy, channel) || legacy.epoch(channel) != *epoch
-            });
-            let sources = if moved {
-                Err(Refused::retry("Legacy moved before O took the channel"))
-            } else {
-                snapshot.recheck(legacy, waiting.log, channel)
-            };
-            sources.map_err(|refused| {
-                let detail = refused.to_string();
-                rechecked = Some(refused);
+            let sources = (|| {
+                if waiting.candidate.sends() != fence_sends {
+                    return Err(Refused::retry(
+                        "Legacy body send changed while O fenced activation",
+                    ));
+                }
+                if let Some((token, _)) = end {
+                    let (_, tmux) = current.ok_or_else(|| {
+                        Refused::retry("no current source to recheck Legacy progress")
+                    })?;
+                    let now = Progress::at(waiting, tmux, snapshot.start());
+                    if now.in_flight() || now.sends.0 != token.sends.0 {
+                        return Err(Refused::retry(
+                            "Legacy body send in flight or newly started",
+                        ));
+                    }
+                    if &now != token {
+                        return Err(Refused::retry("Legacy moved before O took the channel"));
+                    }
+                    snapshot.recheck_past_stall(&*waiting.legacy, waiting.log, channel)
+                } else {
+                    snapshot.recheck(&*waiting.legacy, waiting.log, channel)
+                }
+            })();
+            sources.map_err(|again| {
+                let detail = again.to_string();
+                rechecked = Some(again);
                 detail
             })
         };
         let local = || {
             let custody = io.local_custody(channel, provider)?;
-            Ok(custody == Custody::Active || io.relaying(channel))
+            Ok((end.is_none() && custody == Custody::Active)
+                || relay_blocks(end.map(|(_, kind)| kind), io.relaying(channel)))
         };
-        let activated =
-            activation::activate_with(waiting.store, channel, facts, local, candidate, sources);
-        let detail = match activated {
-            Ok(()) => {
-                if let Some(alarm) = snapshot.abandoned() {
-                    tracing::info!(
+        let result = waiting
+            .gate
+            .admit(|epoch| {
+                (epoch == expected).then(|| {
+                    activation::activate_with(
+                        waiting.store,
                         channel,
-                        ?alarm,
-                        "[tui_o] adopted past Legacy's stalled records"
-                    );
-                    alarms.raise(channel, alarm);
-                }
-                tracing::info!(channel, "[tui_o] deferred adoption committed");
-                return true;
-            }
-            Err(detail) => detail,
-        };
-        if candidate.peek() != Adoption::Deferred {
-            stop(
-                candidate,
-                &alarms,
-                channel,
-                &format!("first activation: {detail}"),
-            );
-            return false;
+                        Ok(facts),
+                        local,
+                        waiting.candidate,
+                        sources,
+                    )
+                })
+            })
+            .flatten();
+        match result {
+            Some(Ok(())) => Ok(()),
+            Some(Err(detail)) => Err(rechecked.unwrap_or_else(|| Refused::retry(detail))),
+            None => Err(Refused::retry(
+                "gateway ownership changed before O activation",
+            )),
         }
-        tracing::info!(channel, detail, "[tui_o] deferred adoption still waits");
-        refused = match rechecked {
-            Some(again) if again.hold == Hold::Final => {
-                release(candidate, &alarms, channel, &again.to_string());
-                return false;
-            }
-            Some(again) => again,
-            None => Refused::retry(detail),
-        };
+    })();
+    if let Err(error) = hold.release().await {
+        tracing::warn!(channel, %error, "[tui_o] intake fence rollback failed");
     }
+    activated
+}
+
+// Hard expiry retains the relay slot through locked activation; soft expiry may pass it.
+fn relay_blocks(kind: Option<StallKind>, relaying: bool) -> bool {
+    relaying && kind != Some(StallKind::Soft)
+}
+
+fn rotation<I: HostIo>(waiting: &Waiting<'_, I>, events: &[BindingEvent]) -> Option<String> {
+    let (source, since) = &waiting.bound;
+    let rotated = adoption::rotated(events, *since, source)?;
+    Some(format!(
+        "source {} was bound while the adoption waited",
+        rotated.path.display()
+    ))
+}
+
+fn leaves<I: HostIo>(waiting: &Waiting<'_, I>, alarms: &I::Alarms, again: &Refused) -> bool {
+    if waiting.candidate.peek() != Adoption::Deferred {
+        stop(
+            waiting.candidate,
+            alarms,
+            waiting.channel,
+            &format!("first activation: {again}"),
+        );
+        return true;
+    }
+    if again.hold == Hold::Final {
+        release(
+            waiting.candidate,
+            alarms,
+            waiting.channel,
+            &again.to_string(),
+        );
+        return true;
+    }
+    false
+}
+
+fn note_wait(channel: u64, again: &Refused, last: &mut Option<String>, stalled: bool) {
+    let detail = again.to_string();
+    if last.as_ref() != Some(&detail) {
+        if stalled {
+            tracing::info!(channel, refused = %again, "[tui_o] stalled adoption still waits");
+        } else {
+            tracing::info!(channel, refused = %again, "[tui_o] deferred adoption still waits");
+        }
+        *last = Some(detail);
+    }
+}
+
+fn committed<I: HostIo>(waiting: &Waiting<'_, I>, alarms: &I::Alarms, snapshot: &Snapshot) {
+    if let Some(alarm) = snapshot.abandoned() {
+        tracing::info!(
+            channel = waiting.channel,
+            ?alarm,
+            "[tui_o] adopted past Legacy's stalled records"
+        );
+        alarms.raise(waiting.channel, alarm);
+    }
+    tracing::info!(
+        channel = waiting.channel,
+        "[tui_o] deferred adoption committed"
+    );
+}
+
+async fn relaxed<I: HostIo>(
+    waiting: &Waiting<'_, I>,
+    current: Option<&(SourceId, String)>,
+) -> Vec<&'static str> {
+    let (io, channel) = (waiting.io, waiting.channel);
+    let mut markers = Vec::new();
+    if current.is_some_and(|(_, tmux)| waiting.legacy.tail_running(tmux)) {
+        markers.push("tail");
+    }
+    if matches!(
+        io.local_custody(channel, waiting.provider),
+        Ok(Custody::Active)
+    ) {
+        markers.push("custody");
+    }
+    if io.legacy_busy(channel).await {
+        markers.push("busy");
+    }
+    if io.relaying(channel) {
+        markers.push("relaying");
+    }
+    markers
 }
 
 /// Legacy holds nothing for the channel: no tail, active custody, mailbox work or emission. An

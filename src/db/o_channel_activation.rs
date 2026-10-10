@@ -9,9 +9,12 @@ pub struct IntakeFence {
     _transaction: Option<Transaction<'static, Postgres>>,
 }
 
-// Explicit release is exercised by tests until deferred activation starts using the fence.
-#[cfg(test)]
 impl IntakeFence {
+    #[cfg(test)]
+    pub(crate) fn empty_for_test() -> Self {
+        Self { _transaction: None }
+    }
+
     pub async fn release(mut self) -> Result<(), sqlx::Error> {
         if let Some(transaction) = self._transaction.take() {
             transaction.rollback().await?;
