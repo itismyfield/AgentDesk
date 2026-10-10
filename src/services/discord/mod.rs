@@ -74,6 +74,13 @@ pub(crate) mod response_sanitizer;
 mod session_banner;
 #[cfg(unix)]
 mod session_relay_sink;
+#[cfg(unix)]
+pub(crate) use session_relay_sink::journal::append_exact_metadata;
+#[cfg(all(test, unix))]
+pub(crate) use session_relay_sink::journal::{
+    exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt,
+    exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged,
+};
 mod sidecar_interaction;
 // #2011 Phase 5.3: standalone JSONL → Discord relay loop on cluster-standby nodes (leader uses tmux_watcher's relay path).
 #[cfg(unix)]

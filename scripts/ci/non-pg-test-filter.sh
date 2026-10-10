@@ -40,7 +40,6 @@ NON_PG_SKIP_ARGS=(
   --skip db::intake_outbox_delivery_proof::tests
   --skip db::intake_outbox_dispatch_stamp::tests
   --skip db::intake_outbox_dispatched_audit::postgres_tests
-  --skip db::o_channel_activation::fence_tests
   --skip db::o_channel_activation::postgres_tests
   --skip db::o_channel_homes::tests
   --skip db::postgres::advisory_lock::tests
@@ -188,7 +187,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_sweep::tests
-  --skip services::discord::runtime_bootstrap::o_writer_host::fence_tests
   --skip services::discord::session_idle_cleanup::tests
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   --skip services::discord::task_notification_delivery::tests
@@ -253,6 +251,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::stale_turn_reconciler::tests
   --skip services::tmux_turn_liveness::tests_pg
   --skip services::tui_o::alarm::postgres_tests
+  --skip services::tui_o::exact_pg::tests
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
@@ -604,7 +603,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_cutoffs_do_not_panic_for_extreme_values
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_spawns_exactly_once_per_process
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_task_can_restart_after_task_death
-  services::discord::runtime_bootstrap::o_writer_host::fence_tests::a_host_without_an_intake_fence_refuses_deferred_activation_facts
+  services::discord::session_relay_sink::journal::pg_store::mixed_tests::mixed_strict_rows_leave_legacy_fold_frontier_and_shadow_bytes_unchanged
   services::discord::session_relay_sink::journal::pg_store::tests::stored_journal_event_mapping_is_closed_and_fail_closed
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reconcile_noop_when_db_matches_tmux
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reconcile_prefers_live_tmux_over_divergent_db_cwd
@@ -772,6 +771,9 @@ NON_PG_FILTER_REPLAY=(
   services::settings::tests::settings_response_dtos_serialize_existing_contract_fields
   services::settings::tests::settings_write_response_serializes_ok_contract
   services::stale_turn_reconciler::tests::tmux_identity_rejects_provider_mismatch_and_spinner_is_busy
+  services::tui_o::exact_pg::tests::exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt
+  services::tui_o::exact_pg::tests::exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged
+  services::tui_o::exact_pg::tests::exact_snapshot_sibling_construction_is_compile_rejected
   services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
   services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
@@ -820,7 +822,6 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::intake_outbox_delivery_proof::tests
   db::intake_outbox_dispatch_stamp::tests
   db::intake_outbox_dispatched_audit::postgres_tests
-  db::o_channel_activation::fence_tests
   db::o_channel_activation::postgres_tests
   db::o_channel_homes::tests
   db::postgres::advisory_lock::tests
@@ -968,7 +969,6 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
   services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests
-  services::discord::runtime_bootstrap::o_writer_host::fence_tests
   services::discord::session_idle_cleanup::tests
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   services::discord::task_notification_delivery::tests
@@ -1033,6 +1033,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::stale_turn_reconciler::tests
   services::tmux_turn_liveness::tests_pg
   services::tui_o::alarm::postgres_tests
+  services::tui_o::exact_pg::tests
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests
   voice::announce_meta::tests

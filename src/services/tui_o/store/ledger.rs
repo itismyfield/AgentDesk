@@ -17,6 +17,9 @@ use crate::services::tui_o::shadow::{SourceId, UnitKey};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LedgerEntry {
+    ExactEvidence {
+        metadata: Box<crate::services::tui_o::exact_episode::EpisodeMetadata>,
+    },
     /// Written before the POST; `epoch` is the gateway ownership the POST was admitted under.
     Prepared {
         serial: u64,
@@ -104,6 +107,7 @@ pub struct LedgerState {
     gc: HashMap<SourceId, Vec<(u64, u64)>>,
     resolved: HashMap<SourceId, u64>,
     violation: Option<String>,
+    exact_evidence: Vec<crate::services::tui_o::exact_episode::EpisodeMetadata>,
 }
 
 impl LedgerState {
@@ -165,6 +169,12 @@ impl LedgerState {
 
     pub(super) fn apply(&mut self, at: DateTime<Utc>, entry: LedgerEntry) {
         match entry {
+            LedgerEntry::ExactEvidence { metadata } => {
+                if !metadata.supported() {
+                    self.violate("unsupported exact ledger evidence".into());
+                }
+                self.exact_evidence.push(*metadata);
+            }
             LedgerEntry::Prepared {
                 serial,
                 unit_key,
@@ -423,6 +433,30 @@ fn replay(
 mod tests {
     use super::*;
     use crate::services::tui_o::shadow::{ShadowProvider, UnitKind};
+
+    #[test]
+    fn exact_evidence_ledger_replays_without_changing_legacy_frontier() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        std::fs::File::create(&path).unwrap();
+        let metadata = crate::services::tui_o::exact_episode::tests::fixture().remove(4);
+        let before = LedgerState::default();
+        append(
+            &path,
+            Utc::now(),
+            &LedgerEntry::ExactEvidence {
+                metadata: Box::new(metadata.clone()),
+            },
+        )
+        .unwrap();
+        let replay = recover(&path, 0).unwrap();
+        assert_eq!(replay.exact_evidence, vec![metadata]);
+        assert_eq!(
+            (replay.anchor(), replay.next_serial(), replay.unresolved()),
+            (before.anchor(), before.next_serial(), before.unresolved())
+        );
+        assert_eq!(replay.violation(), None);
+    }
 
     fn prepared(serial: u64, anchor_id: u64) -> LedgerEntry {
         let (provider, kind) = (ShadowProvider::Codex, UnitKind::Body);

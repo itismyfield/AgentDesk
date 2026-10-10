@@ -287,6 +287,7 @@ JOURNAL_FACADE_CALL = re.compile(
     r"|\bunix_journal::(?:begin_controller_terminal|settle_controller_terminal)\s*\("
     r"|\bunix_journal::(?:begin_recovery_terminal|settle_recovery_terminal)\s*\("
 )
+EXACT_METADATA_FACADES = {"src/services/tui_o/exact_pg.rs": 1}
 UNINSTRUMENTED_FAMILY_BASELINE = 0
 # Printed on every run, pass or fail. It exists because `0/5` reads like "done"
 # and is not: see the S6 block above for the five named production writers this
@@ -300,6 +301,24 @@ ANCHOR_SCOPE_CAVEAT = (
     "dormant outbound/turn_output_controller/fresh_send.rs), all five pinned per file "
     "and per count by scripts/check_durable_frontier_writer_call_sites.py"
 )
+
+
+def exact_facade_error(root: Path) -> str:
+    registry = EXACT_METADATA_FACADES
+    expected = {"src/services/tui_o/exact_pg.rs": 1}
+    if registry != expected:
+        return "strict metadata facade registry drift"
+    actual = {}
+    for path in root.glob("src/**/*.rs"):
+        if path.name.endswith("_tests.rs"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        if path.as_posix().endswith("journal/pg_store.rs"):
+            text = text.split("#[cfg(test)]",1)[0]
+        count = len(re.findall(r"discord::append_exact_metadata\s*\(", text))
+        if count:
+            actual[path.relative_to(root).as_posix()] = count
+    return "" if actual == registry else f"strict metadata facade count drift: {actual}"
 
 
 def call_sites(root: Path) -> tuple[Counter[str], int]:
@@ -339,6 +358,9 @@ def check(root: Path) -> tuple[bool, str]:
     total = sum(found.values())
     if total > BASELINE:
         return False, f"raw writer call count {total} exceeds monotonic baseline {BASELINE}: {dict(found)} (scanned Rust files: {scanned_files})"
+    facade_error = exact_facade_error(root)
+    if facade_error:
+        return False, facade_error
     if found != ALLOWLIST:
         return False, f"raw writer allowlist mismatch: expected={dict(ALLOWLIST)} actual={dict(found)} (scanned Rust files: {scanned_files})"
     uninstrumented = [name for name, instrumented in families if not instrumented]
