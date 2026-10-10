@@ -1764,11 +1764,6 @@ src/
 │   │   │   │   └── production_seam_tests.rs
 │   │   │   ├── intake_settlement/
 │   │   │   │   └── tests.rs
-│   │   │   ├── replay_policy/
-│   │   │   │   ├── live.rs
-│   │   │   │   ├── permit.rs
-│   │   │   │   ├── permit_tests.rs
-│   │   │   │   └── policy_tests.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs

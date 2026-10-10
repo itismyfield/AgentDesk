@@ -32585,15 +32585,6 @@
     {
       "root": "src",
       "kind": "RUST",
-      "path": "src/services/discord/turn_bridge/replay_policy/policy_tests.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:0f77d8411e99f109a39604a9251412a763089d00e1ce8a5edc33f6c94e00829f"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
       "path": "src/services/discord/turn_bridge/resume_pin_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
