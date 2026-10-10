@@ -675,6 +675,12 @@ src/
 │   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
+│   │   │   ├── s3_real_tests/
+│   │   │   │   ├── drain_pg_tests.rs
+│   │   │   │   ├── force_pg_tests.rs
+│   │   │   │   ├── harness_tests.rs
+│   │   │   │   ├── mod.rs
+│   │   │   │   └── route_pg_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
 │   │   │   ├── home_accept_tests.rs
@@ -759,7 +765,8 @@ src/
 │   │   │   ├── composer_content.rs
 │   │   │   ├── composer_lock.rs
 │   │   │   ├── composer_status.rs
-│   │   │   └── inline_banner.rs
+│   │   │   ├── inline_banner.rs
+│   │   │   └── submission.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── parser/
 │   │   │   │   ├── herdr_replay.rs
@@ -921,7 +928,8 @@ src/
 │   │   │   │   ├── stop_result.rs
 │   │   │   │   └── watchdog_decisions.rs
 │   │   │   ├── relay_auto_heal/
-│   │   │   │   └── orphan_token_tests.rs
+│   │   │   │   ├── orphan_token_tests.rs
+│   │   │   │   └── retired_redrive_tests.rs
 │   │   │   ├── snapshot/
 │   │   │   │   └── relay_probe.rs
 │   │   │   ├── stall_liveness/
@@ -1793,6 +1801,7 @@ src/
 │   │   │   │   ├── stop_host.rs
 │   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs
+│   │   │   ├── before_start_stop.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
 │   │   │   ├── bridge_entry_persist.rs
@@ -2219,6 +2228,7 @@ src/
 │   │   ├── cancel_token_cleanup.rs
 │   │   ├── cancel_watchdog.rs
 │   │   ├── channel_rules.rs
+│   │   ├── herdr_before_start.rs
 │   │   ├── output_reader.rs
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
@@ -2360,8 +2370,12 @@ src/
 │   │   │   ├── pane/
 │   │   │   │   ├── ownership.rs
 │   │   │   │   └── ownership_tests.rs
+│   │   │   ├── busy_tests.rs
+│   │   │   ├── capability.rs
 │   │   │   ├── gate.rs
 │   │   │   ├── pane.rs
+│   │   │   ├── resume.rs
+│   │   │   ├── resume_actor_tests.rs
 │   │   │   ├── token.rs
 │   │   │   └── witness.rs
 │   │   ├── actor.rs
@@ -2378,6 +2392,8 @@ src/
 │   │   ├── receipt_identity.rs
 │   │   ├── rows.rs
 │   │   ├── rows_tests.rs
+│   │   ├── submission.rs
+│   │   ├── submission_tmux.rs
 │   │   ├── transition.rs
 │   │   ├── transition_fixture_tests.rs
 │   │   └── transition_tests.rs
@@ -2491,6 +2507,10 @@ src/
 │   │   ├── exact_pg.rs
 │   │   ├── exact_pg_tests.rs
 │   │   ├── exact_submission.rs
+│   │   ├── gates_m1.rs
+│   │   ├── gates_m1_compact_tests.rs
+│   │   ├── gates_m1_spool_tests.rs
+│   │   ├── gates_m1_support.rs
 │   │   ├── ownership.rs
 │   │   ├── shadow_host.rs
 │   │   ├── topology.rs

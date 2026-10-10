@@ -198,9 +198,9 @@ enum Expect {
 /// The two phases run in different processes; the persisted bytes outlive token and registry state.
 #[tokio::test(flavor = "current_thread")]
 async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
-    use NativeTerminalKind::{Aborted, Completed};
     if std::env::var("ADK_ACT7_PHASE").is_err() {
         let root = tempfile::tempdir().unwrap();
+        let root_guard = crate::config::set_agentdesk_root_for_test(root.path());
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         pool.close().await;
@@ -208,6 +208,28 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
             ("ADK_ACT7_ROOT", root.path().as_os_str()),
             ("ADK_ACT7_DB", std::ffi::OsStr::new(&db.database_url)),
         ];
+        if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
+            "restart_in_process",
+        ) {
+            // Exercise the same phases without the subprocess boundary, retaining the real actor.
+            let pool = db.connect_and_migrate().await;
+            let shared = shared_on(&pool).await;
+            let mut phase = Phase {
+                name: "PERSIST".into(),
+                root: root.path().into(),
+                _root: root_guard,
+                _legacy_output: crate::services::tui_o::cutover::test_override::force_channels(&[]),
+                pool,
+                shared,
+                provider: ProviderKind::Claude,
+            };
+            restart_cases(&phase).await;
+            phase.name = "RESTORE".into();
+            restart_cases(&phase).await;
+            phase.close(RESTART_CASES).await;
+            db.drop().await;
+            return;
+        }
         let persist = run_phase(FILTER, "PERSIST", "ACT7_PHASE PERSIST", &env);
         let restore = run_phase(FILTER, "RESTORE", "ACT7_PHASE RESTORE", &env);
         assert_ne!(persist, restore);
@@ -215,6 +237,15 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
         return;
     }
     let phase = Phase::open().await.unwrap();
+    restart_cases(&phase).await;
+    phase.close(RESTART_CASES).await;
+}
+
+const RESTART_CASES: usize = 15;
+
+#[cfg(test)]
+async fn restart_cases(phase: &Phase) {
+    use NativeTerminalKind::{Aborted, Completed};
     let stored_body = |n| -> &'static str { Box::leak(stored(n).into_boxed_str()) };
     // (kind, expectation): 3 Aborted, 4 Completed with a stored body, 7 a recorded delivery,
     // 8 a completion with no stored body, 9 a planned restart, 10 an un-anchored Aborted.
@@ -230,7 +261,12 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
         (Some(Completed), Expect::Kept),
         (Some(Aborted), Expect::Kept),
         (Some(Aborted), Expect::Settled(ADMITTED_ABORT_NOTICE)),
+        (None, Expect::Held), // Cold intent before any input or own-start.
+        (None, Expect::Held), // Source inode replaced after persistence.
+        (None, Expect::Held), // No source baseline was admitted.
+        (None, Expect::Held), // Source absent and mailbox not reconstructed.
     ];
+    assert_eq!(cases.len(), RESTART_CASES);
     let mut guards = Vec::new();
     for (n, (kind, _)) in cases.into_iter().enumerate() {
         let channel = ChannelId::new(BASE + n as u64);
@@ -257,7 +293,10 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
                             crate::services::discord::InflightRestartMode::DrainRestart,
                         );
                     }
-                    if n == 10 {
+                    if n == 13 || n == 14 {
+                        row.output_path = None;
+                    }
+                    if n == 0 || n == 10 {
                         row.current_msg_id = 0;
                     }
                 })
@@ -271,14 +310,35 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
                 runtime_root: phase.root.display().to_string(),
             };
             let intent = token.prepare_herdr_interrupt(phase.provider.clone(), &owner);
-            intent.submission.lock().unwrap().submission = if n == 2 {
+            intent.submission.lock().unwrap().submission = if n == 11 {
+                HerdrSubmission::Unsubmitted
+            } else if n == 2 {
                 HerdrSubmission::Unknown
             } else {
                 HerdrSubmission::Submitted
             };
-            intent.user_stop.store(n < 3, Ordering::Release);
+            intent.user_stop.store(n < 3 || n == 11, Ordering::Release);
+            if n == 1 || n == 2 {
+                token.bind_claude_tmux_session(&name);
+                assert!(token.claim_claude_interrupt());
+                let guard = token.lock_current_claude_interrupt_session(&name);
+                guard
+                    .expect("the seeded turn owns its delivery")
+                    .commit_success(Ok::<_, String>(()))
+                    .unwrap();
+                assert!(
+                    !token.claim_claude_interrupt(),
+                    "Sent and Indeterminate spend the claim"
+                );
+            }
+            if n == 5 {
+                let mut legacy: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(phase.path(channel)).unwrap()).unwrap();
+                legacy.as_object_mut().unwrap().remove("tui_terminal_kind");
+                std::fs::write(phase.path(channel), serde_json::to_vec(&legacy).unwrap()).unwrap();
+            }
             let row = phase.durable(channel).unwrap();
-            if n == 2 {
+            if kind.is_none() {
                 crate::services::claude::herdr_turn::hold(&row.turn_nonce.clone().unwrap())
                     .unwrap();
             }
@@ -286,38 +346,70 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
             if n == 6 {
                 std::fs::write(phase.root.join(format!("{}.jsonl", channel.get())), "").unwrap();
             }
+            if n == 12 {
+                let source = phase.root.join(format!("{}.jsonl", channel.get()));
+                let old = std::fs::metadata(&source).unwrap();
+                let replacement = phase.root.join("replacement.jsonl");
+                std::fs::write(&replacement, body(n)).unwrap();
+                std::fs::rename(&replacement, &source).unwrap();
+                assert_ne!(
+                    crate::services::tui_o::shadow::capture::file_identity(&old),
+                    crate::services::tui_o::shadow::capture::file_identity(
+                        &std::fs::metadata(&source).unwrap()
+                    ),
+                );
+            }
+            if n == 14 {
+                std::fs::remove_file(phase.root.join(format!("{}.jsonl", channel.get()))).unwrap();
+            }
+            let source = phase.root.join(format!("{}.jsonl", channel.get()));
+            if source.exists() {
+                std::fs::write(
+                    phase.root.join(format!("{n}.source-before")),
+                    std::fs::read(&source).unwrap(),
+                )
+                .unwrap();
+            }
             assert!(token.herdr_interrupt_state().is_some());
+            if n == 11 {
+                assert_eq!(
+                    intent.submission.lock().unwrap().submission,
+                    HerdrSubmission::Unsubmitted
+                );
+                assert!(intent.user_stop.load(Ordering::Acquire));
+                assert!(intent.turn_start.get().is_none());
+                assert!(intent.seen_turn_id().is_none());
+                assert!(token.claim_claude_interrupt());
+                assert!(token.release_claude_interrupt_claim());
+            }
         } else {
             assert!(
                 phase.shared.mailbox_peek(channel).is_none(),
                 "a process restart has no warm mailbox"
             );
-            if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
-                "restart_in_process",
-            ) {
-                phase
-                    .shared
-                    .mailbox(channel)
-                    .restore_active_turn(
-                        Arc::new(crate::services::provider::CancelToken::new()),
-                        serenity::all::UserId::new(7),
-                        serenity::all::MessageId::new(channel.get() + 1),
-                    )
-                    .await;
-                assert!(
-                    phase.shared.mailbox_peek(channel).is_none(),
-                    "an in-process restart retains its mailbox"
-                );
-            }
         }
     }
     if phase.name == "RESTORE" {
+        let rig = crate::services::session_host::herdr_socket_rig_tests::HerdrRig::start();
+        let _registry = rig.registry_on_this_thread();
         let discord = phase.restore().await;
+        assert!(
+            rig.sends().is_empty(),
+            "restart must not replay Escape or another input"
+        );
+        let mut lost_holds = Vec::new();
         for (n, (kind, expect)) in cases.into_iter().enumerate() {
             let channel = ChannelId::new(BASE + n as u64);
             let shown = written(&discord, channel);
             let before = std::fs::read(phase.root.join(format!("{n}.before"))).unwrap();
             let case = format!("case={n} kind={kind:?} expect={expect:?} shown={shown:?}");
+            if expect == Expect::Held
+                && (!shown.is_empty()
+                    || std::fs::read(phase.path(channel)).ok().as_ref() != Some(&before))
+            {
+                lost_holds.push(case.clone());
+                continue;
+            }
             assert!(
                 shown.iter().all(|text| !text.contains(&body(n))),
                 "{case}: a transcript result is never the restart terminal"
@@ -344,6 +436,13 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
                     );
                 }
             }
+            let source = phase.root.join(format!("{}.jsonl", channel.get()));
+            let source_before = phase.root.join(format!("{n}.source-before"));
+            assert_eq!(
+                std::fs::read(source).ok(),
+                std::fs::read(source_before).ok(),
+                "{case}: source cursor evidence stays unchanged"
+            );
             if expect != Expect::Held {
                 continue;
             }
@@ -357,7 +456,7 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
                     .contains_key(&channel)
             );
             assert!(phase.shared.mailbox_peek(channel).is_none());
-            if n == 2 {
+            {
                 let row = phase.durable(channel).unwrap();
                 assert!(
                     crate::services::claude::herdr_turn::not_held(
@@ -367,9 +466,12 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
                 );
             }
         }
+        assert!(
+            lost_holds.is_empty(),
+            "restart lost hold effects: {lost_holds:?}"
+        );
     }
     drop(guards);
-    phase.close(cases.len()).await;
 }
 
 /// A restart that stops right after its delivery ack leaves the ack durable; the next process
