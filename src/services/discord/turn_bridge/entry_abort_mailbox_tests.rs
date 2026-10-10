@@ -388,6 +388,186 @@ async fn herdr_stop_case(channel_id: u64, stopped: bool) -> (BridgeCompletionSig
     (signal, holds, row.is_some())
 }
 
+/// How a cold Herdr turn reached the bridge exit.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cold {
+    /// The actual provider launch failed before any input; the user stop came after (input first).
+    FailedThenStop,
+    /// The user stop came first; the actual execution closed before any input (stop first).
+    StopThenClosed,
+    /// Input may have been written, then the user stop came.
+    WrittenThenStop,
+    /// Submitted or Unknown: an Escape may be sent but its ACK was not recorded.
+    SubmittedThenStop(crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission),
+    /// A stop with no input evidence at all (no execution ran): no proof.
+    StopWithoutEvidence,
+    /// A no-attempt exit whose stop lands inside the exit seal, after its one observation.
+    StopAfterSeal,
+}
+
+/// A cold user stop on an unsubmitted Herdr turn ends at the actual bridge exit: a sealed
+/// before-start proof settles mailbox, row and accounting; any turn without the proof stays held.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn herdr_cold_stop_settles_only_with_a_before_start_proof() {
+    use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    for (index, cold) in [
+        Cold::FailedThenStop,
+        Cold::StopThenClosed,
+        Cold::WrittenThenStop,
+        Cold::SubmittedThenStop(HerdrSubmission::Submitted),
+        Cold::SubmittedThenStop(HerdrSubmission::Unknown),
+        Cold::StopWithoutEvidence,
+        Cold::StopAfterSeal,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (signal, holds, row, active) =
+            herdr_cold_case(5_340_331_000 + index as u64, cold).await;
+        if cold == Cold::StopAfterSeal {
+            // A sealed Normal exit is not reopened by the late stop: the ordinary error finalize
+            // frees the slot and accounting (its row follows the ordinary error disposition).
+            let _ = row;
+            assert_eq!((holds, active), (false, 0), "{cold:?}");
+            continue;
+        }
+        let proof = matches!(cold, Cold::FailedThenStop | Cold::StopThenClosed);
+        assert_eq!(signal, BridgeCompletionSignal::Unresolved, "{cold:?}");
+        assert_eq!(
+            (holds, row, active),
+            if proof {
+                (false, false, 0)
+            } else {
+                (true, true, 1)
+            },
+            "{cold:?}"
+        );
+    }
+}
+
+/// (completion signal, mailbox still holds the token, inflight row present, active turns)
+#[cfg(unix)]
+async fn herdr_cold_case(
+    channel_id: u64,
+    cold: Cold,
+) -> (BridgeCompletionSignal, bool, bool, usize) {
+    use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
+    use crate::services::discord::turn_bridge::before_start_stop::tests::actual_fresh_exit;
+    use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
+    use std::sync::atomic::Ordering;
+    let mut shared = discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Codex;
+    let channel = ChannelId::new(channel_id);
+    let cancel = Arc::new(CancelToken::new());
+    let owner = HostedOwner {
+        provider: "codex".into(),
+        discord_token_hash: shared.token_hash.clone(),
+        channel_id: channel_id.to_string(),
+        logical_key: format!("AgentDesk-codex-cold-{channel_id}"),
+        owner_node: "node".into(),
+        runtime_root: "/tmp".into(),
+    };
+    let mut row = InflightTurnState::new(
+        ProviderKind::Codex,
+        channel_id,
+        None,
+        1,
+        77_200,
+        18,
+        String::new(),
+        None,
+        Some(owner.logical_key.clone()),
+        None,
+        None,
+        0,
+    );
+    row.turn_nonce = cancel.turn_nonce().map(str::to_owned);
+    let message = MessageId::new(row.user_msg_id);
+    let intent = cancel.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+    assert!(
+        discord::mailbox_try_start_turn(&shared, channel, cancel.clone(), UserId::new(1), message)
+            .await
+    );
+    discord::increment_global_active(&shared, "test_bridge_admission");
+    discord::inflight::save_inflight_state(&row).unwrap();
+    match cold {
+        Cold::FailedThenStop => {
+            actual_fresh_exit(cancel.clone(), owner, ProviderKind::Codex, false).await
+        }
+        Cold::StopThenClosed => {
+            actual_fresh_exit(cancel.clone(), owner, ProviderKind::Codex, true).await
+        }
+        Cold::WrittenThenStop => {
+            let mut input = intent.submission.lock().unwrap();
+            assert!(intent.prepare_input(&mut input));
+            intent.finish_input(&mut input, HerdrSubmission::Unsubmitted, false);
+            drop(input);
+            intent.user_stop.store(true, Ordering::Release);
+        }
+        Cold::SubmittedThenStop(submission) => {
+            let mut input = intent.submission.lock().unwrap();
+            assert!(intent.prepare_input(&mut input));
+            intent.finish_input(&mut input, submission, false);
+            drop(input);
+            intent.user_stop.store(true, Ordering::Release);
+        }
+        Cold::StopWithoutEvidence => intent.user_stop.store(true, Ordering::Release),
+        Cold::StopAfterSeal => {
+            crate::services::provider::herdr_before_start::finish_execution(Some(&cancel));
+            crate::services::provider::herdr_before_start::EXIT_OBSERVED
+                .set(Some(|state| state.user_stop.store(true, Ordering::Release)));
+        }
+    }
+    let mut bridge = seed_context("", row);
+    bridge.provider = ProviderKind::Codex;
+    bridge.user_msg_id = Some(message);
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    bridge.completion_tx = Some(completion_tx);
+    let (tx, rx) = mpsc::channel();
+    if cold != Cold::StopThenClosed {
+        // The intake turns the executor's Err into the turn's Error frame.
+        tx.send(StreamMessage::Error {
+            message: "herdr turn: launch failed".into(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+        })
+        .unwrap();
+    }
+    drop(tx);
+    spawn_turn_bridge(shared.clone(), cancel.clone(), rx, bridge);
+    let signal = tokio::time::timeout(std::time::Duration::from_secs(20), completion_rx)
+        .await
+        .expect("the bridge reports")
+        .unwrap();
+    crate::services::provider::herdr_before_start::EXIT_OBSERVED.set(None);
+    let settle = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut holds = true;
+    while std::time::Instant::now() < settle {
+        let snapshot = discord::mailbox_snapshot(&shared, channel).await;
+        holds = snapshot
+            .cancel_token
+            .as_ref()
+            .is_some_and(|token| Arc::ptr_eq(token, &cancel));
+        if !holds {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // Finalize cleanup marks a released token; a held turn is never cancelled by the bridge.
+    assert!(
+        !holds || !cancel.cancelled.load(Ordering::SeqCst),
+        "{cold:?}"
+    );
+    let row = discord::inflight::load_inflight_state(&ProviderKind::Codex, channel_id);
+    let active = shared.restart.global_active.load(Ordering::Relaxed);
+    (signal, holds, row.is_some(), active)
+}
+
 /// A Herdr Codex turn from the real rollout reader through admission, the bridge and the finalizer.
 #[cfg(unix)]
 mod herdr_settlement {

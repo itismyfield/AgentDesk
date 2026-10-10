@@ -1,15 +1,40 @@
-//! Test-only in-process policy path; durable receipt and production wiring are not present.
-use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState, RelayOwnerKind};
+//! In-process policy close of a sealed before-start proof. A durable receipt and restart
+//! recovery are not present yet, so a crash between admission and finalize stays held.
+use crate::services::discord::gateway::TurnGateway;
+use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
+use crate::services::discord::recovery_engine::herdr_admitted_restart::ADMITTED_ABORT_NOTICE;
 use crate::services::discord::turn_finalizer::{
     FinalizeContext, FinalizeOutcome, SyntheticClaimSnapshot, TerminalEvent, TurnFinalizer, TurnKey,
 };
 use crate::services::discord::{self, SharedData};
 use crate::services::provider::CancelToken;
-#[cfg(unix)]
-use crate::services::provider::ProviderKind;
-use crate::services::provider::herdr_before_start::{BeforeStartProof, ExitDecision, seal_exit};
-use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+use crate::services::provider::herdr_before_start::BeforeStartProof;
+use poise::serenity_prelude::{ChannelId, MessageId};
 use std::sync::Arc;
+
+/// Settles one sealed policy close; on false the bridge keeps the turn held as before.
+pub(super) async fn run_policy_close(
+    shared: &Arc<SharedData>,
+    gateway: &dyn TurnGateway,
+    actor: &Arc<CancelToken>,
+    row: &InflightTurnState,
+    current_msg_id: MessageId,
+    proof: &BeforeStartProof,
+) -> bool {
+    let channel = ChannelId::new(row.channel_id);
+    let notice = gateway.edit_message(channel, current_msg_id, ADMITTED_ABORT_NOTICE);
+    let settled = consume(shared, &shared.turn_finalizer, actor, row, proof, notice).await;
+    tracing::info!(
+        event = "herdr_turn_policy_close",
+        channel_id = row.channel_id,
+        logical = proof.owner.logical_key,
+        turn_nonce = proof.turn_nonce,
+        runtime_generation = proof.generation,
+        settled,
+        "Herdr turn closed before its input started"
+    );
+    settled
+}
 
 async fn consume(
     shared: &Arc<SharedData>,
@@ -55,8 +80,12 @@ async fn consume(
     if notice.await.is_err() {
         return false;
     }
-    let key = TurnKey::new(channel, row.effective_finalizer_turn_id(), 0)
-        .with_episode_nonce(row.turn_nonce.as_deref());
+    let key = TurnKey::new(
+        channel,
+        row.effective_finalizer_turn_id(),
+        shared.restart.current_generation,
+    )
+    .with_episode_nonce(row.turn_nonce.as_deref());
     let mut snapshot = SyntheticClaimSnapshot::from_row(row);
     snapshot.recovery_actor = Some(Arc::downgrade(actor));
     let context = FinalizeContext {
@@ -79,15 +108,19 @@ async fn consume(
 
 #[cfg(test)]
 #[cfg(unix)]
-mod tests {
+pub(in crate::services::discord::turn_bridge) mod tests {
     use super::*;
     use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
+    use crate::services::discord::inflight::RelayOwnerKind;
+    use crate::services::provider::ProviderKind;
     use crate::services::provider::cancel_token_claude_interrupt::{
         HERDR_SETTLEMENT_OVERRIDE, HerdrSubmission,
     };
+    use crate::services::provider::herdr_before_start::{ExitDecision, seal_exit};
     use crate::services::provider::herdr_before_start::{
         InputPhase, finish_execution, prelaunch_closed,
     };
+    use poise::serenity_prelude::UserId;
     use std::sync::atomic::Ordering;
 
     fn prepared(provider: ProviderKind, channel: u64) -> (Arc<CancelToken>, HostedOwner) {
@@ -126,19 +159,31 @@ mod tests {
                         InputPhase::FinishedNoAttempt | InputPhase::FinishedUntouched
                     )
                 );
-                // The unchanged production hold still retains every cold intent before A2 wiring.
-                assert!(
-                    discord::turn_bridge::stream_loop::exit_reconcile::herdr_stop_unconfirmed(
+                // The bridge exit reads the sealed decision, never a fresh stop observation.
+                assert_eq!(
+                    discord::turn_bridge::stream_loop::exit_reconcile::herdr_exit_decision(
                         &actor, false, false
-                    )
+                    ),
+                    decision
                 );
             }
-            for submission in [HerdrSubmission::Submitted, HerdrSubmission::Unknown] {
-                let (actor, _) = prepared(provider.clone(), 902);
-                let state = actor.herdr_interrupt_state().unwrap();
-                state.submission.lock().unwrap().submission = submission;
-                state.user_stop.store(true, Ordering::Release);
-                assert_eq!(seal_exit(&actor, false, false), ExitDecision::Hold);
+            // A submission observation (an Escape interrupted after its send, before its ACK)
+            // holds even where the phase alone would have been negative evidence.
+            for phase in [
+                InputPhase::BeforeInput,
+                InputPhase::FinishedNoAttempt,
+                InputPhase::FinishedUntouched,
+            ] {
+                for submission in [HerdrSubmission::Submitted, HerdrSubmission::Unknown] {
+                    let (actor, _) = prepared(provider.clone(), 902);
+                    let state = actor.herdr_interrupt_state().unwrap();
+                    let mut input = state.submission.lock().unwrap();
+                    input.submission = submission;
+                    input.phase = phase;
+                    drop(input);
+                    state.user_stop.store(true, Ordering::Release);
+                    assert_eq!(seal_exit(&actor, false, false), ExitDecision::Hold);
+                }
             }
             let (actor, _) = prepared(provider.clone(), 903);
             finish_execution(Some(&actor));
@@ -176,10 +221,11 @@ mod tests {
             InputPhase::BeforeInput
         );
         assert_eq!(seal_exit(&actor, false, false), ExitDecision::Normal);
-        assert!(
-            !discord::turn_bridge::stream_loop::exit_reconcile::herdr_stop_unconfirmed(
+        assert_eq!(
+            discord::turn_bridge::stream_loop::exit_reconcile::herdr_exit_decision(
                 &actor, false, false
-            )
+            ),
+            ExitDecision::Normal
         );
         HERDR_SETTLEMENT_OVERRIDE.set(true);
     }
@@ -371,7 +417,7 @@ mod tests {
         assert_eq!(seal_exit(&actor, false, false), ExitDecision::Hold);
     }
 
-    struct NoLaunch;
+    pub(in crate::services::discord::turn_bridge) struct NoLaunch;
     impl crate::services::claude::herdr_turn::HerdrTurnPorts for NoLaunch {
         fn launch_host(&self) -> Option<Arc<dyn crate::services::herdr_launch::HerdrLaunchHost>> {
             None
@@ -420,7 +466,7 @@ mod tests {
         }
     }
 
-    async fn actual_fresh_exit(
+    pub(in crate::services::discord::turn_bridge) async fn actual_fresh_exit(
         actor: Arc<CancelToken>,
         owner: HostedOwner,
         provider: ProviderKind,
@@ -545,7 +591,7 @@ mod tests {
                 panic!("positive proof required");
             };
             let fin = TurnFinalizer::spawn();
-            let key = TurnKey::new(channel, row.user_msg_id, 0)
+            let key = TurnKey::new(channel, row.user_msg_id, shared.restart.current_generation)
                 .with_episode_nonce(row.turn_nonce.as_deref());
             fin.register_start(key, provider.clone(), RelayOwnerKind::None, &shared);
             let mut stale = proof.clone();
@@ -631,6 +677,97 @@ mod tests {
                     .unwrap(),
                 &next
             ));
+        }
+    }
+
+    /// A sealed proof never settles a successor: a replaced mailbox actor or a replaced row
+    /// nonce refuses the close and leaves the successor's token, row and accounting in place.
+    #[tokio::test(flavor = "current_thread")]
+    async fn coldstop_policy_close_spares_successor_actor_and_row() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        for successor_actor in [true, false] {
+            let provider = ProviderKind::Codex;
+            let mut shared = discord::make_shared_data_for_tests_with_storage(None);
+            Arc::get_mut(&mut shared).unwrap().provider = provider.clone();
+            let (actor, owner) = prepared(provider.clone(), 908);
+            let mut row = InflightTurnState::new(
+                provider.clone(),
+                908,
+                None,
+                1,
+                911,
+                0,
+                "cold input".into(),
+                None,
+                Some(owner.logical_key.clone()),
+                None,
+                None,
+                0,
+            );
+            row.turn_nonce = actor.turn_nonce().map(str::to_owned);
+            let channel = ChannelId::new(row.channel_id);
+            assert!(
+                discord::mailbox_try_start_turn_kinded(
+                    &shared,
+                    channel,
+                    actor.clone(),
+                    UserId::new(1),
+                    MessageId::new(row.user_msg_id),
+                    crate::services::turn_orchestrator::ActiveTurnKind::UserOrAgent
+                )
+                .await
+            );
+            discord::increment_global_active(&shared, "coldstop_test");
+            discord::inflight::save_inflight_state(&row).unwrap();
+            actual_fresh_exit(actor.clone(), owner, provider.clone(), true).await;
+            let ExitDecision::PolicyClose(proof) = seal_exit(&actor, false, false) else {
+                panic!("positive proof required");
+            };
+            let successor = Arc::new(CancelToken::new());
+            let mut successor_row = row.clone();
+            if successor_actor {
+                discord::mailbox_finish_turn(&shared, &provider, channel).await;
+                assert!(
+                    discord::mailbox_try_start_turn_kinded(
+                        &shared,
+                        channel,
+                        successor.clone(),
+                        UserId::new(1),
+                        MessageId::new(row.user_msg_id + 1),
+                        crate::services::turn_orchestrator::ActiveTurnKind::UserOrAgent
+                    )
+                    .await
+                );
+            } else {
+                successor_row.turn_nonce = Some("successor-nonce".into());
+                discord::inflight::save_inflight_state(&successor_row).unwrap();
+            }
+            let fin = TurnFinalizer::spawn();
+            let key = TurnKey::new(channel, row.user_msg_id, shared.restart.current_generation)
+                .with_episode_nonce(row.turn_nonce.as_deref());
+            fin.register_start(key, provider.clone(), RelayOwnerKind::None, &shared);
+            let noticed = std::sync::atomic::AtomicBool::new(false);
+            let notice = async {
+                noticed.store(true, Ordering::Release);
+                Ok(())
+            };
+            assert!(!consume(&shared, &fin, &actor, &row, &proof, notice).await);
+            // The successor's placeholder is never edited to the stopped notice.
+            assert!(!noticed.load(Ordering::Acquire));
+            let current = shared
+                .mailbox_peek(channel)
+                .unwrap()
+                .snapshot()
+                .await
+                .cancel_token
+                .expect("the slot stays occupied");
+            let expected_actor = if successor_actor { &successor } else { &actor };
+            assert!(Arc::ptr_eq(&current, expected_actor));
+            let kept = discord::inflight::load_inflight_state_read_only(&provider, 908)
+                .expect("the row stays");
+            assert_eq!(kept.turn_nonce, successor_row.turn_nonce);
+            assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
         }
     }
 }

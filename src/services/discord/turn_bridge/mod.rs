@@ -1,4 +1,5 @@
 mod activity_heartbeat;
+mod before_start_stop;
 mod bridge_entry_persist;
 mod bridge_latency_spans;
 mod cancel_finalize_policy;
@@ -73,6 +74,7 @@ use crate::services::observability::session_inventory::{
     format_child_inventory_progress, load_child_inventory_by_parent_key_pg,
 };
 use crate::services::provider::cancel_requested;
+use crate::services::provider::herdr_before_start::ExitDecision;
 use output_lifecycle::BridgeOutputOwner;
 pub(super) use panel_lifecycle::record_placeholder_live_event;
 use panel_lifecycle::{
@@ -695,13 +697,21 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         }
         #[rustfmt::skip]
         let terminal_admitted = stream_loop_output.codex_tui_terminal_range.is_some() || stream_loop_output.herdr_terminal.is_some();
-        let unconfirmed = stream_loop::exit_reconcile::herdr_stop_unconfirmed;
-        if (is_external_input_tui_direct && rx_disconnected)
-            || unconfirmed(&cancel_token, cancelled, terminal_admitted)
-            || stream_loop::exit_reconcile::held_before_submit(&bridge.inflight_state, cancelled)
-        {
+        let held = (is_external_input_tui_direct && rx_disconnected)
+            || stream_loop::exit_reconcile::held_before_submit(&bridge.inflight_state, cancelled);
+        // One sealed Herdr exit decision; a held row is never closed by policy.
+        let exit = match held {
+            true => ExitDecision::Hold,
+            false => stream_loop::exit_reconcile::herdr_exit_decision(&cancel_token, cancelled, terminal_admitted),
+        };
+        if let ExitDecision::PolicyClose(proof) = &exit {
+            let gateway = &*gateway;
+            before_start_stop::run_policy_close(&shared_owned, gateway, &cancel_token, &inflight_state, current_msg_id, proof).await;
+        }
+        if exit != ExitDecision::Normal {
             // No admitted terminal frame: keep the row for recovery (a held prompt stays Waiting),
-            // or a stopped Herdr turn for its provider; a partial stream is not a terminal.
+            // or a stopped Herdr turn for its provider (a settled policy close was already
+            // finalized; a refused one stays held); a partial stream is not a terminal.
             completion_guard.relinquish_bridge_authority();
             inflight_guard.defuse();
             return;
