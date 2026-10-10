@@ -430,6 +430,7 @@ jobs:
               - 'src/services/tmux_turn_liveness/tests_pg.rs'
               - 'src/services/tui_o/alarm.rs'
               - 'src/services/tui_o/exact_pg_tests.rs'
+              - 'src/services/tui_o/exact_submission.rs'
               - 'src/services/turn_host_tests.rs'
               - 'src/services/turn_lifecycle.rs'
               - 'src/voice/announce_meta.rs'
