@@ -9,6 +9,8 @@ pub mod handover;
 pub mod input_key;
 pub mod ledger;
 pub mod rows;
+pub(crate) mod submission;
+pub(crate) mod submission_tmux;
 pub mod transition;
 
 #[cfg(test)]

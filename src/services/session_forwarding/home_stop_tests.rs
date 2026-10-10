@@ -143,7 +143,7 @@ fn route(holder: &str, origin: &str) {
 #[tokio::test(flavor = "current_thread")]
 async fn t10_only_a_matching_typed_answer_counts_and_nothing_is_retried_or_run_here() {
     let gateway = Gateway::new().await;
-    let cases: [(u64, Script, Option<&str>); 7] = [
+    let cases: Vec<(u64, Script, Option<&str>)> = vec![
         (1, |request| Some((200, echo(request))), None),
         (
             2,
@@ -185,15 +185,131 @@ async fn t10_only_a_matching_typed_answer_counts_and_nothing_is_retried_or_run_h
             Some("answer_mismatch"),
         ),
         (7, |_| None, Some("no_response")),
+        (
+            8,
+            |request| Some((200, without(echo(request), "delivery"))),
+            Some("answer_mismatch"),
+        ),
+        (
+            9,
+            |request| {
+                let mut answer = echo(request);
+                answer["delivery"] = "unknown".into();
+                Some((200, answer))
+            },
+            Some("answer_mismatch"),
+        ),
+        (
+            10,
+            |request| {
+                let mut answer = echo(request);
+                answer["effect_started"] = "true".into();
+                Some((200, answer))
+            },
+            Some("answer_mismatch"),
+        ),
+        (
+            11,
+            |request| Some((200, without(echo(request), "intent"))),
+            Some("answer_mismatch"),
+        ),
+        (
+            12,
+            |request| {
+                let mut answer = echo(request);
+                answer["intent"] = "unknown".into();
+                Some((200, answer))
+            },
+            Some("answer_mismatch"),
+        ),
+        (
+            13,
+            |request| Some((200, without(echo(request), "effect_started"))),
+            Some("answer_mismatch"),
+        ),
+        (
+            14,
+            |request| Some((200, without(echo(request), "v"))),
+            Some("answer_mismatch"),
+        ),
+        (
+            15,
+            |request| Some((200, without(echo(request), "request_id"))),
+            Some("answer_mismatch"),
+        ),
+        (
+            16,
+            |request| Some((200, without(echo(request), "channel_id"))),
+            Some("answer_mismatch"),
+        ),
+        (
+            17,
+            |request| Some((200, without(echo(request), "provider"))),
+            Some("answer_mismatch"),
+        ),
+        (
+            18,
+            |request| Some((200, without(echo(request), "holder"))),
+            Some("answer_mismatch"),
+        ),
+        (
+            19,
+            |request| Some((200, without(echo(request), "terminal_confirmed"))),
+            Some("answer_mismatch"),
+        ),
     ];
     for (n, script, unconfirmed) in cases {
+        TEST_COUNTS.with(|counts| *counts.borrow_mut() = (0, 0));
         let channel = CHANNEL + n;
         gateway
             .home(channel, "worker", Some(HOLDER), "claude")
             .await;
         let (origin, seen) = holder(script).await;
         route(HOLDER, &origin);
+        sqlx::query("INSERT INTO sessions (session_key, provider, status, channel_id, instance_id) VALUES ($1, 'claude', 'turn_active', $2, 'owner-b')")
+            .bind(format!("owner-b:t10-{n}")).bind(channel.to_string()).execute(&gateway.pool).await.unwrap();
+        let (owner_origin, owner_seen) = holder(|request| Some((200, echo(request)))).await;
+        route("owner-b", &owner_origin);
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(
+            gateway.pool.clone(),
+        ));
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        let channel_id = poise::serenity_prelude::ChannelId::new(channel);
+        assert!(
+            crate::services::discord::zombie_foreground_release::start_home_stop_test_turn(
+                &shared,
+                channel_id,
+                token.clone(),
+                poise::serenity_prelude::UserId::new(7),
+                poise::serenity_prelude::MessageId::new(channel + 1)
+            )
+            .await
+        );
+        let registry = crate::services::discord::health::HealthRegistry::new();
+        registry.register("claude".into(), shared.clone()).await;
         let result = gateway.stop(channel).await;
+        let mut local_entries = 0;
+        if matches!(result, GatewayStop::Legacy) {
+            local_entries += 1;
+            crate::services::discord::zombie_foreground_release::run_holder_stop(
+                Some(&registry),
+                &ProviderKind::Claude,
+                channel,
+            )
+            .await;
+        }
+        assert_eq!(
+            TEST_COUNTS.with(|counts| *counts.borrow()),
+            (1, 1),
+            "case {n}: one row read and one holder send"
+        );
+        assert_eq!(
+            owner_seen.lock().unwrap().len(),
+            0,
+            "case {n}: no owner retry"
+        );
+        assert_eq!(local_entries, 0, "case {n}: no local stop continuation");
+        assert!(!token.cancelled.load(std::sync::atomic::Ordering::SeqCst));
         match unconfirmed {
             None => {
                 let GatewayStop::Confirmed(answer) = &result else {
@@ -249,14 +365,21 @@ async fn t18_holder_comes_from_the_home_row_never_the_session_owner() {
 async fn t18_c_legacy_reads_no_row_and_g_without_a_row_is_refused_not_legacy() {
     let gateway = Gateway::new().await;
     let unreachable = Some(gateway.pool.clone());
+    TEST_COUNTS.with(|counts| *counts.borrow_mut() = (0, 0));
     // A channel with a gate here keeps the existing D2 path without any row read.
     let registered = CHANNEL + 30;
     let _home =
         channel_home::register_for_test(registered, Some(o_channel_homes::HomeState::Worker));
     assert_eq!(
-        gateway_stop(&gateway.context(None), registered, "claude").await,
+        gateway_stop(
+            &gateway.context(Some(gateway.pool.clone())),
+            registered,
+            "claude"
+        )
+        .await,
         GatewayStop::Legacy
     );
+    assert_eq!(TEST_COUNTS.with(|counts| *counts.borrow()), (0, 0));
     channel_home::unregister(&registered.to_string());
     // The gateway's own unregistered channel: no pool or a failed read is refused, never Legacy.
     let unregistered = CHANNEL + 31;
@@ -339,11 +462,15 @@ async fn off_reads_nothing_and_advertises_nothing() {
     };
     // Off: even a delegated row is not read, so the existing path runs exactly as before.
     assert_eq!(home_availability::state("claude"), Availability::Off);
-    for pool in [None, Some(pool.clone())] {
+    TEST_COUNTS.with(|counts| *counts.borrow_mut() = (0, 0));
+    for pool in [Some(pool.clone()), None] {
+        let result = gateway_stop(&context(pool), channel, "claude").await;
         assert_eq!(
-            gateway_stop(&context(pool), channel, "claude").await,
-            GatewayStop::Legacy
+            TEST_COUNTS.with(|counts| *counts.borrow()),
+            (0, 0),
+            "off reads and sends nothing"
         );
+        assert_eq!(result, GatewayStop::Legacy);
     }
     let mut config = crate::config::Config::default();
     config.cluster.api_base_url = Some("http://10.0.0.5:8791".into());

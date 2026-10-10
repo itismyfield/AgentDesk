@@ -21,6 +21,7 @@ pub(in crate::services::discord) type Answer =
 pub(in crate::services::discord) struct MockDiscord {
     pub(in crate::services::discord) http: Arc<Http>,
     calls: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<String>>>,
     server: tokio::task::AbortHandle,
 }
 
@@ -31,15 +32,22 @@ impl MockDiscord {
 
     pub(in crate::services::discord) async fn start_with(answer: Answer) -> Self {
         let calls: Arc<Mutex<Vec<String>>> = Arc::default();
-        let recorded = calls.clone();
+        let requests: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (recorded, recorded_requests) = (calls.clone(), requests.clone());
         let app = axum::Router::new().fallback(axum::routing::any(
-            move |method: Method, uri: Uri, _body: Bytes| {
+            move |method: Method, uri: Uri, body: Bytes| {
                 let (recorded, answer) = (recorded.clone(), answer.clone());
+                let recorded_requests = recorded_requests.clone();
                 async move {
                     recorded
                         .lock()
                         .unwrap()
                         .push(format!("{method} {}", uri.path()));
+                    recorded_requests.lock().unwrap().push(format!(
+                        "{method} {} {}",
+                        uri.path(),
+                        String::from_utf8_lossy(&body)
+                    ));
                     let (status, body) = match answer(&method, uri.path()) {
                         Some(answer) => answer,
                         None if method == Method::DELETE => {
@@ -64,6 +72,7 @@ impl MockDiscord {
         Self {
             http: Arc::new(http),
             calls,
+            requests,
             server: server.abort_handle(),
         }
     }
@@ -76,6 +85,19 @@ impl MockDiscord {
             .unwrap()
             .iter()
             .filter(|call| call.contains(&needle))
+            .cloned()
+            .collect()
+    }
+}
+
+impl MockDiscord {
+    /// Requests whose path names `channel_id`, in arrival order, each with its body.
+    pub(in crate::services::discord) fn requests_for(&self, channel_id: u64) -> Vec<String> {
+        let needle = format!("/channels/{channel_id}/");
+        let requests = self.requests.lock().unwrap();
+        requests
+            .iter()
+            .filter(|r| r.contains(&needle))
             .cloned()
             .collect()
     }

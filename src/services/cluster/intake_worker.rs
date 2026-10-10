@@ -1022,3 +1022,7 @@ pub(crate) mod test_executor;
 #[cfg(test)]
 #[path = "intake_worker/input_effect_tests.rs"]
 mod input_effect_tests;
+
+#[cfg(test)]
+#[path = "intake_worker/replay_hold_tests.rs"]
+mod replay_hold_tests;
