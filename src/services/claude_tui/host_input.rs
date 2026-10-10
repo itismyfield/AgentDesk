@@ -860,7 +860,11 @@ mod spy {
         pub sends: usize,
         /// Cancels this token when the n-th (from 1) call with this prefix is recorded.
         pub cancel_on: Option<(&'static str, usize, std::sync::Arc<CancelToken>)>,
+        /// Sees each send (load, literal, paste or keys) just before the pane would receive it.
+        pub on_send: Option<SendHook>,
     }
+
+    pub(crate) type SendHook = Box<dyn FnMut(&str)>;
 
     impl Default for SpyState {
         fn default() -> Self {
@@ -876,6 +880,7 @@ mod spy {
                 absent: false,
                 sends: 0,
                 cancel_on: None,
+                on_send: None,
             }
         }
     }
@@ -908,6 +913,9 @@ mod spy {
     impl Spy {
         fn send(&mut self, call: String) -> Result<Output, String> {
             let mut state = self.0.borrow_mut();
+            if let Some(on_send) = state.on_send.as_mut() {
+                on_send(&call);
+            }
             state.record(call);
             let index = state.sends;
             state.sends += 1;

@@ -102,6 +102,69 @@ fn a_failed_fresh_turn_tears_down_only_under_its_clearance() {
     }
 }
 
+// A fresh prompt held before submit keeps its session and owner marker even under an
+// admitting clearance, while a failure after the fence still tears down as above.
+#[test]
+fn a_fresh_prompt_held_before_submit_keeps_its_session_and_owner_marker() {
+    use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
+    use crate::services::claude_tui::submission_fence::{
+        self, SubmissionFence, test_support::RefusingFence,
+    };
+    use std::sync::Arc;
+    const NAME: &str = "adk-zp1-claude-held";
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let tmux = FakeTmux::install(NAME);
+    let dir = tempfile::tempdir().unwrap();
+    let (owner, transcript) = (dir.path().join("owner"), dir.path().join("t.jsonl"));
+    let rule = "─".repeat(80);
+    let ready = format!("Claude Code v2.1.289\n\n{rule}\n\u{276f} \n{rule}\n  MCP: 2");
+    for (label, fence, held) in [
+        (
+            "held",
+            Some(Arc::new(RefusingFence::default()) as Arc<dyn SubmissionFence>),
+            true,
+        ),
+        ("sent then failed", None, false),
+    ] {
+        std::fs::write(&owner, "owner").unwrap();
+        let spy = SpyGuard::install(SpyState {
+            captures: std::iter::repeat_n(Some(ready.clone()), 8).collect(),
+            fail_send: Some((0, Err("send-keys failed".to_string()))),
+            ..SpyState::default()
+        });
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let result = submission_fence::with_scope(fence, || {
+            run_claude_tui_fresh_turn_and_finalize(
+                &transcript,
+                &transcript.display().to_string(),
+                tx,
+                None,
+                NAME,
+                Some(&TeardownClearance::Unkeyed),
+                "sid",
+                None,
+                "hello",
+                &owner.display().to_string(),
+            )
+        });
+        let error = result.expect_err(label);
+        assert_eq!(
+            error.contains("held before submit"),
+            held,
+            "{label}: {error}"
+        );
+        let sent = spy.calls().iter().any(|call| call.starts_with("literal:"));
+        assert_eq!(sent, !held, "{label}: {:?}", spy.calls());
+        let calls = tmux.take_calls();
+        assert_eq!(called(&calls, "kill-session"), !held, "{label}: {calls:?}");
+        assert_eq!(take_exit_reason(NAME), !held, "{label}");
+        assert_eq!(owner.exists(), held, "{label}: owner marker");
+    }
+}
+
 // A stale session is killed, its files swept and a new one launched only under its own
 // clearance; a refusal ends the turn with no audit, kill, sweep or relaunch.
 #[test]

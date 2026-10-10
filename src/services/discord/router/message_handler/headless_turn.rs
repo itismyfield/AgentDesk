@@ -885,6 +885,17 @@ async fn start_reserved_headless_turn_admitted(
     inflight_state.delivery_bot = metadata_delivery_bot(metadata.as_ref());
     inflight_state.silent_turn = metadata_silent_flag(metadata.as_ref());
     inflight_state.source = metadata_turn_source(source, metadata.as_ref());
+    let turn_host = crate::services::turn_host::for_turn(
+        shared.pg_pool.as_ref(),
+        &provider,
+        channel_id.get(),
+        adk_session_key.as_deref(),
+    )
+    .await;
+    let submission = crate::services::discord::inflight::install_managed_submission_boundary(
+        &mut inflight_state,
+        &turn_host,
+    );
     let original_registration =
         register_headless_original(shared, &provider, &inflight_state, &cancel_token)
             .await
@@ -981,13 +992,6 @@ async fn start_reserved_headless_turn_admitted(
     let prompt_owned = prompt.to_string();
     let provider_for_blocking = provider.clone();
     let execution_pool = shared.pg_pool.clone();
-    let turn_host = crate::services::turn_host::for_turn(
-        shared.pg_pool.as_ref(),
-        &provider,
-        channel_id.get(),
-        adk_session_key.as_deref(),
-    )
-    .await;
     let producer_registration = original_registration.clone();
     let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
         shared.pg_pool.as_ref(),
@@ -1033,6 +1037,7 @@ async fn start_reserved_headless_turn_admitted(
                                 cache_ttl_minutes,
                                 dispatch_type: None,
                                 force_fresh: force_fresh_provider_session,
+                                submission: submission.as_ref(),
                             },
                             tx.clone(),
                         )
@@ -1044,12 +1049,14 @@ async fn start_reserved_headless_turn_admitted(
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     tracing::warn!("  [headless streaming] Error: {}", error);
-                    let _ = tx.send(StreamMessage::Error {
-                        message: error,
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        exit_code: None,
-                    });
+                    let message = super::provider_dispatch::producer_error(
+                        submission.as_ref(),
+                        channel_id.get(),
+                        error,
+                    );
+                    if let Some(message) = message {
+                        let _ = tx.send(message);
+                    }
                 }
                 Err(panic_info) => {
                     let msg = if let Some(value) = panic_info.downcast_ref::<String>() {

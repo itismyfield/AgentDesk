@@ -361,6 +361,17 @@ fn run_claude_tui_warm_followup_submit_and_stream(
         cancel_token.as_deref(),
         &transcript_path,
     ) {
+        // A held prompt is neither a cancellation nor a provider failure; nothing reached the pane.
+        if crate::services::claude_tui::submission_fence::refusal().is_some() {
+            log_producer_exit(
+                "tui_warm_followup_pre_submit_persistence_refused",
+                Some(&resolved_session_id),
+                report_channel_id,
+                0,
+                serde_json::json!({ "tmux_session_name": tmux_session_name }),
+            );
+            return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(error));
+        }
         if crate::services::claude_tui::input::is_prompt_ready_cancelled_error(&error) {
             debug_log(&format!(
                 "Claude TUI follow-up: cancellation observed during prompt submission, aborting injection (session={})",
