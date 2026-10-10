@@ -1653,6 +1653,7 @@ services::calendar_sync::recovery::tests::recovery_requires_explicit_resolution_
 services::calendar_sync::tests::patch_requires_its_observed_revision_and_preserves_other_fields
 services::claude::c1_teardown_tests::a_cleared_stale_session_is_relaunched_exactly_once
 services::claude::c1_teardown_tests::a_failed_fresh_turn_tears_down_only_under_its_clearance
+services::claude::c1_teardown_tests::a_fresh_prompt_held_before_submit_keeps_its_session_and_owner_marker
 services::claude::c1_teardown_tests::a_stale_session_is_recreated_only_under_its_clearance
 services::claude::claude_tui_followup_requeue_flag_tests::followup_requeue_defaults_on_when_env_is_unset
 services::claude::claude_tui_followup_requeue_flag_tests::followup_requeue_keeps_legacy_opt_in_and_invalid_values_enabled
@@ -2012,6 +2013,7 @@ services::claude_tui::hosting::host_draft::tests::tf2_hosts_without_input_stop_b
 services::claude_tui::hosting::host_draft::tests::tf2_legacy_tmux_clear_then_submits_once
 services::claude_tui::hosting::host_draft::tests::tf2_legacy_tmux_recreates_only_after_retiring_the_session
 services::claude_tui::hosting::host_draft::tests::tf2_swap_stop_or_lingering_draft_never_recreates
+services::claude_tui::hosting::host_draft::tests::warm_prompt_held_before_submit_neither_types_nor_recreates
 services::claude_tui::hosting::warm_followup::followup_wait_error_requeue_tests::followup_wait_requeue_requires_timeout_error
 services::claude_tui::hosting::warm_followup::followup_wait_error_requeue_tests::followup_wait_requeue_respects_emergency_opt_out
 services::claude_tui::hosting::warm_followup::pre_submit_cancel_tests::only_a_sourceless_cleanup_teardown_fails_and_stops_stay_silent
@@ -4092,6 +4094,11 @@ services::discord::inflight::host_recovery_guard::tests::a_tmux_name_disagreemen
 services::discord::inflight::host_recovery_guard::tests::caller_runtime_evidence_survives_the_inflight_row_merge
 services::discord::inflight::host_recovery_guard::tests::host_kind_marker_maps_without_reading_a_failure_as_absent
 services::discord::inflight::host_recovery_guard::tests::inflight_row_host_evidence_reaches_the_guard_verdict
+services::discord::inflight::managed_submission::tests::a_composer_change_after_readiness_fails_before_the_fence
+services::discord::inflight::managed_submission::tests::a_refused_fence_write_holds_every_payload_and_late_input
+services::discord::inflight::managed_submission::tests::legacy_and_unmanaged_routes_stay_unknown
+services::discord::inflight::managed_submission::tests::row_writes_never_lower_promote_or_transfer_the_submission_record
+services::discord::inflight::managed_submission::tests::the_first_host_payload_already_sees_may_have_submitted_at_every_cut
 services::discord::inflight::model::discord_id_tests::optional_id_helpers_return_none_for_zero_without_panicking
 services::discord::inflight::model::discord_id_tests::slice_a_transfer_end_boundaries
 services::discord::inflight::model::identity::tests::only_an_id_zero_row_without_a_disambiguator_is_unnameable_5464
@@ -6260,6 +6267,8 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e1
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e3_an_unclear_send_is_never_sent_again_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::the_switch_alone_decides_whether_a_configured_turn_reaches_the_herdr_executor
+services::discord::router::message_handler::provider_dispatch::submission_tests::headless_creator_installs_waiting_and_holds_a_refused_prompt
+services::discord::router::message_handler::provider_dispatch::submission_tests::intake_creator_installs_waiting_and_holds_a_refused_prompt
 services::discord::router::message_handler::provider_dispatch::tests::agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation
 services::discord::router::message_handler::provider_dispatch::tests::configured_herdr_turn_reaches_no_tmux_or_process_driver_until_an_executor_is_wired_pg
 services::discord::router::message_handler::provider_isolation::host_tests::a_runtime_kind_mismatch_recreates_only_what_the_turn_key_admits_pg

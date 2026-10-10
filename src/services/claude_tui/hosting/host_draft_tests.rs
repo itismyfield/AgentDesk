@@ -47,6 +47,7 @@ struct Scenario {
     captures: Vec<&'static str>,
     fail_send: Option<(usize, Result<std::process::Output, String>)>,
     cancel_on: Option<(&'static str, usize)>,
+    fence: Option<Arc<dyn crate::services::claude_tui::submission_fence::SubmissionFence>>,
 }
 
 impl Scenario {
@@ -58,6 +59,7 @@ impl Scenario {
             captures,
             fail_send: None,
             cancel_on: None,
+            fence: None,
         }
     }
 }
@@ -96,18 +98,21 @@ fn follow_up(name: &str, scenario: Scenario) -> (Ended, Vec<String>, usize) {
             gate: &gate,
         };
         let (sender, streamed) = std::sync::mpsc::channel();
-        let outcome = try_claude_tui_warm_followup(
-            SESSION_ID.to_string(),
-            transcript.clone(),
-            transcript.display().to_string(),
-            true,
-            dir.path(),
-            PROMPT,
-            sender,
-            Some(token),
-            &host,
-            None,
-        );
+        let outcome =
+            crate::services::claude_tui::submission_fence::with_scope(scenario.fence, || {
+                try_claude_tui_warm_followup(
+                    SESSION_ID.to_string(),
+                    transcript.clone(),
+                    transcript.display().to_string(),
+                    true,
+                    dir.path(),
+                    PROMPT,
+                    sender,
+                    Some(token),
+                    &host,
+                    None,
+                )
+            });
         let ended = match outcome {
             ClaudeTuiWarmFollowupOutcome::Terminal(result) => Ended::Terminal(result),
             ClaudeTuiWarmFollowupOutcome::Recreate(state) => Ended::Recreate {
@@ -185,6 +190,29 @@ fn tf2_hosts_without_input_stop_before_any_host_call() {
         assert!(calls.is_empty(), "{refusal:?}: {calls:?}");
         stopped_without_side_effects(&format!("{refusal:?}"), &ended, &calls, streamed);
     }
+}
+
+/// A warm prompt held before submit ends the turn with the typed refusal: no payload, no
+/// recreate or retire, nothing streamed; the same pane without the refusal types the prompt.
+#[test]
+fn warm_prompt_held_before_submit_neither_types_nor_recreates() {
+    use crate::services::claude_tui::submission_fence::test_support::RefusingFence;
+    let mut held = Scenario::tmux(true, vec![EMPTY; 12]);
+    held.fence = Some(Arc::new(RefusingFence::default()));
+    let (ended, calls, streamed) = follow_up("zp1-held", held);
+    let Ended::Terminal(Err(error)) = &ended else {
+        panic!("held prompt must end the turn: {ended:?}");
+    };
+    assert!(error.contains("held before submit"), "{error}");
+    assert!(
+        !calls.iter().any(|c| c.starts_with("literal:")
+            || c.starts_with("keys:")
+            || c.starts_with("retire:")),
+        "{calls:?}"
+    );
+    assert_eq!(streamed, 0);
+    let (_, calls, _) = follow_up("zp1-control", Scenario::tmux(true, vec![EMPTY; 12]));
+    assert!(calls.contains(&format!("literal:{PROMPT}")), "{calls:?}");
 }
 
 #[test]

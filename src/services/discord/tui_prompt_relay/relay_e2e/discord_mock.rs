@@ -102,6 +102,17 @@ impl DiscordMockState {
         }
     }
 
+    /// Every text the mock received, as posted and as last edited.
+    pub(in crate::services::discord) fn written_texts(&self) -> Vec<String> {
+        let posts = self.channel_posts.lock().expect("channel posts").clone();
+        let minted = self.messages.lock().expect("messages").clone();
+        posts
+            .into_iter()
+            .map(|(_, text)| text)
+            .chain(minted.into_values().map(|(_, text)| text))
+            .collect()
+    }
+
     pub(in crate::services::discord) fn allow_channel(&self, channel_id: u64) {
         self.extra_channels
             .lock()
