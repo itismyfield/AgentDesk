@@ -561,6 +561,7 @@ async fn idle_expired_holder_loses_the_lease_to_a_peer_and_self_fences_pg() {
 
 /// A keepalive loss and a later yield each withdraw the approvals resting on the provider's
 /// Gateway witness; an approval resting elsewhere stays.
+#[cfg(unix)]
 #[tokio::test]
 async fn b2b1_lease_loss_and_yield_withdraw_only_gateway_approvals_pg() {
     use crate::services::discord::turn_presence::entrypoints::{Fence, tests};
