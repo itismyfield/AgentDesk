@@ -432,6 +432,7 @@ src/
 │   │   ├── provider_auth_profiles.rs
 │   │   ├── provider_cli_api.rs
 │   │   ├── queue_api.rs
+│   │   ├── queue_api_home_stop_tests.rs
 │   │   ├── receipt.rs
 │   │   ├── resume.rs
 │   │   ├── reviews.rs
@@ -1031,9 +1032,12 @@ src/
 │   │   │   ├── supervisor/
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_entry_tests.rs
-│   │   │   │   └── drive_tests.rs
+│   │   │   │   ├── drive_tests.rs
+│   │   │   │   └── receipt_entry_tests.rs
+│   │   │   ├── admission.rs
 │   │   │   ├── clear.rs
 │   │   │   ├── clear_tests.rs
+│   │   │   ├── command.rs
 │   │   │   ├── effect.rs
 │   │   │   ├── effect_tests.rs
 │   │   │   ├── effects.rs
@@ -1041,7 +1045,12 @@ src/
 │   │   │   ├── fence.rs
 │   │   │   ├── fence_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── ordering.rs
+│   │   │   ├── ordering_tests.rs
+│   │   │   ├── receipt.rs
+│   │   │   ├── receipt_tests.rs
 │   │   │   ├── reconcile.rs
+│   │   │   ├── source.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
 │   │   ├── live_bridge/
@@ -1165,6 +1174,8 @@ src/
 │   │   │   ├── transport.rs
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
+│   │   ├── queue_park_ledger/
+│   │   │   └── cancel_park_tests.rs
 │   │   ├── recovery_engine/
 │   │   │   ├── manual_rebind/
 │   │   │   │   ├── adoption.rs
@@ -1744,6 +1755,7 @@ src/
 │   │   │   │   ├── claude_stop_delivery.rs
 │   │   │   │   ├── claude_stop_pane_tests.rs
 │   │   │   │   ├── codex_stop_delivery.rs
+│   │   │   │   ├── codex_stop_delivery_home_stop_tests.rs
 │   │   │   │   ├── codex_stop_delivery_tests.rs
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── judged_stop.rs
@@ -1950,6 +1962,7 @@ src/
 │   │   ├── queue_io.rs
 │   │   ├── queue_marker.rs
 │   │   ├── queue_overflow_dlq.rs
+│   │   ├── queue_park_ledger.rs
 │   │   ├── queue_reactions.rs
 │   │   ├── queued_placeholders_store.rs
 │   │   ├── reaction_cleanup.rs
@@ -2256,6 +2269,8 @@ src/
 │   ├── session_forwarding/
 │   │   ├── probe/
 │   │   │   └── tests.rs
+│   │   ├── home_stop.rs
+│   │   ├── home_stop_tests.rs
 │   │   ├── probe.rs
 │   │   └── trusted_target.rs
 │   ├── session_host/
@@ -2332,6 +2347,7 @@ src/
 │   │   ├── handover.rs
 │   │   ├── ledger.rs
 │   │   ├── mod.rs
+│   │   ├── receipt_identity.rs
 │   │   ├── rows.rs
 │   │   ├── rows_tests.rs
 │   │   ├── transition.rs
@@ -2506,6 +2522,7 @@ src/
 │   │   ├── input_handback_tests.rs
 │   │   ├── intervention.rs
 │   │   ├── lease_release.rs
+│   │   ├── mailbox_observation.rs
 │   │   ├── mailbox_unreachable_tests.rs
 │   │   ├── overflow.rs
 │   │   ├── pending_queue_persistence.rs

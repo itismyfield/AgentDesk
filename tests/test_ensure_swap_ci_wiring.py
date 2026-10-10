@@ -25,6 +25,7 @@ SWAP_ACTION = "./.github/actions/ensure-swap"
 # Ubuntu jobs that link the lib test binary or run workspace clippy, per workflow.
 EXPECTED_SWAP_JOBS = {
     ".github/workflows/ci-pr.yml": {
+        "check_fast",
         "test_fast",
         "high-risk-recovery",
         "library_sweep",
@@ -53,6 +54,7 @@ LIB_BUILD_MARKERS = (
     re.compile(r"--observe-selection"),
     re.compile(r"run_relay_authority_mutations\.sh"),
     re.compile(r"check_relay_authority_contract\.py"),
+    re.compile(r"\bjust cargo-check\b|\bcargo check\b[^\n]*--all-targets\b"),
 )
 CLIPPY_MARKER = re.compile(r"\bjust lint\b|\bcargo clippy\b")
 
@@ -64,6 +66,15 @@ def needs_swap(step: dict, job: dict) -> bool:
     # The cargo Script checks shard runs --verify-lib-inventory.
     shard = (step.get("env") or {}).get("SCRIPT_CHECK_SHARD")
     return "ci-script-checks.sh" in run and shard == "cargo"
+
+
+def runs_on_ubuntu(job: dict) -> bool:
+    # A matrix runs-on is resolved from its os list.
+    runs_on = str(job.get("runs-on", ""))
+    if "matrix.os" in runs_on:
+        oses = ((job.get("strategy") or {}).get("matrix") or {}).get("os") or []
+        return any("ubuntu" in str(os_name) for os_name in oses)
+    return "ubuntu" in runs_on
 
 
 def expected_df(target: Path) -> str:
@@ -90,7 +101,7 @@ class SwapStepWiring(unittest.TestCase):
             jobs = yaml.safe_load((REPO_ROOT / relative).read_text("utf-8"))["jobs"]
             discovered = {
                 job_id for job_id, job in jobs.items()
-                if "ubuntu" in str(job.get("runs-on", ""))
+                if runs_on_ubuntu(job)
                 and any(needs_swap(step, job) for step in job.get("steps", []))
             }
             self.assertEqual(discovered, expected, relative)

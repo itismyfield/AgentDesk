@@ -217,6 +217,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests
   --skip services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
+  --skip services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop
   --skip services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   --skip services::discord::turn_bridge::tmux_runtime::stop_host::tests
   --skip services::discord::turn_bridge::voice_completion::voice_completion_tests
@@ -243,6 +244,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::routines::session_control::tests
   --skip services::scheduled_messages::context_snapshot::postgres_tests
   --skip services::scheduled_messages::postgres_tests
+  --skip services::session_forwarding::home_stop::tests
   --skip services::session_forwarding::tests
   --skip services::session_host::herdr_clear_adapter::tests
   --skip services::session_host::session_record::tests
@@ -685,6 +687,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::resume_pin_tests::c1_synthetic_and_handoff_stale_pins_leave_replacement_untouched
   services::discord::turn_bridge::resume_pin_tests::sa2_capture_hands_off_owned_provider_receiver
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_each_stop_reason_preserves_delivery_and_settlement_axes
+  services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::slash_stop_asks_the_home_before_the_legacy_owner_forward_and_ends_there
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_sends_one_escape_and_spends_the_claim_only_once_sent
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_writes_nothing_unless_every_fence_passes
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_stop_for_another_provider_is_refused_before_any_io
@@ -732,6 +735,7 @@ NON_PG_FILTER_REPLAY=(
   services::routines::session_control::tests::target_channel_prefers_session_thread_then_routine_thread_then_primary
   services::routines::session_control::tests::tmux_name_from_session_key_uses_suffix_after_host
   services::scheduled_messages::postgres_tests::postgres_precision_normalizes_linux_nanosecond_timestamps
+  services::session_forwarding::home_stop::tests::f1_receiver_shape_and_trust_refusals_run_nothing
   services::session_forwarding::tests::cancel_retry_accepts_ack_and_authenticated_structured_not_found
   services::session_forwarding::tests::cancel_retry_reloads_owner_only_for_conflict
   services::session_forwarding::tests::cleartext_rejection_never_yields_an_authenticated_request_target
@@ -1001,6 +1005,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
+  services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop
   services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   services::discord::turn_bridge::tmux_runtime::stop_host::tests
   services::discord::turn_bridge::voice_completion::voice_completion_tests
@@ -1027,6 +1032,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::routines::session_control::tests
   services::scheduled_messages::context_snapshot::postgres_tests
   services::scheduled_messages::postgres_tests
+  services::session_forwarding::home_stop::tests
   services::session_forwarding::tests
   services::session_host::herdr_clear_adapter::tests
   services::session_host::session_record::tests

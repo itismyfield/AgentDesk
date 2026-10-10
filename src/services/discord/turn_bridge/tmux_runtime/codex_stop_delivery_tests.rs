@@ -1041,3 +1041,6 @@ fn act7_each_stop_reason_preserves_delivery_and_settlement_axes() {
             .contains("요청은 유지")
     );
 }
+
+#[path = "codex_stop_delivery_home_stop_tests.rs"]
+mod home_stop;
