@@ -35,7 +35,11 @@ pub(in crate::services::discord::turn_bridge) fn herdr_stop_unconfirmed(
         && !cancelled
         && !terminal_admitted
         && token.herdr_interrupt_state().is_some_and(|intent| {
-            let submission = *intent.submission.lock().unwrap_or_else(|e| e.into_inner());
+            let submission = intent
+                .submission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .submission;
             intent.user_stop.load(std::sync::atomic::Ordering::Acquire)
                 || submission != HerdrSubmission::Unsubmitted
         });

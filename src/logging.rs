@@ -236,6 +236,7 @@ fn init_dcserver_tracing_once() -> Result<()> {
     let root = crate::config::runtime_root()
         .ok_or_else(|| anyhow::anyhow!("Failed to resolve AgentDesk runtime root"))?;
     let log_path = root.join("logs").join("dcserver.stdout.log");
+    crate::services::tui_o::n1_observation::sink::initialize(&root.join("logs"));
     let writer =
         RotatingLogWriter::new(log_path, dcserver_log_max_bytes(), dcserver_log_max_files())?;
 
