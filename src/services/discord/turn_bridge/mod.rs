@@ -226,18 +226,9 @@ use voice_completion::{
 use watcher_handoff::{live_watcher_registered_for_relay, should_delegate_bridge_relay_to_watcher};
 mod context;
 use super::tmux_watcher_registry::WatcherClaimIncarnation;
-pub(super) use context::{BridgeCompletionSignal, TurnBridgeContext};
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WatcherHandoffClaimOutcome {
-    None,
-    ReusedExisting,
-    Spawned,
-}
-// Shared by the bridge task body below and the extracted stream_loop.rs
-// (#4230 S6) — must live at module scope so both resolve them.
-const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 pub(super) use bridge_entry_persist::spawn_turn_bridge;
+pub(super) use context::{BridgeCompletionSignal, TurnBridgeContext, WatcherHandoffClaimOutcome};
+use context::{LIVE_LONG_RUN_HEARTBEAT_INTERVAL, SPINNER};
 pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
@@ -276,6 +267,9 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     let probe_channel = bridge.channel_id;
     let _bridge_task = super::task_supervisor::spawn_observed("discord_turn_bridge", super::input_runtime::fence::effect::detached(super::input_runtime::fence::effect::current(), async move {
         let _original_registration = original_registration;
+        #[cfg(test)]
+        #[cfg(unix)]
+        cancel_backstop_test_support::pause(bridge.channel_id).await;
         let channel_id = bridge.channel_id;
         let provider = bridge.provider.clone();
         let gateway = bridge.gateway.clone();
@@ -985,9 +979,16 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
 
         // completion_tx is sent automatically by CompletionGuard on drop
     }.instrument(bridge_span)));
+    #[cfg(test)]
+    #[cfg(unix)]
+    cancel_backstop_test_support::record(probe_channel, _bridge_task.abort_handle());
     #[cfg(all(test, unix))]
     resume_pin_tests::observe_bridge_completion(probe_channel, _bridge_task);
 }
+
+#[cfg(test)]
+#[cfg(unix)]
+pub(in crate::services::discord) mod cancel_backstop_test_support;
 
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) mod resume_pin_tests;

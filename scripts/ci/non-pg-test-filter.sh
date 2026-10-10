@@ -88,6 +88,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::intake_worker::replay_hold_tests
   --skip services::cluster::machine_resources::store::tests
   --skip services::discord::admin_host_guard::tests
+  --skip services::discord::commands::cancel_backstop_tests
   --skip services::discord::commands::control::clear_persist_failure_tests
   --skip services::discord::commands::control::home_fence::tests
   --skip services::discord::commands::control::input_clear::tests
@@ -100,6 +101,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
   --skip services::discord::health::turn_deliver::inject_codex_tests
   --skip services::discord::health::turn_deliver::inject_tests
+  --skip services::discord::herdr_terminate::tests
   --skip services::discord::host_defer_gate::tests
   --skip services::discord::host_key_derivation::tests
   --skip services::discord::idle_cleanup_selector_tests
@@ -152,6 +154,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::herdr_source::tests
   --skip services::discord::tui_prompt_relay::rehydration::tests::host_defer
   --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
@@ -389,6 +393,9 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::turn_deliver::inject_tests::any_holder_takes_input_unless_a_claimed_input_has_not_reached_its_row
   services::discord::health::turn_deliver::inject_tests::the_row_stamp_or_the_first_bound_pane_decides_whether_a_session_is_tui
   services::discord::health::turn_deliver::inject_tests::the_switch_opens_only_on_external_or_all
+  services::discord::herdr_terminate::tests::m1_disabled_service_has_zero_io
+  services::discord::herdr_terminate::tests::m1_hold_release_window_preserves_input_until_settlement
+  services::discord::herdr_terminate::tests::m1_host_terminated_settles_exact_turn_and_publishes_queue_once
   services::discord::idle_recap_interaction::tests::claim_database_error_fails_closed_without_injection
   services::discord::idle_recap_interaction::tests::compact_uses_claimed_recap_target_and_native_prompt
   services::discord::idle_recap_interaction::tests::concurrent_compact_claims_allow_exactly_one_injection
@@ -593,6 +600,14 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rowless_turn_with_a_mid_stream_resume_baseline
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::soft_terminal_read_ending_in_a_split_scalar_baseline
   services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::configured_channel_binding_is_last_resort_and_provider_scoped
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::active_q_reinsert_and_real_kick_leave_one_provider_input_and_answer
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::autoheal::periodic_orphan_token_refusal_preserves_q_then_cancel_backstop_runs_it_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::bang_stop_with_dead_bridge_parks_then_owner_runs_q_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::live_foreign_row_survives_sweep_and_backstop
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::reclaimable_foreign_row_is_swept_then_backstop_runs_q_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::released_anchor_preserves_prior_tail_and_runs_q_exactly_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::restart_restores_q_and_inflight_then_runs_q_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::session_bound_row_keeps_its_anchor_despite_dead_pane
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_preserves_legacy_error_shape
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_uses_auth_token_expired_code
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::post_commit_failure_emits_result_and_quality_observability
@@ -685,6 +700,15 @@ NON_PG_FILTER_REPLAY=(
   services::session_forwarding::tests::resolve_forward_target_rejects_invalid_owner_and_local_instance_ids
   services::session_forwarding::tests::resolve_forward_target_returns_trusted_foreign_owner
   services::session_forwarding::tests::stale_capability_and_missing_trust_config_fail_before_forwarding
+  services::session_host::herdr_gate::tests::m1_afterwrite_never_auto_retries_pg
+  services::session_host::herdr_gate::tests::m1_confirmation_required_stops_pg
+  services::session_host::herdr_gate::tests::m1_last_pane_is_allowed_pg
+  services::session_host::herdr_gate::tests::m1_provider_survived_close_keeps_bound_pg
+  services::session_host::herdr_gate::tests::m1_replaced_root_refuses_before_send_pg
+  services::session_host::herdr_gate::tests::m1_retire_cas_failure_keeps_hold_pg
+  services::session_host::herdr_gate::tests::m1_service_missing_pane_absent_provider_retires_pg
+  services::session_host::herdr_gate::tests::m1_stale_a_never_releases_b_pg
+  services::session_host::herdr_gate::tests::m1_unreadable_process_never_means_absent_pg
   services::session_resume::tests::completed_critical_section_cancels_its_watchdog
   services::session_resume::tests::critical_section_watchdog_records_once_without_cancelling_work
   services::session_resume::tests::discover_excludes_live_bound_session
@@ -810,6 +834,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::cluster::intake_worker::replay_hold_tests
   services::cluster::machine_resources::store::tests
   services::discord::admin_host_guard::tests
+  services::discord::commands::cancel_backstop_tests
   services::discord::commands::control::clear_persist_failure_tests
   services::discord::commands::control::home_fence::tests
   services::discord::commands::control::input_clear::tests
@@ -822,6 +847,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::health::recovery::stall_watchdog_auto_heal_tests
   services::discord::health::turn_deliver::inject_codex_tests
   services::discord::health::turn_deliver::inject_tests
+  services::discord::herdr_terminate::tests
   services::discord::host_defer_gate::tests
   services::discord::host_key_derivation::tests
   services::discord::idle_cleanup_selector_tests
@@ -874,6 +900,8 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tui_prompt_relay::herdr_source::tests
   services::discord::tui_prompt_relay::rehydration::tests::host_defer
   services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
+  services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
   services::discord::turn_bridge::headless_delivery::production_seam_tests

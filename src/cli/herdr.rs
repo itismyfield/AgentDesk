@@ -33,6 +33,25 @@ pub(crate) fn run(args: HerdrArgs) -> Result<(), String> {
 }
 
 #[cfg(unix)]
+pub(crate) fn confirmed_ended(
+    record: &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
+    reading: &crate::services::session_host::PaneReading,
+) -> bool {
+    use crate::services::session_host::{PaneProvider, PaneReading};
+    match reading {
+        PaneReading::Missing => true,
+        PaneReading::Present {
+            root,
+            provider: PaneProvider::Exited,
+        } => record
+            .expected
+            .as_ref()
+            .is_some_and(|expected| expected.root == *root),
+        PaneReading::Present { .. } | PaneReading::Unreadable(_) => false,
+    }
+}
+
+#[cfg(unix)]
 mod node {
     use serde_json::{Value, json};
     use sqlx::PgPool;
@@ -202,17 +221,7 @@ mod node {
         record: &HostedExecution,
         reading: &PaneReading,
     ) -> Result<Retired, RetireRefusal> {
-        let ended = match reading {
-            PaneReading::Missing => true,
-            PaneReading::Present {
-                root,
-                provider: PaneProvider::Exited,
-            } => record
-                .expected
-                .as_ref()
-                .is_some_and(|expected| expected.root == *root),
-            _ => false,
-        };
+        let ended = super::confirmed_ended(record, reading);
         if !ended {
             return Err(match reading {
                 PaneReading::Present {

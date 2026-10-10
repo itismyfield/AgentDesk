@@ -203,7 +203,7 @@ pub(super) async fn handle_terminal(
     .await
     {
         Ok(outcome) => {
-            if matches!(event, TerminalEvent::OperatorRelease(_)) {
+            if event.is_mute_settlement() {
                 entry.completion_admission.operator_released = true;
                 entry.completion_admission.queue_eligible_published = false;
             }

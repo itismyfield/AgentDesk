@@ -44,7 +44,7 @@ pub(crate) use herdr_clear_adapter::{
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr_gate::{
     HerdrGateRefusal, HerdrPaneView, HerdrTarget, Mutation as HerdrMutation, PaneProvider,
-    PaneReading,
+    PaneReading, TerminationFence,
 };
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr_registry::registry as herdr_endpoints;
