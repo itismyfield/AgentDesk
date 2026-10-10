@@ -25,6 +25,10 @@ use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents};
 pub(crate) mod admission;
 #[path = "command.rs"]
 pub(crate) mod command;
+#[path = "external.rs"]
+pub(crate) mod external;
+#[path = "mapping.rs"]
+pub(crate) mod mapping;
 #[path = "ordering.rs"]
 pub(crate) mod ordering;
 #[path = "receipt.rs"]
@@ -337,6 +341,9 @@ pub(crate) enum Landing {
 pub(crate) trait Ports: Send + 'static {
     type Clear: ClearHost;
     type Move: Host + Send + 'static;
+    /// Reads the actual writer map synchronously; unverified registration/provider coverage
+    /// returns Unavailable. No map reference may escape this call.
+    fn mapping(&self, channel: u64) -> mapping::Check;
     /// Freezes the drained channel's Legacy queue.
     fn freeze(&mut self, closing: Arc<Closing>) -> Step<'_, Result<(), Failure>>;
     /// A clear host with the session transition guard its resume runs under.
@@ -488,7 +495,28 @@ impl<P: Ports> Supervisor<P> {
                 let _ = reply.send(self.order.fetch_ticket(self.admission_gen));
             }
             SupervisorCmd::PendingSource { sources, reply } => {
-                let _ = reply.send(self.order.pending(&sources));
+                let _ = reply.send(self.order.admit_pending(&sources));
+            }
+            SupervisorCmd::SubmitExternal { source, reply } => {
+                // Captured before the loan, which itself closes admission while it lasts.
+                let admit_new = receipt_open
+                    && self.admission_open()
+                    && !ordering::order_barrier(&self.config.provider, self.config.channel);
+                let result = if source.identity().execution_channel_id != self.config.channel {
+                    external::ExternalReceipt::Deferred(Deferred::Conflict)
+                } else {
+                    loan(&mut self.slot, move |lease| {
+                        external::submit(lease, *source, admit_new)
+                    })
+                    .await
+                    .unwrap_or(external::ExternalReceipt::Deferred(
+                        Deferred::SupervisorLost,
+                    ))
+                };
+                let persistence = external::ExternalReceipt::Deferred(Deferred::Persistence);
+                self.registration
+                    .report(&held("ledger_receipt_unconfirmed"), result == persistence);
+                let _ = reply.send(result);
             }
             SupervisorCmd::LookupResponsibility { identity, reply } => {
                 let result = if identity.execution_channel_id != self.config.channel {
@@ -660,6 +688,9 @@ impl<P: Ports> Supervisor<P> {
             }
             tokio::time::sleep(transition::backoff(attempt - 1)).await;
         }
+        if self.config.request == Request::Ledger {
+            self.check_mapping()?;
+        }
         if gate.mode() == Mode::Closing {
             (self.ports.freeze(closing.clone()).await).map_err(|_| held("freeze"))?;
         }
@@ -681,6 +712,22 @@ impl<P: Ports> Supervisor<P> {
         }
         self.resume_clear().await?;
         self.transition(&closing, history).await
+    }
+
+    // An unavailable lookup preserves the last mapping hold; only a fresh empty scan clears it.
+    fn check_mapping(&mut self) -> Result<(), HoldCause> {
+        let mapped = match self.ports.mapping(self.config.channel) {
+            mapping::Check::Empty => false,
+            mapping::Check::MappedThread => true,
+            mapping::Check::Unavailable => return Err(HoldCause::MappingUnavailable),
+        };
+        self.registration
+            .report(&HoldCause::MappingUnavailable, false);
+        if mapped {
+            return Err(HoldCause::MappedThread);
+        }
+        self.registration.report(&HoldCause::MappedThread, false);
+        Ok(())
     }
 
     /// S5: settles a clear cutoff a crash left behind before anything else touches the ledger.

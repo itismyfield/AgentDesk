@@ -22,19 +22,56 @@ ENTRIES = {
     R + "/publication.rs": "matches new confirm publish_with seal",
     H: "",
 }
+# Boot activation sites are pinned per function so unrelated edits elsewhere in a file pass;
+# "*" pins the whole file: legacy_supervision.rs owns RETIRED, and a new writer there escapes SYMBOL.
 PROTECTED = {
-    'src/cli/dcserver.rs': '61e850c1d3ea0acf4725c8ce4fa109f64918fbf3cf451d43b3330a9b6d660fb3',
-    'src/services/discord/runtime_bootstrap.rs': '2c76094a3c6bb098ee0b4eccd87416a7927fe80f52739995ca4c56efc2490d0a',
-    'src/services/discord/inflight/removal/boot_reaper.rs': '14b7475c4471438af7667b50f7053d5cc86fba5d10f3d5407253f6b92dc81b1e',
-    'src/services/discord/tui_direct_pending_start/turn_retirement.rs': 'fb01deafde3c9bc0b55c2590a294fa1f8f5a6c6b94e3e54441dd0fcadf8273b9',
-    'src/services/discord/runtime_bootstrap/o_writer_host.rs': '52d696ebffbf91e7d24ea8344ff9d034ba9b158ceceb6afe13add7349488abe0',
-    'src/services/discord/health/legacy_supervision.rs': '1c1497db24b104d698762e3d24c51e224acce622e0cc4255806b1d02dd55a4b3',
-    'src/services/discord/health/snapshot.rs': 'a389f92170602c561a021ab6f36d4db543648817b4da8b6f5d90f2ba4eb9a035'}
+    'src/cli/dcserver.rs': {'handle_dcserver': 'cd0fa633d7bbf6ed71ab6887cba145d5d2cc01e6255ed5668ea4173659b9cd66'},
+    'src/services/discord/runtime_bootstrap.rs': {'run_bot': 'd4958569f809284797c4c381894d5072f3fd81fcce9146a38a9f117b38179f55'},
+    'src/services/discord/inflight/removal/boot_reaper.rs': {
+        'run_once': '6364c6e13da83bbf08092a6460de03dda10281c0af81b5f1293ab51b3ace9858',
+        'prepare_before_reap': '9de0e7d478987fc0464a1753bee32171dc54a76cbebd4f8db4a7df6b47068f3e',
+        'reap_inflight_rows_at_boot_blocking': '33ea1fcffa8493b9269880c2b9d4d10d9ccd2fafb316e7c9b8eca353b72913f1',
+        'reap_inflight_rows_at_boot_with_guard': 'b4caa2fdf84b50fb3ff8e255d9712b791bfd07ea69e0aee9a8bb08f1a3d8e284',
+        'reap_inflight_rows_after_preparation': 'f3fee466ddc3d3925b5bfee8805a6678875db72874f30c51a9a74fee38d693bd'},
+    'src/services/discord/tui_direct_pending_start/turn_retirement.rs': {'confirm_at_boot': '835b358746ebb4b1dd99bf662b73923f4904b73ce0b973b9aea84fa1d128ad07'},
+    'src/services/discord/runtime_bootstrap/o_writer_host.rs': {'adopted': '0fe2f48e1465b84da5a3b7155df25e012efc1510762c78a4c61ae55ea48f2a23'},
+    'src/services/discord/health/legacy_supervision.rs': {'*': '1c1497db24b104d698762e3d24c51e224acce622e0cc4255806b1d02dd55a4b3'},
+    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': 'dc4f69221f468ab3a3943975e9812ae8b3ce7db43ccccb1cf9a387c1ca86c6d0'}}
 SYMBOL = re.compile(r"\b(?:Boot(?:Cohort|Slot|Publication|WorkOnce|Roster|Bot|Selection|Result|RetirementHealth)|boot_retirement|boot_status|install_process|wait_released|publish_with)\b")
 FN = re.compile(r"\bfn\s+(\w+)")
 
 def digest(code):
     return hashlib.sha256(re.sub(r"\s+", "", code).encode()).hexdigest()
+
+def function_text(code, name):
+    """One `fn name` item, from its line start to the matching brace; `code` is production text,
+    whose strings and comments are already blanked, so braces inside them never count."""
+    found = list(re.finditer(r"\bfn\s+" + re.escape(name) + r"\b", code))
+    if len(found) != 1:
+        raise ValueError(f"{len(found)} definitions")
+    start = code.rfind("\n", 0, found[0].start()) + 1
+    depth = nest = 0
+    for at in range(found[0].end(), len(code)):
+        nest += {"(": 1, "[": 1, ")": -1, "]": -1}.get(code[at], 0) if depth == 0 else 0
+        if code[at] == ";" and depth == nest == 0:
+            raise ValueError("no body")
+        depth += {"{": 1, "}": -1}.get(code[at], 0)
+        if code[at] == "}" and depth == 0:
+            return code[start:at + 1]
+    raise ValueError("unbalanced body")
+
+def protected_errors(path, code, pins):
+    errors = []
+    for name, expected in pins.items():
+        try:
+            actual = digest(code if name == "*" else function_text(code, name))
+        except ValueError as error:
+            errors.append(f"{path}::{name}: protected function extraction failed ({error})")
+            continue
+        if actual != expected:
+            errors.append(f"{path}::{name}: protected boot/RETIRED body changed; "
+                          f"after review re-pin {name!r}: {actual!r}")
+    return errors
 
 def audit(sources, entries=ENTRIES, protected=PROTECTED, skips=frozenset()):
     errors = []
@@ -44,9 +81,10 @@ def audit(sources, entries=ENTRIES, protected=PROTECTED, skips=frozenset()):
             errors.append(f"{path}: primitive entry manifest drift")
         if re.search(r"\b(?:macro_rules|include|ctor|env|unsafe|Command)\b", code):
             errors.append(f"{path}: unclassified activation syntax")
-    for path, expected in protected.items():
-        if digest(sources.get(path, "")) != expected:
-            errors.append(f"{path}: protected boot/RETIRED body changed")
+    for path, pins in protected.items():
+        if path not in sources or not pins:
+            errors.append(f"{path}: protected file missing or unpinned")
+        errors.extend(protected_errors(path, sources.get(path, ""), pins))
     tests = {R + "/" + name + "_tests.rs" for name in ("cohort", "completion", "publication")}
     for path, code in sources.items():
         if path.startswith(R + "/") and path not in entries and path not in tests:

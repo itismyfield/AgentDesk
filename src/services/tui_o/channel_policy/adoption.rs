@@ -82,6 +82,14 @@ impl Candidate {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    #[cfg(test)]
+    pub(crate) fn locked_for_test(&self) -> bool {
+        matches!(
+            self.state.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+
     /// Read without deciding anything, for callers that carry no body.
     pub(crate) fn peek(&self) -> Adoption {
         *self.lock()
@@ -98,6 +106,14 @@ impl Candidate {
     pub(in crate::services::tui_o) fn claim_body(&self, channel: u64) -> BodyClaimed {
         let state = self.take(channel);
         let owned = state.owned();
+        #[cfg(test)]
+        if !owned {
+            crate::services::tui_o::writer::activation::test_hook::run(
+                channel,
+                crate::services::tui_o::writer::activation::test_hook::Step::BeforeLegacyStarted,
+            )
+            .expect("Legacy start hook");
+        }
         let send = (!owned).then(|| {
             self.sends.started.fetch_add(1, Ordering::SeqCst);
             LegacySend(Arc::clone(&self.sends))
@@ -117,8 +133,7 @@ impl Candidate {
         state
     }
 
-    /// Legacy body sends this channel started and finished so far.
-    #[cfg(test)]
+    /// Legacy body sends this channel started and finished so far; callers hold the state lock.
     pub(crate) fn sends(&self) -> (u64, u64) {
         let sends = &self.sends;
         let started = sends.started.load(Ordering::SeqCst);

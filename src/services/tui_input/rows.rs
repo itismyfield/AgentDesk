@@ -12,6 +12,7 @@ use super::attempt::{
 };
 use super::blob::BlobPin;
 use super::durable::invalid;
+use super::input_key::is_external_key;
 use super::ledger::{Ledger, Record, Snapshot};
 #[path = "receipt_identity.rs"]
 pub(crate) mod receipt_identity;
@@ -536,7 +537,7 @@ impl Rows {
         self.ignored
     }
 
-    // Settled rows drop their input but keep attempt detail; open rows and Staged keep everything.
+    // Settled rows drop their input (external rows keep their origin) but keep attempt detail.
     pub fn compact(&self) -> io::Result<Value> {
         self.compact_with(&Keep, 0)
     }
@@ -565,7 +566,10 @@ impl Rows {
             {
                 compacted.receipts.insert(*key, identity);
             }
-            row.input = Value::Null;
+            row.input = match is_external_key(*key) {
+                true => external_tombstone(&row.input),
+                false => Value::Null,
+            };
             let Some(now) = facts.now_ms().filter(|_| !row.attempts.is_empty()) else {
                 continue;
             };
@@ -593,6 +597,19 @@ impl Rows {
             }
         }
         Ok(serde_json::to_value(compacted)?)
+    }
+}
+
+/// A settled external row keeps only what a retry of its origin is matched against; a missing
+/// origin stays missing, so that retry reads as unknown rather than new.
+fn external_tombstone(input: &Value) -> Value {
+    let kept: serde_json::Map<_, _> = ["receipt_identity", "http_origin"]
+        .into_iter()
+        .filter_map(|field| Some((field.to_owned(), input.get(field)?.clone())))
+        .collect();
+    match kept.is_empty() {
+        true => Value::Null,
+        false => Value::Object(kept),
     }
 }
 

@@ -80,6 +80,7 @@ pub fn activate_with(
     let mut spent = Spent::default();
     let result = adopt(
         &mut adoption,
+        candidate,
         store,
         (channel, facts),
         local_custody,
@@ -111,8 +112,14 @@ fn since(at: Instant) -> u64 {
     at.elapsed().as_micros() as u64
 }
 
+/// A body admitted by Legacy must finish before O publishes its first init.
+pub(super) fn body_in_flight((started, finished): (u64, u64)) -> bool {
+    started != finished
+}
+
 fn adopt(
     adoption: &mut Adoption,
+    candidate: &Candidate,
     store: &OStore,
     (channel, facts): (u64, Result<ActivationFacts, String>),
     local_custody: impl FnOnce() -> Result<bool, String>,
@@ -121,6 +128,9 @@ fn adopt(
 ) -> Result<(), String> {
     if !matches!(*adoption, Adoption::Pending | Adoption::Deferred) {
         return Err(format!("adoption is already {adoption:?}"));
+    }
+    if body_in_flight(candidate.sends()) {
+        return Err("Legacy body send in flight".into());
     }
     let at = Instant::now();
     let checked = facts
@@ -266,8 +276,15 @@ pub(crate) mod test_hook {
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub(crate) enum Step {
+        BeforeLegacyStarted,
         /// As an adoption starts pinning the sources of a channel that already holds output.
         Snapshot,
+        /// Deferred retry entry; the clocks start at this instant.
+        DeferredStarted,
+        /// Before the next retry sleep, after the preceding cycle finished.
+        DeferredTick,
+        BeforeFence,
+        AfterFence,
         /// Before the serial and adoption locks are taken.
         BeforeLock,
         BeforeWrite,
@@ -285,7 +302,7 @@ pub(crate) mod test_hook {
         HOOKS.lock().unwrap().push((channel, step, Box::new(hook)));
     }
 
-    pub(in crate::services::tui_o::writer) fn run(channel: u64, step: Step) -> Result<(), String> {
+    pub(in crate::services::tui_o) fn run(channel: u64, step: Step) -> Result<(), String> {
         let mut hooks = HOOKS.lock().unwrap();
         let Some(at) = hooks
             .iter()

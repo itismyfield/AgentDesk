@@ -5,9 +5,9 @@ use super::SharedData;
 
 const MIN_REAL_DISCORD_MESSAGE_ID: u64 = 100_000_000_000_000;
 
+/// Synthetic ids, including external input keys, have no Discord message to react on.
 pub(in crate::services::discord) fn is_real_discord_message_id_value(id: u64) -> bool {
-    (MIN_REAL_DISCORD_MESSAGE_ID..super::voice_barge_in::INTERNAL_VOICE_MESSAGE_ID_START)
-        .contains(&id)
+    id >= MIN_REAL_DISCORD_MESSAGE_ID && crate::services::tui_input::input_key::is_discord_key(id)
 }
 
 pub(in crate::services::discord) fn is_real_discord_message_id(

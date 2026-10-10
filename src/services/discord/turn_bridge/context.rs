@@ -1,5 +1,17 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum WatcherHandoffClaimOutcome {
+    None,
+    ReusedExisting,
+    Spawned,
+}
+// Shared by the bridge task body below and the extracted stream_loop.rs
+// (#4230 S6) — must live at module scope so both resolve them.
+pub(super) const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub(super) const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 /// Bridge lifecycle notification, not proof of durable terminal delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum BridgeCompletionSignal {
