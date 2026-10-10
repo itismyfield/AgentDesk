@@ -788,6 +788,13 @@ async fn unretired_supervisor_consumer_preserves_legacy_decode_and_backfill() {
     use crate::services::discord::inflight::o_seed_observation;
     let channel = 63_254_081;
     let provider = ProviderKind::Claude;
+    let config = serde_json::from_value(serde_json::json!({"server": {}, "agents": [{
+        "id": "legacy-control", "name": "Legacy", "channels": {
+            "claude": {"id": channel.to_string(), "runtime": "tui"}
+        }
+    }], "tui_o": {"writer": {"channels": []}}}))
+    .unwrap();
+    crate::bootstrap::install_boot_snapshots(&config).unwrap();
     let shared = crate::services::discord::make_shared_data_for_tests();
     shared
         .http
