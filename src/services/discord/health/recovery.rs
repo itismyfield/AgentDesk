@@ -653,6 +653,12 @@ pub async fn schedule_pending_queue_drain_after_cancel(
             queue_depth_after: Some(0),
         };
     }
+    let snapshot = discord::mailbox_snapshot(&shared, channel_id).await;
+    shared.queue_park_ledger.register(
+        channel_id,
+        &snapshot,
+        discord::queue_park_ledger::Origin::PostCancelPreserved,
+    );
     discord::schedule_deferred_idle_queue_kickoff(shared.clone(), provider, channel_id, reason);
     PostCancelDrainOutcome {
         scheduled: true,
