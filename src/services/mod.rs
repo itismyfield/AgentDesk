@@ -151,6 +151,8 @@ pub(crate) mod tui_o {
     pub(crate) mod alarm;
     pub(crate) mod channel_policy;
     pub(crate) mod cutover;
+    #[cfg(all(test, unix))]
+    mod gates_m1;
     pub(crate) mod ownership;
     pub(crate) mod shadow;
     pub(crate) mod shadow_host;
