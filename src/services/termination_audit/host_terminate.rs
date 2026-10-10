@@ -67,19 +67,33 @@ pub(crate) fn terminate_hosted_session(
     })
 }
 
-// No production caller until the termination service owns revalidation and settlement.
+// No external production caller until explicit operator activation.
 #[cfg(test)]
 pub(crate) mod herdr_terminate {
     use crate::services::session_host::{HerdrGateRefusal, HerdrTarget};
 
     /// Explicit operator intent bound to one gate; a cancel warrant cannot convert into it.
-    pub(crate) struct OperatorTerminateWarrant {
+    pub(crate) struct OperatorTerminateWarrant<'a> {
         target: HerdrTarget,
+        fence: Option<&'a crate::services::session_host::TerminationFence>,
     }
 
-    impl OperatorTerminateWarrant {
+    impl<'a> OperatorTerminateWarrant<'a> {
+        #[cfg(test)]
         pub(crate) fn issue(target: HerdrTarget) -> Self {
-            Self { target }
+            Self {
+                target,
+                fence: None,
+            }
+        }
+        pub(crate) fn issue_fenced(
+            target: HerdrTarget,
+            fence: &'a crate::services::session_host::TerminationFence,
+        ) -> Self {
+            Self {
+                target,
+                fence: Some(fence),
+            }
         }
     }
 
@@ -99,14 +113,20 @@ pub(crate) mod herdr_terminate {
     }
 
     /// One fresh judgment and one witnessed close; ACK never retires or settles a turn.
-    pub(crate) fn terminate_herdr_once(warrant: OperatorTerminateWarrant) -> HerdrTerminateResult {
+    pub(crate) fn terminate_herdr_once(
+        warrant: OperatorTerminateWarrant<'_>,
+    ) -> HerdrTerminateResult {
         if !crate::config_live_reload::current()
             .is_some_and(|config| config.runtime.herdr_terminate_enabled == Some(true))
         {
             warrant.target.discard_pin();
             return HerdrTerminateResult::Refused(TerminateRefusal::Disabled);
         }
-        if let Err(why) = warrant.target.pin_terminate() {
+        let judged = match warrant.fence.as_ref() {
+            Some(fence) => warrant.target.pin_terminate_fenced(fence),
+            None => warrant.target.pin_terminate(),
+        };
+        if let Err(why) = judged {
             return HerdrTerminateResult::Refused(TerminateRefusal::Gate(why));
         }
         warrant.target.send_close_pinned().into()

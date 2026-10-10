@@ -276,7 +276,7 @@ fn off_elsewhere(_: &dyn HerdrTransport, endpoint: &HerdrEndpoint) -> RestoreRes
 fn audited_version(transport: &dyn HerdrTransport, _: &HerdrEndpoint) -> RestoreResume {
     match transport.hello() {
         Ok(hello)
-            if super::super::herdr::model::VERIFIED_HERDR_VERSIONS
+            if crate::services::session_host::herdr::model::VERIFIED_HERDR_VERSIONS
                 .contains(&hello.version.as_str()) =>
         {
             RestoreResume::Off {
@@ -1032,4 +1032,579 @@ fn m0_close_uncertain_reply_never_retries() {
         ),
         CloseEffect::Indeterminate(_)
     ));
+}
+
+#[test]
+fn m1_production_e7_rejects_unaudited_version_before_provenance() {
+    use crate::services::session_host::herdr::observe::{self, ConfigRead, ServerProvenance};
+    use std::path::Path;
+    struct NoReads;
+    impl ServerProvenance for NoReads {
+        fn process_start(&self, _: u32) -> Result<ProcessStart, RestoreUnverified> {
+            panic!("unknown version must not reach process provenance")
+        }
+        fn process_env(&self, _: u32, _: &str) -> Result<Vec<String>, RestoreUnverified> {
+            panic!("unknown version must not reach environment provenance")
+        }
+        fn read_config(&self, _: &Path) -> Result<ConfigRead, RestoreUnverified> {
+            panic!("unknown version must not reach config provenance")
+        }
+    }
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let endpoint = endpoint(&rig.server);
+    let transport = transport(&rig.server, vec![SERVER]);
+    *rig.server.version.lock().unwrap() = "0.9.4".into();
+    assert_eq!(
+        observe::read_restore_resume_with(transport.as_ref(), &endpoint, &NoReads),
+        RestoreResume::Unverified(RestoreUnverified::VersionNotVerified)
+    );
+}
+
+#[test]
+fn m1_production_e7_accepts_audited_version() {
+    use crate::services::session_host::herdr::observe::{self, ConfigRead, ServerProvenance};
+    use std::path::Path;
+    struct Proven;
+    impl ServerProvenance for Proven {
+        fn process_start(&self, _: u32) -> Result<ProcessStart, RestoreUnverified> {
+            Ok(start(1_000))
+        }
+        fn process_env(&self, _: u32, key: &str) -> Result<Vec<String>, RestoreUnverified> {
+            Ok(vec![
+                match key {
+                    "HERDR_CONFIG_PATH" => "/adk/herdr/config.toml",
+                    "XDG_CONFIG_HOME" => "/adk/herdr/xdg",
+                    _ => panic!("unexpected key"),
+                }
+                .into(),
+            ])
+        }
+        fn read_config(&self, _: &Path) -> Result<ConfigRead, RestoreUnverified> {
+            Ok(ConfigRead {
+                bytes: observe::CANONICAL_CONFIG.to_vec(),
+                modified: UNIX_EPOCH + Duration::from_secs(900),
+            })
+        }
+    }
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let transport = transport(&rig.server, vec![SERVER]);
+    assert!(matches!(
+        observe::read_restore_resume_with(transport.as_ref(), &endpoint(&rig.server), &Proven),
+        RestoreResume::Off { .. }
+    ));
+}
+
+#[test]
+fn m1_input_pin_races_terminate_across_fresh_targets() {
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let a = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
+    let b = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
+    herdr(&a).pin(Mutation::Input).unwrap();
+    assert!(matches!(
+        herdr(&b).termination_fence(),
+        Err(HerdrGateRefusal::MutationBusy)
+    ));
+    herdr(&a).discard_pin();
+    let fence = herdr(&b).termination_fence().unwrap();
+    assert!(matches!(
+        herdr(&a).pin(Mutation::Input),
+        Err(HerdrGateRefusal::MutationBusy)
+    ));
+    assert_eq!(rig.server.mutations(), Vec::<Value>::new());
+    fence.reopen();
+    drop(fence);
+    herdr(&a).pin(Mutation::Input).unwrap();
+    herdr(&a).discard_pin();
+}
+
+/// The termination service driven end to end against the fake server, a throwaway PG row and a
+/// scripted OS.
+mod service {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    pub(super) use crate::services::discord::herdr_terminate::{
+        OperatorTerminate, TerminationResult, probe_settlement_window, terminate_explicit_herdr,
+        test_queue,
+    };
+
+    pub(super) const KEY: &str = "claude/hash/mac-mini:AgentDesk-claude-service";
+    pub(super) const SUCCESSOR: &str = "fedcba9876543210fedcba9876543210";
+
+    type CloseHook = Box<dyn FnOnce() + Send>;
+
+    /// The recorded pane as the server lists it: gone from the start, after a close, or never.
+    pub(super) struct PaneLife {
+        inner: Arc<dyn HerdrTransport>,
+        gone: AtomicBool,
+        vanish_on_close: bool,
+        on_close: Mutex<Option<CloseHook>>,
+    }
+
+    impl PaneLife {
+        pub(super) fn new(rig: &Rig, gone: bool, vanish_on_close: bool) -> Arc<Self> {
+            Arc::new(Self {
+                inner: transport(&rig.server, vec![SERVER]),
+                gone: AtomicBool::new(gone),
+                vanish_on_close,
+                on_close: Mutex::new(None),
+            })
+        }
+
+        /// Runs once, after the close reached the server and before the service reads the end.
+        pub(super) fn on_close(&self, hook: CloseHook) {
+            *self.on_close.lock().unwrap() = Some(hook);
+        }
+    }
+
+    impl HerdrTransport for PaneLife {
+        fn call(
+            &self,
+            call: &HerdrCall,
+        ) -> (
+            crate::services::session_host::herdr::contract::HerdrOutcome,
+            crate::services::session_host::herdr::contract::Witnessed,
+        ) {
+            let (mut result, witness) = self.inner.call(call);
+            if matches!(call.request, HerdrRequest::SessionSnapshot {})
+                && self.gone.load(Ordering::SeqCst)
+                && let Ok(reply) = &mut result
+                && let Ok(
+                    crate::services::session_host::herdr::model::HerdrResult::SessionSnapshot {
+                        snapshot,
+                    },
+                ) = &mut reply.body
+            {
+                snapshot.panes.clear();
+            }
+            (result, witness)
+        }
+        fn call_with_witness(
+            &self,
+            call: &HerdrCall,
+            witness: &ServerWitness,
+        ) -> crate::services::session_host::herdr::contract::HerdrOutcome {
+            let outcome = self.inner.call_with_witness(call, witness);
+            // The service's only witnessed write is its close; `closes` asserts the shape.
+            if !call.request.is_read_only() {
+                if self.vanish_on_close {
+                    self.gone.store(true, Ordering::SeqCst);
+                }
+                if let Some(hook) = self.on_close.lock().unwrap().take() {
+                    hook();
+                }
+            }
+            outcome
+        }
+        fn server_witness(&self) -> crate::services::session_host::herdr::contract::Witnessed {
+            self.inner.server_witness()
+        }
+        fn hello(
+            &self,
+        ) -> Result<crate::services::session_host::herdr::contract::ServerHello, RestoreUnverified>
+        {
+            self.inner.hello()
+        }
+    }
+
+    /// An OS whose launch evidence can be swapped between requests and whose answer for the
+    /// recorded provider's existence is scripted.
+    pub(super) struct ScriptedOs {
+        inner: Mutex<Arc<dyn ProcessOs>>,
+        exists: Result<bool, RestoreUnverified>,
+    }
+
+    impl ScriptedOs {
+        pub(super) fn new(
+            inner: Arc<dyn ProcessOs>,
+            exists: Result<bool, RestoreUnverified>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                inner: Mutex::new(inner),
+                exists,
+            })
+        }
+        pub(super) fn swap(&self, inner: Arc<dyn ProcessOs>) {
+            *self.inner.lock().unwrap() = inner;
+        }
+        fn os(&self) -> Arc<dyn ProcessOs> {
+            self.inner.lock().unwrap().clone()
+        }
+    }
+
+    impl ProcessOs for ScriptedOs {
+        fn exists(&self, _: u32) -> Result<bool, RestoreUnverified> {
+            self.exists
+        }
+        fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified> {
+            self.os().parent(pid)
+        }
+        fn start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+            self.os().start(pid)
+        }
+        fn environ(&self, pid: u32) -> Result<Vec<String>, RestoreUnverified> {
+            self.os().environ(pid)
+        }
+        fn exec_path(&self, pid: u32) -> Option<String> {
+            self.os().exec_path(pid)
+        }
+    }
+
+    /// This node's registry, live switch and one PG row holding `row`, with its hold taken.
+    pub(super) struct Service {
+        pub(super) pool: sqlx::PgPool,
+        db: TestPostgresDb,
+        pub(super) shared: Arc<crate::services::discord::SharedData>,
+        _registry: herdr_registry::ForcedRegistry,
+        _node: crate::config::session_hosts::ForcedSessionHosts,
+        _switch: LiveTerminateSwitch,
+    }
+
+    impl Service {
+        pub(super) async fn start(
+            rig: &Rig,
+            pane: Arc<PaneLife>,
+            os: Arc<ScriptedOs>,
+            nonce: &str,
+        ) -> Self {
+            let _switch = LiveTerminateSwitch::new();
+            let _registry = herdr_registry::force_for_test(
+                HerdrRegistry::with_transport(endpoint(&rig.server), pane)
+                    .with_reads((off_where_dialled, os)),
+            );
+            let _node = crate::config::session_hosts::force_for_test(Some("mac-mini"), &[]);
+            let db = TestPostgresDb::create().await;
+            let pool = db.connect_and_migrate().await;
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let mut record = stored(&rig.server, HostedState::Bound);
+            record.owner.discord_token_hash = shared.token_hash.clone();
+            record.execution_nonce = nonce.into();
+            record.source_ref.execution_nonce = nonce.into();
+            if let Some(expected) = record.expected.as_mut() {
+                expected.binding_nonce = nonce.into();
+            }
+            sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id, hosted_execution) VALUES ($1, 'claude', 'idle', 'discord_channel', $2, '1', $3)")
+                .bind(KEY).bind(&shared.token_hash).bind(serde_json::to_value(&record).unwrap())
+                .execute(&pool).await.unwrap();
+            crate::services::claude::herdr_turn::hold(nonce).unwrap();
+            Self {
+                pool,
+                db,
+                shared,
+                _registry,
+                _node,
+                _switch,
+            }
+        }
+
+        pub(super) async fn terminate(&self, nonce: &str) -> TerminationResult {
+            let request = OperatorTerminate {
+                session_key: KEY.into(),
+                execution_nonce: nonce.into(),
+            };
+            terminate_explicit_herdr(request, self.shared.clone(), &self.pool).await
+        }
+
+        /// The row's state and nonce.
+        pub(super) async fn row(&self) -> (String, String) {
+            sqlx::query_as("SELECT hosted_execution->>'state', hosted_execution->>'execution_nonce' FROM sessions WHERE session_key = $1")
+                .bind(KEY).fetch_one(&self.pool).await.unwrap()
+        }
+
+        pub(super) async fn finish(self) {
+            self.pool.close().await;
+            self.db.drop().await;
+        }
+    }
+
+    pub(super) fn held(nonce: &str) -> bool {
+        crate::services::claude::herdr_turn::input_holds()
+            .unwrap()
+            .iter()
+            .any(|(held, _)| held == nonce)
+    }
+
+    pub(super) fn closes(rig: &Rig) -> Vec<Value> {
+        let mutations = rig.server.mutations();
+        assert!(
+            mutations
+                .iter()
+                .all(|m| m["params"] == json!({"pane_id": PANE})
+                    && m["method"].as_str().is_some_and(|m| m.ends_with(".close"))),
+            "{mutations:?}"
+        );
+        mutations
+    }
+
+    pub(super) fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    /// A launch of `nonce` under the rig's runtime root, its provider alive.
+    pub(super) fn launch_of(nonce: &str) -> Arc<dyn ProcessOs> {
+        Arc::new(FakeOs::launched(env_naming(&context(nonce))))
+    }
+}
+
+use service::{PaneLife, ScriptedOs, Service, TerminationResult, block_on, closes, held};
+
+#[test]
+fn m1_service_missing_pane_absent_provider_retires_pg() {
+    use service::{probe_settlement_window, test_queue};
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, true, false);
+    let os = ScriptedOs::new(launched_os(&rig), Ok(false));
+    block_on(async {
+        let service = Service::start(&rig, pane, os, NONCE).await;
+        let channel = serenity::model::id::ChannelId::new(1);
+        test_queue::queue_original(&service.shared, channel).await;
+        let mut record = stored(&rig.server, HostedState::Bound);
+        record.owner.discord_token_hash = service.shared.token_hash.clone();
+        let window = Arc::new(Mutex::new(None));
+        let (probe_shared, probe_window) = (service.shared.clone(), window.clone());
+        probe_settlement_window(Box::new(move || {
+            Box::pin(async move {
+                // Input that arrives after the hold is gone: a fresh target of the execution and the queue.
+                let pane = herdr_registry::registry().target(&record).unwrap();
+                let pinned = pane.pin(Mutation::Input);
+                pane.discard_pin();
+                let taken = test_queue::take_queued(&probe_shared, channel).await;
+                *probe_window.lock().unwrap() = Some((
+                    pinned,
+                    taken,
+                    test_queue::queued_texts(&probe_shared, channel).await,
+                ));
+            })
+        }));
+        assert_eq!(service.terminate(NONCE).await, TerminationResult::Retired);
+        let (pinned, taken, queued) = window
+            .lock()
+            .unwrap()
+            .take()
+            .expect("settlement window observed");
+        assert!(
+            matches!(pinned, Err(HerdrGateRefusal::MutationBusy)),
+            "{pinned:?}"
+        );
+        assert_eq!(taken, None, "no queued start before settlement");
+        assert_eq!(queued, vec![test_queue::ORIGINAL.to_string()]);
+        assert_eq!(
+            test_queue::take_queued(&service.shared, channel)
+                .await
+                .as_deref(),
+            Some(test_queue::ORIGINAL)
+        );
+        assert_eq!(
+            test_queue::take_queued(&service.shared, channel).await,
+            None
+        );
+        assert_eq!(service.row().await.0, "retired");
+        assert!(!held(NONCE));
+        assert!(
+            rig.server.mutations().is_empty(),
+            "a missing pane must never be closed again"
+        );
+        service.finish().await;
+    });
+}
+
+#[test]
+fn m1_last_pane_is_allowed_pg() {
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, false, true);
+    let os = ScriptedOs::new(launched_os(&rig), Ok(false));
+    block_on(async {
+        let service = Service::start(&rig, pane, os, NONCE).await;
+        assert_eq!(service.terminate(NONCE).await, TerminationResult::Retired);
+        let closes = closes(&rig);
+        assert_eq!(closes.len(), 1);
+        assert_eq!(closes[0]["params"], json!({"pane_id": PANE}));
+        assert_eq!(service.row().await, ("retired".into(), NONCE.into()));
+        assert!(!held(NONCE));
+        service.finish().await;
+    });
+}
+
+#[test]
+fn m1_provider_survived_close_keeps_bound_pg() {
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, false, true);
+    let os = ScriptedOs::new(launched_os(&rig), Ok(true));
+    block_on(async {
+        let service = Service::start(&rig, pane, os, NONCE).await;
+        assert_eq!(
+            service.terminate(NONCE).await,
+            TerminationResult::ProviderSurvivedClose
+        );
+        assert_eq!(closes(&rig).len(), 1);
+        assert_eq!(service.row().await, ("bound".into(), NONCE.into()));
+        assert!(held(NONCE), "a live provider keeps its mailbox hold");
+        service.finish().await;
+    });
+}
+
+#[test]
+fn m1_unreadable_process_never_means_absent_pg() {
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, false, true);
+    let os = ScriptedOs::new(launched_os(&rig), Err(RestoreUnverified::ProcessUnreadable));
+    block_on(async {
+        let service = Service::start(&rig, pane, os, NONCE).await;
+        assert!(matches!(
+            service.terminate(NONCE).await,
+            TerminationResult::Indeterminate(_)
+        ));
+        assert_eq!(closes(&rig).len(), 1);
+        assert_eq!(service.row().await, ("bound".into(), NONCE.into()));
+        assert!(held(NONCE));
+        service.finish().await;
+    });
+}
+
+#[test]
+fn m1_replaced_root_refuses_before_send_pg() {
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, false, true);
+    let os = ScriptedOs::new(replaced_root(&rig), Ok(false));
+    block_on(async {
+        let service = Service::start(&rig, pane, os, NONCE).await;
+        assert_eq!(
+            service.terminate(NONCE).await,
+            TerminationResult::Close(HerdrTerminateResult::Refused(TerminateRefusal::Gate(
+                HerdrGateRefusal::RootReplaced
+            )))
+        );
+        assert!(rig.server.mutations().is_empty());
+        assert_eq!(service.row().await, ("bound".into(), NONCE.into()));
+        assert!(held(NONCE));
+        service.finish().await;
+    });
+}
+
+#[test]
+fn m1_afterwrite_never_auto_retries_pg() {
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, false, false);
+    let os = ScriptedOs::new(launched_os(&rig), Ok(false));
+    *rig.server.close_reply.lock().unwrap() = Some(json!({"result": {"type": "future_close"}}));
+    block_on(async {
+        let service = Service::start(&rig, pane, os.clone(), NONCE).await;
+        assert!(matches!(
+            service.terminate(NONCE).await,
+            TerminationResult::Indeterminate(_)
+        ));
+        assert_eq!(
+            closes(&rig).len(),
+            1,
+            "an uncertain close is never sent again on its own"
+        );
+        assert_eq!(service.row().await, ("bound".into(), NONCE.into()));
+        assert!(held(NONCE));
+        // A repeated command judges afresh: a root replaced since then refuses before any write.
+        os.swap(replaced_root(&rig));
+        assert_eq!(
+            service.terminate(NONCE).await,
+            TerminationResult::Close(HerdrTerminateResult::Refused(TerminateRefusal::Gate(
+                HerdrGateRefusal::RootReplaced
+            )))
+        );
+        assert_eq!(closes(&rig).len(), 1);
+        assert!(held(NONCE));
+        service.finish().await;
+    });
+}
+
+#[test]
+fn m1_confirmation_required_stops_pg() {
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, false, false);
+    let os = ScriptedOs::new(launched_os(&rig), Ok(false));
+    *rig.server.close_reply.lock().unwrap() = Some(json!({"error": {
+        "code": "confirmation_required", "message": "closing this pane would close a worktree group"
+    }}));
+    block_on(async {
+        let service = Service::start(&rig, pane, os, NONCE).await;
+        assert_eq!(
+            service.terminate(NONCE).await,
+            TerminationResult::Close(HerdrTerminateResult::ConfirmationRequired)
+        );
+        assert_eq!(closes(&rig).len(), 1, "no group, workspace or second close");
+        assert_eq!(service.row().await, ("bound".into(), NONCE.into()));
+        assert!(held(NONCE));
+        service.finish().await;
+    });
+}
+
+#[test]
+fn m1_stale_a_never_releases_b_pg() {
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, false, true);
+    let os = ScriptedOs::new(service::launch_of(service::SUCCESSOR), Ok(false));
+    block_on(async {
+        let service = Service::start(&rig, pane, os, service::SUCCESSOR).await;
+        assert_eq!(
+            service.terminate(NONCE).await,
+            TerminationResult::Refused("execution identity differs".into())
+        );
+        assert!(
+            rig.server.mutations().is_empty(),
+            "B's pane is never closed for A"
+        );
+        assert_eq!(
+            service.row().await,
+            ("bound".into(), service::SUCCESSOR.into())
+        );
+        assert!(held(service::SUCCESSOR));
+        service.finish().await;
+    });
+}
+
+#[test]
+fn m1_retire_cas_failure_keeps_hold_pg() {
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, false, true);
+    let os = ScriptedOs::new(launched_os(&rig), Ok(false));
+    block_on(async {
+        let service = Service::start(&rig, pane.clone(), os, NONCE).await;
+        let (pool, runtime) = (service.pool.clone(), tokio::runtime::Handle::current());
+        let mut successor = stored(&rig.server, HostedState::Bound);
+        successor.owner.discord_token_hash = service.shared.token_hash.clone();
+        successor.execution_nonce = service::SUCCESSOR.into();
+        // A successor row lands between the close and the retire CAS.
+        pane.on_close(Box::new(move || {
+            runtime.block_on(async {
+                sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1")
+                    .bind(service::KEY)
+                    .bind(serde_json::to_value(&successor).unwrap())
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            });
+        }));
+        assert!(
+            matches!(service.terminate(NONCE).await, TerminationResult::Indeterminate(why) if why.contains("CAS"))
+        );
+        assert_eq!(closes(&rig).len(), 1);
+        assert_eq!(
+            service.row().await,
+            ("bound".into(), service::SUCCESSOR.into())
+        );
+        assert!(held(NONCE), "a failed CAS never releases the hold");
+        service.finish().await;
+    });
 }

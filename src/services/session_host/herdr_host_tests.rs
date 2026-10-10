@@ -2798,8 +2798,12 @@ fn close_owner_violations(sources: &BTreeMap<String, String>) -> Vec<String> {
     violations.extend(guarded_item_violations(
         sources,
         &[
-            ("terminate_herdr_once", &[]),
+            (
+                "terminate_herdr_once",
+                &[("src/services/discord/herdr_terminate.rs", 1)],
+            ),
             ("pin_terminate", &[]),
+            ("pin_terminate_fenced", &[]),
             ("send_close_pinned", &[]),
             (
                 "call_with_witness",
