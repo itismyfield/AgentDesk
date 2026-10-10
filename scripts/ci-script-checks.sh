@@ -243,6 +243,11 @@ if run_check guards "TUI output shadow write-zero census"; then
 "$PYTHON" scripts/check_o_shadow_write_zero.py
 fi
 
+if run_check guards "N1 observation effect boundary"; then
+"$PYTHON" scripts/check_n1_observation_boundary.py
+"$PYTHON" -m unittest tests.test_n1_observation_boundary
+fi
+
 if run_check guards "Alert dedupe/authority/routing wiring contract (#4448/#4449)"; then
 "$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 fi
@@ -334,11 +339,20 @@ if run_check guards "Durable frontier writer per-file call-site allowlist (#5071
 "$PYTHON" -m unittest tests.test_durable_frontier_writer_call_sites
 fi
 
+if run_check guards "Input thread mapping census"; then
+"$PYTHON" scripts/test_input_mapping_census.py
+fi
+
 if run_check guards "TUI O writer census: Legacy send sites and cutover gates"; then
 # Pins every Discord send site's census row and every O cutover gate by exact
 # per-file count; the script docstring declares its lexical limits.
 "$PYTHON" scripts/check_tui_o_writer_census.py
 "$PYTHON" -m unittest tests.test_check_tui_o_writer_census
+fi
+
+if run_check guards "Dormant boot retirement census"; then
+"$PYTHON" scripts/check_legacy_supervision_census.py
+"$PYTHON" -m unittest tests.test_check_legacy_supervision_census
 fi
 
 if run_check guards "Intake-outbox done writer per-file call-site allowlist (#5071 T2)"; then

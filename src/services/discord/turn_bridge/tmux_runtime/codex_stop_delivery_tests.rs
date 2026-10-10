@@ -187,7 +187,7 @@ impl Case {
         );
         let token = Arc::new(CancelToken::new());
         let observation = token.prepare_herdr_interrupt(provider.clone(), &owner);
-        *observation.submission.lock().unwrap() = HerdrSubmission::Submitted;
+        observation.submission.lock().unwrap().submission = HerdrSubmission::Submitted;
         if provider == ProviderKind::Codex {
             assert!(observation.record_turn_start(HerdrTurnStart {
                 execution_nonce: record.execution_nonce.clone(),
@@ -403,12 +403,12 @@ fn herdr_typed_refusals_have_no_escape_effects() {
             HerdrDelivery::NotSent(HerdrNotSent::Idle)
         );
         let state = case.token.herdr_interrupt_state().unwrap();
-        *state.submission.lock().unwrap() = HerdrSubmission::Unsubmitted;
+        state.submission.lock().unwrap().submission = HerdrSubmission::Unsubmitted;
         assert_eq!(
             runtime.block_on(interrupt_herdr(pool, &case.token, &case.provider)),
             HerdrDelivery::NotSent(HerdrNotSent::Pending)
         );
-        *state.submission.lock().unwrap() = HerdrSubmission::Submitted;
+        state.submission.lock().unwrap().submission = HerdrSubmission::Submitted;
         dedupe::clear_tmux_runtime_binding(&case.owner.logical_key);
         assert_eq!(
             runtime.block_on(interrupt_herdr(pool, &case.token, &case.provider)),
@@ -844,13 +844,13 @@ fn a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token() {
             return;
         }
         let state = case.token.herdr_interrupt_state().unwrap();
-        *state.submission.lock().unwrap() = HerdrSubmission::Unsubmitted;
+        state.submission.lock().unwrap().submission = HerdrSubmission::Unsubmitted;
         state.own_start_observed(0, "turn-a");
         let (shared, channel, provider) =
             (case.shared.clone(), case.channel, case.provider.clone());
         // The turn is submitted and the channel takes another token before the stop runs again.
         *BEFORE_LATE_STOP.lock().unwrap() = Some(Box::pin(async move {
-            *state.submission.lock().unwrap() = HerdrSubmission::Submitted;
+            state.submission.lock().unwrap().submission = HerdrSubmission::Submitted;
             crate::services::discord::mailbox_finish_turn(&shared, &provider, channel).await;
             let (next, user) = (Arc::new(CancelToken::new()), UserId::new(7));
             let message = MessageId::new(channel.get() + 2);
@@ -874,14 +874,14 @@ fn a_rollout_rewritten_in_place_never_retargets_a_late_stop() {
             return;
         }
         let state = case.token.herdr_interrupt_state().unwrap();
-        *state.submission.lock().unwrap() = HerdrSubmission::Unsubmitted;
+        state.submission.lock().unwrap().submission = HerdrSubmission::Unsubmitted;
         state.own_start_observed(0, "turn-a");
         let (path, observation) = (case.path.clone(), state.clone());
         *BEFORE_LATE_STOP.lock().unwrap() = Some(Box::pin(async move {
             let next =
                 json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-b"}});
             std::fs::write(&path, format!("{next}\n")).unwrap();
-            *observation.submission.lock().unwrap() = HerdrSubmission::Submitted;
+            observation.submission.lock().unwrap().submission = HerdrSubmission::Submitted;
         }));
         let inode = |path: &Path| {
             crate::services::tui_o::shadow::capture::file_identity(
@@ -899,6 +899,78 @@ fn a_rollout_rewritten_in_place_never_retargets_a_late_stop() {
     });
 }
 
+/// Captures the command's structured events, excluding unrelated actor diagnostics.
+fn capture_stop_events() -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::DefaultGuard) {
+    use tracing_subscriber::layer::SubscriberExt;
+    struct Events(Arc<Mutex<Vec<String>>>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Fields(Vec<String>);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.push(format!("{}={value:?}", field.name()));
+                }
+            }
+            if event.metadata().target().contains("judged_stop")
+                || event.metadata().target().contains("codex_stop_delivery")
+                || event.metadata().target().ends_with("commands::stop")
+            {
+                let mut fields = Fields(Vec::new());
+                event.record(&mut fields);
+                fields.0.sort();
+                self.0.lock().unwrap().push(format!(
+                    "{} {:?}",
+                    event.metadata().target(),
+                    fields.0
+                ));
+            }
+        }
+    }
+    let events = Arc::new(Mutex::new(Vec::new()));
+    crate::logging::test_capture::pin_callsite_interest();
+    let guard = tracing::subscriber::set_default(
+        tracing_subscriber::registry().with(Events(events.clone())),
+    );
+    (events, guard)
+}
+
+/// Slot and queue identities remain the same, not merely the response or Escape count.
+fn assert_same_stop_mailbox(
+    before: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
+    after: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
+) {
+    assert!(Arc::ptr_eq(
+        before.cancel_token.as_ref().unwrap(),
+        after.cancel_token.as_ref().unwrap()
+    ));
+    assert_eq!(after.active_request_owner, before.active_request_owner);
+    assert_eq!(after.active_user_message_id, before.active_user_message_id);
+    assert_eq!(after.active_turn_nonce, before.active_turn_nonce);
+    assert_eq!(after.active_turn_kind, before.active_turn_kind);
+    assert_eq!(
+        format!("{:?}", after.intervention_queue),
+        format!("{:?}", before.intervention_queue)
+    );
+    assert_eq!(after.pending_user_dispatch, before.pending_user_dispatch);
+    assert_eq!(
+        after.pending_user_dispatch_source_ids,
+        before.pending_user_dispatch_source_ids
+    );
+    assert_eq!(
+        after.active_absorbed_source_ids,
+        before.active_absorbed_source_ids
+    );
+    assert_eq!(after.turn_started_at, before.turn_started_at);
+}
+
 #[test]
 fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
     use crate::services::discord::commands::stop::run_slash_stop;
@@ -906,6 +978,32 @@ fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
     with_cases(|case, fx, runtime| {
         HERDR_SETTLEMENT_OVERRIDE.set(false);
         assert!(!herdr_stop_settlement_available());
+        let row = crate::services::discord::inflight::InflightTurnState::new(
+            case.provider.clone(),
+            case.channel.get(),
+            None,
+            1,
+            case.channel.get() + 1,
+            case.channel.get() + 2,
+            "dormant equality".into(),
+            None,
+            Some(case.owner.logical_key.clone()),
+            None,
+            None,
+            0,
+        );
+        crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+        let row_path = crate::services::discord::inflight::inflight_state_path(
+            &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
+            &case.provider,
+            case.channel.get(),
+        );
+        let bytes = std::fs::read(&row_path).unwrap();
+        let before = runtime.block_on(crate::services::discord::mailbox_snapshot(
+            &case.shared,
+            case.channel,
+        ));
+        let (logs, _capture) = capture_stop_events();
         let base = runtime.block_on(begin_command_stop(
             &case.shared,
             &case.provider,
@@ -913,6 +1011,20 @@ fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
             false,
         ));
         assert!(matches!(base, CommandStop::HostRefused));
+        let base_logs = std::mem::take(&mut *logs.lock().unwrap());
+        assert_same_stop_mailbox(
+            &before,
+            &runtime.block_on(crate::services::discord::mailbox_snapshot(
+                &case.shared,
+                case.channel,
+            )),
+        );
+        assert_eq!(std::fs::read(&row_path).unwrap(), bytes);
+        assert!(!case.token.cancelled.load(Ordering::SeqCst));
+        assert!(
+            crate::services::discord::tmux::recent_turn_stop_for_channel(case.channel).is_none()
+        );
+        assert!(fx.take_calls().is_empty());
         let dormant = runtime.block_on(run_slash_stop(&case.shared, &case.provider, case.channel));
         assert_eq!(
             dormant.text(),
@@ -920,6 +1032,40 @@ fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
         );
         runtime.block_on(dormant.finish(&case.shared, &case.provider, case.channel));
         assert_eq!(case.escapes(), 0);
+        assert_eq!(
+            *logs.lock().unwrap(),
+            base_logs,
+            "off and base log events must agree"
+        );
+        assert_same_stop_mailbox(
+            &before,
+            &runtime.block_on(crate::services::discord::mailbox_snapshot(
+                &case.shared,
+                case.channel,
+            )),
+        );
+        assert_eq!(std::fs::read(&row_path).unwrap(), bytes);
+        assert!(!case.token.cancelled.load(Ordering::SeqCst));
+        assert!(
+            !case
+                .token
+                .herdr_interrupt_state()
+                .unwrap()
+                .user_stop
+                .load(Ordering::Acquire)
+        );
+        assert!(
+            crate::services::discord::tmux::recent_turn_stop_for_channel(case.channel).is_none()
+        );
+        assert!(fx.take_calls().is_empty());
+        assert_eq!(
+            case.token
+                .herdr_interrupt_state()
+                .unwrap()
+                .owner
+                .logical_key,
+            case.record.owner.logical_key
+        );
         HERDR_SETTLEMENT_OVERRIDE.set(true);
         let reply = runtime.block_on(run_slash_stop(&case.shared, &case.provider, case.channel));
         assert_eq!(
@@ -948,6 +1094,49 @@ fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
         .unwrap();
     assert_eq!(body.matches("run_slash_stop(").count(), 1);
     assert!(!body.contains("begin_command_stop(") && !body.contains("begin_user_stop("));
+}
+
+/// Known defect: a cold stop survives an unsubmitted failure without an automatic terminal.
+#[test]
+fn cold_unsubmitted_stop_keeps_the_bridge_hold_without_a_terminal() {
+    with_cases(|case, fx, runtime| {
+        let state = case.token.herdr_interrupt_state().unwrap();
+        state.submission.lock().unwrap().submission = HerdrSubmission::Unsubmitted;
+        mark(&case.owner.logical_key, Mark::Absent);
+        let reply = runtime.block_on(crate::services::discord::commands::stop::run_slash_stop(
+            &case.shared,
+            &case.provider,
+            case.channel,
+        ));
+        assert_eq!(
+            reply.text(),
+            HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Pending)).reply()
+        );
+        runtime.block_on(reply.finish(&case.shared, &case.provider, case.channel));
+        assert!(state.user_stop.load(Ordering::Acquire));
+        let unconfirmed = crate::services::discord::turn_bridge::stream_loop::exit_reconcile::herdr_stop_unconfirmed;
+        for _ in 0..2 {
+            assert!(
+                unconfirmed(&case.token, false, false),
+                "an input error has no admitted terminal"
+            );
+            assert!(Arc::ptr_eq(
+                &current_token(case, runtime).unwrap(),
+                &case.token
+            ));
+        }
+        assert!(
+            !unconfirmed(&case.token, false, true),
+            "an admitted terminal is the positive control"
+        );
+        assert_eq!(
+            state.submission.lock().unwrap().submission,
+            HerdrSubmission::Unsubmitted
+        );
+        assert!(!case.token.cancelled.load(Ordering::Acquire));
+        assert_eq!(case.escapes(), 0);
+        assert!(fx.take_calls().is_empty());
+    });
 }
 
 #[test]

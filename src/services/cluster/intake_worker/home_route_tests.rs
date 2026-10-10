@@ -242,3 +242,7 @@ async fn a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg() {
     pool.close().await;
     fixture.drop().await;
 }
+
+#[cfg(unix)]
+#[path = "s3_real_tests/mod.rs"]
+mod s3_real;
