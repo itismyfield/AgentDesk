@@ -75,6 +75,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/input_runtime/ordering_tests.rs",
         "src/services/discord/input_runtime/receipt_tests.rs",
         "src/services/discord/input_runtime/supervisor_tests.rs",
+        "src/services/discord/input_runtime/mapping_guard_tests.rs",
         "src/services/discord/input_runtime/fence/modes_tests.rs",
         "src/services/discord/input_runtime/supervisor/drive_tests.rs",
         "src/services/discord/input_runtime/supervisor/drive_entry_tests.rs",
