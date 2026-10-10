@@ -538,9 +538,21 @@ fn capture_entry_abort_notice(
     })
 }
 
-/// Sends a captured notice on its own bounded task; the caller has already unwound the turn
-/// and nothing awaits this, so its success, error or timeout changes no turn state.
-pub(super) fn spawn_entry_abort_notice(notice: Option<EntryAbortNotice>) {
+/// Unwinds the refused turn exactly as before, then starts its notice; nothing awaits the send.
+pub(super) async fn unwind_and_notify(
+    shared: &std::sync::Arc<SharedData>,
+    channel_id: ChannelId,
+    cancel: &std::sync::Arc<crate::services::provider::CancelToken>,
+    notice: Option<EntryAbortNotice>,
+) {
+    crate::services::discord::mailbox_finish::unwind_unstarted_turn(shared, channel_id, cancel)
+        .await;
+    spawn_entry_abort_notice(notice);
+}
+
+/// Sends a captured notice on its own bounded task; the turn is already unwound and nothing
+/// awaits this, so its success, error or timeout changes no turn state.
+fn spawn_entry_abort_notice(notice: Option<EntryAbortNotice>) {
     let Some(notice) = notice else {
         return;
     };
