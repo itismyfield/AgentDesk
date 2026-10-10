@@ -40,7 +40,7 @@ struct Progress {
     role: Option<BootRole>,
     /// The latest finished pass, numbered within this runtime.
     discovery: Option<(u64, DiscoveryPass)>,
-    /// Set by recovery producers (U3-2a2); until then no witness is made.
+    /// Set only by recovery producers, none of which records yet; until then no witness is made.
     recovered: bool,
 }
 
@@ -157,7 +157,7 @@ impl AdoptionRuntime {
 
 #[cfg(test)]
 impl AdoptionRuntime {
-    /// Stands in for U3-2a2's recovery producers.
+    /// Stands in for the recovery producers.
     pub(in crate::services::discord) fn record_recovery_for_tests(&self) {
         self.boot
             .progress
@@ -173,7 +173,7 @@ impl CodexBootWitness {
 }
 
 /// Records the boot's role. With a runtime installed it also logs the boot read for the
-/// configured writer channels; the adoption host (U3-4) will read per channel instead.
+/// configured writer channels; the adoption host will read per channel instead.
 pub(in crate::services::discord) fn record_role(
     runtime: Option<&Arc<AdoptionRuntime>>,
     role: BootRole,

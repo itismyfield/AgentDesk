@@ -1,4 +1,4 @@
-//! Dormant observation runtime for Codex history adoption (#6325 U3-2). Only a Codex boot with
+//! Dormant observation runtime for Codex history adoption. Only a Codex boot with
 //! `tui_o.codex_history_adoption` on installs one; otherwise producers find none and record nothing.
 
 pub(super) mod boot;
