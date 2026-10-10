@@ -865,11 +865,22 @@ fn names_the_probe(path: &str, line: &str) -> bool {
         || (path == ADAPTER && line.contains("probe"))
 }
 
+/// `line` with the blanks around each `::` removed, so a spaced path reads as written tight.
+fn tight_paths(line: &str) -> String {
+    let parts: Vec<&str> = line.split("::").collect();
+    let last = parts.len() - 1;
+    let tight = parts.iter().enumerate().map(|(index, part)| {
+        let part = if index > 0 { part.trim_start() } else { part };
+        if index < last { part.trim_end() } else { part }
+    });
+    tight.collect::<Vec<_>>().join("::")
+}
+
 /// Imports a line scan cannot follow: a glob of the re-post module, `self` paths inside it, and a
 /// path split before its group. Reported, never skipped.
 fn escapes_by_path(path: &str, line: &str) -> bool {
     let in_repost = path.contains("tui_o/repost/");
-    // `super::*` stays allowed: in-file test modules glob their own parent.
+    // `super::*` is judged in `probe_edges`: only an in-file test module may glob its parent.
     let glob = line.contains("repost::*");
     let words = line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'));
     let selfish = in_repost
@@ -994,7 +1005,19 @@ fn probe_edges(root: &std::path::Path) -> Vec<String> {
             let text = std::fs::read_to_string(&path).unwrap();
             // Inside a multi-line re-post import group, every member line is read as part of it.
             let mut in_group = false;
-            for (number, line) in text.lines().enumerate() {
+            // `#[cfg(test)] mod … {` until its closing brace at the same indent.
+            let (mut cfg_test, mut test_mod_end) = (false, None::<String>);
+            for (number, raw) in text.lines().enumerate() {
+                let line = &tight_paths(raw);
+                if test_mod_end.as_deref() == Some(raw.trim_end()) {
+                    test_mod_end = None;
+                } else if cfg_test && test_mod_end.is_none() && raw.trim_start().starts_with("mod ")
+                {
+                    let indent = &raw[..raw.len() - raw.trim_start().len()];
+                    test_mod_end = raw.trim_end().ends_with('{').then(|| format!("{indent}}}"));
+                }
+                cfg_test =
+                    raw.trim() == "#[cfg(test)]" || (cfg_test && raw.trim().starts_with("#["));
                 let member = in_group && names_a_member(line);
                 if in_group && line.contains('}') {
                     in_group = false;
@@ -1012,7 +1035,11 @@ fn probe_edges(root: &std::path::Path) -> Vec<String> {
                         names_the_probe(&relative, line) || names_the_runner(&relative, line);
                     // A macro could assemble any path; beside the re-post module it is an edge.
                     let macro_beside = line.contains("macro_rules!") && text.contains("repost");
-                    (named || member || macro_beside) && !allowed
+                    // Only an in-file test module may glob its parent inside the re-post tree.
+                    let parent_glob = relative.contains("tui_o/repost/")
+                        && line.contains("super::*")
+                        && test_mod_end.is_none();
+                    (named || member || macro_beside || parent_glob) && !allowed
                 };
                 if edge {
                     found.push(format!("{relative}:{}", number + 1));
@@ -1634,6 +1661,31 @@ fn f6_the_dormancy_scan_fails_closed_on_globs_self_paths_and_macros() {
             "src/services/tui_o/writer/d.rs:1",
             "src/services/tui_o/writer/e.rs:1",
             "src/services/tui_o/writer/f.rs:1",
+        ]
+    );
+}
+
+#[test]
+fn f3r_the_dormancy_scan_reads_spaced_paths_and_parent_globs_outside_tests() {
+    let write = |root: &std::path::Path, relative: &str, text: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let tree = tempfile::tempdir().unwrap();
+    let root = tree.path();
+    let spaced = "use crate::services::tui_o::repost :: runner::Runner;\nuse crate::services::tui_o::repost :: {dispatch as dd};\n";
+    write(root, "src/services/tui_o/writer/a.rs", spaced);
+    let globbed =
+        "use super::*;\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n}\nuse super::*;\n";
+    write(root, "src/services/tui_o/repost/b.rs", globbed);
+    assert_eq!(
+        probe_edges(root),
+        [
+            "src/services/tui_o/repost/b.rs:1",
+            "src/services/tui_o/repost/b.rs:7",
+            "src/services/tui_o/writer/a.rs:1",
+            "src/services/tui_o/writer/a.rs:2",
         ]
     );
 }

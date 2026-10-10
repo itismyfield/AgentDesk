@@ -11363,6 +11363,8 @@ services::tui_o::repost::admission_tests::a_new_holder_never_resends_an_admitted
 services::tui_o::repost::admission_tests::a_torn_sidecar_tail_is_cut_and_any_other_damage_refuses_the_sidecar
 services::tui_o::repost::admission_tests::an_admission_a_crash_or_outage_cut_resumes_from_the_sidecar_with_one_slot_zero_pg
 services::tui_o::repost::admission_tests::an_operator_retry_and_the_automatic_reconfirm_share_one_three_post_budget_pg
+services::tui_o::repost::admission_tests::f3r_a_failed_append_refuses_more_until_a_reopen_cuts_its_bytes
+services::tui_o::repost::admission_tests::f3r_an_original_sent_while_on_stays_eligible_across_off_and_on
 services::tui_o::repost::admission_tests::f4_nonce_receipt_closes_the_existing_budget_pg
 services::tui_o::repost::admission_tests::f4_receipt_race_never_reattributes_a_message_pg
 services::tui_o::repost::admission_tests::f4_row_change_invalidates_absence_evidence_pg
