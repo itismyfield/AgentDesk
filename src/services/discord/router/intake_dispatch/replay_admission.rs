@@ -195,6 +195,9 @@ pub(crate) async fn prepare_effect_start(
             write::begin(ctx.pool, receipt.id, from, &effect, ctx.incarnation).await
         }
         (Some(retry), Some(receipt_id)) if retry.receipt_id() == receipt_id => {
+            write::ensure_same_request(ctx.pool, receipt_id, input)
+                .await
+                .map_err(StartRefusal::Write)?;
             let from = BeginFrom::NoEffect {
                 previous: retry.previous_nonce(),
                 next: retry.next_nonce(),

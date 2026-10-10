@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use super::intake_settlement;
+use super::retry_state::{StaleRetry, StaleRetryState, retry_stale_resume};
 use super::output_lifecycle::BridgeOutputOwner;
 use super::stream_tick::{
     LongRunningPlaceholderActive, PendingLongRunningOpenAfterStateSave,
@@ -283,27 +284,26 @@ pub(super) async fn run_terminal_outcome_delivery(
                 "  [{ts}] ⚠ Resume failed (error in response), clearing session_id (channel {})",
                 channel_id
             );
-            let reset = reset_session_for_auto_retry(
-                &shared_owned,
-                channel_id,
-                &cancel_token,
-                adk_session_key.as_deref(),
-                &mut new_session_id,
-                &mut new_raw_provider_session_id,
-                &mut inflight_state,
-                "resume failed in response output",
-            )
-            .await;
-            // Retry with history only for an anchored user message whose session was cleared.
-            if let Some(user_msg_id) = auto_retry.queue(reset, user_msg_id) {
-                spawn_retry_with_history_with_release(
-                    gateway.clone(),
+            retry_stale_resume(
+                StaleRetry {
+                    shared: &shared_owned,
+                    gateway: &gateway,
+                    cancel_token: &cancel_token,
                     channel_id,
                     user_msg_id,
-                    user_text_owned.clone(),
-                );
-            }
-            full_response = String::new(); // Suppress error message to user
+                    adk_session_key: adk_session_key.as_deref(),
+                    user_text: &user_text_owned,
+                    reason: "resume failed in response output",
+                },
+                StaleRetryState {
+                    full_response: &mut full_response,
+                    new_session_id: &mut new_session_id,
+                    new_raw_provider_session_id: &mut new_raw_provider_session_id,
+                    inflight_state: &mut inflight_state,
+                    auto_retry: &mut auto_retry,
+                },
+            )
+            .await;
         }
 
         let (

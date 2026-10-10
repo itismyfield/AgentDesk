@@ -255,27 +255,26 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                     "  [{ts}] ⚠ Resume failed (stale session_id in recovered output), auto-retrying (channel {})",
                     channel_id
                 );
-                let reset = reset_session_for_auto_retry(
-                    &shared_owned,
-                    channel_id,
-                    &cancel_token,
-                    adk_session_key.as_deref(),
-                    &mut new_session_id,
-                    &mut new_raw_provider_session_id,
-                    &mut inflight_state,
-                    "stale session_id in recovered output",
-                )
-                .await;
-                // #2452 H6: explicit completion path — see helper docs.
-                if let Some(user_msg_id) = auto_retry.queue(reset, user_msg_id) {
-                    spawn_retry_with_history_with_release(
-                        gateway.clone(),
+                retry_stale_resume(
+                    StaleRetry {
+                        shared: &shared_owned,
+                        gateway: &gateway,
+                        cancel_token: &cancel_token,
                         channel_id,
                         user_msg_id,
-                        user_text_owned.clone(),
-                    );
-                }
-                full_response = String::new();
+                        adk_session_key: adk_session_key.as_deref(),
+                        user_text: user_text_owned,
+                        reason: "stale session_id in recovered output",
+                    },
+                    StaleRetryState {
+                        full_response: &mut full_response,
+                        new_session_id: &mut new_session_id,
+                        new_raw_provider_session_id: &mut new_raw_provider_session_id,
+                        inflight_state: &mut *inflight_state,
+                        auto_retry: &mut *auto_retry,
+                    },
+                )
+                .await;
             } else {
                 // Check for resume failure via other methods
                 let mut resume_failed = false;
@@ -293,27 +292,26 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                         "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
                         channel_id
                     );
-                    let reset = reset_session_for_auto_retry(
-                        &shared_owned,
-                        channel_id,
-                        &cancel_token,
-                        adk_session_key.as_deref(),
-                        &mut new_session_id,
-                        &mut new_raw_provider_session_id,
-                        &mut inflight_state,
-                        "stale session_id in output file",
-                    )
-                    .await;
-                    // #2452 H6: explicit completion path — see helper.
-                    if let Some(user_msg_id) = auto_retry.queue(reset, user_msg_id) {
-                        spawn_retry_with_history_with_release(
-                            gateway.clone(),
+                    retry_stale_resume(
+                        StaleRetry {
+                            shared: &shared_owned,
+                            gateway: &gateway,
+                            cancel_token: &cancel_token,
                             channel_id,
                             user_msg_id,
-                            user_text_owned.clone(),
-                        );
-                    }
-                    full_response = String::new();
+                            adk_session_key: adk_session_key.as_deref(),
+                            user_text: user_text_owned,
+                            reason: "stale session_id in output file",
+                        },
+                        StaleRetryState {
+                            full_response: &mut full_response,
+                            new_session_id: &mut new_session_id,
+                            new_raw_provider_session_id: &mut new_raw_provider_session_id,
+                            inflight_state: &mut *inflight_state,
+                            auto_retry: &mut *auto_retry,
+                        },
+                    )
+                    .await;
                 }
                 // #2451 H5 Method 2: authoritative resume-failure
                 // classification via the explicit `Init` handshake
@@ -341,27 +339,26 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                             turn_start.elapsed().as_secs(),
                             channel_id
                         );
-                        let reset = reset_session_for_auto_retry(
-                            &shared_owned,
-                            channel_id,
-                            &cancel_token,
-                            adk_session_key.as_deref(),
-                            &mut new_session_id,
-                            &mut new_raw_provider_session_id,
-                            &mut inflight_state,
-                            "quick exit with empty response",
-                        )
-                        .await;
-                        // #2452 H6: explicit completion path.
-                        if let Some(user_msg_id) = auto_retry.queue(reset, user_msg_id) {
-                            spawn_retry_with_history_with_release(
-                                gateway.clone(),
+                        retry_stale_resume(
+                            StaleRetry {
+                                shared: &shared_owned,
+                                gateway: &gateway,
+                                cancel_token: &cancel_token,
                                 channel_id,
                                 user_msg_id,
-                                user_text_owned.clone(),
-                            );
-                        }
-                        full_response = String::new();
+                                adk_session_key: adk_session_key.as_deref(),
+                                user_text: user_text_owned,
+                                reason: "quick exit with empty response",
+                            },
+                            StaleRetryState {
+                                full_response: &mut full_response,
+                                new_session_id: &mut new_session_id,
+                                new_raw_provider_session_id: &mut new_raw_provider_session_id,
+                                inflight_state: &mut *inflight_state,
+                                auto_retry: &mut *auto_retry,
+                            },
+                        )
+                        .await;
                     }
                 }
                 if !resume_failed {

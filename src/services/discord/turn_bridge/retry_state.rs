@@ -26,19 +26,45 @@ pub(in crate::services::discord) fn spawn_retry_with_history_with_release(
     user_msg_id: MessageId,
     retry_text: String,
 ) {
+    spawn_retry(gateway, channel_id, user_msg_id, retry_text, None);
+}
+
+/// Schedules one retry with history; an exact retry carries its permit to the gateway and nowhere else.
+fn spawn_retry(
+    gateway: std::sync::Arc<dyn gateway::TurnGateway>,
+    channel_id: ChannelId,
+    user_msg_id: MessageId,
+    retry_text: String,
+    exact: Option<crate::services::discord::replay_policy::RetryPermit>,
+) {
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<()>();
     let permit = super::super::input_runtime::fence::effect::current();
     super::super::task_supervisor::spawn_observed(
         "retry_with_history_dispatch",
         super::super::input_runtime::fence::effect::detached(permit.clone(), async move {
-            gateway
-                .schedule_retry_with_history_with_completion(
-                    channel_id,
-                    user_msg_id,
-                    &retry_text,
-                    completion_tx,
-                )
-                .await;
+            match exact {
+                None => {
+                    gateway
+                        .schedule_retry_with_history_with_completion(
+                            channel_id,
+                            user_msg_id,
+                            &retry_text,
+                            completion_tx,
+                        )
+                        .await
+                }
+                Some(retry) => {
+                    gateway
+                        .schedule_exact_retry_with_history(
+                            channel_id,
+                            user_msg_id,
+                            &retry_text,
+                            retry,
+                            completion_tx,
+                        )
+                        .await
+                }
+            }
         }),
     );
     super::super::task_supervisor::spawn_observed(
@@ -49,6 +75,67 @@ pub(in crate::services::discord) fn spawn_retry_with_history_with_release(
             release_retry_pending(channel_id);
         }),
     );
+}
+
+/// One stale-resume retry point of a turn and the request it would rerun.
+pub(super) struct StaleRetry<'a> {
+    pub(super) shared: &'a Arc<SharedData>,
+    pub(super) gateway: &'a Arc<dyn gateway::TurnGateway>,
+    pub(super) cancel_token: &'a Arc<CancelToken>,
+    pub(super) channel_id: ChannelId,
+    pub(super) user_msg_id: Option<MessageId>,
+    pub(super) adk_session_key: Option<&'a str>,
+    pub(super) user_text: &'a str,
+    pub(super) reason: &'static str,
+}
+
+/// The turn state a stale-resume retry may reset or clear.
+pub(super) struct StaleRetryState<'a> {
+    pub(super) full_response: &'a mut String,
+    pub(super) new_session_id: &'a mut Option<String>,
+    pub(super) new_raw_provider_session_id: &'a mut Option<String>,
+    pub(super) inflight_state: &'a mut InflightTurnState,
+    pub(super) auto_retry: &'a mut AutoRetry,
+}
+
+/// Runs the legacy reset and history retry, or a protected request's decision: an exact retry
+/// defers every reset to its next start, and a held request keeps its body and session.
+pub(super) async fn retry_stale_resume(point: StaleRetry<'_>, state: StaleRetryState<'_>) {
+    use crate::services::discord::replay_policy::{self, StaleResume};
+    let pool = point.shared.pg_pool.as_ref();
+    match replay_policy::stale_resume(pool, point.cancel_token, state.inflight_state).await {
+        StaleResume::Legacy => {
+            let reset = reset_session_for_auto_retry(
+                point.shared,
+                point.channel_id,
+                point.cancel_token,
+                point.adk_session_key,
+                state.new_session_id,
+                state.new_raw_provider_session_id,
+                state.inflight_state,
+                point.reason,
+            )
+            .await;
+            // Retry with history only for an anchored user message whose session was cleared.
+            if let Some(user_msg_id) = state.auto_retry.queue(reset, point.user_msg_id) {
+                spawn_retry_with_history_with_release(
+                    point.gateway.clone(),
+                    point.channel_id,
+                    user_msg_id,
+                    point.user_text.to_string(),
+                );
+            }
+            state.full_response.clear();
+        }
+        StaleResume::Exact(retry) => {
+            if let Some(user_msg_id) = point.user_msg_id {
+                let text = point.user_text.to_string();
+                spawn_retry(point.gateway.clone(), point.channel_id, user_msg_id, text, Some(retry));
+            }
+            state.full_response.clear();
+        }
+        StaleResume::Hold => {}
+    }
 }
 
 pub(super) fn clear_local_session_state(

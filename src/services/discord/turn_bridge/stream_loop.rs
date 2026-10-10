@@ -313,6 +313,7 @@ pub(super) async fn run_stream_loop(
                                     gateway: &gateway,
                                     channel_id,
                                     provider: &provider,
+                                    cancel_token: &cancel_token,
                                     recovery_lease: recovery_lease.as_ref(),
                                     expected_identity: &stream_tick_expected_identity,
                                     voice_progress_playback_channel_id,

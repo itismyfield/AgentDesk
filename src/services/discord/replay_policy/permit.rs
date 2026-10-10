@@ -1,6 +1,7 @@
 //! Move-only effect permits: a start exists only behind a committed begin, and a permit runs one effect.
 
-use crate::db::replay_disposition::write::{BeginAck, ExactAttempt, NoEffectAck};
+pub(crate) use super::RetryPermit;
+use crate::db::replay_disposition::write::{BeginAck, ExactAttempt};
 
 /// Where a permitted first input lands: a new provider start, or an existing busy pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,37 +70,6 @@ impl StartPermit {
             return Err(PermitRefusal::InputMismatch);
         }
         Ok(effect(self.attempt))
-    }
-}
-
-/// The right to prepare one exact retry of a committed no-effect nonce.
-#[derive(Debug)]
-pub(crate) struct RetryPermit {
-    receipt_id: i64,
-    previous_nonce: String,
-    next_nonce: String,
-}
-
-impl RetryPermit {
-    pub(crate) fn from_no_effect(ack: NoEffectAck) -> Self {
-        let (receipt_id, previous_nonce) = ack.into_parts();
-        Self {
-            receipt_id,
-            previous_nonce,
-            next_nonce: uuid::Uuid::new_v4().to_string(),
-        }
-    }
-
-    pub(crate) fn receipt_id(&self) -> i64 {
-        self.receipt_id
-    }
-
-    pub(crate) fn previous_nonce(&self) -> &str {
-        &self.previous_nonce
-    }
-
-    pub(crate) fn next_nonce(&self) -> &str {
-        &self.next_nonce
     }
 }
 

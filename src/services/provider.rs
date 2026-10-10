@@ -717,6 +717,9 @@ pub struct CancelToken {
     /// Herdr-only input observation and user-stop intent; absent on all existing paths.
     herdr_interrupt:
         Mutex<Option<std::sync::Arc<cancel_token_claude_interrupt::HerdrInterruptState>>>,
+    /// The protected request attempt this turn's executor started; absent on every legacy turn.
+    replay_attempt:
+        std::sync::OnceLock<std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>>,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
     pub restart_mode: AtomicU8,
     /// Independent destructive claims prevent a PID-only cleanup from suppressing tmux cleanup.
@@ -753,6 +756,7 @@ impl CancelToken {
             turn_nonce,
             claude_interrupt_submit_pending: AtomicBool::new(false),
             herdr_interrupt: Mutex::new(None),
+            replay_attempt: std::sync::OnceLock::new(),
             restart_mode: AtomicU8::new(0),
             pid_kill_claim: AtomicU8::new(0),
             name_kill_claim: AtomicU8::new(0),
@@ -761,6 +765,21 @@ impl CancelToken {
 
     pub fn turn_nonce(&self) -> Option<&str> {
         self.turn_nonce.as_deref()
+    }
+
+    pub(crate) fn replay_attempt(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>> {
+        self.replay_attempt.get()
+    }
+
+    /// Binds the attempt whose start permit this turn's executor spent; at most once per token.
+    #[cfg(test)]
+    pub(crate) fn attach_replay_attempt(
+        &self,
+        live: std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>,
+    ) -> bool {
+        self.replay_attempt.set(live).is_ok()
     }
 
     pub fn mark_completion_cleanup(&self) {

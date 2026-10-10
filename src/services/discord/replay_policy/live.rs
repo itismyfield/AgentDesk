@@ -1,6 +1,7 @@
 //! What one live attempt was seen to do, and the evidence a complete observation can give.
 
 use crate::db::replay_disposition::write::ExactAttempt;
+use std::sync::Mutex;
 
 /// Activity after start that makes an automatic rerun unsafe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +35,7 @@ pub(crate) enum Seen {
 }
 
 /// Raw record of one exact attempt; an incomplete record never reads as an empty one.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct RawObservation {
     receipt_id: i64,
     nonce: String,
@@ -42,6 +43,7 @@ pub(crate) struct RawObservation {
 }
 
 impl RawObservation {
+    #[cfg(test)]
     pub(crate) fn for_attempt(attempt: &ExactAttempt) -> Self {
         Self {
             receipt_id: attempt.receipt_id(),
@@ -50,8 +52,22 @@ impl RawObservation {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn record(&mut self, seen: Seen) {
         self.seen.push(seen);
+    }
+
+    /// The reader has nothing more to add: stdout ended, the child was waited and stderr drained,
+    /// or the record broke.
+    fn finished(&self) -> bool {
+        self.seen.contains(&Seen::Broken)
+            || [Seen::StdoutEof, Seen::StderrDrained]
+                .iter()
+                .all(|needed| self.seen.contains(needed))
+                && self
+                    .seen
+                    .iter()
+                    .any(|seen| matches!(seen, Seen::Exited { .. }))
     }
 
     fn complete(&self) -> bool {
@@ -143,4 +159,69 @@ impl NoEffectEvidence {
     pub(crate) fn names(&self, attempt: &ExactAttempt) -> bool {
         self.receipt_id == attempt.receipt_id() && self.nonce == attempt.nonce()
     }
+}
+
+/// How a protected attempt's terminal was settled; only `Ordinary` admits ordinary effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    Ordinary,
+    Retried,
+    Held,
+}
+
+/// The in-process record of one started protected attempt. Only the token of the executor that
+/// spent its start permit carries one, so a restored or foreign turn never decides with it.
+#[derive(Debug)]
+pub(crate) struct LiveAttempt {
+    attempt: Mutex<Option<ExactAttempt>>,
+    observation: Mutex<RawObservation>,
+    recorded: tokio::sync::Notify,
+    verdict: Mutex<Option<Verdict>>,
+}
+
+impl LiveAttempt {
+    #[cfg(test)]
+    pub(crate) fn new(attempt: ExactAttempt) -> Self {
+        Self {
+            observation: Mutex::new(RawObservation::for_attempt(&attempt)),
+            attempt: Mutex::new(Some(attempt)),
+            recorded: tokio::sync::Notify::new(),
+            verdict: Mutex::new(None),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record(&self, seen: Seen) {
+        lock(&self.observation).record(seen);
+        self.recorded.notify_waiters();
+    }
+
+    /// Hands the attempt to its one decision once the reader finished, or what it saw by `wait`.
+    pub(crate) async fn take_for_decision(
+        &self,
+        wait: std::time::Duration,
+    ) -> Option<(ExactAttempt, RawObservation)> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let recorded = self.recorded.notified();
+            let finished = lock(&self.observation).finished();
+            if finished || tokio::time::timeout_at(deadline, recorded).await.is_err() {
+                break;
+            }
+        }
+        let attempt = lock(&self.attempt).take()?;
+        Some((attempt, lock(&self.observation).clone()))
+    }
+
+    pub(crate) fn settle(&self, verdict: Verdict) {
+        *lock(&self.verdict) = Some(verdict);
+    }
+
+    pub(crate) fn verdict(&self) -> Option<Verdict> {
+        *lock(&self.verdict)
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
