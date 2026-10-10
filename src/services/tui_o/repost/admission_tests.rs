@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::time::Duration;
 
@@ -11,12 +11,20 @@ use super::admission::{
     classify, posted_receipts, report_backlog,
 };
 use super::config::{RepostConfig, RepostSwitch};
-use super::identity::{PieceKey, piece_of};
+use super::identity::{PieceKey, marker, piece_of};
+use super::io::probe::evidence::EvidenceScope;
+use super::io::probe::matcher::{
+    Attribution, AttributionSnapshot, ObservedMessage, RecoveryKind, match_observations,
+};
+use super::io::probe::tests::{absent_evidence, run};
 use super::o_piece_attempts::{
     AttemptResult, GrantOutcome, GrantRequest, Intent, SlotGrant, attempts, grant, settle,
 };
-use super::o_piece_delivery::{AdmitOutcome, ReceiptOutcome, load};
+use super::o_piece_delivery::{
+    AdmitOutcome, Receipt, ReceiptMethod, ReceiptOutcome, load, record_receipt,
+};
 use super::provenance::{ProvenanceEntry, ProvenanceLog};
+use super::send::RepostIds;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
@@ -440,6 +448,203 @@ async fn an_operator_retry_and_the_automatic_reconfirm_share_one_three_post_budg
         refused,
         GrantOutcome::Failed(super::o_piece_delivery::Failure::CapUnknown)
     );
+    pool.close().await;
+    db.drop().await;
+}
+
+/// Admits each `(serial, native_key)` as an on original of `payload` that went uncertain.
+async fn admit_on(
+    pool: &PgPool,
+    log: &mut ProvenanceLog,
+    pieces: &[(u64, &str)],
+    payload: &str,
+) -> Vec<PieceKey> {
+    let records: Vec<_> = pieces
+        .iter()
+        .map(|(serial, native_key)| {
+            (
+                *serial,
+                record(native_key, payload, Some(PieceOutcome::NotFound)),
+            )
+        })
+        .collect();
+    let sent: Vec<_> = records
+        .iter()
+        .map(|(serial, record)| (*serial, record))
+        .collect();
+    sent_while_on(log, 3, &sent);
+    let mut on = switch(true);
+    let admitter = Admitter::when_on(&mut on, pool, "node-a", BOT).unwrap();
+    let mut keys = Vec::new();
+    for (serial, record) in &records {
+        let Candidate::Eligible(original) = classify(*serial, record, log.state()) else {
+            panic!("an on original");
+        };
+        admitter.adopt_uncertain(log, &original).await.unwrap();
+        keys.push(original.key);
+    }
+    keys
+}
+
+async fn scope_now(pool: &PgPool, key: &PieceKey) -> EvidenceScope {
+    let row = load(pool, key).await.unwrap().unwrap();
+    let spent = attempts(pool, key).await.unwrap();
+    EvidenceScope::of(&row, &spent, &run("run-1")).unwrap()
+}
+
+fn sent_by_bot(id: u64, content: &str) -> ObservedMessage {
+    ObservedMessage {
+        id,
+        channel_id: CHANNEL,
+        author_id: BOT,
+        content: content.into(),
+        footers: Vec::new(),
+        nonce: None,
+    }
+}
+
+fn attribute(
+    scope: &EvidenceScope,
+    snapshot: AttributionSnapshot,
+    seen: &ObservedMessage,
+) -> Attribution {
+    let mut into = Attribution::default();
+    match_observations(scope, &snapshot, [seen], &mut into);
+    into
+}
+
+fn nobody_else() -> AttributionSnapshot {
+    AttributionSnapshot::Known {
+        receipts: BTreeMap::new(),
+        same_payload: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn f4_nonce_receipt_closes_the_existing_budget_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let dir = tempfile::tempdir().unwrap();
+    let key = admit_on(&pool, &mut sidecar(&dir), &[(3, "f4-nonce")], "piece")
+        .await
+        .remove(0);
+    let scope = scope_now(&pool, &key).await;
+    let nonce = RepostIds::for_piece(&marker(&key))
+        .unwrap()
+        .nonce()
+        .to_owned();
+    let returned = ObservedMessage {
+        nonce: Some(nonce),
+        ..sent_by_bot(41, "piece, as Discord rendered it")
+    };
+    let seen = attribute(&scope, nobody_else(), &returned);
+    let candidate = &seen.found[&41];
+    assert_eq!(candidate.recovery, RecoveryKind::OriginalRecovered);
+    assert_eq!(candidate.receipt.slot, Some(0));
+
+    // A write that never reached PostgreSQL resolves nothing.
+    let down = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy(&db.database_url)
+        .unwrap();
+    down.close().await;
+    assert!(record_receipt(&down, &candidate.receipt).await.is_err());
+    let unchanged = load(&pool, &key).await.unwrap().unwrap();
+    assert_eq!(unchanged.revision, scope.row_revision);
+
+    let recorded = record_receipt(&pool, &candidate.receipt).await.unwrap();
+    assert!(matches!(recorded, ReceiptOutcome::Recorded { .. }));
+    assert_eq!(next_grant(&pool, &key).await, GrantOutcome::Resolved);
+    let spent = attempts(&pool, &key).await.unwrap();
+    assert_eq!(spent.iter().map(|a| a.slot).collect::<Vec<_>>(), [0]);
+    assert_eq!(load(&pool, &key).await.unwrap().unwrap().payload, "piece");
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn f4_receipt_race_never_reattributes_a_message_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let dir = tempfile::tempdir().unwrap();
+    let pieces = [(3, "f4-a"), (4, "f4-b")];
+    let keys = admit_on(&pool, &mut sidecar(&dir), &pieces, "same").await;
+    let (a, b) = (&keys[0], &keys[1]);
+    let message = sent_by_bot(51, "same");
+    let seen_by_a = attribute(&scope_now(&pool, a).await, nobody_else(), &message);
+    let candidate = seen_by_a.found[&51].receipt.clone();
+    assert_eq!(candidate.method, ReceiptMethod::ExactMatch);
+
+    // B records the same message first.
+    let first = Receipt {
+        key: b.clone(),
+        ..candidate.clone()
+    };
+    assert!(matches!(
+        record_receipt(&pool, &first).await.unwrap(),
+        ReceiptOutcome::Recorded { .. }
+    ));
+    let late = record_receipt(&pool, &candidate).await.unwrap();
+    assert_eq!(late, ReceiptOutcome::AttributedElsewhere(b.clone()));
+    assert_eq!(
+        record_receipt(&pool, &first).await.unwrap(),
+        ReceiptOutcome::Known
+    );
+
+    let now_known = AttributionSnapshot::Known {
+        receipts: BTreeMap::from([(51, b.clone())]),
+        same_payload: Vec::new(),
+    };
+    assert!(attribute(&scope_now(&pool, a).await, now_known, &message).is_clear());
+    assert_ne!(next_grant(&pool, a).await, GrantOutcome::Resolved);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn f4_row_change_invalidates_absence_evidence_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let dir = tempfile::tempdir().unwrap();
+    let pieces = [(3, "f4-slot"), (4, "f4-receipt")];
+    let keys = admit_on(&pool, &mut sidecar(&dir), &pieces, "piece").await;
+    let current = |key: PieceKey| {
+        let pool = pool.clone();
+        async move {
+            let row = load(&pool, &key).await.unwrap().unwrap();
+            (row, attempts(&pool, &key).await.unwrap())
+        }
+    };
+    let run_1 = run("run-1");
+
+    // Another holder consumes and settles slot 1 after the passes.
+    let slot = &keys[0];
+    let evidence = absent_evidence(scope_now(&pool, slot).await, run_1.clone());
+    let (row, spent) = current(slot.clone()).await;
+    assert!(evidence.validate_current(&row, &spent, &run_1));
+    assert_eq!(send_uncertain(&pool, slot, Intent::AutoReconfirm).await, 1);
+    let (row, spent) = current(slot.clone()).await;
+    assert!(!evidence.validate_current(&row, &spent, &run_1));
+    let stale = grant(
+        &pool,
+        request(slot, evidence.scope().row_revision, Intent::AutoReconfirm),
+    );
+    assert!(matches!(stale.await.unwrap(), GrantOutcome::Stale { .. }));
+    assert_eq!(attempts(&pool, slot).await.unwrap().len(), 2);
+
+    // A receipt moves only the revision; the evidence is stale all the same.
+    let receipt = &keys[1];
+    let evidence = absent_evidence(scope_now(&pool, receipt).await, run_1.clone());
+    let recorded = Receipt {
+        key: receipt.clone(),
+        message_id: 61,
+        author_id: BOT,
+        slot: None,
+        method: ReceiptMethod::Marker,
+    };
+    record_receipt(&pool, &recorded).await.unwrap();
+    let (row, spent) = current(receipt.clone()).await;
+    assert_eq!(spent.len(), 1);
+    assert!(!evidence.validate_current(&row, &spent, &run_1));
     pool.close().await;
     db.drop().await;
 }
