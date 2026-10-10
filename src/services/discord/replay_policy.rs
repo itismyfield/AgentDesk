@@ -181,18 +181,6 @@ pub(in crate::services::discord) async fn stale_resume(
     }
 }
 
-async fn ordinary_terminal(
-    pool: Option<&PgPool>,
-    token: &CancelToken,
-    inflight: &InflightTurnState,
-) -> bool {
-    let ordinary = classify_terminal(pool, token, inflight).await;
-    if !ordinary {
-        bar_legacy_retry(inflight);
-    }
-    ordinary
-}
-
 /// Classifies a protected attempt's terminal from a complete observation with exactly one
 /// provider terminal; anything else holds.
 async fn classify_terminal(
@@ -205,6 +193,9 @@ async fn classify_terminal(
     }
     if let Some(verdict) = token.replay_attempt().and_then(|live| live.verdict()) {
         return verdict == Verdict::Ordinary;
+    }
+    if token.replay_attempt().is_some_and(|live| live.stale()) {
+        return false;
     }
     let Some((pool, live, attempt, observation)) = decide_live(pool, token).await else {
         return false;
@@ -230,19 +221,34 @@ async fn classify_terminal(
     ordinary
 }
 
-/// Whether ordinary completion, failure, provider recovery and session effects may run. A legacy
-/// turn always may; a protected one only once its terminal is classified ordinary, and a stale
-/// resume is never classified here because only the stale-resume decision may judge it.
-pub(in crate::services::discord) async fn ordinary_outcome(
+/// Whether a provider error may take the ordinary recovery, presentation and reset path; a
+/// protected stale resume is left to the stale-resume decision.
+pub(in crate::services::discord) async fn error_is_ordinary(
     pool: Option<&PgPool>,
     token: &CancelToken,
     inflight: &InflightTurnState,
     stale_resume: bool,
 ) -> bool {
     if stale_resume && !ordinary_allowed(token, inflight) {
+        token.replay_attempt().inspect(|live| live.mark_stale());
+        bar_legacy_retry(inflight);
         return false;
     }
-    ordinary_terminal(pool, token, inflight).await
+    ordinary_outcome(pool, token, inflight).await
+}
+
+/// Whether ordinary completion, failure and session effects may run: always for a legacy turn,
+/// and for a protected one once its terminal is classified ordinary.
+pub(in crate::services::discord) async fn ordinary_outcome(
+    pool: Option<&PgPool>,
+    token: &CancelToken,
+    inflight: &InflightTurnState,
+) -> bool {
+    let ordinary = classify_terminal(pool, token, inflight).await;
+    if !ordinary {
+        bar_legacy_retry(inflight);
+    }
+    ordinary
 }
 
 /// Holds a protected request at a recovery sentinel, which is never no-effect evidence; returns

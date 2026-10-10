@@ -73,7 +73,6 @@ pub(super) async fn prepare_receipt_disposition(
                 state.shared_owned.pg_pool.as_ref(),
                 &state.cancel_token,
                 &state.inflight_state,
-                state.resume_failure_detected,
             )
             .await;
             outcome = match preserve_or_publish(Handoff {

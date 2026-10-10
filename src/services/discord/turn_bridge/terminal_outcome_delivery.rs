@@ -776,7 +776,6 @@ pub(super) async fn run_terminal_outcome_delivery(
             pool,
             &cancel_token,
             &inflight_state,
-            resume_failure_detected,
         )
         .await;
         handle_delivery_epilogue(

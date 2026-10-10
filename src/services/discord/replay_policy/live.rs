@@ -192,6 +192,8 @@ pub(crate) struct LiveAttempt {
     observation: Mutex<RawObservation>,
     recorded: tokio::sync::Notify,
     verdict: Mutex<Option<Verdict>>,
+    /// The bridge saw a stale resume; only the stale-resume decision may judge this attempt.
+    stale: std::sync::atomic::AtomicBool,
 }
 
 impl LiveAttempt {
@@ -202,6 +204,7 @@ impl LiveAttempt {
             attempt: Mutex::new(Some(attempt)),
             recorded: tokio::sync::Notify::new(),
             verdict: Mutex::new(None),
+            stale: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -234,6 +237,14 @@ impl LiveAttempt {
 
     pub(crate) fn verdict(&self) -> Option<Verdict> {
         *lock(&self.verdict)
+    }
+
+    pub(crate) fn mark_stale(&self) {
+        self.stale.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn stale(&self) -> bool {
+        self.stale.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 

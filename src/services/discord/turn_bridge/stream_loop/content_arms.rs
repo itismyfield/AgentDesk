@@ -424,7 +424,7 @@ pub(super) async fn handle_stream_content_message(
                             let is_stale_resume =
                                 stream_error_has_stale_resume_error(&message, &stderr);
                             // A protected attempt is judged before provider recovery, presentation or reset.
-                            let ordinary = crate::services::discord::replay_policy::ordinary_outcome(shared_owned.pg_pool.as_ref(), ctx.cancel_token, inflight_state, is_stale_resume).await;
+                            let ordinary = crate::services::discord::replay_policy::error_is_ordinary(shared_owned.pg_pool.as_ref(), ctx.cancel_token, inflight_state, is_stale_resume).await;
                             recovery_retry = recovery_retry || (ordinary && super::provider_recovery::on_error(&shared_owned, &provider, channel_id, ctx.recovery_lease, expected_identity, inflight_state, !done, any_tool_used || !active_background_child_session_ids.is_empty(), &full_response, &message, &stderr).await);
                             let session_reset_required = ordinary
                                 && stream_error_requires_terminal_session_reset(&message, &stderr);
