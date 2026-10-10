@@ -192,12 +192,16 @@ pub(super) async fn update_streaming_status_tick(
         }
 
         let has_assistant_response_for_streaming = !full_response.trim().is_empty();
+        // The frontier is bounded by the transcript's length; the read position may trail it.
+        let transcript_eof = std::fs::metadata(output_path.as_str())
+            .ok()
+            .map(|meta| meta.len());
         let bridge_committed_range =
             crate::services::discord::outbound::delivery_frontier_probe::delivered_frontier_current_generation(
                 &watcher_provider,
                 channel_id,
                 &tmux_session_name,
-                Some(current_offset),
+                transcript_eof,
             )
             .map(|commit| commit.range);
         if watcher_should_suppress_streaming_after_bridge_delivery(

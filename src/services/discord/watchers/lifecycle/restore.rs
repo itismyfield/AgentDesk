@@ -508,14 +508,13 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     finish_mailbox_on_completion,
                     ..restored_tmux
                 });
-                let file_len = std::fs::metadata(&output_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                if file_len >= state.last_offset {
-                    state.last_offset
-                } else {
-                    0
-                }
+                restored_inflight_start_offset(
+                    selected_claude_tui_fallback_transcript.is_some(),
+                    &state,
+                    *channel_id,
+                    session_name,
+                    &output_path,
+                )
             } else {
                 std::fs::metadata(&output_path)
                     .map(|m| m.len())

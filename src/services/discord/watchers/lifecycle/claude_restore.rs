@@ -115,6 +115,41 @@ fn select_claude_tui_restore_scan_cwd(
         })
 }
 
+/// Start for a Claude transcript fallback whose inflight row never recorded a position in it:
+/// the furthest known position within the file, else EOF, since byte 0 replays every older turn.
+pub(super) fn claude_fallback_unrecorded_start_offset(
+    state: &crate::services::discord::inflight::InflightTurnState,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    transcript_path: &str,
+    file_len: u64,
+) -> Option<u64> {
+    if state.last_offset != 0 || state.output_path.as_deref() == Some(transcript_path) {
+        return None;
+    }
+    let frontier_end =
+        crate::services::discord::outbound::delivery_record::resolved_delivered_frontier_end_current_generation(
+            &crate::services::provider::ProviderKind::Claude,
+            channel_id,
+            tmux_session_name,
+            Some(file_len),
+        );
+    let binding_offset =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
+            .filter(|binding| {
+                binding.runtime_kind
+                    == crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+                    && binding.output_path == transcript_path
+            })
+            .map(|binding| binding.last_offset);
+    let known = [frontier_end, binding_offset, state.turn_start_offset]
+        .into_iter()
+        .flatten()
+        .filter(|&offset| offset > 0 && offset <= file_len)
+        .max();
+    Some(known.unwrap_or(file_len))
+}
+
 fn claude_tui_transcript_fallback_path_for_context(
     provider: &crate::services::provider::ProviderKind,
     cwd: &std::path::Path,

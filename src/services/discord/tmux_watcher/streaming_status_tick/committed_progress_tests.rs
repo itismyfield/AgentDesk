@@ -356,6 +356,8 @@ fn seed_bridge_frontier(shared: &Arc<SharedData>, fx: &Fixture, end: u64) {
     use crate::services::discord::outbound::{delivery_frontier_probe, delivery_record};
     let marker = crate::services::tmux_common::session_temp_path(&fx.tmux, "generation");
     std::fs::write(marker, b"1").expect("wrapper generation marker");
+    // The delivered bytes the watcher read lie inside the transcript.
+    std::fs::write(&fx.output_path, vec![b'\n'; end as usize]).expect("fixture transcript bytes");
     let generation = delivery_record::current_generation_mtime_ns(&fx.tmux);
     assert_ne!(generation, 0, "fixture needs a readable generation");
     shared.tmux_relay_coord(fx.channel)

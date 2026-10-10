@@ -248,3 +248,28 @@ pub(crate) fn watcher_has_post_work_ready_evidence(
 ) -> bool {
     !full_response.trim().is_empty() || tool_state.any_tool_used
 }
+
+/// Where a watcher restored with its open inflight row starts reading `output_path`.
+pub(super) fn restored_inflight_start_offset(
+    claude_fallback: bool,
+    state: &crate::services::discord::inflight::InflightTurnState,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    output_path: &str,
+) -> u64 {
+    let file_len = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+    let unrecorded = claude_fallback.then(|| {
+        claude_fallback_unrecorded_start_offset(
+            state,
+            channel_id,
+            tmux_session_name,
+            output_path,
+            file_len,
+        )
+    });
+    match unrecorded.flatten() {
+        Some(start) => start,
+        None if file_len >= state.last_offset => state.last_offset,
+        None => 0,
+    }
+}

@@ -35,6 +35,9 @@ mod herdr_entry_host_tests;
 #[path = "n1a_turn_mode_tests.rs"]
 mod n1a_turn_mode_tests;
 
+#[path = "restore_offset_harness_tests.rs"]
+mod restore_offset_harness_tests;
+
 const CHILD: &str = "ADK_STREAMING_HARNESS_CHILD";
 pub(super) const STATUS_PANEL_V2: &str = "ADK_STREAMING_HARNESS_STATUS_PANEL_V2";
 const CLAUDE: ProviderKind = ProviderKind::Claude;
@@ -54,6 +57,7 @@ case "$1" in
   list-panes) [ "$state" = listfail ] && exit 1
     case "$state" in dead|deadpane) echo 1 ;; *) echo 0 ;; esac; exit 0 ;;
   kill-session) echo "$*" >> "ROOT/tmux-kills"; exit 0 ;;
+  list-sessions) [ -f "ROOT/sessions" ] && while read -r s; do echo "$s"; done < "ROOT/sessions"; exit 0 ;;
   capture-pane) [ "$state" = busy ] && printf '%s\n' '⏺ Running 1 shell command…' '· Actioning… (4m 7s · esc to interrupt)'; exit 0 ;;
 esac
 exit 0
@@ -89,7 +93,9 @@ pub(super) fn isolated_in(submodule: &str, test: &str, envs: &[(&str, &str)]) ->
                  agentdesk::services::discord::tmux::tmux_watcher::turn_stream_collector=info,\
                  agentdesk::services::discord::host_liveness=info,\
                  agentdesk::services::discord::tmux::tmux_watcher::post_stream_exit::host_gate=debug,\
-                 agentdesk::services::discord::tmux::watcher_lifecycle::watch_host=debug",
+                 agentdesk::services::discord::tmux::watcher_lifecycle::watch_host=debug,\
+                 agentdesk::services::discord::tmux::watcher_lifecycle::restore=info,\
+                 agentdesk::services::discord::tmux::tmux_watcher::streaming_status_tick=warn",
             )
             .with_writer(|| Capture)
             .finish();
@@ -282,6 +288,8 @@ pub(super) struct Harness {
     http: Arc<serenity::Http>,
     discord: Arc<Mutex<Discord>>,
     watcher: Option<Controls>,
+    /// Whether the next watcher starts on a turn the bridge already delivered.
+    pub(super) bridge_delivered: bool,
 }
 
 impl Harness {
@@ -339,6 +347,7 @@ impl Harness {
             http,
             discord,
             watcher: None,
+            bridge_delivered: false,
         };
         harness.pane("busy");
         harness
@@ -406,7 +415,7 @@ impl Harness {
         let resume = Arc::new(Mutex::new(None));
         let paused = Arc::new(AtomicBool::new(false));
         let epoch = Arc::new(AtomicU64::new(0));
-        let delivered = Arc::new(AtomicBool::new(false));
+        let delivered = Arc::new(AtomicBool::new(self.bridge_delivered));
         let beat = Arc::new(AtomicI64::new(
             crate::services::discord::tmux_watcher_now_ms(),
         ));

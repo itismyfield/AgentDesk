@@ -598,7 +598,7 @@ pub(super) async fn poll_watcher_output_or_continue(
                 watcher_provider,
                 channel_id,
                 tmux_session_name,
-                Some(current_offset),
+                std::fs::metadata(output_path).ok().map(|meta| meta.len()),
             )
             .is_some_and(|commit| {
                 commit.generation_mtime_ns == source_generation_mtime_ns

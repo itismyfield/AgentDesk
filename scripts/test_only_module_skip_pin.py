@@ -157,6 +157,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/watchers/lifecycle/claims_host_tests.rs",
         "src/services/discord/router/message_handler/watchdog_host_tests.rs",
         "src/services/discord/tmux_watcher/herdr_entry_host_tests.rs",
+        "src/services/discord/tmux_watcher/restore_offset_harness_tests.rs",
         "src/services/tui_o/writer/herdr_resume_tests.rs",
         "src/services/discord/turn_bridge/runtime_handoff_loop/herdr_owner_tests.rs",
         "src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs",
