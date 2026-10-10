@@ -1056,7 +1056,8 @@ fn observed_input(
     Ok(HerdrInputRun::Ran(run))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod coldstop_input_tests {
     use super::*;
     use crate::services::provider::cancel_token_claude_interrupt::{

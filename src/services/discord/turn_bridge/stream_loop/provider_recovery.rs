@@ -249,7 +249,8 @@ fn before_start_recovery_blocked(
         || state.closed_probe().unwrap_or(true)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod coldstop_recovery_tests {
     use super::*;
     use crate::db::dispatched_sessions::hosted_execution::HostedOwner;

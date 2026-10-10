@@ -615,7 +615,8 @@ mod observed_input_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod coldstop_input_tests {
     use super::*;
     use crate::services::provider::herdr_before_start::{InputPhase, InputRun as HerdrInputRun};

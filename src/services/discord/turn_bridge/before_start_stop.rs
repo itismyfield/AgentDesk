@@ -77,6 +77,7 @@ async fn consume(
     )
 }
 
+#[cfg(test)]
 #[cfg(unix)]
 mod tests {
     use super::*;
