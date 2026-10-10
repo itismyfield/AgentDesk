@@ -468,11 +468,9 @@ mod b2b1_presence_withdraw_tests {
         // A live incumbent on the same transcript keeps its slot; the claim changes nothing.
         assert!(!try_claim_watcher(watchers, x, handle("b2b1-e")));
         assert!(Probe::current(&ticket));
-        watchers
-            .get(&x)
-            .unwrap()
-            .cancel
-            .store(true, Ordering::Relaxed);
+        // A heartbeat-stale incumbent is replaced, and the replacement withdraws.
+        let stale = watchers.get(&x).unwrap().last_heartbeat_ts_ms.clone();
+        stale.store(1, Ordering::Release);
         assert!(try_claim_watcher(watchers, x, handle("b2b1-e")));
         assert!(!Probe::current(&ticket));
     }

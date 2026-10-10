@@ -584,7 +584,10 @@ async fn b2b1_lease_loss_and_yield_withdraw_only_gateway_approvals_pg() {
     let Some(fixture) = Fixture::new().await else {
         return;
     };
+    // The first session idles out between keepalive ticks; the re-acquired one keeps the default.
+    fixture.save_config(|config| config.cluster.gateway_lease_idle_expiry_secs = 2);
     let mut running = fixture.backup().await;
+    fixture.save_config(|_| {});
     let probe = Probe::install(&running.shared);
     let serving = Arc::new(Serving(running.shared.clone(), Default::default()));
     let fence = Arc::downgrade(&serving) as std::sync::Weak<dyn Fence>;
@@ -593,11 +596,6 @@ async fn b2b1_lease_loss_and_yield_withdraw_only_gateway_approvals_pg() {
     let uncertain = probe.arm_gateway(6_325_621, gate.clone());
     let elsewhere = probe.arm(6_325_622);
     let pid = fixture.holder().await.unwrap();
-    sqlx::query("SELECT pg_terminate_backend($1)")
-        .bind(pid)
-        .execute(&fixture.pool)
-        .await
-        .unwrap();
     tokio::time::timeout(Duration::from_secs(25), async {
         while fixture.holder().await.is_none_or(|holder| holder == pid) {
             tokio::time::sleep(Duration::from_millis(20)).await;
