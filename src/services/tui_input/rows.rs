@@ -13,6 +13,9 @@ use super::attempt::{
 use super::blob::BlobPin;
 use super::durable::invalid;
 use super::ledger::{Ledger, Record, Snapshot};
+#[path = "receipt_identity.rs"]
+pub(crate) mod receipt_identity;
+use receipt_identity::{ReceiptIdentity, Responsibility};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -185,6 +188,8 @@ struct StagedRow {
 pub struct Rows {
     folded_seq: u64,
     rows: BTreeMap<u64, Row>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    receipts: BTreeMap<u64, ReceiptIdentity>,
     // Staged records since the last commit or handback; only they can still be bound.
     staged: Vec<StagedRow>,
     boundary_seq: u64,
@@ -197,9 +202,21 @@ impl Rows {
     pub fn fold(snapshot: Option<&Snapshot>, records: &[Record]) -> io::Result<Self> {
         let mut rows = match snapshot {
             Some(snapshot) => {
-                let rows: Self = serde_json::from_value(snapshot.state.clone())?;
+                let mut rows: Self = serde_json::from_value(snapshot.state.clone())?;
                 if rows.folded_seq != snapshot.seq {
                     return Err(invalid("input snapshot state does not match its sequence"));
+                }
+                // Preserve explicitly recorded receipt fields from snapshots with the older Row shape.
+                if let Some(saved) = snapshot.state.get("rows").and_then(Value::as_object) {
+                    for &key in rows.rows.keys() {
+                        if !rows.receipts.contains_key(&key)
+                            && let Some(identity) = saved
+                                .get(&key.to_string())
+                                .and_then(|row| ReceiptIdentity::from_input(key, row))
+                        {
+                            rows.receipts.insert(key, identity);
+                        }
+                    }
                 }
                 rows
             }
@@ -399,6 +416,9 @@ impl Rows {
 
     fn activate(&mut self, key: u64, seq: u64, received_seq: u64, input: Value, state: RowState) {
         self.unbound.remove(&key);
+        if let Some(identity) = ReceiptIdentity::from_input(key, &input) {
+            self.receipts.entry(key).or_insert(identity);
+        }
         self.rows.insert(
             key,
             Row {
@@ -440,6 +460,27 @@ impl Rows {
 
     pub fn row(&self, key: u64) -> Option<&Row> {
         self.rows.get(&key)
+    }
+
+    pub fn responsibility(&self, source: &ReceiptIdentity) -> Responsibility {
+        receipt_identity::lookup(self, source)
+    }
+
+    pub(crate) fn receipt_identity(&self, key: u64) -> Option<ReceiptIdentity> {
+        match self.receipts.get(&key) {
+            Some(identity) => identity.validates(key).then(|| identity.clone()),
+            None => ReceiptIdentity::from_input(key, &self.rows.get(&key)?.input),
+        }
+    }
+
+    pub(crate) fn receipt_identity_missing(&self) -> bool {
+        self.receipts
+            .iter()
+            .any(|(key, identity)| !self.rows.contains_key(key) || !identity.validates(*key))
+            || self
+                .rows
+                .iter()
+                .any(|(key, row)| row.input.is_null() && self.receipt_identity(*key).is_none())
     }
 
     /// Every tracked attempt with its row key and whether that row is still open.
@@ -513,6 +554,16 @@ impl Rows {
         for (key, row) in compacted.rows.iter_mut() {
             if !row.state.is_terminal() {
                 continue;
+            }
+            #[cfg(test)]
+            let capture = !receipt_identity::mutant("skip_compact_identity");
+            #[cfg(not(test))]
+            let capture = true;
+            if capture
+                && !compacted.receipts.contains_key(key)
+                && let Some(identity) = ReceiptIdentity::from_input(*key, &row.input)
+            {
+                compacted.receipts.insert(*key, identity);
             }
             row.input = Value::Null;
             let Some(now) = facts.now_ms().filter(|_| !row.attempts.is_empty()) else {

@@ -191,20 +191,31 @@ impl PlaceholderCleanupRegistry {
         message_id: MessageId,
     ) -> bool {
         self.prune_expired();
+        self.terminal_cleanup_retry_pending_read_only(provider, channel_id, message_id)
+    }
+
+    pub(super) fn terminal_cleanup_retry_pending_read_only(
+        &self,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) -> bool {
         let key = PlaceholderCleanupKey {
             provider: provider.as_str().to_string(),
             channel_id,
             message_id,
         };
         self.records.get(&key).is_some_and(|stored| {
-            matches!(
-                stored.record.operation,
-                PlaceholderCleanupOperation::DeleteTerminal
-                    | PlaceholderCleanupOperation::EditTerminal
-            ) && matches!(
-                stored.record.outcome,
-                PlaceholderCleanupOutcome::Failed { .. }
-            )
+            stored.recorded_at.elapsed() <= PLACEHOLDER_CLEANUP_TTL
+                && matches!(
+                    stored.record.operation,
+                    PlaceholderCleanupOperation::DeleteTerminal
+                        | PlaceholderCleanupOperation::EditTerminal
+                )
+                && matches!(
+                    stored.record.outcome,
+                    PlaceholderCleanupOutcome::Failed { .. }
+                )
         })
     }
 

@@ -220,6 +220,289 @@ async fn without_ownership_the_actor_keeps_spooling_and_posts_once_ownership_ret
     halt(stop, task).await;
 }
 
+#[derive(Clone, Default)]
+struct WaitingAlarms {
+    raised: Arc<Mutex<Vec<WriterAlarm>>>,
+    cleared: Arc<AtomicUsize>,
+    active: Arc<AtomicBool>,
+}
+
+impl AlarmSink for WaitingAlarms {
+    fn raise(&self, _channel: u64, alarm: WriterAlarm) {
+        if matches!(alarm, WriterAlarm::WaitingTooLong { .. }) {
+            self.active.store(true, Ordering::SeqCst);
+            self.raised.lock().unwrap().push(alarm);
+        }
+    }
+
+    fn waiting_cleared(&self, _channel: u64) {
+        if self.active.swap(false, Ordering::SeqCst) {
+            self.cleared.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+fn spawn_waiting(
+    harness: &Harness,
+    utc: DateTime<Utc>,
+) -> (WaitingAlarms, watch::Sender<bool>, Actor) {
+    let alarms = WaitingAlarms::default();
+    let (stop, task) = spawn_waiting_sink(harness, utc, alarms.clone());
+    (alarms, stop, task)
+}
+
+fn spawn_waiting_sink<A: AlarmSink + 'static>(
+    harness: &Harness,
+    utc: DateTime<Utc>,
+    alarms: A,
+) -> (watch::Sender<bool>, Actor) {
+    let channel = harness.channel();
+    let bindings = Arc::new(FakeBindings::new());
+    for (seq, source) in (1..).zip(channel.cursors().map(|c| c.source.clone())) {
+        let mut event = bound(
+            seq,
+            None,
+            BindingTarget::Source(source),
+            BindingCause::Startup,
+            None,
+        );
+        event.channel_id = harness.channel_id;
+        bindings.commit(event);
+    }
+    let writer = ChannelWriter::new(
+        channel,
+        harness.gate.clone(),
+        harness.port.clone(),
+        harness.lease.clone(),
+        alarms,
+    );
+    let (stop, stopped) = watch::channel(false);
+    let task = tokio::spawn(super::super::actor::run_channel_at(
+        writer,
+        ShadowProvider::Claude,
+        bindings,
+        stopped,
+        utc,
+    ));
+    (stop, task)
+}
+
+async fn waiting_poll(stop: &watch::Sender<bool>, elapsed: std::time::Duration) {
+    tokio::time::advance(elapsed).await;
+    // Wake a real actor poll at sub-second boundaries without changing its stop decision.
+    stop.send_replace(false);
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn overdue_ready_is_observed_by_the_loop_at_strict_boundary_and_recurrence() {
+    use std::time::Duration;
+    let (harness, path, source) = switched_over(&row("m0", "before"));
+    append(&path, &row("m1", "first waiting piece"));
+    let (alarms, stop, task) = spawn_waiting(&harness, Utc::now());
+    waiting_poll(&stop, Duration::ZERO).await;
+    assert_eq!(
+        harness.channel().cursor(&source).unwrap().captured_through,
+        std::fs::metadata(&path).unwrap().len(),
+        "the loop really captured Ready work"
+    );
+    assert!(harness.port.posts().is_empty());
+    assert_eq!(harness.channel().ledger().next_serial(), 0);
+    waiting_poll(&stop, Duration::from_millis(299_999)).await;
+    assert!(alarms.raised.lock().unwrap().is_empty());
+    waiting_poll(&stop, Duration::from_millis(1)).await;
+    assert!(
+        alarms.raised.lock().unwrap().is_empty(),
+        "exactly 300s is not overdue"
+    );
+    waiting_poll(&stop, Duration::from_millis(1)).await;
+    let first = alarms.raised.lock().unwrap().clone();
+    assert_eq!(
+        first.len(),
+        1,
+        "the actor loop must produce the overdue alarm"
+    );
+    assert!(matches!(
+        &first[0],
+        WriterAlarm::WaitingTooLong {
+            ready: 1,
+            prepared: None,
+            ..
+        }
+    ));
+    waiting_poll(&stop, Duration::from_secs(600)).await;
+    assert_eq!(
+        alarms.raised.lock().unwrap().len(),
+        1,
+        "same incident only once"
+    );
+    assert!(
+        harness.port.posts().is_empty(),
+        "observing does not send body output"
+    );
+    assert_eq!(harness.channel().ledger().next_serial(), 0);
+    harness.gate.acquired();
+    waiting_poll(&stop, Duration::ZERO).await;
+    assert_eq!(harness.port.posts(), ["first waiting piece"]);
+    assert_eq!(alarms.cleared.load(Ordering::SeqCst), 1);
+    harness.gate.lost();
+    append(&path, &row("m2", "next waiting piece"));
+    waiting_poll(&stop, Duration::ZERO).await;
+    waiting_poll(&stop, Duration::from_millis(300_001)).await;
+    let events = alarms.raised.lock().unwrap().clone();
+    assert_eq!(events.len(), 2);
+    let incident = |alarm: &WriterAlarm| match alarm {
+        WriterAlarm::WaitingTooLong { incident, .. } => incident.clone(),
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_ne!(incident(&events[0]), incident(&events[1]));
+    assert!(
+        !task.is_finished(),
+        "an overdue alarm must not stop the writer"
+    );
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn restored_prepared_uses_durable_utc_age_and_clamps_future_time() {
+    use std::time::Duration;
+    let (harness, _, _) = switched_over(&row("m0", "before"));
+    let mut store = harness.channel();
+    store
+        .append_ledger(LedgerEntry::Prepared {
+            serial: 0,
+            unit_key: unit("restore"),
+            piece_index: 0,
+            payload: "still unresolved".into(),
+            anchor_id: 100,
+            epoch: 1,
+        })
+        .unwrap();
+    let prepared_at = store.ledger().unresolved().unwrap().1.prepared_at;
+    drop(store);
+    let (alarms, stop, task) =
+        spawn_waiting(&harness, prepared_at - chrono::Duration::seconds(600));
+    waiting_poll(&stop, Duration::ZERO).await;
+    assert!(!task.is_finished(), "the restored observer really runs");
+    waiting_poll(&stop, Duration::from_millis(300_001)).await;
+    assert!(
+        alarms.raised.lock().unwrap().is_empty(),
+        "future timestamp has zero age"
+    );
+    waiting_poll(&stop, Duration::from_millis(599_998)).await;
+    assert!(
+        alarms.raised.lock().unwrap().is_empty(),
+        "restored age 299.999s"
+    );
+    waiting_poll(&stop, Duration::from_millis(1)).await;
+    assert!(
+        alarms.raised.lock().unwrap().is_empty(),
+        "restored age exactly 300s"
+    );
+    waiting_poll(&stop, Duration::from_millis(1)).await;
+    let events = alarms.raised.lock().unwrap().clone();
+    assert_eq!(events.len(), 1);
+    assert!(
+        !task.is_finished(),
+        "age observation does not stop the writer"
+    );
+    assert!(matches!(
+        &events[0],
+        WriterAlarm::WaitingTooLong {
+            ready: 0,
+            prepared: Some(0),
+            ..
+        }
+    ));
+    let before = harness.channel().ledger().clone();
+    assert!(harness.port.posts().is_empty());
+    halt(stop, task).await;
+    let (replayed, stop, task) =
+        spawn_waiting(&harness, prepared_at + chrono::Duration::seconds(301));
+    waiting_poll(&stop, Duration::ZERO).await;
+    assert_eq!(
+        *replayed.raised.lock().unwrap(),
+        events,
+        "same durable Prepared incident after restart"
+    );
+    assert_eq!(
+        *harness.channel().ledger(),
+        before,
+        "observation never appends a result"
+    );
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn ready_item_ages_and_channels_are_independent() {
+    use std::time::Duration;
+    let (first, a, _) = switched_over(&row("m0", "before"));
+    let (second, b, _) = switched_over_on(632_504, &row("n0", "before"));
+    append(&a, &row("m1", "older"));
+    let (alarms_a, stop_a, task_a) = spawn_waiting(&first, Utc::now());
+    let (alarms_b, stop_b, task_b) = spawn_waiting(&second, Utc::now());
+    waiting_poll(&stop_a, Duration::ZERO).await;
+    waiting_poll(&stop_b, Duration::from_secs(100)).await;
+    append(&a, &row("m2", "younger"));
+    append(&b, &row("n1", "second channel"));
+    waiting_poll(&stop_a, Duration::ZERO).await;
+    waiting_poll(&stop_b, Duration::ZERO).await;
+    waiting_poll(&stop_a, Duration::from_millis(200_001)).await;
+    assert_eq!(alarms_a.raised.lock().unwrap().len(), 1);
+    assert!(matches!(
+        alarms_a.raised.lock().unwrap()[0],
+        WriterAlarm::WaitingTooLong { ready: 1, .. }
+    ));
+    assert!(alarms_b.raised.lock().unwrap().is_empty());
+    waiting_poll(&stop_b, Duration::from_secs(100)).await;
+    assert_eq!(alarms_b.raised.lock().unwrap().len(), 1);
+    assert!(first.port.posts().is_empty() && second.port.posts().is_empty());
+    halt(stop_a, task_a).await;
+    halt(stop_b, task_b).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recovered_actor_clears_waiting_health_through_its_shared_sink() {
+    use crate::services::tui_o::alarm::{AlarmHealth, AlarmRouter};
+    use std::time::{Duration, Instant};
+    let (harness, path, _) = switched_over(&row("m0", "before"));
+    append(&path, &row("m1", "recover this piece"));
+    let health = Arc::new(AlarmHealth::default());
+    let router = Arc::new(AlarmRouter::new(None, None, health.clone()));
+    let reason = format!("tui_o:waiting_too_long:{CHANNEL}");
+    let (stop, task) = spawn_waiting_sink(&harness, Utc::now(), router.clone());
+    waiting_poll(&stop, Duration::ZERO).await;
+    waiting_poll(&stop, Duration::from_millis(300_001)).await;
+    assert!(health.current_at(Instant::now()).contains(&reason));
+    halt(stop, task).await;
+    assert!(
+        health.current_at(Instant::now()).contains(&reason),
+        "stopping did not settle the work"
+    );
+    let (stop, task) = spawn_waiting_sink(&harness, Utc::now(), router.clone());
+    waiting_poll(&stop, Duration::ZERO).await;
+    assert!(
+        health.current_at(Instant::now()).contains(&reason),
+        "reconstructing with the gateway lost does not settle the work"
+    );
+    assert!(harness.port.posts().is_empty());
+    waiting_poll(&stop, Duration::from_millis(300_001)).await;
+    assert!(health.current_at(Instant::now()).contains(&reason));
+    assert!(harness.port.posts().is_empty());
+    halt(stop, task).await;
+    harness.gate.acquired();
+    let (stop, task) = spawn_waiting_sink(&harness, Utc::now(), router);
+    waiting_poll(&stop, Duration::ZERO).await;
+    assert_eq!(harness.port.posts(), ["recover this piece"]);
+    assert!(
+        !health.current_at(Instant::now()).contains(&reason),
+        "the shared health condition clears"
+    );
+    halt(stop, task).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_stop_an_abort_or_eof_settles_nothing_the_channel_still_owes() {
     let codex = |value: serde_json::Value| {

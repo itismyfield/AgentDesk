@@ -34,6 +34,8 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/tui_o/exact_episode_tests.rs",
+        "src/services/tui_o/exact_pg_tests.rs",
         "src/services/discord/health/recovery/legacy_send_tests.rs",
         "src/db/session_observability/background_ordering_pg_tests.rs",
         "src/services/cluster/home_supervisor_tests.rs",
@@ -70,10 +72,13 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/input_transition_tests.rs",
         "src/services/discord/input_runtime/fence_tests.rs",
         "src/services/discord/input_runtime/effects_tests.rs",
+        "src/services/discord/input_runtime/ordering_tests.rs",
+        "src/services/discord/input_runtime/receipt_tests.rs",
         "src/services/discord/input_runtime/supervisor_tests.rs",
         "src/services/discord/input_runtime/fence/modes_tests.rs",
         "src/services/discord/input_runtime/supervisor/drive_tests.rs",
         "src/services/discord/input_runtime/supervisor/drive_entry_tests.rs",
+        "src/services/discord/input_runtime/supervisor/receipt_entry_tests.rs",
         "src/services/turn_orchestrator/input_fence_tests.rs",
         "src/services/tui_input/transition_fixture_tests.rs",
         "src/services/tui_input/transition_tests.rs",
@@ -170,6 +175,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/cluster/intake_router_hook/home_route_tests.rs",
         "src/services/cluster/channel_home_tests.rs",
         "src/services/discord/queue_io/transport/tests.rs",
+        "src/services/discord/queue_park_ledger/cancel_park_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rest_delivery_tests.rs",
         "src/db/automation_candidates/verdict_tests.rs",
@@ -490,6 +496,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/provenance_tests.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant_tests.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/permission_tests.rs",
+        "src/services/session_forwarding/home_stop_tests.rs",
+        "src/server/routes/queue_api_home_stop_tests.rs",
+        "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs",
     }
 )
 
