@@ -70,6 +70,10 @@ pub(in crate::services::discord) async fn handle_idle_queue_guard_skip(
         slow_backstop_armed,
         recovery_owner = if residue_recorded {
             "turn_finalizer_reconcile"
+        } else if snapshot.cancel_token.as_ref().is_some_and(|token| {
+            token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+        }) {
+            "idle_queue_backstop_cancelled_anchor"
         } else {
             "active_turn_completion"
         },

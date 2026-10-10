@@ -13,6 +13,7 @@ use super::{
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::SharedData;
+use crate::services::discord::input_runtime::fence::{BootTarget, boot_skip};
 use crate::services::provider::ProviderKind;
 
 /// Four STALL-WATCHDOG ticks. Normal recovery takes one, so this WARN only ever
@@ -148,6 +149,10 @@ pub(super) fn observe_routable_unwatched_session(
     candidate: &RoutableUnwatchedSession,
     now_unix_secs: i64,
 ) -> bool {
+    // Like boot, absence observation leaves a protected channel to its move or handback.
+    if boot_skip(BootTarget::Channel(provider, candidate.channel_id.get())) {
+        return false;
+    }
     let key = WatcherAbsenceKey::new(provider, candidate.channel_id);
     // A channel the relay-work sweep already observed on this tick carries the
     // richer evidence (and the dead-man ERROR); do not double-observe it.
