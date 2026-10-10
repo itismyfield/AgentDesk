@@ -50,6 +50,11 @@ pub(crate) fn mutant(name: &str) -> bool {
 impl HerdrInterruptState {
     /// Caller holds the input lock. Own-start is only negative evidence.
     pub(crate) fn close_before_start(&self, input: &mut HerdrInputState) -> bool {
+        self.close_observed(input, self.user_stop.load(Ordering::Acquire))
+    }
+
+    /// Closes on one stop observation `stop`, so a caller deciding more from it sees one instant.
+    fn close_observed(&self, input: &mut HerdrInputState, stop: bool) -> bool {
         if !super::cancel_token_claude_interrupt::herdr_stop_settlement_available()
             && !mutant("policy_settlement_gate_removed")
         {
@@ -58,7 +63,7 @@ impl HerdrInterruptState {
         if input.phase == InputPhase::Closed {
             return input.submission == HerdrSubmission::Unsubmitted;
         }
-        if !self.user_stop.load(Ordering::Acquire)
+        if !stop
             || input.submission != HerdrSubmission::Unsubmitted
             || !matches!(
                 input.phase,
@@ -132,6 +137,28 @@ pub(crate) fn finish_execution(token: Option<&CancelToken>) {
     state.close_before_start(&mut input);
 }
 
+/// Runs one execution after its prelaunch check and settles its input phase whatever it returns.
+pub(crate) fn observed_execution(
+    token: Option<&CancelToken>,
+    run: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if prelaunch_closed(token)? {
+        return Ok(());
+    }
+    let result = run();
+    finish_execution(token);
+    result
+}
+
+/// Releases a Claude input hold whose turn closed before any input.
+pub(crate) fn release_claude_hold(logical: &str, held: &std::path::Path) {
+    if !mutant("closed_keeps_input_hold")
+        && let Err(error) = std::fs::remove_file(held)
+    {
+        tracing::warn!(logical, %error, "herdr turn: input hold kept");
+    }
+}
+
 pub(crate) fn prelaunch_closed(token: Option<&CancelToken>) -> Result<bool, String> {
     if !super::cancel_token_claude_interrupt::herdr_stop_settlement_available()
         && !mutant("policy_settlement_gate_removed")
@@ -165,12 +192,23 @@ pub(crate) enum ExitDecision {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Runs inside a seal after its one stop observation, where a concurrent stop can land.
+    pub(crate) static EXIT_OBSERVED: std::cell::Cell<Option<fn(&HerdrInterruptState)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
 pub(crate) fn seal_exit(
     token: &CancelToken,
     cancelled: bool,
     terminal_admitted: bool,
 ) -> ExitDecision {
     use super::cancel_token_claude_interrupt::herdr_stop_settlement_available;
+    let exception = !herdr_stop_settlement_available() || cancelled || terminal_admitted;
+    if exception && !mutant("exit_exception_after_try_lock") {
+        return ExitDecision::Normal;
+    }
     let Some(state) = token.herdr_interrupt_state() else {
         return ExitDecision::Normal;
     };
@@ -180,26 +218,112 @@ pub(crate) fn seal_exit(
     if let Some(sealed) = &input.exit {
         return sealed.clone();
     }
-    let decision = if !herdr_stop_settlement_available() || cancelled || terminal_admitted {
+    // One stop observation decides both the close and the hold: a stop taken after it is late.
+    let stop = state.user_stop.load(Ordering::Acquire);
+    let closed = !exception
+        && matches!(
+            input.phase,
+            InputPhase::FinishedNoAttempt | InputPhase::FinishedUntouched | InputPhase::Closed
+        )
+        && state.close_observed(&mut input, stop)
+        && token.turn_nonce().is_some();
+    if let Some(hook) = EXIT_OBSERVED.with(std::cell::Cell::get) {
+        hook(&state);
+    }
+    let stop = match mutant("exit_stop_reread") {
+        true => state.user_stop.load(Ordering::Acquire),
+        false => stop,
+    };
+    let decision = if exception {
         ExitDecision::Normal
-    } else if matches!(
-        input.phase,
-        InputPhase::FinishedNoAttempt | InputPhase::FinishedUntouched | InputPhase::Closed
-    ) && state.close_before_start(&mut input)
-        && token.turn_nonce().is_some()
-    {
+    } else if closed {
         ExitDecision::PolicyClose(BeforeStartProof {
             owner: state.owner.clone(),
             turn_nonce: token.turn_nonce().unwrap().to_owned(),
             generation: token.claude_interrupt_generation(),
         })
-    } else if state.user_stop.load(Ordering::Acquire)
-        || input.submission != HerdrSubmission::Unsubmitted
-    {
+    } else if stop || input.submission != HerdrSubmission::Unsubmitted {
         ExitDecision::Hold
     } else {
         ExitDecision::Normal
     };
     input.exit = Some(decision.clone());
     decision
+}
+
+pub(crate) fn claude_observed_input(
+    cancel: Option<&super::CancelToken>,
+    start: impl FnOnce() -> crate::services::provider::cancel_token_claude_interrupt::HerdrTurnStart,
+    write: impl FnOnce() -> crate::services::claude_tui::host_input::InputRun,
+) -> Result<
+    crate::services::provider::herdr_before_start::InputRun<
+        crate::services::claude_tui::host_input::InputRun,
+    >,
+    String,
+> {
+    use crate::services::claude_tui::host_input::InputRun;
+    use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
+    use crate::services::provider::herdr_before_start::InputRun as HerdrInputRun;
+    let state = cancel
+        .filter(|_| {
+            super::cancel_token_claude_interrupt::herdr_stop_settlement_available()
+                || crate::services::tui_o::exact_submission::logical_key().is_some()
+        })
+        .and_then(CancelToken::herdr_interrupt_state);
+    let run = if let Some(state) = state {
+        let mut input = state.submission.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.prepare_input(&mut input) {
+            return Ok(HerdrInputRun::Closed);
+        }
+        crate::services::tui_o::exact_submission::begin_input()?;
+        if !state.record_turn_start(start()) {
+            return Err("herdr turn: the token already began another turn".into());
+        }
+        let run = write();
+        let observation = match &run {
+            InputRun::Applied => HerdrSubmission::Submitted,
+            InputRun::Indeterminate {
+                confirmed: 1,
+                cause: crate::services::claude_tui::host_input::StopCause::Send(_),
+            } => HerdrSubmission::Unknown,
+            _ => HerdrSubmission::Unsubmitted,
+        };
+        state.finish_input(
+            &mut input,
+            observation,
+            matches!(
+                run,
+                InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }
+            ),
+        );
+        run
+    } else {
+        crate::services::tui_o::exact_submission::begin_input()?;
+        write()
+    };
+    Ok(HerdrInputRun::Ran(run))
+}
+
+#[cfg(test)]
+static BOUNDARY_STOPS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+#[cfg(test)]
+pub(crate) fn stop_at_input_boundary(logical: &str, stop: bool) {
+    let mut stops = BOUNDARY_STOPS.lock().unwrap();
+    if stop {
+        stops.insert(logical.into());
+    } else {
+        stops.remove(logical);
+    }
+}
+#[cfg(test)]
+pub(crate) fn test_input_boundary(token: Option<&CancelToken>) {
+    if let Some(state) = token.and_then(CancelToken::herdr_interrupt_state)
+        && BOUNDARY_STOPS
+            .lock()
+            .unwrap()
+            .contains(&state.owner.logical_key)
+    {
+        state.user_stop.store(true, Ordering::Release);
+    }
 }

@@ -284,6 +284,73 @@ mod tests {
     }
 
     #[test]
+    fn coldstop_exit_exceptions_precede_busy_input_probe() {
+        let (actor, _) = prepared(ProviderKind::Claude, 916);
+        let state = actor.herdr_interrupt_state().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _lock = state.submission.lock().unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        ready_rx.recv().unwrap();
+        HERDR_SETTLEMENT_OVERRIDE.set(false);
+        let off = seal_exit(&actor, false, false);
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        let cancelled = seal_exit(&actor, true, false);
+        let admitted = seal_exit(&actor, false, true);
+        let normal_hold = seal_exit(&actor, false, false);
+        release_tx.send(()).unwrap();
+        thread.join().unwrap();
+        assert_eq!(
+            (off, cancelled, admitted),
+            (
+                ExitDecision::Normal,
+                ExitDecision::Normal,
+                ExitDecision::Normal
+            )
+        );
+        assert_eq!(normal_hold, ExitDecision::Hold);
+    }
+
+    #[test]
+    fn coldstop_exit_seal_reads_one_stop_observation() {
+        use crate::services::provider::herdr_before_start::EXIT_OBSERVED;
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        let stop_now = |state: &crate::services::provider::cancel_token_claude_interrupt::HerdrInterruptState| {
+            state.user_stop.store(true, Ordering::Release);
+        };
+        let mut sealed = Vec::new();
+        for (channel, submission, early) in [
+            (917, HerdrSubmission::Unsubmitted, true),
+            (918, HerdrSubmission::Unsubmitted, false),
+            (919, HerdrSubmission::Submitted, false),
+        ] {
+            let (actor, _) = prepared(ProviderKind::Codex, channel);
+            let state = actor.herdr_interrupt_state().unwrap();
+            let mut input = state.submission.lock().unwrap();
+            input.phase = InputPhase::FinishedNoAttempt;
+            input.submission = submission;
+            drop(input);
+            state.user_stop.store(early, Ordering::Release);
+            // A stop the writer lands after the seal's observation, inside the seal.
+            EXIT_OBSERVED.set(Some(stop_now));
+            let decision = seal_exit(&actor, false, false);
+            EXIT_OBSERVED.set(None);
+            assert!(state.user_stop.load(Ordering::Acquire));
+            // The late stop does not reopen a sealed decision.
+            assert_eq!(seal_exit(&actor, false, false), decision);
+            sealed.push(match decision {
+                ExitDecision::PolicyClose(_) => "close",
+                ExitDecision::Hold => "hold",
+                ExitDecision::Normal => "normal",
+            });
+        }
+        assert_eq!(sealed, ["close", "normal", "hold"]);
+    }
+
+    #[test]
     fn coldstop_closed_drops_callback_and_own_start_is_negative_evidence() {
         let (actor, _) = prepared(ProviderKind::Claude, 914);
         let state = actor.herdr_interrupt_state().unwrap();

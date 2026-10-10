@@ -376,6 +376,8 @@ fn first_prompt(
     crate::services::tui_prompt_dedupe::register_provider_session("codex", logical, logical);
     crate::services::tui_prompt_dedupe::register_codex_herdr_placeholder(logical, turn.channel_id);
     hold(nonce)?;
+    #[cfg(test)]
+    crate::services::provider::herdr_before_start::test_input_boundary(turn.cancel.as_deref());
     let run = observed_input(
         turn.cancel.as_deref(),
         || None,
@@ -384,7 +386,11 @@ fn first_prompt(
     let run = match run {
         crate::services::provider::herdr_before_start::InputRun::Ran(run) => run,
         crate::services::provider::herdr_before_start::InputRun::Closed => {
-            release_closed_hold(logical, nonce);
+            if !crate::services::provider::herdr_before_start::mutant(
+                "closed_release_callsite_removed_codex_first",
+            ) {
+                release_closed_hold(logical, nonce);
+            }
             return Ok(());
         }
     };
@@ -513,6 +519,8 @@ fn followup(
         .map_err(|_| refused(PromptRefused::NoSource))?
         .len();
     hold(nonce)?;
+    #[cfg(test)]
+    crate::services::provider::herdr_before_start::test_input_boundary(turn.cancel.as_deref());
     let start = || {
         let start = HerdrTurnStart::at_end_of(nonce, &path, None);
         Some(HerdrTurnStart {
@@ -526,7 +534,11 @@ fn followup(
     let run = match run {
         crate::services::provider::herdr_before_start::InputRun::Ran(run) => run,
         crate::services::provider::herdr_before_start::InputRun::Closed => {
-            release_closed_hold(logical, nonce);
+            if !crate::services::provider::herdr_before_start::mutant(
+                "closed_release_callsite_removed_codex_followup",
+            ) {
+                release_closed_hold(logical, nonce);
+            }
             return Ok(());
         }
     };

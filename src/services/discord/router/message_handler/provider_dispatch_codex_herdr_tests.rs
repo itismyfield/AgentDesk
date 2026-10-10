@@ -141,6 +141,9 @@ struct Fixture {
     started: AtomicBool,
     finished: AtomicBool,
     cancel: Mutex<Arc<CancelToken>>,
+    /// Installs C2a for the next turns whatever the tag says; each strict turn logs its attempts.
+    strict: AtomicBool,
+    attempts: Mutex<Vec<i64>>,
     _dirs: (tempfile::TempDir, tempfile::TempDir),
     _endpoint: crate::services::claude_tui::hook_server::HookEndpointGuard,
     _guards: Vec<Guard>,
@@ -220,6 +223,8 @@ impl Fixture {
             started: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             cancel: Mutex::new(Arc::new(CancelToken::new())),
+            strict: AtomicBool::new(false),
+            attempts: Mutex::default(),
             _dirs: (dir, cwd),
             _endpoint: endpoint,
             _guards: guards,
@@ -350,6 +355,7 @@ impl Fixture {
         let cancel = Arc::new(CancelToken::new());
         *self.cancel.lock().unwrap() = cancel.clone();
         let token = cancel.clone();
+        let (strict, attempts) = (self.strict.load(Ordering::SeqCst), &self.attempts);
         std::thread::scope(|scope| {
             let executor = scope.spawn(move || {
                 let _runtime = rt.enter();
@@ -376,7 +382,7 @@ impl Fixture {
                     compact_token_limit: None,
                     cancel: Some(token),
                 };
-                let strict_pin = if owner_for_strict.contains("strict-") {
+                let strict_pin = if strict || owner_for_strict.contains("strict-") {
                     use crate::services::tui_o::exact_episode::{EpisodeEvidence, EpisodeMetadata};
                     let EpisodeEvidence::Pin(mut pin) = crate::services::tui_o::exact_episode::tests::fixture().remove(0).evidence else { panic!("pin fixture"); };
                     pin.episode = uuid::Uuid::new_v4();
@@ -392,6 +398,7 @@ impl Fixture {
                         let mut connection = pool.acquire().await.unwrap();
                         let resolution = crate::services::tui_o::exact_pg::resolve_in_tx(&mut connection, pin.episode).await.unwrap();
                         let attempted: i64 = sqlx::query_scalar("SELECT count(*) FROM public.delivery_journal_events WHERE canonical_payload->>'episode'=$1 AND canonical_payload->'evidence'->>'type'='InputAttemptBegun'").bind(pin.episode.to_string()).fetch_one(&mut *connection).await.unwrap();
+                        attempts.lock().unwrap().push(attempted);
                         if attempted == 0 {
                             assert_eq!(resolution.authority(), crate::services::tui_o::exact_episode::Authority::Policy);
                         } else {
@@ -1466,4 +1473,66 @@ fn a_turn_cancelled_before_its_stop_state_writes_nothing_pg() {
     assert!(fx.rig.sends().is_empty(), "nothing sent to the pane");
     assert!(token.herdr_interrupt_state().is_none());
     assert!(token.tmux_session_name().is_none());
+}
+
+/// One `kind` turn (fresh, pending or bound) on its own fixture with C2a installed; `stop` lands
+/// at its input boundary, after the hold and before any input. The fixture, result, C2a input
+/// attempts and pane writes of that turn.
+fn coldstop_turn(kind: &str, stop: bool) -> (Fixture, Result<(), String>, i64, usize) {
+    let fx = Fixture::admitted(&format!("coldstop-{kind}-{stop}"));
+    let launcher = Arc::new(Launcher::default());
+    let mut record = HostedRecord::Legacy;
+    if kind != "fresh" {
+        let (setup, _) = fx.turn(&record, &fx.ports(&launcher), || {
+            if let Some(nonce) = fx.start_provider(&launcher, kind == "bound") {
+                match kind {
+                    "pending" => fx.cancel_now(),
+                    _ => drop(fx.answer(&nonce)),
+                }
+            }
+        });
+        assert_eq!(setup.is_ok(), kind == "bound", "{kind}: {setup:?}");
+        record = fx.record();
+    }
+    let before = fx.rig.sends().len();
+    fx.strict.store(true, Ordering::SeqCst);
+    crate::services::provider::herdr_before_start::stop_at_input_boundary(fx.logical(), stop);
+    let (result, _) = fx.turn(&record, &fx.ports(&launcher), || {
+        match kind {
+            "fresh" => drop(fx.start_provider(&launcher, true)),
+            _ => fx.rig.answer("pane.read", screen(READY)),
+        }
+        if !stop && wait_for(&fx.finished, "the prompt", || fx.rig.sends().len() > before) {
+            fx.cancel_now();
+        }
+    });
+    crate::services::provider::herdr_before_start::stop_at_input_boundary(fx.logical(), false);
+    let attempts = *fx.attempts.lock().unwrap().last().unwrap();
+    let writes = fx.rig.sends().len() - before;
+    (fx, result, attempts, writes)
+}
+
+// A stop taken after the hold and before input ends the first prompt (fresh, pending) and the
+// follow-up (bound) through their Closed arms: no C2a attempt, no pane write, no turn start, and
+// that arm's own release frees the hold.
+#[test]
+fn coldstop_execute_fresh_pending_bound_closed_arm_releases_hold_pg() {
+    for kind in ["fresh", "pending", "bound"] {
+        let (_, control, attempts, writes) = coldstop_turn(kind, false);
+        assert_eq!(
+            (attempts, writes > 0),
+            (1, true),
+            "{kind} reaches input: {control:?}"
+        );
+        let (fx, result, attempts, writes) = coldstop_turn(kind, true);
+        assert_eq!((result, attempts, writes), (Ok(()), 0, 0), "{kind}");
+        let actor = fx.cancel.lock().unwrap().clone();
+        let state = actor.herdr_interrupt_state().unwrap();
+        assert!(state.turn_start.get().is_none(), "{kind}");
+        assert_eq!(state.closed_probe(), Some(true), "{kind}");
+        let HostedRecord::Known(record) = fx.record() else {
+            panic!("{kind}: no execution");
+        };
+        assert!(!hold_of(&record.execution_nonce).exists(), "{kind}");
+    }
 }
