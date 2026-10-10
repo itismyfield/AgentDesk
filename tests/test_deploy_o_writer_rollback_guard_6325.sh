@@ -10,7 +10,21 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Overridable so a mutation run can point the same assertions at a patched copy.
 DEPLOY_SH="${AGENTDESK_TEST_DEPLOY_SH:-$REPO_ROOT/scripts/deploy-release.sh}"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-o-writer-rollback-test.XXXXXX")
-trap 'rm -rf "$TMP_ROOT"' EXIT
+trap 'clean_paths "$TMP_ROOT"' EXIT
+
+clean_paths() {
+    python3 - "$@" <<'PY_CLEAN'
+import pathlib
+import shutil
+import sys
+for name in sys.argv[1:]:
+    path = pathlib.Path(name)
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+PY_CLEAN
+}
 
 FAILURES=0
 fail() { echo "  ✗ $1" >&2; FAILURES=$((FAILURES + 1)); }
@@ -30,6 +44,7 @@ extract_function() {
 
 for fn in _rollback_release_binary _signal_release_lock_pid _wait_release_stopped \
     _source_o_tui_writer _manifest_o_tui_writer \
+    _source_o_ledger_operator_resume _rollback_would_revert_o_ledger _source_would_revert_o_ledger \
     _rollback_would_revert_o_writer _write_release_source_manifest \
     _external_artifact_would_skip_o_writer; do
     body="$(extract_function "$fn")"
@@ -80,7 +95,7 @@ MANIFEST="$ADK_REL/runtime/release-source.json"
 
 # $1 topology.rs body ("" = no switch in the source), $2 manifest JSON ("" = none).
 setup_case() {
-    rm -rf "$ADK_REL" "$REPO" "$TMP_ROOT/calls"
+    clean_paths "$ADK_REL" "$REPO" "$TMP_ROOT/calls"
     mkdir -p "$ADK_REL/bin" "$ADK_REL/runtime" "$REPO/src/services/tui_o"
     printf 'new\n' >"$REL_BINARY"
     printf 'old\n' >"$REL_BINARY_BACKUP"
@@ -130,6 +145,22 @@ expect "switch on, rollback target switch unknown" refused
 setup_case "$SWITCH_ON" "$O_MANIFEST"
 expect "switch on, O writer rollback target" rolled_back
 
+echo "== OperatorResume floor applies only after first use =="
+setup_case "$SWITCH_ON" "$O_MANIFEST"
+expect "no floor, old O reader (first deployment failure)" rolled_back
+for target in "$O_MANIFEST" "not json" "" \
+    '{"o_tui_writer":"true","o_ledger_operator_resume":false}' \
+    '{"o_tui_writer":"true","o_ledger_operator_resume":"true"}'; do
+    setup_case "$SWITCH_OFF" "$target"
+    mkdir -p "$ADK_REL/o_store"
+    printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
+    AGENTDESK_DEPLOY_FORCE_ROLLBACK=1 expect "floor, incompatible target: $target" refused
+done
+setup_case "$SWITCH_ON" '{"o_tui_writer":"true","o_ledger_operator_resume":true}'
+mkdir -p "$ADK_REL/o_store"
+printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
+expect "floor, compatible target" rolled_back
+
 echo "== an unreadable switch counts as on =="
 setup_case 'pub(crate) const O_TUI_WRITER: bool = cfg!(feature = "o");' "$LEGACY_MANIFEST"
 expect "non-literal switch" refused
@@ -154,7 +185,7 @@ _resolve_default_release_binary() { echo "own-build"; }
 expect_binary() {
     local actual
     setup_case "$2" ""
-    actual="$(AGENTDESK_DEPLOY_BINARY="$3" bash -c "$(declare -f _source_o_tui_writer \
+    actual="$(AGENTDESK_DEPLOY_BINARY="$3" bash -c "$(declare -f _source_o_tui_writer _source_o_ledger_operator_resume \
         _external_artifact_would_skip_o_writer _resolve_default_release_binary)
 REPO='$REPO' DEPLOY_BUILD_PROFILE=release
 $selection
@@ -176,6 +207,26 @@ for value in true false; do
     recorded="$(_manifest_o_tui_writer || true)"
     if [ "$recorded" = "$value" ]; then pass "manifest records ${value}"; else fail "manifest records ${value}: got '${recorded}'"; fi
 done
+
+echo "== the capability records only this source's own reader and consumer =="
+setup_case "$SWITCH_OFF" ""
+mkdir -p "$REPO/src/services/tui_o/store"
+printf 'pub const OPERATOR_RESUME_SUPPORTED: bool = true;\n' >"$REPO/src/services/tui_o/store/ledger.rs"
+_write_release_source_manifest >/dev/null 2>&1 || true
+if python3 - "$MANIFEST" <<'PY'
+import json
+import sys
+assert json.load(open(sys.argv[1]))["o_ledger_operator_resume"] is True
+PY
+then pass "manifest records OperatorResume capability"; else fail "manifest misses capability"; fi
+if AGENTDESK_DEPLOY_BINARY=/tmp/artifact _external_artifact_would_skip_o_writer; then
+    pass "capable source refuses an external artifact even with O switch off"
+else fail "external artifact could be assigned an unverified capability"; fi
+mkdir -p "$ADK_REL/o_store"
+printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
+if _source_would_revert_o_ledger; then fail "compatible source refused"; else pass "compatible source passes floor"; fi
+printf 'pub const OPERATOR_RESUME_SUPPORTED: bool = false;\n' >"$REPO/src/services/tui_o/store/ledger.rs"
+if _source_would_revert_o_ledger; then pass "source downgrade refused"; else fail "source downgrade passed floor"; fi
 
 echo "== this repository's switch reads as one value =="
 real="$(REPO="$REPO_ROOT" _source_o_tui_writer)"

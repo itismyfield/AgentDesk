@@ -815,6 +815,8 @@ async fn a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_po
 mod actor;
 #[path = "codex_herdr_drive_tests.rs"]
 pub(crate) mod codex_herdr_drive;
+#[path = "operator_resume_tests.rs"]
+mod operator_resume;
 
 #[path = "deliver_home_tests.rs"]
 mod deliver_home;
