@@ -4,6 +4,7 @@
 mod durable;
 pub mod ledger;
 mod operator_resume;
+pub use operator_resume::{OPERATOR_RESUME_FLOOR, ResumeRecord};
 pub mod rotation;
 pub mod spool;
 

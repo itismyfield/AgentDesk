@@ -1,5 +1,5 @@
 //! `agentdesk o status|resume` in a child process through the real subcommand parser and
-//! dispatcher: status writes nothing, and only a fresh durable approval exits 0.
+//! dispatcher: status writes nothing, and only an approval the call wrote exits 0.
 #![cfg(unix)]
 
 use std::collections::BTreeMap;
@@ -17,6 +17,7 @@ use crate::services::tui_o::store::ledger::LedgerEntry;
 use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
 
 const CHILD: &str = "AGENTDESK_O_CLI_CHILD_ARGS";
+const PAUSE: &str = "AGENTDESK_O_CLI_PAUSE_DIR";
 const CHANNEL: u64 = 7;
 
 #[derive(Parser)]
@@ -37,15 +38,39 @@ pub(crate) fn run_cli(root: &Path, args: &[&str]) -> (Option<i32>, String, Strin
 }
 
 fn spawn(root: &Path, args: &[&str]) -> Child {
-    Command::new(std::env::current_exe().unwrap())
+    command(root, args).spawn().unwrap()
+}
+
+fn command(root: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
         .args(["--exact", "cli::o::tests::o_cli_child", "--nocapture"])
         .args(["--test-threads=1"])
         .env("AGENTDESK_ROOT_DIR", root)
         .env(CHILD, serde_json::to_string(args).unwrap())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::piped());
+    command
+}
+
+/// In a child given a pause dir, `o resume` stops right before the store call until `go` exists.
+pub(crate) fn pause_before_entry() {
+    let Some(dir) = std::env::var_os(PAUSE).map(PathBuf::from) else {
+        return;
+    };
+    std::fs::write(dir.join("paused"), b"").unwrap();
+    wait_for(&dir.join("go"));
+}
+
+fn wait_for(path: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{path:?} never appeared"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 #[test]
@@ -188,6 +213,8 @@ fn o_resume_refusals_exit_with_their_own_code_and_write_nothing() {
         ("floor", 6, "the rollback floor is absent"),
         ("tail", 4, "unfinished ledger entry"),
         ("unknown", 7, "the approval may be durable"),
+        ("damage", 6, "StoreDamage"),
+        ("damage_floor", 7, "StoreDamage"),
     ] {
         let root = rejected();
         let marker = root.path().join("o_store/operator_resume.floor");
@@ -198,6 +225,14 @@ fn o_resume_refusals_exit_with_their_own_code_and_write_nothing() {
                 file.write_all(b"{").unwrap();
             }
             "unknown" => std::fs::write(&marker, b"1\n").unwrap(),
+            "damage" | "damage_floor" => {
+                let options = std::fs::OpenOptions::new().append(true).clone();
+                let mut file = options.open(ledger(root.path())).unwrap();
+                file.write_all(b"{}\n").unwrap();
+                if case == "damage_floor" {
+                    std::fs::write(&marker, b"1\n").unwrap();
+                }
+            }
             _ => {}
         }
         let before = files(root.path());
@@ -221,7 +256,7 @@ fn o_resume_refusals_exit_with_their_own_code_and_write_nothing() {
                 held.try_lock().unwrap();
                 resume(root.path(), "restored")
             }
-            "tail" => resume(root.path(), "restored"),
+            "tail" | "damage" | "damage_floor" => resume(root.path(), "restored"),
             "unknown" => {
                 let other = ["o", "resume", "--channel", "8", "--rejected-serial", "0"];
                 run_cli(root.path(), &[&other[..], &["--reason", "r"]].concat())
@@ -237,37 +272,98 @@ fn o_resume_refusals_exit_with_their_own_code_and_write_nothing() {
         drop(held);
         assert_eq!(code, Some(expected), "{case}: {stderr}");
         assert!(stderr.contains(words), "{case}: {stderr}");
+        if case.starts_with("damage") {
+            assert!(stderr.contains("ledger byte"), "{case}: {stderr}");
+        }
         assert_eq!(files(root.path()), before, "{case}");
-        assert_eq!(floor(root.path()), case == "unknown", "{case}");
+        let floored = matches!(case, "unknown" | "damage_floor");
+        assert_eq!(floor(root.path()), floored, "{case}");
     }
 }
 
+const SAME: [&str; 8] = [
+    "o",
+    "resume",
+    "--channel",
+    "7",
+    "--rejected-serial",
+    "0",
+    "--reason",
+    "restored",
+];
+
 #[test]
-fn o_resume_two_racing_operators_leave_one_approval_and_one_exit_zero() {
+fn o_resume_two_racing_identical_commands_leave_one_approval_and_one_exit_zero() {
     let root = rejected();
-    let args = |reason| {
-        [
-            "o",
-            "resume",
-            "--channel",
-            "7",
-            "--rejected-serial",
-            "0",
-            "--reason",
-            reason,
-        ]
-    };
-    let racers = [
-        spawn(root.path(), &args("first")),
-        spawn(root.path(), &args("second")),
-    ];
+    let racers = [spawn(root.path(), &SAME), spawn(root.path(), &SAME)];
     let codes = racers.map(|racer| racer.wait_with_output().unwrap().status.code());
-    let winner = match codes {
-        [Some(0), Some(3 | 5)] => "first",
-        [Some(3 | 5), Some(0)] => "second",
-        other => panic!("racing approvals exited {other:?}"),
-    };
+    assert!(
+        matches!(codes, [Some(0), Some(3 | 5)] | [Some(3 | 5), Some(0)]),
+        "racing approvals exited {codes:?}"
+    );
     assert_eq!(approvals(root.path()), 1);
-    let shown = status(root.path());
-    assert!(shown.contains(&format!("\"{winner}\"")), "{shown}");
+}
+
+// The loser of two identical commands starts before the winner writes and reaches the store
+// after it: it exits 3 with the winner's approval and writes nothing.
+#[test]
+fn o_resume_identical_command_overtaken_by_another_reports_the_existing_approval() {
+    let root = rejected();
+    let gate = tempfile::tempdir().unwrap();
+    let mut loser = command(root.path(), &SAME);
+    let loser = loser.env(PAUSE, gate.path()).spawn().unwrap();
+    wait_for(&gate.path().join("paused"));
+    let (code, stdout, stderr) = run_cli(root.path(), &SAME);
+    assert_eq!(code, Some(0), "{stderr}");
+    let id = stdout
+        .split("approval ")
+        .nth(1)
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap();
+    let written = std::fs::read(ledger(root.path())).unwrap();
+    std::fs::write(gate.path().join("go"), b"").unwrap();
+    let output = loser.wait_with_output().unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(3), "{stderr}");
+    let existing = format!("serial 0 already has approval {id} by \"operator\"");
+    assert!(stderr.contains(&existing), "{stderr}");
+    assert_eq!(std::fs::read(ledger(root.path())).unwrap(), written);
+    assert_eq!(approvals(root.path()), 1);
+}
+
+#[test]
+fn o_status_failures_exit_non_zero_without_a_header_or_a_write() {
+    for (case, words) in [
+        ("tail", "unfinished ledger entry"),
+        ("busy", "WouldBlock"),
+        ("no_channel", "NotFound"),
+        ("no_store", "no O store under the runtime root"),
+    ] {
+        let root = match case {
+            "no_store" => tempfile::tempdir().unwrap(),
+            _ => rejected(),
+        };
+        if case == "tail" {
+            let options = std::fs::OpenOptions::new().append(true).clone();
+            let mut file = options.open(ledger(root.path())).unwrap();
+            file.write_all(b"{").unwrap();
+        }
+        let held = (case == "busy").then(|| {
+            let options = std::fs::OpenOptions::new().read(true).append(true).clone();
+            let file = options.open(ledger(root.path())).unwrap();
+            file.try_lock().unwrap();
+            file
+        });
+        let before = files(root.path());
+        let channel = if case == "no_channel" { "8" } else { "7" };
+        let (code, stdout, stderr) = run_cli(root.path(), &["o", "status", "--channel", channel]);
+        drop(held);
+        assert_eq!(code, Some(1), "{case}: {stderr}");
+        assert!(stderr.contains(words), "{case}: {stderr}");
+        assert!(!stdout.contains("blocked"), "{case}: {stdout}");
+        assert_eq!(files(root.path()), before, "{case}");
+        assert!(!floor(root.path()), "{case}");
+    }
 }

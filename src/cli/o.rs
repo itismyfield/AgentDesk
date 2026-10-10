@@ -2,15 +2,13 @@
 
 use std::path::Path;
 
-use chrono::Utc;
 use clap::{Args, Subcommand};
 
 use crate::services::tui_o::store::ledger::{PieceOutcome, PieceRecord};
 use crate::services::tui_o::store::rotation::ResolveFrom;
-use crate::services::tui_o::store::{OStore, STORE_DIR_NAME, StoreError};
-
-/// Written by the store before the first approval append; `scripts/deploy-release.sh` reads it too.
-const OPERATOR_RESUME_FLOOR: &str = "operator_resume.floor";
+use crate::services::tui_o::store::{
+    OPERATOR_RESUME_FLOOR, OStore, ResumeRecord, STORE_DIR_NAME, StoreError,
+};
 
 #[derive(Args)]
 #[command(
@@ -161,7 +159,7 @@ fn outcome(piece: Option<&PieceRecord>) -> String {
     outcome.map_or("open".into(), |outcome| format!("{outcome:?}"))
 }
 
-/// The exit code and message for one approval attempt; only a fresh durable approval exits 0.
+/// The exit code and message for one approval attempt; only an approval this call wrote exits 0.
 fn resume(
     store: &OStore,
     runtime_root: &Path,
@@ -170,17 +168,13 @@ fn resume(
     operator: &str,
     reason: &str,
 ) -> (i32, String) {
-    let started = Utc::now();
     let floor = runtime_root
         .join(STORE_DIR_NAME)
         .join(OPERATOR_RESUME_FLOOR);
-    match store.record_operator_resume(channel, serial, operator, reason) {
-        // An approval stamped before this call, or with another audit text, was already there.
-        Ok(approval)
-            if approval.at >= started
-                && approval.operator == operator
-                && approval.reason == reason =>
-        {
+    #[cfg(all(test, unix))]
+    tests::pause_before_entry();
+    match store.record_operator_resume_outcome(channel, serial, operator, reason) {
+        Ok(ResumeRecord::Recorded(approval)) => {
             let id = approval.approval_id;
             let message = format!(
                 "approval {id} for serial {serial} is durable; nothing was sent yet. Run the \
@@ -188,7 +182,7 @@ fn resume(
             );
             (0, message)
         }
-        Ok(approval) => {
+        Ok(ResumeRecord::Existing(approval)) => {
             let state = approval
                 .consumed_serial
                 .map_or("unconsumed".into(), |consumed| {

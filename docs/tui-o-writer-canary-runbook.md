@@ -231,13 +231,13 @@ the original piece once, then the output that followed. Run these on the O home,
 
 | Exit | Meaning | Next step |
 |---|---|---|
-| 0 | The approval is durable | Managed restart |
+| 0 | This command wrote the approval and it is durable | Managed restart |
 | 1 | No runtime root, or no `o_store` under it; nothing was written | Run it on the O home |
-| 3 | The serial already has an approval; the first one stands, with its state | Nothing more to record |
-| 4 | Refused: not the latest 400/403/404 attempt, a POST in flight, blank input or a damaged ledger; nothing was written | Run `o status`; an unfinished ledger tail is recovered by the next writer start |
+| 3 | The serial already had an approval, possibly from a command that ran at the same time; the first one stands, with its state | Nothing more to record |
+| 4 | The store refused the request or the ledger check: not the latest 400/403/404 attempt, a POST in flight, blank input, a ledger violation or an unfinished tail; nothing was written | Run `o status`; an unfinished ledger tail is recovered by the next writer start |
 | 5 | The ledger is locked by a writer or another operator; nothing was written | Retry once the other command or the restart is done |
-| 6 | An I/O error before the rollback floor existed; nothing was written | Fix the disk or permission and retry |
-| 7 | An I/O error after the floor existed; the approval may be durable | Run `o status`, then the same command again |
+| 6 | Any other error, such as store damage, a missing channel ledger or an I/O error, with the rollback floor confirmed absent, so this command appended no approval | Fix the cause the message names and retry |
+| 7 | Any other error while the floor exists or cannot be checked, so the command cannot tell whether an approval is durable. It does not mean the append was reached | Run `o status`, then the same command again |
 
 - A writer that starts while the ledger is locked holds the channel; the next managed restart
   recovers it.
