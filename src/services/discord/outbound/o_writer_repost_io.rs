@@ -103,6 +103,9 @@ struct Author {
 #[derive(serde::Deserialize)]
 struct Embed {
     footer: Option<Footer>,
+    /// `rich` for a sent embed; Discord's link previews carry another type.
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -249,13 +252,19 @@ struct Seen {
 
 impl Seen {
     fn observed(self) -> ObservedMessage {
+        // A sent embed stays counted even when its footer is gone, so the loss stays visible.
+        let rich: Vec<Embed> = self
+            .embeds
+            .into_iter()
+            .filter(|embed| embed.kind.as_deref().is_none_or(|kind| kind == "rich"))
+            .collect();
         ObservedMessage {
             id: self.id.get(),
             channel_id: self.channel_id.get(),
             author_id: self.author.id.get(),
             content: self.content,
-            footers: self
-                .embeds
+            rich_embeds: rich.len(),
+            footers: rich
                 .into_iter()
                 .filter_map(|embed| Some(embed.footer?.text))
                 .collect(),

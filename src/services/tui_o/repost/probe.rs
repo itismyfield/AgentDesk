@@ -9,6 +9,7 @@ pub(crate) mod matcher;
 #[path = "probe_tests.rs"]
 pub(crate) mod tests;
 
+use std::collections::BTreeMap;
 use std::future::Future;
 
 use tokio::time::{Duration, Instant};
@@ -88,6 +89,9 @@ pub(crate) struct PassCursor {
     before: Option<u64>,
     started_at: Instant,
     proof: PermissionProof,
+    /// The message the proof read returned; it is an observation like any history entry.
+    proof_read: ObservedMessage,
+    proof_listed: bool,
 }
 
 pub(crate) struct ProbeSession {
@@ -98,6 +102,8 @@ pub(crate) struct ProbeSession {
     settled_at: Instant,
     cursor: Option<PassCursor>,
     first: Option<CompletedPass>,
+    /// Every in-range message this session read, kept so each snapshot judges all of them again.
+    observed: BTreeMap<u64, ObservedMessage>,
     seen: Attribution,
 }
 
@@ -109,13 +115,34 @@ impl ProbeSession {
             settled_at,
             cursor: None,
             first: None,
+            observed: BTreeMap::new(),
             seen: Attribution::default(),
         }
     }
 
-    /// What this session has seen of the piece, kept across partial and failed pages.
+    /// What this session's reads show of the piece, judged by the latest snapshot.
     pub(crate) fn attribution(&self) -> &Attribution {
         &self.seen
+    }
+
+    /// The latest read of an id replaces the earlier one, except a nonce once seen stays.
+    fn observe(&mut self, message: &ObservedMessage) {
+        let kept = self
+            .observed
+            .get(&message.id)
+            .and_then(|old| old.nonce.clone());
+        let nonce = message.nonce.clone().or(kept);
+        let latest = ObservedMessage {
+            nonce,
+            ..message.clone()
+        };
+        self.observed.insert(message.id, latest);
+    }
+
+    fn judge(&mut self, snapshot: &AttributionSnapshot) {
+        let mut seen = Attribution::default();
+        match_observations(&self.scope, snapshot, self.observed.values(), &mut seen);
+        self.seen = seen;
     }
 
     /// Reads up to `PAGES_PER_STEP` pages of the current pass, starting one when it is due.
@@ -129,6 +156,13 @@ impl ProbeSession {
             self.cursor = None;
             self.first = None;
             return Progress::Incomplete("the run or credentials changed".into());
+        }
+        self.judge(snapshot);
+        if let AttributionSnapshot::Unknown(reason) = snapshot {
+            // Without the receipt index nothing read now can show absence, nor pair with later.
+            self.cursor = None;
+            self.first = None;
+            return Progress::Incomplete(format!("attribution unknown: {reason}"));
         }
         let cursor = match self.cursor.take() {
             Some(cursor) => cursor,
@@ -162,6 +196,8 @@ impl ProbeSession {
                             before,
                             started_at,
                             proof,
+                            proof_read: read,
+                            proof_listed: false,
                         });
                     }
                 }
@@ -194,12 +230,22 @@ impl ProbeSession {
             // The first page fixes the upper bound; later messages belong to the next pass.
             if cursor.before.is_none() {
                 cursor.upper = page.iter().map(|message| message.id).max();
+                let proof = cursor.proof_read.id;
+                if proof > lower && cursor.upper.is_some_and(|upper| proof <= upper) {
+                    let read = cursor.proof_read.clone();
+                    self.observe(&read);
+                }
             }
             let upper = cursor.upper.unwrap_or(lower);
+            let proof = cursor.proof.message_id();
+            cursor.proof_listed |= page.iter().any(|message| message.id == proof);
             let in_range = page
                 .iter()
                 .filter(|message| message.id > lower && message.id <= upper);
-            match_observations(&self.scope, snapshot, in_range, &mut self.seen);
+            for message in in_range {
+                self.observe(message);
+            }
+            self.judge(snapshot);
             let oldest = page.iter().map(|message| message.id).min();
             if page.len() < usize::from(PAGE_LIMIT) || oldest.is_some_and(|id| id <= lower) {
                 return self.complete(cursor);
@@ -212,6 +258,13 @@ impl ProbeSession {
     }
 
     fn complete(&mut self, cursor: PassCursor) -> Progress {
+        // A message read by id above the anchor must lie under the upper bound and be listed.
+        let proof = cursor.proof.message_id();
+        let above_anchor = proof > self.scope.original_anchor;
+        if above_anchor && (cursor.upper.is_none_or(|upper| proof > upper) || !cursor.proof_listed)
+        {
+            return Progress::Incomplete("history disagrees with the message read by id".into());
+        }
         let pass = CompletedPass::new(
             self.scope.clone(),
             cursor.number,

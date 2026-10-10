@@ -15,6 +15,8 @@ pub(crate) struct ObservedMessage {
     pub(crate) channel_id: u64,
     pub(crate) author_id: u64,
     pub(crate) content: String,
+    /// Embeds of the kind a send attaches, with or without a footer.
+    pub(crate) rich_embeds: usize,
     pub(crate) footers: Vec<String>,
     pub(crate) nonce: Option<String>,
 }
@@ -122,6 +124,7 @@ pub(crate) fn match_observations<'m>(
         }
         let content_sha256 = payload_sha256(&message.content);
         let exact = content_sha256 == scope.payload_sha256;
+        let own_nonce = message.nonce.is_some() && message.nonce == nonce;
         let found = |method, recovery, slot| ValidatedReceipt {
             receipt: Receipt {
                 key: scope.key.clone(),
@@ -140,7 +143,9 @@ pub(crate) fn match_observations<'m>(
         // Both re-post slots share the marker and nonce, so neither names the slot that posted.
         let attributed = if message.footers.iter().any(|footer| carries(footer, &own)) {
             Some(found(ReceiptMethod::Marker, RecoveryKind::Reposted, None))
-        } else if !message.footers.is_empty() {
+        } else if message.rich_embeds > 0 || !message.footers.is_empty() {
+            // A re-post embed without this piece's intact marker is never a success, and when the
+            // payload or this piece's nonce came with it, it is no absence either.
             let elsewhere = rivals.iter().any(|rival| {
                 let theirs = marker(rival);
                 message
@@ -148,7 +153,7 @@ pub(crate) fn match_observations<'m>(
                     .iter()
                     .any(|footer| carries(footer, &theirs))
             });
-            if exact && !elsewhere {
+            if (exact || own_nonce) && !elsewhere {
                 into.damaged.insert(message.id);
             }
             None
@@ -158,7 +163,7 @@ pub(crate) fn match_observations<'m>(
             } else {
                 (RecoveryKind::OriginalRecovered, Some(0))
             };
-            (message.nonce == nonce).then(|| found(ReceiptMethod::Nonce, recovery, slot))
+            own_nonce.then(|| found(ReceiptMethod::Nonce, recovery, slot))
         } else if exact && receipts.is_some() && rivals.is_empty() {
             Some(found(
                 ReceiptMethod::ExactMatch,

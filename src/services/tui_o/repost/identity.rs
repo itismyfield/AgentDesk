@@ -23,12 +23,14 @@ pub(crate) fn piece_of(record: &PieceRecord) -> Option<PieceKey> {
     PieceKey::new(record.unit_key.clone(), record.piece_index)
 }
 
-/// The marker every send of the piece carries outside its content, the same on every node.
+/// The marker every send of the piece carries outside its content, the same on every node and
+/// slot. It names the whole key, channel first; the native key sits between fixed fields.
 pub(crate) fn marker(key: &PieceKey) -> String {
     let unit = key.unit();
     let (provider, kind) = (provider_name(unit.provider), kind_name(unit.kind));
     format!(
-        "o:{provider}:{kind}:{}#{}",
+        "o:{}:{provider}:{kind}:{}#{}",
+        unit.channel_id,
         unit.native_key,
         key.piece_index()
     )

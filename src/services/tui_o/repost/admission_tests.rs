@@ -498,6 +498,7 @@ fn sent_by_bot(id: u64, content: &str) -> ObservedMessage {
         channel_id: CHANNEL,
         author_id: BOT,
         content: content.into(),
+        rich_embeds: 0,
         footers: Vec::new(),
         nonce: None,
     }

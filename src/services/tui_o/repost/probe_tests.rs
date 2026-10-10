@@ -97,6 +97,7 @@ pub(crate) fn message(id: u64, author: u64, content: &str) -> ObservedMessage {
         channel_id: CHANNEL,
         author_id: author,
         content: content.into(),
+        rich_embeds: 0,
         footers: Vec::new(),
         nonce: None,
     }
@@ -867,5 +868,260 @@ async fn f4_has_no_operational_probe_edges_and_preserves_legacy_confirmation() {
     assert!(
         matches!(verdict, confirm::Verdict::Unresolved(_)),
         "{verdict:?}"
+    );
+}
+
+fn receipts(of: &[(u64, PieceKey)]) -> AttributionSnapshot {
+    AttributionSnapshot::Known {
+        receipts: of.iter().cloned().collect(),
+        same_payload: Vec::new(),
+    }
+}
+
+/// Advances `session` with `snapshot` every 30 s, `times` times; returns every result.
+async fn drive(
+    session: &mut ProbeSession,
+    reader: &Fake,
+    snapshot: &AttributionSnapshot,
+    times: usize,
+) -> Vec<Progress> {
+    let mut outcomes = Vec::new();
+    for _ in 0..times {
+        tokio::time::advance(Duration::from_secs(30)).await;
+        outcomes.push(session.advance(reader, &run("run-1"), snapshot).await);
+    }
+    outcomes
+}
+
+#[tokio::test(start_paused = true)]
+async fn f4r_an_unknown_receipt_index_never_yields_absence() {
+    let own = key("f4");
+    let unknown = AttributionSnapshot::Unknown("receipt lookup failed".into());
+    // 450 is this piece only through its recorded receipt; Discord changed its content.
+    let channels = [
+        vec![message(900, BOT, "earlier")],
+        vec![
+            message(900, BOT, "earlier"),
+            message(450, BOT, "변형된 본문"),
+        ],
+    ];
+    for channel in channels {
+        let reader = Fake::with(channel);
+        let mut session = ProbeSession::new(scope(&[0]), vec![900], Instant::now());
+        for progress in drive(&mut session, &reader, &unknown, 4).await {
+            assert!(matches!(progress, Progress::Incomplete(_)), "{progress:?}");
+        }
+    }
+
+    // A pass done while the index was known does not pair with one after an unknown read.
+    let reader = Fake::with([message(900, BOT, "earlier")]);
+    let mut session = ProbeSession::new(scope(&[0]), vec![900], Instant::now());
+    let first = drive(&mut session, &reader, &known(), 1).await;
+    assert!(matches!(first[0], Progress::FirstPassDone { .. }));
+    drive(&mut session, &reader, &unknown, 1).await;
+    let again = drive(&mut session, &reader, &known(), 2).await;
+    assert!(
+        matches!(again[0], Progress::FirstPassDone { .. }),
+        "{again:?}"
+    );
+    assert!(matches!(again[1], Progress::Absent(_)), "the known control");
+
+    let reader = Fake::with([
+        message(900, BOT, "earlier"),
+        message(450, BOT, "변형된 본문"),
+    ]);
+    let mut session = ProbeSession::new(scope(&[0]), vec![900], Instant::now());
+    let recorded = receipts(&[(450, own)]);
+    assert_eq!(
+        drive(&mut session, &reader, &recorded, 1).await,
+        [Progress::Present]
+    );
+}
+
+fn with_embeds(mut message: Value, embeds: Value) -> Value {
+    message["embeds"] = embeds;
+    message
+}
+
+#[tokio::test]
+async fn f4r_a_damaged_identifier_is_kept_apart_from_success_and_absence() {
+    let footer = repost_footer(&key("f4"));
+    let truncated = &footer[..footer.len() - 3];
+    let ids = RepostIds::for_piece(&marker(&key("f4"))).unwrap();
+    let no_footer = with_embeds(
+        wire(601, BOT, PAYLOAD, None, None),
+        json!([{"type": "rich"}]),
+    );
+    let nonce_damaged = wire(602, BOT, "변형된 본문", Some(truncated), Some(ids.nonce()));
+    let link_preview = with_embeds(
+        wire(
+            604,
+            BOT,
+            "변형된 본문 https://example.com",
+            None,
+            Some(ids.nonce()),
+        ),
+        json!([{"type": "article", "footer": {"text": "example"}}]),
+    );
+    let discord = Discord::start(
+        vec![
+            wire(900, BOT, "earlier", None, None),
+            no_footer.clone(),
+            nonce_damaged.clone(),
+            wire(603, BOT, PAYLOAD, Some(&footer), None),
+            link_preview,
+        ],
+        false,
+    )
+    .await;
+    let (progress, seen) = first_pass(&discord, scope(&[0])).await;
+    assert_eq!(progress, Progress::Present);
+    assert_eq!(seen.damaged.iter().copied().collect::<Vec<_>>(), [601, 602]);
+    assert_eq!(seen.found.keys().copied().collect::<Vec<_>>(), [603, 604]);
+    // A link preview is not a send's embed: the nonce still names the original.
+    assert_eq!(seen.found[&604].recovery, RecoveryKind::OriginalRecovered);
+    discord.gets();
+
+    for alone in [no_footer, nonce_damaged] {
+        let discord =
+            Discord::start(vec![wire(900, BOT, "earlier", None, None), alone], false).await;
+        let (progress, seen) = first_pass(&discord, scope(&[0, 1])).await;
+        assert_eq!(
+            progress,
+            Progress::Present,
+            "a damaged observation is no absence"
+        );
+        assert!(seen.found.is_empty(), "nor a success");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn f4r_the_latest_snapshot_rejudges_everything_the_session_read() {
+    let rival = key("f4-rival");
+    let mut messages = filler(1000, 1100);
+    messages.push(message(900, BOT, "earlier"));
+    messages.push(message(2050, BOT, PAYLOAD));
+    let reader = Fake::with(messages);
+    let mut session = ProbeSession::new(scope(&[0]), vec![900], Instant::now());
+    let contested = AttributionSnapshot::Known {
+        receipts: BTreeMap::new(),
+        same_payload: vec![rival.clone()],
+    };
+    assert_eq!(
+        drive(&mut session, &reader, &contested, 1).await,
+        [Progress::Partial]
+    );
+    assert_eq!(session.attribution().unattributed.len(), 1);
+    // B recorded 2050 before the resume, whose pages are all below it.
+    let resumed = drive(&mut session, &reader, &receipts(&[(2050, rival)]), 1).await;
+    assert!(
+        matches!(resumed[0], Progress::FirstPassDone { .. }),
+        "{resumed:?}"
+    );
+    assert!(session.attribution().is_clear());
+    assert_eq!(session.attribution().distinct_ids(), 0);
+
+    // An exact match seen again with this piece's nonce is promoted, and still counts once.
+    let reader = Fake::with([message(900, BOT, "earlier"), message(450, BOT, PAYLOAD)]);
+    let mut session = ProbeSession::new(scope(&[0]), vec![900], Instant::now());
+    drive(&mut session, &reader, &known(), 1).await;
+    assert_eq!(
+        session.attribution().found[&450].receipt.method,
+        ReceiptMethod::ExactMatch
+    );
+    let nonce = RepostIds::for_piece(&marker(&key("f4")))
+        .unwrap()
+        .nonce()
+        .to_owned();
+    reader.add(ObservedMessage {
+        nonce: Some(nonce),
+        ..message(450, BOT, PAYLOAD)
+    });
+    drive(&mut session, &reader, &known(), 1).await;
+    let promoted = &session.attribution().found[&450];
+    assert_eq!(promoted.recovery, RecoveryKind::OriginalRecovered);
+    assert_eq!(session.attribution().distinct_ids(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn f4r_a_proof_read_of_the_piece_is_an_observation() {
+    let nonce = RepostIds::for_piece(&marker(&key("f4")))
+        .unwrap()
+        .nonce()
+        .to_owned();
+    let piece = ObservedMessage {
+        nonce: Some(nonce),
+        ..message(450, BOT, "Discord가 바꾼 본문")
+    };
+    // History never lists 450, though the read by id returned it.
+    let mut reader = Fake::with([message(900, BOT, "earlier")]);
+    reader.singles.insert(450, Some(piece.clone()));
+    let mut session = ProbeSession::new(scope(&[0]), vec![450], Instant::now());
+    for progress in drive(&mut session, &reader, &known(), 4).await {
+        assert!(matches!(progress, Progress::Incomplete(_)), "{progress:?}");
+    }
+    let found = &session.attribution().found[&450];
+    assert_eq!(found.recovery, RecoveryKind::OriginalRecovered);
+
+    // The anchor itself stays outside the range, whatever it carries.
+    let mut reader = Fake::with([message(900, BOT, "earlier")]);
+    reader.singles.insert(
+        ANCHOR,
+        Some(ObservedMessage {
+            id: ANCHOR,
+            ..piece
+        }),
+    );
+    let mut session = ProbeSession::new(scope(&[0]), vec![ANCHOR], Instant::now());
+    let outcomes = drive(&mut session, &reader, &known(), 2).await;
+    assert!(matches!(outcomes[1], Progress::Absent(_)), "{outcomes:?}");
+    assert!(session.attribution().is_clear());
+}
+
+#[test]
+fn f4r_the_marker_names_the_channel_and_is_the_same_on_every_node_and_slot() {
+    use crate::services::tui_o::repost::identity::piece_of;
+    use crate::services::tui_o::store::ledger::PieceRecord;
+    let unit = |channel_id| UnitKey {
+        channel_id,
+        provider: ShadowProvider::Claude,
+        native_key: "msg_01".into(),
+        kind: UnitKind::Body,
+    };
+    let here = PieceKey::new(unit(CHANNEL), 2).unwrap();
+    let there = PieceKey::new(unit(CHANNEL + 1), 2).unwrap();
+    assert_ne!(marker(&here), marker(&there));
+    assert!(marker(&here).contains(&CHANNEL.to_string()));
+    let nonce = |key: &PieceKey| {
+        RepostIds::for_piece(&marker(key))
+            .unwrap()
+            .nonce()
+            .to_owned()
+    };
+    assert_ne!(nonce(&here), nonce(&there));
+
+    // Two nodes derive the piece from their own ledger records: another epoch, anchor, time.
+    let record = |epoch, anchor_id| PieceRecord {
+        unit_key: unit(CHANNEL),
+        piece_index: 2,
+        payload: PAYLOAD.into(),
+        anchor_id,
+        epoch,
+        prepared_at: chrono::Utc::now(),
+        outcome: None,
+    };
+    let node_a = piece_of(&record(1, 40)).unwrap();
+    let node_b = piece_of(&record(7, 990)).unwrap();
+    assert_eq!(marker(&node_a), marker(&node_b));
+    assert_eq!(marker(&node_a), marker(&here));
+    let slot = |key: &PieceKey| {
+        let ids = RepostIds::for_piece(&marker(key)).unwrap();
+        serde_json::to_value(RepostEnvelope::additional(CHANNEL, PAYLOAD.into(), ids).message())
+            .unwrap()
+    };
+    assert_eq!(
+        slot(&node_a),
+        slot(&node_b),
+        "slot 1 and slot 2 on any node"
     );
 }
