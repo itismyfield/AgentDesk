@@ -4493,6 +4493,7 @@ services::discord::input_runtime::clear::tests::a_wal_failure_holds_unresolved_a
 services::discord::input_runtime::clear::tests::an_input_received_after_the_cutoff_keeps_its_row
 services::discord::input_runtime::clear::tests::an_uncertain_commit_resets_nothing_until_the_ticket_is_read_back
 services::discord::input_runtime::clear::tests::an_unconfirmed_reset_holds_and_keeps_the_cut_without_a_second_reset
+services::discord::input_runtime::clear::tests::clear_cutoff_includes_external_rows_and_a_retry_stays_settled
 services::discord::input_runtime::clear::tests::clear_cuts_the_cutoff_inputs_then_resets_and_resolves_for_both_providers
 services::discord::input_runtime::clear::tests::postgres_outage_holds_without_reset_or_cut_and_reports_it
 services::discord::input_runtime::clear::tests::superseded_foreign_or_mismatched_tickets_hold_without_effects
@@ -4507,6 +4508,7 @@ services::discord::input_runtime::effects::tests::e1_pinned_upload_handback_copi
 services::discord::input_runtime::effects::tests::e1_production_effects_move_population_and_request_one_actor
 services::discord::input_runtime::effects::tests::e1_production_effects_take_the_runtime_root_and_reject_a_foreign_capability
 services::discord::input_runtime::effects::tests::e1_turn_row_residue_is_held_with_notice_never_reinjected
+services::discord::input_runtime::effects::tests::prod_enqueue_rejects_external_before_materialization
 services::discord::input_runtime::effects::tests::unbound_key_holds_the_move_before_its_only_legacy_copy_is_retired
 services::discord::input_runtime::fence::effect::tests::c1_async_accessory_worker_consumes_preclose_permit_and_keeps_scheduler_backstop
 services::discord::input_runtime::fence::effect::tests::c1_detached_panic_preserves_payload_and_effectful_drop_off_and_protected
@@ -4552,9 +4554,17 @@ services::discord::input_runtime::supervisor::command::tests::g1a_pending_succes
 services::discord::input_runtime::supervisor::command::tests::g1a_pending_try_send_full_and_closed_dirties_without_queue_wait
 services::discord::input_runtime::supervisor::command::tests::g1a_pending_unstarted_ack_timeout_is_bounded_and_marks_dirty
 services::discord::input_runtime::supervisor::command::tests::g1a_request_bound_covers_unstarted_receiver_and_full_mailbox
+services::discord::input_runtime::supervisor::command::tests::pending_order_error_is_not_supervisor_lost
 services::discord::input_runtime::supervisor::drive::tests::a_record_inside_a_wake_ends_the_instance_and_only_its_successors_idle_submits
 services::discord::input_runtime::supervisor::drive::tests::input_keeps_the_latest_dev_a_renumbered_resume_logged
 services::discord::input_runtime::supervisor::drive::tests::input_view_reaches_each_boundary_value_under_every_wake_split
+services::discord::input_runtime::supervisor::external::tests::closed_admission_refuses_only_new_origins
+services::discord::input_runtime::supervisor::external::tests::existing_generators_start_above_external_range
+services::discord::input_runtime::supervisor::external::tests::external_collision_precedes_generic_known_receipt
+services::discord::input_runtime::supervisor::external::tests::external_source_is_origin_keyed_trimmed_and_bounded
+services::discord::input_runtime::supervisor::external::tests::external_terminal_origin_survives_compact_reopen
+services::discord::input_runtime::supervisor::external::tests::external_unknown_identity_never_becomes_absent
+services::discord::input_runtime::supervisor::external::tests::hm1_external_producer_census_is_zero
 services::discord::input_runtime::supervisor::ordering::tests::g1a_an_older_deferred_head_does_not_erase_the_previous_retry_obligation
 services::discord::input_runtime::supervisor::ordering::tests::g1a_capability_checks_provider_channel_owner_and_named_epoch
 services::discord::input_runtime::supervisor::ordering::tests::g1a_complete_requires_full_horizon_all_pending_and_no_unsettled_page
@@ -4578,6 +4588,9 @@ services::discord::input_runtime::supervisor::ordering::tests::g1a_shared_overfl
 services::discord::input_runtime::supervisor::ordering::tests::g1a_source_range_cannot_cross_the_verified_horizon
 services::discord::input_runtime::supervisor::ordering::tests::g1a_uncertain_handback_failure_dirty_race_preserves_cause_and_whole_retry_range
 services::discord::input_runtime::supervisor::ordering::tests::g1a_whole_receipt_sources_must_be_the_exact_unsettled_prefix
+services::discord::input_runtime::supervisor::ordering::tests::handback_snapshot_rejects_before_release
+services::discord::input_runtime::supervisor::ordering::tests::pending_entry_rejects_mixed_without_partial_insert
+services::discord::input_runtime::supervisor::ordering::tests::scan_namespace_rejection_preserves_frontier
 services::discord::input_runtime::supervisor::receipt::tests::g1a_handback_rescan_retains_legacy_responsibility_and_appends_nothing
 services::discord::input_runtime::supervisor::receipt::tests::g1a_ignored_received_on_tracked_handback_has_no_ack_and_requires_reopen
 services::discord::input_runtime::supervisor::receipt::tests::g1a_materialized_source_requires_exact_full_coverage_and_author
@@ -4603,6 +4616,8 @@ services::discord::input_runtime::supervisor::tests::drive_entry::held_readiness
 services::discord::input_runtime::supervisor::tests::drive_entry::lost_worker_closes_gate_before_tick_returns
 services::discord::input_runtime::supervisor::tests::drive_entry::pending_binding_opens_the_gate_once_holds_input_and_its_resolution_submits_once
 services::discord::input_runtime::supervisor::tests::drive_entry::reactions_skip_synthetic_inputs_and_a_failed_one_changes_no_ledger_record
+services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::external_receipt_busy_waits_for_existing_actor_without_reactions
+services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::external_receipt_does_not_require_discord_scan
 services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::g1a_clear_and_binding_boundaries_reject_paused_scan_receipts_without_a_wal_append
 services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::g1a_close_ack_follows_synced_commit_and_blocks_later_commit
 services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::g1a_hold_open_cycle_and_unsettled_clear_close_receipts
@@ -4618,6 +4633,8 @@ services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry:
 services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::g1a_synced_receipt_dirty_race_reports_failed_settlement_and_blocks_offer_until_full_proof
 services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::g1a_uncertain_other_deferred_dirty_race_retains_only_prevalidated_retry_sources
 services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::g1a_uncertain_persistence_dirty_race_retains_whole_sources_without_wal_append
+services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::hm1_normal_boot_has_no_external_receipts
+services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::submit_external_same_origin_keeps_first_body_and_seq
 services::discord::input_runtime::supervisor::tests::drive_entry::run_cancellation_holds_gate_even_when_supervisor_remains
 services::discord::input_runtime::supervisor::tests::drive_entry::run_cancellation_mid_step_keeps_the_worker_write
 services::discord::input_runtime::supervisor::tests::drive_entry::the_drive_loop_submits_pauses_for_a_clear_and_holds_the_gate_when_it_ends
@@ -11187,6 +11204,8 @@ services::tui_input::durability_tests::supported::reopen_adopted_unsynced_prefix
 services::tui_input::durability_tests::supported::reopen_refuses_handle_when_adopted_prefix_sync_fails
 services::tui_input::durability_tests::supported::replay_stops_at_first_bad_record_and_discards_valid_suffix
 services::tui_input::durability_tests::supported::snapshot_replacement_survives_every_cut_and_resumes_append
+services::tui_input::input_key_tests::external_key_namespace_boundaries
+services::tui_input::input_key_tests::external_key_v1_vectors_and_encoding
 services::tui_input::rows::receipt_identity::tests::canonical_full_source_coverage_matches_aliases_and_ignores_enrichment
 services::tui_input::rows::receipt_identity::tests::complete_legacy_envelope_derives_identity_without_defaulted_fields
 services::tui_input::rows::receipt_identity::tests::malformed_retained_receipts_hold_health_without_guessing_fields
@@ -11238,6 +11257,7 @@ services::tui_input::transition_fixture_tests::old_snapshot_without_received_ord
 services::tui_input::transition_fixture_tests::retry_backoff_is_bounded
 services::tui_input::transition_fixture_tests::second_staging_failure_requires_another_successful_reopen_before_legacy
 services::tui_input::transition_fixture_tests::uncertain_commit_whole_and_cut_reopen_decide_responsibility
+services::tui_input::transition_tests::supported::handback_with_external_row_has_zero_partial_effects
 services::tui_input::transition_tests::supported::staged_order_survives_checkpoint_handback
 services::tui_input::transition_tests::supported::staged_order_survives_commit_and_checkpoint
 services::tui_o::alarm::postgres_tests::distinct_channels_and_kinds_enqueue_once_pg

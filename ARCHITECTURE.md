@@ -1068,6 +1068,8 @@ src/
 │   │   │   ├── effect_tests.rs
 │   │   │   ├── effects.rs
 │   │   │   ├── effects_tests.rs
+│   │   │   ├── external.rs
+│   │   │   ├── external_tests.rs
 │   │   │   ├── fence.rs
 │   │   │   ├── fence_tests.rs
 │   │   │   ├── mapping.rs
@@ -2416,6 +2418,8 @@ src/
 │   │   ├── durability_tests.rs
 │   │   ├── durable.rs
 │   │   ├── handover.rs
+│   │   ├── input_key.rs
+│   │   ├── input_key_tests.rs
 │   │   ├── ledger.rs
 │   │   ├── mod.rs
 │   │   ├── receipt_identity.rs
