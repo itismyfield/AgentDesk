@@ -927,7 +927,8 @@ src/
 │   │   │   │   ├── stop_result.rs
 │   │   │   │   └── watchdog_decisions.rs
 │   │   │   ├── relay_auto_heal/
-│   │   │   │   └── orphan_token_tests.rs
+│   │   │   │   ├── orphan_token_tests.rs
+│   │   │   │   └── retired_redrive_tests.rs
 │   │   │   ├── snapshot/
 │   │   │   │   └── relay_probe.rs
 │   │   │   ├── stall_liveness/

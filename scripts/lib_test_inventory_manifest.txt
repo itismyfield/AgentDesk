@@ -3639,6 +3639,11 @@ services::discord::health::relay_auto_heal::orphan_token_tests::confirmed_dead_r
 services::discord::health::relay_auto_heal::orphan_token_tests::retired_channel_orphan_token_is_not_cleaned_or_graded
 services::discord::health::relay_auto_heal::orphan_token_tests::retirement_during_orphan_snapshot_prevents_auto_apply_and_grading
 services::discord::health::relay_auto_heal::orphan_token_tests::unmeasured_orphan_token_keeps_anchor_and_queue_and_is_graded_once
+services::discord::health::relay_auto_heal::retired_redrive_tests::empty_retired_set_keeps_the_legacy_nudge_outcome
+services::discord::health::relay_auto_heal::retired_redrive_tests::empty_retired_set_keeps_the_legacy_reattach_outcome
+services::discord::health::relay_auto_heal::retired_redrive_tests::retired_redrive_key_never_moves_the_watcher_resume_offset
+services::discord::health::relay_auto_heal::retired_redrive_tests::retired_watcher_owner_key_stops_the_nudge_of_a_legacy_request
+services::discord::health::relay_auto_heal::retired_redrive_tests::retirement_before_reattach_promotion_spawns_no_watcher
 services::discord::health::relay_auto_heal::tests::a_fresh_watcher_still_accepts_the_zero_frontier_5943
 services::discord::health::relay_auto_heal::tests::a_freshly_born_turn_resumes_at_its_birth_offset_not_zero_5943
 services::discord::health::relay_auto_heal::tests::a_generation_mismatch_still_floors_the_redrive_at_the_turn_start_5943
