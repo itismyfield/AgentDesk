@@ -8,6 +8,21 @@ use ledger::ResumeApproval;
 
 pub const OPERATOR_RESUME_FLOOR: &str = "operator_resume.floor";
 
+/// What one approval call did, decided under the ledger lock: wrote and synced it, or found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResumeRecord {
+    Recorded(ResumeApproval),
+    Existing(ResumeApproval),
+}
+
+impl ResumeRecord {
+    pub fn approval(&self) -> &ResumeApproval {
+        match self {
+            Self::Recorded(approval) | Self::Existing(approval) => approval,
+        }
+    }
+}
+
 impl OStore {
     fn resume_snapshot(
         &self,
@@ -47,6 +62,18 @@ impl OStore {
         )
     }
 
+    /// As `record_operator_resume`, also telling whether this call wrote the approval.
+    pub fn record_operator_resume_outcome(
+        &self,
+        channel: u64,
+        rejected_serial: u64,
+        operator: &str,
+        reason: &str,
+    ) -> Result<ResumeRecord, StoreError> {
+        let append = ledger::append_to;
+        self.resume_transaction(channel, rejected_serial, operator, reason, append)
+    }
+
     pub(super) fn record_operator_resume_with_append(
         &self,
         channel: u64,
@@ -55,9 +82,21 @@ impl OStore {
         reason: &str,
         append: impl FnOnce(&mut File, DateTime<Utc>, &LedgerEntry) -> Result<(), StoreError>,
     ) -> Result<ResumeApproval, StoreError> {
+        self.resume_transaction(channel, rejected_serial, operator, reason, append)
+            .map(|record| record.approval().clone())
+    }
+
+    fn resume_transaction(
+        &self,
+        channel: u64,
+        rejected_serial: u64,
+        operator: &str,
+        reason: &str,
+        append: impl FnOnce(&mut File, DateTime<Utc>, &LedgerEntry) -> Result<(), StoreError>,
+    ) -> Result<ResumeRecord, StoreError> {
         let (mut file, mut state) = self.resume_snapshot(channel)?;
         if let Some(existing) = state.approval(rejected_serial) {
-            return Ok(existing.clone());
+            return Ok(ResumeRecord::Existing(existing.clone()));
         }
         if !state.can_resume(rejected_serial)
             || state
@@ -98,6 +137,7 @@ impl OStore {
         state
             .approval(rejected_serial)
             .cloned()
+            .map(ResumeRecord::Recorded)
             .ok_or_else(|| damage("validated approval was not applied"))
     }
 }
