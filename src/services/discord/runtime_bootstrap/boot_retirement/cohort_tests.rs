@@ -340,12 +340,18 @@ async fn second_process_epoch_is_rejected() {
     const CHILD: &str = "AGENTDESK_BOOT_EPOCH_FIXTURE";
     if std::env::var_os(CHILD).is_none() {
         let name = "services::discord::runtime_bootstrap::boot_retirement::cohort_tests::second_process_epoch_is_rejected";
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", name, "--nocapture"])
             .env(CHILD, "1")
-            .status()
+            .output()
             .unwrap();
-        assert!(status.success());
+        assert!(
+            output.status.success(),
+            "child failed: {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         return;
     }
     let c = BootCohort::<usize>::install_process(
