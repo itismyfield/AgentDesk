@@ -2369,8 +2369,12 @@ src/
 │   │   │   ├── pane/
 │   │   │   │   ├── ownership.rs
 │   │   │   │   └── ownership_tests.rs
+│   │   │   ├── busy_tests.rs
+│   │   │   ├── capability.rs
 │   │   │   ├── gate.rs
 │   │   │   ├── pane.rs
+│   │   │   ├── resume.rs
+│   │   │   ├── resume_actor_tests.rs
 │   │   │   ├── token.rs
 │   │   │   └── witness.rs
 │   │   ├── actor.rs
