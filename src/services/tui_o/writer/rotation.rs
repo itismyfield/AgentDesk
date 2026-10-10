@@ -602,6 +602,10 @@ impl<B: BindingEvents> Sources<B> {
             let parent =
                 parent_hint.filter(|parent| **parent != new && store.cursor(parent).is_some());
             let boundary = match (cause, parent) {
+                // An adoption left this past source unpinned, so its records are old: hold them.
+                _ if self.bound_before(event.seq, &new) => Boundary::Pending {
+                    candidates: vec![0],
+                },
                 (BindingCause::Startup | BindingCause::Clear, _) => Boundary::Owed { from: 0 },
                 (BindingCause::Unknown, _) | (_, None) => Boundary::Pending {
                     candidates: vec![0],
@@ -663,6 +667,18 @@ impl<B: BindingEvents> Sources<B> {
             Some(cursor) if cursor.retired => self.unretire(writer, &new),
             Some(_) => Ok(()),
         }
+    }
+
+    /// Whether the log bound `source`'s session and path before `seq`, whatever device number a
+    /// remount gave it then; an unreadable log counts as bound.
+    fn bound_before(&self, seq: u64, source: &SourceId) -> bool {
+        let Ok(events) = self.bindings.binding_events_since(self.channel, 0) else {
+            return true;
+        };
+        let earlier = events.iter().filter(|event| event.seq < seq);
+        earlier
+            .filter_map(bound_source)
+            .any(|bound| bound.session_id == source.session_id && bound.path == source.path)
     }
 
     fn unretire<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(

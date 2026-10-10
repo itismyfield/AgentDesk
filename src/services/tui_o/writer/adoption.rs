@@ -549,13 +549,15 @@ pub fn pin_at(
         return Err(open());
     }
     let mut pinned = vec![head];
-    let past = past_of(&bound);
-    let lens = past.iter().map(|source| len_of(&source.path));
-    let lens: Vec<u64> = lens.collect::<Result<_, _>>().map_err(Refused::retry)?;
-    if past.len() > PAST_BUDGET_SOURCES || lens.iter().sum::<u64>() > PAST_BUDGET_BYTES {
-        return Err(Refused::new(Hold::Final, "past sources exceed budget"));
-    }
-    for (source, len) in past.into_iter().zip(lens) {
+    // Only the newest past sources within budget are pinned; a later bind of an older one has no
+    // cursor, so O's rotation holds it as a pending boundary instead of posting it.
+    let mut total = 0;
+    for source in past_of(&bound).into_iter().take(PAST_BUDGET_SOURCES) {
+        let len = len_of(&source.path).map_err(Refused::retry)?;
+        total += len;
+        if total > PAST_BUDGET_BYTES {
+            break;
+        }
         match read(source, len, None) {
             Ok(read) => pinned.push(read),
             Err(Unread::Short(detail) | Unread::Other(detail)) => {

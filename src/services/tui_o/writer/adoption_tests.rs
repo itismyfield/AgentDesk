@@ -280,11 +280,74 @@ fn a_past_source_starts_at_its_length_when_the_channel_is_adopted() {
     assert_eq!(init.sources.len(), 2, "{:?}", init.sources);
 }
 
+/// The sources the adopted `channel`'s init names, in pin order.
+fn adopted_sources(channel: &Channel) -> Vec<SourceId> {
+    let store = channel.store();
+    let snapshot = channel
+        .pin()
+        .expect("the budget does not refuse the channel");
+    channel.activate(&store, &snapshot).unwrap();
+    let init = store.read_init(channel.channel).unwrap().unwrap();
+    init.sources.into_iter().map(|s| s.source_id).collect()
+}
+
+/// The head, then `past` newest first.
+fn head_then(channel: &Channel, past: &[SourceId]) -> Vec<SourceId> {
+    [channel.source.clone()]
+        .into_iter()
+        .chain(past.iter().rev().cloned())
+        .collect()
+}
+
 #[test]
-fn past_sources_over_the_boot_budget_are_not_adopted() {
-    let (channel, _) = rotated(641007, PAST_BUDGET_SOURCES + 1);
-    let detail = channel.pin().expect_err("the budget refuses the channel");
-    assert!(detail.contains("past sources exceed budget"), "{detail}");
+fn past_sources_over_the_count_budget_pin_only_the_newest() {
+    let (channel, past) = rotated(641007, PAST_BUDGET_SOURCES + 1);
+    assert_eq!(adopted_sources(&channel), head_then(&channel, &past[1..]));
+    let (channel, past) = rotated(641008, PAST_BUDGET_SOURCES);
+    assert_eq!(
+        adopted_sources(&channel),
+        head_then(&channel, &past),
+        "the count is inclusive"
+    );
+}
+
+#[test]
+fn past_sources_over_the_byte_budget_pin_only_the_newest() {
+    let (channel, past) = rotated(641009, 3);
+    // Never read once dropped, so a sparse file stands in for an old long transcript.
+    let file = std::fs::File::options()
+        .write(true)
+        .open(&past[0].path)
+        .unwrap();
+    file.set_len(PAST_BUDGET_BYTES).unwrap();
+    let past = [past[0].clone(), past[1].clone(), past[2].clone()];
+    assert_eq!(adopted_sources(&channel), head_then(&channel, &past[1..]));
+}
+
+#[test]
+fn a_bind_of_an_unpinned_past_source_while_waiting_refuses_the_pin() {
+    let (mut channel, past) = rotated(641011, PAST_BUDGET_SOURCES + 1);
+    let store = channel.store();
+    let snapshot = channel.pin().unwrap();
+    let seq = channel.log.0.len() as u64;
+    let back = bound(seq + 1, channel.channel, Some(&channel.source), &past[0]);
+    channel.log.0.push(back);
+    assert_eq!(
+        super::rotated(&channel.log.0, seq, &channel.source),
+        Some(&past[0])
+    );
+    let result = channel.activate(&store, &snapshot);
+    channel.assert_released(&store, result, "binding log moved");
+}
+
+#[test]
+fn past_sources_exactly_at_the_byte_budget_are_all_pinned_and_the_next_older_is_dropped() {
+    let (channel, past) = rotated(641010, 3);
+    let newest = std::fs::metadata(&past[2].path).unwrap().len();
+    let middle = std::fs::metadata(&past[1].path).unwrap().len();
+    let pad = PAST_BUDGET_BYTES - newest - middle;
+    append(&past[1].path, &"\n".repeat(pad as usize));
+    assert_eq!(adopted_sources(&channel), head_then(&channel, &past[1..]));
 }
 
 fn prompt(key: &str) -> serde_json::Value {
