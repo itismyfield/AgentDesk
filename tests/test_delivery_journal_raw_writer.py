@@ -926,6 +926,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
     # thing the entry was originally guessing at (pin 2).
 
     COLLECTOR = "src/services/discord/tmux_watcher/turn_stream_collector.rs"
+    COLLECTOR_ENTRY = "src/services/discord/tmux_watcher/turn_stream_collector/entry.rs"
 
     def test_source_contract_stream_collector_is_no_longer_a_family_anchor(self):
         """Pin 1. Why "pipe stream epoch" was deleted rather than re-anchored.
@@ -972,7 +973,19 @@ class RawWriterAllowlistTests(unittest.TestCase):
             "repeats the defect #5071 T1 S5a named in tmux_reaper.rs",
         )
 
-        source = (ROOT / self.COLLECTOR).read_text(encoding="utf-8")
+        parent_source = (ROOT / self.COLLECTOR).read_text(encoding="utf-8")
+        self.assertIn(
+            'pub(super) use state::*;\n\n'
+            '#[path = "turn_stream_collector/entry.rs"]\n'
+            'mod entry;\n'
+            '#[cfg(test)]\n'
+            '#[path = "turn_stream_collector/observations.rs"]\n'
+            'mod o_test;\n'
+            'pub(super) use entry::collect_turn_stream_until_terminal;\n',
+            parent_source,
+            "the collector entry must remain a production module wired to its facade",
+        )
+        source = parent_source + "\n" + (ROOT / self.COLLECTOR_ENTRY).read_text(encoding="utf-8")
         self.assertIn("async fn collect_turn_stream_until_terminal(", source)
         for absent in (
             "delivery_record",
@@ -988,7 +1001,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
             self.assertEqual(
                 source.count(absent),
                 0,
-                f"turn_stream_collector.rs now mentions {absent!r}; it is no longer the file "
+                f"collector parent/entry now mentions {absent!r}; it is no longer the file "
                 f"that writes no delivery, so the S6 deletion has to be re-argued",
             )
 
