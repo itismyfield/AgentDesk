@@ -1419,6 +1419,9 @@ use service::{PaneLife, ScriptedOs, Service, TerminationResult, block_on, closes
 
 #[test]
 fn m1_service_missing_pane_absent_provider_retires_pg() {
+    if run_terminate_child("m1_service_missing_pane_absent_provider_retires_pg") {
+        return;
+    }
     use service::{probe_settlement_window, test_queue};
     let _lock = crate::config::shared_test_env_lock();
     let rig = rig();
@@ -1480,6 +1483,9 @@ fn m1_service_missing_pane_absent_provider_retires_pg() {
 
 #[test]
 fn m1_last_pane_is_allowed_pg() {
+    if run_terminate_child("m1_last_pane_is_allowed_pg") {
+        return;
+    }
     let _lock = crate::config::shared_test_env_lock();
     let rig = rig();
     let pane = PaneLife::new(&rig, false, true);
@@ -1498,6 +1504,9 @@ fn m1_last_pane_is_allowed_pg() {
 
 #[test]
 fn m1_provider_survived_close_keeps_bound_pg() {
+    if run_terminate_child("m1_provider_survived_close_keeps_bound_pg") {
+        return;
+    }
     let _lock = crate::config::shared_test_env_lock();
     let rig = rig();
     let pane = PaneLife::new(&rig, false, true);
@@ -1517,6 +1526,9 @@ fn m1_provider_survived_close_keeps_bound_pg() {
 
 #[test]
 fn m1_unreadable_process_never_means_absent_pg() {
+    if run_terminate_child("m1_unreadable_process_never_means_absent_pg") {
+        return;
+    }
     let _lock = crate::config::shared_test_env_lock();
     let rig = rig();
     let pane = PaneLife::new(&rig, false, true);
@@ -1536,6 +1548,9 @@ fn m1_unreadable_process_never_means_absent_pg() {
 
 #[test]
 fn m1_replaced_root_refuses_before_send_pg() {
+    if run_terminate_child("m1_replaced_root_refuses_before_send_pg") {
+        return;
+    }
     let _lock = crate::config::shared_test_env_lock();
     let rig = rig();
     let pane = PaneLife::new(&rig, false, true);
@@ -1557,6 +1572,9 @@ fn m1_replaced_root_refuses_before_send_pg() {
 
 #[test]
 fn m1_afterwrite_never_auto_retries_pg() {
+    if run_terminate_child("m1_afterwrite_never_auto_retries_pg") {
+        return;
+    }
     let _lock = crate::config::shared_test_env_lock();
     let rig = rig();
     let pane = PaneLife::new(&rig, false, false);
@@ -1591,6 +1609,9 @@ fn m1_afterwrite_never_auto_retries_pg() {
 
 #[test]
 fn m1_confirmation_required_stops_pg() {
+    if run_terminate_child("m1_confirmation_required_stops_pg") {
+        return;
+    }
     let _lock = crate::config::shared_test_env_lock();
     let rig = rig();
     let pane = PaneLife::new(&rig, false, false);
@@ -1613,6 +1634,9 @@ fn m1_confirmation_required_stops_pg() {
 
 #[test]
 fn m1_stale_a_never_releases_b_pg() {
+    if run_terminate_child("m1_stale_a_never_releases_b_pg") {
+        return;
+    }
     let _lock = crate::config::shared_test_env_lock();
     let rig = rig();
     let pane = PaneLife::new(&rig, false, true);
@@ -1638,6 +1662,9 @@ fn m1_stale_a_never_releases_b_pg() {
 
 #[test]
 fn m1_retire_cas_failure_keeps_hold_pg() {
+    if run_terminate_child("m1_retire_cas_failure_keeps_hold_pg") {
+        return;
+    }
     let _lock = crate::config::shared_test_env_lock();
     let rig = rig();
     let pane = PaneLife::new(&rig, false, true);
