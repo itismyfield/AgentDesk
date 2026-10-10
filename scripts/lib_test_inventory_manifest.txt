@@ -10912,6 +10912,11 @@ services::tui_o::repost::io::probe::tests::f4_scan_uses_original_anchor_and_froz
 services::tui_o::repost::io::probe::tests::f4_slot_two_requires_new_closed_attempt_evidence
 services::tui_o::repost::io::probe::tests::f4_timeout_budget_and_nonprogress_remain_incomplete
 services::tui_o::repost::io::probe::tests::f4_two_passes_wait_after_completion
+services::tui_o::repost::io::probe::tests::f4r_a_damaged_identifier_is_kept_apart_from_success_and_absence
+services::tui_o::repost::io::probe::tests::f4r_a_proof_read_of_the_piece_is_an_observation
+services::tui_o::repost::io::probe::tests::f4r_an_unknown_receipt_index_never_yields_absence
+services::tui_o::repost::io::probe::tests::f4r_the_latest_snapshot_rejudges_everything_the_session_read
+services::tui_o::repost::io::probe::tests::f4r_the_marker_names_the_channel_and_is_the_same_on_every_node_and_slot
 services::tui_o::repost::io::tests::bounded_create_counts_one_post_and_sends_again_only_after_a_confirmed_429
 services::tui_o::repost::io::tests::bounded_create_shares_the_gateway_route_bucket_and_refuses_a_lone_limiter
 services::tui_o::repost::io::tests::bounded_dispatch_times_out_with_the_request_gone_and_waits_429s_inside_the_timeout
