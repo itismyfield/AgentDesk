@@ -49,6 +49,7 @@ use poise::serenity_prelude::ChannelId;
 
 use super::HealthRegistry;
 use super::snapshot::WatcherStateSnapshot;
+use crate::services::discord::input_runtime::fence::{BootTarget, boot_skip};
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::ProviderKind;
 
@@ -351,6 +352,10 @@ pub(super) async fn observe_watcher_absence_for_unwatched_work(
     for (channel_id, shared) in
         unwatched_relay_work_candidates(provider, runtimes, watcher_derived).await
     {
+        // Like boot, absence observation leaves a protected channel to its move or handback.
+        if boot_skip(BootTarget::Channel(provider, channel_id.get())) {
+            continue;
+        }
         let Some(snapshot) = registry
             .snapshot_watcher_state_for_shared(provider, shared, channel_id.get())
             .await
@@ -2546,6 +2551,42 @@ mod tests {
             "the absence must be armed before the queue is drained, or recovery \
              waits a whole extra tick"
         );
+    }
+
+    /// Like boot, both absence observers leave an input-protected channel to its move or
+    /// handback: neither arms it for respawn while its tmux is live and work is owed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn absence_observers_leave_an_input_protected_channel_unarmed() {
+        use crate::services::discord::input_runtime::fence::{Gate, test_health};
+        let _absence = lock_watcher_absence_for_test().await;
+        let provider = ProviderKind::Codex;
+        let (protected, routable) = (ChannelId::new(6_325_579_001), ChannelId::new(6_325_579_002));
+        clear_watcher_absence(&provider, protected);
+        clear_watcher_absence(&provider, routable);
+        let _tmux = FakeTmux::answering_alive(true);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        engage_mailbox_bound_to_tmux(&shared, protected, 6_325_579_101, "AgentDesk-codex-c2b2a")
+            .await;
+        let gates = [protected, routable].map(|channel| {
+            let gate = Gate::protect(provider.clone(), channel.get()).unwrap();
+            test_health::Clear::new(&gate)
+        });
+        let registry = HealthRegistry::new();
+        let now = chrono::Utc::now().timestamp();
+        let none = std::collections::HashSet::new();
+        let runtimes = [shared];
+        let absent =
+            observe_watcher_absence_for_unwatched_work(&registry, &provider, &runtimes, &none, now);
+        assert_eq!(absent.await, 0);
+        assert!(!observe_routable_unwatched_session(
+            &provider,
+            &candidate(routable),
+            now
+        ));
+        let pending = pending_absent_channels(&provider);
+        assert!(!pending.contains(&protected) && !pending.contains(&routable));
+        drop(gates);
     }
 }
 

@@ -3844,6 +3844,7 @@ services::discord::health::watcher_respawn::live_bridge_guard::input_fence_tests
 services::discord::health::watcher_respawn::tests::a_channel_observed_on_this_tick_is_left_to_the_relay_work_sweep
 services::discord::health::watcher_respawn::tests::a_recovered_channel_can_announce_a_later_gap_again
 services::discord::health::watcher_respawn::tests::a_routable_unwatched_session_reaches_the_respawn_queue_within_one_minute
+services::discord::health::watcher_respawn::tests::absence_observers_leave_an_input_protected_channel_unarmed
 services::discord::health::watcher_respawn::tests::absence_retry_parks_the_channel_after_the_attempt_cap
 services::discord::health::watcher_respawn::tests::absence_sweep_arms_then_drives_one_respawn_attempt_and_backs_off
 services::discord::health::watcher_respawn::tests::an_unrecovered_routable_absence_warns_once_past_the_threshold
@@ -4138,6 +4139,8 @@ services::discord::inflight::removal::custody_notice_tests::without_postgres_the
 services::discord::inflight::removal::host_liveness_stale_tests::stale_row_stays_when_its_host_evidence_is_not_tmux
 services::discord::inflight::removal::input_fence_reaper_tests::c2_boot_reaper_leaves_input_protected_rows_untouched
 services::discord::inflight::removal::input_fence_reaper_tests::c2_stale_generation_invalidate_leaves_input_protected_rows_untouched
+services::discord::inflight::removal::input_fence_reaper_tests::c2b_boot_custody_leaves_a_protected_channel_unread
+services::discord::inflight::removal::input_fence_reaper_tests::c2b_boot_preparation_settles_before_the_reaper_pass_is_reserved
 services::discord::inflight::removal::loader_gate_observation_tests::allocation_route_is_observed_but_never_changes_loader_preservation
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_carries_the_generation_and_name_filter
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_marks_the_unnamed_current_generation_row
@@ -5221,6 +5224,7 @@ services::discord::placeholder_sweeper::probe_classification_tests::permanent_st
 services::discord::placeholder_sweeper::probe_classification_tests::transient_statuses_classified_as_retryable
 services::discord::placeholder_sweeper::retirement_tests::inline_panel_rechecks_retirement_after_owner_probe
 services::discord::placeholder_sweeper::retirement_tests::tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg
+services::discord::placeholder_sweeper::retirement_tests::tick_leaves_input_protected_rows_before_and_after_probe
 services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_without_mutating_retired_rows
 services::discord::placeholder_sweeper::safety_net_threshold_tests::abandon_strictly_greater_than_stall
 services::discord::placeholder_sweeper::safety_net_threshold_tests::abandon_threshold_is_at_least_thirty_minutes
@@ -6347,7 +6351,9 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_spawns_exactly_once_per_process
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_task_can_restart_after_task_death
+services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
 services::discord::runtime_bootstrap::queued_placeholders::tests::recovery_consumer_routes_uninstalled_candidates_to_cleanup
+services::discord::runtime_bootstrap::queued_placeholders::tests::restore_and_cleanup_leave_a_protected_channel
 services::discord::runtime_bootstrap::queued_placeholders::tests::restore_rows_and_cleanup_preserve_current_owners
 services::discord::runtime_bootstrap::queued_placeholders::tests::restore_waits_for_channel_lock_and_keeps_other_channel
 services::discord::runtime_bootstrap::queued_recovery::fence_tests::c2_boot_restore_installs_nothing_for_an_input_protected_channel
@@ -6798,6 +6804,7 @@ services::discord::startup_reclaim::tests::orphan_placeholder_candidate_is_exact
 services::discord::startup_reclaim::tests::orphan_placeholder_delete_is_terminal_cleanup_guarded
 services::discord::startup_reclaim::tests::prior_generation_filter_excludes_post_boot_rows
 services::discord::startup_reclaim::tests::startup_outer_sweep_builds_durable_plan_and_preserves_retired_channels
+services::discord::startup_reclaim::tests::startup_passes_leave_protected_channels_before_claim_and_after_read
 services::discord::startup_reclaim::tests::startup_passes_skip_retired_channels_before_claim_and_after_read
 services::discord::status_panel_orphan_store::tests::drain_committed_delete_emits_relay_delete
 services::discord::status_panel_orphan_store::tests::enqueue_is_idempotent_and_removable
@@ -7063,6 +7070,7 @@ services::discord::tmux::tmux_output_stream::tests::string_api_error_envelope_ha
 services::discord::tmux::tmux_output_stream::tests::unique_provider_prose_flood_uses_fixed_category_slots
 services::discord::tmux::tmux_output_stream::tests::watcher_status_panel_bound_placeholder_keeps_events_on_status_panel
 services::discord::tmux::tmux_output_stream::tests::watcher_status_panel_fallback_inlines_events_without_status_message
+services::discord::tmux::tmux_session_files::input_fence_tests::c2b_orphan_file_sweep_leaves_protected_and_unplaced_groups
 services::discord::tmux::tmux_session_files::tests::adoption_current_generation_marker_is_a_noop
 services::discord::tmux::tmux_session_files::tests::adoption_never_stamps_a_fresh_incarnation_with_an_old_mtime
 services::discord::tmux::tmux_session_files::tests::adoption_recovers_an_absent_marker_with_nonzero_identity
@@ -7575,6 +7583,7 @@ services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests::post_terminal_output_with_pending_synthetic_start_is_not_suppressed
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests::post_terminal_output_without_inflight_is_suppressed
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests::streaming_placeholder_without_inflight_is_skipped
+services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests::c2b_startup_cleanup_leaves_a_protected_channel_alone_pg
 services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests::startup_cleanup_runs_only_after_the_host_guard_admits_the_stored_rows_pg
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::configured_channel_binding_is_last_resort_and_provider_scoped
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::dispatched_origin_ghost_marker_is_consumed_only_for_matching_turn
@@ -7609,6 +7618,8 @@ services::discord::tmux::watcher_stream_progress_tests::streaming_tick_persists_
 services::discord::tmux::watcher_stream_progress_tests::streaming_tick_persists_tool_hold_without_requiring_discord_edit_4104
 services::discord::tmux_error_detect::pure_tests::classifies_auth_and_overload_prose_without_retaining_source_text
 services::discord::tmux_overload_retry::completion_release_tests::retry_release_helper_uses_completion_gateway_variant
+services::discord::tmux_reaper::host_guard_tests::c2b_dead_session_reaper_leaves_a_protected_channel_pg
+services::discord::tmux_reaper::host_guard_tests::c2b_orphan_cleanup_leaves_protected_and_unplaced_sessions_pg
 services::discord::tmux_reaper::host_guard_tests::dead_session_reaper_kills_only_what_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::fresh_routine_backstop_keeps_the_session_when_ownership_is_unreadable_pg
 services::discord::tmux_reaper::host_guard_tests::fresh_routine_backstop_reads_the_run_that_owned_the_listed_session_pg
@@ -10939,6 +10950,7 @@ services::tui_input::transition_tests::supported::staged_order_survives_checkpoi
 services::tui_input::transition_tests::supported::staged_order_survives_commit_and_checkpoint
 services::tui_o::alarm::postgres_tests::distinct_channels_and_kinds_enqueue_once_pg
 services::tui_o::alarm::postgres_tests::suppression_settles_existing_rows_and_errors_retry_pg
+services::tui_o::alarm::postgres_tests::waiting_incidents_repeat_once_recur_and_replay_independently_pg
 services::tui_o::alarm::postgres_tests::writer_alarm_retries_after_insert_failure_without_another_raise_pg
 services::tui_o::alarm::tests::a_pause_ends_on_gateway_return_while_blocked_and_history_stay
 services::tui_o::alarm::tests::a_pending_resume_shows_until_settled_and_a_cleared_halt_leaves_every_other_reason
@@ -10949,6 +10961,7 @@ services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
 services::tui_o::alarm::tests::not_found_frequency_clears_when_its_window_passes_without_new_events
 services::tui_o::alarm::tests::p2_2_reader_recovery_preserves_history_other_reasons_and_first_notification_latch
 services::tui_o::alarm::tests::retry_backoff_caps_without_ending_and_attempt_timeout_has_an_exact_boundary
+services::tui_o::alarm::tests::waiting_clear_keeps_other_health_and_owned_retry_slots
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
 services::tui_o::channel_policy::tests::a_body_releases_a_pending_adoption_while_a_peek_or_another_channel_leaves_it
 services::tui_o::channel_policy::tests::a_channel_both_nodes_dropped_stays_o_on_the_home_and_turns_legacy_on_the_standby
@@ -11147,6 +11160,7 @@ services::tui_o::writer::tests::a_stop_keeps_its_store_error_and_names_a_prepare
 services::tui_o::writer::tests::a_tool_call_is_left_to_the_panel_and_only_the_body_posts
 services::tui_o::writer::tests::a_violation_recorded_while_running_stops_the_writer_before_the_next_post
 services::tui_o::writer::tests::actor::a_full_spool_pauses_capture_until_delivered_segments_are_collected
+services::tui_o::writer::tests::actor::a_recovered_actor_clears_waiting_health_through_its_shared_sink
 services::tui_o::writer::tests::actor::a_source_rewritten_behind_the_cursor_halts_the_channel_before_any_post
 services::tui_o::writer::tests::actor::a_stop_an_abort_or_eof_settles_nothing_the_channel_still_owes
 services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until_it_is_sealed_and_posted
@@ -11242,6 +11256,9 @@ services::tui_o::writer::tests::actor::host_start::rotation_unsettled::consecuti
 services::tui_o::writer::tests::actor::host_start::rotation_unsettled::resume::a_resumed_actor_publishes_its_unretired_predecessor_and_never_an_unread_zero
 services::tui_o::writer::tests::actor::host_start::rotation_unsettled::the_readiness_map_reports_a_running_actors_projection_only
 services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
+services::tui_o::writer::tests::actor::overdue_ready_is_observed_by_the_loop_at_strict_boundary_and_recurrence
+services::tui_o::writer::tests::actor::ready_item_ages_and_channels_are_independent
+services::tui_o::writer::tests::actor::restored_prepared_uses_durable_utc_age_and_clamps_future_time
 services::tui_o::writer::tests::actor::rotation::a_bind_waiting_for_its_file_alarms_once_late_and_its_resolution_attaches_it
 services::tui_o::writer::tests::actor::rotation::a_body_the_parent_only_announced_is_posted_from_the_resumed_source
 services::tui_o::writer::tests::actor::rotation::a_channel_whose_binding_log_names_no_switched_source_halts_before_capture

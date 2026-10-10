@@ -368,6 +368,7 @@ jobs:
               - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs'
+              - 'src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs'
               - 'src/services/discord/session_idle_cleanup_tests.rs'
               - 'src/services/discord/session_runtime.rs'
               - 'src/services/discord/task_notification_delivery/tests.rs'
