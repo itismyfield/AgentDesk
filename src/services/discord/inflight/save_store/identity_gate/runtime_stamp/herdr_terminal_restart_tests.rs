@@ -243,6 +243,7 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
 
 const RESTART_CASES: usize = 15;
 
+#[cfg(test)]
 async fn restart_cases(phase: &Phase) {
     use NativeTerminalKind::{Aborted, Completed};
     let stored_body = |n| -> &'static str { Box::leak(stored(n).into_boxed_str()) };

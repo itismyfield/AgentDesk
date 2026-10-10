@@ -1564,6 +1564,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_roll
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_cold_start_accepts_intent_without_marker_then_sends_once
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cold_unsubmitted_stop_keeps_the_bridge_hold_without_a_terminal
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_generation_only_stale_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_generation_only_stale_sends_no_escape
