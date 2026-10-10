@@ -877,6 +877,7 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
         cache_ttl_minutes: None,
         dispatch_type: None,
         force_fresh: false,
+        submission: None,
     };
     let (sender, _receiver) = std::sync::mpsc::channel();
     execute(turn, sender)

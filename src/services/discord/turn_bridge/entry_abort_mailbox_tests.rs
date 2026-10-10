@@ -232,6 +232,179 @@ async fn run_abort_case(waiter: bool, successor: bool, caller: &str) {
     );
 }
 
+use crate::services::discord::formatting::ReplaceLongMessageOutcome;
+use crate::services::discord::gateway::GatewayFuture;
+
+/// A gateway whose refusal-notice send either never resolves or fails at once.
+struct NoticeGateway {
+    pending: bool,
+    started: tokio::sync::Notify,
+    sends: std::sync::atomic::AtomicUsize,
+}
+
+impl TurnGateway for NoticeGateway {
+    fn send_message<'a>(
+        &'a self,
+        _: ChannelId,
+        _: &'a str,
+    ) -> GatewayFuture<'a, Result<MessageId, String>> {
+        self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.started.notify_one();
+        if self.pending {
+            Box::pin(std::future::pending())
+        } else {
+            Box::pin(async { Err("notice gateway down".to_string()) })
+        }
+    }
+    fn edit_message<'a>(
+        &'a self,
+        _: ChannelId,
+        _: MessageId,
+        _: &'a str,
+    ) -> GatewayFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn replace_message_with_outcome<'a>(
+        &'a self,
+        _: ChannelId,
+        _: MessageId,
+        _: &'a str,
+    ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+        Box::pin(async { Ok(ReplaceLongMessageOutcome::EditedOriginal) })
+    }
+    fn schedule_retry_with_history<'a>(
+        &'a self,
+        _: ChannelId,
+        _: MessageId,
+        _: &'a str,
+    ) -> GatewayFuture<'a, ()> {
+        Box::pin(async {})
+    }
+    fn dispatch_queued_turn<'a>(
+        &'a self,
+        _: ChannelId,
+        _: &'a Intervention,
+        _: &'a str,
+        _: bool,
+        _: Option<Arc<crate::services::turn_orchestrator::DispatchLease>>,
+    ) -> GatewayFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn validate_live_routing<'a>(&'a self, _: ChannelId) -> GatewayFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn requester_mention(&self) -> Option<String> {
+        None
+    }
+    fn can_chain_locally(&self) -> bool {
+        false
+    }
+    fn can_deliver_directly(&self) -> bool {
+        true
+    }
+    fn bot_owner_provider(&self) -> Option<ProviderKind> {
+        Some(ProviderKind::Codex)
+    }
+}
+
+/// The refused turn unwinds before its notice is sent: while that send is pending or failing,
+/// a provider parked before its input finds the token cancelled and submits nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn a_pending_or_failing_refusal_notice_never_holds_the_unwind() {
+    use std::sync::atomic::Ordering;
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    for (index, pending) in [true, false].into_iter().enumerate() {
+        let shared = discord::make_shared_data_for_tests();
+        let mut row = InflightTurnState::new(
+            shared.provider.clone(),
+            6_484_501 + index as u64,
+            None,
+            1,
+            77_484,
+            18,
+            String::new(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        let channel = ChannelId::new(row.channel_id);
+        let message = MessageId::new(row.user_msg_id);
+        let cancel = Arc::new(CancelToken::new());
+        row.turn_nonce = cancel.turn_nonce().map(str::to_owned);
+        assert!(
+            discord::mailbox_try_start_turn(
+                &shared,
+                channel,
+                cancel.clone(),
+                UserId::new(1),
+                message
+            )
+            .await
+        );
+        discord::increment_global_active(&shared, "test_bridge_admission");
+        let mut incumbent = row.clone();
+        incumbent.user_msg_id += 1;
+        incumbent.turn_nonce = Some("durable-incumbent".into());
+        discord::inflight::save_inflight_state(&incumbent).unwrap();
+        let path = discord::inflight::inflight_state_path(
+            &discord::inflight::inflight_runtime_root().unwrap(),
+            &shared.provider,
+            channel.get(),
+        );
+        let before = std::fs::read(&path).unwrap();
+        let gateway = Arc::new(NoticeGateway {
+            pending,
+            started: Default::default(),
+            sends: Default::default(),
+        });
+        let mut bridge = seed_context("", row);
+        bridge.provider = shared.provider.clone();
+        bridge.user_msg_id = Some(message);
+        let dyn_gateway: Arc<dyn TurnGateway> = gateway.clone();
+        bridge.gateway = dyn_gateway;
+        let (_tx, rx) = mpsc::channel();
+        let inputs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Notify::new());
+        let provider = tokio::spawn({
+            let (cancel, inputs, barrier) = (cancel.clone(), inputs.clone(), barrier.clone());
+            async move {
+                barrier.notified().await;
+                if !cancel.cancelled.load(Ordering::Acquire) {
+                    inputs.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        spawn_turn_bridge(shared.clone(), cancel.clone(), rx, bridge);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            gateway.started.notified(),
+        )
+        .await
+        .expect("the refusal notice is sent");
+        barrier.notify_one();
+        provider.await.unwrap();
+
+        assert_eq!(
+            inputs.load(Ordering::SeqCst),
+            0,
+            "pending={pending}: input after refusal"
+        );
+        assert!(cancel.cancelled.load(Ordering::Acquire));
+        let snapshot = discord::mailbox_snapshot(&shared, channel).await;
+        assert!(
+            snapshot.cancel_token.is_none(),
+            "pending={pending}: slot released"
+        );
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(gateway.sends.load(Ordering::SeqCst), 1);
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn c1_actual_spawn_bridge_retains_effect_until_future_disposal() {
