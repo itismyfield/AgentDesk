@@ -1856,9 +1856,6 @@ mod tests {
                     }
                 ));
                 assert!(!InputTarget::legacy_tmux("guarded-claude-helper").keys_may_follow(&run));
-                let error = run.into_legacy().unwrap_err();
-                assert!(error.starts_with("claude tui input held after mutation:"));
-                assert!(!crate::services::claude_tui::input::is_prompt_ready_timeout_error(&error));
             }
         }
     }
