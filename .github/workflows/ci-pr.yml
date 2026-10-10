@@ -873,6 +873,9 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Ensure swap for the workspace check
+        uses: ./.github/actions/ensure-swap
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
