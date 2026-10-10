@@ -474,46 +474,55 @@ pub(super) async fn establish_bridge_entry_authority(
     true
 }
 
-/// Channel, finalizer turn id, nonce and start stamp of an attempted turn.
+/// Channel, finalizer turn id, nonce and start stamp of a turn row.
 type EntryAbortNoticeKey = (u64, u64, Option<String>, String);
 
-/// Attempted turns already told about an entry refusal; bounded, since losing an old
-/// key only risks one repeated notice.
+fn entry_abort_notice_key(row: &InflightTurnState) -> EntryAbortNoticeKey {
+    (
+        row.channel_id,
+        row.effective_finalizer_turn_id(),
+        row.turn_nonce.clone(),
+        row.started_at.clone(),
+    )
+}
+
+/// Attempted turns and blocking rows already noticed; bounded, since losing an old key
+/// only risks one repeated notice.
 static ENTRY_ABORT_NOTICED: std::sync::LazyLock<
     std::sync::Mutex<std::collections::VecDeque<EntryAbortNoticeKey>>,
 > = std::sync::LazyLock::new(Default::default);
 const ENTRY_ABORT_NOTICE_MEMORY: usize = 256;
 const ENTRY_ABORT_NOTICE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Posts one channel notice per attempted turn whose entry another row's identity refused.
-/// Nothing is deleted or finalized; the notice only explains the dropped start.
+/// Posts one channel notice per attempted turn, and per blocking row, whose identity refused
+/// the entry. Nothing is deleted or finalized; the notice only explains the dropped start.
 async fn notify_bridge_entry_identity_abort(
     bridge: &TurnBridgeContext,
     outcome: crate::services::discord::inflight::GuardedSaveOutcome,
 ) {
     let attempted = &bridge.inflight_state;
-    let key = (
-        attempted.channel_id,
-        attempted.effective_finalizer_turn_id(),
-        attempted.turn_nonce.clone(),
-        attempted.started_at.clone(),
-    );
-    {
-        let mut noticed = ENTRY_ABORT_NOTICED
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if noticed.contains(&key) {
-            return;
-        }
-        if noticed.len() >= ENTRY_ABORT_NOTICE_MEMORY {
-            noticed.pop_front();
-        }
-        noticed.push_back(key);
-    }
     let preserved = crate::services::discord::inflight::load_inflight_state_read_only(
         &bridge.provider,
         attempted.channel_id,
     );
+    let keys: Vec<_> = std::iter::once(attempted)
+        .chain(preserved.as_ref())
+        .map(entry_abort_notice_key)
+        .collect();
+    {
+        let mut noticed = ENTRY_ABORT_NOTICED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if keys.iter().any(|key| noticed.contains(key)) {
+            return;
+        }
+        for key in keys {
+            if noticed.len() >= ENTRY_ABORT_NOTICE_MEMORY {
+                noticed.pop_front();
+            }
+            noticed.push_back(key);
+        }
+    }
     let notice = bridge_entry_abort_notice(outcome, attempted, preserved.as_ref());
     // Bounded: the caller unwinds the mailbox claim only after this returns.
     let sent = TurnGateway::send_message(bridge.gateway.as_ref(), bridge.channel_id, &notice);
@@ -992,8 +1001,8 @@ mod tests {
         assert_eq!(std::fs::read(path).expect("successor survives"), before);
     }
 
-    /// An entry refused because another episode owns the row tells the channel once per
-    /// attempted turn, without the prompt, and leaves that row and the mailbox as they were.
+    /// An entry refused because another episode owns the row tells the channel once per turn
+    /// and blocking row, without the prompt, and leaves that row and the mailbox as they were.
     #[tokio::test(flavor = "current_thread")]
     async fn an_identity_refused_entry_notifies_the_channel_once_and_keeps_the_row() {
         use super::super::stream_tick::provider_output_guard_tests::CapturingGateway;
@@ -1033,7 +1042,11 @@ mod tests {
         let dyn_gateway: std::sync::Arc<dyn TurnGateway> = gateway.clone();
         bridge.gateway = dyn_gateway;
 
-        for attempt in 0..2 {
+        for attempt in 0..3 {
+            if attempt == 2 {
+                // A fresh attempt held off by the same row adds no second notice.
+                bridge.inflight_state.started_at = "next-attempt-started-at".to_string();
+            }
             let (completion_tx, mut completion_rx) = tokio::sync::oneshot::channel();
             bridge.completion_tx = Some(completion_tx);
             let mut durable = bridge.inflight_state.clone();
@@ -1059,7 +1072,11 @@ mod tests {
         }
 
         let sends = gateway.sends.lock().expect("sends lock").clone();
-        assert_eq!(sends.len(), 1, "one notice per attempted turn: {sends:?}");
+        assert_eq!(
+            sends.len(),
+            1,
+            "one notice per turn and blocking row: {sends:?}"
+        );
         assert!(sends[0].contains("시도한 턴: 77648"), "{}", sends[0]);
         assert!(
             sends[0].contains("보존한 기존 기록: 턴 77648 (Managed, 시작 "),

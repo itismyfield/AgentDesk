@@ -3180,7 +3180,18 @@ async fn s3_completion_fixture_body(
             .active_user_message_id,
         Some(MessageId::new(880004))
     );
-    assert!(gateway.bodies.lock().unwrap().is_empty());
+    // An entry abort may post its refusal notice, never a response body.
+    assert!(
+        gateway
+            .bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|body| signal == Some(false)
+                && body.starts_with("⚠️ 이번 턴을 시작하지 못했습니다")),
+        "{}",
+        gateway.traffic_dump()
+    );
     let expected = if signal != Some(true) {
         owned
             .filter(|id| Some(*id) != durable && *id != 880004)
