@@ -439,6 +439,90 @@ async fn both_expired_clocks_choose_soft_after_a_long_open_turn() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn expired_rotation_is_released_before_an_unchanged_open_turn_refusal() {
+    if !isolated(concat!(
+        module_path!(),
+        "::expired_rotation_is_released_before_an_unchanged_open_turn_refusal"
+    )) {
+        return;
+    }
+    let open = row("m0", "source A stays open");
+    let stalled = Stalled::new(&open, open.len() as u64, Some(0), Custody::Active);
+    stalled.legacy.tail.store(true, Ordering::SeqCst);
+    let original = std::fs::read(&stalled.path).unwrap();
+    let version = crate::services::tui_o::writer::adoption::ReadVersion::of(&stalled.path)
+        .expect("source A exists");
+    let clock = Clock::new();
+    let tasks = stalled.start();
+    clock.started().await;
+    let path = stalled.path.clone();
+    let pinned_version = version.clone();
+    let body = original.clone();
+    let reached = hook_reached(Step::Snapshot, move || {
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        assert_eq!(
+            crate::services::tui_o::writer::adoption::ReadVersion::of(&path),
+            Some(pinned_version)
+        );
+    });
+    clock.to(SOFT - Duration::from_nanos(1)).await;
+    assert!(!reached.load(Ordering::SeqCst));
+    clock.to(SOFT).await;
+    assert!(
+        reached.load(Ordering::SeqCst),
+        "the actual expired End pin attempted unchanged open source A"
+    );
+    stalled.assert_waiting("the actual End pin cached source A's OpenTurn refusal");
+    assert_eq!(fence_calls(&stalled.io), 0);
+    assert_eq!(candidate().sends(), (0, 0));
+    assert_eq!(stalled.legacy.reconnects.load(Ordering::SeqCst), 0);
+
+    // Keep A's refusal unchanged while only the binding names another source.
+    let runtime = stalled.harness._runtime.path().to_path_buf();
+    let other = runtime.join("rotated-b.jsonl");
+    std::fs::write(&other, [row("m1", "source B"), closed()].concat()).unwrap();
+    let a = source_id_for("s1", &stalled.path).unwrap();
+    let b = source_id_for("s2", &other).unwrap();
+    p5_log(&runtime, CHANNEL, &binds(&[&a, &b]));
+    assert_eq!(std::fs::read(&stalled.path).unwrap(), original);
+    assert_eq!(
+        crate::services::tui_o::writer::adoption::ReadVersion::of(&stalled.path),
+        Some(version)
+    );
+    assert!(stalled.legacy.tail.load(Ordering::SeqCst));
+    assert_eq!(*stalled.io.custody.lock().unwrap(), Ok(Custody::Active));
+    assert_eq!(candidate().sends(), (0, 0));
+    assert_eq!(*stalled.legacy.frontier.lock().unwrap(), Some(0));
+    assert_eq!(stalled.legacy.reconnects.load(Ordering::SeqCst), 0);
+    clock.to(SOFT + TICK).await;
+    assert_eq!(
+        adoption(CHANNEL),
+        Adoption::Released,
+        "the next expired tick handles rotation before stale OpenTurn cache or B quiet"
+    );
+    assert!(!stalled.harness.store.has_channel_dir(CHANNEL));
+    assert!(stalled.harness.store.read_init(CHANNEL).unwrap().is_none());
+    assert!(!stalled.ready.is_ready(CHANNEL));
+    assert_eq!(fence_calls(&stalled.io), 0);
+    assert_eq!(stalled.harness.port.posts(), Vec::<String>::new());
+    let released = stalled.io.alarms.released();
+    assert!(
+        matches!(released.as_slice(), [(CHANNEL, detail)]
+            if detail.contains("bound while the adoption waited")
+                && detail.contains(other.to_string_lossy().as_ref())),
+        "exactly one rotation release must name B: {released:?}"
+    );
+    assert_eq!(stalled.alarms().len(), 1, "no unrelated alarm was reported");
+    clock.to(SOFT + 3 * TICK).await;
+    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    assert_eq!(stalled.io.alarms.released(), released);
+    assert_eq!(fence_calls(&stalled.io), 0);
+    assert_eq!(stalled.harness.port.posts(), Vec::<String>::new());
+    drop(clock);
+    finish(tasks).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn expired_intake_queue_and_fence_errors_block_without_restarting_the_clocks() {
     if !isolated(concat!(
         module_path!(),
@@ -828,52 +912,69 @@ async fn normal_deferred_commit_rejects_a_real_send_started_before_its_lock() {
     finish(tasks).await;
 }
 
+async fn ownership_stays_locked_through_init(expired: bool) {
+    let stalled = Stalled::dead_tail();
+    let clock = Clock::new();
+    let tasks = stalled.start();
+    clock.started().await;
+    if !expired {
+        *stalled.legacy.frontier.lock().unwrap() = Some(stalled.len());
+        *stalled.io.custody.lock().unwrap() = Ok(Custody::Free);
+    }
+    let observer = Arc::clone(&stalled.harness.gate);
+    let changing = Arc::clone(&stalled.harness.gate);
+    let protected = Arc::new(AtomicBool::new(false));
+    let checked = Arc::clone(&protected);
+    let thread = Arc::new(Mutex::new(None));
+    let save = Arc::clone(&thread);
+    let reached = hook_reached(Step::BeforeWrite, move || {
+        let locked = std::thread::spawn(move || observer.locked_for_test())
+            .join()
+            .unwrap();
+        checked.store(locked, Ordering::SeqCst);
+        *save.lock().unwrap() = Some(std::thread::spawn(move || changing.lost()));
+    });
+    clock.to(if expired { SOFT } else { 6 * TICK }).await;
+    assert!(
+        reached.load(Ordering::SeqCst),
+        "the actual Deferred activation reached BeforeWrite"
+    );
+    assert!(
+        fence_calls(&stalled.io) > 0,
+        "the actual Deferred activation used its intake fence"
+    );
+    assert!(
+        protected.load(Ordering::SeqCst),
+        "Owned must stay locked through the init write"
+    );
+    assert_eq!(adoption(CHANNEL), Adoption::Committed);
+    assert!(stalled.harness.store.read_init(CHANNEL).unwrap().is_some());
+    thread.lock().unwrap().take().unwrap().join().unwrap();
+    assert_eq!(stalled.harness.gate.current(), GatewayOwnership::Lost);
+    drop(clock);
+    finish(tasks).await;
+}
+
 #[tokio::test(start_paused = true)]
-async fn owned_loss_waits_until_init_publication_for_normal_and_expired_commits() {
+async fn normal_deferred_commit_holds_ownership_until_init_publication() {
     if !isolated(concat!(
         module_path!(),
-        "::owned_loss_waits_until_init_publication_for_normal_and_expired_commits"
+        "::normal_deferred_commit_holds_ownership_until_init_publication"
     )) {
         return;
     }
-    for expired in [false, true] {
-        let stalled = Stalled::dead_tail();
-        let clock = Clock::new();
-        let tasks = stalled.start();
-        clock.started().await;
-        if !expired {
-            *stalled.legacy.frontier.lock().unwrap() = Some(stalled.len());
-            *stalled.io.custody.lock().unwrap() = Ok(Custody::Free);
-        }
-        let changing = Arc::clone(&stalled.harness.gate);
-        let blocked = Arc::new(AtomicBool::new(false));
-        let waited = Arc::clone(&blocked);
-        let thread = Arc::new(Mutex::new(None));
-        let save = Arc::clone(&thread);
-        let reached = hook_reached(Step::BeforeWrite, move || {
-            let (started, attempted) = std::sync::mpsc::channel();
-            let loss = std::thread::spawn(move || {
-                started.send(()).unwrap();
-                changing.lost();
-            });
-            attempted.recv_timeout(Duration::from_secs(2)).unwrap();
-            std::thread::sleep(Duration::from_millis(50));
-            waited.store(!loss.is_finished(), Ordering::SeqCst);
-            *save.lock().unwrap() = Some(loss);
-        });
-        clock.to(if expired { SOFT } else { 6 * TICK }).await;
-        assert!(reached.load(Ordering::SeqCst));
-        assert!(
-            blocked.load(Ordering::SeqCst),
-            "Owned was protected through the init write"
-        );
-        thread.lock().unwrap().take().unwrap().join().unwrap();
-        assert_eq!(adoption(CHANNEL), Adoption::Committed);
-        assert!(stalled.harness.store.read_init(CHANNEL).unwrap().is_some());
-        assert_eq!(stalled.harness.gate.current(), GatewayOwnership::Lost);
-        drop(clock);
-        finish(tasks).await;
+    ownership_stays_locked_through_init(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_handoff_holds_ownership_until_init_publication() {
+    if !isolated(concat!(
+        module_path!(),
+        "::expired_handoff_holds_ownership_until_init_publication"
+    )) {
+        return;
     }
+    ownership_stays_locked_through_init(true).await;
 }
 
 #[tokio::test(start_paused = true)]

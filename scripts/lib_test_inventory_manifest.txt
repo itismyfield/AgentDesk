@@ -11125,14 +11125,16 @@ services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::bot
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::default_intake_fence_prevents_actual_deferred_activation
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::epoch_churn_does_not_postpone_exact_hard_boundary
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::expired_adoption_legacy_attempts_are_judged_owned_and_o_posts_once
+services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::expired_handoff_holds_ownership_until_init_publication
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::expired_intake_queue_and_fence_errors_block_without_restarting_the_clocks
+services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::expired_rotation_is_released_before_an_unchanged_open_turn_refusal
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::frontier_at_expiry_lock_refuses_and_restarts_delivery_clocks
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::frontier_decrease_restarts_the_hard_clock_despite_epoch_churn
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::frontier_lost_or_misaligned_after_deferral_never_initializes_for_120_minutes
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::frontier_progress_restarts_both_clocks_at_the_observed_tick
+services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::normal_deferred_commit_holds_ownership_until_init_publication
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::normal_deferred_commit_rejects_a_real_send_started_before_its_fence
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::normal_deferred_commit_rejects_a_real_send_started_before_its_lock
-services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::owned_loss_waits_until_init_publication_for_normal_and_expired_commits
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::permanent_open_turn_and_held_body_reservation_block_for_120_minutes
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::redrive_schedule_keeps_hard_expiry_blocked_until_relay_slot_clears
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::relay_started_after_fence_blocks_hard_expiry_without_progress

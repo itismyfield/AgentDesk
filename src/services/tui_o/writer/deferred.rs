@@ -313,6 +313,10 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
         let Ok(observed) = events(&waiting) else {
             continue;
         };
+        if let Some(detail) = rotation(&waiting, &observed) {
+            release(candidate, &alarms, channel, &detail);
+            return false;
+        }
         let current = adoption::current(&observed);
         let version = current
             .as_ref()
@@ -343,10 +347,6 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
             let again = Refused::retry("Legacy is relaying at the hard stall limit");
             note_wait(channel, &again, &mut last_logged, true);
             continue;
-        }
-        if let Some(detail) = rotation(&waiting, &observed) {
-            release(candidate, &alarms, channel, &detail);
-            return false;
         }
         let pinned = pin(Arc::clone(&waiting.legacy), Ok(observed), channel, At::End).await;
         let snapshot = match pinned {
