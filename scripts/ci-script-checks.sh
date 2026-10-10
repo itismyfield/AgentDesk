@@ -339,6 +339,10 @@ if run_check guards "Durable frontier writer per-file call-site allowlist (#5071
 "$PYTHON" -m unittest tests.test_durable_frontier_writer_call_sites
 fi
 
+if run_check guards "Input thread mapping census"; then
+"$PYTHON" scripts/test_input_mapping_census.py
+fi
+
 if run_check guards "TUI O writer census: Legacy send sites and cutover gates"; then
 # Pins every Discord send site's census row and every O cutover gate by exact
 # per-file count; the script docstring declares its lexical limits.
