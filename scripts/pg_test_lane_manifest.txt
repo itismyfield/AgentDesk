@@ -29,6 +29,10 @@ src/db/postgres/advisory_lock_tests.rs
 src/db/postgres/test_db_reclaim.rs
 src/db/prompt_manifests/tests.rs
 src/db/relay_dead_letter.rs
+src/db/replay_disposition_tests.rs
+src/db/replay_disposition_tests/compatibility_tests.rs
+src/db/replay_disposition_tests/concurrency_tests.rs
+src/db/replay_disposition_tests/consumer_tests.rs
 src/db/scheduled_messages/postgres_tests.rs
 src/db/session_observability/background_ordering_pg_tests.rs
 src/db/session_transcripts.rs
@@ -67,6 +71,7 @@ src/server/routes/session_evidence_tests.rs
 src/server/routes/stats.rs
 src/server/routes/tests/auto_queue_preflight_harness_tests.rs
 src/server/task_dispatch_claims.rs
+src/server/task_dispatch_claims_replay_tests.rs
 src/services/agent_quality/regression_alerts.rs
 src/services/agent_recovery/durable/postgres_tests.rs
 src/services/auto_queue.rs
@@ -104,6 +109,7 @@ src/services/cluster/intake_worker/home_accept_tests.rs
 src/services/cluster/intake_worker/home_route_tests.rs
 src/services/cluster/intake_worker/input_effect_tests.rs
 src/services/cluster/intake_worker/o_route_tests.rs
+src/services/cluster/intake_worker/replay_hold_tests.rs
 src/services/cluster/machine_resources/store.rs
 src/services/discord/admin_host_guard_tests.rs
 src/services/discord/catch_up/too_old_drop_pg_tests.rs
@@ -137,12 +143,14 @@ src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs
 src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs
 src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs
 src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs
+src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs
 src/services/discord/recovery_engine/routing_orphan_tests.rs
 src/services/discord/relay_recovery/tests/host_deferred.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
 src/services/discord/router/intake_dispatch/home_order_tests.rs
 src/services/discord/router/intake_dispatch/tests.rs
+src/services/discord/router/intake_dispatch/tests/replay_hold.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs
@@ -182,6 +190,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs
 src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
+src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs
 src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs
 src/services/discord/turn_bridge/intake_settlement/tests.rs
 src/services/discord/turn_bridge/recovery_text.rs
@@ -200,6 +209,7 @@ src/services/discord/watchers/lifecycle/restore.rs
 src/services/discord/watchers/lifecycle/restore_tests.rs
 src/services/dispatches/discord_delivery/guard.rs
 src/services/dispatches/outbox_claiming.rs
+src/services/dispatches/outbox_queue_replay_tests.rs
 src/services/dispatches/wait_queue.rs
 src/services/herdr_launch_tests.rs
 src/services/maintenance/jobs/db_retention.rs
@@ -265,6 +275,10 @@ db::postgres::test_db_reclaim::tests
 db::postgres::tests
 db::prompt_manifests::tests
 db::relay_dead_letter::tests
+db::replay_disposition::tests
+db::replay_disposition::tests::compatibility_tests
+db::replay_disposition::tests::concurrency_tests
+db::replay_disposition::tests::consumer_tests
 db::scheduled_messages::postgres_tests
 db::session_observability::tests_pg
 db::session_transcripts::clear_fence_pg_tests
@@ -302,6 +316,7 @@ server::routes::queue_api::cancel_queue_preserve_pg_tests
 server::routes::scheduled_messages::postgres_tests
 server::routes::session_evidence::tests
 server::routes::stats::memento_feedback_stats_pg_tests
+server::task_dispatch_claims::replay_tests
 server::task_dispatch_claims::task_dispatch_claims_pg_tests
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests
 services::agent_recovery::durable::postgres_tests
@@ -345,6 +360,7 @@ services::cluster::intake_worker::home_accept_tests
 services::cluster::intake_worker::home_route_tests
 services::cluster::intake_worker::input_effect_tests
 services::cluster::intake_worker::o_route_tests
+services::cluster::intake_worker::replay_hold_tests
 services::cluster::machine_resources::store::tests
 services::discord::admin_host_guard::tests
 services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests
@@ -380,12 +396,14 @@ services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
 services::discord::recovery_engine::restore_inflight::host_probe_tests
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
+services::discord::recovery_engine::restore_inflight::replay_hold_tests
 services::discord::recovery_engine::routing_orphan::host_guard_tests
 services::discord::relay_recovery::apply::host_deferred_tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::router::intake_dispatch::home_order_tests
 services::discord::router::intake_dispatch::tests
+services::discord::router::intake_dispatch::tests::replay_hold
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
@@ -428,6 +446,7 @@ services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
+services::discord::turn_bridge::completion_guard::completion_postgres::replay_hold_tests
 services::discord::turn_bridge::headless_delivery::production_seam_tests
 services::discord::turn_bridge::intake_settlement::tests
 services::discord::turn_bridge::recovery_text::tests
@@ -443,6 +462,7 @@ services::discord::turn_bridge::voice_completion::voice_completion_tests
 services::discord::turn_teardown_clearance::tests
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests
+services::dispatches::outbox_queue::replay_hold_tests
 services::dispatches::wait_queue::tests
 services::herdr_launch::tests
 services::maintenance::jobs::db_retention::tests
@@ -764,6 +784,15 @@ db::prompt_manifests::tests::prompt_manifest_save_applies_write_time_cap_via_glo
 db::prompt_manifests::tests::prompt_manifest_save_fetch_round_trip_pg
 db::relay_dead_letter::tests::deferred_rows_do_not_starve_a_never_tried_row_pg
 db::relay_dead_letter::tests::insert_read_back_detached_and_retention_roundtrip_pg
+db::replay_disposition::tests::absorbed_sources_and_all_blocked_states_are_provider_and_channel_scoped_pg
+db::replay_disposition::tests::compatibility_tests::dormant_schema_keeps_runtime_delivery_and_preaccept_retry_attempt_policy_pg
+db::replay_disposition::tests::concurrency_tests::concurrent_source_authority_serializes_with_claim_and_duplicate_start_pg
+db::replay_disposition::tests::consumer_tests::held_dispatch_claim_autoqueue_history_outbox_and_atomic_rollback_pg
+db::replay_disposition::tests::consumer_tests::held_dispatch_nonnull_result_rewrite_is_fenced_pg
+db::replay_disposition::tests::consumer_tests::held_session_canonical_identity_rewrites_are_fenced_pg
+db::replay_disposition::tests::consumer_tests::legacy_null_link_cannot_requeue_via_held_history_pg
+db::replay_disposition::tests::consumer_tests::normal_retry_parent_absorbed_sources_survive_sweep_and_old_writer_child_pg
+db::replay_disposition::tests::receipt_transitions_old_writers_and_delivery_settlement_preserve_authority_pg
 db::scheduled_messages::postgres_tests::postgres_agent_claim_waits_for_runtime_and_cancel_fences_turn_start
 db::scheduled_messages::postgres_tests::postgres_agent_launch_intent_crash_rearms_without_phantom_lease_renewal
 db::scheduled_messages::postgres_tests::postgres_agent_turn_start_waits_for_parent_lock_and_observes_cancel
@@ -957,6 +986,8 @@ server::routes::session_evidence::tests::session_evidence_missing_raw_identity_i
 server::routes::session_evidence::tests::session_evidence_provider_channels_ignore_unbound_history_pg
 server::routes::session_evidence::tests::session_evidence_stale_working_pending_is_observation_only_pg
 server::routes::stats::memento_feedback_stats_pg_tests::load_memento_feedback_counts_returns_persisted_writer_values_pg
+server::task_dispatch_claims::replay_tests::replay_hold_prevents_actual_dispatch_claim_and_expired_lease_reclaim_pg
+server::task_dispatch_claims::replay_tests::replay_schema_keeps_actual_dispatch_claim_without_a_hold_pg
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_acquires_first_per_node_semaphore_on_preferred_node
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_does_not_reclaim_active_null_expiry_semaphore_holder
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_falls_back_when_preferred_node_semaphore_is_exhausted
@@ -1171,6 +1202,9 @@ services::cluster::intake_worker::o_route_tests::a_canary_row_commits_accept_and
 services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
 services::cluster::intake_worker::o_route_tests::readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_last_check_pg
+services::cluster::intake_worker::replay_hold_tests::replay_hold_committed_after_worker_claim_blocks_accept_and_provider_pg
+services::cluster::intake_worker::replay_hold_tests::replay_hold_survives_worker_replacement_and_foreign_claim_owners_pg
+services::cluster::intake_worker::replay_hold_tests::replay_schema_preserves_normal_worker_delivery_and_preaccept_attempt_budget_pg
 services::cluster::machine_resources::store::tests::postgres_machine_history_is_durable_ordered_deduplicated_and_retained
 services::discord::admin_host_guard::tests::a_configured_channel_refuses_a_dispatch_reset_before_any_change_pg
 services::discord::admin_host_guard::tests::a_dispatch_reusing_a_configured_thread_is_refused_before_its_bootstrap_pg
@@ -1277,6 +1311,16 @@ services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::he
 services::discord::recovery_engine::restore_inflight::host_probe_tests::a_restored_reader_hands_off_or_retries_only_on_a_confirmed_pane_pg
 services::discord::recovery_engine::restore_inflight::host_probe_tests::restart_recovery_moves_a_claude_row_only_on_a_local_tmux_answer_pg
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_dead_pane_needs_the_host_guard_before_any_notice_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_delivers_debt_without_finalizing_or_readopting_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_dormant_rows_keep_existing_missing_host_disposal_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_failed_delivery_retains_the_original_debt_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_keeps_already_visible_prefix_at_the_same_anchor_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_missing_receipt_keeps_request_and_frozen_state_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_preserves_a_fresh_actor_while_old_debt_waits_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_preserves_unknown_runtime_bytes_before_legacy_clear_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_projected_read_errors_keep_bytes_until_authority_recovers_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_read_error_is_not_a_durable_hold_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_retains_ambiguous_or_invalid_frozen_debt_pg
 services::discord::recovery_engine::routing_orphan::host_guard_tests::routing_orphan_finalizes_only_a_dead_pane_the_host_guard_admits_pg
 services::discord::relay_recovery::apply::host_deferred_tests::automatic_orphan_apply_keeps_a_turn_on_an_unconfirmed_host_pg
 services::discord::relay_recovery::apply::host_deferred_tests::manual_orphan_recovery_keeps_a_turn_on_an_unconfirmed_host_pg
@@ -1293,6 +1337,9 @@ services::discord::router::intake_dispatch::tests::obligation_window_facade_rest
 services::discord::router::intake_dispatch::tests::queued_foreign_attachment_is_rejected_without_requeue_pg
 services::discord::router::intake_dispatch::tests::queued_foreign_owner_forwards_without_local_body_pg
 services::discord::router::intake_dispatch::tests::raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg
+services::discord::router::intake_dispatch::tests::replay_hold::replay_admission_dormant_and_other_identity_keeps_local_policy_pg
+services::discord::router::intake_dispatch::tests::replay_hold::replay_live_absorbed_sources_cannot_forward_and_keep_original_pg
+services::discord::router::intake_dispatch::tests::replay_hold::replay_queued_whole_consumed_and_mixed_original_restored_pg
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
 services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_a_stale_thread_on_an_unconfirmed_host_pg
@@ -1526,6 +1573,8 @@ services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::restoring_retry_failure_terminalizes_dispatch_and_requeues_entry_pg
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::terminal_failure_reconciles_phase_gate_and_releases_semaphore_pg
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::terminal_fallback_finalizes_run_once_pg
+services::discord::turn_bridge::completion_guard::completion_postgres::replay_hold_tests::replay_hold_dormant_and_classified_generic_failure_preserve_retry_policy_pg
+services::discord::turn_bridge::completion_guard::completion_postgres::replay_hold_tests::replay_hold_generic_failure_preserves_request_entry_links_slots_and_delivery_owner_pg
 services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_active_statuses_return_existing_id_and_terminal_statuses_retry_pg
 services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_concurrent_duplicates_converge_on_one_active_row_pg
 services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_exact_identity_is_content_free_and_owner_sensitive_pg
@@ -1551,6 +1600,7 @@ services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_ca
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_foreign_or_stale_pg
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_to_executor_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::kept_resume_failure_keeps_the_session_id_and_inflight_through_completion_pg
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_hold_session_died_recovery_preserves_body_and_session_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::session_died_recovery_retries_only_a_session_the_host_guard_admits_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests::bridge_child_close_and_terminal_http_write_converge_in_all_orders_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests::bridge_child_completion_before_insert_commit_reconciles_both_cursors_pg
@@ -1607,6 +1657,9 @@ services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::outbox_c
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::outbox_skip_reason_reports_offline_claim_owner_beside_route_preference
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::reassign_stale_claim_owner_clears_owner_when_no_live_candidate_matches
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::reassign_stale_claim_owners_moves_100_pending_rows_to_live_label_match
+services::dispatches::outbox_queue::replay_hold_tests::replay_hold_dormant_batch_preserves_legacy_notify_and_classified_terminal_followup_pg
+services::dispatches::outbox_queue::replay_hold_tests::replay_hold_old_notify_and_followup_never_call_notifier_but_status_reaction_does_pg
+services::dispatches::outbox_queue::replay_hold_tests::replay_hold_unreadable_batch_gate_fails_closed_without_spending_retry_budget_pg
 services::dispatches::wait_queue::tests::wake_waiting_dispatch_outbox_pg_reassigns_wait_rows_fifo
 services::herdr_launch::tests::herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that_nonce_pg
 services::herdr_launch::tests::herdr_launch_creates_nothing_unless_its_own_pending_commits_pg
