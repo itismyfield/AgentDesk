@@ -188,6 +188,8 @@ pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
 mod tui_task_card;
 mod turn_bridge;
+#[cfg(test)]
+pub(crate) use turn_bridge::replay_policy;
 #[allow(clippy::too_many_arguments)]
 mod turn_finalizer;
 pub(crate) mod turn_lease;

@@ -20,6 +20,8 @@ mod panel_lifecycle;
 mod post_loop_finalize;
 mod recall_feedback;
 pub(in crate::services::discord) mod recovery_text;
+#[cfg(test)]
+pub(crate) mod replay_policy;
 mod response_delivery;
 mod retry_state;
 mod runtime_handoff_loop;

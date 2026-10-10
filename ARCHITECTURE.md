@@ -169,6 +169,10 @@ src/
 │   │   ├── retention.rs
 │   │   ├── storage_stats.rs
 │   │   └── tests.rs
+│   ├── replay_disposition/
+│   │   ├── receipt.rs
+│   │   ├── write.rs
+│   │   └── write_tests.rs
 │   ├── replay_disposition_tests/
 │   │   ├── compatibility_tests.rs
 │   │   ├── concurrency_tests.rs
@@ -1315,6 +1319,8 @@ src/
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── policy_channel.rs
 │   │   │   │   ├── queued.rs
+│   │   │   │   ├── replay_admission.rs
+│   │   │   │   ├── replay_admission_tests.rs
 │   │   │   │   ├── skill.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── intake_gate/
@@ -1747,6 +1753,11 @@ src/
 │   │   │   │   └── production_seam_tests.rs
 │   │   │   ├── intake_settlement/
 │   │   │   │   └── tests.rs
+│   │   │   ├── replay_policy/
+│   │   │   │   ├── live.rs
+│   │   │   │   ├── permit.rs
+│   │   │   │   ├── permit_tests.rs
+│   │   │   │   └── policy_tests.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
@@ -1855,6 +1866,7 @@ src/
 │   │   │   ├── post_loop_finalize.rs
 │   │   │   ├── recall_feedback.rs
 │   │   │   ├── recovery_text.rs
+│   │   │   ├── replay_policy.rs
 │   │   │   ├── response_delivery.rs
 │   │   │   ├── resume_pin_tests.rs
 │   │   │   ├── retry_state.rs
