@@ -7522,6 +7522,7 @@ services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_o
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_offset_harness_tests::a_row_at_a_recorded_zero_keeps_it
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_offset_harness_tests::a_row_with_no_transcript_offset_restores_at_the_furthest_known_position
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_offset_harness_tests::a_row_with_no_transcript_offset_restores_past_older_turns
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::restore_offset_harness_tests::an_undelivered_tail_before_the_restart_is_read_from_the_frontier
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_after_a_normal_exit_baseline_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_against_a_same_identity_successor_baseline
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::planned_drain_pinned_row_baseline

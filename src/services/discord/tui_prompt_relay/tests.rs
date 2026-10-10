@@ -3226,10 +3226,10 @@ fn s3t2_delivery_failure_never_cancels_successor_or_commits_cursor() {
             .unwrap();
         assert!(!branch.contains("finish_tui_direct_synthetic_turn_if_current"));
         assert!(!branch.contains("advance_"));
-        let commit = if source.contains("advance_claude_tmux_runtime_binding_offset(") {
-            "if let Ok(Some(final_offset)) = delivery_result {"
-        } else {
+        let commit = if source.contains("advance_codex_tui_runtime_binding_and_marker_offset(") {
             "Ok(Some(final_offset)) => {\n            advance_codex_tui_runtime_binding_and_marker_offset("
+        } else {
+            "if let Ok(Some(final_offset)) = delivery_result {"
         };
         assert!(
             source.contains(commit),

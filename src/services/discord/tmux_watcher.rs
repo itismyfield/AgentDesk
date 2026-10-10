@@ -1525,7 +1525,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             ) {
                 // Keep the SSH-direct replay watermark in lockstep with committed bytes
                 // Busy pane observations no longer keep this a candidate.
-                crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+                crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_checkpoint(
                     &tmux_session_name,
                     &output_path,
                     candidate_offset,

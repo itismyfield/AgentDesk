@@ -416,9 +416,9 @@ pub(super) async fn run_claude_idle_response_tail(
     // The adapter consumes reader completion before Done. Only a decoded
     // terminal plus committed publication can advance this source cursor.
     if let Ok(Some(final_offset)) = delivery_result {
-        advance_claude_tmux_runtime_binding_offset(
+        crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_checkpoint(
             &tmux_session_name,
-            &transcript_path,
+            transcript_path.to_str().unwrap_or_default(),
             final_offset,
         );
     }

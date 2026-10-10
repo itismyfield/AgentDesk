@@ -134,15 +134,12 @@ pub(super) fn claude_fallback_unrecorded_start_offset(
             tmux_session_name,
             Some(file_len),
         );
-    let binding_offset =
-        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
-            .filter(|binding| {
-                binding.runtime_kind
-                    == crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
-                    && binding.output_path == transcript_path
-            })
-            .map(|binding| binding.last_offset);
-    let known = [frontier_end, binding_offset, state.turn_start_offset]
+    // Not the binding cursor: a rehydrate seeds it at boot EOF, past any undelivered tail.
+    let checkpoint = crate::services::tui_prompt_dedupe::runtime_binding_resume_checkpoint(
+        tmux_session_name,
+        transcript_path,
+    );
+    let known = [frontier_end, checkpoint, state.turn_start_offset]
         .into_iter()
         .flatten()
         .filter(|&offset| offset > 0 && offset <= file_len)

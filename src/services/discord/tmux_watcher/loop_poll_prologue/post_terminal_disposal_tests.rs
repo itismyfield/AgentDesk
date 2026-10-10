@@ -33,6 +33,10 @@ async fn suppressed_poll_keeps_shared_delivery_frontier() {
     }
     let payload = "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"늦은 결과\"}\n";
     let end = payload.len() as u64;
+    // Longer than one read, so the read stops before a frontier at the file's end.
+    let trailing: String =
+        std::iter::repeat_n("{\"type\":\"result\",\"result\":\"late\"}\n", 600).collect();
+    let (trailing_len, first_read) = (trailing.len() as u64, 16_384);
     for (index, (case, range, stale, carried, pending_utf8)) in [
         ("no receipt", None, false, "", false),
         ("covered", Some((0, end)), false, "", false),
@@ -49,11 +53,28 @@ async fn suppressed_poll_keeps_shared_delivery_frontier() {
             false,
         ),
         ("pending UTF8", Some((0, end)), false, "", true),
+        (
+            "trailing covered",
+            Some((0, trailing_len)),
+            false,
+            "",
+            false,
+        ),
+        (
+            "trailing uncovered",
+            Some((0, first_read - 1)),
+            false,
+            "",
+            false,
+        ),
     ]
     .into_iter()
     .enumerate()
     {
-        let disk_payload = if pending_utf8 {
+        let trail = case.starts_with("trailing");
+        let disk_payload = if trail {
+            trailing.clone()
+        } else if pending_utf8 {
             "한".to_owned()
         } else if !carried.is_empty() {
             format!("{carried}다음 결과\"}}\n")
@@ -66,6 +87,8 @@ async fn suppressed_poll_keeps_shared_delivery_frontier() {
             carried.len() as u64
         };
         let end = disk_payload.len() as u64;
+        let read_end = if trail { first_read } else { end };
+        assert!(read_end <= end);
         let range = if pending_utf8 || !carried.is_empty() {
             range.map(|_| (0, end))
         } else {
@@ -177,17 +200,20 @@ async fn suppressed_poll_keeps_shared_delivery_frontier() {
         )
         .await
         .unwrap();
-        assert_eq!(offset, end, "{case}: read position advances without rewind");
-        if case == "covered" {
+        assert_eq!(
+            offset, read_end,
+            "{case}: read position advances without rewind"
+        );
+        if case == "covered" || case == "trailing covered" {
             assert_eq!(result, PollOutcome::ContinueWatcherLoop, "{case}");
             assert_eq!(
                 (local_end, local_generation),
-                (Some(end), Some(generation_mtime))
+                (Some(read_end), Some(generation_mtime))
             );
             assert_eq!(
                 suppressed,
-                Some((0, end)),
-                "receipt-backed disposal reached"
+                Some((0, read_end)),
+                "{case}: receipt-backed disposal reached"
             );
         } else {
             let PollOutcome::OutputReady {
@@ -201,7 +227,7 @@ async fn suppressed_poll_keeps_shared_delivery_frontier() {
             };
             assert_eq!(
                 data,
-                &disk_payload.as_bytes()[start as usize..],
+                &disk_payload.as_bytes()[start as usize..read_end as usize],
                 "{case}: all unread bytes survive"
             );
             assert_eq!(data_start_offset, start);

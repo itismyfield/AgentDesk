@@ -71,6 +71,13 @@ use self::rehydration::{
 };
 #[cfg(all(unix, test))]
 pub(crate) use rehydration::run_codex_rehydrate_pass_for_tests;
+/// The binding a boot rehydrate builds for `tmux` from its launch script.
+#[cfg(all(unix, test))]
+pub(in crate::services::discord) fn rehydrated_claude_binding_for_tests(
+    tmux: &str,
+) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
+    rehydrated_claude_tui_binding_for_tmux_session(tmux)
+}
 
 mod anchor_completion;
 mod bridge_completion;
@@ -183,10 +190,10 @@ pub(super) use self::claude_idle_runtime::resolve_rehydrated_claude_tmux_channel
 #[cfg(unix)]
 use self::claude_idle_runtime::{
     DEAD_ORPHANED_PANE_PROBE_DELAY, DEAD_ORPHANED_PANE_PROBE_SAMPLES,
-    advance_claude_tmux_runtime_binding_offset, claude_continuation_binding_supersedes_launch,
-    claude_tui_rehydrate_start_offset, claude_tui_runtime_binding_matches_launch,
-    resolve_idle_relay_transcript, resolve_rehydrated_tmux_channel_id,
-    resolved_claude_idle_relay_transcript_path, spawn_claude_idle_transcript_relay,
+    claude_continuation_binding_supersedes_launch, claude_tui_rehydrate_start_offset,
+    claude_tui_runtime_binding_matches_launch, resolve_idle_relay_transcript,
+    resolve_rehydrated_tmux_channel_id, resolved_claude_idle_relay_transcript_path,
+    spawn_claude_idle_transcript_relay,
 };
 #[cfg(unix)]
 pub(in crate::services::discord) use self::claude_idle_runtime::{

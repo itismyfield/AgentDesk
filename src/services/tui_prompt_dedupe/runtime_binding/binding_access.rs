@@ -55,6 +55,39 @@ pub fn register_provider_session(
     }
 }
 
+/// Per session, the source and offset a confirmed delivery last reached. Kept apart from the
+/// binding cursor, which a rehydrate seeds at the file's end and the prompt scan advances.
+static RESUME_CHECKPOINTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (String, u64)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Advances the binding cursor after a confirmed delivery and records it as a resume checkpoint.
+pub(crate) fn advance_tmux_runtime_binding_checkpoint(
+    tmux_session_name: &str,
+    output_path: &str,
+    offset: u64,
+) -> bool {
+    let tmux_session_name = tmux_session_name.trim();
+    if !tmux_session_name.is_empty() && !output_path.trim().is_empty() {
+        let mut checkpoints = RESUME_CHECKPOINTS.lock().unwrap_or_else(|e| e.into_inner());
+        checkpoints.insert(
+            tmux_session_name.to_owned(),
+            (output_path.to_owned(), offset),
+        );
+    }
+    super::advance_tmux_runtime_binding_offset(tmux_session_name, output_path, offset)
+}
+
+/// The offset a confirmed delivery last reached in `output_path` for this session, if any.
+pub(crate) fn runtime_binding_resume_checkpoint(
+    tmux_session_name: &str,
+    output_path: &str,
+) -> Option<u64> {
+    let checkpoints = RESUME_CHECKPOINTS.lock().unwrap_or_else(|e| e.into_inner());
+    let (path, offset) = checkpoints.get(tmux_session_name.trim())?;
+    (path == output_path).then_some(*offset)
+}
+
 pub(crate) fn runtime_binding_for_tmux_session(
     tmux_session_name: &str,
 ) -> Option<TuiRuntimeBinding> {
