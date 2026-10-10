@@ -831,8 +831,13 @@ fn claude_actual_entries_deliver_long_single_line_as_one_folded_paste() {
     let empty = constructed_composer(80, "");
     let folded = constructed_composer(80, "[Pasted text #3]");
     let wrong_lf_count = constructed_composer(80, "[Pasted text #3 +1 lines]");
-    for prompt in ["가".repeat(1200), format!("{}x", "x ".repeat(999))] {
-        // Typed as rows, either line needs more than the 14 composer rows of 80x24.
+    let lines = [
+        "가".repeat(801),
+        "가".repeat(1200),
+        format!("{}x", "x ".repeat(999)),
+    ];
+    for prompt in lines {
+        // Typed as rows, each line needs more than the 14 composer rows of 80x24.
         assert!(prompt.chars().count() > 800 && !prompt.contains('\n'));
         for entry in ENTRIES {
             for after in [&folded, &wrong_lf_count] {
