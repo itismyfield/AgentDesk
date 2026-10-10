@@ -66,7 +66,7 @@ pub(crate) enum Progress {
     /// the pass is dropped, and nothing is concluded.
     Incomplete(String),
     /// Two clean passes. Evidence for the grant to check, not a permit.
-    Absent(NotFoundEvidence),
+    Absent(Box<NotFoundEvidence>),
 }
 
 impl Progress {
@@ -229,10 +229,12 @@ impl ProbeSession {
                 self.first = Some(pass);
                 Progress::FirstPassDone { second_from }
             }
-            Some(first) => NotFoundEvidence::from_passes(self.settled_at, first, pass).map_or_else(
-                || Progress::Incomplete("the passes do not pair".into()),
-                Progress::Absent,
-            ),
+            Some(first) => NotFoundEvidence::from_passes(self.settled_at, first, pass)
+                .map(Box::new)
+                .map_or_else(
+                    || Progress::Incomplete("the passes do not pair".into()),
+                    Progress::Absent,
+                ),
         }
     }
 }

@@ -331,41 +331,33 @@ impl ProbeRead for RepostHttp {
         hex::encode(Sha256::digest(self.http.token().as_bytes()))[..16].to_owned()
     }
 
-    fn message(
-        &self,
-        channel: u64,
-        id: u64,
-    ) -> impl Future<Output = Result<Option<ObservedMessage>, String>> + Send {
-        async move {
-            let (channel_id, message_id) = ids(channel, Some(id))?;
-            let message_id = message_id.ok_or("no message id")?;
-            let route = Route::ChannelMessage {
-                channel_id,
-                message_id,
-            };
-            let Some(response) = self.get(route, Vec::new()).await? else {
-                return Ok(None);
-            };
-            let seen: Seen = response.json().await.map_err(|error| error.to_string())?;
-            Ok(Some(seen.observed()))
-        }
+    async fn message(&self, channel: u64, id: u64) -> Result<Option<ObservedMessage>, String> {
+        let (channel_id, message_id) = ids(channel, Some(id))?;
+        let message_id = message_id.ok_or("no message id")?;
+        let route = Route::ChannelMessage {
+            channel_id,
+            message_id,
+        };
+        let Some(response) = self.get(route, Vec::new()).await? else {
+            return Ok(None);
+        };
+        let seen: Seen = response.json().await.map_err(|error| error.to_string())?;
+        Ok(Some(seen.observed()))
     }
 
-    fn history(
+    async fn history(
         &self,
         channel: u64,
         before: Option<u64>,
         limit: u8,
-    ) -> impl Future<Output = Result<Vec<ObservedMessage>, String>> + Send {
-        async move {
-            let (channel_id, before) = ids(channel, before)?;
-            let mut params = vec![("limit", limit.to_string())];
-            params.extend(before.map(|before| ("before", before.get().to_string())));
-            let route = Route::ChannelMessages { channel_id };
-            let response = self.get(route, params).await?.ok_or("HTTP 404 Not Found")?;
-            let page: Vec<Seen> = response.json().await.map_err(|error| error.to_string())?;
-            Ok(page.into_iter().map(Seen::observed).collect())
-        }
+    ) -> Result<Vec<ObservedMessage>, String> {
+        let (channel_id, before) = ids(channel, before)?;
+        let mut params = vec![("limit", limit.to_string())];
+        params.extend(before.map(|before| ("before", before.get().to_string())));
+        let route = Route::ChannelMessages { channel_id };
+        let response = self.get(route, params).await?.ok_or("HTTP 404 Not Found")?;
+        let page: Vec<Seen> = response.json().await.map_err(|error| error.to_string())?;
+        Ok(page.into_iter().map(Seen::observed).collect())
     }
 }
 

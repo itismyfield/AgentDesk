@@ -228,7 +228,7 @@ pub(crate) fn absent_evidence(scope: EvidenceScope, run: RunScope) -> NotFoundEv
                 match session.advance(&reader, &run, &known()).await {
                     Progress::Waiting { until } => tokio::time::sleep_until(until).await,
                     Progress::FirstPassDone { .. } => {}
-                    Progress::Absent(evidence) => return evidence,
+                    Progress::Absent(evidence) => return *evidence,
                     other => panic!("an empty channel: {other:?}"),
                 }
             }
@@ -807,15 +807,11 @@ impl DiscordPort for Legacy {
     }
 
     fn post(&self, _: u64, _: String) -> impl Future<Output = PostOutcome> + Send + 'static {
-        async { unreachable!("confirmation never posts") }
+        std::future::pending()
     }
 
-    fn history_after(
-        &self,
-        _: u64,
-        _: u64,
-    ) -> impl Future<Output = Result<Vec<SeenMessage>, String>> + Send {
-        async { Ok(Vec::new()) }
+    async fn history_after(&self, _: u64, _: u64) -> Result<Vec<SeenMessage>, String> {
+        Ok(Vec::new())
     }
 
     fn history_readable(&self, channel: u64) -> bool {
