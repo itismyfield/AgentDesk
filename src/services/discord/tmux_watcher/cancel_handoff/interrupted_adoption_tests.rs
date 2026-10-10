@@ -83,6 +83,7 @@ pub(in crate::services::discord) async fn interrupt_before_poll(
         &ctx.tmux_session_name,
         &ctx.output_path,
         &ctx.cancel,
+        WatcherLegacyMode::Legacy,
     )
     .await
     .unwrap();

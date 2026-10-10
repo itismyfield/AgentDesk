@@ -113,6 +113,7 @@ async fn compact_summary_owned_tail_split_and_rewind_preserve_unreceipted_range(
                         watcher_thread_channel_id: None,
                         watcher_instance_id: 6300,
                         host: &Arc::new(HostSnapshot::new(WatchHost::Legacy)),
+                        legacy_mode: WatcherLegacyMode::Legacy,
                     },
                     &PollWatcherControls {
                         cancel: &Arc::new(AtomicBool::new(false)),

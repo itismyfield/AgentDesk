@@ -43,6 +43,7 @@ pub(super) struct PollWatcherContext<'a> {
     pub(super) watcher_thread_channel_id: Option<u64>,
     pub(super) watcher_instance_id: u64,
     pub(super) host: &'a Arc<HostSnapshot>,
+    pub(super) legacy_mode: WatcherLegacyMode,
 }
 
 pub(super) struct PollWatcherControls<'a> {
@@ -194,14 +195,16 @@ pub(super) async fn poll_watcher_output_or_continue(
         return PollOutcome::BreakWatcherLoop;
     }
 
-    refresh_watcher_turn_identity(
-        &mut *relay_offset_state.watcher_turn_identity,
-        &mut *relay_offset_state.watcher_turn_nonce,
-        watcher_provider,
-        channel_id,
-        tmux_session_name,
-        current_offset,
-    );
+    if context.legacy_mode.is_legacy() {
+        refresh_watcher_turn_identity(
+            &mut *relay_offset_state.watcher_turn_identity,
+            &mut *relay_offset_state.watcher_turn_nonce,
+            watcher_provider,
+            channel_id,
+            tmux_session_name,
+            current_offset,
+        );
+    }
 
     // If paused (Discord handler is processing its own turn), keep the
     // liveness monitor active so a dead pane still clears watcher state.
@@ -209,7 +212,15 @@ pub(super) async fn poll_watcher_output_or_continue(
         match tmux_liveness_decision(
             cancel.load(Ordering::Relaxed),
             shared.restart.shutting_down.load(Ordering::Relaxed),
-            host_gate::tmux_alive(shared, tmux_session_name, channel_id, context.host).await,
+            host_gate::tmux_alive_for_mode(
+                shared,
+                tmux_session_name,
+                channel_id,
+                context.host,
+                context.legacy_mode,
+                output_path,
+            )
+            .await,
         ) {
             TmuxLivenessDecision::Continue => {
                 // #2441 (H1) — graduate the fixed 200ms paused-loop
@@ -234,20 +245,22 @@ pub(super) async fn poll_watcher_output_or_continue(
                 return PollOutcome::BreakWatcherLoop;
             }
             TmuxLivenessDecision::TmuxDied => {
-                handle_tmux_watcher_observed_death(
-                    channel_id,
-                    http,
-                    shared,
-                    tmux_session_name,
-                    output_path,
-                    watcher_provider,
-                    prompt_too_long_killed,
-                    watcher_lifecycle_terminal_delivery_observed(
-                        terminal_delivery_observed,
-                        turn_delivered.load(Ordering::Acquire),
-                    ),
-                )
-                .await;
+                if context.legacy_mode.is_legacy() {
+                    handle_tmux_watcher_observed_death(
+                        channel_id,
+                        http,
+                        shared,
+                        tmux_session_name,
+                        output_path,
+                        watcher_provider,
+                        prompt_too_long_killed,
+                        watcher_lifecycle_terminal_delivery_observed(
+                            terminal_delivery_observed,
+                            turn_delivered.load(Ordering::Acquire),
+                        ),
+                    )
+                    .await;
+                }
                 commit_poll_state!();
                 return PollOutcome::BreakWatcherLoop;
             }
@@ -315,7 +328,15 @@ pub(super) async fn poll_watcher_output_or_continue(
             match tmux_liveness_decision(
                 cancel.load(Ordering::Relaxed),
                 shared.restart.shutting_down.load(Ordering::Relaxed),
-                host_gate::tmux_alive(shared, tmux_session_name, channel_id, context.host).await,
+                host_gate::tmux_alive_for_mode(
+                    shared,
+                    tmux_session_name,
+                    channel_id,
+                    context.host,
+                    context.legacy_mode,
+                    output_path,
+                )
+                .await,
             ) {
                 TmuxLivenessDecision::Continue => {
                     // #2441 (H1) — notify-backed wake-up for the
@@ -338,20 +359,22 @@ pub(super) async fn poll_watcher_output_or_continue(
                     return PollOutcome::BreakWatcherLoop;
                 }
                 TmuxLivenessDecision::TmuxDied => {
-                    handle_tmux_watcher_observed_death(
-                        channel_id,
-                        http,
-                        shared,
-                        tmux_session_name,
-                        output_path,
-                        watcher_provider,
-                        prompt_too_long_killed,
-                        watcher_lifecycle_terminal_delivery_observed(
-                            terminal_delivery_observed,
-                            turn_delivered.load(Ordering::Acquire),
-                        ),
-                    )
-                    .await;
+                    if context.legacy_mode.is_legacy() {
+                        handle_tmux_watcher_observed_death(
+                            channel_id,
+                            http,
+                            shared,
+                            tmux_session_name,
+                            output_path,
+                            watcher_provider,
+                            prompt_too_long_killed,
+                            watcher_lifecycle_terminal_delivery_observed(
+                                terminal_delivery_observed,
+                                turn_delivered.load(Ordering::Acquire),
+                            ),
+                        )
+                        .await;
+                    }
                     commit_poll_state!();
                     return PollOutcome::BreakWatcherLoop;
                 }
@@ -370,12 +393,26 @@ pub(super) async fn poll_watcher_output_or_continue(
 
     let bytes_available = data.len().saturating_add(all_data.len());
     let poll_decision = if bytes_available == 0 {
+        #[cfg(test)]
+        crate::services::discord::inflight::o_seed_observation::record_event(
+            watcher_provider,
+            channel_id.get(),
+            "outer_eof",
+        );
         watcher_output_poll_decision(
             bytes_available,
             Some(tmux_liveness_decision(
                 cancel.load(Ordering::Relaxed),
                 shared.restart.shutting_down.load(Ordering::Relaxed),
-                host_gate::tmux_alive(shared, tmux_session_name, channel_id, context.host).await,
+                host_gate::tmux_alive_for_mode(
+                    shared,
+                    tmux_session_name,
+                    channel_id,
+                    context.host,
+                    context.legacy_mode,
+                    output_path,
+                )
+                .await,
             )),
         )
     } else {
@@ -384,14 +421,16 @@ pub(super) async fn poll_watcher_output_or_continue(
     match poll_decision {
         WatcherOutputPollDecision::DrainOutput => {}
         WatcherOutputPollDecision::Continue => {
-            refresh_watcher_completion_footer_if_due(
-                http,
-                shared,
-                channel_id,
-                shared.ui.status_panel_v2_enabled,
-                &mut *loop_poll_state.completion_footer_idle,
-            )
-            .await;
+            if context.legacy_mode.is_legacy() {
+                refresh_watcher_completion_footer_if_due(
+                    http,
+                    shared,
+                    channel_id,
+                    shared.ui.status_panel_v2_enabled,
+                    &mut *loop_poll_state.completion_footer_idle,
+                )
+                .await;
+            }
             // #2441 (H1) — notify-backed wake-up for the
             // poll-decision "wait more" branch.
             sleep_or_jsonl_event(
@@ -412,20 +451,22 @@ pub(super) async fn poll_watcher_output_or_continue(
             return PollOutcome::BreakWatcherLoop;
         }
         WatcherOutputPollDecision::TmuxDied => {
-            handle_tmux_watcher_observed_death(
-                channel_id,
-                http,
-                shared,
-                tmux_session_name,
-                output_path,
-                watcher_provider,
-                prompt_too_long_killed,
-                watcher_lifecycle_terminal_delivery_observed(
-                    terminal_delivery_observed,
-                    turn_delivered.load(Ordering::Acquire),
-                ),
-            )
-            .await;
+            if context.legacy_mode.is_legacy() {
+                handle_tmux_watcher_observed_death(
+                    channel_id,
+                    http,
+                    shared,
+                    tmux_session_name,
+                    output_path,
+                    watcher_provider,
+                    prompt_too_long_killed,
+                    watcher_lifecycle_terminal_delivery_observed(
+                        terminal_delivery_observed,
+                        turn_delivered.load(Ordering::Acquire),
+                    ),
+                )
+                .await;
+            }
             commit_poll_state!();
             return PollOutcome::BreakWatcherLoop;
         }
@@ -456,140 +497,145 @@ pub(super) async fn poll_watcher_output_or_continue(
             "  [{ts}] 👁 post-terminal-success continuation: new output arrived for {tmux_session_name} after terminal success (offset {data_start_offset} -> {new_offset}); watcher staying alive"
         );
     }
-    // Compute the SSH-direct bypass signal lazily — the dedupe state
-    // lookup grabs a global Mutex and walks the purge maps, so we only
-    // pay that cost when the cheap (terminal + no-inflight) prefix is
-    // already true and we are about to suppress.
-    let post_terminal_inflight_missing =
-        crate::services::discord::inflight::load_inflight_state(watcher_provider, channel_id.get())
+    if context.legacy_mode.is_legacy() {
+        // Compute the SSH-direct bypass signal lazily — the dedupe state
+        // lookup grabs a global Mutex and walks the purge maps, so we only
+        // pay that cost when the cheap (terminal + no-inflight) prefix is
+        // already true and we are about to suppress.
+        let post_terminal_inflight_missing =
+            crate::services::discord::inflight::load_inflight_state(
+                watcher_provider,
+                channel_id.get(),
+            )
             .is_none();
-    let runtime_kind_marker = if turn_result_relayed && post_terminal_inflight_missing {
-        crate::services::tmux_common::resolve_tmux_runtime_kind_marker(tmux_session_name)
-    } else {
-        None
-    };
-    if matches!(
-        runtime_kind_marker,
-        Some(crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper)
-    ) && watcher_batch_contains_relayable_response(&data)
-    {
-        let _ = observe_legacy_wrapper_direct_prompt_from_pane(
-            watcher_provider,
-            tmux_session_name,
-            channel_id,
-            data_start_offset,
-            current_offset,
-        );
-    }
-    let ssh_direct_prompt_pending = if turn_result_relayed && post_terminal_inflight_missing {
-        crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
-            watcher_provider.as_str(),
-            tmux_session_name,
-            channel_id.get(),
-        )
-        .is_some()
-            || crate::services::tui_prompt_dedupe::is_ssh_direct_observation_pending(
+        let runtime_kind_marker = if turn_result_relayed && post_terminal_inflight_missing {
+            crate::services::tmux_common::resolve_tmux_runtime_kind_marker(tmux_session_name)
+        } else {
+            None
+        };
+        if matches!(
+            runtime_kind_marker,
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper)
+        ) && watcher_batch_contains_relayable_response(&data)
+        {
+            let _ = observe_legacy_wrapper_direct_prompt_from_pane(
+                watcher_provider,
+                tmux_session_name,
+                channel_id,
+                data_start_offset,
+                current_offset,
+            );
+        }
+        let ssh_direct_prompt_pending = if turn_result_relayed && post_terminal_inflight_missing {
+            crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
                 watcher_provider.as_str(),
                 tmux_session_name,
-            )
-    } else {
-        false
-    };
-    let external_input_lease_present = if turn_result_relayed && post_terminal_inflight_missing {
-        crate::services::tui_prompt_dedupe::external_input_relay_lease_present(
-            watcher_provider.as_str(),
-            tmux_session_name,
-            channel_id.get(),
-        )
-    } else {
-        false
-    };
-    let post_terminal_payload =
-        (turn_result_relayed && post_terminal_inflight_missing).then(|| {
-            let mut post_terminal_payload = String::with_capacity(all_data.len() + data.len());
-            post_terminal_payload.push_str(all_data);
-            post_terminal_payload.push_str(&String::from_utf8_lossy(&data));
-            post_terminal_payload
-        });
-    let post_terminal_payload_allows_external_relay =
-        post_terminal_payload.as_deref().is_some_and(|payload| {
-            post_terminal_jsonl_payload_contains_init_without_user_event(payload.as_bytes())
-        });
-    let post_terminal_payload_contains_assistant_event = post_terminal_payload
-        .as_deref()
-        .is_some_and(|payload| watcher_batch_contains_assistant_event(payload.as_bytes()));
-    // Probe the pane only after a Legacy terminal relay with no inflight row.
-    let post_terminal_pane_actively_streaming = turn_result_relayed
-        && post_terminal_inflight_missing
-        && !crate::services::tui_o::turn_mode::transcript_turns(channel_id.get())
-        && watcher_pane_actively_streaming(tmux_session_name, context.host);
-    if post_terminal_pane_actively_streaming {
-        // Self-heal: a live turn lost its inflight but kept streaming post-terminal;
-        // re-establish a watcher-owned inflight (reusing the restored turn's persisted ids).
-        let restored_panel = post_terminal_state
-            .restored_turn
-            .as_ref()
-            .and_then(|turn| turn.status_message_id);
-        let restored_placeholder = post_terminal_state
-            .restored_turn
-            .as_ref()
-            .and_then(|turn| (turn.current_msg_id.get() != 0).then_some(turn.current_msg_id));
-        let reacquired = reacquire_watcher_inflight_for_active_stream(
-            watcher_provider,
-            channel_id,
-            tmux_session_name,
-            output_path,
-            data_start_offset,
-            restored_panel,
-            restored_placeholder,
-            restored_injected_prompt_message_id,
-        );
-        if reacquired && !active_stream_inflight_reacquire_logged {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] 🩹 watcher: re-acquired watcher-owned inflight for actively-streaming pane after post-terminal output without inflight (channel {}, tmux={}, range {}..{})",
                 channel_id.get(),
+            )
+            .is_some()
+                || crate::services::tui_prompt_dedupe::is_ssh_direct_observation_pending(
+                    watcher_provider.as_str(),
+                    tmux_session_name,
+                )
+        } else {
+            false
+        };
+        let external_input_lease_present = if turn_result_relayed && post_terminal_inflight_missing
+        {
+            crate::services::tui_prompt_dedupe::external_input_relay_lease_present(
+                watcher_provider.as_str(),
                 tmux_session_name,
+                channel_id.get(),
+            )
+        } else {
+            false
+        };
+        let post_terminal_payload =
+            (turn_result_relayed && post_terminal_inflight_missing).then(|| {
+                let mut post_terminal_payload = String::with_capacity(all_data.len() + data.len());
+                post_terminal_payload.push_str(all_data);
+                post_terminal_payload.push_str(&String::from_utf8_lossy(&data));
+                post_terminal_payload
+            });
+        let post_terminal_payload_allows_external_relay =
+            post_terminal_payload.as_deref().is_some_and(|payload| {
+                post_terminal_jsonl_payload_contains_init_without_user_event(payload.as_bytes())
+            });
+        let post_terminal_payload_contains_assistant_event = post_terminal_payload
+            .as_deref()
+            .is_some_and(|payload| watcher_batch_contains_assistant_event(payload.as_bytes()));
+        // Probe the pane only after a Legacy terminal relay with no inflight row.
+        let post_terminal_pane_actively_streaming = turn_result_relayed
+            && post_terminal_inflight_missing
+            && !crate::services::tui_o::turn_mode::transcript_turns(channel_id.get())
+            && watcher_pane_actively_streaming(tmux_session_name, context.host);
+        if post_terminal_pane_actively_streaming {
+            // Self-heal: a live turn lost its inflight but kept streaming post-terminal;
+            // re-establish a watcher-owned inflight (reusing the restored turn's persisted ids).
+            let restored_panel = post_terminal_state
+                .restored_turn
+                .as_ref()
+                .and_then(|turn| turn.status_message_id);
+            let restored_placeholder = post_terminal_state
+                .restored_turn
+                .as_ref()
+                .and_then(|turn| (turn.current_msg_id.get() != 0).then_some(turn.current_msg_id));
+            let reacquired = reacquire_watcher_inflight_for_active_stream(
+                watcher_provider,
+                channel_id,
+                tmux_session_name,
+                output_path,
                 data_start_offset,
-                current_offset
+                restored_panel,
+                restored_placeholder,
+                restored_injected_prompt_message_id,
             );
-            active_stream_inflight_reacquire_logged = true;
+            if reacquired && !active_stream_inflight_reacquire_logged {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] 🩹 watcher: re-acquired watcher-owned inflight for actively-streaming pane after post-terminal output without inflight (channel {}, tmux={}, range {}..{})",
+                    channel_id.get(),
+                    tmux_session_name,
+                    data_start_offset,
+                    current_offset
+                );
+                active_stream_inflight_reacquire_logged = true;
+            }
         }
-    }
-    // #3154: a deferred synthetic turn-start pending for this channel means
-    // the per-channel worker has not yet saved the matching inflight; keep
-    // the bytes buffered (do NOT suppress / advance confirmed offset) so the
-    // wakeup turn's response batch survives the wait window.
-    let pending_synthetic_start_present = post_terminal_inflight_missing
-        && crate::services::discord::tui_direct_pending_start::pending_synthetic_start_present(
-            watcher_provider.as_str(),
-            channel_id.get(),
-        );
-    let post_terminal_no_inflight_suppression_candidate =
-        should_suppress_post_terminal_output_without_inflight(
-            turn_result_relayed,
-            post_terminal_inflight_missing,
-            ssh_direct_prompt_pending,
-            external_input_lease_present,
-            post_terminal_payload_contains_assistant_event,
-            post_terminal_pane_actively_streaming,
-            pending_synthetic_start_present,
-        ) && !post_terminal_payload_allows_external_relay;
-    if post_terminal_payload_allows_external_relay {
-        tracing::info!(
-            channel_id = channel_id.get(),
-            tmux_session = %tmux_session_name,
-            range_start = data_start_offset,
-            range_end = current_offset,
-            "watcher allowed post-terminal no-inflight JSONL init payload for external relay"
-        );
-    }
-    // Structural late-output signals nominate a duplicate; they are not a
-    // delivery receipt. Only discard this read when a current-generation
-    // durable commit covers its ENTIRE nonempty range. Carried text/UTF-8 has
-    // independent read provenance, so let the ordinary decoder/retry path keep
-    // it. The local last_relayed_offset is consumption, never delivery proof.
-    let post_terminal_no_inflight_should_suppress =
+        // #3154: a deferred synthetic turn-start pending for this channel means
+        // the per-channel worker has not yet saved the matching inflight; keep
+        // the bytes buffered (do NOT suppress / advance confirmed offset) so the
+        // wakeup turn's response batch survives the wait window.
+        let pending_synthetic_start_present = post_terminal_inflight_missing
+            && crate::services::discord::tui_direct_pending_start::pending_synthetic_start_present(
+                watcher_provider.as_str(),
+                channel_id.get(),
+            );
+        let post_terminal_no_inflight_suppression_candidate =
+            should_suppress_post_terminal_output_without_inflight(
+                turn_result_relayed,
+                post_terminal_inflight_missing,
+                ssh_direct_prompt_pending,
+                external_input_lease_present,
+                post_terminal_payload_contains_assistant_event,
+                post_terminal_pane_actively_streaming,
+                pending_synthetic_start_present,
+            ) && !post_terminal_payload_allows_external_relay;
+        if post_terminal_payload_allows_external_relay {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                range_start = data_start_offset,
+                range_end = current_offset,
+                "watcher allowed post-terminal no-inflight JSONL init payload for external relay"
+            );
+        }
+        // Structural late-output signals nominate a duplicate; they are not a
+        // delivery receipt. Only discard this read when a current-generation
+        // durable commit covers its ENTIRE nonempty range. Carried text/UTF-8 has
+        // independent read provenance, so let the ordinary decoder/retry path keep
+        // it. The local last_relayed_offset is consumption, never delivery proof.
+        let post_terminal_no_inflight_should_suppress =
         post_terminal_no_inflight_suppression_candidate
             && all_data.is_empty()
             && !loop_poll_state.utf8_decoder.has_pending()
@@ -605,73 +651,74 @@ pub(super) async fn poll_watcher_output_or_continue(
                     && commit.range.0 <= data_start_offset
                     && commit.range.1 >= current_offset
             });
-    if post_terminal_no_inflight_should_suppress {
-        let suppressed_range = (data_start_offset, current_offset);
-        // #5071 T1 S3b: this arm is re-entered on every poll pass while the same
-        // bytes stay suppressed, so the one-shot test that already keeps the
-        // warning from repeating now also gates the shadow observation. Without
-        // it a stuck suppression would submit an O+S batch on every pass.
-        let first_observation_of_range = journal_watcher::first_observation_of_suppressed_range(
-            last_post_terminal_suppressed_range,
-            suppressed_range,
-        );
-        if first_observation_of_range {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] 🛑 watcher: suppressed post-terminal output without inflight for channel {} (tmux={}, range {}..{})",
-                channel_id.get(),
-                tmux_session_name,
-                data_start_offset,
-                current_offset
+        if post_terminal_no_inflight_should_suppress {
+            let suppressed_range = (data_start_offset, current_offset);
+            // #5071 T1 S3b: this arm is re-entered on every poll pass while the same
+            // bytes stay suppressed, so the one-shot test that already keeps the
+            // warning from repeating now also gates the shadow observation. Without
+            // it a stuck suppression would submit an O+S batch on every pass.
+            let first_observation_of_range = journal_watcher::first_observation_of_suppressed_range(
+                last_post_terminal_suppressed_range,
+                suppressed_range,
             );
-            last_post_terminal_suppressed_range = Some(suppressed_range);
-        } else {
-            tracing::debug!(
-                channel_id = channel_id.get(),
-                tmux_session = %tmux_session_name,
-                range_start = data_start_offset,
-                range_end = current_offset,
-                "watcher: repeated post-terminal suppress for same range"
-            );
-        }
-        let confirmed_end = suppressed_terminal_confirmed_end(current_offset, all_data);
-        let generation_mtime_ns = source_generation_mtime_ns;
-        last_relayed_offset = Some(current_offset);
-        last_observed_generation_mtime_ns = Some(generation_mtime_ns);
-        // The receipt already proved this local range delivered. This O+S
-        // records duplicate disposal only; it cannot create a new receipt or
-        // advance shared delivery authority.
-        if first_observation_of_range {
-            journal_watcher::settle_without_transport(
-                shared,
-                journal_watcher::WatcherObligationCoordinates {
-                    provider: watcher_provider,
-                    channel_id,
+            if first_observation_of_range {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] 🛑 watcher: suppressed post-terminal output without inflight for channel {} (tmux={}, range {}..{})",
+                    channel_id.get(),
                     tmux_session_name,
-                    generation_mtime_ns,
-                    range: (data_start_offset, confirmed_end),
-                },
-                journal_watcher::SettlementReason::PostTerminalNoInflightSuppressed,
+                    data_start_offset,
+                    current_offset
+                );
+                last_post_terminal_suppressed_range = Some(suppressed_range);
+            } else {
+                tracing::debug!(
+                    channel_id = channel_id.get(),
+                    tmux_session = %tmux_session_name,
+                    range_start = data_start_offset,
+                    range_end = current_offset,
+                    "watcher: repeated post-terminal suppress for same range"
+                );
+            }
+            let confirmed_end = suppressed_terminal_confirmed_end(current_offset, all_data);
+            let generation_mtime_ns = source_generation_mtime_ns;
+            last_relayed_offset = Some(current_offset);
+            last_observed_generation_mtime_ns = Some(generation_mtime_ns);
+            // The receipt already proved this local range delivered. This O+S
+            // records duplicate disposal only; it cannot create a new receipt or
+            // advance shared delivery authority.
+            if first_observation_of_range {
+                journal_watcher::settle_without_transport(
+                    shared,
+                    journal_watcher::WatcherObligationCoordinates {
+                        provider: watcher_provider,
+                        channel_id,
+                        tmux_session_name,
+                        generation_mtime_ns,
+                        range: (data_start_offset, confirmed_end),
+                    },
+                    journal_watcher::SettlementReason::PostTerminalNoInflightSuppressed,
+                );
+            }
+            // #3053: suppressing post-terminal output is NOT idleness — the
+            // wrapper is still alive and producing JSONL. The original code
+            // `continue`d here before reaching the heartbeat refresh below, so
+            // a live TUI session that only ever emitted post-terminal output
+            // (e.g. provider selector continuation) never refreshed its
+            // idle-kill heartbeat and was killed as "idle". Touch it here too.
+            touch_session_activity(
+                shared.pg_pool.as_ref(),
+                &shared.token_hash,
+                watcher_provider,
+                tmux_session_name,
+                watcher_thread_channel_id,
+                "post_terminal_suppressed_output_while_tmux_alive",
+                "tmux_watcher.rs:post_terminal_no_inflight_suppressed_output",
             );
+            loop_poll_state.utf8_decoder.clear_pending();
+            commit_poll_state!();
+            return PollOutcome::ContinueWatcherLoop;
         }
-        // #3053: suppressing post-terminal output is NOT idleness — the
-        // wrapper is still alive and producing JSONL. The original code
-        // `continue`d here before reaching the heartbeat refresh below, so
-        // a live TUI session that only ever emitted post-terminal output
-        // (e.g. provider selector continuation) never refreshed its
-        // idle-kill heartbeat and was killed as "idle". Touch it here too.
-        touch_session_activity(
-            shared.pg_pool.as_ref(),
-            &shared.token_hash,
-            watcher_provider,
-            tmux_session_name,
-            watcher_thread_channel_id,
-            "post_terminal_suppressed_output_while_tmux_alive",
-            "tmux_watcher.rs:post_terminal_no_inflight_suppressed_output",
-        );
-        loop_poll_state.utf8_decoder.clear_pending();
-        commit_poll_state!();
-        return PollOutcome::ContinueWatcherLoop;
     }
     maybe_refresh_watcher_activity_heartbeat(
         shared.pg_pool.as_ref(),

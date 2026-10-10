@@ -28,6 +28,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct TurnStreamCollectorC
     pub(in crate::services::discord::tmux::tmux_watcher) restored_injected_prompt_message_id:
         Option<u64>,
     pub(in crate::services::discord::tmux::tmux_watcher) host: Arc<HostSnapshot>,
+    pub(in crate::services::discord::tmux::tmux_watcher) legacy_mode: WatcherLegacyMode,
 }
 
 pub(in crate::services::discord::tmux::tmux_watcher) struct TurnStreamCollectorIo {
@@ -203,6 +204,7 @@ impl TurnStreamCollectorContext {
             turn_result_relayed,
             restored_injected_prompt_message_id,
             host: context.host.clone(),
+            legacy_mode: context.legacy_mode,
         }
     }
 }

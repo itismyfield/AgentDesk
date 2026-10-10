@@ -51,6 +51,8 @@ pub(super) async fn update_streaming_status_tick(
 
     // Update Discord placeholder at configurable interval
     if render.last_status_update.elapsed() >= crate::services::discord::status_update_interval() {
+        #[cfg(test)]
+        crate::services::discord::inflight::o_seed_observation::record_event(watcher_provider, channel_id.get(), "streaming_tick");
         let mut last_status_update = *render.last_status_update;
         let mut spin_idx = *render.spin_idx;
         let mut placeholder_msg_id = *render.placeholder_msg_id;
@@ -103,7 +105,8 @@ pub(super) async fn update_streaming_status_tick(
             !full_response.trim().is_empty(),
             &last_edit_text,
         );
-        if turn_is_external_input_for_session
+        if ctx.legacy_mode.is_legacy()
+            && turn_is_external_input_for_session
             && (status_panel_msg_id.is_some() || tick_placeholder_reclaim)
             && watcher_external_input_turn_abandoned(
                 &watcher_provider,
@@ -145,7 +148,7 @@ pub(super) async fn update_streaming_status_tick(
         // long tool hold must not leave the durable row at its initial empty state.
         // Silent turns suppress rendering, not durable state; the helper validates
         // complete turn identity under the sidecar lock to block stale overwrites.
-        let progress_outcome = persist_watcher_stream_progress(
+        let progress_outcome = ctx.legacy_mode.is_legacy().then(|| persist_watcher_stream_progress(
             &watcher_provider,
             channel_id,
             &tmux_session_name,
@@ -159,17 +162,18 @@ pub(super) async fn update_streaming_status_tick(
             tool_state.any_tool_used,
             tool_state.has_post_tool_text,
             &watcher_streaming_rollover_frozen_msg_ids,
-        );
+        ));
         // #5191: the locked writer rejected this frame because the pinned owner's
         // row is already terminal-committed. Suppress this tick's preview/status
         // writes, but only AFTER the pre-existing cleanup paths below have run.
         let terminal_progress_rejected = progress_outcome
-            == crate::services::discord::inflight::WatcherProgressOutcome::TerminalAlreadyCommitted;
+            == Some(crate::services::discord::inflight::WatcherProgressOutcome::TerminalAlreadyCommitted);
 
         // Headless silent trigger (metadata.silent=true): skip both
         // status-panel and streaming-chunk edits to keep the channel
         // at zero bytes for the assistant turn.
-        let streaming_silent_turn = crate::services::discord::inflight::load_inflight_state(
+        let streaming_silent_turn = ctx.legacy_mode.is_legacy()
+            && crate::services::discord::inflight::load_inflight_state(
             &watcher_provider,
             channel_id.get(),
         )
@@ -180,7 +184,7 @@ pub(super) async fn update_streaming_status_tick(
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
         }
 
-        if !terminal_progress_rejected {
+        if ctx.legacy_mode.is_legacy() && !terminal_progress_rejected {
             last_status_panel_text = existing_panel_update::update_existing_panel(
                 ctx,
                 &turn,
@@ -253,8 +257,8 @@ pub(super) async fn update_streaming_status_tick(
         } else {
             None
         };
-        let inflight_missing_for_streaming =
-            crate::services::discord::inflight::load_inflight_state(
+        let inflight_missing_for_streaming = ctx.legacy_mode.is_legacy()
+            && crate::services::discord::inflight::load_inflight_state(
                 &watcher_provider,
                 channel_id.get(),
             )
@@ -312,7 +316,7 @@ pub(super) async fn update_streaming_status_tick(
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
         }
-        if should_suppress_streaming_placeholder_after_recent_stop(
+        if ctx.legacy_mode.is_legacy() && should_suppress_streaming_placeholder_after_recent_stop(
             has_assistant_response_for_streaming,
             inflight_missing_for_streaming,
             recent_stop_for_streaming.is_some(),
@@ -383,7 +387,8 @@ pub(super) async fn update_streaming_status_tick(
                 tool_state.current_tool_line.as_deref(),
                 task_notification_kind,
             );
-        if watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled)
+        if ctx.legacy_mode.is_legacy()
+            && watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled)
             && status_panel_msg_id.is_none()
             && has_visible_streaming_work
             // #3805 P2 (PR-C): under the two-message flag, defer panel
@@ -787,7 +792,8 @@ pub(super) async fn update_streaming_status_tick(
                             watcher_did_rollover_this_interval = true;
                             response_sent_offset += raw_split_at;
                             last_edit_text = status_block;
-                            persist_watcher_stream_progress(
+                            if ctx.legacy_mode.is_legacy() {
+                                persist_watcher_stream_progress(
                                 &watcher_provider,
                                 channel_id,
                                 &tmux_session_name,
@@ -801,7 +807,8 @@ pub(super) async fn update_streaming_status_tick(
                                 tool_state.any_tool_used,
                                 tool_state.has_post_tool_text,
                                 &watcher_streaming_rollover_frozen_msg_ids,
-                            );
+                                );
+                            }
                         }
                         Err(error) => {
                             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -842,7 +849,7 @@ pub(super) async fn update_streaming_status_tick(
         // #3805 P2 (PR-D): re-anchor the stranded panel below a rollover tail; OFF-inert.
         let two_message_panel_enabled = shared.ui.two_message_panel_enabled;
         let inflight_for_reanchor =
-            if two_message_panel_enabled && watcher_did_rollover_this_interval {
+            if ctx.legacy_mode.is_legacy() && two_message_panel_enabled && watcher_did_rollover_this_interval {
                 crate::services::discord::inflight::load_inflight_state(
                     &watcher_provider,
                     channel_id.get(),
@@ -850,7 +857,7 @@ pub(super) async fn update_streaming_status_tick(
             } else {
                 None
             };
-        if watcher_did_rollover_this_interval
+        if ctx.legacy_mode.is_legacy() && watcher_did_rollover_this_interval
             && watcher_two_message_should_reanchor_panel_on_rollover(
                 two_message_panel_enabled,
                 status_panel_msg_id.is_some(),
@@ -944,7 +951,8 @@ pub(super) async fn update_streaming_status_tick(
             let edit_committed = written.is_some();
             if edit_committed {
                 last_edit_text = display_text;
-                persist_watcher_stream_progress(
+                if ctx.legacy_mode.is_legacy() {
+                    persist_watcher_stream_progress(
                     &watcher_provider,
                     channel_id,
                     &tmux_session_name,
@@ -958,7 +966,8 @@ pub(super) async fn update_streaming_status_tick(
                     tool_state.any_tool_used,
                     tool_state.has_post_tool_text,
                     &watcher_streaming_rollover_frozen_msg_ids,
-                );
+                    );
+                }
             }
         }
         commit_streaming_status_tick_state!();

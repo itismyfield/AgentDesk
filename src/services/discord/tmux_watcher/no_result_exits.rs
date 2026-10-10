@@ -20,6 +20,7 @@ pub(super) struct NoResultExitContext<'a> {
     pub(super) shared: &'a Arc<SharedData>,
     pub(super) channel_id: serenity::ChannelId,
     pub(super) watcher_provider: &'a ProviderKind,
+    pub(super) legacy_mode: entry::WatcherLegacyMode,
     pub(super) tmux_session_name: &'a String,
     pub(super) output_path: &'a String,
     pub(super) paused: &'a Arc<AtomicBool>,
@@ -96,7 +97,15 @@ pub(super) async fn handle_no_result_exits(
             ..
         } = active_read_state.expect("active read state must exist when result was not found");
 
+        #[cfg(test)]
         if fresh_ready_for_input_idle {
+            crate::services::discord::inflight::o_seed_observation::record_event(
+                watcher_provider,
+                channel_id.get(),
+                "fresh_idle_no_result",
+            );
+        }
+        if fresh_ready_for_input_idle && context.legacy_mode.is_legacy() {
             // #3016 S3: the STRUCTURAL completion signal — the authority that
             // finally distinguishes "turn done" from "paused-live" (which the
             // old flag-only path could not). Resolve the runtime kind exactly
@@ -502,6 +511,12 @@ pub(super) async fn handle_no_result_exits(
             let generation_mtime_ns = read_generation_file_mtime_ns(&tmux_session_name);
             *state.last_relayed_offset = Some(current_offset);
             *state.last_observed_generation_mtime_ns = Some(generation_mtime_ns);
+            #[cfg(test)]
+            crate::services::discord::inflight::o_seed_observation::record_event(
+                watcher_provider,
+                channel_id.get(),
+                "fresh_idle_legacy_settlement",
+            );
             advance_watcher_confirmed_end(
                 &shared,
                 &watcher_provider,
@@ -536,44 +551,21 @@ pub(super) async fn handle_no_result_exits(
         }
 
         if tmux_death_observed {
-            handle_tmux_watcher_observed_death(
-                channel_id,
-                &http,
-                &shared,
-                &tmux_session_name,
-                &output_path,
-                &watcher_provider,
-                prompt_too_long_killed,
-                watcher_lifecycle_terminal_delivery_observed(
-                    terminal_delivery_observed,
-                    turn_delivered.load(Ordering::Acquire),
-                ),
-            )
-            .await;
-            finish_monitor_auto_turn_if_claimed(
-                &shared,
-                &watcher_provider,
-                channel_id,
-                &mut *state.monitor_auto_turn_claimed,
-                &mut *state.monitor_auto_turn_finished,
-                &mut *state.monitor_auto_turn_synthetic_msg_id,
-                &mut *state.monitor_auto_turn_ledger_generation,
-            )
-            .await;
-            return NoResultExitOutcome::BreakWatcherLoop;
-        }
-
-        if cancel.load(Ordering::Relaxed) || shared.restart.shutting_down.load(Ordering::Relaxed) {
-            // #3277 (Defect B): same stop-reason visibility as the early break.
-            tracing::info!(
-                instance = watcher_instance_id,
-                cancel = cancel.load(Ordering::Relaxed),
-                shutting_down = shared.restart.shutting_down.load(Ordering::Relaxed),
-                "tmux watcher stopping for #{tmux_session_name}: cancelled/shutdown"
-            );
-            // Cooperative cancellation transfers custody, not actor completion.
-            // Keep the existing global-shutdown behavior when no replacement is requested.
-            if !cancel.load(Ordering::Acquire) {
+            if context.legacy_mode.is_legacy() {
+                handle_tmux_watcher_observed_death(
+                    channel_id,
+                    &http,
+                    &shared,
+                    &tmux_session_name,
+                    &output_path,
+                    &watcher_provider,
+                    prompt_too_long_killed,
+                    watcher_lifecycle_terminal_delivery_observed(
+                        terminal_delivery_observed,
+                        turn_delivered.load(Ordering::Acquire),
+                    ),
+                )
+                .await;
                 finish_monitor_auto_turn_if_claimed(
                     &shared,
                     &watcher_provider,
@@ -588,7 +580,40 @@ pub(super) async fn handle_no_result_exits(
             return NoResultExitOutcome::BreakWatcherLoop;
         }
 
+        if cancel.load(Ordering::Relaxed) || shared.restart.shutting_down.load(Ordering::Relaxed) {
+            // #3277 (Defect B): same stop-reason visibility as the early break.
+            tracing::info!(
+                instance = watcher_instance_id,
+                cancel = cancel.load(Ordering::Relaxed),
+                shutting_down = shared.restart.shutting_down.load(Ordering::Relaxed),
+                "tmux watcher stopping for #{tmux_session_name}: cancelled/shutdown"
+            );
+            // Cooperative cancellation transfers custody, not actor completion.
+            // Keep the existing global-shutdown behavior when no replacement is requested.
+            if context.legacy_mode.is_legacy() && !cancel.load(Ordering::Acquire) {
+                finish_monitor_auto_turn_if_claimed(
+                    &shared,
+                    &watcher_provider,
+                    channel_id,
+                    &mut *state.monitor_auto_turn_claimed,
+                    &mut *state.monitor_auto_turn_finished,
+                    &mut *state.monitor_auto_turn_synthetic_msg_id,
+                    &mut *state.monitor_auto_turn_ledger_generation,
+                )
+                .await;
+            }
+            return NoResultExitOutcome::BreakWatcherLoop;
+        }
+
+        // Idle observation keeps O's source carry; only the writer can confirm delivery.
+        if fresh_ready_for_input_idle {
+            return NoResultExitOutcome::ContinueWatcherLoop;
+        }
+
         if let Some(notice) = ready_for_input_failure_notice {
+            if !context.legacy_mode.is_legacy() {
+                return NoResultExitOutcome::ContinueWatcherLoop;
+            }
             let notice_ok = match *state.placeholder_msg_id {
                 Some(msg_id) => {
                     rate_limit_wait(&shared, channel_id).await;

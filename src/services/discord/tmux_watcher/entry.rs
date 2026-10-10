@@ -1,6 +1,26 @@
 use super::*;
 use crate::services::cluster::stream_relay::RelayProducer;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WatcherLegacyMode {
+    Legacy,
+    RetiredO,
+}
+
+impl WatcherLegacyMode {
+    pub(super) fn for_channel(provider: &ProviderKind, channel: ChannelId) -> Self {
+        if crate::services::discord::health::legacy_supervision::is_retired(provider.as_str(), channel.get())
+        {
+            Self::RetiredO
+        } else {
+            Self::Legacy
+        }
+    }
+    pub(super) fn is_legacy(self) -> bool {
+        self == Self::Legacy
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn tmux_output_watcher(
     channel_id: ChannelId,
@@ -40,12 +60,16 @@ pub(super) fn restore_delivery_position(
     channel_id: ChannelId,
     tmux_session_name: &str,
     output_path: &str,
+    legacy_mode: WatcherLegacyMode,
 ) -> (
     Option<crate::services::discord::inflight::InflightTurnIdentity>,
     Option<String>,
     Option<u64>,
     Option<i64>,
 ) {
+    if !legacy_mode.is_legacy() {
+        return (None, None, None, None);
+    }
     // Guard against duplicate relay: track the offset from which the last relay was sent.
     // If the outer loop circles back and current_offset hasn't advanced past this point,
     // the relay is suppressed.

@@ -24,6 +24,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct StreamingStatusTickC
     pub(in crate::services::discord::tmux::tmux_watcher) output_path: &'a String,
     pub(in crate::services::discord::tmux::tmux_watcher) turn_delivered: &'a Arc<AtomicBool>,
     pub(in crate::services::discord::tmux::tmux_watcher) host: &'a HostSnapshot,
+    pub(in crate::services::discord::tmux::tmux_watcher) legacy_mode: WatcherLegacyMode,
 }
 
 pub(in crate::services::discord::tmux::tmux_watcher) struct StreamingStatusTickTurn<'a> {

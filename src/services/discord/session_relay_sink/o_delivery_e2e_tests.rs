@@ -23,7 +23,8 @@ fn isolated(name: &str) -> bool {
     std::fs::create_dir_all(&base).unwrap();
     let root = tempfile::tempdir_in(base).unwrap();
     let qualified = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+    child
         .args(["--exact", &qualified, "--nocapture"])
         .env(CHILD, "1")
         .env("AGENTDESK_ROOT_DIR", root.path())
@@ -33,9 +34,33 @@ fn isolated(name: &str) -> bool {
         .env("ALL_PROXY", "http://127.0.0.1:9")
         .env("NO_PROXY", "")
         .env_remove(cutover::test_override::CHILD_ENV)
-        .env_remove("DATABASE_URL")
-        .output()
+        .env_remove("DATABASE_URL");
+    if name == "retired_registered_supervisor_consumers_hold_legacy_while_o_delivers_once" {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = root.path().join("tmux");
+        let script = r#"#!/bin/sh
+while [ "${1#-}" != "$1" ]; do
+  [ "$1" = "-V" ] && { echo 'tmux fixture'; exit 0; }
+  shift
+done
+printf '%s\n' "$*" >> "ROOT/tmux-calls"
+case "$1" in
+  has-session) exit 0 ;;
+  list-panes) echo 0; exit 0 ;;
+  capture-pane) printf '%s\n' '⏺ Running a fixture command'; exit 0 ;;
+  kill-session) printf '%s\n' "$*" >> "ROOT/tmux-kills"; exit 97 ;;
+  *) printf '%s\n' "$*" >> "ROOT/tmux-errors"; exit 97 ;;
+esac
+"#;
+        std::fs::write(
+            &fake,
+            script.replace("ROOT", &root.path().display().to_string()),
+        )
         .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+        child.env("PATH", format!("{}:/usr/bin:/bin", root.path().display()));
+    }
+    let output = child.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
@@ -502,4 +527,316 @@ async fn an_empty_writer_list_leaves_both_channels_to_legacy() {
         crate::bootstrap::install_boot_snapshots(&config.unwrap()).unwrap();
         run_canary_pair(&[]).await;
     }
+}
+
+async fn next_registered_idle_tick() -> BTreeMap<String, (u64, u8)> {
+    let ticks = crate::services::discord::session_relay_sink::tests::DC1_TICKS
+        .get()
+        .unwrap();
+    let before = ticks.lock().unwrap().len();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        {
+            let samples = ticks.lock().unwrap();
+            if samples.len() > before {
+                return samples.last().unwrap().clone();
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "registered idle task must finish an actual scanner tick"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retired_registered_supervisor_consumers_hold_legacy_while_o_delivers_once() {
+    if !isolated("retired_registered_supervisor_consumers_hold_legacy_while_o_delivers_once") {
+        return;
+    }
+    use crate::services::cluster::relay_producer_registry::global_relay_producer_registry;
+    use crate::services::cluster::session_registry::global_session_registry;
+    use crate::services::cluster::stream_relay::{SourceFileIdentity, spawn_stream_relay};
+    use crate::services::discord::health::legacy_supervision::{RetiredForTest, test_support};
+    use crate::services::discord::inflight::o_seed_observation;
+
+    let root = PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
+    let provider = ProviderKind::Claude;
+    let channel = 63_254_080;
+    let mut fixture =
+        crate::services::discord::tmux::InstallFixture::new(provider.clone(), channel).await;
+    let mock = test_support::MockDiscord::start().await;
+    fixture.http = mock.http.clone();
+    let shared = fixture.shared.clone();
+    let session = fixture.session.clone();
+    let source = PathBuf::from(&fixture.output);
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(&session, "generation"),
+        "registered-consumer-generation",
+    )
+    .unwrap();
+    crate::services::tmux_common::host_marker::record_tmux_host_marker(&session);
+    let binding = crate::services::cluster::session_matcher::MatchedChannel {
+        channel_id: channel.to_string(),
+        agent_id: "n4d-supervisor".into(),
+        provider: provider.clone(),
+        expected_session_name: session.clone(),
+        expected_rollout_path: fixture.output.clone(),
+    };
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        &session,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: fixture.output.clone(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some("e2e".into()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    let writer =
+        writer::WriterFixture::new(&root, &source, ShadowProvider::Claude, channel, &session);
+    let mut row = inflight_with_identity_offset(channel, &session, 710, STARTED, Some(0));
+    row.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+    row.current_msg_id = 88010;
+    row.output_path = Some(fixture.output.clone());
+    test_support::seed_backfill_row(&row);
+    let inflight_root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
+    let before = test_support::tree_fingerprint(&inflight_root);
+    let frontier_before = shared.committed_relay_offset(ChannelId::new(channel));
+    let retired = RetiredForTest::new(provider.as_str(), channel);
+    let owned = cutover::test_override::force_channels(&[(channel, RuntimeHandoffKind::ClaudeTui)]);
+    let gateway = Arc::new(RelayContractFakeGateway::edited());
+    let mut sink = SessionBoundDiscordRelaySink::new(fixture.registry.clone());
+    sink.test_gateway = Some(gateway.clone());
+    let sink = Arc::new(sink);
+    let observations = o_seed_observation::Guard::new(&provider, channel);
+    observations.register_source(&source);
+    let relay = spawn_stream_relay(
+        binding.clone(),
+        Arc::new(LegacySessionRelayConsumer(sink.clone())),
+    );
+    let producers = global_relay_producer_registry();
+    producers.register(session.clone(), relay.producer());
+    let sessions = global_session_registry();
+    sessions.upsert(binding.clone(), None);
+    crate::services::discord::session_relay_sink::tests::DC1_TICKS
+        .get_or_init(|| Mutex::new(Vec::new()));
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let idle = tokio::spawn(run_idle_jsonl_relay_loop(shutdown.clone(), sink.clone()));
+    let (stop, actor) = writer.start();
+    let first_idle_tick = next_registered_idle_tick().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let initial_captured = writer.channel().cursors().next().unwrap().captured_through;
+
+    assert_eq!(
+        fixture.install().await,
+        crate::services::discord::OOnlyInstallOutcome::Spawned
+    );
+    for _ in 0..800 {
+        if observations.snapshot().event_count("outer_eof") > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        observations.snapshot().event_count("outer_eof") > 0,
+        "installer watcher must observe initial EOF"
+    );
+    assert!(
+        observations.snapshot().event_count("rowless_host_probe") > 0,
+        "confirmed tmux evidence must reach the real rowless host probe"
+    );
+    let payload = transcript(Turn::Claude);
+    let nonterminal = format!("{}\n", payload.lines().next().unwrap());
+    std::fs::write(&source, &nonterminal).unwrap();
+    for _ in 0..800 {
+        let metrics = relay.metrics().snapshot();
+        let raw = observations.raw_process_snapshot();
+        if observations
+            .snapshot()
+            .decoded_chunks
+            .iter()
+            .any(|chunk| chunk.contains(BODY))
+            && (metrics.sink_errors > 0
+                || metrics.frames_delivered > 0
+                || raw.writable_inflight_load_calls > 0
+                || raw.readonly_inflight_load_calls > 0)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    fixture.cancel_and_join().await;
+    // Closing source bytes reach the registered Legacy consumer only after the watcher joins.
+    // The O actor independently reads the same complete source and owns its delivery.
+    let mut append = std::fs::OpenOptions::new().append(true).open(&source).unwrap();
+    std::io::Write::write_all(&mut append, payload[nonterminal.len()..].as_bytes()).unwrap();
+    let mut source_file = std::fs::File::open(&source).unwrap();
+    let file_identity = SourceFileIdentity::from_open_file(&source_file);
+    let mut forwarded_source = String::new();
+    std::io::Read::read_to_string(&mut source_file, &mut forwarded_source).unwrap();
+    let witness = source_epoch_observer::read_source_epoch_witness(&session);
+    let stamp = source_epoch_observer::source_stamp(&session, witness, file_identity).unwrap();
+    let closing_outcome = producers.get_producer(&session).unwrap().try_send_frame_with_source(
+        forwarded_source[nonterminal.len()..].to_owned(),
+        None,
+        dr::current_generation_mtime_ns(&session),
+        Some(stamp),
+        Some((nonterminal.len() as u64, forwarded_source.len() as u64)),
+    );
+    writer.acquired();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let second_idle_tick = next_registered_idle_tick().await;
+
+    stop.send(true).unwrap();
+    actor.await.unwrap();
+    shutdown.store(true, Ordering::Release);
+    tokio::time::timeout(Duration::from_secs(2), idle)
+        .await
+        .unwrap()
+        .unwrap();
+    sessions.remove(&session);
+    producers.deregister(&session);
+    let metrics = relay.metrics().clone();
+    relay.shutdown_with_result().await.unwrap();
+    let raw = observations.raw_process_snapshot();
+    assert_eq!(
+        (
+            raw.writable_inflight_load_calls,
+            raw.readonly_inflight_load_calls,
+            raw.compatibility_backfill_attempts,
+            raw.legacy_prefix_restore_calls
+        ),
+        (0, 0, 0, 0),
+        "all process loader calls remain observable: {raw:?}",
+    );
+    let checkpointed = observations.snapshot();
+    assert!(
+        checkpointed
+            .decoded_chunks
+            .iter()
+            .any(|chunk| chunk.contains(BODY)),
+        "real installer watcher must decode the new body: {checkpointed:?}"
+    );
+    assert!(
+        checkpointed.parser_responses.iter().any(|body| body == BODY),
+        "real provider parser checkpoint must retain BODY through watcher join: {checkpointed:?}"
+    );
+    assert_eq!(forwarded_source, payload);
+    assert!(closing_outcome.is_alive() && closing_outcome.sequence.is_some());
+    let metrics = metrics.snapshot();
+    assert!(
+        metrics.frames_received >= 2 && metrics.sink_errors >= 2,
+        "watcher and closing source must reach the registered consumer: {metrics:?}"
+    );
+    assert_eq!(metrics.frames_delivered, 0);
+    assert_eq!(
+        metrics.terminal_commits, 0,
+        "the Legacy consumer cannot confirm an O delivery"
+    );
+    assert!(
+        !first_idle_tick.contains_key(&session) && !second_idle_tick.contains_key(&session),
+        "retired reader must not adopt a Legacy cursor"
+    );
+    assert_eq!(initial_captured, 0);
+    assert_eq!(
+        writer.channel().cursors().next().unwrap().captured_through,
+        payload.len() as u64
+    );
+    assert_eq!(
+        writer.posts(),
+        [BODY],
+        "the actual O decoder/writer must deliver one unit"
+    );
+    assert_eq!(observations.snapshot().writable_inflight_load_calls, 0);
+    assert_eq!(
+        shared.committed_relay_offset(ChannelId::new(channel)),
+        frontier_before
+    );
+    assert_eq!(test_support::tree_fingerprint(&inflight_root), before);
+    assert_eq!(gateway.send_calls.load(Ordering::Acquire), 0);
+    assert_eq!(gateway.replace_calls.load(Ordering::Acquire), 0);
+    assert!(
+        !root.join("tmux-kills").exists(),
+        "the watcher must not kill a fixture session"
+    );
+    assert!(
+        !root.join("tmux-errors").exists(),
+        "all fake host probes must match the fixture contract"
+    );
+    drop((owned, retired));
+}
+
+#[tokio::test(start_paused = true)]
+async fn unretired_supervisor_consumer_preserves_legacy_decode_and_backfill() {
+    if !isolated("unretired_supervisor_consumer_preserves_legacy_decode_and_backfill") {
+        return;
+    }
+    use crate::services::discord::health::legacy_supervision::test_support;
+    use crate::services::discord::inflight::o_seed_observation;
+    let channel = 63_254_081;
+    let provider = ProviderKind::Claude;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    shared
+        .http
+        .cached_bot_token
+        .set("test-token".into())
+        .unwrap();
+    let health = Arc::new(HealthRegistry::new());
+    health.register(provider.as_str().into(), shared).await;
+    let leg = Leg::new(channel, &health);
+    let mut row = inflight_with_identity_offset(
+        channel,
+        &leg.binding.expected_session_name,
+        710,
+        STARTED,
+        Some(0),
+    );
+    row.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+    row.current_msg_id = 88010;
+    let row_path = test_support::seed_backfill_row(&row);
+    let before = test_support::fingerprint(&row_path);
+    let payload = transcript(Turn::Claude);
+    std::fs::write(&leg.binding.expected_rollout_path, &payload).unwrap();
+    let frame = terminal_frame_offset(
+        &leg.binding,
+        &payload,
+        1,
+        payload.len() as u64,
+        710,
+        STARTED,
+        Some(0),
+    );
+    let sink = Arc::new(leg.sink);
+    let observations = o_seed_observation::Guard::new(&provider, channel);
+    let outcome = LegacySessionRelayConsumer(sink.clone())
+        .deliver(&frame)
+        .await;
+    assert!(
+        matches!(outcome, Ok(RelaySinkOutcome::TerminalDelivered)),
+        "{outcome:?}"
+    );
+    let raw = observations.raw_process_snapshot();
+    assert!(
+        raw.writable_inflight_load_calls > 0,
+        "the unretired consumer retains its row path"
+    );
+    assert!(
+        raw.compatibility_backfill_attempts > 0,
+        "valid old rows still backfill"
+    );
+    assert_ne!(test_support::fingerprint(&row_path), before);
+    assert_eq!(
+        sink.frames_total.load(Ordering::Acquire),
+        1,
+        "actual parser received the frame"
+    );
+    assert_eq!(
+        leg.gateway.send_calls.load(Ordering::Acquire)
+            + leg.gateway.replace_calls.load(Ordering::Acquire),
+        1
+    );
 }

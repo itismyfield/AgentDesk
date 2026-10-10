@@ -12,6 +12,7 @@ use crate::services::discord::session_relay_sink::journal::watcher as journal_wa
 
 #[path = "tmux_watcher/entry.rs"]
 mod entry;
+use self::entry::WatcherLegacyMode;
 pub(in crate::services::discord) use self::entry::tmux_output_watcher;
 
 #[path = "tmux_watcher/liveness.rs"]
@@ -231,6 +232,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             crate::services::provider::ProviderKind::Claude,
             String::new(),
         ));
+    let legacy_mode = WatcherLegacyMode::for_channel(&watcher_provider, channel_id);
+    #[cfg(test)]
+    crate::services::discord::inflight::o_seed_observation::watcher_initialized(
+        &watcher_provider,
+        channel_id.get(),
+    );
     let Some(mut cancellation_custody) = cancel_handoff::Custody::acquire(
         &shared,
         channel_id,
@@ -238,6 +245,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         &tmux_session_name,
         &output_path,
         &cancel,
+        legacy_mode,
     )
     .await
     else {
@@ -282,7 +290,19 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     let mut active_stream_inflight_reacquire_logged = false;
     let mut completion_footer_idle = WatcherCompletionFooterIdleState::default();
     let mut completion_footer_spin_idx: usize = 0;
-    let mut restored_turn = restored_turn;
+    #[cfg(test)]
+    if !legacy_mode.is_legacy() && restored_turn.is_some() {
+        crate::services::discord::inflight::o_seed_observation::record_event(
+            &watcher_provider,
+            channel_id.get(),
+            "restored_turn_argument_rejected",
+        );
+    }
+    let mut restored_turn = if legacy_mode.is_legacy() {
+        restored_turn
+    } else {
+        None
+    };
     // #3107 codex re-review (P2#3, F3): the #3099 hourglass anchor
     // (`injected_prompt_message_id`) pinned by the restored turn, captured ONCE
     // up front before `restored_turn` is consumed by the streaming path's
@@ -300,7 +320,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         mut watcher_turn_nonce,
         mut last_relayed_offset,
         mut last_observed_generation_mtime_ns,
-    ) = entry::restore_delivery_position(&shared, channel_id, &tmux_session_name, &output_path);
+    ) = entry::restore_delivery_position(
+        &shared,
+        channel_id,
+        &tmux_session_name,
+        &output_path,
+        legacy_mode,
+    );
     let mut pending_terminal_rewind_seed: Option<RestoredWatcherTurn> = None;
     let mut terminal_rewind_attempt_key: Option<WatcherRewindAttemptKey> = None;
     let mut terminal_rewind_attempts: u8 = 0;
@@ -320,6 +346,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         watcher_thread_channel_id,
         watcher_instance_id,
         host: &host,
+        legacy_mode,
     };
     let poll_controls = PollWatcherControls {
         cancel: &cancel,
@@ -468,21 +495,40 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &mut render_seed_state,
         )
         .await;
-        let checkpoint_row = crate::services::discord::inflight::load_inflight_state(
-            &watcher_provider,
-            channel_id.get(),
-        )
-        .filter(|row| {
-            turn_parse_state
-                .watcher_turn_identity
-                .as_ref()
-                .is_some_and(|identity| identity.matches_state(row))
-                && row.turn_nonce == watcher_turn_nonce
-        });
+        let checkpoint_row = legacy_mode
+            .is_legacy()
+            .then(|| {
+                crate::services::discord::inflight::load_inflight_state(
+                    &watcher_provider,
+                    channel_id.get(),
+                )
+            })
+            .flatten()
+            .filter(|row| {
+                turn_parse_state
+                    .watcher_turn_identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.matches_state(row))
+                    && row.turn_nonce == watcher_turn_nonce
+            });
         let checkpoint_turn = match &collection_outcome {
             CollectOutcome::Fallthrough(turn) => Some(turn),
             _ => None,
         };
+        #[cfg(test)]
+        if let Some(turn) = checkpoint_turn {
+            crate::services::discord::inflight::o_seed_observation::record_parser_response(
+                &watcher_provider,
+                channel_id.get(),
+                &turn.full_response,
+            );
+        }
+        #[cfg(test)]
+        crate::services::discord::inflight::o_seed_observation::record_event(
+            &watcher_provider,
+            channel_id.get(),
+            "checkpoint",
+        );
         cancellation_custody.checkpoint(
             &turn_parse_state,
             &supervisor_relay_state,
@@ -560,6 +606,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 cancel: &cancel,
                 turn_delivered: &turn_delivered,
                 watcher_instance_id,
+                legacy_mode,
             };
             let no_result_locals = NoResultExitLocals {
                 found_result,
@@ -2538,6 +2585,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
     // Publish custody before the old task's independently fenced registry cleanup.
     drop(cancellation_custody);
+    // Rowless cancellation releases only its own registry slot; Legacy teardown reads rows.
+    if !legacy_mode.is_legacy() {
+        shared
+            .tmux_watchers
+            .remove_tmux_session_if_current(&tmux_session_name, &cancel);
+        tracing::info!(
+            instance = watcher_instance_id,
+            "tmux watcher stopped for #{tmux_session_name}"
+        );
+        return;
+    }
     // #4229 S5: post-stream-exit finalize tail moved verbatim to tmux_watcher/post_stream_exit.rs.
     run_post_stream_exit(PostStreamExitContext {
         channel_id,

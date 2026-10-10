@@ -79,6 +79,7 @@ async fn n1a_post_terminal_prologue_cannot_recreate_confirmed_row() {
         watcher_thread_channel_id: None,
         watcher_instance_id: 6327,
         host: &host,
+        legacy_mode: WatcherLegacyMode::Legacy,
     };
     let cancel = Arc::new(AtomicBool::new(false));
     let paused = Arc::new(AtomicBool::new(false));

@@ -145,6 +145,11 @@ impl super::loop_poll_prologue::WatcherSourceAuthority {
     ) -> Result<(super::WatcherToolState, Option<super::InflightTurnState>), ()> {
         let mut tool_state = super::WatcherToolState::new();
         tool_state.set_provider(&ctx.watcher_provider);
+        #[cfg(test)]
+        crate::services::discord::inflight::o_seed_observation::decoder_initialized(&ctx.watcher_provider, ctx.channel_id.get());
+        if !ctx.legacy_mode.is_legacy() {
+            return Ok((tool_state, None));
+        }
         let row = crate::services::discord::inflight::load_inflight_state(
             &ctx.watcher_provider,
             ctx.channel_id.get(),
@@ -161,6 +166,8 @@ impl super::loop_poll_prologue::WatcherSourceAuthority {
         row: Option<&super::InflightTurnState>,
         cursor: u64,
     ) -> Result<Option<crate::services::codex_tui::rollout_tail::RolloutRecordDecoder>, ()> {
+        #[cfg(test)]
+        crate::services::discord::inflight::o_seed_observation::prefix_restore(&ctx.watcher_provider, ctx.channel_id.get());
         if ctx.watcher_provider == super::ProviderKind::Codex
             && let Some(row) = row
             && row.runtime_kind
@@ -241,6 +248,8 @@ impl Utf8ChunkDecoder {
             && source.source_file != SourceFileIdentity::Unavailable
             && self.pending_source == Some(source);
         let mut decoded = self.decode(chunk, offset);
+        #[cfg(test)]
+        crate::services::discord::inflight::o_seed_observation::source_decoded(source.source_file, &decoded.text);
         decoded.mixed_read_provenance &= !same_source;
         if !chunk.is_empty() {
             self.pending_source =

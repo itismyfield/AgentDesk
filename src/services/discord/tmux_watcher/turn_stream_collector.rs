@@ -360,6 +360,12 @@ async fn collect_turn_stream_body(
     // await sites from duplicating the nine-argument call verbatim.
     macro_rules! ensure_monitor_auto_turn_inflight_now {
         () => {
+            #[cfg(test)]
+            crate::services::discord::inflight::o_seed_observation::record_event(
+                &watcher_provider,
+                channel_id.get(),
+                "monitor_upsert_call",
+            );
             let _ = ensure_monitor_auto_turn_inflight(
                 &shared,
                 &watcher_provider,
@@ -392,6 +398,12 @@ async fn collect_turn_stream_body(
         Some(initial_buffer_start_offset),
         Some(turn_terminal_start_offset),
     );
+    #[cfg(test)]
+    if !full_response.is_empty() {
+        crate::services::discord::inflight::o_seed_observation::record_parser_response(
+            &watcher_provider, channel_id.get(), &full_response,
+        );
+    }
     // #3041 P1-3 (Part a, B1): DEFERRED forward of the outer-read chunk. We now
     // know — from `initial_outcome.found_result` — whether THIS chunk is the
     // RESULT-bearing (terminal) one. If so, forward it as a TERMINAL frame
@@ -511,13 +523,31 @@ async fn collect_turn_stream_body(
             "  [{ts}] 👁 post-terminal-success continuation: flushing relayed output for {tmux_session_name} immediately (offset {data_start_offset} -> {current_offset})"
         );
     }
-    if !monitor_auto_turn_claimed
+    #[cfg(test)]
+    if matches!(
+        task_notification_kind,
+        Some(TaskNotificationKind::MonitorAutoTurn)
+    ) {
+        crate::services::discord::inflight::o_seed_observation::record_event(
+            &watcher_provider,
+            channel_id.get(),
+            "monitor_initial_candidate",
+        );
+    }
+    if ctx.legacy_mode.is_legacy()
+        && !monitor_auto_turn_claimed
         && !cancel.load(Ordering::Acquire)
         && matches!(
             task_notification_kind,
             Some(TaskNotificationKind::MonitorAutoTurn)
         )
     {
+        #[cfg(test)]
+        crate::services::discord::inflight::o_seed_observation::record_event(
+            &watcher_provider,
+            channel_id.get(),
+            "monitor_start_call",
+        );
         let start = start_monitor_auto_turn_when_available(
             &shared,
             &watcher_provider,
@@ -685,6 +715,12 @@ async fn collect_turn_stream_body(
                         Some(chunk_buffer_start_offset),
                         Some(turn_terminal_start_offset),
                     );
+                    #[cfg(test)]
+                    if !full_response.is_empty() {
+                        crate::services::discord::inflight::o_seed_observation::record_parser_response(
+                            &watcher_provider, channel_id.get(), &full_response,
+                        );
+                    }
                     // #3041 P1-3 (Part a, B1): deferred forward of THIS streaming
                     // chunk. `outcome.found_result` now tells us whether this is
                     // the RESULT-bearing chunk; if so it rides a TERMINAL frame
@@ -767,11 +803,30 @@ async fn collect_turn_stream_body(
                     }
                     assistant_text_seen |= outcome.assistant_text_seen;
                     fresh_assistant_text_seen |= outcome.assistant_text_seen;
+                    #[cfg(test)]
                     if matches!(
                         task_notification_kind,
                         Some(TaskNotificationKind::MonitorAutoTurn)
                     ) {
+                        crate::services::discord::inflight::o_seed_observation::record_event(
+                            &watcher_provider,
+                            channel_id.get(),
+                            "monitor_inner_candidate",
+                        );
+                    }
+                    if ctx.legacy_mode.is_legacy()
+                        && matches!(
+                            task_notification_kind,
+                            Some(TaskNotificationKind::MonitorAutoTurn)
+                        )
+                    {
                         if !monitor_auto_turn_claimed {
+                            #[cfg(test)]
+                            crate::services::discord::inflight::o_seed_observation::record_event(
+                                &watcher_provider,
+                                channel_id.get(),
+                                "monitor_start_call",
+                            );
                             let start = start_monitor_auto_turn_when_available(
                                 &shared,
                                 &watcher_provider,
@@ -817,6 +872,12 @@ async fn collect_turn_stream_body(
                     }
                 }
                 Ok(Ok(Ok((_, off, _)))) => {
+                    #[cfg(test)]
+                    crate::services::discord::inflight::o_seed_observation::record_event(
+                        &watcher_provider,
+                        channel_id.get(),
+                        "inner_eof",
+                    );
                     current_offset = off;
                     if should_probe_tmux_liveness(
                         last_liveness_probe_at.elapsed(),
@@ -828,11 +889,13 @@ async fn collect_turn_stream_body(
                             Some(tmux_liveness_decision(
                                 cancel.load(Ordering::Relaxed),
                                 shared.restart.shutting_down.load(Ordering::Relaxed),
-                                host_gate::tmux_alive(
+                                host_gate::tmux_alive_for_mode(
                                     &shared,
                                     &tmux_session_name,
                                     channel_id,
                                     &ctx.host,
+                                    ctx.legacy_mode,
+                                    &output_path,
                                 )
                                 .await,
                             )),
@@ -929,15 +992,22 @@ async fn collect_turn_stream_body(
                                 tracing::info!(
                                     "  [{ts}] 👁 watcher observed fresh ready-for-input idle for {tmux_session_name} at offset {current_offset}; leaving session untouched"
                                 );
+                                #[cfg(test)]
+                                crate::services::discord::inflight::o_seed_observation::record_event(&watcher_provider, channel_id.get(), "fresh_idle_classified");
                                 fresh_ready_for_input_idle = true;
                                 break;
                             }
                             crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout => {
+                                #[cfg(test)]
+                                crate::services::discord::inflight::o_seed_observation::record_event(&watcher_provider, channel_id.get(), "post_work_idle_classified");
+                                if !ctx.legacy_mode.is_legacy() {
+                                    continue;
+                                }
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                let stall_inflight_snapshot = crate::services::discord::inflight::load_inflight_state(
+                                let stall_inflight_snapshot = ctx.legacy_mode.is_legacy().then(|| crate::services::discord::inflight::load_inflight_state(
                                     &watcher_provider,
                                     channel_id.get(),
-                                );
+                                )).flatten();
                                 let dispatch_id = resolve_dispatched_thread_dispatch_from_db(
                                     shared.pg_pool.as_ref(),
                                     watcher_thread_channel_id.unwrap_or_else(|| channel_id.get()),
@@ -1019,6 +1089,7 @@ async fn collect_turn_stream_body(
                     output_path: &output_path,
                     turn_delivered: &turn_delivered,
                     host: &ctx.host,
+                    legacy_mode: ctx.legacy_mode,
                 },
                 StreamingStatusTickTurn {
                     data_start_offset,

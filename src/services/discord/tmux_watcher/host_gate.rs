@@ -2,6 +2,7 @@
 //! session the host evidence, the channel's inflight row and sessions row included, leaves tmux.
 
 use super::*;
+use crate::services::cluster::stream_relay::SourceFileIdentity;
 use crate::services::discord::host_liveness;
 use crate::services::discord::host_teardown_gate::shared_teardown;
 use crate::services::discord::inflight::{KeyedTeardown, load_inflight_state_read_only_result};
@@ -26,6 +27,107 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn tmux_alive(
     host: &HostSnapshot,
 ) -> bool {
     host_alive(shared, name, channel_id, host, row_probe(name, channel_id)).await
+}
+
+/// Retired watchers require independent tmux and native-source evidence before probing.
+pub(in crate::services::discord::tmux::tmux_watcher) async fn tmux_alive_for_mode(
+    shared: &SharedData,
+    name: &str,
+    channel_id: ChannelId,
+    host: &HostSnapshot,
+    legacy_mode: WatcherLegacyMode,
+    output_path: &str,
+) -> bool {
+    #[cfg(test)]
+    crate::services::discord::inflight::o_seed_observation::record_event(&watcher_provider(name), channel_id.get(), "host_probe");
+    if legacy_mode.is_legacy() {
+        return tmux_alive(shared, name, channel_id, host).await;
+    }
+    let provider = watcher_provider(name);
+    if watch_host_of(shared, &provider, channel_id.get(), name).await != WatchHost::Legacy {
+        return true;
+    }
+    let Some(evidence) = retired_tmux_evidence(name, output_path, host) else {
+        return true;
+    };
+    let name_owned = name.to_string();
+    #[cfg(test)]
+    crate::services::discord::inflight::o_seed_observation::record_event(&watcher_provider(name), channel_id.get(), "rowless_host_probe");
+    let observed = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || host_liveness::observe_liveness(&name_owned, None)),
+    )
+    .await;
+    if !matches!(observed, Ok(Ok(SessionLiveness::Missing))) {
+        return true;
+    }
+    #[cfg(all(test, unix))]
+    retired_probe_test::after_probe(channel_id.get()).await;
+    watch_host_of(shared, &provider, channel_id.get(), name).await != WatchHost::Legacy
+        || retired_tmux_evidence(name, output_path, host).as_ref() != Some(&evidence)
+}
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::tmux::tmux_watcher) mod retired_probe_test {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    use tokio::sync::oneshot;
+
+    type Pause = (oneshot::Sender<()>, oneshot::Receiver<()>);
+    static PAUSES: LazyLock<Mutex<HashMap<u64, Pause>>> = LazyLock::new(Mutex::default);
+
+    pub(in crate::services::discord::tmux::tmux_watcher) fn pause_after_probe(channel: u64) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, entry) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        assert!(PAUSES.lock().unwrap().insert(channel, (entered, resume)).is_none());
+        (entry, release)
+    }
+
+    pub(super) async fn after_probe(channel: u64) {
+        let pause = PAUSES.lock().unwrap().remove(&channel);
+        if let Some((entered, resume)) = pause {
+            let _ = entered.send(());
+            let _ = resume.await;
+        }
+    }
+}
+
+fn retired_tmux_evidence(
+    name: &str,
+    output_path: &str,
+    host: &HostSnapshot,
+) -> Option<(crate::services::tui_prompt_dedupe::TuiRuntimeBinding, SourceFileIdentity)> {
+    use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
+    use crate::services::session_host::HostKind;
+    use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
+    if host.refresh_sync(name) != WatchHost::Legacy
+        || read_host_kind_marker(name) != HostKindMarker::Known(HostKind::Tmux)
+    {
+        return None;
+    }
+    let Ok(Some(binding)) = crate::services::tui_prompt_dedupe::try_peek_tmux_runtime_binding(name)
+    else {
+        return None;
+    };
+    let valid = matches!(
+        (parse_provider_and_channel_from_tmux_name(name).map(|(p, _)| p), binding.runtime_kind),
+        (Some(ProviderKind::Claude), ClaudeTui) | (Some(ProviderKind::Codex), CodexTui)
+    ) && crate::services::tmux_common::resolve_tmux_runtime_kind_marker(name)
+        == Some(binding.runtime_kind)
+        && binding.output_path == output_path
+        && binding.session_id.as_deref().is_some_and(|id| !id.trim().is_empty());
+    if !valid {
+        return None;
+    }
+    let file = std::fs::File::open(output_path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let source = SourceFileIdentity::from_open_file(&file);
+    if source == SourceFileIdentity::Unavailable {
+        return None;
+    }
+    Some((binding, source))
 }
 
 async fn row_probe(name: &str, channel_id: ChannelId) -> bool {
