@@ -700,6 +700,11 @@
       "path": "migrations/postgres/0137_request_replay_exact_attempt.sql",
       "sha256": "d333ad80e1bce3e99c590d406f21682a5ca2ea7a97894663a36ee11a557d0634",
       "version": 137
+    },
+    {
+      "path": "migrations/postgres/0138_o_piece_delivery.sql",
+      "sha256": "7e834babe7a018f9a7313d1944d530a9c8e9da77e9b50c36ea39fc517274e528",
+      "version": 138
     }
   ],
   "version": 1

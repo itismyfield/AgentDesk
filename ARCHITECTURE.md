@@ -78,6 +78,7 @@ src/
 │   ├── monitoring.rs
 │   ├── o.rs
 │   ├── o_shadow.rs
+│   ├── o_tests.rs
 │   ├── query.rs
 │   ├── restart_terminal_proof.rs
 │   ├── run.rs
@@ -216,6 +217,9 @@ src/
 │   ├── o_channel_activation_fence_tests.rs
 │   ├── o_channel_homes.rs
 │   ├── o_channel_homes_tests.rs
+│   ├── o_piece_attempts.rs
+│   ├── o_piece_delivery.rs
+│   ├── o_piece_ledger_tests.rs
 │   ├── postgres.rs
 │   ├── relay_dead_letter.rs
 │   ├── replay_disposition.rs
@@ -2468,8 +2472,16 @@ src/
 │   │   │   ├── sink.rs
 │   │   │   └── sink_tests.rs
 │   │   ├── repost/
+│   │   │   ├── admission.rs
+│   │   │   ├── admission_tests.rs
 │   │   │   ├── config.rs
+│   │   │   ├── evidence.rs
+│   │   │   ├── identity.rs
+│   │   │   ├── matcher.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── probe.rs
+│   │   │   ├── probe_tests.rs
+│   │   │   ├── provenance.rs
 │   │   │   └── send.rs
 │   │   ├── shadow/
 │   │   │   ├── binding_reader.rs
