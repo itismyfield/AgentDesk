@@ -1493,8 +1493,20 @@ fn restart_restores_q_and_inflight_then_runs_q_once() {
         .expect("restored turn's completion event owns queue eligibility");
         assert_eq!(owner.channel_id, h.channel_id);
         answered_once(&h).await;
-        if let Some(restored_watcher) = shared.tmux_watchers.get(&h.channel_id) {
-            restored_watcher.cancel.store(true, Ordering::Release);
+        let restored_identity = shared.tmux_watchers.get(&h.channel_id).map(|watcher| {
+            (
+                watcher.tmux_session_name.clone(),
+                watcher.output_path.clone(),
+                watcher.cancel.clone(),
+            )
+        });
+        if let Some((session, output, cancel)) = restored_identity {
+            shared.tmux_watchers.cancel_and_remove_channel_if_current(
+                &h.channel_id,
+                &session,
+                &output,
+                &cancel,
+            );
         }
     });
 }
