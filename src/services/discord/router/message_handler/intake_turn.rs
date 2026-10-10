@@ -2313,6 +2313,17 @@ async fn handle_text_message_admitted(
     }
     inflight_state.session_key = adk_session_key.clone();
     inflight_state.dispatch_id = dispatch_id.clone();
+    let turn_host = crate::services::turn_host::for_turn(
+        shared.pg_pool.as_ref(),
+        &provider,
+        channel_id.get(),
+        adk_session_key.as_deref(),
+    )
+    .await;
+    let submission = crate::services::discord::inflight::install_managed_submission_boundary(
+        &mut inflight_state,
+        &turn_host,
+    );
     let original_registration = match crate::services::discord::live_bridge::register_or_requeue(
         shared,
         &provider,
@@ -2437,13 +2448,6 @@ async fn handle_text_message_admitted(
     }
     let provider_for_blocking = provider.clone();
     let execution_pool = shared.pg_pool.clone();
-    let turn_host = crate::services::turn_host::for_turn(
-        shared.pg_pool.as_ref(),
-        &provider,
-        channel_id.get(),
-        adk_session_key.as_deref(),
-    )
-    .await;
     let producer_registration = original_registration.clone();
     let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
         shared.pg_pool.as_ref(),
@@ -2486,6 +2490,7 @@ async fn handle_text_message_admitted(
                             cache_ttl_minutes,
                             dispatch_type: dispatch_type_for_mcp.as_deref(),
                             force_fresh: force_fresh_provider_session,
+                            submission: submission.as_ref(),
                         },
                         tx.clone(),
                     )
@@ -2497,12 +2502,9 @@ async fn handle_text_message_admitted(
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 tracing::warn!("  [streaming] Error: {}", e);
-                let _ = tx.send(StreamMessage::Error {
-                    message: e,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: None,
-                });
+                if let Some(message) = super::provider_dispatch::producer_error(submission.as_ref(), channel_id.get(), e) {
+                    let _ = tx.send(message);
+                }
             }
             Err(panic_info) => {
                 let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
