@@ -1,6 +1,4 @@
 //! Dormant input ownership capabilities; selection and supervisor start are not wired.
-#[cfg(test)]
-pub(crate) mod activation;
 #[allow(dead_code)]
 pub(crate) mod clear;
 #[allow(dead_code)]

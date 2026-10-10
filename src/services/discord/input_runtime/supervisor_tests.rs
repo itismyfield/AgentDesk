@@ -65,6 +65,9 @@ impl Default for Runtime {
     }
 }
 
+// The fake event name, how many of them to let pass first, and the parent → thread edge.
+type Inject = (&'static str, usize, (u64, u64));
+
 // Everything the fakes observed, shared across the supervisor, its workers and the test.
 #[derive(Default)]
 struct World {
@@ -72,7 +75,7 @@ struct World {
     mapping_unavailable: AtomicBool,
     mapping_pending: AtomicBool,
     // An edge written into the real map at the nth matching fake event, after its own effect.
-    inject: Mutex<Option<(&'static str, usize, (u64, u64))>>,
+    inject: Mutex<Option<Inject>>,
     effects: Mutex<Vec<&'static str>>,
     mapping_checks: AtomicUsize,
     freeze_failed: AtomicBool,
@@ -553,6 +556,19 @@ impl Rig {
         inputs: Vec<u64>,
         refusal: Option<&'static str>,
     ) -> Supervisor<Fake> {
+        let reserved =
+            (self.registry).reserve_for_test(&ProviderKind::Claude, self.channel, &self.root);
+        self.adopt(reserved.unwrap(), request, inputs, refusal)
+            .unwrap()
+    }
+    // Supervisor::start over a given reservation, with this rig's config and fakes.
+    fn adopt(
+        &self,
+        reserved: Reserved,
+        request: Request,
+        inputs: Vec<u64>,
+        refusal: Option<&'static str>,
+    ) -> Result<Supervisor<Fake>, Refused> {
         let config = Config {
             provider: ProviderKind::Claude,
             channel: self.channel,
@@ -568,7 +584,7 @@ impl Rig {
             inputs,
             mailbox: ChannelMailboxRegistry::default(),
         };
-        Supervisor::start(self.registry, config, ports).unwrap()
+        Supervisor::start(reserved, config, ports)
     }
     fn health(&self) -> Vec<String> {
         super::super::reasons_with(self.registry)
@@ -1059,6 +1075,9 @@ mod drive_entry;
 
 #[path = "mapping_guard_tests.rs"]
 mod mapping_guard;
+
+#[path = "reserve_tests.rs"]
+mod reserve;
 
 #[test]
 fn registered_holds_join_fence_health_and_leave_on_release() {

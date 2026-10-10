@@ -70,6 +70,67 @@ def retain_arguments(source):
     return arguments
 
 
+TOKEN = re.compile(r"->|::|[A-Za-z_]\w*|\S")
+# The one private turn-presence Ports impl; any other Ports impl, or a second copy, is installation.
+ALLOWED_PORTS = {(D + "turn_presence/activity.rs", "impl Ports for LivePorts"): 1}
+
+
+def skip_generics(tokens, index):
+    """Index after a balanced <...>; `->` is one token and `>>` closes twice."""
+    depth = 0
+    for end in range(index, len(tokens)):
+        depth += (tokens[end] == "<") - (tokens[end] == ">")
+        if depth == 0:
+            return end + 1
+    raise AssertionError("unbalanced generic arguments")
+
+
+def ports_impls(source):
+    """Normalized headers of every `impl ... Ports ... for` item, whatever its generics."""
+    tokens, headers = TOKEN.findall(source), []
+    for start, token in enumerate(tokens):
+        if token != "impl":
+            continue
+        index = skip_generics(tokens, start + 1) if tokens[start + 1:start + 2] == ["<"] else start + 1
+        trait = []
+        while index < len(tokens) and tokens[index] not in {"for", "{", "where", ";"}:
+            if tokens[index] == "<":
+                index = skip_generics(tokens, index)
+                continue
+            trait.append(tokens[index])
+            index += 1
+        if index == len(tokens):
+            raise AssertionError("unterminated impl header")
+        if tokens[index] == "for" and [t for t in trait if t != "::"][-1:] == ["Ports"]:
+            end = next((i for i in range(index, len(tokens)) if tokens[i] in {"{", "where"}), None)
+            if end is None:
+                raise AssertionError("unterminated Ports impl")
+            headers.append(" ".join(tokens[start:end]))
+    return headers
+
+
+def supervisor_starts(source):
+    """`Supervisor::start(` with any turbofish, nested or spaced."""
+    tokens, calls = TOKEN.findall(source), 0
+    for index, token in enumerate(tokens):
+        if token != "Supervisor" or tokens[index + 1:index + 2] != ["::"]:
+            continue
+        at = index + 2
+        if tokens[at:at + 1] == ["<"]:
+            at = skip_generics(tokens, at)
+            if tokens[at:at + 1] != ["::"]:
+                raise AssertionError("unparsed Supervisor turbofish")
+            at += 1
+        calls += tokens[at:at + 2] == ["start", "("]
+    return calls
+
+
+def calls(source, name):
+    tokens = TOKEN.findall(source)
+    return sum(tokens[i + 1:i + 2] == ["("] and tokens[i - 1:i] != ["fn"]
+               for i, token in enumerate(tokens) if token == name)
+
+
 EXPECTED = {
     "health/snapshot.rs": {"get": 1, "iter": 2, "contains_key": 1},
     "input_runtime/mapping.rs": {"iter": 1},
@@ -179,12 +240,13 @@ class Census(unittest.TestCase):
             self.assertEqual(expressions(source), ["unclassified"])
 
     def test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation(self):
+        impls = Counter()
         for path, source in self.sources.items():
-            # Turn presence has its own private Ports trait.
-            if path != D + "turn_presence/activity.rs":
-                self.assertIsNone(re.search(r"\bimpl\s*(<[^>]*>)?\s*(?:[\w:]+::)?Ports\s+for", source), path)
-            self.assertIsNone(re.search(r"\bSupervisor\s*::\s*(<[^>]*>\s*::\s*)?start\s*\(", source), path)
+            impls.update((path, header) for header in ports_impls(source))
+            self.assertEqual(supervisor_starts(source), 0, path)
+            self.assertEqual(calls(source, "reserve_boot"), 0, path)
             self.assertEqual(len(re.findall(r"\bmapping\s*::\s*inspect\s*\(", source)), 0, path)
+        self.assertEqual(dict(impls), ALLOWED_PORTS)
         # The probe's only map read is one iter() inside Probe::check, over each handed-over runtime.
         probe = re.sub(r"\s+", "", self.sources[D + "input_runtime/mapping.rs"])
         self.assertEqual(Counter(expressions(probe)), {"iter": 1})
@@ -228,26 +290,91 @@ class Census(unittest.TestCase):
         guard = Census("test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation")
         helper_path = D + "input_runtime/mapping.rs"
         private_ports_path = D + "turn_presence/activity.rs"
-        guard.sources = {helper_path: self.sources[helper_path], private_ports_path: "impl Ports for LivePorts {}"}
+        allowed = "impl Ports for LivePorts {}"
+        base = {helper_path: self.sources[helper_path], private_ports_path: allowed}
+        guard.sources = dict(base)
         guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
         fixtures = [
             "impl crate::services::discord::input_runtime::supervisor::Ports for Live {}",
             "impl<T> input_runtime::supervisor::Ports for Live<T> {}",
+            "impl<T: Bound<Inner>> Ports for Live<T> {}",
+            "impl<T: Bound<Inner<u8>>>\n    supervisor :: Ports<X>\n    for Live<T> where T: Send {}",
+            "impl<F: Fn() -> u8> Ports for Live<F> {}",
             "impl Ports for Live {}",
             "fn activate() { input_runtime::supervisor::Supervisor :: start(); }",
             "fn activate() { Supervisor :: <Live> :: start (); }",
+            "fn activate() { Supervisor::<Live<Vec<u8>>>::start(); }",
+            "fn activate() { supervisor::Supervisor\n  ::<Live<Vec<Box<dyn Fn() -> u8>>>>\n  ::start(); }",
+            "fn boot() { REGISTRY.reserve_boot(root, &selection, &config, &snapshots, &probe); }",
             "fn inspect() { crate::services::discord::input_runtime::supervisor::mapping :: inspect (&parents, channel); }",
         ]
-        for source in fixtures:
-            with self.subTest(source=source):
-                guard.sources = {helper_path: self.sources[helper_path], "src/other_module.rs": source}
+        for path in ["src/other_module.rs", private_ports_path]:
+            for source in fixtures:
+                with self.subTest(path=path, source=source):
+                    extra = allowed + "\n" + source if path == private_ports_path else source
+                    guard.sources = dict(base, **{path: extra})
+                    with self.assertRaises(AssertionError):
+                        guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
+        # The one allowed impl is exact: zero, two, or a moved copy all fail.
+        for sources in [{private_ports_path: "fn none() {}"},
+                        {private_ports_path: allowed + "\n" + allowed},
+                        {private_ports_path: "fn none() {}", "src/other_module.rs": allowed}]:
+            with self.subTest(sources=sources):
+                guard.sources = dict(base, **sources)
                 with self.assertRaises(AssertionError):
                     guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
-        for source in fixtures[-3:]:
-            with self.subTest(private_ports_path=source):
-                guard.sources = {helper_path: self.sources[helper_path], private_ports_path: source}
+        for source in ["fn a() { Supervisor::<Live<u8>::start(); }", "impl<T: Bound<Inner> Ports for X {}"]:
+            with self.subTest(unparsed=source), self.assertRaises(AssertionError):
+                guard.sources = dict(base, **{"src/other_module.rs": source})
+                guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
+
+    def test_input_runtime_reader_pin_rejects_aliases_mutators_and_extra_reads(self):
+        probe = D + "input_runtime/mapping.rs"
+        additions = [
+            (probe, "fn alias(s: &SharedData) { let m = &s.dispatch.thread_parents; }"),
+            (probe, "fn more(s: &SharedData) { s.dispatch.thread_parents.iter(); }"),
+            (D + "input_runtime/supervisor.rs", "fn w(s: &SharedData) { s.dispatch.thread_parents.insert(a, b); }"),
+            (D + "input_runtime/supervisor/drive.rs", "fn r(s: &SharedData) { s.dispatch.thread_parents.iter(); }"),
+        ]
+        for path, extra in additions:
+            with self.subTest(path=path, extra=extra):
+                guard = Census("test_all_production_mapping_expressions_are_classified")
+                guard.sources = dict(self.sources)
+                guard.sources[path] += "\n" + extra
                 with self.assertRaises(AssertionError):
-                    guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
+                    guard.test_all_production_mapping_expressions_are_classified()
+        moved = Census("test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation")
+        moved.sources = dict(self.sources)
+        moved.sources[probe] = moved.sources[probe].replace("pub(crate) fn check(&self, channel: u64)", "pub(crate) fn peek(&self, channel: u64)")
+        with self.assertRaises((AssertionError, ValueError)):
+            moved.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
+
+    def test_tokens_balance_nested_generics_exactly(self):
+        self.assertEqual(ports_impls("impl<T: Bound<Inner>> Ports for Live<T> {}"),
+                         ["impl < T : Bound < Inner > > Ports for Live < T >"])
+        self.assertEqual(ports_impls("impl<F: Fn() -> u8> a::Ports<X<Y>> for Live<F> where F: Send {}"),
+                         ["impl < F : Fn ( ) -> u8 > a :: Ports < X < Y > > for Live < F >"])
+        self.assertEqual(supervisor_starts("Supervisor::<Live<Vec<u8>>>::start();"), 1)
+        self.assertEqual(supervisor_starts("Supervisor :: < F < fn() -> u8 >> :: start ( )"), 1)
+        self.assertEqual(supervisor_starts("Supervisor::<Live<Vec<u8>>>::stop();"), 0)
+        for source in ["Supervisor::<Live<u8>::start();", "impl<T: Bound<Inner> Ports for X {}"]:
+            with self.subTest(source=source), self.assertRaisesRegex(AssertionError, "unbalanced"):
+                ports_impls(source), supervisor_starts(source)
+
+    def test_comments_strings_and_test_items_are_not_installation(self):
+        source = (
+            "// impl<T: Bound<Inner>> Ports for Live<T> {}\n"
+            "/* Supervisor::<Live<Vec<u8>>>::start(); */\n"
+            "fn text() -> &'static str { \"impl Ports for Live {} reserve_boot(x)\" }\n"
+            "#[cfg(test)]\nmod tests { impl<T: Bound<Inner>> Ports for Live<T> {}\n"
+            "fn t() { Supervisor::<Live<Vec<u8>>>::start(); reserve_boot(x); } }\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.rs"
+            path.write_text(source)
+            text = rust._production_text(path)
+        self.assertEqual((ports_impls(text), supervisor_starts(text), calls(text, "reserve_boot")), ([], 0, 0))
+        self.assertEqual(len(ports_impls(source)), 3)
 
 
 if __name__ == "__main__":

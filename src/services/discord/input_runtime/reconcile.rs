@@ -1,6 +1,7 @@
 //! Hold causes a channel supervisor reports as health, and the Notices it sends for them.
 
 use super::fence::modes::TRANSITION_HELD;
+use super::supervisor::activation::scope::Refusal;
 use super::supervisor::mapping::Edge;
 
 /// Why a supervised channel stopped short of admission; each cause owns one health line.
@@ -12,6 +13,10 @@ pub(crate) enum HoldCause {
     MappingPresent(Edge, &'static str),
     MappingUnavailable,
     RuntimeViewPending,
+    /// E2 refused a channel without history; it stays effective Legacy.
+    ScopeRefused(Refusal),
+    /// E2 refused a channel with history or unknown responsibility; it stays protected.
+    ScopeHeld(Refusal),
     ModeRefused(&'static str),
     TransitionHeld(&'static str),
     Unbound(Vec<u64>),
@@ -28,6 +33,7 @@ impl HoldCause {
             Self::MappingPresent(..) => "mapped_thread",
             Self::MappingUnavailable => "mapping_unavailable",
             Self::RuntimeViewPending => "runtime_view_pending",
+            Self::ScopeRefused(_) | Self::ScopeHeld(_) => "scope",
             Self::ModeRefused(_) => "mode",
             Self::TransitionHeld(_) => "transition",
             Self::Unbound(_) => "unbound",
@@ -49,6 +55,8 @@ impl HoldCause {
             Self::MappingUnavailable | Self::RuntimeViewPending => {
                 format!("{TRANSITION_HELD} {at} reason={}", self.slot())
             }
+            Self::ScopeRefused(reason) => format!("input_scope_refused {at} reason={reason:?}"),
+            Self::ScopeHeld(reason) => format!("input_scope_held {at} reason={reason:?}"),
             Self::ModeRefused(reason) => format!("turn_mode_refused {at} reason={reason}"),
             Self::InputHeld(reason, head, held) => {
                 format!("input_reconcile_required {at} reason={reason} head={head} held={held}")

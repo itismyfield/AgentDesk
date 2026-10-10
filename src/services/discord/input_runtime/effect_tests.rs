@@ -231,7 +231,11 @@ async fn c1b_detached_cross_channel_uses_root_admission_without_lending_capabili
             Err(Failure::StalePermit)
         ));
         assert!(admit(&ProviderKind::Codex, 6_325_403).unwrap().is_none());
-        assert!(admit(&ProviderKind::Claude, 6_325_453).unwrap().is_none());
+        // Another provider meets the owner's protection on this channel, never an unprotected None.
+        assert!(matches!(
+            admit(&ProviderKind::Claude, 6_325_453),
+            Err(Failure::Mode(Mode::Closing))
+        ));
         assert!(matches!(
             admit(&ProviderKind::Codex, 6_325_454),
             Err(Failure::Mode(Mode::Closing))

@@ -13,6 +13,7 @@ use tokio::sync::{OwnedMutexGuard, watch};
 use self::command::{ScanCommit, SupervisorCmd};
 use self::ordering::AdmissionOrder;
 use self::receipt::{Deferred, Receipt};
+use self::reserve::Reserved;
 use super::clear::{self, ClearHost, Step, Unresolved};
 use super::fence::{self, Closing, Failure, Gate, Mode};
 use super::reconcile::{self, HoldCause};
@@ -21,6 +22,8 @@ use crate::services::tui_input::ledger::{Ledger, LedgerLease, LedgerSlot, Presen
 use crate::services::tui_input::transition::{self, Host, Move, Outcome};
 use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents};
 
+#[path = "activation.rs"]
+pub(crate) mod activation;
 #[path = "admission.rs"]
 pub(crate) mod admission;
 #[path = "command.rs"]
@@ -38,6 +41,7 @@ pub(crate) fn mutant(name: &str) -> bool {
     std::env::var("ADK_TEST_INPUT_G1A_MUTANT").is_ok_and(|value| value == name)
 }
 pub(crate) mod drive;
+pub(crate) mod reserve;
 
 /// Retries per boot for a held stage; an exhausted stage stays held until the next boot.
 pub(crate) const BUDGET: u32 = 8;
@@ -47,6 +51,8 @@ pub(crate) static REGISTRY: Registry = Registry::new();
 
 pub(crate) struct Registry {
     used: AtomicBool,
+    // Set once under the entries lock by the first boot plan; nothing installs after it.
+    sealed: AtomicBool,
     entries: Mutex<BTreeMap<(String, u64), Entry>>,
     // A close outlives its supervisor, so a later one in this process continues from it.
     closings: Mutex<BTreeMap<(String, u64), Arc<Closing>>>,
@@ -67,12 +73,16 @@ pub(crate) enum Refused {
     Duplicate,
     Poisoned,
     Latched,
+    Sealed,
+    /// The supervisor's config names another channel, provider or root than its reservation.
+    Mismatch,
 }
 
 impl Registry {
     pub(crate) const fn new() -> Self {
         Self {
             used: AtomicBool::new(false),
+            sealed: AtomicBool::new(false),
             entries: Mutex::new(BTreeMap::new()),
             closings: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
@@ -91,8 +101,21 @@ impl Registry {
         channel: u64,
         root: &Path,
     ) -> Result<Registration, Refused> {
-        let key = (provider.as_str().to_owned(), channel);
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if self.sealed.load(Ordering::Acquire) {
+            return Err(Refused::Sealed);
+        }
+        self.insert(&mut entries, provider, channel, root)
+    }
+
+    fn insert(
+        &'static self,
+        entries: &mut BTreeMap<(String, u64), Entry>,
+        provider: &ProviderKind,
+        channel: u64,
+        root: &Path,
+    ) -> Result<Registration, Refused> {
+        let key = (provider.as_str().to_owned(), channel);
         if let Some(entry) = entries.get(&key) {
             return Err(match (entry.poisoned, entry.latch.is_some()) {
                 (true, _) => Refused::Poisoned,
@@ -394,6 +417,8 @@ pub(crate) struct Supervisor<P: Ports> {
     config: Config,
     ports: P,
     registration: Registration,
+    gate: Option<Arc<Gate>>,
+    hold: Option<HoldCause>,
     slot: LedgerSlot,
     cursor: Option<Cursor>,
     watch_lost: bool,
@@ -415,19 +440,27 @@ fn held(reason: &'static str) -> HoldCause {
 }
 
 impl<P: Ports> Supervisor<P> {
-    /// S0: refuses a channel that already has a live or lost supervisor in this process.
-    pub(crate) fn start(
-        registry: &'static Registry,
-        config: Config,
-        ports: P,
-    ) -> Result<Self, Refused> {
-        let mut registration = registry.register(&config.provider, config.channel, &config.root)?;
+    /// S0: adopts one reservation's registration, slot, gate and close without a new epoch.
+    pub(crate) fn start(reserved: Reserved, config: Config, ports: P) -> Result<Self, Refused> {
+        let Reserved {
+            mut registration,
+            root,
+            gate,
+            hold,
+        } = reserved;
+        // A mismatched config drops the registration unreleased, so the channel stays poisoned.
+        let key = (config.provider.as_str().to_owned(), config.channel);
+        if registration.key != key || root != config.root {
+            return Err(Refused::Mismatch);
+        }
         let slot = registration.slot().ok_or(Refused::Duplicate)?;
         let order = AdmissionOrder::new(config.provider.clone(), config.channel, 1, 0);
         Ok(Self {
             config,
             ports,
             registration,
+            gate,
+            hold,
             slot,
             cursor: None,
             watch_lost: false,
@@ -663,7 +696,10 @@ impl<P: Ports> Supervisor<P> {
     }
 
     async fn stages(&mut self) -> Result<Landing, HoldCause> {
-        let (provider, channel) = (self.config.provider.clone(), self.config.channel);
+        let channel = self.config.channel;
+        if let Some(cause) = self.hold.clone() {
+            return Err(cause);
+        }
         let binding = self.config.binding.clone();
         let (cursor, _) =
             Cursor::start(binding, channel).map_err(|_| HoldCause::BindingUnreadable)?;
@@ -675,7 +711,8 @@ impl<P: Ports> Supervisor<P> {
             Presence::Unreadable => return Err(HoldCause::LedgerUnreadable),
             presence => presence == Presence::Present,
         };
-        let gate = Gate::protect(provider, channel).map_err(|_| held("protect"))?;
+        let gate = self.gate.clone().ok_or(held("protect"))?;
+        // The reservation's close; only a reopen after a refusal closes the gate afresh.
         let closing = (self.registration.closing(&gate)).map_err(|_| held("close"))?;
         if let Some(reason) = self.config.refusal {
             self.registration

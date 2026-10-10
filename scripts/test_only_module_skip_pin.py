@@ -88,6 +88,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/input_runtime/receipt_tests.rs",
         "src/services/discord/input_runtime/supervisor_tests.rs",
         "src/services/discord/input_runtime/mapping_guard_tests.rs",
+        "src/services/discord/input_runtime/reserve_tests.rs",
         "src/services/discord/input_runtime/fence/modes_tests.rs",
         "src/services/discord/input_runtime/supervisor/drive_tests.rs",
         "src/services/discord/input_runtime/supervisor/drive_entry_tests.rs",
@@ -534,9 +535,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
-        "src/services/discord/input_runtime/activation.rs",
-        "src/services/discord/input_runtime/activation/plan.rs",
-        "src/services/discord/input_runtime/activation/scope.rs",
         "src/services/discord/input_runtime/offer.rs",
         "src/services/tui_input/actor/pane/ownership.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
