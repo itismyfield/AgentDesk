@@ -533,6 +533,16 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl -X PATCH http://localhost:8787/api/dispatches/dispatch-1 -H 'Content-Type: application/json' -d '{\"status\":\"completed\"}'"),
         ep(
             "POST",
+            "/api/internal/home-stop/v1",
+            "internal",
+            "A gateway's user stop forwarded to the holder of a delegated channel. Accepted only through the trusted cluster forward (loopback or Bearer, plus the x-agentdesk-forwarded-by and x-agentdesk-session-owner headers naming this node); the holder checks its fresh o_channel_homes row (provider, holder, epoch, worker state), admits the command on its home gate and runs its own /stop. Answers echo the request identity with a typed outcome and terminal_confirmed=false; it never re-forwards.",
+        )
+        .with_example(
+            json!({"body": {"v": 1, "request_id": "r-1", "channel_id": "1500000000000000000", "provider": "claude", "expected_holder": "mac-mini", "home_epoch": 7, "surface": "slash_stop", "intent": "user_stop", "force": false}}),
+            json!({"v": 1, "request_id": "r-1", "channel_id": "1500000000000000000", "provider": "claude", "holder": "mac-mini", "home_epoch": 7, "terminal_confirmed": false, "outcome": "herdr", "intent": "recorded", "delivery": "sent", "reason": null, "settlement": "host_owned", "effect_started": true}),
+        ),
+        ep(
+            "POST",
             "/api/internal/link-dispatch-thread",
             "internal",
             "Link dispatch to an existing Discord thread",

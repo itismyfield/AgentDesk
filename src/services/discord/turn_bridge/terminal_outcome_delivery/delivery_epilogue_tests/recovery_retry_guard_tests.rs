@@ -214,6 +214,131 @@ async fn session_died_recovery_retries_only_a_session_the_host_guard_admits_pg()
     db.drop().await;
 }
 
+#[tokio::test]
+async fn replay_hold_session_died_recovery_preserves_body_and_session_pg() {
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let version: String = sqlx::query_scalar("SELECT version()")
+        .fetch_one(&pool)
+        .await
+        .expect("mandatory postgres fixture");
+    eprintln!("replay_hold session-died real-PG fixture: {version}");
+    Arc::get_mut(&mut driver.shared).unwrap().pg_pool = Some(pool.clone());
+    let shared = driver.shared.clone();
+    let channel_id = ChannelId::new(DRIVER_CHANNEL_ID);
+    let mut session = resumable_session();
+    session.channel_name = Some("replay-held-recovery".to_string());
+    shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .insert(channel_id, session);
+    let _mailbox = shared.mailbox(channel_id);
+    let key = crate::services::discord::adk_session::build_adk_session_key(
+        &shared,
+        channel_id,
+        &ProviderKind::Claude,
+        None,
+    )
+    .await
+    .expect("channel session key");
+    crate::services::discord::inflight::seed_session_row_keyed(
+        &pool,
+        &key,
+        DRIVER_CHANNEL_ID,
+        None,
+    )
+    .await;
+
+    let scheduled = Arc::new(AtomicUsize::new(0));
+    let edits = Arc::new(Mutex::new(Vec::new()));
+    let (mut ctx, mut state) = driver.parts();
+    ctx.recovery_retry = true;
+    state.gateway = Arc::new(RetryCounter(scheduled.clone(), edits.clone()));
+    state
+        .cancel_token
+        .bind_unmanaged_session_name(DRIVER_TMUX_SESSION);
+    state.adk_session_key = Some(key);
+    state.full_response = "held partial answer".to_string();
+    state.new_session_id = Some("held-session-id".to_string());
+    state.new_raw_provider_session_id = Some("held-raw-id".to_string());
+    state.inflight_state.session_id = state.new_session_id.clone();
+    state.inflight_state.full_response = state.full_response.clone();
+    state.inflight_state.replay_hold_reasons = vec!["started_unclassified".to_string()];
+    state.terminal_full_replay_cleanup_msg_ids.clear();
+    let exit_reason =
+        crate::services::tmux_common::session_temp_path(DRIVER_TMUX_SESSION, "exit_reason");
+    assert!(!std::path::Path::new(&exit_reason).exists());
+
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_target(true)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(CapturingWriter(buffer.clone()))
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+    let output = tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+        .await
+        .expect("held terminal recovery finishes");
+
+    assert_eq!(output.full_response, "held partial answer");
+    assert_eq!(output.new_session_id.as_deref(), Some("held-session-id"));
+    assert_eq!(
+        output.new_raw_provider_session_id.as_deref(),
+        Some("held-raw-id")
+    );
+    assert_eq!(
+        output.inflight_state.session_id.as_deref(),
+        Some("held-session-id")
+    );
+    assert_eq!(
+        output.inflight_state.replay_hold_reasons,
+        ["started_unclassified"]
+    );
+    assert_eq!(output.auto_retry, AutoRetry::default());
+    assert_eq!(scheduled.load(Ordering::SeqCst), 0);
+    assert!(
+        !edits
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.contains("자동으로 이어갑니다"))
+    );
+    assert_eq!(
+        shared.core.lock().await.sessions[&channel_id]
+            .session_id
+            .as_deref(),
+        Some("sid-core")
+    );
+    assert!(!std::path::Path::new(&exit_reason).exists());
+    let logs = String::from_utf8(buffer.lock().unwrap().clone()).expect("captured UTF-8 logs");
+    let warning = logs
+        .lines()
+        .find(|line| line.contains("session died during recovery of a held request; not retried"))
+        .expect("held recovery warning");
+    assert!(
+        warning.contains(
+            "agentdesk::services::discord::turn_bridge::terminal_outcome_delivery::recovery_retry"
+        ),
+        "{warning}"
+    );
+    assert!(
+        warning.contains(&format!("channel_id={DRIVER_CHANNEL_ID}")),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("reasons=[\"started_unclassified\"]"),
+        "{warning}"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
 /// How the turn's resume failure surfaces to terminal delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Trigger {

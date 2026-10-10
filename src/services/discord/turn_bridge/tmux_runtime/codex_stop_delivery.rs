@@ -338,11 +338,11 @@ pub(in crate::services::discord) enum HerdrStop {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct StopObservation {
-    intent: &'static str,
-    delivery: &'static str,
-    reason: Option<&'static str>,
-    settlement: Option<&'static str>,
+pub(in crate::services::discord) struct StopObservation {
+    pub(in crate::services::discord) intent: &'static str,
+    pub(in crate::services::discord) delivery: &'static str,
+    pub(in crate::services::discord) reason: Option<&'static str>,
+    pub(in crate::services::discord) settlement: Option<&'static str>,
 }
 
 impl HerdrNotSent {
@@ -365,7 +365,7 @@ impl HerdrNotSent {
 }
 
 impl HerdrStop {
-    fn observation(self) -> StopObservation {
+    pub(in crate::services::discord) fn observation(self) -> StopObservation {
         let (intent, delivery, reason, settlement) = match self {
             Self::Requested(HerdrDelivery::Sent) => ("recorded", "sent", None, Some("host_owned")),
             Self::Requested(HerdrDelivery::Indeterminate) => {
@@ -757,7 +757,7 @@ fn deliver(
         }
         let write = || {
             let submission = state.submission.lock().unwrap_or_else(|e| e.into_inner());
-            if *submission == HerdrSubmission::Unsubmitted {
+            if submission.submission == HerdrSubmission::Unsubmitted {
                 return Err(Pending);
             }
             if !held() {
@@ -859,3 +859,7 @@ fn deliver(
     };
     attempt().unwrap_or_else(HerdrDelivery::NotSent)
 }
+
+#[cfg(all(test, unix))]
+#[path = "../before_start_stop.rs"]
+mod before_start_stop;

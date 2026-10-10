@@ -600,8 +600,7 @@ impl QueueService {
             channel_id: parsed_channel_id,
             tmux_name: tmux_name.clone(),
         };
-        // #5176 R3: read the queue before the cancel can empty it. Everything
-        // below is about putting back whatever this cancel takes.
+        // Capture identifies discarded sources for durable reporting; it does not restore them.
         let queue_capture =
             crate::services::turn_cancel_queue_guard::capture_queue_before_cancel(&target).await;
         let lifecycle = if force {

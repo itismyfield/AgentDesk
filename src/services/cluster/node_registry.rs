@@ -7,9 +7,7 @@ use sqlx::{PgPool, Row};
 
 use crate::config::{ClusterConfig, ClusterRole, Config};
 use crate::db::postgres::AdvisoryLockLease;
-use crate::services::cluster::session_routing::{
-    cluster_capabilities_with_worker_api, worker_api_base_url_from_capabilities,
-};
+use crate::services::cluster::session_routing::worker_api_base_url_from_capabilities;
 
 pub(crate) const CLUSTER_LEADER_ADVISORY_LOCK_ID: i64 = 7_801_100;
 
@@ -180,7 +178,7 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
             .map(|label| serde_json::Value::String(label.clone()))
             .collect(),
     );
-    let base_capabilities = cluster_capabilities_with_worker_api(&config.cluster);
+    let base_capabilities = super::session_routing::node_capabilities(&config);
     super::readiness::spawn_probe(config.clone());
     super::machine_resources::spawn(
         config.cluster.heartbeat_interval_secs,

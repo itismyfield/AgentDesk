@@ -70,9 +70,65 @@ impl InflightTurnIdentity {
     }
 }
 
+impl InflightTurnState {
+    pub(in crate::services::discord) fn replay_rerun_blocked(&self) -> bool {
+        !self.replay_hold_reasons.is_empty()
+    }
+
+    /// Keep a held recovery request's body, session and delivery with its existing owner.
+    pub(in crate::services::discord) fn warn_replay_held(
+        &self,
+        channel_id: poise::serenity_prelude::ChannelId,
+    ) -> bool {
+        #[cfg(test)]
+        if tests::recovery_retry_fence_disabled() {
+            return false;
+        }
+        if !self.replay_rerun_blocked() {
+            return false;
+        }
+        tracing::warn!(
+            target: "agentdesk::services::discord::turn_bridge::terminal_outcome_delivery::recovery_retry",
+            channel_id = %channel_id,
+            reasons = ?self.replay_hold_reasons,
+            "session died during recovery of a held request; not retried"
+        );
+        true
+    }
+
+    /// Keep a projected episode's receipt and hold reasons; refuse a different projected episode
+    /// or a conflicting receipt before the guarded writer can persist anything.
+    pub(in crate::services::discord) fn merge_replay_projection(&mut self, other: &Self) -> bool {
+        let has_projection = self.replay_receipt_id.or(other.replay_receipt_id).is_some()
+            || self.replay_rerun_blocked()
+            || other.replay_rerun_blocked();
+        if (has_projection && self.turn_nonce != other.turn_nonce)
+            || self
+                .replay_receipt_id
+                .zip(other.replay_receipt_id)
+                .is_some_and(|(a, b)| a != b)
+        {
+            return false;
+        }
+        if self.replay_receipt_id.is_none() {
+            self.replay_receipt_id = other.replay_receipt_id;
+        }
+        for reason in &other.replay_hold_reasons {
+            if !self.replay_hold_reasons.contains(reason) {
+                self.replay_hold_reasons.push(reason.clone());
+            }
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    pub(super) fn recovery_retry_fence_disabled() -> bool {
+        std::env::var("ADK_REPLAY_FENCE_MUTANT").ok().as_deref() == Some("recovery-retry")
+    }
 
     fn identity(user_msg_id: u64, turn_start_offset: Option<u64>) -> InflightTurnIdentity {
         InflightTurnIdentity {

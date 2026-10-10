@@ -35,6 +35,7 @@ use super::inflight::{
     reap_abandoned_rebind_origin_locked, should_reap_abandoned_rebind_origin,
     sweep_reap_dead_watcher_rebind_origin,
 };
+use super::input_runtime::fence::{BootTarget, boot_skip};
 use crate::services::provider::ProviderKind;
 
 mod abandon_guard;
@@ -339,7 +340,8 @@ async fn run_placeholder_sweep_pass(
             provider.as_str(),
             state.channel_id,
             "placeholder_row_pass",
-        ) {
+        ) || boot_skip(BootTarget::Channel(provider, state.channel_id))
+        {
             continue;
         }
         if state.rebind_origin {
@@ -481,7 +483,8 @@ async fn run_placeholder_sweep_pass(
             provider.as_str(),
             state.channel_id,
             "placeholder_row_pass_after_probe",
-        ) {
+        ) || boot_skip(BootTarget::Channel(provider, state.channel_id))
+        {
             continue;
         }
         // Transient probe failure: leave everything for next sweep.

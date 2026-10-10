@@ -1589,6 +1589,15 @@ def pg_shard_contract_errors(repo_root: Path, jobs: Iterable[Job]) -> list[str]:
     return errors
 
 
+def non_pg_module_selectors(modules: tuple[str, ...]) -> tuple[str, ...]:
+    """Drop module selectors whose substring matches are already covered."""
+    return tuple(
+        module for module in modules
+        if not any(name in module for name in NON_PG_NAME_SKIPS)
+        and not any(other != module and other in module for other in modules)
+    )
+
+
 def non_pg_selection(repo_root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """The skip values, and the lib tests they take with them.
 
@@ -1600,7 +1609,7 @@ def non_pg_selection(repo_root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]
     coverage = _load_coverage_module(repo_root)
     modules = coverage.load_manifest_section(manifest_text, "modules", str(MANIFEST_REL))
     pg_tests = coverage.load_pg_manifest_tests(repo_root)
-    skips = tuple(NON_PG_NAME_SKIPS) + modules
+    skips = tuple(NON_PG_NAME_SKIPS) + non_pg_module_selectors(modules)
     inventory = load_lib_test_inventory(repo_root)
     if not inventory:
         raise ValueError(f"no library tests listed: {LIB_TEST_INVENTORY_REL}")

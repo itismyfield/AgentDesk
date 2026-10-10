@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::services::discord::input_runtime::fence::{BootTarget, boot_skip};
 
 /// codex review round-6 P2 (#1332): outcome of filtering loaded
 /// queued-placeholder mappings against the live mailbox queue.
@@ -152,6 +153,11 @@ pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards_
     let mut preserved = 0usize;
     for (channel_id, user_msg_id, placeholder_msg_id) in stale_cards {
         let (channel_id, placeholder_msg_id) = (*channel_id, *placeholder_msg_id);
+        // A protected channel's card waits for its move or handback.
+        if boot_skip(BootTarget::Channel(&shared.provider, channel_id.get())) {
+            preserved += 1;
+            continue;
+        }
         // Candidates include late/conflicting restores whose owners may still queue.
         // The departing hint deprioritizes an owner; it does not exclude one.
         let teardown = match queued_card_gate::release_or_rekey(
@@ -230,6 +236,10 @@ pub(in crate::services::discord) async fn install_restored_queued_placeholders(
     }
     let mut uninstalled = Vec::new();
     for (channel, rows) in by_channel {
+        // A protected channel keeps its disk cards for its move or handback, installed or not.
+        if boot_skip(BootTarget::Channel(&shared.provider, channel.get())) {
+            continue;
+        }
         let lock = shared.queued_placeholders_persist_lock(channel);
         let _guard = lock.lock_owned().await;
         let snapshot = mailbox_snapshot(shared, channel).await;

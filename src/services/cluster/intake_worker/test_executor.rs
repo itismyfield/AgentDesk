@@ -10,6 +10,8 @@ thread_local! {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Checkpoint {
+    /// The claim picked its row and has not confirmed it yet.
+    ClaimSelected,
     AfterClaim,
     PreAccept,
     FinalDb,
@@ -34,6 +36,10 @@ pub(super) async fn checkpoint(point: Checkpoint) {
     if let Some(pending) = pending {
         pending.await;
     }
+}
+/// The claim's checkpoint between its SELECT and its confirming UPDATE.
+pub(crate) async fn claim_selected() {
+    checkpoint(Checkpoint::ClaimSelected).await;
 }
 pub(super) fn fail_execution() {
     FAIL.with(|fail| *fail.borrow_mut() = true);

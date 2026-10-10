@@ -160,6 +160,39 @@ async fn tick_retries_5xx_without_mutating_retired_rows() {
     assert_eq!(fingerprint(&rpath), before_r);
 }
 
+/// The sweep leaves an input-protected row unread in Discord and on disk, and re-judges
+/// after its probe so a channel protected meanwhile is not edited.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tick_leaves_input_protected_rows_before_and_after_probe() {
+    use crate::services::discord::input_runtime::fence::{Gate, test_health};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let (protected, race, legacy) = (6_325_578_001, 6_325_578_002, 6_325_578_003);
+    let discord = MockDiscord::start_with(Arc::new(move |method, path| {
+        if method == Method::GET && path.contains(&format!("/channels/{race}/")) {
+            Gate::protect(ProviderKind::Claude, race).unwrap();
+        }
+        None
+    }))
+    .await;
+    let paths = [protected, race, legacy].map(|channel| seed(&row(channel, false), 600));
+    let before = paths.each_ref().map(|path| fingerprint(path));
+    let gate = Gate::protect(ProviderKind::Claude, protected).unwrap();
+    let _health = test_health::Clear::new(&gate);
+    let mut tracker = StalledEditTracker::default();
+    tick::run_placeholder_sweeper_tick(&discord.http, &shared, &ProviderKind::Claude, &mut tracker)
+        .await;
+    assert!(discord.calls_for(protected).is_empty());
+    assert!(discord.calls_for(race).iter().all(|c| c.starts_with("GET")));
+    assert_eq!(fingerprint(&paths[0]), before[0]);
+    assert_eq!(fingerprint(&paths[1]), before[1]);
+    let legacy_calls = discord.calls_for(legacy);
+    assert!(
+        legacy_calls.iter().any(|c| c.starts_with("PATCH")),
+        "{legacy_calls:?}"
+    );
+}
+
 #[tokio::test]
 async fn tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg() {
     use crate::services::discord::host_teardown_gate::test_support::{

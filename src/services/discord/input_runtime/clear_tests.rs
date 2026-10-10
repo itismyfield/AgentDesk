@@ -276,6 +276,39 @@ async fn clear_cuts_the_cutoff_inputs_then_resets_and_resolves_for_both_provider
 }
 
 #[tokio::test]
+async fn clear_cutoff_includes_external_rows_and_a_retry_stays_settled() {
+    use crate::services::discord::input_runtime::supervisor::external::{
+        ExternalReceipt, source, submit,
+    };
+    let (root, channel) = (sandbox(), 6_325_404);
+    let input = |text| source(channel, 7, text, Some("imessage"), "guid-1").unwrap();
+    let mut lease = crate::services::tui_input::ledger::LedgerLease::new(root.path(), channel);
+    let ExternalReceipt::Received { receipt, .. } = submit(&mut lease, input("first"), true) else {
+        panic!("external input was not received")
+    };
+    drop(lease);
+    let mut ledger = open(root.path(), channel, &[11]);
+    let mut host = Fake::new("claude", channel);
+    assert_eq!(run(&mut ledger, &mut host, guard()).await, Outcome::Cleared);
+    assert_eq!(
+        host.stored().input.unwrap().affected_keys,
+        vec![11, receipt.key]
+    );
+    let seq = ledger.rows().unwrap().folded_seq();
+    drop(ledger);
+    // The cleared origin answers with its first receipt and stays cut; nothing is appended.
+    let mut lease = crate::services::tui_input::ledger::LedgerLease::new(root.path(), channel);
+    let retry = submit(&mut lease, input("retry"), true);
+    let settled = ExternalReceipt::Received {
+        receipt,
+        duplicate: true,
+        state: CUT,
+    };
+    assert_eq!(retry, settled);
+    assert_eq!(lease.get().unwrap().rows().unwrap().folded_seq(), seq);
+}
+
+#[tokio::test]
 async fn an_input_received_after_the_cutoff_keeps_its_row() {
     let (root, channel) = (sandbox(), 6_325_403);
     let mut ledger = open(root.path(), channel, &[11, 12]);

@@ -540,6 +540,105 @@ fn presence_host_read_overtaken_by_a_poll_or_rebind_answers_unknown() {
     }
 }
 
+fn strict_reading(probe: &Probe) -> Reading {
+    let ports: Arc<dyn Ports> = probe.fake.clone();
+    let (observed, stamp) = judge_presence(
+        &probe.watch,
+        &ports,
+        probe.provider,
+        CHANNEL,
+        probe.target.clone(),
+    );
+    Reading {
+        observed,
+        stamp,
+        watch: Some(probe.watch.clone()),
+        host_checked: true,
+    }
+}
+
+#[test]
+fn b2_stamped_unknown_advances_revision_and_revokes_busy() {
+    let root = tempfile::tempdir().unwrap();
+    let (probe, _) = codex_probe(root.path(), &[codex("task_started", "A")]);
+    assert_eq!(probe.settle(), (Activity::Busy, "open"));
+    let busy = strict_reading(&probe);
+    assert_eq!(busy.publish_if_current(|| 1), Some(1));
+    probe.age(STALE_OPEN_AFTER + Duration::from_secs(1));
+    let unknown = strict_reading(&probe);
+    assert_eq!(unknown.observed.activity, Activity::Unknown);
+    assert_eq!(unknown.publish_if_current(|| 2), Some(2));
+    assert!(unknown.stamp.as_ref().unwrap().revision > busy.stamp.as_ref().unwrap().revision);
+    assert_eq!(busy.publish_if_current(|| 3), None);
+}
+
+#[test]
+fn b2_generic_observer_keeps_its_existing_unknown_policy() {
+    let root = tempfile::tempdir().unwrap();
+    let (probe, _) = codex_probe(root.path(), &[codex("task_started", "A")]);
+    assert_eq!(probe.settle(), (Activity::Busy, "open"));
+    let ports: Arc<dyn Ports> = probe.fake.clone();
+    let busy = judge(
+        &probe.watch,
+        &ports,
+        probe.provider,
+        CHANNEL,
+        probe.target.clone(),
+    );
+    probe.age(STALE_OPEN_AFTER + Duration::from_secs(1));
+    let unknown = judge(
+        &probe.watch,
+        &ports,
+        probe.provider,
+        CHANNEL,
+        probe.target.clone(),
+    );
+    assert_eq!(unknown.0.activity, Activity::Unknown);
+    assert_eq!(busy.1, unknown.1);
+}
+
+#[test]
+fn b2_superseded_host_read_cannot_borrow_successor_stamp() {
+    let root = tempfile::tempdir().unwrap();
+    let (probe, _) = claude(root.path(), &[prompt("A")]);
+    assert_eq!(probe.settle(), (Activity::Busy, "open"));
+    let (started, entered) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *lock(&probe.fake.host_pause) = Some((started, released));
+    std::thread::scope(|scope| {
+        let old = scope.spawn(|| strict_reading(&probe));
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        lock(&probe.watch).revision += 1;
+        let successor = strict_reading(&probe);
+        assert_eq!(successor.observed.activity, Activity::Busy);
+        release.send(()).unwrap();
+        let old = old.join().unwrap();
+        assert_eq!(old.observed.reason, "superseded");
+        assert_eq!(old.publish_if_current(|| 1), None);
+        assert_eq!(successor.publish_if_current(|| 2), Some(2));
+    });
+}
+
+#[test]
+fn b2_superseded_pane_read_cannot_borrow_successor_stamp() {
+    let probe = Probe::new(ShadowProvider::Claude, vec![]);
+    assert_eq!(probe.settle(), (Activity::Idle, "no_turn_evidence_ready"));
+    let (started, entered) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *lock(&probe.fake.pause) = Some((started, released));
+    std::thread::scope(|scope| {
+        let old = scope.spawn(|| strict_reading(&probe));
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        lock(&probe.watch).revision += 1;
+        let successor = strict_reading(&probe);
+        release.send(()).unwrap();
+        let old = old.join().unwrap();
+        assert_eq!(old.observed.reason, "superseded");
+        assert_eq!(old.publish_if_current(|| 1), None);
+        assert_eq!(successor.publish_if_current(|| 2), Some(2));
+    });
+}
+
 /// Each stored outcome answers from memory for the same key; only an unreadable one retries,
 /// once, after its delay.
 #[test]

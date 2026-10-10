@@ -1,7 +1,7 @@
 //! One channel's O actor: replays the spool, follows source binds, spools captured bytes and
 //! delivers owed pieces in order. Capture goes on while the gateway is not Owned.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -14,11 +14,12 @@ use super::deliver::{ChannelWriter, Step, StopCause};
 use super::pieces::{Derived, UnitDeriver};
 use super::rotation::Sources;
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
-use crate::services::tui_o::shadow::ShadowProvider;
+use crate::services::tui_o::shadow::{ShadowProvider, UnitKey};
 use crate::services::tui_o::store::rotation::Boundary;
 use crate::services::tui_o::store::spool::source_key;
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const WAIT_LIMIT: Duration = Duration::from_secs(300);
 
 /// Runs the channel's actor only when the channel's boot ownership enabled `config`.
 pub fn spawn_if_enabled<P, L, A, B>(
@@ -151,6 +152,7 @@ where
             bindings,
             (stop, resumed),
             projections,
+            None,
         ))
     };
     config.enabled.then(run)
@@ -164,6 +166,14 @@ struct Actor<P, L, A, B> {
     bindings: Arc<B>,
     /// The binding log's latest seq, watched once the channel first publishes what it owes.
     notice: Option<watch::Receiver<u64>>,
+    waiting: Waiting,
+    clock: (tokio::time::Instant, chrono::DateTime<chrono::Utc>),
+}
+
+#[derive(Default)]
+struct Waiting {
+    ready: HashMap<(UnitKey, u32), tokio::time::Instant>,
+    incident: Option<String>,
 }
 
 /// Returns when the channel stops, with why, or when `stop` turns true or closes. `resumed` turns
@@ -201,7 +211,15 @@ where
     B: BindingEvents,
 {
     let projections = (unsettled, Owing::default());
-    run_publishing(writer, provider, bindings, (stop, resumed), projections).await
+    run_publishing(
+        writer,
+        provider,
+        bindings,
+        (stop, resumed),
+        projections,
+        None,
+    )
+    .await
 }
 
 /// [`run_projecting`] that also publishes what the channel still owes, beside its count.
@@ -211,6 +229,7 @@ async fn run_publishing<P, L, A, B>(
     bindings: Arc<B>,
     (mut stop, resumed): (watch::Receiver<bool>, watch::Sender<bool>),
     (unsettled, owing): (Unsettled, Owing),
+    utc: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Option<StopCause>
 where
     P: DiscordPort,
@@ -228,6 +247,11 @@ where
         sources,
         bindings,
         notice: None,
+        waiting: Waiting::default(),
+        clock: (
+            tokio::time::Instant::now(),
+            utc.unwrap_or_else(chrono::Utc::now),
+        ),
     };
     let mut sources_resumed = false;
     while !actor.writer.is_stopped() && !*stop.borrow() {
@@ -238,12 +262,15 @@ where
             }
             sources_resumed = true;
             if !actor.writer.is_stopped() {
+                actor.project_operator_resumes();
                 resumed.send_replace(true);
             }
         }
+        actor.observe_waiting(false);
         actor.deliver_owed().await;
         actor.collect_settled();
         actor.read_sources();
+        actor.observe_waiting(sources_resumed);
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
         if actor.writer.is_stopped() {
             break;
@@ -265,7 +292,150 @@ where
     actor.writer.stop_cause().cloned()
 }
 
+#[cfg(test)]
+pub(crate) async fn run_channel_at<P, L, A, B>(
+    writer: ChannelWriter<P, L, A>,
+    provider: ShadowProvider,
+    bindings: Arc<B>,
+    stop: watch::Receiver<bool>,
+    utc: chrono::DateTime<chrono::Utc>,
+) -> Option<StopCause>
+where
+    P: DiscordPort,
+    L: DeliveryLease,
+    A: AlarmSink,
+    B: BindingEvents,
+{
+    run_publishing(
+        writer,
+        provider,
+        bindings,
+        (stop, watch::channel(false).0),
+        (watch::channel(None).0, Owing::default()),
+        Some(utc),
+    )
+    .await
+}
+
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
+    fn project_operator_resumes(&mut self) {
+        let pieces: Vec<_> = self
+            .writer
+            .store()
+            .ledger()
+            .resume_pieces()
+            .map(|(rejected, piece)| {
+                (
+                    rejected,
+                    super::pieces::PieceWork {
+                        unit_key: piece.unit_key.clone(),
+                        index: piece.piece_index,
+                        payload: piece.payload.clone(),
+                    },
+                )
+            })
+            .collect();
+        for (rejected_serial, piece) in pieces.into_iter().rev() {
+            self.owed.retain(|item| {
+                let Derived::Piece(derived) = item else {
+                    return true;
+                };
+                if derived.unit_key != piece.unit_key || derived.index != piece.index {
+                    return true;
+                }
+                if derived.payload != piece.payload {
+                    tracing::warn!(rejected_serial, unit_key = ?piece.unit_key,
+                        "[tui_o] rederived payload differs; keeping ledger payload");
+                }
+                false
+            });
+            // Retry precedes later pieces, but never a retained schema stop.
+            let at = self
+                .owed
+                .iter()
+                .rposition(|item| matches!(item, Derived::Blocked { .. }))
+                .map_or(0, |blocked| blocked + 1);
+            self.owed.insert(at, Derived::Piece(piece));
+        }
+    }
+
+    fn observe_waiting(&mut self, restored: bool) {
+        if self.writer.is_stopped() {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let elapsed =
+            chrono::Duration::from_std(now - self.clock.0).unwrap_or(chrono::Duration::MAX);
+        let utc = self
+            .clock
+            .1
+            .checked_add_signed(elapsed)
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
+        let open = self
+            .writer
+            .store()
+            .ledger()
+            .unresolved()
+            .map(|(serial, piece)| {
+                (
+                    serial,
+                    piece.unit_key.clone(),
+                    piece.piece_index,
+                    piece.prepared_at,
+                )
+            });
+        let keys: HashSet<_> = self
+            .owed
+            .iter()
+            .filter_map(|item| match item {
+                Derived::Piece(piece)
+                    if !open.as_ref().is_some_and(|(_, key, index, _)| {
+                        key == &piece.unit_key && *index == piece.index
+                    }) =>
+                {
+                    Some((piece.unit_key.clone(), piece.index))
+                }
+                _ => None,
+            })
+            .collect();
+        self.waiting.ready.retain(|key, _| keys.contains(key));
+        for key in keys {
+            self.waiting.ready.entry(key).or_insert(now);
+        }
+        let ready = self
+            .waiting
+            .ready
+            .values()
+            .filter(|first| now - **first > WAIT_LIMIT)
+            .count();
+        // UTC restores a Prepared wait's initial age; monotonic elapsed advances that age thereafter.
+        let prepared = open.as_ref().filter(|(_, _, _, at)| {
+            utc.signed_duration_since(*at) > chrono::Duration::seconds(WAIT_LIMIT.as_secs() as i64)
+        });
+        if ready == 0 && prepared.is_none() {
+            // A fresh actor's empty queue is evidence only after its durable sources were restored.
+            if self.waiting.incident.take().is_some()
+                || (restored && self.waiting.ready.is_empty() && open.is_none())
+            {
+                self.writer.waiting_cleared();
+            }
+            return;
+        }
+        if self.waiting.incident.is_some() {
+            return;
+        }
+        let incident = match prepared {
+            Some((serial, _, _, at)) => format!("prepared:{serial}:{}", at.to_rfc3339()),
+            None => format!("ready:{}", uuid::Uuid::new_v4()),
+        };
+        self.waiting.incident = Some(incident.clone());
+        self.writer.alarm(WriterAlarm::WaitingTooLong {
+            incident,
+            ready,
+            prepared: prepared.map(|piece| piece.0),
+        });
+    }
+
     fn delivery_allowed(&mut self) -> bool {
         let channel = self.writer.channel();
         if !crate::services::tui_prompt_dedupe::codex_verified_channel_delivery_allowed(channel) {
@@ -430,6 +600,8 @@ mod test_support {
             sources: Sources::new(channel, provider, Arc::clone(&bindings)),
             bindings,
             notice: None,
+            waiting: Waiting::default(),
+            clock: (tokio::time::Instant::now(), chrono::Utc::now()),
         };
         actor
             .sources

@@ -525,6 +525,12 @@ async fn fail_dispatch_with_policy(
                     "dispatch failure writer preserved existing terminal dispatch"
                 );
             }
+            DispatchFailureWriteOutcome::ReplayHeld => {
+                tracing::warn!(
+                    dispatch_id = %dispatch_id,
+                    "dispatch failure writer kept a started attempt instead of retrying it"
+                );
+            }
             DispatchFailureWriteOutcome::Missing => {
                 tracing::warn!(
                     dispatch_id = %dispatch_id,

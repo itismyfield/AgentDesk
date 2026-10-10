@@ -450,10 +450,20 @@ impl HealthRegistry {
         channel_id: ChannelId,
         now_unix_secs: i64,
     ) -> Result<bool, RelayRecoveryError> {
-        let Some(snapshot) = self
+        // A retired key ends here with no snapshot, nudge, reattach or accounting.
+        if retired_target(provider, channel_id, None, "redrive_entry") {
+            return Ok(false);
+        }
+        let snapshot = self
             .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id.get())
-            .await
-        else {
+            .await;
+        #[cfg(test)]
+        retired_redrive_tests::checkpoint(channel_id, "redrive_snapshot");
+        // The snapshot await can span a retirement, and it names the owner channel the nudge targets.
+        if retired_target(provider, channel_id, snapshot.as_ref(), "redrive_snapshot") {
+            return Ok(false);
+        }
+        let Some(snapshot) = snapshot else {
             return Ok(false);
         };
         #[cfg(test)]
@@ -505,6 +515,11 @@ impl HealthRegistry {
                 {
                     return Ok(false);
                 }
+                #[cfg(test)]
+                retired_redrive_tests::checkpoint(channel_id, "redrive_reattach");
+                if retired_target(provider, channel_id, Some(&snapshot), "redrive_reattach") {
+                    return Ok(false);
+                }
                 let response = relay_recovery::auto_apply_relay_recovery_for_shared(
                     self,
                     shared.clone(),
@@ -540,6 +555,21 @@ impl HealthRegistry {
         }
         Ok(applied)
     }
+}
+
+/// True when the redrive channel, or the watcher owner channel its nudge targets, is retired.
+fn retired_target(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot: Option<&WatcherStateSnapshot>,
+    site: &'static str,
+) -> bool {
+    let retired =
+        |channel| super::legacy_supervision::legacy_retired(provider.as_str(), channel, site);
+    retired(channel_id.get())
+        || snapshot
+            .and_then(|snapshot| snapshot.watcher_owner_channel_id)
+            .is_some_and(|owner| owner != channel_id.get() && retired(owner))
 }
 
 fn redrive_shield_channel_for_action(
@@ -955,6 +985,9 @@ fn trace_orphan_auto_heal_error(
 mod orphan_token_tests;
 
 #[cfg(test)]
+mod retired_redrive_tests;
+
+#[cfg(test)]
 mod tests {
     use std::io::{self, Write};
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -966,7 +999,7 @@ mod tests {
 
     use super::*;
 
-    fn watcher_handle(
+    pub(super) fn watcher_handle(
         tmux_session_name: &str,
         output_path: &str,
         resume_offset: Arc<Mutex<Option<u64>>>,
@@ -1811,7 +1844,7 @@ mod tests {
         );
     }
 
-    fn clear_redrive_test_state(
+    pub(super) fn clear_redrive_test_state(
         shared: &SharedData,
         provider: &ProviderKind,
         channel_id: ChannelId,

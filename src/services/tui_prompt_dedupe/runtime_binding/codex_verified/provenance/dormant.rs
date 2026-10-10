@@ -1,5 +1,6 @@
 //! Submit and boot span construction is compiled only for tests until its owners are connected.
 
+use super::permission::NativeSubmitFloor;
 use super::{CodexEpisodeSpan, ExecutionProofRef, TurnEpisodeRef};
 use crate::services::codex_tui::rollout_tail::provenance::{
     NativeTurnAnchor, scan_anchor, terminal_end,
@@ -142,6 +143,7 @@ pub(crate) struct BootOwedRecord {
     execution: ExecutionProofRef,
     episode: TurnEpisodeRef,
     turn_start_offset: u64,
+    native_floor: NativeSubmitFloor,
     boot_eof: u64,
     generation_mtime_ns: i64,
 }
@@ -151,10 +153,11 @@ impl BootOwedRecord {
     pub(crate) fn from_scanned_row(
         execution: ExecutionProofRef,
         episode: TurnEpisodeRef,
-        turn_start_offset: u64,
+        native_floor: &NativeSubmitFloor,
         boot_eof: u64,
         generation_mtime_ns: i64,
     ) -> Result<Self, &'static str> {
+        let turn_start_offset = native_floor.verify_for(&execution)?;
         if episode.turn_nonce.trim().is_empty()
             || episode.channel_id == 0
             || episode.user_message_id == 0
@@ -167,6 +170,7 @@ impl BootOwedRecord {
             execution,
             episode,
             turn_start_offset,
+            native_floor: native_floor.clone(),
             boot_eof,
             generation_mtime_ns,
         })
@@ -203,6 +207,10 @@ fn complete_boot_span_with_hook(
     {
         return Err("boot_row_identity_mismatch");
     }
+    record
+        .native_floor
+        .verify_for(&record.execution)
+        .map_err(|_| "source_checkpoint_changed")?;
     let mut capture = SourceCapture::reopen(
         record.execution.source.clone(),
         checkpoint.through,

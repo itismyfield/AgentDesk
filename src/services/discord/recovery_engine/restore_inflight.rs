@@ -60,6 +60,8 @@ pub(in crate::services::discord) use kickoff_identity::finish_recovered_turn_mai
 mod output_paths;
 #[cfg(unix)]
 pub(super) use output_paths::detect_live_tmux_output_path;
+#[path = "restore_inflight/replay_hold.rs"]
+mod replay_hold;
 
 fn observe_restore_inflight_snapshot(
     provider: &ProviderKind,
@@ -108,6 +110,14 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         if crate::services::discord::input_runtime::fence::lookup(provider, state.channel_id)
             .is_some()
         {
+            continue;
+        }
+        // An unverified projected receipt waits for another pass without persisting a read error.
+        if !replay_hold::hydrate_replay_hold(shared.pg_pool.as_ref(), &mut state).await {
+            continue;
+        }
+        if state.replay_rerun_blocked() {
+            replay_hold::deliver_held_debt(http, shared, provider, &mut state).await;
             continue;
         }
         if matches!(
@@ -2729,3 +2739,6 @@ mod kickoff_identity_tests;
 #[cfg(test)]
 #[path = "restore_inflight/ready_without_output_tests.rs"]
 mod ready_without_output_tests;
+#[cfg(all(test, unix))]
+#[path = "restore_inflight/replay_hold_tests.rs"]
+mod replay_hold_tests;

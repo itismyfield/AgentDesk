@@ -178,7 +178,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         .await;
     }
 
-    if may_publish && recovery_retry && !cancelled {
+    if may_publish && recovery_retry && !cancelled && !inflight_state.warn_replay_held(channel_id) {
         let outcome = handle_recovery_retry(
             RecoveryRetryMessage::SessionDiedDuringRecovery,
             RecoveryRetryContext {

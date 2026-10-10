@@ -69,6 +69,11 @@ mod tests {
     async fn security_banner_pane_is_ready_and_followup_dismisses_it_once() {
         let mut captures = vec![Some(BANNER.to_string()); 3];
         captures.extend(vec![Some(dismissed()); 2]);
+        let own_draft = dismissed().replace(
+            "\x1b[2mAsk Codex to do anything\x1b[0m",
+            "1 fixture follow-up",
+        );
+        captures.extend([Some(own_draft), Some(dismissed())]);
         let guard = SpyGuard::install(SpyState {
             captures: captures.into(),
             ..SpyState::default()

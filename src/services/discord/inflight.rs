@@ -45,6 +45,7 @@ impl InflightTurnState {
 }
 
 mod episode_guard;
+mod managed_submission;
 mod store;
 
 // #3479: the FS path layout + advisory-lock guard moved to `store.rs`.
@@ -62,6 +63,11 @@ pub(in crate::services::discord) use episode_guard::{
     InflightEpisodeLockError, InflightEpisodePin, LockedInflightEpisode,
     adopt_and_lock_inflight_episode, lock_inflight_episode,
 };
+pub(in crate::services::discord) use managed_submission::{
+    ManagedSubmission, SubmissionFailure, install_managed_submission_boundary,
+};
+#[cfg(test)]
+pub(in crate::services::discord) use managed_submission::{SubmissionPhase, fault};
 pub(in crate::services::discord) use store::InflightDeliveryRewindReason;
 use store::inflight_provider_dir;
 pub(crate) use store::lock_inflight_state_path;
@@ -389,9 +395,11 @@ fn now_string() -> String {
 }
 
 fn bump_save_generation_for_write(path: &Path, state: &mut InflightTurnState) {
-    let existing_generation = fs::read_to_string(path)
+    let existing = fs::read_to_string(path)
         .ok()
-        .and_then(|content| serde_json::from_str::<InflightTurnState>(&content).ok())
+        .and_then(|content| serde_json::from_str::<InflightTurnState>(&content).ok());
+    managed_submission::carry_forward(existing.as_ref(), state);
+    let existing_generation = existing
         .map(|existing| existing.save_generation)
         .unwrap_or(0);
     state.save_generation = existing_generation

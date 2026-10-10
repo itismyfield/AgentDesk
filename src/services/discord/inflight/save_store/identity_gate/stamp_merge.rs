@@ -75,6 +75,9 @@ pub(super) fn merge_runtime_stamp_progress(
     durable: &mut InflightTurnState,
     local: &InflightTurnState,
 ) -> bool {
+    if !durable.merge_replay_projection(local) {
+        return false;
+    }
     let Some((full_response, response_sent_offset)) = merge_forward_response_progress(
         (&durable.full_response, durable.response_sent_offset),
         (&local.full_response, local.response_sent_offset),

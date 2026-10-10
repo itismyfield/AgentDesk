@@ -87,6 +87,93 @@ pub(in crate::services::discord::session_relay_sink::journal) async fn append_de
     events: &[JournalEvent],
 ) -> Result<AppendResult, sqlx::Error> {
     let mut transaction = pool.begin().await?;
+    for event in events {
+        use crate::services::tui_o::exact_episode::{
+            EpisodeEvidence, EpisodeMetadata, SubmissionBasis,
+        };
+        let Ok(metadata) =
+            serde_json::from_value::<EpisodeMetadata>(event.canonical_payload.clone())
+        else {
+            continue;
+        };
+        if !matches!(
+            metadata.evidence,
+            EpisodeEvidence::InputAttemptBegun { .. } | EpisodeEvidence::SubmissionClosed { .. }
+        ) {
+            continue;
+        }
+        // Both producers serialize before reading admission state, through the commit ACK.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("strict-submission:{}", metadata.episode))
+            .execute(&mut *transaction)
+            .await?;
+        let payloads: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT canonical_payload FROM public.delivery_journal_events WHERE canonical_payload->>'namespace'=$1 AND canonical_payload->>'episode'=$2",
+        ).bind(crate::services::tui_o::exact_episode::STRICT_NAMESPACE)
+            .bind(metadata.episode.to_string()).fetch_all(&mut *transaction).await?;
+        let records = payloads
+            .into_iter()
+            .map(serde_json::from_value::<EpisodeMetadata>)
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(records) = records else {
+            return Ok(AppendResult::InvariantConflict);
+        };
+        if records.iter().any(|record| !record.supported()) {
+            return Ok(AppendResult::InvariantConflict);
+        }
+        if records.iter().any(|record| record == &metadata) {
+            continue;
+        }
+        let attempts: Vec<_> = records
+            .iter()
+            .filter_map(|record| match record.evidence {
+                EpisodeEvidence::InputAttemptBegun { nonce } => Some(nonce),
+                _ => None,
+            })
+            .collect();
+        let closed = records
+            .iter()
+            .any(|record| matches!(record.evidence, EpisodeEvidence::SubmissionClosed { .. }));
+        let pin = records.iter().find_map(|record| match &record.evidence {
+            EpisodeEvidence::Pin(pin) => Some(pin),
+            _ => None,
+        });
+        let accepted = match &metadata.evidence {
+            EpisodeEvidence::InputAttemptBegun { nonce } => {
+                !closed && attempts.is_empty() && !nonce.is_nil() && pin.is_some()
+            }
+            EpisodeEvidence::SubmissionClosed {
+                generation,
+                basis,
+                policy_version,
+            } => {
+                !closed
+                    && pin.is_some_and(|pin| {
+                        pin.born_generation == *generation
+                            && pin.context.policy_version == *policy_version
+                    })
+                    && !records.iter().any(|record| {
+                        matches!(
+                            record.evidence,
+                            EpisodeEvidence::Obligation { .. }
+                                | EpisodeEvidence::Attempt { .. }
+                                | EpisodeEvidence::Transport { .. }
+                                | EpisodeEvidence::Committed { .. }
+                                | EpisodeEvidence::WholeFrontier { .. }
+                                | EpisodeEvidence::Manifest(_)
+                        )
+                    })
+                    && match basis {
+                        SubmissionBasis::NoAttempt => attempts.is_empty(),
+                        SubmissionBasis::GateRefused { nonce } => attempts.as_slice() == [*nonce],
+                    }
+            }
+            _ => false,
+        };
+        if !accepted {
+            return Ok(AppendResult::InvariantConflict);
+        }
+    }
     let mut inserted = false;
     for event in events {
         let receipt = event.receipt.as_ref();
@@ -139,6 +226,14 @@ pub(in crate::services::discord::session_relay_sink::journal) async fn append_de
             transaction.rollback().await?;
             return Ok(AppendResult::InvariantConflict);
         }
+    }
+    #[cfg(test)]
+    for event in events {
+        crate::services::tui_o::exact_submission::before_commit(
+            &mut transaction,
+            &event.canonical_payload,
+        )
+        .await?;
     }
     transaction.commit().await?;
     Ok(if inserted {
@@ -321,9 +416,13 @@ pub(crate) mod exact_tests {
         let metadata = EpisodeMetadata::new(
             Uuid::new_v4(),
             Uuid::new_v4(),
-            EpisodeEvidence::InputAttemptBegun {
-                nonce: Uuid::new_v4(),
-            },
+            EpisodeEvidence::SourceResolved(
+                crate::services::tui_o::exact_episode::SourceIdentity {
+                    incarnation: Uuid::new_v4(),
+                    opener: 0,
+                    digest: "strict metadata".into(),
+                },
+            ),
         );
         crate::services::discord::append_exact_metadata(pool.clone(), &metadata)
             .await
@@ -411,5 +510,90 @@ mod mixed_tests {
             }
             assert_eq!(view(&mixed), expected);
         }
+        let source = [id, Uuid::from_u128(902)];
+        assert_eq!(source.len(), 2, "real source obligations");
+        let missing = |events: &[JournalEvent]| {
+            source
+                .iter()
+                .filter(|obligation| {
+                    let window = events
+                        .iter()
+                        .filter(|event| event.obligation_id == **obligation)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    !super::super::exact_delivery_predicate(&window).0
+                })
+                .count()
+        };
+        let mut mixed = legacy.clone();
+        assert_eq!(missing(&mixed), 1);
+        let attempt2 = Uuid::from_u128(903);
+        let complete2 = super::super::admission_events(
+            source[1],
+            attempt2,
+            serde_json::json!({"intake_outbox_id":9}),
+            (20, 30),
+        );
+        mixed.extend(complete2.clone());
+        // Plausible strict O/A/T/C cannot satisfy an existing source obligation.
+        let strict_payload = |payload: serde_json::Value| {
+            let mut payload = payload;
+            payload["namespace"] =
+                serde_json::json!(crate::services::tui_o::exact_episode::STRICT_NAMESPACE);
+            payload
+        };
+        for event in &complete2 {
+            let mut strict = event.clone();
+            strict.canonical_payload = strict_payload(strict.canonical_payload);
+            mixed.push(strict);
+        }
+        let mut strict_t = super::super::transport_event(
+            source[1],
+            attempt2,
+            DiscordTransportReceipt {
+                requested_channel_id: "10".into(),
+                returned_channel_id: "10".into(),
+                message_id: "101".into(),
+            },
+        );
+        strict_t.canonical_payload = strict_payload(strict_t.canonical_payload);
+        mixed.push(strict_t);
+        mixed.push(super::super::event(
+            source[1],
+            Some(attempt2),
+            "C",
+            3,
+            strict_payload(serde_json::json!({"frontier_start":20,"frontier_end":30})),
+        ));
+        mixed.push(super::super::event(
+            source[1],
+            None,
+            "O",
+            0,
+            strict_payload(serde_json::json!({"evidence":{"type":"Settled","effects":["policy"]}})),
+        ));
+        assert_eq!(mixed.len(), 11, "source events plus strict O/A/T/C/R");
+        assert_eq!(missing(&mixed), 1, "strict metadata is not legacy delivery");
+        mixed.push(super::super::transport_event(
+            source[1],
+            attempt2,
+            DiscordTransportReceipt {
+                requested_channel_id: "10".into(),
+                returned_channel_id: "10".into(),
+                message_id: "101".into(),
+            },
+        ));
+        mixed.push(super::super::event(
+            source[1],
+            Some(attempt2),
+            "C",
+            3,
+            serde_json::json!({"frontier_start":20,"frontier_end":30}),
+        ));
+        assert_eq!(
+            missing(&mixed),
+            0,
+            "only actual legacy delivery closes missing source"
+        );
     }
 }

@@ -70,7 +70,7 @@ fn binding(fx: &Fixture) -> Option<crate::services::tui_prompt_dedupe::TuiRuntim
 // the follow-up with nothing written, held or unbound; a bare `›` then takes it.
 #[test]
 fn a_draft_in_the_bound_composer_refuses_the_follow_up_and_is_left_as_it_is_pg() {
-    let fx = Fixture::admitted("draft");
+    let fx = Fixture::admitted("strict-draft");
     let launcher = Arc::new(Launcher::default());
     let (nonce, path) = launch(&fx, &fx.ports(&launcher));
     let edge = "─".repeat(30);
@@ -203,7 +203,7 @@ fn refused_untouched(
 // execution or none, or whose pane kept none, writes nothing.
 #[test]
 fn changed_or_unkept_launch_options_refuse_the_follow_up_pg() {
-    let fx = Fixture::admitted("options");
+    let fx = Fixture::admitted("strict-options");
     let launcher = Arc::new(Launcher::default());
     let (nonce, _) = launch(&fx, &fx.ports(&launcher));
     let kept = options_of(&fx);

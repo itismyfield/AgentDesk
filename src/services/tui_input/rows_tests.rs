@@ -921,6 +921,198 @@ mod tracked {
         (row.attempts.len(), row.witnesses.len())
     }
 
+    #[test]
+    fn receipt_identity_survives_terminal_compact_reopen_and_attempt_collection() {
+        use super::super::rows::receipt_identity::{ReceiptIdentity, Responsibility};
+
+        let root = sandbox();
+        let mut ledger = open(root.path());
+        let identity = ReceiptIdentity::new(1, vec![1, 11], 7, 8, CHANNEL).unwrap();
+        let input = json!({"text":"input 1","receipt_identity":identity});
+        ledger
+            .append_entry(&Entry::Received { key: 1, input }, &[])
+            .unwrap();
+        let first = meta(1, "n1", 0);
+        attempt(&mut ledger, 1, &first).unwrap();
+        set(&mut ledger, 1, RowState::AwaitTurn);
+        ledger
+            .append_witness(1, witness(&first, WitnessKind::User, 10))
+            .unwrap();
+        set(&mut ledger, 1, RowState::Done(DoneReason::Completed));
+        let facts = Facts {
+            now: Some(1_000 * DAY_MS),
+            retired: true,
+            obligated: false,
+        };
+        ledger.checkpoint_rows_with(&facts).unwrap();
+        drop(ledger);
+
+        let mut ledger = open(root.path());
+        assert_eq!(row(&ledger, 1).input, json!(null));
+        assert_eq!(
+            ledger.rows().unwrap().receipt_identity(1).as_ref(),
+            Some(&identity)
+        );
+        let later = Facts {
+            now: Some(facts.now.unwrap() + TOMBSTONE_HORIZON_MS),
+            ..facts
+        };
+        ledger.checkpoint_rows_with(&later).unwrap();
+        ledger.checkpoint_rows_with(&later).unwrap();
+        assert_eq!(detail(&ledger), (0, 0), "attempt GC actually occurred");
+        drop(ledger);
+
+        let restored = open(root.path()).rows().unwrap();
+        assert_eq!(restored.receipt_identity(1).as_ref(), Some(&identity));
+        let alias = ReceiptIdentity::new(11, vec![11], 7, 8, CHANNEL).unwrap();
+        assert_eq!(
+            restored.responsibility(&alias),
+            Responsibility::Known {
+                key: 1,
+                received_seq: 1
+            }
+        );
+    }
+
+    #[test]
+    fn moved_merged_receipt_is_captured_before_old_snapshot_compaction_and_gc() {
+        use super::super::rows::receipt_identity::{ReceiptIdentity, Responsibility};
+
+        let root = sandbox();
+        let mut ledger = open(root.path());
+        let input = json!({"message_id":1,"source_message_ids":[11,1],"author_id":7,"channel_id":CHANNEL,"text":"input 1"});
+        let first_seq = ledger
+            .append_entry(
+                &Entry::Staged {
+                    key: 1,
+                    input: json!({"legacy_input":input}),
+                    state: RowState::Received,
+                },
+                &[],
+            )
+            .unwrap();
+        ledger
+            .append_entry(
+                &Entry::MoveCommitted {
+                    first_staged_seq: first_seq,
+                    ids: vec![1],
+                },
+                &[],
+            )
+            .unwrap();
+        let first = meta(1, "n1", 0);
+        attempt(&mut ledger, 1, &first).unwrap();
+        set(&mut ledger, 1, RowState::AwaitTurn);
+        ledger
+            .append_witness(1, witness(&first, WitnessKind::User, 10))
+            .unwrap();
+        set(&mut ledger, 1, RowState::Done(DoneReason::Completed));
+        let mut old = serde_json::to_value(ledger.rows().unwrap()).unwrap();
+        old.as_object_mut().unwrap().remove("receipts");
+        assert!(
+            old["rows"]["1"].get("receipt_identity").is_none(),
+            "Row retains its old shape"
+        );
+        ledger.checkpoint(old).unwrap();
+        drop(ledger);
+
+        let mut ledger = open(root.path());
+        let alias = ReceiptIdentity::new(11, vec![11], 7, CHANNEL, CHANNEL).unwrap();
+        assert_eq!(
+            ledger.rows().unwrap().responsibility(&alias),
+            Responsibility::Known {
+                key: 1,
+                received_seq: first_seq
+            }
+        );
+        let facts = Facts {
+            now: Some(1_000 * DAY_MS),
+            retired: true,
+            obligated: false,
+        };
+        ledger.checkpoint_rows_with(&facts).unwrap();
+        let compacted = ledger.rows().unwrap();
+        assert_eq!(compacted.row(1).unwrap().input, json!(null));
+        assert!(!compacted.receipt_identity_missing());
+        assert_eq!(
+            compacted.responsibility(&alias),
+            Responsibility::Known {
+                key: 1,
+                received_seq: first_seq
+            }
+        );
+        let later = Facts {
+            now: Some(facts.now.unwrap() + TOMBSTONE_HORIZON_MS),
+            ..facts
+        };
+        ledger.checkpoint_rows_with(&later).unwrap();
+        ledger.checkpoint_rows_with(&later).unwrap();
+        assert_eq!(detail(&ledger), (0, 0), "actual attempt GC");
+        drop(ledger);
+        assert_eq!(
+            open(root.path()).rows().unwrap().responsibility(&alias),
+            Responsibility::Known {
+                key: 1,
+                received_seq: first_seq
+            }
+        );
+    }
+
+    #[test]
+    fn prior_row_field_snapshots_migrate_only_full_positive_receipt_identity() {
+        use super::super::rows::receipt_identity::{ReceiptIdentity, Responsibility};
+
+        for full in [true, false] {
+            let root = sandbox();
+            let mut ledger = open(root.path());
+            let identity = ReceiptIdentity::new(1, vec![1, 11], 7, CHANNEL, CHANNEL).unwrap();
+            ledger
+                .append_entry(
+                    &Entry::Received {
+                        key: 1,
+                        input: json!({"receipt_identity":identity}),
+                    },
+                    &[],
+                )
+                .unwrap();
+            set(&mut ledger, 1, RowState::Done(DoneReason::Completed));
+            let mut snapshot = ledger.rows().unwrap().compact().unwrap();
+            snapshot.as_object_mut().unwrap().remove("receipts");
+            snapshot["rows"]["1"]["receipt_identity"] = if full {
+                serde_json::to_value(&identity).unwrap()
+            } else {
+                json!({"source_ids":[1,11],"author_id":7})
+            };
+            ledger.checkpoint(snapshot).unwrap();
+            drop(ledger);
+            let mut ledger = open(root.path());
+            let restored = ledger.rows().unwrap();
+            assert_eq!(restored.receipt_identity_missing(), !full);
+            let alias = ReceiptIdentity::new(11, vec![11], 7, CHANNEL, CHANNEL).unwrap();
+            assert_eq!(
+                restored.responsibility(&alias),
+                if full {
+                    Responsibility::Known {
+                        key: 1,
+                        received_seq: 1,
+                    }
+                } else {
+                    Responsibility::Unknown
+                }
+            );
+            ledger.checkpoint_rows().unwrap();
+            assert!(
+                ledger.snapshot().unwrap().state["rows"]["1"]
+                    .get("receipt_identity")
+                    .is_none()
+            );
+            assert_eq!(
+                ledger.snapshot().unwrap().state.get("receipts").is_some(),
+                full
+            );
+        }
+    }
+
     // Detail goes only after thirty days, retirement, no obligation and a second checkpoint agree.
     #[test]
     fn a_tombstone_is_collected_only_after_every_condition_holds_at_two_checkpoints() {

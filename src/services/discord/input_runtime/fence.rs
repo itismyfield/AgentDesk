@@ -590,6 +590,46 @@ impl Drop for PopulationScope {
 pub(crate) fn any_protected() -> bool {
     find(|_| true).is_some()
 }
+/// What a boot or restore consumer knows about the channel its effect would touch.
+pub(crate) enum BootTarget<'a> {
+    Channel(&'a ProviderKind, u64),
+    AnyProvider(u64),
+    Unknown,
+}
+/// The one boot-skip predicate: the consumer leaves a protected channel to its move or
+/// handback, and an effect it cannot place holds while any channel is protected.
+pub(crate) fn boot_skip(target: BootTarget<'_>) -> bool {
+    match target {
+        BootTarget::Channel(provider, channel) => lookup(provider, channel).is_some(),
+        BootTarget::AnyProvider(channel) => channel_gate(channel).is_some(),
+        BootTarget::Unknown => unknown_held(),
+    }
+}
+#[cfg(not(test))]
+fn unknown_held() -> bool {
+    any_protected()
+}
+// The registry is process-global, so a test opts into the unknown-target hold on its thread.
+#[cfg(test)]
+thread_local! { static HOLD_UNKNOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(test)]
+fn unknown_held() -> bool {
+    HOLD_UNKNOWN.with(std::cell::Cell::get)
+}
+#[cfg(test)]
+pub(crate) struct HoldUnknownForTest(bool);
+#[cfg(test)]
+impl HoldUnknownForTest {
+    pub(crate) fn new() -> Self {
+        Self(HOLD_UNKNOWN.with(|held| held.replace(true)))
+    }
+}
+#[cfg(test)]
+impl Drop for HoldUnknownForTest {
+    fn drop(&mut self) {
+        HOLD_UNKNOWN.with(|held| held.set(self.0));
+    }
+}
 pub(crate) fn write<T>(
     provider: &ProviderKind,
     channel: u64,

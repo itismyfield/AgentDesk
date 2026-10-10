@@ -180,6 +180,8 @@ pub(crate) enum HerdrRequest {
         lines: Option<u32>,
         strip_ansi: bool,
     },
+    #[serde(rename = "pane.close")]
+    PaneClose { pane_id: String },
     #[serde(rename = "pane.send_text")]
     PaneSendText { pane_id: String, text: String },
     #[serde(rename = "pane.send_keys")]

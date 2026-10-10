@@ -32,6 +32,7 @@ pub(crate) mod o_channel_homes;
 pub mod postgres;
 pub mod prompt_manifests;
 pub mod relay_dead_letter;
+pub(crate) mod replay_disposition;
 pub mod scheduled_messages;
 pub(crate) mod session_agent_resolution;
 pub(crate) mod session_evidence;

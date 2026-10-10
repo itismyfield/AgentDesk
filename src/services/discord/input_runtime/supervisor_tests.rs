@@ -53,6 +53,10 @@ type Then = Option<Box<dyn FnOnce() + Send>>;
 // Everything the fakes observed, shared across the supervisor, its workers and the test.
 #[derive(Default)]
 struct World {
+    parents: dashmap::DashMap<ChannelId, ChannelId>,
+    mapping_unavailable: AtomicBool,
+    mapping_checks: AtomicUsize,
+    freeze_failed: AtomicBool,
     log: Mutex<Vec<&'static str>>,
     clears: Mutex<Vec<(Instant, Vec<String>)>>,
     record: Mutex<Option<NativeClearRecord>>,
@@ -261,8 +265,19 @@ struct Fake {
 impl Ports for Fake {
     type Clear = ClearFake;
     type Move = MoveFake;
+    fn mapping(&self, channel: u64) -> mapping::Check {
+        self.world.mapping_checks.fetch_add(1, Ordering::SeqCst);
+        if self.world.mapping_unavailable.load(Ordering::SeqCst) {
+            mapping::Check::Unavailable
+        } else {
+            mapping::inspect(&self.world.parents, channel)
+        }
+    }
     fn freeze(&mut self, closing: Arc<Closing>) -> Step<'_, Result<(), Failure>> {
         self.world.note("freeze");
+        if self.world.freeze_failed.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(Failure::Busy) });
+        }
         let handle = self.mailbox.handle(ChannelId::new(self.channel));
         Box::pin(async move {
             let context = QueuePersistenceContext::new(&ProviderKind::Claude, "token", None);
@@ -917,6 +932,41 @@ async fn unbound_keys_are_reported_before_a_crash_left_clear_resumes() {
 
 #[tokio::test]
 async fn unused_registry_leaves_health_to_the_fence() {
+    if std::env::var("ADK_G1A_OFF_CHILD").as_deref() != Ok("1") {
+        let name = format!(
+            "{}::unused_registry_leaves_health_to_the_fence",
+            module_path!()
+        );
+        let name = name.split_once("::").unwrap().1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--nocapture", "--test-threads=1"])
+            .env("ADK_G1A_OFF_CHILD", "1")
+            .output()
+            .unwrap();
+        let result = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{result}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(result.contains("1 passed; 0 failed; 0 ignored"), "{result}");
+        return;
+    }
+    let unused = sandbox();
+    if mutant("off_register") {
+        let registration = REGISTRY
+            .register(&ProviderKind::Claude, 6_325_717, unused.path())
+            .unwrap();
+        drop(registration);
+    }
+    let before = super::super::health_reasons();
+    assert!(before.is_empty());
+    assert!(fence::lookup(&ProviderKind::Claude, 6_325_717).is_none());
+    assert!(!fence::modes::order_barrier(
+        &ProviderKind::Claude,
+        6_325_717
+    ));
+    assert!(!unused.path().join("input_ledger").exists());
     assert!(
         !REGISTRY.used(),
         "no test or production path registers globally"
@@ -951,6 +1001,9 @@ async fn unused_registry_leaves_health_to_the_fence() {
 
 #[path = "supervisor/drive_entry_tests.rs"]
 mod drive_entry;
+
+#[path = "mapping_guard_tests.rs"]
+mod mapping_guard;
 
 #[test]
 fn registered_holds_join_fence_health_and_leave_on_release() {

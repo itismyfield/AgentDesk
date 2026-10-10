@@ -13,6 +13,8 @@ pub(crate) enum QueuedAdmissionDisposition {
     Deferred,
     RejectedNonPortableAttachment,
     RejectedRestore,
+    /// Every source already started under a held request; that request keeps the original.
+    ConsumedToHold,
 }
 
 pub(crate) struct AdmittedQueuedIntake {
@@ -70,8 +72,23 @@ pub(crate) async fn admit_queued_intake(
         preloaded_uploads: intervention.pending_uploads.clone(),
         voice_announcement: None,
     };
-    let admission = admit_text_intake(deps, &submission).await;
-    let local_permit = match admission {
+    let local_permit = match admit_text_intake(deps, &submission).await {
+        IntakeAdmission::ConsumedToHold => {
+            tracing::warn!(
+                provider = submission.provider.as_str(),
+                channel_id = channel_id.get(),
+                user_msg_id = intervention.message_id.get(),
+                "queued intake consumed to the hold of its already started request"
+            );
+            let _ = super::super::super::mailbox_abandon_pending_dispatch(
+                deps.shared,
+                &submission.provider,
+                channel_id,
+                intervention.message_id,
+            )
+            .await;
+            return QueuedAdmissionDisposition::ConsumedToHold;
+        }
         IntakeAdmission::Local(permit) => Some(permit),
         IntakeAdmission::Forwarded { .. } | IntakeAdmission::SkippedDuplicate => None,
         IntakeAdmission::Blocked {

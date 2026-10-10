@@ -39,6 +39,18 @@ pub(in crate::services::discord) struct FinalizeContext {
 }
 
 impl FinalizeContext {
+    /// Only the captured hosted episode is settled; output ownership stays with its reader.
+    #[cfg(test)]
+    pub(in crate::services::discord) fn host_terminated() -> Self {
+        Self {
+            clear_inflight: true,
+            allow_completion_cleanup: false,
+            drain_voice: false,
+            kickoff_queue: false,
+            expected_idempotent_guard_miss: true,
+        }
+    }
+
     /// Bridge non-delegation / missing-handoff branches: bridge owns the
     /// inflight clear elsewhere, marks completion-cleanup on non-cancel, drains
     /// voice, and leaves queue admission to the completion-event listener.

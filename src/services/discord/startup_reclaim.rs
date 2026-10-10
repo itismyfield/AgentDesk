@@ -36,6 +36,7 @@ use poise::serenity_prelude as serenity;
 use super::SharedData;
 use super::gateway::edit_outbound_message;
 use super::inflight::{load_inflight_states_for_sweep, parse_updated_at_unix};
+use super::input_runtime::fence::{BootTarget, boot_skip};
 use super::single_message_panel::reclaim_finalize_text;
 use crate::services::provider::ProviderKind;
 
@@ -260,7 +261,8 @@ async fn reclaim_frozen_panels(
             provider.as_str(),
             channel_id,
             "startup_reclaim_frozen_panel_edit",
-        ) {
+        ) || boot_skip(BootTarget::Channel(provider, channel_id))
+        {
             return (finalized, markers);
         }
         if edit_outbound_message(
@@ -341,7 +343,8 @@ async fn reclaim_orphan_placeholders(
             provider.as_str(),
             channel_id,
             "startup_reclaim_orphan_placeholder_delete",
-        ) {
+        ) || boot_skip(BootTarget::Channel(provider, channel_id))
+        {
             return deleted;
         }
         attempted += 1;
@@ -421,7 +424,8 @@ async fn run_startup_reclaim_plan(
             provider.as_str(),
             channel_id,
             "startup_reclaim_channel",
-        ) || !claim_channel_once(pass, provider, channel_id)
+        ) || boot_skip(BootTarget::Channel(provider, channel_id))
+            || !claim_channel_once(pass, provider, channel_id)
         {
             continue;
         }
@@ -972,6 +976,65 @@ mod tests {
             );
         }
         assert!(discord.calls_for(retired).is_empty());
+        let read = |c: u64| format!("GET /api/v10/channels/{c}/messages");
+        assert_eq!(discord.calls_for(race_frozen), vec![read(race_frozen)]);
+        assert_eq!(discord.calls_for(race_orphan), vec![read(race_orphan)]);
+        let legacy_calls = discord.calls_for(legacy);
+        assert!(
+            legacy_calls.iter().any(|c| c.starts_with("PATCH")),
+            "{legacy_calls:?}"
+        );
+        assert!(
+            legacy_calls.iter().any(|c| c.starts_with("DELETE")),
+            "{legacy_calls:?}"
+        );
+    }
+
+    /// Both startup passes leave an input-protected channel unclaimed and unread, and a
+    /// channel protected while its page is read is neither edited nor deleted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_passes_leave_protected_channels_before_claim_and_after_read() {
+        use super::super::health::legacy_supervision::test_support::MockDiscord;
+        use super::super::input_runtime::fence::Gate;
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let (protected, legacy, race_frozen, race_orphan) = (
+            6_325_577_001u64,
+            6_325_577_002u64,
+            6_325_577_003u64,
+            6_325_577_004u64,
+        );
+        let answer = reclaim_answer(Vec::new());
+        let discord = MockDiscord::start_with(Arc::new(move |method, path| {
+            for race in [race_frozen, race_orphan] {
+                if path.ends_with(&format!("/channels/{race}/messages")) {
+                    Gate::protect(ProviderKind::Codex, race).unwrap();
+                }
+            }
+            answer(method, path)
+        }))
+        .await;
+        Gate::protect(ProviderKind::Codex, protected).unwrap();
+        let plan = ReclaimScanPlan {
+            frozen_panel_channels: vec![protected, legacy, race_frozen],
+            orphan_placeholder_channels: vec![protected, legacy, race_orphan],
+            ..Default::default()
+        };
+        let boot = chrono::Utc::now().timestamp();
+        for pass in [ReclaimPass::FrozenPanels, ReclaimPass::OrphanPlaceholders] {
+            let provider = ProviderKind::Codex;
+            run_startup_reclaim_plan(&discord.http, &shared, &provider, boot, pass, &plan).await;
+            assert!(
+                !claimed(pass, protected),
+                "a protected channel is never claimed"
+            );
+        }
+        assert!(discord.calls_for(protected).is_empty());
         let read = |c: u64| format!("GET /api/v10/channels/{c}/messages");
         assert_eq!(discord.calls_for(race_frozen), vec![read(race_frozen)]);
         assert_eq!(discord.calls_for(race_orphan), vec![read(race_orphan)]);

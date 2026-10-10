@@ -11,6 +11,7 @@ mod retirement_await_tests;
 
 use super::host_teardown_gate::shared_teardown;
 use super::inflight::KeyedTeardown;
+use super::input_runtime::fence::{BootTarget, boot_skip};
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 use crate::services::session_host::HostLiveness;
@@ -285,6 +286,16 @@ async fn clean_orphan_sessions(shared: &Arc<SharedData>, output: &[String]) {
             });
 
             if !has_owner {
+                // An unowned session of a protected channel, or one no binding places while
+                // any channel is protected, waits for that move or handback.
+                let target =
+                    match crate::services::tmux_common::read_tmux_channel_binding(session_name) {
+                        Some(channel) => BootTarget::Channel(&provider, channel),
+                        None => BootTarget::Unknown,
+                    };
+                if boot_skip(target) {
+                    continue;
+                }
                 let parsed_channel_name = parse_provider_and_channel_from_tmux_name(session_name)
                     .as_ref()
                     .map(|(_, ch_name)| ch_name.clone());
@@ -493,6 +504,9 @@ async fn reap_listed_dead_sessions(shared: &Arc<SharedData>, output: &[String]) 
             }
             continue;
         };
+        if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
+            continue;
+        }
 
         // If a watcher is attached, tmux liveness is the termination authority:
         // the watcher observes pane death, clears the registry, and applies the

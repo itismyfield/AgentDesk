@@ -9,6 +9,7 @@ pub fn spawn_stall_watchdog(registry: Arc<HealthRegistry>, provider: ProviderKin
         }
         loop {
             let cleaned = run_stall_watchdog_pass(&registry, &provider).await;
+            discord::queue_park_ledger::evaluate_provider(&registry, &provider).await;
             if cleaned > 0 {
                 tracing::info!(
                     provider = provider.as_str(),

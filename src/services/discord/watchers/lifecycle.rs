@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::input_runtime::fence::{BootTarget, boot_skip};
 
 #[path = "lifecycle/activity.rs"]
 mod activity;

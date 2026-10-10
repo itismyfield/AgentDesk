@@ -33,7 +33,19 @@ impl EntryDispatchFailureResult {
     ) -> Result<Self, String> {
         let retry_limit = max_retries.max(1);
         let current = load_entry_status_row_pg_tx_for_dispatch_failure(tx, entry_id).await?;
-        if current.status != ENTRY_STATUS_DISPATCHED {
+        // An entry whose dispatch already started (unclassified, no-effect or withheld) keeps its
+        // link, slot and retry count; requeueing it would run the same request again.
+        let replay_held = match current.dispatch_id.as_deref() {
+            Some(dispatch_id) => {
+                crate::db::replay_disposition::dispatch_blocked_on_tx(tx, dispatch_id)
+                    .await
+                    .map_err(|error| {
+                        format!("read replay hold of {dispatch_id} for entry {entry_id}: {error}")
+                    })?
+            }
+            None => false,
+        };
+        if current.status != ENTRY_STATUS_DISPATCHED || replay_held {
             return Ok(Self {
                 run_id: current.run_id,
                 from_status: current.status.clone(),

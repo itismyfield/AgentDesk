@@ -121,4 +121,30 @@ mod supported {
             );
         }
     }
+
+    #[test]
+    fn handback_with_external_row_has_zero_partial_effects() {
+        let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/i01-tmp");
+        std::fs::create_dir_all(&parent).unwrap();
+        let root = tempfile::tempdir_in(parent).unwrap();
+        let external = super::super::input_key::EXTERNAL_KEY_BASE + 7;
+        let mut ledger = Ledger::open(root.path(), 3).unwrap();
+        // The Discord row is older, so a per-row stop would already have returned it.
+        for key in [2, external] {
+            let input = json!({"text": format!("input {key}")});
+            let entry = Entry::Received { key, input };
+            ledger.append_entry(&entry, &[]).unwrap();
+        }
+        let seq = ledger.rows().unwrap().folded_seq();
+        drop(ledger);
+        let mut destination = Destination(Vec::new());
+        assert_eq!(
+            handback(&mut LedgerLease::new(root.path(), 3), &mut destination).unwrap(),
+            Outcome::Held
+        );
+        assert!(destination.0.is_empty(), "nothing enqueued to Legacy");
+        let rows = Ledger::open(root.path(), 3).unwrap().rows().unwrap();
+        assert_eq!(rows.folded_seq(), seq, "no row closed");
+        assert_eq!(rows.open_rows().count(), 2);
+    }
 }

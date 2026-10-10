@@ -124,6 +124,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 delete(monitoring::remove_monitoring),
             )
             .route("/turns/{channel_id}/cancel", post(queue_api::cancel_turn))
+            .route("/internal/home-stop/v1", post(queue_api::home_stop_v1))
             .route(
                 "/provider-cli",
                 get(provider_cli_api::get_provider_cli_status),

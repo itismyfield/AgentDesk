@@ -10,7 +10,21 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Overridable so a mutation run can point the same assertions at a patched copy.
 DEPLOY_SH="${AGENTDESK_TEST_DEPLOY_SH:-$REPO_ROOT/scripts/deploy-release.sh}"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-o-writer-rollback-test.XXXXXX")
-trap 'rm -rf "$TMP_ROOT"' EXIT
+trap 'clean_paths "$TMP_ROOT"' EXIT
+
+clean_paths() {
+    python3 - "$@" <<'PY_CLEAN'
+import pathlib
+import shutil
+import sys
+for name in sys.argv[1:]:
+    path = pathlib.Path(name)
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+PY_CLEAN
+}
 
 FAILURES=0
 fail() { echo "  ✗ $1" >&2; FAILURES=$((FAILURES + 1)); }
@@ -30,6 +44,7 @@ extract_function() {
 
 for fn in _rollback_release_binary _signal_release_lock_pid _wait_release_stopped \
     _source_o_tui_writer _manifest_o_tui_writer \
+    _source_o_ledger_operator_resume _rollback_would_revert_o_ledger _source_would_revert_o_ledger \
     _rollback_would_revert_o_writer _write_release_source_manifest \
     _external_artifact_would_skip_o_writer; do
     body="$(extract_function "$fn")"
@@ -80,7 +95,7 @@ MANIFEST="$ADK_REL/runtime/release-source.json"
 
 # $1 topology.rs body ("" = no switch in the source), $2 manifest JSON ("" = none).
 setup_case() {
-    rm -rf "$ADK_REL" "$REPO" "$TMP_ROOT/calls"
+    clean_paths "$ADK_REL" "$REPO" "$TMP_ROOT/calls"
     mkdir -p "$ADK_REL/bin" "$ADK_REL/runtime" "$REPO/src/services/tui_o"
     printf 'new\n' >"$REL_BINARY"
     printf 'old\n' >"$REL_BINARY_BACKUP"
@@ -130,6 +145,22 @@ expect "switch on, rollback target switch unknown" refused
 setup_case "$SWITCH_ON" "$O_MANIFEST"
 expect "switch on, O writer rollback target" rolled_back
 
+echo "== OperatorResume floor applies only after first use =="
+setup_case "$SWITCH_ON" "$O_MANIFEST"
+expect "no floor, old O reader (first deployment failure)" rolled_back
+for target in "$O_MANIFEST" "not json" "" \
+    '{"o_tui_writer":"true","o_ledger_operator_resume":false}' \
+    '{"o_tui_writer":"true","o_ledger_operator_resume":"true"}'; do
+    setup_case "$SWITCH_OFF" "$target"
+    mkdir -p "$ADK_REL/o_store"
+    printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
+    AGENTDESK_DEPLOY_FORCE_ROLLBACK=1 expect "floor, incompatible target: $target" refused
+done
+setup_case "$SWITCH_ON" '{"o_tui_writer":"true","o_ledger_operator_resume":true}'
+mkdir -p "$ADK_REL/o_store"
+printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
+expect "floor, compatible target" rolled_back
+
 echo "== an unreadable switch counts as on =="
 setup_case 'pub(crate) const O_TUI_WRITER: bool = cfg!(feature = "o");' "$LEGACY_MANIFEST"
 expect "non-literal switch" refused
@@ -143,23 +174,57 @@ $SWITCH_ON" "$LEGACY_MANIFEST"
 expect "two definitions that disagree" refused
 
 echo "== switch on: only this source's own build is deployed =="
+# Buffer the bounded selection range so a missing boundary cannot include later deploy steps.
 selection="$(awk '
-    /^if _external_artifact_would_skip_o_writer; then$/ { printing = 1 }
-    printing { print }
-    printing && /^fi$/ { exit }
+    /^_check_repo_remote_freshness$/ { collecting = 1; next }
+    collecting && /^# Cluster peers are pinned to this commit,/ { print body; exit }
+    collecting { body = body $0 ORS }
 ' "$DEPLOY_SH")"
-[ -n "$selection" ] || fail "the binary selection block does not run the external artifact guard"
-_resolve_default_release_binary() { echo "own-build"; }
+if [ -z "$selection" ] || ! bash -n <<<"$selection" 2>/dev/null; then
+    fail "the source floor and binary selection range is missing or invalid"
+    exit 1
+fi
+for guard in _source_would_revert_o_ledger _external_artifact_would_skip_o_writer; do
+    if ! grep -qx "if $guard; then" <<<"$selection"; then
+        fail "the source floor and binary selection range does not run $guard"
+        exit 1
+    fi
+done
+_resolve_default_release_binary() {
+    echo "select own-build" >>"$TMP_ROOT/calls"
+    echo "own-build"
+}
+run_selection() {
+    AGENTDESK_DEPLOY_BINARY="$1" REPO="$REPO" ADK_REL="$ADK_REL" TMP_ROOT="$TMP_ROOT" \
+        DEPLOY_BUILD_PROFILE=release bash -euo pipefail -c "$(declare -f _source_o_tui_writer \
+        _source_o_ledger_operator_resume _source_would_revert_o_ledger \
+        _external_artifact_would_skip_o_writer _resolve_default_release_binary)
+$selection
+echo \"\$SOURCE_BINARY\""
+}
 # $1 label, $2 topology.rs body, $3 AGENTDESK_DEPLOY_BINARY, $4 expected binary or "refused"
 expect_binary() {
     local actual
     setup_case "$2" ""
-    actual="$(AGENTDESK_DEPLOY_BINARY="$3" bash -c "$(declare -f _source_o_tui_writer \
-        _external_artifact_would_skip_o_writer _resolve_default_release_binary)
-REPO='$REPO' DEPLOY_BUILD_PROFILE=release
-$selection
-echo \"\$SOURCE_BINARY\"" 2>/dev/null)" || actual=refused
+    actual="$(run_selection "$3" 2>/dev/null)" || actual=refused
     if [ "$actual" = "$4" ]; then pass "$1 → $4"; else fail "$1 → expected $4, got $actual"; fi
+}
+expect_source_floor() {
+    local actual status=0 calls
+    actual="$(run_selection "" 2>"$TMP_ROOT/selection-error")" || status=$?
+    calls="$(cat "$TMP_ROOT/calls" 2>/dev/null || true)"
+    if [ "$2" = refused ]; then
+        if [ "$status" -eq 1 ] && [ -z "$actual" ] && [ -z "$calls" ] \
+            && grep -q "OperatorResume floor refuses" "$TMP_ROOT/selection-error"; then
+            pass "$1 → refused before binary selection"
+        else
+            fail "$1 → expected refusal before selection, got rc=$status output='$actual' calls='$calls'"
+        fi
+    elif [ "$status" -eq 0 ] && [ "$actual" = "$2" ] && [ "$calls" = "select own-build" ]; then
+        pass "$1 → $2 with binary selection observed"
+    else
+        fail "$1 → expected $2 with selection, got rc=$status output='$actual' calls='$calls'"
+    fi
 }
 expect_binary "switch on, external artifact" "$SWITCH_ON" /tmp/artifact refused
 expect_binary "unreadable switch, external artifact" \
@@ -175,6 +240,41 @@ for value in true false; do
     _write_release_source_manifest >/dev/null 2>&1 || true
     recorded="$(_manifest_o_tui_writer || true)"
     if [ "$recorded" = "$value" ]; then pass "manifest records ${value}"; else fail "manifest records ${value}: got '${recorded}'"; fi
+done
+
+echo "== the capability records only this source's own reader and consumer =="
+setup_case "$SWITCH_OFF" ""
+mkdir -p "$REPO/src/services/tui_o/store"
+printf 'pub const OPERATOR_RESUME_SUPPORTED: bool = true;\n' >"$REPO/src/services/tui_o/store/ledger.rs"
+_write_release_source_manifest >/dev/null 2>&1 || true
+if python3 - "$MANIFEST" <<'PY'
+import json
+import sys
+assert json.load(open(sys.argv[1]))["o_ledger_operator_resume"] is True
+PY
+then pass "manifest records OperatorResume capability"; else fail "manifest misses capability"; fi
+if AGENTDESK_DEPLOY_BINARY=/tmp/artifact _external_artifact_would_skip_o_writer; then
+    pass "capable source refuses an external artifact even with O switch off"
+else fail "external artifact could be assigned an unverified capability"; fi
+mkdir -p "$ADK_REL/o_store"
+printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
+expect_source_floor "source floor, compatible source" own-build
+setup_case "$SWITCH_OFF" ""
+mkdir -p "$REPO/src/services/tui_o/store"
+printf 'pub const OPERATOR_RESUME_SUPPORTED: bool = false;\n' >"$REPO/src/services/tui_o/store/ledger.rs"
+expect_source_floor "no source floor, legacy source" own-build
+for capability in missing false unknown unreadable; do
+    setup_case "$SWITCH_OFF" ""
+    mkdir -p "$ADK_REL/o_store" "$REPO/src/services/tui_o/store"
+    printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
+    case "$capability" in
+        false) printf 'pub const OPERATOR_RESUME_SUPPORTED: bool = false;\n' \
+            >"$REPO/src/services/tui_o/store/ledger.rs" ;;
+        unknown) printf 'pub const OPERATOR_RESUME_SUPPORTED: bool = cfg!(feature = "o");\n' \
+            >"$REPO/src/services/tui_o/store/ledger.rs" ;;
+        unreadable) mkdir "$REPO/src/services/tui_o/store/ledger.rs" ;;
+    esac
+    expect_source_floor "source floor, $capability capability" refused
 done
 
 echo "== this repository's switch reads as one value =="

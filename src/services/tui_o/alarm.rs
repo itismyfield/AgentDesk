@@ -31,6 +31,7 @@ pub(crate) struct AlarmHealth {
     raised: Mutex<BTreeSet<String>>,
     notifications: Mutex<HashMap<String, NotificationState>>,
     active: Mutex<BTreeSet<String>>,
+    waiting: Mutex<HashMap<u64, String>>,
     not_found: Mutex<HashMap<u64, VecDeque<Instant>>>,
 }
 
@@ -45,6 +46,7 @@ enum NotificationState {
 pub(crate) struct AlarmNotification {
     channel: u64,
     kind: &'static str,
+    incident: Option<String>,
     text: String,
 }
 
@@ -111,6 +113,23 @@ impl AlarmHealth {
 
     fn activate(&self, reason: &str) {
         locked(&self.active).insert(reason.to_string());
+    }
+
+    /// A recovered actor shares the unfinished incident until evidence clears it.
+    fn activate_waiting(&self, channel: u64, incident: &str) -> String {
+        let mut waiting = locked(&self.waiting);
+        let incident = waiting
+            .entry(channel)
+            .or_insert_with(|| incident.to_owned())
+            .clone();
+        self.activate(&format!("tui_o:{WAITING_TOO_LONG}:{channel}"));
+        incident
+    }
+
+    fn clear_waiting(&self, channel: u64) {
+        let mut waiting = locked(&self.waiting);
+        waiting.remove(&channel);
+        locked(&self.active).remove(&format!("tui_o:{WAITING_TOO_LONG}:{channel}"));
     }
 
     /// Records one NotFound and reports whether the channel reached the threshold within the window.
@@ -200,6 +219,7 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
         WriterAlarm::BindingLogUnavailable { .. } => "binding_log_unavailable",
         WriterAlarm::RotationStalled { .. } => "rotation_stalled",
         WriterAlarm::SelectionMissing => "selection_missing",
+        WriterAlarm::WaitingTooLong { .. } => WAITING_TOO_LONG,
         WriterAlarm::NotFound { .. } => return None,
     })
 }
@@ -207,8 +227,9 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
 const NOT_FOUND_FREQUENT: &str = "not_found_frequent";
 const RESUME_PENDING: &str = "resume_pending";
 const PAUSED_NO_GATEWAY: &str = "paused_no_gateway";
+const WAITING_TOO_LONG: &str = "waiting_too_long";
 
-/// The writer's alarm sink: each (channel, kind) alarms once, NotFound only past its frequency.
+/// Routes each writer incident once; NotFound only alarms past its frequency.
 pub(crate) struct AlarmRouter {
     alert_channel: Option<u64>,
     notifier: Option<Arc<dyn AlarmNotifier>>,
@@ -236,9 +257,17 @@ impl AlarmRouter {
     }
 
     pub(crate) fn raise_at(&self, channel: u64, alarm: &WriterAlarm, now: Instant) {
+        let incident = match alarm {
+            WriterAlarm::WaitingTooLong { incident, .. } => {
+                Some(self.health.activate_waiting(channel, incident))
+            }
+            _ => None,
+        };
         let kind = match alarm_kind(alarm) {
             Some(kind) => {
-                self.health.activate(&format!("tui_o:{kind}:{channel}"));
+                if incident.is_none() {
+                    self.health.activate(&format!("tui_o:{kind}:{channel}"));
+                }
                 kind
             }
             None if self.health.record_not_found(channel, now) => NOT_FOUND_FREQUENT,
@@ -259,7 +288,11 @@ impl AlarmRouter {
             );
             return;
         }
-        let Some(attempt) = NotificationAttempt::begin(self.health.clone(), reason) else {
+        let notification_key = incident
+            .as_ref()
+            .map_or(reason.clone(), |incident| format!("{reason}:{incident}"));
+        let Some(attempt) = NotificationAttempt::begin(self.health.clone(), notification_key)
+        else {
             return;
         };
         notifier.notify(
@@ -267,6 +300,7 @@ impl AlarmRouter {
             AlarmNotification {
                 channel,
                 kind,
+                incident,
                 text: format!("[tui_o] {kind} on channel {channel}: {alarm:?}"),
             },
             attempt,
@@ -292,6 +326,10 @@ impl AlarmSink for AlarmRouter {
     fn halt_cleared(&self, channel: u64) {
         self.health.clear_halted(channel);
     }
+
+    fn waiting_cleared(&self, channel: u64) {
+        self.health.clear_waiting(channel);
+    }
 }
 
 impl AlarmSink for Arc<AlarmRouter> {
@@ -309,6 +347,10 @@ impl AlarmSink for Arc<AlarmRouter> {
 
     fn halt_cleared(&self, channel: u64) {
         self.as_ref().halt_cleared(channel);
+    }
+
+    fn waiting_cleared(&self, channel: u64) {
+        self.as_ref().waiting_cleared(channel);
     }
 }
 
@@ -330,7 +372,10 @@ impl AlarmNotifier for OutboxNotifier {
         runtime.spawn(async move {
             let target = format!("channel:{alert_channel}");
             let reason_code = format!("{ALARM_REASON_CODE}.{}", alarm.kind);
-            let session_key = format!("tui_o:{}", alarm.channel);
+            let session_key = match &alarm.incident {
+                Some(incident) => format!("tui_o:{}:{incident}", alarm.channel),
+                None => format!("tui_o:{}", alarm.channel),
+            };
             enqueue_with_retry(alert_channel, attempt, || {
                 crate::services::message_outbox::enqueue_outbox_best_effort(
                     Some(&pool),
@@ -389,6 +434,43 @@ mod tests {
 
     const ALERT: u64 = 900;
     const FAILING: u64 = 42;
+
+    #[test]
+    fn waiting_clear_keeps_other_health_and_owned_retry_slots() {
+        let health = Arc::new(AlarmHealth::default());
+        let router = Arc::new(AlarmRouter::new(None, None, health.clone()));
+        let waiting = |incident: &str| WriterAlarm::WaitingTooLong {
+            incident: incident.into(),
+            ready: 1,
+            prepared: None,
+        };
+        router.raise(FAILING, WriterAlarm::Blocked { status: 403 });
+        router.raise(FAILING, waiting("first"));
+        let reason = format!("tui_o:{WAITING_TOO_LONG}:{FAILING}");
+        let first_key = format!("{reason}:first");
+        let first = NotificationAttempt::begin(health.clone(), first_key.clone()).unwrap();
+        first.state(NotificationState::RetryWaiting);
+
+        router.waiting_cleared(FAILING);
+        assert_eq!(health.current_at(Instant::now()), ["tui_o:blocked:42"]);
+        assert_eq!(
+            locked(&health.notifications).get(&first_key),
+            Some(&NotificationState::RetryWaiting)
+        );
+        router.raise(FAILING, waiting("second"));
+        let second_key = format!("{reason}:second");
+        let second = NotificationAttempt::begin(health.clone(), second_key.clone()).unwrap();
+        first.commit();
+        assert_eq!(
+            locked(&health.notifications).get(&second_key),
+            Some(&NotificationState::Pending),
+            "the earlier retry must not settle the new incident"
+        );
+        router.waiting_cleared(FAILING);
+        second.existing();
+        assert_eq!(locked(&health.notifications).len(), 2);
+        assert_eq!(health.current_at(Instant::now()), ["tui_o:blocked:42"]);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn retry_backoff_caps_without_ending_and_attempt_timeout_has_an_exact_boundary() {
@@ -872,6 +954,89 @@ mod postgres_tests {
             Some(Arc::new(OutboxNotifier { pool: pool.clone() })),
             health,
         ))
+    }
+
+    #[tokio::test]
+    async fn waiting_incidents_repeat_once_recur_and_replay_independently_pg() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_o_alarm_waiting",
+            "O waiting alarm incident identity",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        let health = Arc::new(AlarmHealth::default());
+        let router = pg_router(&pool, health.clone());
+        let prepared_incident = "prepared:12:2026-10-10T00:00:00Z";
+        let prepared_alarm = || WriterAlarm::WaitingTooLong {
+            incident: prepared_incident.into(),
+            ready: 0,
+            prepared: Some(12),
+        };
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let router = router.clone();
+            let alarm = prepared_alarm();
+            tasks.push(tokio::spawn(async move { router.raise(42, alarm) }));
+        }
+        for task in tasks {
+            task.await.expect("concurrent waiting alarm producer");
+        }
+        settled(&health).await;
+        assert_eq!(row_count(&pool).await, 1, "one row per waiting incident");
+
+        router.waiting_cleared(42);
+        assert!(health.current_at(Instant::now()).is_empty());
+        let ready_alarm = || WriterAlarm::WaitingTooLong {
+            incident: "ready:second-incident".into(),
+            ready: 1,
+            prepared: None,
+        };
+        router.raise(42, ready_alarm());
+        router.raise(42, ready_alarm());
+        router.raise(
+            42,
+            WriterAlarm::WaitingTooLong {
+                incident: "ready:reconstructed-same-work".into(),
+                ready: 1,
+                prepared: None,
+            },
+        );
+        settled(&health).await;
+        assert_eq!(
+            row_count(&pool).await,
+            2,
+            "recurrence gets a row; reconstruction keeps the unfinished incident"
+        );
+
+        router.raise(7, prepared_alarm());
+        settled(&health).await;
+        assert_eq!(
+            row_count(&pool).await,
+            3,
+            "channel is part of the incident identity"
+        );
+        let same_health_router = pg_router(&pool, health.clone());
+        same_health_router.raise(42, prepared_alarm());
+        settled(&health).await;
+        assert_eq!(row_count(&pool).await, 3, "old incident slots stay settled");
+
+        let replay_health = Arc::new(AlarmHealth::default());
+        let replay_router = pg_router(&pool, replay_health.clone());
+        replay_router.raise(42, prepared_alarm());
+        settled(&replay_health).await;
+        assert_eq!(
+            row_count(&pool).await,
+            3,
+            "stable Prepared identity survives a new router"
+        );
+        assert_eq!(
+            locked(&replay_health.notifications)
+                .get(&format!("tui_o:{WAITING_TOO_LONG}:42:{prepared_incident}")),
+            Some(&NotificationState::Existing),
+            "PG NoRow settles the restored incident without claiming a new row"
+        );
+        pool.close().await;
+        db.drop().await;
     }
 
     #[tokio::test]

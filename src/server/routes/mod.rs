@@ -779,3 +779,8 @@ fn response_is_json(response: &Response) -> bool {
         .map(|value| value.starts_with("application/json"))
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+pub(crate) use queue_api::home_stop_tests::{
+    app_with as home_stop_test_app, post as home_stop_test_post,
+};

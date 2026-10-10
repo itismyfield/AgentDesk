@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -30,8 +29,10 @@ pub(crate) mod input_fence;
 pub(crate) mod input_handback;
 mod intervention;
 mod lease_release;
+mod mailbox_observation;
 #[cfg(test)]
 mod mailbox_unreachable_tests;
+pub(crate) use mailbox_observation::MailboxObservationFailure;
 mod overflow;
 mod pending_queue_persistence;
 mod queue_cancellation;
@@ -1187,19 +1188,6 @@ impl ChannelMailboxRegistry {
         GLOBAL_TURN_FINISHED_SIGNALS
             .get(&channel_id)
             .map(|entry| entry.value().clone())
-    }
-
-    pub(crate) async fn snapshot_all(&self) -> HashMap<ChannelId, ChannelMailboxSnapshot> {
-        let handles: Vec<_> = self
-            .handles
-            .iter()
-            .map(|entry| (*entry.key(), entry.value().clone()))
-            .collect();
-        let mut snapshots = HashMap::new();
-        for (channel_id, handle) in handles {
-            snapshots.insert(channel_id, handle.snapshot().await);
-        }
-        snapshots
     }
 
     pub(crate) async fn restart_drain_all(

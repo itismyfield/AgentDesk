@@ -644,6 +644,7 @@ _write_release_source_manifest() {
     AGENTDESK_MANIFEST_SKIP_FRESHNESS="${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" \
     AGENTDESK_MANIFEST_SKIP_REMOTE_FRESHNESS="${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}" \
     AGENTDESK_MANIFEST_O_TUI_WRITER="$(_source_o_tui_writer)" \
+    AGENTDESK_MANIFEST_O_LEDGER_OPERATOR_RESUME="$(_source_o_ledger_operator_resume)" \
     python3 - "$manifest_tmp" <<PY
 import json
 import os
@@ -669,6 +670,7 @@ payload = {
     "skip_freshness": os.environ.get("AGENTDESK_MANIFEST_SKIP_FRESHNESS", "0"),
     "skip_remote_freshness": os.environ.get("AGENTDESK_MANIFEST_SKIP_REMOTE_FRESHNESS", "0"),
     "o_tui_writer": os.environ.get("AGENTDESK_MANIFEST_O_TUI_WRITER", "unknown"),
+    "o_ledger_operator_resume": os.environ.get("AGENTDESK_MANIFEST_O_LEDGER_OPERATOR_RESUME") == "true",
 }
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
@@ -1007,6 +1009,54 @@ print(value)
 PY
 }
 
+_source_o_ledger_operator_resume() {
+    python3 - "$REPO/src/services/tui_o/store/ledger.rs" <<'PY'
+import pathlib
+import re
+import sys
+try:
+    text = pathlib.Path(sys.argv[1]).read_text()
+except FileNotFoundError:
+    print("false")
+    sys.exit(0)
+except OSError:
+    print("unknown")
+    sys.exit(0)
+definitions = [line.strip() for line in text.splitlines() if "const OPERATOR_RESUME_SUPPORTED" in line]
+if not definitions:
+    print("false")
+    sys.exit(0)
+match = re.fullmatch(r"pub const OPERATOR_RESUME_SUPPORTED: bool = (true|false);", definitions[0]) if len(definitions) == 1 else None
+print(match[1] if match else "unknown")
+PY
+}
+
+_rollback_would_revert_o_ledger() {
+    # Only first use raises the floor; an unused new build can still roll back after a failed deploy.
+    local floor="$ADK_REL/o_store/operator_resume.floor"
+    [ -e "$floor" ] || [ -L "$floor" ] || return 1
+    if python3 - "$ADK_REL/runtime/release-source.json" <<'PY' 2>/dev/null
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        compatible = json.load(handle).get("o_ledger_operator_resume") is True
+except (OSError, ValueError, AttributeError):
+    compatible = False
+sys.exit(0 if compatible else 1)
+PY
+    then
+        return 1
+    fi
+    return 0
+}
+
+_source_would_revert_o_ledger() {
+    local floor="$ADK_REL/o_store/operator_resume.floor"
+    [ -e "$floor" ] || [ -L "$floor" ] || return 1
+    [ "$(_source_o_ledger_operator_resume)" != "true" ]
+}
+
 _rollback_would_revert_o_writer() {
     # Returns 0 (refuse) when this source may have the O writer on and the
     # rollback target is not recorded as an O writer build: the old binary would
@@ -1031,6 +1081,10 @@ _external_artifact_would_skip_o_writer() {
     # known to carry its switch, which the manifest then records for rollback.
     local value
     [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 1
+    if [ "$(_source_o_ledger_operator_resume)" != "false" ]; then
+        echo "✗ OperatorResume capability requires this source's own build; external artifact refused" >&2
+        return 0
+    fi
     value="$(_source_o_tui_writer)"
     [ "$value" != "false" ] || return 1
     echo "✗ O writer switch is ${value} in this source; AGENTDESK_DEPLOY_BINARY is refused — deploy a build of this source" >&2
@@ -1143,6 +1197,12 @@ _rollback_release_binary() {
         echo "   Check http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/health and fix forward."
         echo "   Release logs: ${ADK_REL:-}/logs/"
         echo ""
+        return 0
+    fi
+
+    if _rollback_would_revert_o_ledger; then
+        echo "🛑 ROLLBACK REFUSED — OperatorResume floor requires a compatible O ledger reader"
+        echo "   The new binary stays live; $rel_backup is preserved. Fix forward with a compatible build."
         return 0
     fi
 
@@ -2407,6 +2467,11 @@ fi
 # keeps the override behavior only while this source's O writer switch is false.
 _ensure_dashboard_dependencies
 _check_repo_remote_freshness
+if _source_would_revert_o_ledger; then
+    echo "✗ OperatorResume floor refuses this source's incompatible O ledger reader" >&2
+    exit 1
+fi
+
 if _external_artifact_would_skip_o_writer; then
     exit 1
 elif [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then

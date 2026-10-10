@@ -1088,6 +1088,38 @@ pub(in crate::services::discord) fn is_synthetic_create_state(state: &InflightTu
     rebind || watcher || tui_direct
 }
 
+fn observe_synthetic_create(state: &InflightTurnState, site: &'static str, phase: &'static str) {
+    if !is_synthetic_create_state(state) {
+        return;
+    }
+    let Some(turn_nonce) =
+        crate::services::tui_o::n1_observation::bounded_id(state.turn_nonce.as_deref())
+    else {
+        return;
+    };
+    crate::services::tui_o::n1_observation::emit(
+        &state.provider,
+        state.channel_id,
+        crate::services::tui_o::n1_observation::Kind::SyntheticCreate {
+            phase,
+            site,
+            turn_source: state.turn_source.as_str(),
+            synthetic_kind: if state.rebind_origin {
+                "rebind"
+            } else if state.request_owner_user_id == 0 {
+                "watcher"
+            } else {
+                "tui_direct"
+            },
+            turn_nonce,
+            user_msg_id: state.user_msg_id,
+            request_owner_user_id: state.request_owner_user_id,
+            relay_owner_kind: state.effective_relay_owner_kind().as_str(),
+            rebind_origin: state.rebind_origin,
+        },
+    );
+}
+
 pub(in crate::services::discord) fn save_inflight_state_create_new(
     state: &InflightTurnState,
 ) -> Result<(), CreateNewInflightError> {
@@ -1155,6 +1187,7 @@ fn save_inflight_state_create_new_in_root_with_io(
     // cooperating writer takes it, so the exact final-path existence check and
     // the atomic temp+sync+rename publication below are one serialized action.
     let _lock = lock_inflight_state_path(&path).map_err(CreateNewInflightError::Internal)?;
+    observe_synthetic_create(state, "create_new", "attempt");
     match final_name_is_occupied_with_metadata(&path, metadata) {
         Ok(true) => return Err(CreateNewInflightError::AlreadyExists),
         Ok(false) => {}
@@ -1178,6 +1211,7 @@ fn save_inflight_state_create_new_in_root_with_io(
     // a write/sync failure or crash before rename cannot leave an empty or
     // partial final row that permanently converts retries into AlreadyExists.
     write(&path, &json).map_err(CreateNewInflightError::Internal)?;
+    observe_synthetic_create(&updated, "create_new", "committed");
     if !is_synthetic_create_state(&updated) {
         create_monotonic_observer::observe_successful_real_create(&updated);
     }
@@ -1282,6 +1316,7 @@ fn save_inflight_state_if_absent_in_root_with_io(
     // `symlink_metadata` treats any final-name entry, including a dangling
     // symlink, as occupied; only NotFound permits publication.
     let _lock = lock_inflight_state_path(&path)?;
+    observe_synthetic_create(state, "if_absent", "attempt");
     if final_name_is_occupied_with_metadata(&path, metadata).map_err(|error| error.to_string())? {
         return Ok(false);
     }
@@ -1297,8 +1332,154 @@ fn save_inflight_state_if_absent_in_root_with_io(
     bump_save_generation_for_write(&path, &mut updated);
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     write(&path, &json)?;
+    observe_synthetic_create(&updated, "if_absent", "committed");
     if !is_synthetic_create_state(&updated) {
         create_monotonic_observer::observe_successful_real_create(&updated);
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod n1_observation_tests {
+    use super::*;
+    use crate::services::tui_o::n1_observation::tests as harness;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn state() -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            100_000_006_325_001,
+            None,
+            1,
+            8,
+            9,
+            "private prompt".into(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        state.turn_source = TurnSource::ExternalInput;
+        state.turn_nonce = Some("stable-nonce".into());
+        state
+    }
+
+    fn exercise(state: &InflightTurnState, site: &str, fail: bool) -> (String, Vec<u8>) {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &Path, bytes: &str| {
+            if fail {
+                Err("injected write failure".into())
+            } else {
+                atomic_write(path, bytes)
+            }
+        };
+        let result = if site == "create_new" {
+            format!(
+                "{:?}",
+                save_inflight_state_create_new_in_root_with_write(dir.path(), state, write)
+            )
+        } else {
+            format!(
+                "{:?}",
+                save_inflight_state_if_absent_in_root_with_io(
+                    dir.path(),
+                    state,
+                    |p| fs::symlink_metadata(p),
+                    write,
+                )
+            )
+        };
+        let path = inflight_state_path(dir.path(), &ProviderKind::Codex, state.channel_id);
+        assert!(
+            second_handle_try_lock(&path).is_ok(),
+            "sidecar released before observer resumes"
+        );
+        let bytes = fs::read(path).unwrap_or_default();
+        (result, bytes)
+    }
+
+    #[test]
+    fn n1_both_physical_store_boundaries_return_with_stopped_failed_or_locked_observer() {
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let state = state();
+        for site in ["create_new", "if_absent"] {
+            for failure in ["full", "closed", "lock", "sink"] {
+                for fail_write in [false, true] {
+                    let before = now_string();
+                    let off = harness::scoped(None, || exercise(&state, site, fail_write));
+                    let (tx, rx) = mpsc::channel();
+                    let state = state.clone();
+                    let thread = std::thread::spawn(move || {
+                        harness::faulted(failure, |_| {
+                            let result = exercise(&state, site, fail_write);
+                            tx.send(result).unwrap();
+                        });
+                    });
+                    let on = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                    thread.join().unwrap();
+                    assert_eq!(on.0, off.0, "{site} {failure} write_failure={fail_write}");
+                    if before == now_string() || on.1.is_empty() {
+                        assert_eq!(on.1, off.1, "row bytes changed");
+                    } else {
+                        let mut a: serde_json::Value = serde_json::from_slice(&on.1).unwrap();
+                        let mut b: serde_json::Value = serde_json::from_slice(&off.1).unwrap();
+                        a["updated_at"] = serde_json::Value::Null;
+                        b["updated_at"] = serde_json::Value::Null;
+                        assert_eq!(a, b, "only the existing wall clock may differ");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn n1_synthetic_attempt_before_occupancy_and_commit_only_after_physical_success() {
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        for site in ["create_new", "if_absent"] {
+            for fail in [false, true] {
+                let (observer, rx) = harness::fixture(16);
+                harness::scoped(Some(observer), || {
+                    exercise(&state(), site, fail);
+                });
+                let events: Vec<_> = rx
+                    .try_iter()
+                    .map(|e| serde_json::to_value(e).unwrap())
+                    .collect();
+                assert_eq!(events.len(), if fail { 1 } else { 2 });
+                assert_eq!(events[0]["phase"], "attempt");
+                assert_eq!(events[0]["site"], site);
+                assert_eq!(events[0]["request_owner_user_id"], 1);
+                assert_eq!(events[0]["turn_source"], "external_input");
+                if !fail {
+                    assert_eq!(events[1]["phase"], "committed");
+                }
+                assert!(
+                    !serde_json::to_string(&events)
+                        .unwrap()
+                        .contains("private prompt")
+                );
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let state = state();
+            save_inflight_state_create_new_in_root(dir.path(), &state).unwrap();
+            let (observer, rx) = harness::fixture(16);
+            harness::scoped(Some(observer), || {
+                if site == "create_new" {
+                    assert!(matches!(
+                        save_inflight_state_create_new_in_root(dir.path(), &state),
+                        Err(CreateNewInflightError::AlreadyExists)
+                    ));
+                } else {
+                    assert!(!save_inflight_state_if_absent_in_root(dir.path(), &state).unwrap());
+                }
+            });
+            assert_eq!(
+                rx.try_iter().count(),
+                1,
+                "occupied rows have attempt without commit"
+            );
+        }
+    }
 }

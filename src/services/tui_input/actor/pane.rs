@@ -9,6 +9,11 @@ use super::super::bounded_tmux::{BoundedTmuxError, run_with_budget};
 use super::gate::{PaneVerdict, judge_pane, own_draft};
 use crate::services::tui_o::shadow::ShadowProvider;
 
+#[cfg(test)]
+mod ownership;
+#[cfg(test)]
+mod ownership_tests;
+
 /// Larger prompts are refused before any tmux call.
 pub const MAX_PROMPT_BYTES: usize = 64 * 1024;
 const CAPTURE_SCROLLBACK: &str = "-80";
@@ -35,6 +40,9 @@ pub trait Pane {
     ) -> SendOutcome {
         self.submit(text)
     }
+    fn with_busy_composer<R>(&mut self, operation: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        self.with_composer(operation)
+    }
     fn with_composer<R>(&mut self, operation: impl FnOnce(&mut Self) -> R) -> Option<R> {
         Some(operation(self))
     }
@@ -53,8 +61,11 @@ pub struct TmuxPane {
     budget: Duration,
     provider: ShadowProvider,
     pre_empty: bool,
+    busy: bool,
     #[cfg(test)]
     test_nonce: Option<String>,
+    #[cfg(test)]
+    offer: Option<crate::services::discord::input_runtime::offer::Offer>,
 }
 
 impl TmuxPane {
@@ -69,14 +80,26 @@ impl TmuxPane {
             budget,
             provider: ShadowProvider::Claude,
             pre_empty: false,
+            busy: false,
             #[cfg(test)]
             test_nonce: None,
+            #[cfg(test)]
+            offer: None,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn attest_test_nonce(&mut self, nonce: &str) {
         self.test_nonce = Some(nonce.into());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_offer(
+        mut self,
+        offer: crate::services::discord::input_runtime::offer::Offer,
+    ) -> Self {
+        self.offer = Some(offer);
+        self
     }
 
     fn command(&self, args: &[&str]) -> std::io::Result<Command> {
@@ -99,7 +122,24 @@ impl TmuxPane {
                         .enable_all()
                         .build()
                         .map_err(BoundedTmuxError::Spawn)?
-                        .block_on(run_with_budget(&mut command, self.budget))
+                        .block_on(async {
+                            #[cfg(test)]
+                            if let Some(offer) = &self.offer {
+                                let effect = args.first().copied();
+                                if matches!(effect, Some("paste-buffer" | "send-keys")) {
+                                    let pending = ownership::spawn(
+                                        offer,
+                                        self.provider,
+                                        &tokio::runtime::Handle::current(),
+                                        &mut command,
+                                        self.budget,
+                                        effect == Some("send-keys"),
+                                    )?;
+                                    return pending.wait().await;
+                                }
+                            }
+                            run_with_budget(&mut command, self.budget).await
+                        })
                 })
                 .join()
                 .unwrap_or_else(|_| {
@@ -199,6 +239,34 @@ fn stderr_of(output: &std::process::Output) -> String {
     )
 }
 
+pub(crate) fn canonical(provider: ShadowProvider, text: &str) -> String {
+    #[cfg(test)]
+    if super::super::transition::mutant("busy_raw_paste") {
+        return text.into();
+    }
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    match provider {
+        ShadowProvider::Claude => text.replace('\t', "    "),
+        ShadowProvider::Codex => text,
+    }
+}
+
+// Busy only relaxes the turn gate; modal and exact-empty checks still precede paste.
+pub(crate) fn ready(provider: ShadowProvider, capture: &str, busy: bool) -> PaneVerdict {
+    let verdict = judge_pane(provider, capture);
+    if !busy || provider != ShadowProvider::Claude || verdict != PaneVerdict::NotReady {
+        return verdict;
+    }
+    let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(capture);
+    if crate::services::tmux_common::tmux_capture_indicates_claude_tui_exact_empty_composer(&plain)
+        && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft(&plain)
+    {
+        PaneVerdict::Ready
+    } else {
+        verdict
+    }
+}
+
 impl Pane for TmuxPane {
     fn capture(&mut self) -> Result<String, String> {
         let output = self
@@ -292,9 +360,15 @@ impl Pane for TmuxPane {
         let session = self.session.clone();
         let provider = self.provider;
         let callback = || {
-            self.pre_empty = self
-                .capture()
-                .is_ok_and(|c| judge_pane(provider, &c) == PaneVerdict::Ready);
+            let capture = self.capture();
+            #[cfg(test)]
+            if self.offer.is_some()
+                && let Err(error) = &capture
+            {
+                eprintln!("offer fixture composer capture failed: {error}");
+            }
+            self.pre_empty =
+                capture.is_ok_and(|c| ready(provider, &c, self.busy) == PaneVerdict::Ready);
             let result = operation(self);
             self.pre_empty = false;
             result
@@ -315,5 +389,12 @@ impl Pane for TmuxPane {
                 )
             }
         }
+    }
+
+    fn with_busy_composer<R>(&mut self, operation: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        self.busy = true;
+        let result = self.with_composer(operation);
+        self.busy = false;
+        result
     }
 }
