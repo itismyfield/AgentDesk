@@ -653,6 +653,12 @@ pub async fn schedule_pending_queue_drain_after_cancel(
             queue_depth_after: Some(0),
         };
     }
+    let snapshot = discord::mailbox_snapshot(&shared, channel_id).await;
+    shared.queue_park_ledger.register(
+        channel_id,
+        &snapshot,
+        discord::queue_park_ledger::Origin::PostCancelPreserved,
+    );
     discord::schedule_deferred_idle_queue_kickoff(shared.clone(), provider, channel_id, reason);
     PostCancelDrainOutcome {
         scheduled: true,
@@ -2245,8 +2251,8 @@ async fn maybe_recover_completed_stale_leak(
     let kind = (state.channel_id == channel_id.get())
         .then_some(state.runtime_kind)
         .flatten();
-    let o_holds = |gate: fn(u64, _) -> Result<bool, _>| {
-        let held = gate(channel_id.get(), kind) != Ok(false);
+    let o_holds = |owned: Result<bool, _>| {
+        let held = owned != Ok(false);
         if held {
             tracing::info!(
                 channel_id = channel_id.get(),
@@ -2255,7 +2261,9 @@ async fn maybe_recover_completed_stale_leak(
         }
         held
     };
-    if o_holds(crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel) {
+    if o_holds(
+        crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(channel_id.get(), kind),
+    ) {
         return false;
     }
     let ledger_identity = LeakRecoveryLedgerIdentity::new(provider, &state, start, end, &chunks);
@@ -2397,11 +2405,23 @@ async fn maybe_recover_completed_stale_leak(
         }
     }
     // Claimed only here, before the first edit or post; a confirm-only pass reads the adoption.
-    if confirmed_chunks < chunks.len()
-        && o_holds(crate::services::tui_o::cutover::o_owns_tui_output_for_channel)
-    {
-        return false;
-    }
+    // The claimed send stays counted until this pass returns, past its last chunk.
+    let _legacy_send = if confirmed_chunks < chunks.len() {
+        let claimed = crate::services::tui_o::cutover::o_owns_tui_output_for_channel_reserving(
+            channel_id.get(),
+            kind,
+        );
+        let (owned, send) = match claimed {
+            Ok(claimed) => (Ok(claimed.owned), claimed.send),
+            Err(error) => (Err(error), None),
+        };
+        if o_holds(owned) {
+            return false;
+        }
+        send
+    } else {
+        None
+    };
     let mut wrote_any_chunk = false;
     if confirmed_chunks == 0 {
         // Edit the original placeholder to chunk 0. If Discord commits the edit
@@ -6996,3 +7016,6 @@ mod retired_channel_tests {
 
 #[cfg(test)]
 mod retirement_await_tests;
+
+#[cfg(test)]
+mod legacy_send_tests;

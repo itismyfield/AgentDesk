@@ -157,6 +157,12 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             );
             continue;
         }
+        // An admitted Herdr terminal settles from its persisted kind, never from a transcript read.
+        #[cfg(unix)]
+        if let Some(terminal) = super::herdr_admitted_restart::admitted(provider, &state) {
+            terminal.settle(http, shared, &state).await;
+            continue;
+        }
 
         // #2235: silent-skip rows whose on-disk `runtime_kind` was a
         // present-but-unknown variant string. `load_inflight_states_from_root`

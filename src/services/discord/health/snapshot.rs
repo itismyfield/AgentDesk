@@ -8,7 +8,7 @@ use serde::Serialize;
 mod relay_probe;
 
 use super::liveness_authority::CaptureCoordinateObservation;
-use super::mailbox::MailboxHealthSnapshot;
+use super::mailbox::{MailboxHealthSnapshot, QueueParkHealthObservations as ParkObservations};
 use super::provider_probe::{self, ProviderHealthSnapshot};
 // #5071 T4-B6: `health::reachability` is `#[cfg(unix)]` (see the `mod` decl in
 // `health.rs`), so the composition wiring built on it — this import,
@@ -230,8 +230,13 @@ pub struct DiscordHealthSnapshot {
     /// `routes::health_api::public_health_json`. How to read it — count the
     /// entries, never test emptiness — is in `relay_probe`'s module doc.
     expired_relay_ledgers: Vec<String>,
+    /// Providers whose latest restart-marking pass left rows unmarked; beside `degraded_reasons`,
+    /// never inside it, because marking runs during every deploy.
+    restart_marking_short_passes: Vec<discord::inflight::ShortPass>,
     providers: Vec<ProviderHealthSnapshot>,
     mailboxes: Vec<MailboxHealthSnapshot>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    queue_park_observation_failures: Vec<super::mailbox::QueueParkObservationFailureSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     transcript_turns: Option<super::transcript_turn::TranscriptTurnsHealth>,
 }
@@ -811,6 +816,7 @@ pub(super) async fn build_health_snapshot_with_options(
     let mut watcher_count = 0usize;
     let mut recovery_duration = 0.0f64;
     let mut mailbox_entries = Vec::new();
+    let mut failures = Vec::new();
     let mut provider_active_turns = 0usize;
     // Read the authority switch once per snapshot. Structural polarity is a
     // no-op, so the public build skips channel observation entirely (#5736).
@@ -837,6 +843,7 @@ pub(super) async fn build_health_snapshot_with_options(
         watcher_count += provider_probe.watcher_count;
         recovery_duration = recovery_duration.max(provider_probe.recovery_duration);
         let provider_kind = ProviderKind::from_str(&entry.name);
+        let park = ParkObservations::observe(entry, include_mailbox_details, &mut failures).await;
         let observed_mailboxes = observe_channels
             .then_some(&provider_probe.mailbox_snapshots)
             .into_iter()
@@ -1004,6 +1011,7 @@ pub(super) async fn build_health_snapshot_with_options(
                     channel_id: channel.get(),
                     has_cancel_token: mailbox_has_cancel_token,
                     queue_depth,
+                    queue_park: park.project(channel),
                     recovery_started: snapshot.recovery_started_at.is_some(),
                     active_request_owner: snapshot.active_request_owner.map(|id| id.get()),
                     active_user_message_id: mailbox_active_user_msg_id,
@@ -1092,8 +1100,10 @@ pub(super) async fn build_health_snapshot_with_options(
         bot_token_reload_scopes: bot_token_reload_scopes(),
         degraded_reasons,
         expired_relay_ledgers,
+        restart_marking_short_passes: discord::inflight::short_passes(),
         providers: provider_entries,
         mailboxes: mailbox_entries,
+        queue_park_observation_failures: failures,
         transcript_turns,
     }
 }

@@ -3,7 +3,7 @@ use std::time::Instant;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::tui_o::{
     alarm::AlarmRouter,
-    channel_policy::{self, BootChannels},
+    channel_policy::{self, BodyClaimed, BootChannels, LegacySend},
     writer::WriterAlarm,
 };
 
@@ -31,20 +31,37 @@ enum Use {
     Peek,
 }
 
-/// The raw claim behind [`claim_then_send`]: a pending adoption is released to Legacy. Callers
-/// outside it are pinned with their reason in the writer census.
+/// The raw claim behind [`claim_then_send`]: a pending adoption is released to Legacy, whose send
+/// stays counted until the answer's guard drops. Callers outside it are pinned in the census.
+pub(crate) fn o_owns_tui_output_for_channel_reserving(
+    channel_id: u64,
+    kind: Option<RuntimeHandoffKind>,
+) -> Result<BodyClaimed, IdentityError> {
+    decide(channel_id, Use::Body, || kind)
+}
+
+fn o_owns_tui_output_for_channel_tmux_reserving(
+    channel_id: u64,
+    session: Option<&str>,
+) -> Result<BodyClaimed, IdentityError> {
+    decide(channel_id, Use::Body, || session_kind(session))
+}
+
+/// Test builds: the raw claim's answer alone, its send counted as finished at once.
+#[cfg(test)]
 pub(crate) fn o_owns_tui_output_for_channel(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
-    decide(channel_id, Use::Body, || kind)
+    o_owns_tui_output_for_channel_reserving(channel_id, kind).map(|claimed| claimed.owned)
 }
 
+#[cfg(test)]
 pub(crate) fn o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,
 ) -> Result<bool, IdentityError> {
-    decide(channel_id, Use::Body, || session_kind(session))
+    o_owns_tui_output_for_channel_tmux_reserving(channel_id, session).map(|claimed| claimed.owned)
 }
 
 /// For diagnostics and lifecycle checks that send no body: a pending adoption stays pending.
@@ -52,14 +69,14 @@ pub(crate) fn peek_o_owns_tui_output_for_channel(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
-    decide(channel_id, Use::Peek, || kind)
+    decide(channel_id, Use::Peek, || kind).map(|peeked| peeked.owned)
 }
 
 pub(crate) fn peek_o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,
 ) -> Result<bool, IdentityError> {
-    decide(channel_id, Use::Peek, || session_kind(session))
+    decide(channel_id, Use::Peek, || session_kind(session)).map(|peeked| peeked.owned)
 }
 
 /// Where a Legacy body goes, with how the destination's runtime kind is found.
@@ -100,12 +117,16 @@ impl<'a> BodyClaim<'a> {
         Self { direct, ..self }
     }
 
-    fn claim(self) -> Result<bool, IdentityError> {
-        let owned = match self.kind {
-            KindOf::Known(kind) => o_owns_tui_output_for_channel(self.channel_id, kind),
-            KindOf::Tmux(session) => o_owns_tui_output_for_channel_tmux(self.channel_id, session),
+    fn claim(self) -> Result<BodyClaimed, IdentityError> {
+        let channel_id = self.channel_id;
+        let claimed = match self.kind {
+            KindOf::Known(kind) => o_owns_tui_output_for_channel_reserving(channel_id, kind),
+            KindOf::Tmux(session) => {
+                o_owns_tui_output_for_channel_tmux_reserving(channel_id, session)
+            }
         }?;
-        Ok(o_keeps_body(self.channel_id, owned, self.direct))
+        let owned = o_keeps_body(channel_id, claimed.owned, self.direct);
+        Ok(BodyClaimed { owned, ..claimed })
     }
 }
 
@@ -141,22 +162,35 @@ impl<T> BodySend<Result<T, String>> {
 
 /// The one place a Legacy body ends a pending adoption: claim, then send at once unless O owns
 /// the channel. Callers settle guards and no-ops on a peek first; `None` sends without a claim.
+/// The claimed send stays counted until `send` completes.
 pub(crate) async fn claim_then_send<T, F: std::future::Future<Output = T>>(
     claim: Option<BodyClaim<'_>>,
     send: impl FnOnce() -> F,
 ) -> Result<BodySend<T>, IdentityError> {
+    let (sent, _send) = claim_then_send_held(claim, send).await?;
+    Ok(sent)
+}
+
+/// [`claim_then_send`] for a body sent in more than one step: the claimed send is handed back
+/// so the caller keeps it counted until its last step is done.
+pub(crate) async fn claim_then_send_held<T, F: std::future::Future<Output = T>>(
+    claim: Option<BodyClaim<'_>>,
+    send: impl FnOnce() -> F,
+) -> Result<(BodySend<T>, Option<LegacySend>), IdentityError> {
+    let mut reserved = None;
     if let Some(claim) = claim {
-        let owned = claim.claim()?;
+        let claimed = claim.claim()?;
         #[cfg(test)]
         CLAIMS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((claim.channel_id, owned));
-        if owned {
-            return Ok(BodySend::OwnedByO);
+            .push((claim.channel_id, claimed.owned));
+        if claimed.owned {
+            return Ok((BodySend::OwnedByO, None));
         }
+        reserved = claimed.send;
     }
-    Ok(BodySend::Sent(send().await))
+    Ok((BodySend::Sent(send().await), reserved))
 }
 
 /// Test builds: every body claim this process judged, with whether O took the body.
@@ -185,10 +219,10 @@ fn decide(
     channel_id: u64,
     usage: Use,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
-) -> Result<bool, IdentityError> {
+) -> Result<BodyClaimed, IdentityError> {
     let enabled = super::writer_enabled();
     if !enabled {
-        return Ok(false);
+        return Ok(legacy());
     }
     let evaluate = |snapshot: Option<&BootChannels>| {
         decide_with_snapshot(enabled, snapshot, channel_id, usage, resolve_kind)
@@ -211,24 +245,32 @@ impl IdentityError {
     }
 }
 
+/// Legacy's answer for a channel with no adoption to count its send against.
+fn legacy() -> BodyClaimed {
+    BodyClaimed {
+        owned: false,
+        send: None,
+    }
+}
+
 fn decide_with_snapshot(
     enabled: bool,
     snapshot: Option<&BootChannels>,
     channel_id: u64,
     usage: Use,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
-) -> Result<bool, IdentityError> {
+) -> Result<BodyClaimed, IdentityError> {
     let snapshot = snapshot.ok_or(IdentityError::MissingSnapshot)?;
     // A verified empty list is O off: Legacy before any destination or kind is resolved.
     if snapshot.channels().is_empty() {
-        return Ok(false);
+        return Ok(legacy());
     }
     if channel_id == 0 {
         return Err(IdentityError::UnknownChannel);
     }
     // Membership comes before runtime lookup so unrelated Legacy channels stay independent.
     if !snapshot.channels().contains(&channel_id) {
-        return Ok(false);
+        return Ok(legacy());
     }
     let kind = resolve_kind().ok_or(IdentityError::UnknownKind)?;
     let expected = snapshot.kind(channel_id);
@@ -242,11 +284,14 @@ fn decide_with_snapshot(
         channel_policy::owns_output(enabled, snapshot.channels(), channel_id, Some(kind));
     // Only a committed (or held) adoption is O's; off the home a selected channel has none.
     let Some(candidate) = snapshot.candidate(channel_id).filter(|_| selected) else {
-        return Ok(false);
+        return Ok(legacy());
     };
     Ok(match usage {
-        Use::Body => candidate.claim(channel_id),
-        Use::Peek => candidate.peek().owned(),
+        Use::Body => candidate.claim_body(channel_id),
+        Use::Peek => BodyClaimed {
+            owned: candidate.peek().owned(),
+            send: None,
+        },
     })
 }
 

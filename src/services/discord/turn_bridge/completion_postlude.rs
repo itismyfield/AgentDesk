@@ -211,29 +211,31 @@ pub(super) async fn run_completion_postlude(
         && status_panel_completion_committed
         && !preserve_inflight_for_cleanup_retry
     {
-        post_adk_session_status(
-            adk_session_key.as_deref(),
-            adk_session_name.as_deref(),
-            Some(provider.as_str()),
-            final_session_status,
-            &provider,
-            adk_session_info.as_deref(),
-            persisted_context_tokens(
-                accumulated_input_tokens,
-                accumulated_cache_create_tokens,
-                accumulated_cache_read_tokens,
-                accumulated_output_tokens,
-            ),
-            adk_cwd.as_deref(),
-            dispatch_id.as_deref(),
-            adk_session_name
-                .as_deref()
-                .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name),
-            Some(channel_id),
-            role_binding
-                .as_ref()
-                .map(|binding| binding.role_id.as_str()),
-            shared_owned.api_port,
+        crate::services::discord::adk_session::post_adk_turn_terminal_status(
+            crate::services::discord::adk_session::TurnTerminalStatus {
+                session_key: adk_session_key.as_deref(),
+                name: adk_session_name.as_deref(),
+                model: Some(provider.as_str()),
+                status: final_session_status,
+                provider: &provider,
+                session_info: adk_session_info.as_deref(),
+                tokens: persisted_context_tokens(
+                    accumulated_input_tokens,
+                    accumulated_cache_create_tokens,
+                    accumulated_cache_read_tokens,
+                    accumulated_output_tokens,
+                ),
+                cwd: adk_cwd.as_deref(),
+                dispatch_id: dispatch_id.as_deref(),
+                thread_channel_id: adk_session_name.as_deref().and_then(
+                    crate::services::discord::adk_session::parse_thread_channel_id_from_name,
+                ),
+                channel_id: Some(channel_id),
+                agent_id: role_binding
+                    .as_ref()
+                    .map(|binding| binding.role_id.as_str()),
+                turn_nonce: inflight_state.turn_nonce.as_deref(),
+            },
         )
         .await;
     } else if status_panel_terminal_committed && !status_panel_completion_committed {

@@ -361,6 +361,34 @@ fn a_deferred_adoption_survives_legacy_bodies_and_placements_until_its_host_rele
     );
 }
 
+/// A placement carries no body: it ends a pending adoption or leaves a deferred one without
+/// counting a Legacy send, so it never reads as delivery progress.
+#[test]
+fn a_placement_ends_or_leaves_an_adoption_without_counting_a_legacy_send() {
+    use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
+    use crate::services::tui_o::cutover::test_override;
+    use RuntimeHandoffKind::ClaudeTui;
+    let _candidates = test_override::force_candidates(&[(41, ClaudeTui), (42, ClaudeTui)]);
+    let candidate =
+        |channel| test_override::with_channels(|boot| boot?.candidate(channel).cloned()).unwrap();
+    let (pending, deferred) = (candidate(41), candidate(42));
+    assert!(deferred.defer(42));
+    for _ in 0..3 {
+        for channel in [41, 42] {
+            let placed = intake_route::route_for_placement("claude", channel);
+            assert_eq!(placed, IntakeRoute::Unselected);
+        }
+    }
+    assert_eq!(
+        (pending.peek(), pending.sends()),
+        (Adoption::Released, (0, 0))
+    );
+    assert_eq!(
+        (deferred.peek(), deferred.sends()),
+        (Adoption::Deferred, (0, 0))
+    );
+}
+
 #[test]
 fn a_placement_never_waits_on_another_channels_adoption_in_progress() {
     use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute, test_probe};

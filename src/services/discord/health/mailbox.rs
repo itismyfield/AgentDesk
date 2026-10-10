@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Serialize;
 
 use poise::serenity_prelude::ChannelId;
@@ -7,10 +9,10 @@ use crate::services::discord::relay_health::{
     FrontierProvenanceReport, RelayHealthSnapshot, RelayStallState,
 };
 use crate::services::provider::ProviderKind;
-use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
 use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome;
+use crate::services::turn_orchestrator::{ChannelMailboxSnapshot, MailboxObservationFailure};
 
-use super::HealthRegistry;
+use super::{HealthRegistry, ProviderEntry};
 // #5071 T4-B6: `health::reachability` is `#[cfg(unix)]`, so every item this file
 // takes from it — the `RelayVerdictReport` import and the field typed by it — is
 // gated the same way. Windows keeps the pre-B6 entry, which had no such field.
@@ -25,6 +27,8 @@ pub(super) struct MailboxHealthSnapshot {
     pub(super) channel_id: u64,
     pub(super) has_cancel_token: bool,
     pub(super) queue_depth: usize,
+    #[serde(flatten)]
+    pub(super) queue_park: super::super::queue_park_ledger::ParkProjection,
     pub(super) recovery_started: bool,
     pub(super) active_request_owner: Option<u64>,
     pub(super) active_user_message_id: Option<u64>,
@@ -49,6 +53,90 @@ pub(super) struct MailboxHealthSnapshot {
     pub(super) frontier_provenance: FrontierProvenanceReport,
     pub(super) relay_stall_state: RelayStallState,
     pub(super) relay_health: RelayHealthSnapshot,
+}
+
+pub(super) fn queue_park_projection(
+    shared: &SharedData,
+    provider: Option<&ProviderKind>,
+    channel: ChannelId,
+    snapshot: Result<&ChannelMailboxSnapshot, MailboxObservationFailure>,
+) -> super::super::queue_park_ledger::ParkProjection {
+    provider
+        .map(|provider| {
+            shared
+                .queue_park_ledger
+                .project_observed(shared, provider, channel, snapshot)
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct QueueParkObservationFailureSnapshot {
+    provider: String,
+    channel_id: u64,
+    observation_failure: &'static str,
+    #[serde(flatten)]
+    queue_park: super::super::queue_park_ledger::ParkProjection,
+}
+
+#[derive(Default)]
+pub(super) struct QueueParkHealthObservations<'a> {
+    runtime: Option<(&'a SharedData, ProviderKind)>,
+    snapshots: HashMap<ChannelId, Result<ChannelMailboxSnapshot, MailboxObservationFailure>>,
+}
+
+impl<'a> QueueParkHealthObservations<'a> {
+    pub(super) async fn observe(
+        entry: &'a ProviderEntry,
+        include_details: bool,
+        failures: &mut Vec<QueueParkObservationFailureSnapshot>,
+    ) -> Self {
+        let Some(provider) = ProviderKind::from_str(&entry.name).filter(|_| include_details) else {
+            return Self::default();
+        };
+        let shared = entry.shared.as_ref();
+        let snapshots = shared
+            .mailboxes
+            .try_snapshot_all_observed(shared.queue_park_ledger.tracked_channels())
+            .await;
+        for (channel, observation) in &snapshots {
+            if let Err(failure) = observation {
+                let queue_park = shared.queue_park_ledger.project_observed(
+                    shared,
+                    &provider,
+                    *channel,
+                    Err(*failure),
+                );
+                if queue_park.tracked_source_count > 0 {
+                    failures.push(QueueParkObservationFailureSnapshot {
+                        provider: entry.name.clone(),
+                        channel_id: channel.get(),
+                        observation_failure: failure.as_str(),
+                        queue_park,
+                    });
+                }
+            }
+        }
+        Self {
+            runtime: Some((shared, provider)),
+            snapshots,
+        }
+    }
+
+    pub(super) fn project(
+        &self,
+        channel: ChannelId,
+    ) -> super::super::queue_park_ledger::ParkProjection {
+        let Some((shared, provider)) = &self.runtime else {
+            return Default::default();
+        };
+        let snapshot = self
+            .snapshots
+            .get(&channel)
+            .map(|snapshot| snapshot.as_ref().map_err(|failure| *failure))
+            .unwrap_or(Err(MailboxObservationFailure::Missing));
+        queue_park_projection(shared, Some(provider), channel, snapshot)
+    }
 }
 
 /// How a guarded-finish residue is sitting on this channel's mailbox, as the
