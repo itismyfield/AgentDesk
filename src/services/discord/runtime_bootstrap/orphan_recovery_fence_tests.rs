@@ -73,9 +73,8 @@ async fn notified(pool: &PgPool, dispatch: &str) -> (bool, bool) {
     (marker.is_some(), outbox.as_deref() == Some("pending"))
 }
 
-/// The hygiene pass keeps a protected channel's session linked and a pending dispatch whose
-/// delivery channel is protected keeps its marker and gets no outbox row; the unprotected
-/// sibling's stale link is cleared and its orphan dispatch requeued as before.
+/// A protected channel keeps its session link and its pending dispatch's marker with no outbox
+/// row; the unprotected sibling's link is cleared and its dispatch requeued as before.
 #[tokio::test]
 async fn c2b_orphan_recovery_leaves_a_protected_channel_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
