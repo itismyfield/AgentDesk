@@ -953,9 +953,8 @@ fn a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg() {
     assert_eq!(token.tmux_session_name().as_deref(), Some(fx.logical()));
 }
 
-/// One `kind` turn (fresh, pending or bound) on its own fixture with C2a installed; `stop` lands
-/// at its input boundary, after the hold and before any input. The fixture, result, C2a input
-/// attempts and pane writes of that turn.
+/// One `kind` turn (fresh, pending or bound) with C2a installed, `stop` landing after its hold and
+/// before input; returns its fixture, result, C2a input attempts and pane writes.
 fn coldstop_turn(kind: &str, stop: bool) -> (Fixture, Result<(), String>, i64, usize) {
     let fx = Fixture::new(&format!("coldstop-{kind}-{stop}"), None);
     let launcher = Arc::new(Launcher::default());

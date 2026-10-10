@@ -1475,9 +1475,8 @@ fn a_turn_cancelled_before_its_stop_state_writes_nothing_pg() {
     assert!(token.tmux_session_name().is_none());
 }
 
-/// One `kind` turn (fresh, pending or bound) on its own fixture with C2a installed; `stop` lands
-/// at its input boundary, after the hold and before any input. The fixture, result, C2a input
-/// attempts and pane writes of that turn.
+/// One `kind` turn (fresh, pending or bound) with C2a installed, `stop` landing after its hold and
+/// before input; returns its fixture, result, C2a input attempts and pane writes.
 fn coldstop_turn(kind: &str, stop: bool) -> (Fixture, Result<(), String>, i64, usize) {
     let fx = Fixture::admitted(&format!("coldstop-{kind}-{stop}"));
     let launcher = Arc::new(Launcher::default());
@@ -1512,9 +1511,8 @@ fn coldstop_turn(kind: &str, stop: bool) -> (Fixture, Result<(), String>, i64, u
     (fx, result, attempts, writes)
 }
 
-// A stop taken after the hold and before input ends the first prompt (fresh, pending) and the
-// follow-up (bound) through their Closed arms: no C2a attempt, no pane write, no turn start, and
-// that arm's own release frees the hold.
+// A stop after the hold ends the first prompt (fresh, pending) and follow-up (bound) in their Closed
+// arms: no C2a attempt, write or turn start, and that arm's own release frees the hold.
 #[test]
 fn coldstop_execute_fresh_pending_bound_closed_arm_releases_hold_pg() {
     for kind in ["fresh", "pending", "bound"] {
