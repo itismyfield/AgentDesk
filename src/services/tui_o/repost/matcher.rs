@@ -2,11 +2,12 @@
 //! nonce, then an exact payload match nobody else may claim. Anything unclear is never absence.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
 
 use super::evidence::{EvidenceScope, MATCHER_VERSION};
 use crate::services::tui_o::repost::identity::{marker, payload_sha256};
 use crate::services::tui_o::repost::o_piece_delivery::{PieceKey, Receipt, ReceiptMethod};
-use crate::services::tui_o::repost::send::RepostIds;
+use crate::services::tui_o::repost::send::{RepostEnvelope, RepostIds};
 
 /// A message as Discord returned it. `nonce` is only what came back, never what was sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,12 +97,34 @@ fn carries(footer: &str, marker: &str) -> bool {
         .is_some_and(|rest| rest.ends_with(' '))
 }
 
+/// The note a re-post footer starts with, read from the envelope that writes it.
+fn repost_note() -> Option<&'static str> {
+    static NOTE: LazyLock<Option<String>> = LazyLock::new(|| {
+        let ids = RepostIds::for_piece("m")?;
+        let message = RepostEnvelope::additional(1, String::new(), ids).message();
+        let body = serde_json::to_value(message).ok()?;
+        let footer = body["embeds"][0]["footer"]["text"].as_str()?;
+        footer.strip_suffix(" m").map(str::to_owned)
+    });
+    NOTE.as_deref()
+}
+
+/// Whether a footer is the re-post note or a cut-off start of it; unknown note: any footer.
+fn noted(footer: &str) -> bool {
+    let footer = footer.trim();
+    repost_note().is_none_or(|note| {
+        footer.starts_with(note) || (!footer.is_empty() && note.starts_with(footer))
+    })
+}
+
 /// `Some(true)` when the footer carries a well-formed marker of `channel`, `Some(false)` when it
 /// carries something marker-like that is not, `None` when it claims no marker.
 fn marker_claim(footer: &str, channel: u64) -> Option<bool> {
     let at = match footer.find(" o:") {
         Some(space) => space + 1,
-        None => footer.starts_with("o:").then_some(0)?,
+        None if footer.starts_with("o:") => 0,
+        // The re-post note, or what is left of it, with the marker cut off.
+        None => return noted(footer).then_some(false),
     };
     let rest = footer[at..].strip_prefix(&format!("o:{channel}:"));
     let readable = rest.and_then(|rest| {

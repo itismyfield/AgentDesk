@@ -18,7 +18,7 @@ use crate::services::tui_o::repost::send::{
 use probe::ProbeRead;
 use probe::matcher::ObservedMessage;
 
-// The read-only probe, declared beside its reads so it stays dormant with them.
+// The read-only reader, declared beside its reads so it stays dormant with them.
 #[path = "../../tui_o/repost/probe.rs"]
 pub(crate) mod probe;
 

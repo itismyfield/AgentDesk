@@ -827,6 +827,7 @@ const PROBE_FILES: [&str; 3] = [
     "src/services/tui_o/repost/matcher.rs",
 ];
 const ADAPTER: &str = "src/services/discord/outbound/o_writer_repost_io.rs";
+const ADAPTER_PATH: &str = "#[path = \"../../tui_o/repost/probe.rs\"]";
 /// The adapter may only declare the probe and implement its reads.
 const ADAPTER_LINES: [&str; 4] = [
     "use probe::ProbeRead;",
@@ -847,11 +848,60 @@ fn names_the_probe(path: &str, line: &str) -> bool {
         "repost::io",
         "io::probe",
     ];
-    let words = line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'));
+    let words: Vec<&str> = line
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
+        .collect();
+    let in_repost = path.contains("tui_o/repost/");
+    // A grouped import of the re-post module or its siblings: `io` in it, or not on one line.
+    let grouped = line.contains("repost::{") || (in_repost && line.contains("super::{"));
+    let group_names_io = grouped
+        && (!line.contains('}')
+            || line
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|word| word == "io"));
     entries.iter().any(|entry| line.contains(entry))
-        || words.clone().any(|word| word.starts_with("probe::"))
-        || (path.contains("tui_o/repost/")
-            && words.into_iter().any(|word| word.starts_with("super::io")))
+        || words.iter().any(|word| word.starts_with("probe::"))
+        || (in_repost && words.iter().any(|word| word.starts_with("super::io")))
+        || group_names_io
+        || line.contains("repost as ")
+        || (path == ADAPTER && line.contains("probe"))
+}
+
+/// Public functions of the probe files as they stand; a new one, or any re-export, needs review.
+const PROBE_API: [&str; 19] = [
+    "covered",
+    "new",
+    "attribution",
+    "advance",
+    "of",
+    "additional_sent",
+    "verify",
+    "message_id",
+    "upper",
+    "started_at",
+    "completed_at",
+    "proof",
+    "from_passes",
+    "scope",
+    "passes",
+    "validate_current",
+    "is_clear",
+    "distinct_ids",
+    "match_observations",
+];
+
+/// Whether a probe-file line adds public reach: a re-export, or a public fn not in `PROBE_API`.
+fn widens_the_probe(line: &str) -> bool {
+    let line = line.trim();
+    if !line.starts_with("pub") {
+        return false;
+    }
+    let mut words = line.split(|c: char| !(c.is_alphanumeric() || c == '_'));
+    if line.contains(" use ") {
+        return true;
+    }
+    let named = words.by_ref().skip_while(|word| *word != "fn").nth(1);
+    named.is_some_and(|name| !PROBE_API.contains(&name))
 }
 
 /// `path:line` of every production line under `root/src` that names the probe outside what is
@@ -872,16 +922,20 @@ fn probe_edges(root: &std::path::Path) -> Vec<String> {
                 .to_string_lossy()
                 .replace('\\', "/");
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if !name.ends_with(".rs")
-                || name.ends_with("_tests.rs")
-                || PROBE_FILES.contains(&relative.as_str())
-            {
+            if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
                 continue;
             }
+            let definition = PROBE_FILES.contains(&relative.as_str());
             let text = std::fs::read_to_string(&path).unwrap();
             for (number, line) in text.lines().enumerate() {
-                let allowed = relative == ADAPTER && ADAPTER_LINES.contains(&line.trim());
-                if names_the_probe(&relative, line) && !allowed {
+                let allowed = relative == ADAPTER
+                    && (ADAPTER_LINES.contains(&line.trim()) || line.trim() == ADAPTER_PATH);
+                let edge = if definition {
+                    widens_the_probe(line)
+                } else {
+                    names_the_probe(&relative, line) && !allowed
+                };
+                if edge {
                     found.push(format!("{relative}:{}", number + 1));
                 }
             }
@@ -1297,4 +1351,109 @@ async fn f4r2_an_older_or_unreadable_identifier_is_never_absence() {
         ..old_marked
     };
     assert!(attribute(&known(), &readable_other).is_clear());
+}
+
+#[tokio::test(start_paused = true)]
+async fn f4r3_a_note_whose_marker_was_cut_off_is_never_absence() {
+    let footer = repost_footer(&key("f4"));
+    let marker_cut = footer[..footer.find(" o:").unwrap() + 2].to_owned();
+    let note_cut: String = footer.chars().take(3).collect();
+    for cut in [marker_cut, note_cut] {
+        let damaged = ObservedMessage {
+            rich_embeds: 1,
+            footers: vec![cut.clone()],
+            ..message(450, BOT, "변형된 본문")
+        };
+        let reader = Fake::with([message(900, BOT, "earlier"), damaged]);
+        let mut session = ProbeSession::new(scope(&[0, 1]), vec![900], Instant::now());
+        for progress in drive(&mut session, &reader, &known(), 4).await {
+            assert!(
+                matches!(progress, Progress::Incomplete(_)),
+                "{cut}: {progress:?}"
+            );
+        }
+    }
+    // A footer of the bot's own that is no re-post note proves nothing either way.
+    let card = ObservedMessage {
+        rich_embeds: 1,
+        footers: vec!["상태 카드".into()],
+        ..message(450, BOT, "변형된 본문")
+    };
+    let mut into = Attribution::default();
+    match_observations(&scope(&[0, 1]), &known(), [&card], &mut into);
+    assert!(into.is_clear());
+}
+
+#[test]
+fn f4r3_the_dormancy_scan_reads_aliases_groups_and_new_probe_api() {
+    let write = |root: &std::path::Path, relative: &str, text: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let tree = tempfile::tempdir().unwrap();
+    let root = tree.path();
+    let probe = "pub(crate) fn new() {}\npub(crate) async fn start_reader() {}\npub(crate) use self::matcher as m;\n";
+    write(root, PROBE_FILES[0], probe);
+    write(
+        root,
+        ADAPTER,
+        "pub(crate) mod probe;\npub(crate) use self::probe as engine;\n",
+    );
+    let grouped = "use crate::services::tui_o::repost::{io as rp};\nfn go() { rp::engine::start_reader(); }\n";
+    write(root, "src/services/tui_o/writer/host.rs", grouped);
+    let split = "use crate::services::tui_o::repost::{\n    config,\n};\nuse crate::services::tui_o::repost as r;\n";
+    write(root, "src/services/tui_o/writer/actor.rs", split);
+    assert_eq!(
+        probe_edges(root),
+        [
+            "src/services/discord/outbound/o_writer_repost_io.rs:2",
+            "src/services/tui_o/repost/probe.rs:2",
+            "src/services/tui_o/repost/probe.rs:3",
+            "src/services/tui_o/writer/actor.rs:1",
+            "src/services/tui_o/writer/actor.rs:4",
+            "src/services/tui_o/writer/host.rs:1",
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn f4r3_a_nonce_once_read_stays_without_any_other_evidence() {
+    let nonce = RepostIds::for_piece(&marker(&key("f4")))
+        .unwrap()
+        .nonce()
+        .to_owned();
+    let with_nonce = ObservedMessage {
+        nonce: Some(nonce),
+        ..message(450, BOT, "Discord가 바꾼 본문")
+    };
+    let reader = Fake::with([message(900, BOT, "earlier"), with_nonce]);
+    let mut session = ProbeSession::new(scope(&[0]), vec![900], Instant::now());
+    drive(&mut session, &reader, &known(), 1).await;
+    reader.add(message(450, BOT, "Discord가 바꾼 본문"));
+    assert_eq!(
+        drive(&mut session, &reader, &known(), 1).await,
+        [Progress::Present]
+    );
+    let found = &session.attribution().found[&450];
+    assert_eq!(found.receipt.method, ReceiptMethod::Nonce);
+}
+
+#[tokio::test(start_paused = true)]
+async fn f4r3_a_payload_once_matched_stays_without_any_other_evidence() {
+    let reader = Fake::with([message(900, BOT, "earlier"), message(450, BOT, PAYLOAD)]);
+    let mut session = ProbeSession::new(scope(&[0, 1]), vec![900], Instant::now());
+    drive(&mut session, &reader, &known(), 1).await;
+    // Later the content reads changed and a sent embed shows: a damaged copy, not a stranger.
+    reader.add(ObservedMessage {
+        rich_embeds: 1,
+        ..message(450, BOT, "변형된 본문")
+    });
+    assert_eq!(
+        drive(&mut session, &reader, &known(), 1).await,
+        [Progress::Present]
+    );
+    let seen = session.attribution();
+    assert!(seen.found.is_empty());
+    assert_eq!(seen.damaged.iter().copied().collect::<Vec<_>>(), [450]);
 }
