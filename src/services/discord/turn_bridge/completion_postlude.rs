@@ -292,8 +292,16 @@ pub(super) async fn run_completion_postlude(
         .await;
     let routine_attempt_owns_turn = routine_attempt_owns_turn && !cancelled;
     let completion_r2 = ownership.read("completion_r2").await;
+    // A held or unclassified protected request keeps its session and takes no ordinary outcome.
+    let replay_ordinary = crate::services::discord::replay_policy::ordinary_outcome(
+        shared_owned.pg_pool.as_ref(),
+        &cancel_token,
+        &inflight_state,
+        resume_failure_detected,
+    )
+    .await;
     let channel_effects_suppressed =
-        isolated_from_channel || !completion_r2.permits_channel_effects();
+        isolated_from_channel || !completion_r2.permits_channel_effects() || !replay_ordinary;
     // #5168: path-B reflect gate. Scanned once here and reused by the
     // tool_feedback analysis below, so the transcript is walked a single time.
     let memento_tool_call_observed =

@@ -130,7 +130,13 @@ pub(super) async fn retry_stale_resume(point: StaleRetry<'_>, state: StaleRetryS
         StaleResume::Exact(retry) => {
             if let Some(user_msg_id) = point.user_msg_id {
                 let text = point.user_text.to_string();
-                spawn_retry(point.gateway.clone(), point.channel_id, user_msg_id, text, Some(retry));
+                spawn_retry(
+                    point.gateway.clone(),
+                    point.channel_id,
+                    user_msg_id,
+                    text,
+                    Some(retry),
+                );
             }
             state.full_response.clear();
         }

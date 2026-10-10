@@ -88,7 +88,10 @@ impl StoredRequest {
     fn names(&self, input: &CanonicalInput) -> bool {
         let receipt = &self.receipt;
         receipt.request_key.as_deref() == Some(input.request_key.as_str())
-            && self.provider.trim().eq_ignore_ascii_case(input.provider.trim())
+            && self
+                .provider
+                .trim()
+                .eq_ignore_ascii_case(input.provider.trim())
             && self.channel_id == input.channel
             && receipt.sources == input.sources
             && self.request_owner_id == input.owner_id

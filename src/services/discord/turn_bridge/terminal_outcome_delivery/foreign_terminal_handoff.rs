@@ -68,6 +68,14 @@ pub(super) async fn prepare_receipt_disposition(
                 state.gateway.as_ref(),
                 state.terminal_empty_response_notice.as_deref(),
             );
+            // A protected request's custody settles its dispatch only after an ordinary classification.
+            let replay_ordinary = crate::services::discord::replay_policy::ordinary_outcome(
+                state.shared_owned.pg_pool.as_ref(),
+                &state.cancel_token,
+                &state.inflight_state,
+                state.resume_failure_detected,
+            )
+            .await;
             outcome = match preserve_or_publish(Handoff {
                 provider: &state.provider,
                 local: &state.inflight_state,
@@ -89,8 +97,9 @@ pub(super) async fn prepare_receipt_disposition(
                 children: &state.active_background_child_session_ids,
                 dispatch_id: state.dispatch_id.as_deref(),
                 adk_cwd: state.adk_cwd.as_deref(),
-                should_complete: ctx.should_complete_work_dispatch_after_delivery,
-                should_fail: ctx.should_fail_dispatch_after_delivery,
+                should_complete: ctx.should_complete_work_dispatch_after_delivery
+                    && replay_ordinary,
+                should_fail: ctx.should_fail_dispatch_after_delivery && replay_ordinary,
                 resume_failure: state.resume_failure_detected,
                 recovery_retry: ctx.recovery_retry,
             })

@@ -1,4 +1,5 @@
-//! One decision for a stale protected attempt: keep the legacy path, retry the exact attempt once, or hold.
+//! Decisions for a protected attempt's stale resume or terminal: keep the legacy path, retry the
+//! exact attempt once, classify it as ordinary, or hold it.
 
 pub(crate) mod live;
 #[cfg(test)]
@@ -87,8 +88,8 @@ impl RetryPermit {
 
 /// What a stale-resume branch may do with its turn.
 #[derive(Debug)]
-pub(crate) enum StaleResume {
-    /// No protected request: the legacy reset and history retry run unchanged.
+pub(in crate::services::discord) enum StaleResume {
+    /// No protected request, or one already classified ordinary: the legacy reset and retry run.
     Legacy,
     /// Committed no-effect evidence: only this continuation may start the request again.
     Exact(RetryPermit),
@@ -99,19 +100,43 @@ pub(crate) enum StaleResume {
 /// How long a decision waits for the attempt's reader to finish before judging what it saw.
 const READER_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Channel and source messages whose protected request was held or handed to its exact
+/// continuation; the legacy history retry never reruns them in this process.
+static BARRED: std::sync::LazyLock<dashmap::DashSet<(u64, u64)>> =
+    std::sync::LazyLock::new(dashmap::DashSet::new);
+
 /// Whether the turn carries a protected request; reads memory only, so a legacy turn does no IO.
-pub(crate) fn protected(token: &CancelToken, inflight: &InflightTurnState) -> bool {
+fn protected(token: &CancelToken, inflight: &InflightTurnState) -> bool {
     token.replay_attempt().is_some()
         || inflight.replay_receipt_id.is_some()
         || inflight.replay_rerun_blocked()
 }
 
-/// Takes the token's live attempt for its single decision; any other protected turn has none.
-async fn decide_live(
-    pool: Option<&PgPool>,
-    token: &CancelToken,
-) -> Option<(&PgPool, &LiveAttempt, ExactAttempt, RawObservation)> {
-    let live = token.replay_attempt()?;
+/// Whether ordinary completion, failure, recovery and session effects may run: always for a
+/// legacy turn, and for a protected one only after its ordinary classification committed.
+fn ordinary_allowed(token: &CancelToken, inflight: &InflightTurnState) -> bool {
+    !protected(token, inflight)
+        || token.replay_attempt().and_then(|live| live.verdict()) == Some(Verdict::Ordinary)
+}
+
+fn bar_legacy_retry(inflight: &InflightTurnState) {
+    let messages = std::iter::once(inflight.user_msg_id).chain(inflight.source_message_ids.clone());
+    for message in messages.filter(|&id| id != 0) {
+        BARRED.insert((inflight.channel_id, message));
+    }
+}
+
+/// Whether the legacy history retry must refuse this request.
+pub(crate) fn legacy_retry_barred(channel_id: u64, message_id: u64) -> bool {
+    BARRED.contains(&(channel_id, message_id))
+}
+
+/// Takes the token's live attempt for its one decision; a protected turn without one decides nothing.
+async fn decide_live<'a>(
+    pool: Option<&'a PgPool>,
+    token: &'a CancelToken,
+) -> Option<(&'a PgPool, &'a LiveAttempt, ExactAttempt, RawObservation)> {
+    let live = token.replay_attempt()?.as_ref();
     let Some(pool) = pool else {
         live.settle(Verdict::Held);
         return None;
@@ -120,16 +145,17 @@ async fn decide_live(
     Some((pool, live, attempt, observation))
 }
 
-/// Decides a stale resume: a legacy turn keeps the existing retry, and a protected one retries
-/// only on committed no-effect evidence from its own live attempt.
-pub(crate) async fn stale_resume(
+/// Decides a stale resume: the legacy retry for a legacy or ordinary turn, and for a protected
+/// one an exact retry only on committed no-effect evidence from its own live attempt.
+pub(in crate::services::discord) async fn stale_resume(
     pool: Option<&PgPool>,
     token: &CancelToken,
     inflight: &InflightTurnState,
 ) -> StaleResume {
-    if !protected(token, inflight) {
+    if ordinary_allowed(token, inflight) {
         return StaleResume::Legacy;
     }
+    bar_legacy_retry(inflight);
     let Some((pool, live, attempt, observation)) = decide_live(pool, token).await else {
         return StaleResume::Hold;
     };
@@ -141,17 +167,35 @@ pub(crate) async fn stale_resume(
         }
         decision => {
             live.settle(Verdict::Held);
-            if matches!(decision, ReplayDecision::WithholdReplay { persisted: false }) {
-                tracing::warn!(receipt, "stale protected attempt held without a committed hold");
+            if matches!(
+                decision,
+                ReplayDecision::WithholdReplay { persisted: false }
+            ) {
+                tracing::warn!(
+                    receipt,
+                    "stale protected attempt held without a committed hold"
+                );
             }
             StaleResume::Hold
         }
     }
 }
 
-/// Classifies a protected attempt's ordinary terminal before ordinary completion, failure or
-/// provider recovery may run; an observation without one provider terminal holds instead.
-pub(crate) async fn ordinary_terminal(
+async fn ordinary_terminal(
+    pool: Option<&PgPool>,
+    token: &CancelToken,
+    inflight: &InflightTurnState,
+) -> bool {
+    let ordinary = classify_terminal(pool, token, inflight).await;
+    if !ordinary {
+        bar_legacy_retry(inflight);
+    }
+    ordinary
+}
+
+/// Classifies a protected attempt's terminal from a complete observation with exactly one
+/// provider terminal; anything else holds.
+async fn classify_terminal(
     pool: Option<&PgPool>,
     token: &CancelToken,
     inflight: &InflightTurnState,
@@ -159,7 +203,7 @@ pub(crate) async fn ordinary_terminal(
     if !protected(token, inflight) {
         return true;
     }
-    if let Some(verdict) = token.replay_attempt().and_then(LiveAttempt::verdict) {
+    if let Some(verdict) = token.replay_attempt().and_then(|live| live.verdict()) {
         return verdict == Verdict::Ordinary;
     }
     let Some((pool, live, attempt, observation)) = decide_live(pool, token).await else {
@@ -186,23 +230,32 @@ pub(crate) async fn ordinary_terminal(
     ordinary
 }
 
-/// Whether ordinary completion and session effects may run: always for a legacy turn, and for a
-/// protected one only after its ordinary classification committed.
-pub(crate) fn ordinary_allowed(token: &CancelToken, inflight: &InflightTurnState) -> bool {
-    !protected(token, inflight)
-        || token.replay_attempt().and_then(LiveAttempt::verdict) == Some(Verdict::Ordinary)
+/// Whether ordinary completion, failure, provider recovery and session effects may run. A legacy
+/// turn always may; a protected one only once its terminal is classified ordinary, and a stale
+/// resume is never classified here because only the stale-resume decision may judge it.
+pub(in crate::services::discord) async fn ordinary_outcome(
+    pool: Option<&PgPool>,
+    token: &CancelToken,
+    inflight: &InflightTurnState,
+    stale_resume: bool,
+) -> bool {
+    if stale_resume && !ordinary_allowed(token, inflight) {
+        return false;
+    }
+    ordinary_terminal(pool, token, inflight).await
 }
 
-/// Holds a live or projected protected request at a recovery sentinel, which is never no-effect
-/// evidence; returns whether the request was protected.
-pub(crate) async fn hold_recovery(
+/// Holds a protected request at a recovery sentinel, which is never no-effect evidence; returns
+/// whether the request was held.
+pub(in crate::services::discord) async fn hold_recovery(
     pool: Option<&PgPool>,
     token: &CancelToken,
     inflight: &InflightTurnState,
 ) -> bool {
-    if token.replay_attempt().is_none() && inflight.replay_receipt_id.is_none() {
+    if ordinary_allowed(token, inflight) {
         return false;
     }
+    bar_legacy_retry(inflight);
     if let Some((pool, live, attempt, _)) = decide_live(pool, token).await {
         withhold(pool, &attempt, "recovery sentinel after start").await;
         live.settle(Verdict::Held);

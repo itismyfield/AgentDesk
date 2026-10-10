@@ -4,6 +4,7 @@ use crate::db::replay_disposition::write::ExactAttempt;
 use std::sync::Mutex;
 
 /// Activity after start that makes an automatic rerun unsafe.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Activity {
     Output,
@@ -16,6 +17,7 @@ pub(crate) enum Activity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TerminalKind {
     Done,
+    #[cfg(test)]
     Error,
 }
 
@@ -30,8 +32,29 @@ pub(crate) enum Seen {
     StderrDrained,
     /// A malformed record, read or send error, dropped receiver or stderr error.
     Broken,
+    // Only the provider reader records activity and terminals; it is not connected yet.
+    #[cfg(test)]
     Activity(Activity),
+    #[cfg(test)]
     Terminal(TerminalKind),
+}
+
+impl Seen {
+    fn terminal(&self) -> Option<TerminalKind> {
+        #[cfg(test)]
+        if let Self::Terminal(kind) = self {
+            return Some(*kind);
+        }
+        None
+    }
+
+    fn activity(&self) -> bool {
+        #[cfg(test)]
+        if let Self::Activity(_) = self {
+            return true;
+        }
+        false
+    }
 }
 
 /// Raw record of one exact attempt; an incomplete record never reads as an empty one.
@@ -85,19 +108,11 @@ impl RawObservation {
     }
 
     fn terminals(&self) -> Vec<TerminalKind> {
-        self.seen
-            .iter()
-            .filter_map(|seen| match seen {
-                Seen::Terminal(kind) => Some(*kind),
-                _ => None,
-            })
-            .collect()
+        self.seen.iter().filter_map(Seen::terminal).collect()
     }
 
     fn active(&self) -> bool {
-        self.seen
-            .iter()
-            .any(|seen| matches!(seen, Seen::Activity(_)))
+        self.seen.iter().any(Seen::activity)
     }
 
     /// Normal-classification evidence: a complete observation with exactly one provider terminal.

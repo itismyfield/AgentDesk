@@ -718,8 +718,9 @@ pub struct CancelToken {
     herdr_interrupt:
         Mutex<Option<std::sync::Arc<cancel_token_claude_interrupt::HerdrInterruptState>>>,
     /// The protected request attempt this turn's executor started; absent on every legacy turn.
-    replay_attempt:
-        std::sync::OnceLock<std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>>,
+    replay_attempt: std::sync::OnceLock<
+        std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>,
+    >,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
     pub restart_mode: AtomicU8,
     /// Independent destructive claims prevent a PID-only cleanup from suppressing tmux cleanup.
