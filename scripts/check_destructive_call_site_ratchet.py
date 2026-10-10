@@ -148,9 +148,9 @@ CATEGORIES = (
 WARNING = "These counts are a growth-blocking baseline, not proof of safety."
 HOST_TERMINATE_COMMENT = (
     "Herdr close RPC spellings (pane.close, server.stop, their method names and "
-    "aliases). Owner-only: any count outside "
-    "src/services/termination_audit/host_terminate.rs fails regardless of this "
-    "map, and an owner count needs a reviewed diff here."
+    "aliases). Only src/services/termination_audit/host_terminate.rs uses this "
+    "baseline map; its growth needs a reviewed diff here. Fixed declaration "
+    "sites use checker constants, and every other site fails regardless of this map."
 )
 REPIN = (
     "Intentional change: run scripts/check_destructive_call_site_ratchet.py "
@@ -819,7 +819,11 @@ def _snapshot(
             },
             "host_terminate": {
                 "comment": HOST_TERMINATE_COMMENT,
-                "files": dict(sorted(counts["host_terminate"].items())),
+                "files": {
+                    path: count
+                    for path, count in sorted(counts["host_terminate"].items())
+                    if path == HOST_TERMINATE_OWNER
+                },
             },
         },
     }

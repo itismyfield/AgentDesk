@@ -111,6 +111,24 @@ class RatchetDiscriminationTests(unittest.TestCase):
         self.assertEqual(ratchet.growth_errors(actual, empty_counts()), [])
         self.assertEqual(ratchet.owner_only_errors(actual, empty_counts()), [])
 
+    def test_declared_close_sites_round_trip_without_becoming_baseline_owners(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for path, ceiling in self.DECLARED_CLOSE_SITES.items():
+                write(root, path, 'let method = "pane.close";\n' * ceiling)
+            write(root, ratchet.HOST_TERMINATE_OWNER, 'let method = "pane.close";\n')
+            actual, subcounts = ratchet.scan(root)
+            self.assertEqual(
+                actual["host_terminate"],
+                {**self.DECLARED_CLOSE_SITES, ratchet.HOST_TERMINATE_OWNER: 1},
+            )
+            path = root / "baseline.json"
+            ratchet.write_baseline(path, actual, subcounts, "a" * 40)
+            baseline, _ = ratchet.load_baseline(path)
+        self.assertEqual(ratchet.growth_errors(actual, baseline), [])
+        self.assertEqual(ratchet.owner_only_errors(actual, baseline), [])
+        self.assertEqual(baseline["host_terminate"], {ratchet.HOST_TERMINATE_OWNER: 1})
+
     def test_new_close_site_is_red_at_one_spelling(self) -> None:
         outside = "src/services/session_host/herdr/new_close.rs"
         with tempfile.TemporaryDirectory() as tmp:

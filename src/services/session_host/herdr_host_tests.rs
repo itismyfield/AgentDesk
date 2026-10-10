@@ -2931,6 +2931,8 @@ fn m0_close_variant_alias_fixture() {
         "use crate::services::session_host::herdr::model::HerdrRequest as R; use R::*;",
         "type R = crate::services::session_host::herdr::model::HerdrRequest; fn f() { let _ = R::PaneClose { pane_id: String::new() }; }",
         "fn f() { let close = terminate_herdr_once; use_fn(close); }",
+        "fn f(t: HerdrTarget) { t.pin_terminate().ok(); t.send_close_pinned(); }",
+        "fn f() { let f = HerdrTarget::send_close_pinned; }",
         "fn f(t: Transport) { t.call_with_witness(request, witness); }",
         "use crate::services::termination_audit::host_terminate::terminate_herdr_once as close; fn f() { close(); }",
         "fn f() { raw(\"workspace.close\"); }",
