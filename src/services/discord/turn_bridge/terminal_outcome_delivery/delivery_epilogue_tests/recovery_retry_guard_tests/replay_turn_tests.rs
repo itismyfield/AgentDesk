@@ -439,24 +439,30 @@ async fn stale_after_text_preserves_body_without_replay_pg() {
 }
 
 // A complete observation with no activity is the only stale resume that retries, and only
-// through its exact continuation: no reset, kill, session clear or legacy history retry.
+// through its exact continuation: no reset, kill, session clear or legacy history retry. A
+// later error in the same turn cannot classify it ordinary before that decision.
 #[tokio::test]
 async fn stale_no_effect_attempt_retries_only_through_its_exact_permit_pg() {
     let facts = seen(&[Seen::Terminal(TerminalKind::Error)]);
-    let end = bridge_turn("exact", Request::Protected(&facts), vec![error(STALE)]).await;
-    assert_eq!(
-        end.disposition.as_deref(),
-        Some("startup_failed_no_effect"),
-        "{end:?}"
-    );
-    assert_eq!(
-        end.exact,
-        end.started.clone().into_iter().collect::<Vec<_>>(),
-        "{end:?}"
-    );
-    assert_eq!(end.legacy, 0, "{end:?}");
-    assert_eq!(end.core_sid.as_deref(), Some("sid-core"), "{end:?}");
-    assert!(!end.killed && end.barred, "{end:?}");
+    for (case, messages) in [
+        ("exact", vec![error(STALE)]),
+        ("exact-exit", vec![error(STALE), error("process exited")]),
+    ] {
+        let end = bridge_turn(case, Request::Protected(&facts), messages).await;
+        assert_eq!(
+            end.disposition.as_deref(),
+            Some("startup_failed_no_effect"),
+            "{case}: {end:?}"
+        );
+        assert_eq!(
+            end.exact,
+            end.started.clone().into_iter().collect::<Vec<_>>(),
+            "{case}: {end:?}"
+        );
+        assert_eq!(end.legacy, 0, "{case}: {end:?}");
+        assert_eq!(end.core_sid.as_deref(), Some("sid-core"), "{case}: {end:?}");
+        assert!(!end.killed && end.barred, "{case}: {end:?}");
+    }
 }
 
 // The empty-response branches judge the live observation, not the missing Init or the stale
