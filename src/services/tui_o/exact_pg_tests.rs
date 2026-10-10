@@ -117,7 +117,7 @@ async fn exact_off_pg_statement_trace_and_files_zero() {
         let root = crate::config::runtime_root().expect("actual runtime root");
         let before = recursive_files(&root);
         let mut connection = pool.acquire().await.unwrap();
-        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        let _pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *connection)
             .await
             .unwrap();
