@@ -22,6 +22,26 @@ pub(super) async fn collect_turn_stream_until_terminal(
     monitor: &mut MonitorAutoTurnState,
     render_seed: &mut RenderSeedState,
 ) -> CollectOutcome {
+    // Keep the collector's state on the heap instead of embedding its large future in callers.
+    Box::pin(collect_turn_stream_body(
+        ctx,
+        io,
+        parser,
+        relay,
+        monitor,
+        render_seed,
+    ))
+    .await
+}
+
+async fn collect_turn_stream_body(
+    ctx: &TurnStreamCollectorContext,
+    io: TurnStreamCollectorIo,
+    parser: &mut TurnParseState<'_>,
+    relay: &mut SupervisorRelayState<'_>,
+    monitor: &mut MonitorAutoTurnState,
+    render_seed: &mut RenderSeedState,
+) -> CollectOutcome {
     let mut continuation = parser.continuation.take();
     // A terminal already parsed by the outgoing task goes through the ordinary
     // receipt/lease path. EOF is not a new terminal and no frame is forwarded twice.

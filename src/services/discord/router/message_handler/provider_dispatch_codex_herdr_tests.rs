@@ -359,6 +359,7 @@ impl Fixture {
                 let _registry = rig.registry_on_this_thread();
                 let _admission = open_admission();
                 let (sender, receiver) = std::sync::mpsc::channel();
+                let owner_for_strict = owner.logical_key.clone();
                 let turn = CodexHerdrTurn {
                     pool,
                     owner,
@@ -375,7 +376,29 @@ impl Fixture {
                     compact_token_limit: None,
                     cancel: Some(token),
                 };
-                let result = herdr_turn::execute(turn, ports, sender);
+                let strict_pin = if owner_for_strict.contains("strict-") {
+                    use crate::services::tui_o::exact_episode::{EpisodeEvidence, EpisodeMetadata};
+                    let EpisodeEvidence::Pin(mut pin) = crate::services::tui_o::exact_episode::tests::fixture().remove(0).evidence else { panic!("pin fixture"); };
+                    pin.episode = uuid::Uuid::new_v4();
+                    pin.owner = owner_for_strict.clone();
+                    pin.source = None;
+                    rt.block_on(crate::services::tui_o::exact_pg::record_episode_evidence(true, pool, &EpisodeMetadata::new(pin.episode, uuid::Uuid::new_v4(), EpisodeEvidence::Pin(pin.clone())))).unwrap();
+                    Some(pin)
+                } else { None };
+                let _strict = strict_pin.clone().map(|pin| crate::services::tui_o::exact_submission::install(pool.clone(), pin));
+                let result = crate::services::tui_o::exact_submission::dispatch(|| herdr_turn::execute(turn, ports, sender));
+                if let Some(pin) = strict_pin {
+                    rt.block_on(async {
+                        let mut connection = pool.acquire().await.unwrap();
+                        let resolution = crate::services::tui_o::exact_pg::resolve_in_tx(&mut connection, pin.episode).await.unwrap();
+                        let attempted: i64 = sqlx::query_scalar("SELECT count(*) FROM public.delivery_journal_events WHERE canonical_payload->>'episode'=$1 AND canonical_payload->'evidence'->>'type'='InputAttemptBegun'").bind(pin.episode.to_string()).fetch_one(&mut *connection).await.unwrap();
+                        if attempted == 0 {
+                            assert_eq!(resolution.authority(), crate::services::tui_o::exact_episode::Authority::Policy);
+                        } else {
+                            assert_eq!(resolution.authority(), crate::services::tui_o::exact_episode::Authority::Pending);
+                        }
+                    });
+                }
                 finished.store(true, Ordering::SeqCst);
                 (result, receiver.try_iter().collect())
             });

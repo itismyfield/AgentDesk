@@ -1,0 +1,9 @@
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"old","root_turn_id":"old"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture prompt"}]}}
+{"type":"world_state","payload":{"full":true,"state":{"multi_agent_mode":false}}}
+{"type":"turn_context","payload":{"turn_id":"old","root_turn_id":"old"}}
+{"type":"inter_agent_communication_metadata","payload":{"trigger_turn":false}}
+{"type":"response_item","payload":{"type":"agent_message","text":"fixture metadata"}}
+{"type":"token_usage_record","payload":{"response_id":"response","root_turn_id":"old","session_id":"native","thread_id":"native","thread_token_usage":{},"turn_id":"old","turn_token_usage":{},"usage":{}}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","id":"recovered-body","content":[{"type":"output_text","text":"stored reply"}]}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"old"}}

@@ -91,6 +91,27 @@ impl HomeStopRequest {
             && answer.get("home_epoch").and_then(Value::as_i64) == Some(self.home_epoch)
             && answer.get("terminal_confirmed").and_then(Value::as_bool) == Some(false)
             && text("outcome").is_some_and(|outcome| OUTCOMES.contains(&outcome))
+            && (mutant("home_answer_payload_unchecked")
+                || match text("outcome") {
+                    Some("herdr") => {
+                        text("delivery").is_some_and(|value| {
+                            ["sent", "indeterminate", "not_sent"].contains(&value)
+                        }) && text("intent").is_some_and(|value| {
+                            ["recorded", "already_recorded", "refused"].contains(&value)
+                        }) && answer
+                            .get("effect_started")
+                            .and_then(Value::as_bool)
+                            .is_some()
+                    }
+                    Some("refused") => {
+                        text("reason").is_some()
+                            && answer.get("effect_started").and_then(Value::as_bool) == Some(false)
+                    }
+                    Some("stopping") => {
+                        answer.get("effect_started").and_then(Value::as_bool) == Some(true)
+                    }
+                    _ => answer.get("effect_started").and_then(Value::as_bool) == Some(false),
+                })
     }
 }
 
@@ -150,6 +171,8 @@ pub(crate) async fn gateway_stop(
     let (Some(pool), Some(local)) = (ctx.pg_pool_ref(), local_id(ctx)) else {
         return GatewayStop::Refused(UNOBSERVED);
     };
+    #[cfg(test)]
+    TEST_COUNTS.with(|counts| counts.borrow_mut().0 += 1);
     let home = match o_channel_homes::read_home(pool, &channel.to_string()).await {
         Ok(Some(home)) => home,
         Ok(None) => return GatewayStop::Legacy,
@@ -197,7 +220,15 @@ pub(crate) async fn gateway_stop(
 }
 
 #[cfg(test)]
+type RowBarrier = (
+    std::sync::Arc<tokio::sync::Notify>,
+    std::sync::Arc<tokio::sync::Notify>,
+);
+
+#[cfg(test)]
 thread_local! {
+    pub(crate) static TEST_COUNTS: std::cell::RefCell<(usize, usize)> = const { std::cell::RefCell::new((0, 0)) };
+    pub(crate) static AFTER_ROW: std::cell::RefCell<Option<RowBarrier>> = const { std::cell::RefCell::new(None) };
     /// Test holders' origins, reached without the trusted target's address checks.
     pub(crate) static TEST_ORIGINS: std::cell::RefCell<std::collections::BTreeMap<String, String>> =
         const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
@@ -224,13 +255,27 @@ async fn send(
     let Ok(builder) = super::trusted_request(ctx, target, reqwest::Method::POST, ENDPOINT) else {
         return GatewayStop::Refused("holder_unreachable");
     };
+    #[cfg(test)]
+    TEST_COUNTS.with(|counts| counts.borrow_mut().1 += 1);
     let Ok(response) = builder.json(request).send().await else {
         return GatewayStop::Unconfirmed("no_response");
     };
     let status = response.status().as_u16();
     let answer = response.json::<Value>().await.ok();
+    #[cfg(test)]
     if status == 409 && mutant("home_409_owner_retry") {
-        return GatewayStop::Legacy;
+        if let Some(pool) = ctx.pg_pool_ref() {
+            if let Ok(Some(owner)) = super::load_cancel_owner(pool, &request.channel_id).await {
+                if let ForwardResolution::Forward(target) = resolve_holder(ctx, pool, &owner).await
+                {
+                    if let Ok(builder) =
+                        super::trusted_request(ctx, &target, reqwest::Method::POST, ENDPOINT)
+                    {
+                        let _ = builder.json(request).send().await;
+                    }
+                }
+            }
+        }
     }
     if status == 404 && mutant("unknown_404_as_absent") {
         return GatewayStop::Confirmed(request.answer(json!({"outcome": "no_active_turn"})));
@@ -292,6 +337,11 @@ where
         Ok(None) => return refused("home_absent"),
         Err(_) => return refused(UNOBSERVED),
     };
+    #[cfg(test)]
+    if let Some((arrived, resume)) = AFTER_ROW.with(|barrier| barrier.borrow_mut().take()) {
+        arrived.notify_one();
+        resume.notified().await;
+    }
     let epoch_checked = !mutant("receiver_epoch_ignored");
     if home.provider != request.provider {
         return refused("home_provider_mismatch");
@@ -325,7 +375,7 @@ where
     let held_at_epoch = matches!(gate.ownership(), HomeOwnership::Owned {
         home_epoch, intake: HomeIntake::Open, ..
     } if home_epoch == request.home_epoch);
-    if epoch_checked && !held_at_epoch {
+    if epoch_checked && !mutant("receiver_post_admission_epoch_ignored") && !held_at_epoch {
         drop(permit);
         return refused("epoch_mismatch");
     }

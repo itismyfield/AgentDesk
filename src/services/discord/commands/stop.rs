@@ -207,12 +207,13 @@ fn holder_reply(answer: &serde_json::Value) -> String {
         ("herdr", "indeterminate") => {
             "holder 노드가 중지 키 전달을 확인하지 못했어요. 재전송하지 않고 종료 기록을 기다려요."
         }
-        ("herdr", _) => {
+        ("herdr", "not_sent") => {
             return format!(
                 "holder 노드가 중지 키를 보내지 않았어요 ({}).",
                 field("reason")
             );
         }
+        ("herdr", _) => "holder 노드의 중지 키 전달 결과를 확인하지 못했어요. 다시 보내지 않아요.",
         ("stopping", _) => super::STOPPING_RESPONSE,
         ("already_stopping", _) => super::ALREADY_STOPPING_RESPONSE,
         ("host_refused", _) => super::HOST_REFUSED_STOP_RESPONSE,
