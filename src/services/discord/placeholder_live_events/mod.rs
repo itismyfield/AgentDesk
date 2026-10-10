@@ -30,6 +30,9 @@ mod workflow_panel;
 #[cfg(test)]
 mod tests;
 
+pub(in crate::services::discord) use background_task_events::{
+    notification_is_error, notification_is_terminal,
+};
 use common::CHANNEL_EVENT_CAPACITY;
 pub(in crate::services::discord) use completion_footer::TerminalSlotId;
 use completion_footer::{CompletionFooterRender, render_completion_footer};

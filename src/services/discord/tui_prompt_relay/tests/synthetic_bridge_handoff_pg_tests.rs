@@ -213,7 +213,7 @@ fn synthetic_bridge_handoff_fixture(
                         prompt: "handoff prompt".into(), observed_at: chrono::Utc::now(),
                         source_event_id: None, external_input_lease_generation: lease.generation,
                         ssh_direct_observation_generation: crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
-                        hook_prompt_id: None,
+                        hook_prompt_id: None, row_prompt_id: None,
                         native_turn_id: None,
                         steer_echo: false,
                     };

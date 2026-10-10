@@ -70,8 +70,10 @@ pub(super) async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) 
     if !should_run {
         return;
     }
+    recover_orphan_pending_dispatches_once(shared.pg_pool.as_ref()).await;
+}
 
-    let pg_pool = shared.pg_pool.as_ref();
+async fn recover_orphan_pending_dispatches_once(pg_pool: Option<&sqlx::PgPool>) {
     clear_stale_session_dispatch_links(pg_pool).await;
 
     // Boot timestamp from dcserver.pid mtime — represents actual process start,
@@ -165,6 +167,13 @@ pub(super) async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) 
 
     let mut delivered = 0usize;
     for (dispatch_id, agent_id, card_id, _title, dtype) in &orphans {
+        if dispatch_target_held(pg_pool, dispatch_id, agent_id, card_id, dtype).await {
+            tracing::info!(
+                dispatch_id = %dispatch_id,
+                "orphan dispatch recovery left a protected channel's dispatch in place"
+            );
+            continue;
+        }
         // Clear any existing dispatch_notified marker — the 5-condition query already
         // validated this dispatch is truly orphan, so the marker (if any) is stale.
         {
@@ -228,12 +237,92 @@ pub(super) async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) 
     );
 }
 
+/// Whether the dispatch's delivery channel, resolved as its notify would, is protected,
+/// or cannot be placed while any channel is protected.
+async fn dispatch_target_held(
+    pg_pool: Option<&sqlx::PgPool>,
+    dispatch_id: &str,
+    agent_id: &str,
+    card_id: &str,
+    dispatch_type: &str,
+) -> bool {
+    use crate::services::discord::input_runtime::fence::{self, BootTarget};
+    let Some(pool) = pg_pool.filter(|_| fence::any_protected()) else {
+        return false;
+    };
+    let context = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT context FROM task_dispatches WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(pool)
+    .await;
+    let channel = match context {
+        Ok(Some(context)) => crate::db::dispatches::resolve_dispatch_delivery_channel_pg(
+            pool,
+            agent_id,
+            card_id,
+            Some(dispatch_type),
+            context.as_deref(),
+        )
+        .await
+        .ok()
+        .flatten()
+        .and_then(|channel| channel.parse::<u64>().ok()),
+        _ => None,
+    };
+    fence::boot_skip(channel.map_or(BootTarget::Unknown, BootTarget::AnyProvider))
+}
+
+/// Session ids the hygiene pass leaves linked: a protected channel's, and any that no
+/// channel column places while a channel is protected. `None` holds the whole pass.
+async fn hygiene_kept_sessions(pool: &sqlx::PgPool) -> Option<Vec<i64>> {
+    use crate::services::discord::input_runtime::fence::{self, BootTarget};
+    if !fence::any_protected() {
+        return Some(Vec::new());
+    }
+    let rows = sqlx::query(
+        "SELECT id, channel_id, thread_channel_id FROM sessions
+          WHERE active_dispatch_id IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await;
+    let Ok(rows) = rows else {
+        return (!fence::boot_skip(BootTarget::Unknown)).then(Vec::new);
+    };
+    let held = |row: &sqlx::postgres::PgRow| {
+        let channel = |column| {
+            let value = row.try_get::<Option<String>, _>(column).ok().flatten();
+            value.and_then(|value| value.parse::<u64>().ok())
+        };
+        let channels = [channel("thread_channel_id"), channel("channel_id")];
+        if channels.iter().all(Option::is_none) {
+            return fence::boot_skip(BootTarget::Unknown);
+        }
+        let mut channels = channels.into_iter().flatten();
+        channels.any(|channel| fence::boot_skip(BootTarget::AnyProvider(channel)))
+    };
+    let kept = rows.iter().filter(|row| held(row));
+    Some(
+        kept.filter_map(|row| row.try_get::<i64, _>("id").ok())
+            .collect(),
+    )
+}
+
 async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
     let Some(pool) = pg_pool else {
         return;
     };
+    let Some(kept) = hygiene_kept_sessions(pool).await else {
+        return;
+    };
+    // With nothing kept both statements run exactly as before.
+    let keep = if kept.is_empty() {
+        ""
+    } else {
+        "AND NOT (s.id = ANY($1))"
+    };
 
-    match sqlx::query(
+    let sql = format!(
         "UPDATE sessions s
             SET status = CASE
                     WHEN s.status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working') THEN 'idle'
@@ -245,11 +334,16 @@ async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
            FROM task_dispatches d
           WHERE s.active_dispatch_id = d.id
             AND d.status IN ('completed', 'failed', 'cancelled')
+            {keep}
       RETURNING s.session_key, d.id AS dispatch_id, d.status AS dispatch_status",
-    )
-    .fetch_all(pool)
-    .await
-    {
+    );
+    let query = sqlx::query(&sql);
+    let query = if kept.is_empty() {
+        query
+    } else {
+        query.bind(kept.as_slice())
+    };
+    match query.fetch_all(pool).await {
         Ok(rows) => {
             if !rows.is_empty() {
                 let sample = rows
@@ -278,7 +372,7 @@ async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
         }
     }
 
-    match sqlx::query(
+    let sql = format!(
         "WITH stale AS (
              SELECT s.session_key
                FROM sessions s
@@ -286,6 +380,7 @@ async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
                 AND NOT EXISTS (
                     SELECT 1 FROM task_dispatches d WHERE d.id = s.active_dispatch_id
                 )
+                {keep}
          )
          UPDATE sessions s
             SET status = CASE
@@ -298,10 +393,14 @@ async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
            FROM stale
           WHERE s.session_key = stale.session_key
       RETURNING s.session_key",
-    )
-    .fetch_all(pool)
-    .await
-    {
+    );
+    let query = sqlx::query(&sql);
+    let query = if kept.is_empty() {
+        query
+    } else {
+        query.bind(kept.as_slice())
+    };
+    match query.fetch_all(pool).await {
         Ok(rows) => {
             if !rows.is_empty() {
                 let sample = rows
@@ -325,6 +424,10 @@ async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "orphan_recovery_fence_tests.rs"]
+mod fence_tests;
 
 pub(super) fn should_skip_agent_runtime_launch(token: &str) -> Option<String> {
     let bot = agentdesk_config::find_discord_bot_by_token(token)?;

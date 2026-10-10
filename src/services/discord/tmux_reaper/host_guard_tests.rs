@@ -311,3 +311,89 @@ async fn unified_thread_kill_signal_kills_only_what_the_host_guard_admits_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// Boot orphan cleanup leaves an unowned session that its `.channel` binding places on a
+/// protected channel, and one no binding places while unknown targets are held.
+#[tokio::test]
+async fn c2b_orphan_cleanup_leaves_protected_and_unplaced_sessions_pg() {
+    use crate::services::discord::input_runtime::fence::{Gate, HoldUnknownForTest, test_health};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = postgres().await;
+    let (shared, _registry) = runtime(&pool).await;
+    let base = 6_325_574_000u64;
+    let gate = Gate::protect(ProviderKind::Claude, base + 1).unwrap();
+    let _health = test_health::Clear::new(&gate);
+    // (channel, `.channel` binding, unknown targets held, killed)
+    let cases = [
+        (base + 1, true, false, false),
+        (base + 2, true, false, true),
+        (base + 3, false, true, false),
+        (base + 4, false, false, true),
+    ];
+    let mut guards = Vec::new();
+    for (channel, bound, hold, expected) in cases {
+        let name = ProviderKind::Claude.build_tmux_session_name(&format!("c2b2a-orphan-{channel}"));
+        seed(
+            &pool,
+            &channel_key(&shared, &name),
+            &name,
+            channel,
+            Stored::Legacy,
+        )
+        .await;
+        own(&name);
+        if bound {
+            crate::services::tmux_common::write_tmux_channel_binding(&name, channel).unwrap();
+        }
+        guards.push(PaneLivenessOverrideGuard::set(
+            &name,
+            PaneLiveness::DeadOrAbsent,
+        ));
+        let _hold = hold.then(HoldUnknownForTest::new);
+        super::clean_orphan_sessions(&shared, std::slice::from_ref(&name)).await;
+        assert_eq!(killed(&name), expected, "{name}");
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+/// The periodic dead-session reaper leaves a protected channel's mapped dead session, as
+/// boot restore leaves its CoreState entry for the move or handback.
+#[tokio::test]
+async fn c2b_dead_session_reaper_leaves_a_protected_channel_pg() {
+    use crate::services::discord::input_runtime::fence::{Gate, test_health};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = postgres().await;
+    let (shared, _registry) = runtime(&pool).await;
+    let (protected, legacy) = (6_325_574_101u64, 6_325_574_102u64);
+    let gate = Gate::protect(ProviderKind::Claude, protected).unwrap();
+    let _health = test_health::Clear::new(&gate);
+    let mut listed = Vec::new();
+    let mut guards = Vec::new();
+    for channel in [protected, legacy] {
+        let channel_name = format!("c2b2a-dead-{channel}");
+        let name = ProviderKind::Claude.build_tmux_session_name(&channel_name);
+        map_channel(&shared, ChannelId::new(channel), &channel_name).await;
+        seed(
+            &pool,
+            &channel_key(&shared, &name),
+            &name,
+            channel,
+            Stored::Legacy,
+        )
+        .await;
+        own(&name);
+        guards.push(PaneLivenessOverrideGuard::set(
+            &name,
+            PaneLiveness::DeadOrAbsent,
+        ));
+        listed.push((name, channel == legacy));
+    }
+    let names: Vec<String> = listed.iter().map(|(name, _)| name.clone()).collect();
+    super::reap_listed_dead_sessions(&shared, &names).await;
+    for (name, expected) in listed {
+        assert_eq!(killed(&name), expected, "{name}");
+    }
+    pool.close().await;
+    db.drop().await;
+}

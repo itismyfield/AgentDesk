@@ -19,14 +19,30 @@ pub(in crate::services::discord::turn_bridge) fn herdr_stop_unconfirmed(
     use crate::services::provider::cancel_token_claude_interrupt::{
         HerdrSubmission, herdr_stop_settlement_available,
     };
-    herdr_stop_settlement_available()
+    let held = herdr_stop_settlement_available()
         && !cancelled
         && !terminal_admitted
         && token.herdr_interrupt_state().is_some_and(|intent| {
             let submission = *intent.submission.lock().unwrap_or_else(|e| e.into_inner());
             intent.user_stop.load(std::sync::atomic::Ordering::Acquire)
                 || submission != HerdrSubmission::Unsubmitted
-        })
+        });
+    if held && let Some(state) = token.herdr_interrupt_state() {
+        tracing::info!(
+            event = "herdr_turn_held",
+            provider = state.owner.provider,
+            channel_id = state.owner.channel_id,
+            logical = state.owner.logical_key,
+            turn_nonce = token.turn_nonce(),
+            runtime_generation = token.claude_interrupt_generation(),
+            hold_kind = "provider_terminal",
+            hold_reason = "provider_terminal_unconfirmed",
+            settlement = "host_owned",
+            terminal_confirmed = false,
+            "Herdr turn remains held"
+        );
+    }
+    held
 }
 
 pub(super) fn stream_loop_should_continue(

@@ -32,7 +32,7 @@ route_srp_violations = [
 direct_discord_sends = [
   "src/services/discord/commands/model_picker.rs#direct_discord_sends:9cf1f42bcb8abe4f",
   "src/services/discord/commands/text_commands.rs#direct_discord_sends:1a410e0d1c907bdf",
-  "src/services/discord/commands/text_commands.rs#direct_discord_sends:08f62d5d5d316f20",
+  "src/services/discord/commands/text_commands.rs#direct_discord_sends:d2c2f1692300d25b",
   "src/services/discord/discord_io.rs#direct_discord_sends:2f398342de1e7cd7",
   "src/services/discord/gateway.rs#direct_discord_sends:b61365ed28b915b2",
   "src/services/discord/gateway.rs#direct_discord_sends:60a609bdefcf51c2",

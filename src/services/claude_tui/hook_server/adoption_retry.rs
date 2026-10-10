@@ -70,6 +70,8 @@ pub(crate) enum NotDurableReason {
 pub(crate) enum QueueStep {
     Pop,
     Hold,
+    /// A recorded Pending at the front gives way only to a later entry that settles durably.
+    Yield,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -297,6 +299,10 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
         && resolve_tmux_session_name(provider, command_session_id.trim()).as_deref() != Some(tmux)
     {
         pop_front(tmux);
+        // A restored Pending dropped here is seeded again by the next pass once its alias returns.
+        if request.pending && request.pending_record.is_some() {
+            crate::services::tui_prompt_dedupe::pending::forget_seeded_restore(tmux);
+        }
         let http = AdoptionHttp::Skipped(AdoptSkip::UnmappedCommandSession);
         return SettleOutcome {
             http,
@@ -332,22 +338,25 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
                         | AdoptSkip::HostNotAdmitted
                 )
             );
+            let yields = pending && queued && queued_count(tmux) > 1;
             let held = if pending {
-                !(queued && queued_count(tmux) > 1)
+                !yields
             } else {
                 no_channel
                     || transient
                     || (adopted.is_some() && claude_session_rotation_for_tmux(tmux).is_some())
             };
-            let queue = if held {
-                QueueStep::Hold
-            } else {
-                QueueStep::Pop
+            let queue = match (held, yields) {
+                (true, _) => QueueStep::Hold,
+                (false, true) => QueueStep::Yield,
+                (false, false) => QueueStep::Pop,
             };
             if queued && held && !no_channel && !transient {
                 mark_front_recorded(tmux, pending, pending_record);
             } else if queued && !held {
-                pop_front(tmux);
+                if !yields {
+                    pop_front(tmux);
+                }
             } else if pending {
                 let (recorded, pending) = (true, true);
                 let request = request.clone();
@@ -453,10 +462,47 @@ pub(crate) fn retry_deferred_claude_adoptions() {
             // The rotation ledger keeps only the first old transcript, so B→C waits until A→B settles.
             while claude_session_rotation_for_tmux(&tmux).is_none()
                 && let Some(request) = front(&tmux)
-                && settle(&tmux, &request, true).queue == QueueStep::Pop
-            {}
+            {
+                match settle(&tmux, &request, true).queue {
+                    QueueStep::Pop => {}
+                    QueueStep::Hold => break,
+                    QueueStep::Yield if !replaced_by_next(&tmux) => break,
+                    QueueStep::Yield => {}
+                }
+            }
         });
     }
+}
+
+/// Settles the entry behind a yielding front Pending; the Pending leaves the queue only when that
+/// entry settled durably, so a refused successor cannot take its recovery. `true` to poll on.
+fn replaced_by_next(tmux: &str) -> bool {
+    let Some(yielded) = take_front(tmux) else {
+        return false;
+    };
+    let Some(next) = front(tmux) else {
+        restore_front(tmux, yielded);
+        return false;
+    };
+    let settled = settle(tmux, &next, true);
+    if matches!(settled.http, AdoptionHttp::Durable(_)) {
+        return true;
+    }
+    restore_front(tmux, yielded);
+    // A refused successor already left the queue, so the Pending yields to the one after it.
+    settled.queue == QueueStep::Pop
+}
+
+fn take_front(tmux_session_name: &str) -> Option<DeferredAdoption> {
+    deferred().get_mut(tmux_session_name)?.pop_front()
+}
+
+fn restore_front(tmux_session_name: &str, entry: DeferredAdoption) {
+    let mut queues = deferred();
+    queues
+        .entry(tmux_session_name.to_owned())
+        .or_default()
+        .push_front(entry);
 }
 
 #[cfg(not(test))]

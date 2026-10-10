@@ -290,7 +290,7 @@ fn herdr_command_eligible(
         || owner.channel_id != channel.to_string()
         || owner.discord_token_hash != token_hash
         || token.tmux_session_name().as_deref() != Some(&owner.logical_key)
-        || !herdr_marked(&owner.logical_key)
+        || (mutant("cold_start_marker_required") && !herdr_marked(&owner.logical_key))
     {
         return Err(HerdrNotSent::Identity);
     }
@@ -337,38 +337,99 @@ pub(in crate::services::discord) enum HerdrStop {
     Refused(HerdrNotSent),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) struct StopObservation {
+    pub(in crate::services::discord) intent: &'static str,
+    pub(in crate::services::discord) delivery: &'static str,
+    pub(in crate::services::discord) reason: Option<&'static str>,
+    pub(in crate::services::discord) settlement: Option<&'static str>,
+}
+
+impl HerdrNotSent {
+    fn reason(self) -> &'static str {
+        use HerdrNotSent::*;
+        match self {
+            Idle => "idle",
+            Unobserved => "unobserved",
+            Pending => "pending",
+            Generation => "generation",
+            Identity => "identity",
+            Holder => "holder",
+            Gate => "gate",
+            SwitchOff => "switch_off",
+            Duplicate => "duplicate",
+            NotAdmitted => "not_admitted",
+            SettlementUnavailable => "settlement_unavailable",
+        }
+    }
+}
+
 impl HerdrStop {
-    /// The reply names what was delivered; none says the turn has stopped.
+    pub(in crate::services::discord) fn observation(self) -> StopObservation {
+        let (intent, delivery, reason, settlement) = match self {
+            Self::Requested(HerdrDelivery::Sent) => ("recorded", "sent", None, Some("host_owned")),
+            Self::Requested(HerdrDelivery::Indeterminate) => {
+                ("recorded", "indeterminate", None, Some("host_owned"))
+            }
+            Self::Requested(HerdrDelivery::NotSent(reason)) => (
+                "recorded",
+                "not_sent",
+                Some(reason.reason()),
+                Some("host_owned"),
+            ),
+            Self::AlreadyRequested => ("already_recorded", "not_sent", Some("duplicate"), None),
+            Self::Refused(reason) => ("refused", "not_sent", Some(reason.reason()), None),
+        };
+        StopObservation {
+            intent,
+            delivery,
+            reason,
+            settlement,
+        }
+    }
+
+    /// Key delivery is not terminal confirmation; refused requests claim no settlement owner.
     pub(in crate::services::discord) fn reply(self) -> &'static str {
         use HerdrNotSent::*;
-        let not_sent = match self {
+        let reason = match self {
             Self::Requested(HerdrDelivery::Sent) => {
-                return "중지 키를 보냈어요. 작업 종료 기록이 오면 정리해요.";
+                return "중지 키를 보냈어요. 작업 종료 기록을 기다려요. 턴은 provider가 유지해요.";
             }
             Self::Requested(HerdrDelivery::Indeterminate) => {
-                return "중지 키 전달을 확인하지 못했어요. 다시 보내지 않고 작업 종료 기록을 기다려요.";
+                return "중지 키 전달을 확인하지 못했어요. 재전송하지 않고 종료 기록을 기다려요. 턴은 provider가 유지해요.";
             }
             Self::AlreadyRequested => {
-                return "이미 중지 요청을 받았어요. 중지 키를 더 보내지 않아요.";
+                return "이미 중지 요청을 받았어요. 키를 추가로 보내지 않아요.";
             }
             Self::Requested(HerdrDelivery::NotSent(reason)) | Self::Refused(reason) => reason,
         };
-        match not_sent {
-            Pending => "작업 연결을 기다리는 중이라 아직 중지 키를 보내지 않았어요.",
-            Idle => {
-                "실행 중임을 확인하지 못해 중지 키를 보내지 않았어요. 작업 종료 여부는 계속 확인해요."
+        let reason = if mutant("notsent_reason_collapsed")
+            && matches!(reason, Generation | Identity | Holder | Gate)
+        {
+            Identity
+        } else {
+            reason
+        };
+        match reason {
+            Pending => {
+                if matches!(self, Self::Requested(_)) {
+                    "작업 연결·시작 확인을 기다리는 중이라 아직 중지 키를 보내지 않았어요. 요청은 유지하고 종료 기록을 기다려요."
+                } else {
+                    "작업 연결·시작 확인을 기다리는 중이라 아직 중지 키를 보내지 않았어요."
+                }
             }
-            Unobserved => {
-                "작업 상태를 읽지 못해 중지 키를 보내지 않았어요. 작업 종료 여부는 계속 확인해요."
+            Idle => "실행 중임을 확인하지 못해 키를 보내지 않았어요. 종료 여부는 계속 확인해요.",
+            Unobserved => "작업 상태를 읽지 못해 중지 키를 보내지 않았어요.",
+            Generation => "요청한 턴의 세대가 바뀌어 중지 키를 보내지 않았어요.",
+            Identity => "요청한 턴·출력 파일의 식별이 맞지 않아 중지 키를 보내지 않았어요.",
+            Holder => "이 노드가 현재 채널 holder가 아니어서 중지 키를 보내지 않았어요.",
+            Gate => "입력 gate가 요청을 거절해 중지 키를 보내지 않았어요.",
+            SwitchOff => "Herdr 중지 키 설정이 꺼져 있어 키를 보내지 않았어요.",
+            NotAdmitted => "이 종류의 요청으로는 Herdr 중지 키를 보낼 수 없어요.",
+            SettlementUnavailable => {
+                "Herdr 종료 기록 정산이 아직 활성화되지 않아 키를 보내지 않았어요."
             }
-            Generation | Identity | Holder | Gate => {
-                "작업 대상이 바뀌어 중지 키를 보내지 않았어요."
-            }
-            SwitchOff | SettlementUnavailable => {
-                "Herdr 중지 키 전달이 꺼져 있어요. 작업은 그대로 계속돼요."
-            }
-            Duplicate => "이미 중지 요청을 받았어요. 중지 키를 더 보내지 않아요.",
-            NotAdmitted => "이 명령으로는 Herdr 작업을 중지할 수 없어요.",
+            Duplicate => "이미 중지 요청을 받았어요. 키를 추가로 보내지 않아요.",
         }
     }
 }
@@ -385,6 +446,20 @@ pub(super) async fn herdr_command_stop(
     let eligible =
         herdr_command_eligible(token, provider, channel.get(), &shared.token_hash, reason);
     if let Err(refusal) = eligible {
+        let observed = HerdrStop::Refused(refusal).observation();
+        tracing::info!(
+            event = "herdr_stop_result",
+            channel_id = channel.get(),
+            provider = provider.as_str(),
+            turn_nonce = token.turn_nonce(),
+            intent = observed.intent,
+            delivery = observed.delivery,
+            reason = observed.reason,
+            settlement = observed.settlement,
+            terminal_confirmed = false,
+            surface = reason,
+            "herdr user stop refused"
+        );
         return HerdrStop::Refused(refusal);
     }
     let mailbox = shared.mailbox(channel);
@@ -406,7 +481,23 @@ pub(super) async fn herdr_command_stop(
             None => HerdrDelivery::NotSent(HerdrNotSent::Pending),
         }),
     };
-    tracing::info!(channel_id = channel.get(), reason, ?stop, "herdr user stop");
+    let observed = stop.observation();
+    let owner = token.herdr_interrupt_state();
+    tracing::info!(
+        event = "herdr_stop_result",
+        channel_id = channel.get(),
+        provider = provider.as_str(),
+        logical = owner.as_ref().map(|state| state.owner.logical_key.as_str()),
+        turn_nonce = token.turn_nonce(),
+        runtime_generation = token.claude_interrupt_generation(),
+        intent = observed.intent,
+        delivery = observed.delivery,
+        reason = observed.reason,
+        settlement = observed.settlement,
+        terminal_confirmed = false,
+        surface = reason,
+        "herdr user stop"
+    );
     stop
 }
 
@@ -546,6 +637,9 @@ pub(super) async fn interrupt_herdr(
         || token.tmux_session_name().as_deref() != Some(&owner.logical_key)
     {
         return HerdrDelivery::NotSent(Identity);
+    }
+    if !herdr_marked(&owner.logical_key) {
+        return HerdrDelivery::NotSent(Pending);
     }
     let HostedLookup::Found(found) = crate::services::claude::herdr_turn::load(pool, owner).await
     else {

@@ -18,6 +18,9 @@ use axum::{
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct Call {
     pub(in crate::services::discord) content: Option<String>,
+    /// The request's method and path, so a test can tell which channel a call wrote.
+    #[cfg(unix)]
+    pub(in crate::services::discord) route: String,
 }
 
 pub(in crate::services::discord) struct DiscordRecorder {
@@ -86,6 +89,8 @@ async fn serve(
             }
             recorded.lock().unwrap().push(Call {
                 content: content.clone(),
+                #[cfg(unix)]
+                route: format!("{method} {}", uri.path()),
             });
             if method == Method::DELETE {
                 return (StatusCode::NO_CONTENT, String::new()).into_response();

@@ -118,7 +118,8 @@ pub(crate) fn execute(
     let runtime = Handle::try_current().map_err(|error| format!("herdr turn: {error}"))?;
     // The turn takes its stop state before launch, so a stop is recorded whatever the switch says;
     // a stop that cancelled it first, or another turn's state, leaves it to write nothing.
-    if herdr_stop_settlement_available()
+    if (herdr_stop_settlement_available()
+        || crate::services::tui_o::exact_submission::logical_key().is_some())
         && let Some(token) = turn.cancel.as_deref()
         && token
             .try_prepare_herdr_interrupt(ProviderKind::Codex, &turn.owner)
@@ -417,9 +418,15 @@ fn observed_input(
     start: impl FnOnce() -> Option<HerdrTurnStart>,
     write: impl FnOnce() -> PlanRun,
 ) -> Result<PlanRun, String> {
-    let state = cancel.filter(|_| herdr_stop_settlement_available());
+    crate::services::tui_o::exact_submission::begin_input()?;
+    let state = cancel.filter(|_| {
+        herdr_stop_settlement_available()
+            || crate::services::tui_o::exact_submission::logical_key().is_some()
+    });
     let Some(state) = state.and_then(CancelToken::herdr_interrupt_state) else {
-        return Ok(write());
+        let run = write();
+        crate::services::tui_o::exact_submission::observe_untouched(composer_untouched(&run));
+        return Ok(run);
     };
     let mut submitted = state.submission.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(start) = start()
@@ -428,6 +435,7 @@ fn observed_input(
         return Err("herdr turn: the token already began another turn".into());
     }
     let run = write();
+    crate::services::tui_o::exact_submission::observe_untouched(composer_untouched(&run));
     *submitted = match &run.run {
         InputRun::Applied => HerdrSubmission::Submitted,
         InputRun::Indeterminate { .. } if run.enter_attempted => HerdrSubmission::Unknown,
@@ -438,7 +446,10 @@ fn observed_input(
 
 /// Records where this token's turn began, under settlement only; a second, different start refuses.
 fn record_turn_start(cancel: Option<&CancelToken>, start: HerdrTurnStart) -> Result<(), String> {
-    let state = cancel.filter(|_| herdr_stop_settlement_available());
+    let state = cancel.filter(|_| {
+        herdr_stop_settlement_available()
+            || crate::services::tui_o::exact_submission::logical_key().is_some()
+    });
     match state.and_then(CancelToken::herdr_interrupt_state) {
         Some(state) if !state.record_turn_start(start) => {
             Err("herdr turn: the token already began another turn".into())
