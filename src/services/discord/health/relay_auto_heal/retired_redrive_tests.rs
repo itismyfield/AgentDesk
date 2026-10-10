@@ -133,12 +133,14 @@ impl Drop for Probe {
 
 /// Logs every tmux invocation through a PATH wrapper, so a test counts the snapshot's real
 /// producer probes instead of trusting a checkpoint placed after the snapshot.
+#[cfg(unix)]
 struct TmuxLog {
     log: PathBuf,
     _dir: tempfile::TempDir,
     _path: crate::config::TestEnvVarGuard,
 }
 
+#[cfg(unix)]
 impl TmuxLog {
     fn install() -> Self {
         use std::os::unix::fs::PermissionsExt;
