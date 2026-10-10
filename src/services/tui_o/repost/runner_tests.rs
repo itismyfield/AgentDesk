@@ -428,7 +428,9 @@ async fn f5_t01_lost_commit_reply_never_recreates_a_permit_pg() {
     assert!(matches!(first.await.unwrap(), Admission::Granted { .. }));
     let again = DispatchIntent::Auto(kept);
     let second = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, again);
-    assert_eq!(turn_step(&second.await.unwrap()), TurnStep::Wait);
+    // The evidence is refused as stale, before any grant could find the slot open.
+    let second = second.await.unwrap();
+    assert!(matches!(second, Admission::ObserveOnly), "{second:?}");
     assert_eq!(slots(&pool, &key).await.len(), 2);
     assert_eq!(writer.held.load(Ordering::SeqCst), 0);
     pool.close().await;
