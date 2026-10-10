@@ -725,6 +725,11 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     if std::env::var_os("ADK_TEST_CODEX_PROMOTE_READY").is_some() {
         return false;
     }
+    // The host guard keeps a retired Herdr row off tmux; on a Herdr channel its turn relaunches.
+    let retired = super::super::super::host_defer_gate::configured_herdr_retired;
+    if retired(shared, provider, channel_id.get(), &tmux_session_name).await {
+        return false;
+    }
     let host = super::super::super::host_defer_gate::channel_session_deferred;
     if host(shared, provider, channel_id.get(), &tmux_session_name).await {
         return true;

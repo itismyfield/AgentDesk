@@ -1,5 +1,5 @@
-//! Real intake arriving after a terminated execution's hold release waits through settlement.
-//! Routing stays `disabled` (one node owns the channel); the queued id and text witness intake.
+//! Real intake arriving after a terminated execution's hold release waits through settlement,
+//! then starts one Herdr launch. Routing stays `disabled`; the queued id and text witness intake.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,6 +20,8 @@ use crate::services::provider::ProviderKind;
 use crate::services::session_host::herdr_termination_rig as herdr;
 
 const ORIGINAL: &str = "input arriving inside the settlement window [5340-m2a]";
+/// The event backstop that takes over a listener's no-start waits 60s; the start follows it.
+const START_WAIT: Duration = Duration::from_secs(120);
 
 fn recent_message_id(low: u64) -> MessageId {
     const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
@@ -27,13 +29,13 @@ fn recent_message_id(low: u64) -> MessageId {
     MessageId::new((u64::try_from(recent_ms).unwrap() << 22) | low)
 }
 
-/// Listener ready first, then terminate, a real message inside the settlement window, and
-/// settlement while the listener meets the still-held transition; the start is not asserted.
+/// Listener ready first, terminate, a real message inside the settlement window, settlement
+/// against the held transition, then exactly one Herdr launch of that queued message.
 #[test]
-fn m2_1621_real_intake_waits_through_settlement_and_listener_hands_off_pg() {
+fn m2_1621_real_intake_through_termination_to_one_herdr_start_pg() {
     let path = concat!(
         module_path!(),
-        "::m2_1621_real_intake_waits_through_settlement_and_listener_hands_off_pg"
+        "::m2_1621_real_intake_through_termination_to_one_herdr_start_pg"
     );
     if !herdr::in_child(path, CHANNEL_ID) {
         return;
@@ -205,25 +207,60 @@ async fn scenario(rig: herdr::P11TerminationRig) {
         "the listener took QueueEligible and handed the no-start to the event backstop before \
          the transition was released"
     );
-    // Released, the message is neither lost nor consumed without a start.
-    let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel).await;
-    let waiting = snapshot
-        .intervention_queue
-        .iter()
-        .any(|item| item.message_id == queued && item.text == ORIGINAL);
-    let durable = harness
-        .durable_queue()
-        .iter()
-        .any(|item| item.message_id == queued && item.text == ORIGINAL);
-    let launches = rig
-        .writes()
-        .iter()
-        .filter(|(method, _)| method == "workspace.create")
-        .count();
+    // The queue consumer starts the queued message on Herdr: one launch, one typed command.
+    let started = wait_until(START_WAIT, || {
+        let writes = rig.writes();
+        Box::pin(async move {
+            writes
+                .iter()
+                .any(|(method, pane)| method == "pane.send_input" && pane == herdr::LAUNCHED_PANE)
+        })
+    })
+    .await;
     assert!(
-        (waiting && durable && launches == 0) || launches == 1,
-        "waiting={waiting} durable={durable} writes={:?}",
+        started,
+        "no Herdr start followed settlement: {:?}",
         rig.writes()
+    );
+    // A late event or backstop pass starts nothing more.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let writes = rig.writes();
+    let count = |wanted: &str| writes.iter().filter(|(method, _)| method == wanted).count();
+    assert_eq!(count("workspace.create"), 1, "{writes:?}");
+    assert_eq!(count("pane.send_input"), 1, "{writes:?}");
+    assert_eq!(
+        writes.len(),
+        3,
+        "close, launch and its command only: {writes:?}"
+    );
+    // That launch is the queued message's turn: it answers that message and consumed it.
+    assert!(
+        harness
+            .messages()
+            .iter()
+            .any(|(reply_to, _)| *reply_to == Some(queued.get())),
+        "the started turn answers the queued message: {:?}",
+        harness.messages()
+    );
+    let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel).await;
+    assert!(
+        snapshot.intervention_queue.is_empty(),
+        "consumed from the queue"
+    );
+    assert!(
+        harness.durable_queue().is_empty(),
+        "consumed from the durable queue"
+    );
+    let row = herdr::row(&pool, &session_key).await;
+    assert!(
+        row.as_ref()
+            .is_some_and(|(_, nonce)| nonce != herdr::EXECUTION),
+        "the launch installed a new execution: {row:?}"
+    );
+    assert_eq!(
+        harness.provider_starts(),
+        0,
+        "no other driver took the turn"
     );
     drop(harness);
     pool.close().await;

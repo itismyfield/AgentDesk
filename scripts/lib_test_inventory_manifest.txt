@@ -3978,6 +3978,7 @@ services::discord::herdr_terminate::tests::m2_unreadable_mailbox_is_never_an_idl
 services::discord::host_defer_gate::tests::the_promote_gate_holds_only_what_the_host_guard_keeps_pg
 services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_under_another_name_pg
 services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_with_no_channel_name_pg
+services::discord::host_defer_gate::tests::the_promote_gate_releases_only_a_retired_row_on_a_herdr_channel_pg
 services::discord::host_key_derivation::tests::derive_lookup_tries_every_registered_hash_by_exact_key_pg
 services::discord::host_key_derivation::tests::merge_lets_conflicts_and_failed_reads_decide_pg
 services::discord::http::tests::discord_content_or_zwsp_replaces_empty_content
@@ -8175,7 +8176,7 @@ services::discord::tui_prompt_relay::relay_e2e::discord_mock::history_page_retur
 services::discord::tui_prompt_relay::relay_e2e::discord_mock::unregistered_channels_are_unhandled_until_explicitly_allowed
 services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::headless_turn_provider_mismatch_refuses_before_mailbox_or_session_mutation
 services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::headless_turn_setup_failure_releases_only_its_slot_and_active_count
-services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_real_intake_waits_through_settlement_and_listener_hands_off_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_real_intake_through_termination_to_one_herdr_start_pg
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_claude_idle_binding_does_not_resume_its_synthetic_row
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_direct_prompt_posts_only_its_notice
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance
