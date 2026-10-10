@@ -1573,6 +1573,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_user_stop_with_the_switch_or_settlement_off_records_and_sends_nothing
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_writer_unwinding_after_its_escape_keeps_the_claim_spent
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::t9_f1_holder_runs_only_a_trusted_fresh_request_and_refusals_send_nothing
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::t9_row_read_race_rechecks_the_admitted_gate_epoch_before_escape
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_runtime_clear_refuses_another_hosts_session_before_any_change_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_claims_pre_publish_reservation_by_correlation_pg
