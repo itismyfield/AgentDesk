@@ -2478,6 +2478,7 @@ src/
 │   │   │   ├── rotation_unsettled_resume_tests.rs
 │   │   │   ├── rotation_unsettled_tests.rs
 │   │   │   ├── round_trip.rs
+│   │   │   ├── source_identity_tests.rs
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
