@@ -80,6 +80,7 @@ pub(in crate::services::discord) async fn mailbox_finish_judged_turn(
     finish
 }
 
+#[cfg(test)]
 pub(in crate::services::discord) async fn mailbox_finish_cancelled_turn(
     shared: &SharedData,
     channel_id: ChannelId,

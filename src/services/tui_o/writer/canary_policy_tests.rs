@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "operator_resume_source_tests.rs"]
+mod operator_resume;
 use crate::services::tui_prompt_dedupe::{
     self as dedupe,
     binding_context::{

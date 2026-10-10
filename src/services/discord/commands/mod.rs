@@ -16,6 +16,8 @@ macro_rules! log_info_event {
     };
 }
 
+#[cfg(all(test, unix))]
+mod cancel_backstop_tests;
 mod command_policy;
 mod config;
 pub(in crate::services::discord) mod control;

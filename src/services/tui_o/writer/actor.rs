@@ -262,6 +262,7 @@ where
             }
             sources_resumed = true;
             if !actor.writer.is_stopped() {
+                actor.project_operator_resumes();
                 resumed.send_replace(true);
             }
         }
@@ -317,6 +318,47 @@ where
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
+    fn project_operator_resumes(&mut self) {
+        let pieces: Vec<_> = self
+            .writer
+            .store()
+            .ledger()
+            .resume_pieces()
+            .map(|(rejected, piece)| {
+                (
+                    rejected,
+                    super::pieces::PieceWork {
+                        unit_key: piece.unit_key.clone(),
+                        index: piece.piece_index,
+                        payload: piece.payload.clone(),
+                    },
+                )
+            })
+            .collect();
+        for (rejected_serial, piece) in pieces.into_iter().rev() {
+            self.owed.retain(|item| {
+                let Derived::Piece(derived) = item else {
+                    return true;
+                };
+                if derived.unit_key != piece.unit_key || derived.index != piece.index {
+                    return true;
+                }
+                if derived.payload != piece.payload {
+                    tracing::warn!(rejected_serial, unit_key = ?piece.unit_key,
+                        "[tui_o] rederived payload differs; keeping ledger payload");
+                }
+                false
+            });
+            // Retry precedes later pieces, but never a retained schema stop.
+            let at = self
+                .owed
+                .iter()
+                .rposition(|item| matches!(item, Derived::Blocked { .. }))
+                .map_or(0, |blocked| blocked + 1);
+            self.owed.insert(at, Derived::Piece(piece));
+        }
+    }
+
     fn observe_waiting(&mut self, restored: bool) {
         if self.writer.is_stopped() {
             return;
