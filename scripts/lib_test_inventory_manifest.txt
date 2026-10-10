@@ -3348,6 +3348,8 @@ services::discord::gateway::answer_flush_gate_tests::queued_notice_returns_immed
 services::discord::gateway::outbound_messages::classified_edit_tests::only_authoritative_missing_allows_placeholder_replacement_4888
 services::discord::gateway::outbound_messages::classified_post_tests::authoritative_card_post_rejection_stays_permanent
 services::discord::gateway::outbound_messages::classified_post_tests::production_card_post_preserves_transient_500_503_and_transport_vs_permanent_403
+services::discord::gateway::outbound_messages::n1_placeholder_tests::n1_queued_barrier_cancellation_leaves_attempt_before_any_http
+services::discord::gateway::outbound_messages::n1_placeholder_tests::n1_real_post_patch_effects_and_results_unchanged_for_all_observer_failures
 services::discord::gateway::tests::default_long_message_delivery_chunks_over_limit_body
 services::discord::gateway::tests::default_long_message_delivery_rolls_back_sent_chunks_on_failure
 services::discord::gateway::tests::dispatch_promote_gate_busy_defers_silently_across_retry_cycles_4270
@@ -4228,6 +4230,8 @@ services::discord::inflight::save_store::identity_gate::tests::output_restamp_ad
 services::discord::inflight::save_store::identity_gate::tests::readopted_marker_lands_on_restart_preserved_row_and_never_resurrects
 services::discord::inflight::save_store::identity_gate::tests::rebind_adoption_save_adopts_zero_id_orphan_but_refuses_live_synthetic_shapes
 services::discord::inflight::save_store::identity_gate::tests::slice_a_leak_prefix_adoption
+services::discord::inflight::save_store::n1_observation_tests::n1_both_physical_store_boundaries_return_with_stopped_failed_or_locked_observer
+services::discord::inflight::save_store::n1_observation_tests::n1_synthetic_attempt_before_occupancy_and_commit_only_after_physical_success
 services::discord::inflight::save_store::outcome_decomposition_tests::every_split_variant_keeps_the_pre_split_identity_mismatch_verdict
 services::discord::inflight::save_store::outcome_decomposition_tests::guarded_save_outcome_truth_table_separates_all_six_identity_mismatch_causes
 services::discord::inflight::save_store::tests::create_new_atomic_write_failure_leaves_no_final_row_and_retry_succeeds
@@ -10984,6 +10988,16 @@ services::tui_o::exact_pg::tests::exact_off_pg_statement_trace_and_files_zero
 services::tui_o::exact_pg::tests::exact_pg_process_reader_uses_only_metadata
 services::tui_o::exact_pg::tests::exact_settled_ack_names_normalized_pg_payload
 services::tui_o::exact_pg::tests::exact_snapshot_sibling_construction_is_compile_rejected
+services::tui_o::n1_observation::sink::tests::n1_sink_open_and_rotation_failures_are_observation_only
+services::tui_o::n1_observation::sink::tests::n1_sink_rotation_keeps_complete_jsonl_rows
+services::tui_o::n1_observation::sink::tests::n1_sink_write_failure_marks_health_and_disconnects_without_propagation
+services::tui_o::n1_observation::tests::n1_attempt_precedes_effect_and_error_remains_uncertain
+services::tui_o::n1_observation::tests::n1_bounds_ids_channels_and_open_requests_without_eviction
+services::tui_o::n1_observation::tests::n1_closed_only_preserves_physical_and_logical_keys_across_readers
+services::tui_o::n1_observation::tests::n1_confirmation_event_is_later_than_transition_and_preserves_first_window
+services::tui_o::n1_observation::tests::n1_full_closed_and_contended_observer_do_not_wait_for_consumer
+services::tui_o::n1_observation::tests::n1_unavailable_never_becomes_zero_and_loss_never_disappears
+services::tui_o::n1_observation::tests::n1_unterminated_and_patch_attempts_preserve_target_and_origin
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
 services::tui_o::ownership::tests::release_records_lost_before_the_release_runs
 services::tui_o::ownership::tests::transitions_close_admission_and_epochs_grow_per_acquisition
