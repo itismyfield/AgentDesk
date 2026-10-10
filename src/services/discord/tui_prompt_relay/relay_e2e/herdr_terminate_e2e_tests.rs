@@ -1,10 +1,5 @@
-//! #5340 P11 M2-A (P2-2): a real message that arrives once the terminated execution's hold is
-//! gone waits through settlement, and the queue listener, run first, hands it on unconsumed.
-//!
-//! Intake runs with cluster intake routing `disabled` (single node, this node owns the channel),
-//! which is what this fixture verifies; the witness that intake ran is the queued intervention
-//! carrying the message's own id and text. The Herdr start after the hand-off is not asserted
-//! here: the queued-turn promote gate defers every non-Legacy host row (#5340 M2-A report).
+//! Real intake arriving after a terminated execution's hold release waits through settlement.
+//! Routing stays `disabled` (one node owns the channel); the queued id and text witness intake.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,10 +27,8 @@ fn recent_message_id(low: u64) -> MessageId {
     MessageId::new((u64::try_from(recent_ms).unwrap() << 22) | low)
 }
 
-/// One run of the 1621 order: active A with matching inflight and a Bound PG row, the queue
-/// listener started and its initial reconcile done, terminate, the message arriving in the
-/// settlement window through `router::handle_event`, then settlement while the listener runs
-/// first against the still-held transition.
+/// Listener ready first, then terminate, a real message inside the settlement window, and
+/// settlement while the listener meets the still-held transition; the start is not asserted.
 #[test]
 fn m2_1621_real_intake_waits_through_settlement_and_listener_hands_off_pg() {
     let path = concat!(

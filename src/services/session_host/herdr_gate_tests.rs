@@ -1722,9 +1722,8 @@ fn m1_retire_cas_failure_keeps_hold_pg() {
     });
 }
 
-// P2-1: a finalizer that fails before releasing captured turn A is acknowledged
-// `AlreadyFinalized`; the retire and hold release that already happened are reported as
-// Indeterminate, with A's token, the queue and the counter left exactly as they were.
+// A finalizer failing before it releases A reports Indeterminate; the done retire and hold
+// release are reported, and A's token, the queue and the counter stay as they were.
 #[test]
 fn m2_already_finalized_with_active_a_is_indeterminate_pg() {
     if run_terminate_child("m2_already_finalized_with_active_a_is_indeterminate_pg") {
@@ -1768,7 +1767,7 @@ fn m2_already_finalized_with_active_a_is_indeterminate_pg() {
     });
 }
 
-// P2-1: the captured actor stops answering between the hold release and the settlement check;
+// The captured actor stops answering between the hold release and the settlement check;
 // an unanswered read is never an idle mailbox.
 #[test]
 fn m2_settlement_mailbox_unreadable_is_indeterminate_pg() {
@@ -1833,7 +1832,7 @@ fn m2_settlement_mailbox_unreadable_is_indeterminate_pg() {
     });
 }
 
-// P2-1: the turn captured before the transition lock is replaced by B before the recheck; the
+// The turn captured before the transition lock is replaced by B before the recheck; the
 // service refuses with no close, no settlement of B and B's execution hold kept.
 #[test]
 fn m2_turn_changed_before_close_has_zero_effect_pg() {
@@ -1893,9 +1892,8 @@ fn m2_turn_changed_before_close_has_zero_effect_pg() {
     });
 }
 
-/// The termination service's fake Herdr server and scripted OS, wired into a runtime the caller
-/// owns: its `SharedData`, pool, runtime root and one Herdr-configured channel. Each thread of
-/// that runtime reads the boot section's own registry, whose launch host dials the same server.
+/// The fake Herdr server and scripted OS wired into a caller's runtime, pool and root; every
+/// runtime thread reads the boot registry, whose launch host dials the same server.
 pub(crate) mod p11 {
     use super::*;
     use crate::config::session_hosts::BootSessionHosts;
@@ -1905,10 +1903,8 @@ pub(crate) mod p11 {
     pub(crate) const NODE: &str = "mac-mini";
     pub(crate) const EXECUTION: &str = NONCE;
 
-    /// Re-runs test `path` (its `module_path!()` name) in a child that owns its whole process:
-    /// the boot section, the O writer list, and Herdr provenance naming this child as the
-    /// server, whose config home the parent wrote before the child started. Returns whether
-    /// this is that child.
+    /// Re-runs test `path` in a child owning its boot section, O writer list and Herdr
+    /// provenance (config written before it started); returns whether this is that child.
     pub(crate) fn in_child(path: &str, channel: u64) -> bool {
         let name = path.split_once("::").unwrap().1;
         if let Some(child) = std::env::var_os(TERMINATE_TEST_CHILD) {
@@ -2007,9 +2003,8 @@ pub(crate) mod p11 {
             }
         }
 
-        /// Execution `EXECUTION` Bound on the server's pane under `session_key`, launched by
-        /// this runtime root, its provider alive and its input hold taken; the live terminate
-        /// and Herdr turn switches on.
+        /// Execution `EXECUTION` Bound on the server's pane under `session_key`, provider alive
+        /// and hold taken, with the live terminate and Herdr turn switches on.
         pub(crate) async fn bind(
             &self,
             pool: &sqlx::PgPool,
