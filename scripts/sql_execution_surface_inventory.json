@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "8bab58f86ac79f06647718e0361ba558749811cb",
+  "measured_at_sha": "c7509e393a70ebff837533b49b120ea856816fc7",
   "records": [
     {
       "root": "migrations/postgres",
@@ -11080,15 +11080,6 @@
       "symbol": "query",
       "classification": "UNRESOLVED",
       "fingerprint": "sha256:bba7e386c281d01c0652833d926ddec4f7beeccd0f87e0f95997ebb8ce62047f"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/o_piece_delivery.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:d70a3257feba8231965e3e46011153f97e8f8fd1b8722a98df4d68d08314b9b6"
     },
     {
       "root": "src",

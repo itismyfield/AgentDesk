@@ -353,14 +353,6 @@ pub(crate) enum ReceiptMethod {
 }
 
 impl ReceiptMethod {
-    const ALL: [Self; 5] = [
-        Self::PostResponse,
-        Self::LocalPosted,
-        Self::Marker,
-        Self::Nonce,
-        Self::ExactMatch,
-    ];
-
     fn as_str(self) -> &'static str {
         match self {
             Self::PostResponse => "post_response",
@@ -460,39 +452,4 @@ pub(super) async fn advance(
         .fetch_one(&mut **tx)
         .await?
         .try_get(0)?)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ReceiptRow {
-    pub(crate) message_id: u64,
-    pub(crate) slot: Option<u8>,
-    pub(crate) author_id: u64,
-    pub(crate) method: ReceiptMethod,
-}
-
-/// The piece's receipts in message order; the first is its success, any later one a duplicate.
-pub(crate) async fn receipts(
-    pool: &PgPool,
-    key: &PieceKey,
-) -> Result<Vec<ReceiptRow>, LedgerError> {
-    let sql = format!(
-        "SELECT message_id, slot, author_id, method FROM o_piece_receipts \
-         WHERE {KEY_MATCH} ORDER BY message_id"
-    );
-    let rows = key.bind(sqlx::query(&sql)).fetch_all(pool).await?;
-    rows.iter()
-        .map(|row| -> Result<ReceiptRow, LedgerError> {
-            let method: String = row.try_get("method")?;
-            let slot: Option<i16> = row.try_get("slot")?;
-            Ok(ReceiptRow {
-                message_id: from_pg(row.try_get("message_id")?, "message")?,
-                slot: slot.and_then(|slot| u8::try_from(slot).ok()),
-                author_id: from_pg(row.try_get("author_id")?, "author")?,
-                method: ReceiptMethod::ALL
-                    .into_iter()
-                    .find(|known| known.as_str() == method)
-                    .ok_or_else(|| LedgerError::Invalid(format!("stored method {method}")))?,
-            })
-        })
-        .collect()
 }

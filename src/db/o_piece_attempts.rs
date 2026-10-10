@@ -3,7 +3,6 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
@@ -88,10 +87,6 @@ fn parse<T: Copy>(all: &[T], name: fn(T) -> &'static str, raw: &str) -> Result<T
 pub(crate) struct AttemptRow {
     pub(crate) slot: u8,
     pub(crate) kind: AttemptKind,
-    pub(crate) approval_id: Option<String>,
-    pub(crate) owner: String,
-    pub(crate) run_id: String,
-    pub(crate) deadline: Option<DateTime<Utc>>,
     pub(crate) result: Option<AttemptResult>,
 }
 
@@ -316,8 +311,7 @@ async fn attempts_in(
     key: &PieceKey,
 ) -> Result<Vec<AttemptRow>, LedgerError> {
     let sql = format!(
-        "SELECT slot, intent, approval_id, owner, run_id, deadline, result \
-         FROM o_piece_attempts WHERE {KEY_MATCH} ORDER BY slot"
+        "SELECT slot, intent, result FROM o_piece_attempts WHERE {KEY_MATCH} ORDER BY slot"
     );
     let rows = key.bind(sqlx::query(&sql)).fetch_all(&mut **tx).await?;
     rows.iter()
@@ -327,10 +321,6 @@ async fn attempts_in(
             Ok(AttemptRow {
                 slot: slot_of(row.try_get("slot")?)?,
                 kind: parse(&AttemptKind::ALL, AttemptKind::as_str, &kind)?,
-                approval_id: row.try_get("approval_id")?,
-                owner: row.try_get("owner")?,
-                run_id: row.try_get("run_id")?,
-                deadline: row.try_get("deadline")?,
                 result: result
                     .map(|raw| parse(&AttemptResult::ALL, AttemptResult::as_str, &raw))
                     .transpose()?,
