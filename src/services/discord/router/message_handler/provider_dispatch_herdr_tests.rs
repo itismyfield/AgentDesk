@@ -404,6 +404,7 @@ impl Fixture {
                 let _registry = rig.registry_on_this_thread();
                 let _admission = open_admission();
                 let (sender, receiver) = std::sync::mpsc::channel();
+                let owner_for_strict = owner.logical_key.clone();
                 let turn = HerdrTurn {
                     pool,
                     owner,
@@ -417,7 +418,29 @@ impl Fixture {
                     hook_endpoint: Some("http://127.0.0.1:1".into()),
                     cancel: Some(token),
                 };
-                let result = herdr_turn::execute(turn, ports, sender);
+                let strict_pin = if owner_for_strict.contains("strict-") {
+                    use crate::services::tui_o::exact_episode::{EpisodeEvidence, EpisodeMetadata};
+                    let EpisodeEvidence::Pin(mut pin) = crate::services::tui_o::exact_episode::tests::fixture().remove(0).evidence else { panic!("pin fixture"); };
+                    pin.episode = uuid::Uuid::new_v4();
+                    pin.owner = owner_for_strict.clone();
+                    pin.source = None;
+                    rt.block_on(crate::services::tui_o::exact_pg::record_episode_evidence(true, pool, &EpisodeMetadata::new(pin.episode, uuid::Uuid::new_v4(), EpisodeEvidence::Pin(pin.clone())))).unwrap();
+                    Some(pin)
+                } else { None };
+                let _strict = strict_pin.clone().map(|pin| crate::services::tui_o::exact_submission::install(pool.clone(), pin));
+                let result = crate::services::tui_o::exact_submission::dispatch(|| herdr_turn::execute(turn, ports, sender));
+                if let Some(pin) = strict_pin {
+                    rt.block_on(async {
+                        let mut connection = pool.acquire().await.unwrap();
+                        let resolution = crate::services::tui_o::exact_pg::resolve_in_tx(&mut connection, pin.episode).await.unwrap();
+                        let attempted: i64 = sqlx::query_scalar("SELECT count(*) FROM public.delivery_journal_events WHERE canonical_payload->>'episode'=$1 AND canonical_payload->'evidence'->>'type'='InputAttemptBegun'").bind(pin.episode.to_string()).fetch_one(&mut *connection).await.unwrap();
+                        if attempted == 0 {
+                            assert_eq!(resolution.authority(), crate::services::tui_o::exact_episode::Authority::Policy);
+                        } else {
+                            assert_eq!(resolution.authority(), crate::services::tui_o::exact_episode::Authority::Pending);
+                        }
+                    });
+                }
                 finished.store(true, Ordering::SeqCst);
                 (result, receiver.try_iter().collect())
             });
@@ -554,7 +577,7 @@ fn t_e1_a_legacy_row_launches_once_attaches_after_session_start_prompts_once_the
 // and nothing is launched in its place.
 #[test]
 fn t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg() {
-    let fx = Fixture::new("mismatch", None);
+    let fx = Fixture::new("strict-mismatch", None);
     let record = fx.store_bound();
     fx.rig.run_provider(&context_of(NONCE), true);
     let launcher = Arc::new(Launcher::default());
@@ -571,7 +594,7 @@ fn t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg() {
 // paste and no relaunch.
 #[test]
 fn t_e3_an_unclear_send_is_never_sent_again_pg() {
-    let fx = Fixture::new("unclear", None);
+    let fx = Fixture::new("strict-unclear", None);
     let record = fx.store_bound();
     fx.rig.leave_sends_unanswered(true);
     let launcher = Arc::new(Launcher::default());
@@ -586,7 +609,7 @@ fn t_e3_an_unclear_send_is_never_sent_again_pg() {
 // attaches nor prompts it, and nothing is created again.
 #[test]
 fn a_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg() {
-    let fx = Fixture::new("unstarted", None);
+    let fx = Fixture::new("strict-unstarted", None);
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
     let (first, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
@@ -664,7 +687,7 @@ fn a_pending_execution_with_a_logged_start_takes_its_first_prompt_pg() {
 // nothing, so the earlier text is never submitted with it.
 #[test]
 fn after_an_unclear_paste_the_next_prompt_is_held_pg() {
-    let fx = Fixture::new("held", None);
+    let fx = Fixture::new("strict-held", None);
     let record = fx.store_bound();
     let launcher = Arc::new(Launcher::default());
     fx.rig.leave_sends_unanswered(true);
@@ -684,7 +707,7 @@ fn after_an_unclear_paste_the_next_prompt_is_held_pg() {
 // is held the same way.
 #[test]
 fn after_a_paste_then_cancel_the_next_prompt_is_held_pg() {
-    let fx = Fixture::new("pasted", None);
+    let fx = Fixture::new("strict-pasted", None);
     let record = fx.store_bound();
     let launcher = Arc::new(Launcher::default());
     let (first, _) = fx.turn(&record, &fx.ports(&launcher), || {

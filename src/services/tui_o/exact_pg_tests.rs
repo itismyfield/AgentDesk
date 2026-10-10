@@ -82,116 +82,253 @@ async fn exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged() {
         .await;
 }
 
-#[derive(Clone)]
-struct StatementTrace(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StatementTrace {
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        if event.metadata().target() == "sqlx::query" {
-            self.0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(event.metadata().name().to_string());
+fn recursive_files(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn visit(
+        base: &std::path::Path,
+        path: &std::path::Path,
+        files: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(base, &path, files);
+            } else {
+                files.insert(
+                    path.strip_prefix(base).unwrap().to_owned(),
+                    std::fs::read(path).unwrap(),
+                );
+            }
         }
     }
+    let mut files = std::collections::BTreeMap::new();
+    visit(root, root, &mut files);
+    files
 }
 
 #[tokio::test]
 async fn exact_off_pg_statement_trace_and_files_zero() {
-    use tracing::instrument::WithSubscriber;
-    use tracing_subscriber::layer::SubscriberExt;
-    let db = TestPostgresDb::create().await;
-    let pool = crate::db::postgres::connect_test_pool_with_max_connections(
-        &db.database_url,
-        "exact off trace",
-        1,
-    )
-    .await
-    .unwrap();
-    crate::db::postgres::migrate(&pool).await.unwrap();
-    let trace = StatementTrace(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
-    let subscriber = tracing_subscriber::registry().with(trace.clone());
-    let records = super::super::exact_episode::tests::fixture();
-    let runtime = tempfile::tempdir().unwrap();
-    let before = std::fs::read_dir(runtime.path()).unwrap().count();
-    async {
-        let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&pool)
+    if let Ok(url) = std::env::var("C2A_OFF_DATABASE") {
+        let pool =
+            crate::db::postgres::connect_test_pool_with_max_connections(&url, "exact off child", 1)
+                .await
+                .unwrap();
+        let root = crate::config::runtime_root().expect("actual runtime root");
+        let before = recursive_files(&root);
+        let mut connection = pool.acquire().await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *connection)
             .await
             .unwrap();
+        let oid: i64 = sqlx::query_scalar(
+            "SELECT oid::bigint FROM pg_database WHERE datname=current_database()",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+        drop(connection);
+        let admin = crate::db::postgres::connect_test_pool(
+            &std::env::var("C2A_OFF_OBSERVER").unwrap(),
+            "off observer",
+        )
+        .await
+        .unwrap();
+        let count = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT (xact_commit+xact_rollback)::bigint FROM pg_stat_database WHERE datid=$1::oid",
+            )
+            .bind(oid)
+            .fetch_one(&admin)
+            .await
+            .unwrap()
+        };
+        pool.close().await;
+        let flushed = || async {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let active: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datid=$1::oid")
+                        .bind(oid)
+                        .fetch_one(&admin)
+                        .await
+                        .unwrap();
+                if active == 0 {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "target backends stopped"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            let mut previous = -1;
+            let mut same = 0;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                sqlx::query("SELECT pg_stat_clear_snapshot()")
+                    .execute(&admin)
+                    .await
+                    .unwrap();
+                let value = count().await;
+                same = if value == previous { same + 1 } else { 0 };
+                if same >= 5 {
+                    return value;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "server statistics reached stable flush"
+                );
+                previous = value;
+            }
+        };
+        let initial = flushed().await;
+        let open = || async {
+            crate::db::postgres::connect_test_pool_with_max_connections(
+                &url,
+                "off calibrated backend",
+                1,
+            )
+            .await
+            .unwrap()
+        };
+        let control_pool = open().await;
+        sqlx::query("SELECT pg_stat_force_next_flush()")
+            .execute(&control_pool)
+            .await
+            .unwrap();
+        control_pool.close().await;
+        let control = flushed().await;
+        let observation_cost = control - initial;
         assert!(
-            !trace
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_empty(),
-            "trace must see SQL control"
+            observation_cost > 0,
+            "connection/flush control must be counted"
         );
-        trace
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        let base_trace = trace
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let positive = open().await;
+        sqlx::query("SELECT 1").execute(&positive).await.unwrap();
+        sqlx::query("SELECT pg_stat_force_next_flush()")
+            .execute(&positive)
+            .await
+            .unwrap();
+        positive.close().await;
+        let selected = flushed().await;
+        assert!(
+            selected - control > observation_cost,
+            "server sees SELECT control: delta={} base={}",
+            selected - control,
+            observation_cost
+        );
+        let initial = selected;
+        let pool = open().await;
+        let records = super::super::exact_episode::tests::fixture();
         assert_eq!(
             record_episode_evidence(false, &pool, &records[0])
                 .await
                 .unwrap(),
             None
         );
-        assert_eq!(
-            *trace
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            base_trace,
-            "OFF issued SQL"
-        );
-        let after_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&pool)
+        let returned = tokio::task::spawn_blocking(|| {
+            crate::services::tui_o::exact_submission::dispatch(|| {
+                Err::<(), _>("original OFF result".into())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(returned, Err("original OFF result".into()));
+        sqlx::query("SELECT pg_stat_force_next_flush()")
+            .execute(&pool)
             .await
             .unwrap();
-        assert_eq!(backend, after_backend, "single backend trace");
+        pool.close().await;
+        assert_eq!(
+            flushed().await - initial,
+            observation_cost,
+            "OFF issued server statements including spawned tasks"
+        );
+        assert_eq!(
+            recursive_files(&root),
+            before,
+            "OFF changed recursive runtime paths/content"
+        );
+        return;
     }
-    .with_subscriber(subscriber)
-    .await;
-    assert_eq!(
-        std::fs::read_dir(runtime.path()).unwrap().count(),
-        before,
-        "OFF wrote files"
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    pool.close().await;
+
+    let observer_url = format!(
+        "{}/postgres",
+        crate::db::postgres::postgres_test_database_url_base().unwrap()
     );
+
+    let runtime = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(runtime.path().join("runtime/nested")).unwrap();
+    std::fs::write(runtime.path().join("runtime/existing"), "original").unwrap();
+    std::fs::write(
+        runtime.path().join("runtime/nested/existing"),
+        "nested original",
+    )
+    .unwrap();
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "services::tui_o::exact_pg::tests::exact_off_pg_statement_trace_and_files_zero",
+            "--nocapture",
+        ])
+        .env("C2A_OFF_DATABASE", &db.database_url)
+        .env("C2A_OFF_OBSERVER", &observer_url)
+        .env("AGENTDESK_ROOT_DIR", runtime.path())
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "child failed: {} {}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
 }
 
 #[tokio::test]
 async fn exact_ack_pg_waits_for_commit_barrier() {
+    use crate::services::tui_o::exact_submission::{COMMIT_BARRIER, CommitBarrier};
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let mut blocker = pool.begin().await.unwrap();
-    sqlx::query("LOCK TABLE public.delivery_journal_events IN ACCESS EXCLUSIVE MODE")
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
     let record = super::super::exact_episode::tests::fixture().remove(0);
+    let (entered, reached) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    *COMMIT_BARRIER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(CommitBarrier {
+        episode: record.episode,
+        entered,
+        release: released,
+    });
     let p = pool.clone();
     let copy = record.clone();
     let mut task = tokio::spawn(async move { record_episode_evidence(true, &p, &copy).await });
-    for _ in 0..100 {
-        let waiting:i64=sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE relation='public.delivery_journal_events'::regclass AND NOT granted").fetch_one(&pool).await.unwrap();
-        if waiting > 0 {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    let pid = tokio::time::timeout(std::time::Duration::from_secs(10), reached)
+        .await
+        .expect("writer reached barrier")
+        .unwrap();
+    let matching: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid=$1 AND state='idle in transaction'")
+        .bind(pid).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        matching, 1,
+        "target database/PID reached pre-COMMIT barrier"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM public.delivery_journal_events")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "INSERT is not visible before COMMIT");
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), &mut task)
             .await
             .is_err(),
         "ACK before commit"
     );
-    blocker.commit().await.unwrap();
+    release.send(()).unwrap();
     assert!(task.await.unwrap().unwrap().is_some());
     let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM public.delivery_journal_events")
         .fetch_one(&pool)
