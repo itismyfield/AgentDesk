@@ -702,8 +702,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             || unconfirmed(&cancel_token, cancelled, terminal_admitted)
             || stream_loop::exit_reconcile::held_before_submit(&bridge.inflight_state, cancelled)
         {
-            // No admitted terminal frame: keep the row for recovery (a held prompt stays Waiting),
-            // or a stopped Herdr turn for its provider; a partial stream is not a terminal.
+            // No admitted terminal frame: leave the row (Waiting if held) to recovery or Herdr.
             completion_guard.relinquish_bridge_authority();
             inflight_guard.defuse();
             return;
