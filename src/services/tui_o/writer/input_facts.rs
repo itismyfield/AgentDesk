@@ -205,7 +205,14 @@ impl InputFacts {
                         }),
                         None,
                     ),
-                    TurnEvent::Closed(turn) => (Some(TurnState::Idle), turn.native_turn_id),
+                    TurnEvent::Closed(turn) => {
+                        crate::services::tui_o::n1_observation::turn_closed(
+                            &self.binding,
+                            &turn,
+                            aborted(self.binding.provider, &value),
+                        );
+                        (Some(TurnState::Idle), turn.native_turn_id)
+                    }
                     TurnEvent::StrayIdle | TurnEvent::EdgeTurn => (Some(TurnState::Idle), None),
                     TurnEvent::None => {
                         if let RecordFact::Blocked(reason) = &fact {

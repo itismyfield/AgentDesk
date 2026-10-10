@@ -2,6 +2,8 @@ use super::*;
 use crate::services::cluster::{home_availability, node_registry::GatewayWaiterGuard};
 
 #[cfg(test)]
+pub mod boot_retirement;
+#[cfg(test)]
 mod channel_homes_tests;
 mod deferred_restart;
 mod framework_setup;
