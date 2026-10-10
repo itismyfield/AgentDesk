@@ -1,6 +1,8 @@
 use std::io;
 use std::process::{Command, Output};
 use std::time::Duration;
+use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
 
 /// `killed`/`reaped` describe cleanup only; the command may already have had an effect.
 #[derive(Debug, thiserror::Error)]
@@ -30,13 +32,64 @@ impl BoundedTmuxError {
 /// Run a caller-selected tmux command for at most five seconds, plus two to reap.
 /// Stdin is closed; load-buffer callers must provide a durable file path.
 pub async fn run_bounded_tmux(command: &mut Command) -> Result<Output, BoundedTmuxError> {
-    run_with_budget(command, Duration::from_secs(5)).await
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        spawn_bounded(&Handle::current(), command)?.wait().await
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = command;
+        Err(BoundedTmuxError::UnsupportedPlatform)
+    }
+}
+
+pub struct Pending {
+    cleanup: JoinHandle<Result<Output, BoundedTmuxError>>,
+    #[cfg(test)]
+    start: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Pending {
+    pub async fn wait(self) -> Result<Output, BoundedTmuxError> {
+        #[cfg(test)]
+        if let Some(start) = self.start {
+            let _ = start.send(());
+        }
+        self.cleanup.await.map_err(|error| BoundedTmuxError::Io {
+            source: io::Error::other(error),
+            killed: false,
+            reaped: false,
+        })?
+    }
+}
+
+/// Spawn immediately; the supplied runtime owns cleanup independently of `Pending`.
+pub fn spawn_bounded(handle: &Handle, command: &mut Command) -> Result<Pending, BoundedTmuxError> {
+    spawn_with_budget(handle, command, Duration::from_secs(5))
 }
 
 pub(super) async fn run_with_budget(
     command: &mut Command,
     budget: Duration,
 ) -> Result<Output, BoundedTmuxError> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        spawn_with_budget(&Handle::current(), command, budget)?
+            .wait()
+            .await
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (command, budget);
+        Err(BoundedTmuxError::UnsupportedPlatform)
+    }
+}
+
+pub(super) fn spawn_with_budget(
+    handle: &Handle,
+    command: &mut Command,
+    budget: Duration,
+) -> Result<Pending, BoundedTmuxError> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         use std::os::unix::process::CommandExt;
@@ -47,18 +100,29 @@ pub(super) async fn run_with_budget(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let child = command.spawn().map_err(BoundedTmuxError::Spawn)?;
-        // Cancellation of the caller leaves the bounded cleanup task running.
-        tokio::spawn(platform::run(child, budget.min(Duration::from_secs(5))))
-            .await
-            .map_err(|error| BoundedTmuxError::Io {
-                source: io::Error::other(error),
-                killed: false,
-                reaped: false,
-            })?
+        let cleanup = platform::run(child, budget.min(Duration::from_secs(5)));
+        #[cfg(test)]
+        if super::transition::mutant("cleanup_wait") {
+            let (start, started) = tokio::sync::oneshot::channel();
+            return Ok(Pending {
+                cleanup: handle.spawn(async move {
+                    if started.await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                    cleanup.await
+                }),
+                start: Some(start),
+            });
+        }
+        Ok(Pending {
+            cleanup: handle.spawn(cleanup),
+            #[cfg(test)]
+            start: None,
+        })
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (command, budget);
+        let _ = (handle, command, budget);
         Err(BoundedTmuxError::UnsupportedPlatform)
     }
 }
@@ -78,6 +142,7 @@ mod platform {
     struct OwnedChild {
         child: Child,
         owned: bool,
+        cleanup_until: Option<Instant>,
     }
 
     impl OwnedChild {
@@ -135,9 +200,20 @@ mod platform {
             self.owned && unsafe { libc::killpg(self.pid(), libc::SIGKILL) } == 0
         }
 
+        fn cleanup_deadline(&mut self) -> Instant {
+            *self
+                .cleanup_until
+                .get_or_insert_with(|| Instant::now() + Duration::from_secs(2))
+        }
+
         async fn terminate(&mut self) -> (bool, bool) {
+            #[cfg(test)]
+            if super::super::transition::mutant("kill_reap") {
+                self.owned = false;
+                return (false, false);
+            }
             let killed = self.kill();
-            let until = Instant::now() + Duration::from_secs(2);
+            let until = self.cleanup_deadline();
             loop {
                 match self.reap() {
                     Ok(Some(_)) => return (killed, true),
@@ -156,7 +232,16 @@ mod platform {
         fn drop(&mut self) {
             if self.owned {
                 self.kill();
-                let _ = self.reap();
+                #[cfg(test)]
+                if super::super::transition::mutant("drop_reap") {
+                    let _ = self.reap();
+                    return;
+                }
+                let until = self.cleanup_deadline();
+                // Runtime shutdown can cancel async cleanup before the killed child exits.
+                while matches!(self.reap(), Ok(None)) && self.owned && Instant::now() < until {
+                    std::thread::sleep(POLL.min(until.saturating_duration_since(Instant::now())));
+                }
             }
         }
     }
@@ -195,9 +280,19 @@ mod platform {
         child: Child,
         budget: Duration,
     ) -> impl std::future::Future<Output = Result<Output, BoundedTmuxError>> {
-        let mut owner = OwnedChild { child, owned: true };
+        let mut owner = OwnedChild {
+            child,
+            owned: true,
+            cleanup_until: None,
+        };
         let deadline = Instant::now() + budget;
         async move {
+            #[cfg(test)]
+            let deadline = if super::super::transition::mutant("deadline_wait") {
+                Instant::now() + budget
+            } else {
+                deadline
+            };
             let result = async {
                 if let Some(pipe) = &owner.child.stdout {
                     nonblocking(pipe)?;

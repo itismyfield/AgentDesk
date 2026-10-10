@@ -40,6 +40,20 @@ use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tmux_turn_liveness::IndependentTmuxReadiness;
 
 use super::SharedData;
+/// A holder's forwarded user stop, run as its own `/stop`.
+pub(crate) use super::commands::stop::run_holder_stop;
+
+#[cfg(test)]
+// Install a real active gateway token for forwarded-stop effect assertions.
+pub(crate) async fn start_home_stop_test_turn(
+    shared: &SharedData,
+    channel: ChannelId,
+    token: Arc<CancelToken>,
+    owner: poise::serenity_prelude::UserId,
+    message: poise::serenity_prelude::MessageId,
+) -> bool {
+    super::mailbox_try_start_turn(shared, channel, token, owner, message).await
+}
 
 /// Terminal evidence gathered at one cancel boundary. Deliberately plain data:
 /// the decision itself is a pure function so both directions (release the

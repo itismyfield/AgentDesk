@@ -39,6 +39,20 @@ pub(crate) fn cluster_capabilities_with_worker_api(config: &ClusterConfig) -> Va
     Value::Object(capabilities)
 }
 
+/// [`cluster_capabilities_with_worker_api`] plus the holder stop receiver, advertised only where
+/// channel-home delegation is on, so an off node looks exactly as before.
+pub(crate) fn node_capabilities(config: &crate::config::Config) -> Value {
+    let mut capabilities = cluster_capabilities_with_worker_api(&config.cluster);
+    let api = capabilities.get_mut("agentdesk_api");
+    if let Some(api) = api.and_then(Value::as_object_mut)
+        && config.runtime.channel_home_delegation_enabled == Some(true)
+    {
+        let capability = crate::services::session_forwarding::home_stop::CAPABILITY;
+        api.insert(capability.to_string(), Value::Bool(true));
+    }
+    capabilities
+}
+
 pub(crate) fn worker_api_base_url_from_capabilities(capabilities: &Value) -> Option<String> {
     capabilities
         .get("agentdesk_api")
