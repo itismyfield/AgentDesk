@@ -186,6 +186,7 @@ pub(in crate::services::discord) fn begin_controller_terminal(
     let pool = admit(shared, frontier_channel, obligation_id)?;
     let attempt_id = Uuid::new_v5(&obligation_id, b"attempt:0");
     process_observer().submit(AppendCommand {
+        ack: None,
         pool: pool.clone(),
         events: vec![
             event(obligation_id, None, "O", 0, obligation_payload(disposition, anchor_channel, range)),
@@ -228,6 +229,7 @@ pub(in crate::services::discord) fn settle_controller_terminal(
     };
     let events = terminal_events(&observation, anchor_msg_id, committed);
     process_observer().submit(AppendCommand {
+        ack: None,
         pool: observation.pool,
         events: events.clone(),
     });

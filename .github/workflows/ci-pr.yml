@@ -429,6 +429,7 @@ jobs:
               - 'src/services/stale_turn_reconciler.rs'
               - 'src/services/tmux_turn_liveness/tests_pg.rs'
               - 'src/services/tui_o/alarm.rs'
+              - 'src/services/tui_o/exact_pg_tests.rs'
               - 'src/services/turn_host_tests.rs'
               - 'src/services/turn_lifecycle.rs'
               - 'src/voice/announce_meta.rs'
@@ -872,6 +873,9 @@ jobs:
           cache-bin: false
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Ensure swap for the workspace check
+        uses: ./.github/actions/ensure-swap
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

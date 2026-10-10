@@ -1037,19 +1037,67 @@ _external_artifact_would_skip_o_writer() {
     return 0
 }
 
+_signal_release_lock_pid() {
+    local pid="$1" signal="$2" args=""
+    # A lock file can be stale or corrupt; recheck argv before every signal.
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        args=$(ps -ww -o args= -p "$pid" 2>/dev/null || true)
+    fi
+    case "$args" in
+        "$ADK_REL/bin/agentdesk dcserver"|"$ADK_REL/bin/agentdesk dcserver "*|\
+        "$ADK_REL/bin/agentdesk --json dcserver"|"$ADK_REL/bin/agentdesk --json dcserver "*)
+            kill "$signal" "$pid" 2>/dev/null ;;
+        *)
+            echo "  ⚠ Refusing signal $signal to lock PID $pid: not the release agentdesk dcserver" >&2
+            return 1 ;;
+    esac
+}
+
+_wait_release_stopped() {
+    local target="$1" pid="$2" allow_sigkill="${3:-0}" wait_secs=0 job_loaded pid_alive
+    while :; do
+        job_loaded=0
+        pid_alive=0
+        if launchctl print "$target" >/dev/null 2>&1; then job_loaded=1; fi
+        if [ -n "$pid" ] && _signal_release_lock_pid "$pid" -0; then
+            pid_alive=1
+        else
+            pid=""
+        fi
+        if [ "$job_loaded" = 0 ] && [ "$pid_alive" = 0 ]; then
+            echo "  ✓ release job unloaded and old process terminated (${wait_secs}s)"
+            return 0
+        fi
+        if [ "$wait_secs" -ge 15 ]; then
+            # Only the main stop path retains its existing SIGKILL escalation.
+            if [ "$allow_sigkill" = 1 ] && [ "$pid_alive" = 1 ] && [ "$wait_secs" -eq 15 ]; then
+                echo "  ⚠ PID $pid did not exit after 15s — checking before SIGKILL"
+                _signal_release_lock_pid "$pid" -9 || true
+                sleep 1
+                wait_secs=16
+                continue
+            fi
+            echo "  ✗ Release stop timed out for $target after ${wait_secs}s; refusing bootstrap" >&2
+            return 1
+        fi
+        sleep 1
+        wait_secs=$((wait_secs + 1))
+    done
+}
+
 # #3858: restore the last-known-good release binary and restart the service.
 # Invoked from the EXIT trap (via _cleanup_on_exit) whenever the binary was
 # promoted but the deploy never reached DEPLOY_OK — i.e. ANY non-zero exit after
 # promotion, not only the explicit health-check branch (an unguarded
 # post-promotion command failing under `set -e` is covered too). Every step
-# except the restart is best-effort so a failed re-lock can NEVER skip the
-# restart (#3858 finding 3): the service must always come back up.
+# except confirming the stop and restarting is best-effort: a failed re-lock
+# cannot skip restart, but an unfinished bootout must not race bootstrap.
 _rollback_release_binary() {
     local rel_binary="${REL_BINARY:-}"
     local rel_backup="${REL_BINARY_BACKUP:-}"
     local plist="${PLIST_REL:-}"
     local rel_port="${REL_PORT:-${AGENTDESK_REL_PORT:-${ADK_DEFAULT_PORT:-8791}}}"
-    local domain
+    local domain rollback_pid=""
 
     [ -n "$rel_binary" ] && [ -n "$plist" ] || return 0
     if [ ! -f "$rel_backup" ]; then
@@ -1106,8 +1154,17 @@ _rollback_release_binary() {
     # succeeds but process doesn't spawn, tmux fallback will restart via SSH.
     # Observed issue (#5151): explicit kickstart required after bootstrap. Scope: PG tunnel
     # only for now; release rollback suitable for future unification if measured necessary.
-    launchctl bootout "$domain/$plist" 2>/dev/null || true
+    if [ -f "$ADK_REL/runtime/dcserver.lock" ]; then
+        rollback_pid=$(cat "$ADK_REL/runtime/dcserver.lock" 2>/dev/null || true)
+    fi
+    if ! launchctl bootout "$domain/$plist"; then
+        echo "⚠ Rollback bootout failed for $domain/$plist — checking whether release stopped" >&2
+    fi
     tmux kill-session -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" 2>/dev/null || true
+    if ! _wait_release_stopped "$domain/$plist" "$rollback_pid"; then
+        echo "✗ Rollback stop was not confirmed — backup preserved; manual intervention required" >&2
+        return 0
+    fi
     # The bad binary is never locked (uchg is deferred to the success path), so
     # nouchg here is defensive. mv is an atomic same-dir rename: the backup
     # replaces the bad binary in one step — at no instant are both copies gone.
@@ -3055,23 +3112,10 @@ fi
 # Stop release only after migration and the durable persistence acknowledgement.
 echo "▸ Stopping release..."
 LAUNCHD_DOMAIN="$(_launchd_domain)"
-launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_REL" 2>/dev/null || true
-if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    echo "  waiting for PID $OLD_PID to exit..."
-    WAIT_SECS=0
-    while kill -0 "$OLD_PID" 2>/dev/null && [ "$WAIT_SECS" -lt 15 ]; do
-        sleep 1
-        WAIT_SECS=$((WAIT_SECS + 1))
-    done
-    if kill -0 "$OLD_PID" 2>/dev/null; then
-        echo "  ⚠ PID $OLD_PID did not exit after 15s — sending SIGKILL"
-        kill -9 "$OLD_PID" 2>/dev/null || true
-        sleep 1
-    fi
-    echo "  ✓ old process terminated (${WAIT_SECS}s)"
-else
-    sleep 2
+if ! launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_REL"; then
+    echo "⚠ Release bootout failed for $LAUNCHD_DOMAIN/$PLIST_REL — checking whether release stopped" >&2
 fi
+_wait_release_stopped "$LAUNCHD_DOMAIN/$PLIST_REL" "$OLD_PID" 1 || exit 1
 
 _post_deploy_smoke_log_identity_and_size() {
     local log_path="$1"
