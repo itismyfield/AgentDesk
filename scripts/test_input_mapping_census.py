@@ -5,6 +5,7 @@ This lexical census uses cfg item/module boundaries, including inline fixtures.
 It records admission syntax/lifetime, not the deferred G2 E1/E2 proof.
 """
 from collections import Counter
+import os
 from pathlib import Path
 import re
 import tempfile
@@ -19,6 +20,7 @@ D = "src/services/discord/"
 
 def cfg_test_files(files):
     # Derive exclusions from declarations, never from file/directory names.
+    files = [Path(path).resolve() for path in files]
     declarations = {
         path: inventory._module_file_declarations(path, path.read_text())
         for path in files
@@ -112,7 +114,7 @@ class Census(unittest.TestCase):
         excluded = cfg_test_files(files)
         cls.sources = {
             path.relative_to(ROOT).as_posix(): rust._production_text(path)
-            for path in files if path not in excluded
+            for path in files if path.resolve() not in excluded
         }
 
     def test_all_production_mapping_expressions_are_classified(self):
@@ -177,9 +179,11 @@ class Census(unittest.TestCase):
 
     def test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation(self):
         for path, source in self.sources.items():
-            if path.startswith(D + "input_runtime/"):
-                self.assertIsNone(re.search(r"impl\s+Ports\s+for", source), path)
-                self.assertIsNone(re.search(r"\bSupervisor\s*::\s*start\s*\(", source), path)
+            # Turn presence has its own private Ports trait.
+            if path != D + "turn_presence/activity.rs":
+                self.assertIsNone(re.search(r"\bimpl\s*(<[^>]*>)?\s*(?:[\w:]+::)?Ports\s+for", source), path)
+            self.assertIsNone(re.search(r"\bSupervisor\s*::\s*(<[^>]*>\s*::\s*)?start\s*\(", source), path)
+            self.assertEqual(len(re.findall(r"\bmapping\s*::\s*inspect\s*\(", source)), 0, path)
         helper = self.sources[D + "input_runtime/mapping.rs"]
         self.assertEqual(Counter(expressions(helper, "parents")), {"declare": 1, "iter": 1})
 
@@ -190,12 +194,54 @@ class Census(unittest.TestCase):
             fixture = root / "fixture.rs"
             parent.write_text('#[cfg(test)]\nmod fixture;\nfn live() { s.thread_parents.insert(p,t); }\n#[cfg(test)]\nmod inline { fn f() { s.thread_parents.insert(p,t); } }\n')
             fixture.write_text("fn fixture() { s.thread_parents.insert(p,t); }")
-            self.assertEqual(cfg_test_files([parent, fixture]), {fixture})
+            self.assertEqual(cfg_test_files([parent, fixture]), {fixture.resolve()})
             self.assertEqual(expressions(rust._production_text(parent)), ["insert"])
             parent.write_text("mod fixture;\n")
             self.assertEqual(cfg_test_files([parent, fixture]), set())
             parent.write_text('#[cfg(any(test, feature="live"))]\nmod fixture;\n')
             self.assertEqual(cfg_test_files([parent, fixture]), set())
+
+    def test_cfg_exclusions_resolve_symlinked_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            real = root / "real"
+            real.mkdir()
+            linked = root / "linked"
+            os.symlink(real, linked, target_is_directory=True)
+            parent = linked / "lib.rs"
+            fixture = linked / "fixture.rs"
+            parent.write_text('#[cfg(test)]\nmod fixture;\n')
+            fixture.write_text("fn fixture() { s.thread_parents.insert(p,t); }")
+            self.assertEqual(cfg_test_files([parent, fixture]), {fixture.resolve()})
+            parent.write_text("mod fixture;\n")
+            self.assertEqual(cfg_test_files([parent, fixture]), set())
+            parent.write_text('#[cfg(any(test, feature="live"))]\nmod fixture;\n')
+            self.assertEqual(cfg_test_files([parent, fixture]), set())
+
+    def test_dormant_guard_rejects_installation_in_other_sources(self):
+        guard = Census("test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation")
+        helper_path = D + "input_runtime/mapping.rs"
+        private_ports_path = D + "turn_presence/activity.rs"
+        guard.sources = {helper_path: self.sources[helper_path], private_ports_path: "impl Ports for LivePorts {}"}
+        guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
+        fixtures = [
+            "impl crate::services::discord::input_runtime::supervisor::Ports for Live {}",
+            "impl<T> input_runtime::supervisor::Ports for Live<T> {}",
+            "impl Ports for Live {}",
+            "fn activate() { input_runtime::supervisor::Supervisor :: start(); }",
+            "fn activate() { Supervisor :: <Live> :: start (); }",
+            "fn inspect() { crate::services::discord::input_runtime::supervisor::mapping :: inspect (&parents, channel); }",
+        ]
+        for source in fixtures:
+            with self.subTest(source=source):
+                guard.sources = {helper_path: self.sources[helper_path], "src/other_module.rs": source}
+                with self.assertRaises(AssertionError):
+                    guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
+        for source in fixtures[-3:]:
+            with self.subTest(private_ports_path=source):
+                guard.sources = {helper_path: self.sources[helper_path], private_ports_path: source}
+                with self.assertRaises(AssertionError):
+                    guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
 
 
 if __name__ == "__main__":
