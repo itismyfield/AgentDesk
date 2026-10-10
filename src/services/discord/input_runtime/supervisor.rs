@@ -58,12 +58,15 @@ pub(crate) struct Registry {
 struct Entry {
     poisoned: bool,
     health: BTreeMap<&'static str, String>,
+    // The first mapping violation; no report, release or poison in this process removes it.
+    latch: Option<HoldCause>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refused {
     Duplicate,
     Poisoned,
+    Latched,
 }
 
 impl Registry {
@@ -91,9 +94,10 @@ impl Registry {
         let key = (provider.as_str().to_owned(), channel);
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = entries.get(&key) {
-            return Err(match entry.poisoned {
-                true => Refused::Poisoned,
-                false => Refused::Duplicate,
+            return Err(match (entry.poisoned, entry.latch.is_some()) {
+                (true, _) => Refused::Poisoned,
+                (false, true) => Refused::Latched,
+                (false, false) => Refused::Duplicate,
             });
         }
         entries.insert(key.clone(), Entry::default());
@@ -109,9 +113,26 @@ impl Registry {
     pub(crate) fn health_reasons(&self) -> Vec<String> {
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries
-            .values()
-            .flat_map(|entry| entry.health.values().cloned())
+            .iter()
+            .flat_map(|((provider, channel), entry)| {
+                let latch = entry.latch.iter().map(|c| c.health(provider, *channel));
+                latch.chain(entry.health.values().cloned())
+            })
             .collect()
+    }
+
+    pub(crate) fn latched(&self, key: &(String, u64)) -> Option<HoldCause> {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.get(key).and_then(|entry| entry.latch.clone())
+    }
+
+    /// Keeps the first violation and returns it, so a later edge never rewrites the evidence.
+    pub(crate) fn latch(&self, key: &(String, u64), cause: HoldCause) -> HoldCause {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        match entries.get_mut(key) {
+            Some(entry) => entry.latch.get_or_insert(cause).clone(),
+            None => cause,
+        }
     }
 }
 
@@ -147,9 +168,14 @@ impl Registration {
         Ok(())
     }
 
+    pub(crate) fn latched(&self) -> Option<HoldCause> {
+        self.registry.latched(&self.key)
+    }
+
     pub(crate) fn report(&self, cause: &HoldCause, held: bool) {
         // Receipt success clears only its own marker, preserving other held stages.
         let slot = match cause {
+            HoldCause::MappingPresent(..) => return,
             HoldCause::TransitionHeld(reason)
                 if matches!(
                     *reason,
@@ -186,7 +212,10 @@ impl Registration {
         }
         drop(slot);
         let mut entries = (self.registry.entries.lock()).unwrap_or_else(|e| e.into_inner());
-        entries.remove(&self.key);
+        // A latched channel keeps its entry, so no later registration in this process bypasses it.
+        if entries.get(&self.key).is_some_and(|e| e.latch.is_none()) {
+            entries.remove(&self.key);
+        }
         drop(entries);
         #[cfg(test)]
         let observer = (self.registry.on_release.lock())
@@ -339,9 +368,8 @@ pub(crate) enum Landing {
 pub(crate) trait Ports: Send + 'static {
     type Clear: ClearHost;
     type Move: Host + Send + 'static;
-    /// Reads the actual writer map synchronously; unverified registration/provider coverage
-    /// returns Unavailable. No map reference may escape this call.
-    fn mapping(&self, channel: u64) -> mapping::Check;
+    /// The handed-over runtime views; each check reads the actual writer maps synchronously.
+    fn mapping(&self) -> mapping::Probe;
     /// Freezes the drained channel's Legacy queue.
     fn freeze(&mut self, closing: Arc<Closing>) -> Step<'_, Result<(), Failure>>;
     /// A clear host with the session transition guard its resume runs under.
@@ -422,7 +450,7 @@ impl<P: Ports> Supervisor<P> {
         let closed = self.closed;
         #[cfg(test)]
         let closed = closed && !mutant("close_allows_commit");
-        self.admitted && !closed && !self.slot.loaned()
+        self.admitted && !closed && !self.slot.loaned() && self.registration.latched().is_none()
     }
 
     pub(crate) fn pending_overflow(&self) -> ordering::PendingOverflow {
@@ -655,7 +683,7 @@ impl<P: Ports> Supervisor<P> {
             // Without ledger history the channel never left Legacy, so it simply reopens.
             (self.registration.reopened(&closing, history))
                 .map_err(|_| HoldCause::ModeRefused(reason))?;
-            return Ok(Landing::Legacy);
+            return Ok(self.returned(Landing::Legacy));
         }
         let mut attempt = 0;
         while gate.mode() == Mode::Closing && closing.drain_within(DRAIN_LIMIT).await.is_err() {
@@ -665,12 +693,10 @@ impl<P: Ports> Supervisor<P> {
             }
             tokio::time::sleep(transition::backoff(attempt - 1)).await;
         }
-        if self.config.request == Request::Ledger {
-            self.check_mapping()?;
-        }
         if gate.mode() == Mode::Closing {
             (self.ports.freeze(closing.clone()).await).map_err(|_| held("freeze"))?;
         }
+        self.check_mapping(&closing, "after_freeze")?;
         let unbound = loan(&mut self.slot, |lease| {
             Ok::<_, io::Error>(lease.get()?.rows()?.unbound().clone())
         })
@@ -687,34 +713,57 @@ impl<P: Ports> Supervisor<P> {
                 self.notify(Some(key), "unbound").await;
             }
         }
-        self.resume_clear().await?;
+        self.resume_clear(&closing).await?;
         self.transition(&closing, history).await
     }
 
-    // An unavailable lookup preserves the last mapping hold; only a fresh empty scan clears it.
-    fn check_mapping(&mut self) -> Result<(), HoldCause> {
-        let mapped = match self.ports.mapping(self.config.channel) {
-            mapping::Check::Empty => false,
-            mapping::Check::MappedThread => true,
-            mapping::Check::Unavailable => return Err(HoldCause::MappingUnavailable),
-        };
-        self.registration
-            .report(&HoldCause::MappingUnavailable, false);
-        if mapped {
-            return Err(HoldCause::MappedThread);
+    pub(crate) fn guard(&self) -> mapping::Guard {
+        mapping::Guard {
+            registry: self.registration.registry,
+            key: self.registration.key.clone(),
+            probe: self.ports.mapping(),
+            ledger: self.config.request == Request::Ledger,
         }
-        self.registration.report(&HoldCause::MappedThread, false);
-        Ok(())
+    }
+
+    /// A latched violation also holds a frozen gate, so a drained channel never stays Closing.
+    pub(crate) fn check_mapping(
+        &self,
+        closing: &Closing,
+        at: &'static str,
+    ) -> Result<(), HoldCause> {
+        let result = self.guard().check(at);
+        match &result {
+            Err(HoldCause::MappingPresent(..)) => _ = closing.hold(),
+            Ok(()) if self.config.request == Request::Ledger => self.clear_mapping_health(),
+            _ => {}
+        }
+        result
+    }
+
+    fn clear_mapping_health(&self) {
+        for cause in [HoldCause::MappingUnavailable, HoldCause::RuntimeViewPending] {
+            self.registration.report(&cause, false);
+        }
+    }
+
+    /// A real return to Legacy ends any unlatched mapping hold; a latch stays until a new process.
+    fn returned(&self, landing: Landing) -> Landing {
+        self.clear_mapping_health();
+        landing
     }
 
     /// S5: settles a clear cutoff a crash left behind before anything else touches the ledger.
-    async fn resume_clear(&mut self) -> Result<(), HoldCause> {
+    async fn resume_clear(&mut self, closing: &Closing) -> Result<(), HoldCause> {
         for retry in 0..=BUDGET {
+            self.check_mapping(closing, "before_clear")?;
             let (host, guard) = (self.ports.clear().await).ok_or(held("clear_unavailable"))?;
             let outcome =
                 (clear_loan(&mut self.slot, host, guard).await).ok_or(held("supervisor_lost"))?;
             let reset = match outcome {
-                clear::Outcome::Cleared | clear::Outcome::Idle => return Ok(()),
+                clear::Outcome::Cleared | clear::Outcome::Idle => {
+                    return self.check_mapping(closing, "after_clear");
+                }
                 clear::Outcome::Held(Unresolved::ResetUnconfirmed) => true,
                 clear::Outcome::Held(
                     Unresolved::PgUnavailable
@@ -784,18 +833,27 @@ impl<P: Ports> Supervisor<P> {
                     .map_err(|_| held("move_unavailable"))?,
             };
             let movement = self.movement.take();
-            let (mut host, movement, outcome) = loan(&mut self.slot, move |lease| {
+            let guard = self.guard();
+            let (mut host, movement, outcome, found) = loan(&mut self.slot, move |lease| {
                 let mut host = host;
-                let prepared = movement.map_or_else(|| Move::prepare(lease, &mut host), Ok);
+                let mut found = None;
+                // Each effect boundary rereads the maps, so a late edge stops the next effect.
+                let mut check = |at| {
+                    let result = guard.check(boundary(at));
+                    found = result.clone().err();
+                    result.map_err(|_| io::Error::other("mapping hold"))
+                };
+                let prepared = movement
+                    .map_or_else(|| Move::prepare_checked(lease, &mut host, &mut check), Ok);
                 let (movement, outcome) = match prepared {
                     Err(_) => (None, Outcome::Held),
                     Ok(movement) if legacy && movement.is_fresh() => (None, Outcome::Legacy),
                     Ok(mut movement) => {
-                        let outcome = movement.advance(lease, &mut host);
+                        let outcome = movement.advance_checked(lease, &mut host, &mut check);
                         (Some(movement), outcome)
                     }
                 };
-                (host, movement, outcome)
+                (host, movement, outcome, found)
             })
             .await
             .ok_or(held("supervisor_lost"))?;
@@ -804,6 +862,12 @@ impl<P: Ports> Supervisor<P> {
             }
             self.host = Some(host);
             self.movement = movement;
+            if let Some(cause) = found {
+                if matches!(cause, HoldCause::MappingPresent(..)) {
+                    let _ = closing.hold();
+                }
+                return Err(cause);
+            }
             match (outcome, legacy) {
                 (Outcome::Held, _) => self.registration.report(&held("move_held"), true),
                 (_, true) => return self.handback(closing).await,
@@ -815,7 +879,7 @@ impl<P: Ports> Supervisor<P> {
                 (Outcome::Legacy, false) => {
                     (self.registration.reopened(closing, history))
                         .map_err(|_| held("move_refused"))?;
-                    return Ok(Landing::Legacy);
+                    return Ok(self.returned(Landing::Legacy));
                 }
             }
         }
@@ -844,7 +908,7 @@ impl<P: Ports> Supervisor<P> {
         }
         self.host = Some(host);
         match outcome {
-            Ok(Outcome::Legacy) => Ok(Landing::HandedBack),
+            Ok(Outcome::Legacy) => Ok(self.returned(Landing::HandedBack)),
             _ => Err(held("handback_held")),
         }
     }
@@ -856,6 +920,16 @@ impl<P: Ports> Supervisor<P> {
         {
             self.sent.insert(episode);
         }
+    }
+}
+
+fn boundary(at: transition::Boundary) -> &'static str {
+    match at {
+        transition::Boundary::Prepare => "move_prepare",
+        transition::Boundary::Stage => "move_stage",
+        transition::Boundary::Commit => "move_commit",
+        transition::Boundary::Delete(_) => "move_delete",
+        transition::Boundary::Actor => "move_actor",
     }
 }
 

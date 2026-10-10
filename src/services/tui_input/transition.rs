@@ -58,6 +58,18 @@ pub trait Host {
     fn notice(&mut self, key: Option<u64>, reason: &'static str) -> io::Result<()>;
 }
 
+/// An effect boundary a caller's guard runs before; a refusal leaves the phase where it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Boundary {
+    Prepare,
+    Stage,
+    Commit,
+    Delete(DeletePhase),
+    Actor,
+}
+
+pub type Guard<'a> = &'a mut dyn FnMut(Boundary) -> io::Result<()>;
+
 #[derive(Clone, Copy)]
 enum Phase {
     Stage,
@@ -85,6 +97,15 @@ const DELETIONS: [DeletePhase; 4] = [
 
 impl Move {
     pub fn prepare(lease: &mut LedgerLease, host: &mut impl Host) -> io::Result<Self> {
+        Self::prepare_checked(lease, host, &mut |_| Ok(()))
+    }
+
+    pub fn prepare_checked(
+        lease: &mut LedgerLease,
+        host: &mut impl Host,
+        guard: Guard<'_>,
+    ) -> io::Result<Self> {
+        guard(Boundary::Prepare)?;
         let ledger = lease.get()?;
         let rows = ledger.rows()?;
         let inputs = match host.collect(ledger) {
@@ -201,7 +222,16 @@ impl Move {
     }
 
     pub fn advance(&mut self, lease: &mut LedgerLease, host: &mut impl Host) -> Outcome {
-        match self.try_advance(lease, host) {
+        self.advance_checked(lease, host, &mut |_| Ok(()))
+    }
+
+    pub fn advance_checked(
+        &mut self,
+        lease: &mut LedgerLease,
+        host: &mut impl Host,
+        guard: Guard<'_>,
+    ) -> Outcome {
+        match self.try_advance(lease, host, guard) {
             Ok(outcome) => outcome,
             Err(_) => {
                 // Judge the next step only from a fresh read of the durable ledger.
@@ -218,6 +248,7 @@ impl Move {
         &mut self,
         lease: &mut LedgerLease,
         host: &mut impl Host,
+        guard: Guard<'_>,
     ) -> io::Result<Outcome> {
         if let Phase::Finished(outcome) = self.phase {
             return Ok(outcome);
@@ -246,6 +277,7 @@ impl Move {
                 if staged.contains(&input.key) {
                     continue;
                 }
+                guard(Boundary::Stage)?;
                 let mut state = move_disposition(input.source, host.evidence(input)?);
                 if state == super::rows::RowState::Running
                     && serde_json::from_value::<super::rows::AttemptEvidence>(
@@ -279,6 +311,7 @@ impl Move {
                     return Err(error);
                 }
             }
+            guard(Boundary::Commit)?;
             self.phase = Phase::Commit;
             #[cfg(test)]
             if mutant("early_delete") {
@@ -307,6 +340,7 @@ impl Move {
             };
             #[cfg(not(test))]
             let index_for_effect = index;
+            guard(Boundary::Delete(DELETIONS[index_for_effect]))?;
             host.delete(DELETIONS[index_for_effect])?;
             self.phase = if index == 3 {
                 Phase::Actor
@@ -315,6 +349,7 @@ impl Move {
             };
         }
         if matches!(self.phase, Phase::Actor) {
+            guard(Boundary::Actor)?;
             host.start_actor()?;
             self.phase = Phase::Finished(Outcome::Ledger);
         }

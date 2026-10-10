@@ -348,7 +348,7 @@ impl<P: Ports> Supervisor<P> {
     /// S8: a drive over the whole binding log so far. Nothing opens before its first pass, and
     /// nothing starts before admission.
     pub(crate) fn start_drive<D: DrivePorts>(&mut self, ports: D) -> Option<Started<D>> {
-        if !self.admitted {
+        if !self.admitted || self.registration.latched().is_some() {
             return None;
         }
         let gate = fence::lookup(&self.config.provider, self.config.channel)?;
@@ -544,7 +544,12 @@ impl<P: Ports> Supervisor<P> {
         if drive.life.view().key().is_none() {
             drive.counts.held_steps += 1;
         }
+        let guard = self.guard();
         let stepped = loan(&mut self.slot, move |lease| {
+            // A late edge stops the actor before it can submit; the row keeps its responsibility.
+            if let Err(cause) = guard.check("offer") {
+                return (instance, Err(cause));
+            }
             let built = &mut instance.built;
             if built.facts.is_none() {
                 built.facts = InputFacts::open(source).ok();
@@ -561,13 +566,21 @@ impl<P: Ports> Supervisor<P> {
                 .get()
                 .and_then(|ledger| futures::executor::block_on(actor.step(ledger, fact, now)));
             lease.needs_reopen |= step.is_err();
-            (instance, step)
+            (instance, Ok(step))
         })
         .await;
         let Some((instance, step)) = stepped else {
             drive.lost = true;
             self.gate(drive, false);
             return self.registration.report(&held("supervisor_lost"), true);
+        };
+        let step = match step {
+            Ok(step) => step,
+            Err(cause) => {
+                drive.life.restore(instance);
+                self.gate(drive, false);
+                return self.registration.report(&cause, true);
+            }
         };
         let unknown = !matches!(
             instance.fact().map(|fact| &fact.state),
@@ -646,6 +659,10 @@ impl<P: Ports> Supervisor<P> {
             .is_some_and(|gate| gate.mode() == fence::Mode::Frozen);
         if ready == drive.ready && (ready || !frozen) {
             return;
+        }
+        if ready && let Err(cause) = self.check_mapping(&drive.closing, "ledger_open") {
+            drive.ready = false;
+            return self.registration.report(&cause, true);
         }
         #[cfg(test)]
         match ready {

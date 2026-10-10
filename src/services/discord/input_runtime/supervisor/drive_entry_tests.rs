@@ -47,6 +47,8 @@ struct Screen {
     latch: Mutex<Option<mpsc::Receiver<()>>>,
     entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     dropped: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    // Runs once when the drive next asks for a pane, after its gate decision.
+    on_pane: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 struct TestPane(Arc<Screen>);
@@ -100,6 +102,9 @@ impl DrivePorts for DriveFake {
     type Pane = TestPane;
     type Reactions = Self;
     fn pane(&mut self, _: &ViewKey) -> Option<TestPane> {
+        if let Some(hook) = self.0.on_pane.lock().unwrap().take() {
+            hook();
+        }
         let left = self.0.unreachable.load(Ordering::SeqCst);
         if left > 0 {
             self.0.unreachable.store(left - 1, Ordering::SeqCst);
@@ -972,4 +977,76 @@ async fn g1a_close_request_holds_gate_before_flush_ack() {
     );
     assert!(supervisor.admission_gen > generation);
     assert!(supervisor.release());
+}
+
+fn mapped_at(rig: &Rig, thread: u64, at: &'static str) -> HoldCause {
+    let edge = crate::services::discord::input_runtime::supervisor::mapping::Edge {
+        writer: "claude".into(),
+        parent: rig.channel,
+        thread,
+    };
+    HoldCause::MappingPresent(edge, at)
+}
+
+#[tokio::test]
+async fn x13_mapping_late_violation_stops_ledger_open_and_offer_in_the_drive() {
+    // An edge after admission: the first pass latches before its open, and no later pass opens.
+    let rig = Rig::new(6_325_160);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let supervisor = admitted(&rig, &[41]).await;
+    rig.world
+        .parents()
+        .insert(ChannelId::new(rig.channel), ChannelId::new(6));
+    let screen = Arc::new(Screen::default());
+    let mut driven = Driven::start(supervisor, &screen).await;
+    driven.idle(3).await;
+    let cause = mapped_at(&rig, 6, "ledger_open");
+    assert_eq!(
+        driven.supervisor.registration.latched(),
+        Some(cause.clone())
+    );
+    assert_eq!((driven.drive.counts.opens, driven.sent()), (0, 0));
+    assert_eq!(rig.gate.mode(), Mode::Held);
+    assert!(!driven.supervisor.admission_open());
+    assert_eq!(state(&rig, 41), RowState::Received);
+    let Driven {
+        mut supervisor,
+        drive,
+        ..
+    } = driven;
+    supervisor.stop_drive(drive);
+    rig.world.parents().clear();
+    assert_eq!(supervisor.boot().await, Landing::Held(cause.clone()));
+    let ports = DriveFake(screen.clone());
+    assert!(
+        supervisor.start_drive(ports).is_none(),
+        "no drive after the latch"
+    );
+    drop((supervisor, rig));
+    // An edge after the open but before the actor's step: nothing is submitted.
+    let rig = Rig::new(6_325_161);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let screen = Arc::new(Screen::default());
+    *screen.record.lock().unwrap() = Some(a.path.clone());
+    let world = rig.world.clone();
+    let channel = rig.channel;
+    *screen.on_pane.lock().unwrap() = Some(Box::new(move || {
+        world
+            .parents()
+            .insert(ChannelId::new(channel), ChannelId::new(6));
+    }));
+    let mut driven = Driven::start(admitted(&rig, &[41]).await, &screen).await;
+    driven.idle(3).await;
+    let cause = mapped_at(&rig, 6, "offer");
+    assert_eq!(driven.supervisor.registration.latched(), Some(cause));
+    assert_eq!((driven.drive.counts.opens, driven.sent()), (1, 0));
+    assert_eq!(rig.gate.mode(), Mode::Held);
+    assert_eq!(
+        state(&rig, 41),
+        RowState::Received,
+        "the row keeps its responsibility"
+    );
+    assert!(!driven.supervisor.admission_open());
 }

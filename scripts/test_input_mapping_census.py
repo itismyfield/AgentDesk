@@ -72,6 +72,7 @@ def retain_arguments(source):
 
 EXPECTED = {
     "health/snapshot.rs": {"get": 1, "iter": 2, "contains_key": 1},
+    "input_runtime/mapping.rs": {"iter": 1},
     "reaction_lifecycle.rs": {"declare": 1, "into_iter": 1, "iter": 1},
     "relay_recovery/apply.rs": {"len": 2, "retain": 1},
     "router/intake_gate.rs": {"get": 1, "remove": 1},
@@ -184,8 +185,13 @@ class Census(unittest.TestCase):
                 self.assertIsNone(re.search(r"\bimpl\s*(<[^>]*>)?\s*(?:[\w:]+::)?Ports\s+for", source), path)
             self.assertIsNone(re.search(r"\bSupervisor\s*::\s*(<[^>]*>\s*::\s*)?start\s*\(", source), path)
             self.assertEqual(len(re.findall(r"\bmapping\s*::\s*inspect\s*\(", source)), 0, path)
-        helper = self.sources[D + "input_runtime/mapping.rs"]
-        self.assertEqual(Counter(expressions(helper, "parents")), {"declare": 1, "iter": 1})
+        # The probe's only map read is one iter() inside Probe::check, over each handed-over runtime.
+        probe = re.sub(r"\s+", "", self.sources[D + "input_runtime/mapping.rs"])
+        self.assertEqual(Counter(expressions(probe)), {"iter": 1})
+        check = probe.index("pub(crate)fncheck(&self,channel:u64)->Check{")
+        read = probe.index("forsharedinruntimes{if letSome(edge)=(shared.dispatch.thread_parents.iter())".replace(" ", ""))
+        self.assertLess(check, read)
+        self.assertNotIn("fn", probe[check + len("pub(crate)fncheck"):read])
 
     def test_test_items_are_excluded_by_cfg_instead_of_filename(self):
         with tempfile.TemporaryDirectory() as directory:

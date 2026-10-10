@@ -1,14 +1,17 @@
 //! Hold causes a channel supervisor reports as health, and the Notices it sends for them.
 
 use super::fence::modes::TRANSITION_HELD;
+use super::supervisor::mapping::Edge;
 
 /// Why a supervised channel stopped short of admission; each cause owns one health line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum HoldCause {
     BindingUnreadable,
     LedgerUnreadable,
-    MappedThread,
+    /// A writer map edge at a discovery boundary; it stays until a new process rechecks.
+    MappingPresent(Edge, &'static str),
     MappingUnavailable,
+    RuntimeViewPending,
     ModeRefused(&'static str),
     TransitionHeld(&'static str),
     Unbound(Vec<u64>),
@@ -22,8 +25,9 @@ impl HoldCause {
         match self {
             Self::BindingUnreadable => "binding",
             Self::LedgerUnreadable => "ledger",
-            Self::MappedThread => "mapped_thread",
+            Self::MappingPresent(..) => "mapped_thread",
             Self::MappingUnavailable => "mapping_unavailable",
+            Self::RuntimeViewPending => "runtime_view_pending",
             Self::ModeRefused(_) => "mode",
             Self::TransitionHeld(_) => "transition",
             Self::Unbound(_) => "unbound",
@@ -38,9 +42,12 @@ impl HoldCause {
                 format!("input_reconcile_required {at} reason=binding_unreadable")
             }
             Self::LedgerUnreadable => format!("ledger_unreadable {at}"),
-            Self::MappedThread => format!("{TRANSITION_HELD} {at} reason=mapped_thread"),
-            Self::MappingUnavailable => {
-                format!("{TRANSITION_HELD} {at} reason=mapping_unavailable")
+            Self::MappingPresent(edge, boundary) => format!(
+                "{TRANSITION_HELD} {at} reason=mapped_thread writer={} parent={} thread={} at={boundary} recheck=next_boot",
+                edge.writer, edge.parent, edge.thread
+            ),
+            Self::MappingUnavailable | Self::RuntimeViewPending => {
+                format!("{TRANSITION_HELD} {at} reason={}", self.slot())
             }
             Self::ModeRefused(reason) => format!("turn_mode_refused {at} reason={reason}"),
             Self::InputHeld(reason, head, held) => {
