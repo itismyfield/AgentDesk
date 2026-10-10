@@ -12,7 +12,7 @@ pub(crate) fn run_codex_rehydrate_pass_for_tests(
         }
     }
     let _view = RestoreView(CODEX_PASS_TMUX_VIEW.replace(Some(vec![tmux_session_name.to_owned()])));
-    rehydrate_existing_codex_tui_bindings(shared);
+    let _ = rehydrate_existing_codex_tui_bindings(shared, false);
     shared
         .tmux_watchers
         .owner_channel_for_tmux_session(tmux_session_name)

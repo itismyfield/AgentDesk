@@ -1,3 +1,4 @@
+use super::codex_adoption_runtime::boot::{BootRole, record_role};
 use super::*;
 use crate::services::cluster::{home_availability, node_registry::GatewayWaiterGuard};
 
@@ -295,6 +296,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         boot_config.tui_o.as_ref(),
     );
     super::turn_presence::supervisor::register(&provider, &confirmed);
+    // Installed before the relay starts, so the first discovery pass is observed; off, `None`.
+    let adoption = super::codex_adoption_runtime::install(
+        &shared,
+        &provider,
+        &token_hash,
+        boot_config.tui_o.as_ref(),
+    );
     super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());
 
     // Phase 5.2 of intake-node-routing (issue #2009): populate
@@ -316,6 +324,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     }
 
     if !modules.gateway {
+        record_role(adoption.as_ref(), BootRole::RestWorker);
         health_registry
             .register_worker(provider.as_str().to_string(), shared.clone())
             .await;
@@ -377,6 +386,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         GatewayLeaseOutcome::Proceed(Some(acquired)) => (Some(acquired.lease), acquired.waiter),
         GatewayLeaseOutcome::Proceed(None) => (None, None),
         GatewayLeaseOutcome::Standby => {
+            record_role(adoption.as_ref(), BootRole::Standby);
             // Standby can execute full turns through the intake worker. Always
             // register its SharedData so detailed health proves either the real
             // active state or an explicit idle provider entry. This also makes
@@ -407,6 +417,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         }
     };
 
+    record_role(adoption.as_ref(), BootRole::Gateway);
     // Register and fence the gateway runtime before it can admit intake-worker
     // work. The poise setup callback no longer owns marker-poller startup.
     health_registry

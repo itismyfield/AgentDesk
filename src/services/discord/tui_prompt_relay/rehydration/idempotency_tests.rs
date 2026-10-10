@@ -328,7 +328,9 @@ fn entry_pass_recoveries(shared: &Arc<SharedData>) -> usize {
         .with_writer(sink.clone())
         .finish();
     crate::logging::test_capture::pin_callsite_interest();
-    tracing::subscriber::with_default(subscriber, || rehydrate_existing_codex_tui_bindings(shared));
+    tracing::subscriber::with_default(subscriber, || {
+        let _ = rehydrate_existing_codex_tui_bindings(shared, false);
+    });
     String::from_utf8(sink.0.lock().unwrap().clone())
         .unwrap()
         .matches("rehydrated Codex TUI direct relay binding from live rollout")
