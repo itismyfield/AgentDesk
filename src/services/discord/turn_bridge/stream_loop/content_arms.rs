@@ -423,21 +423,16 @@ pub(super) async fn handle_stream_content_message(
         StreamContentArmMessage::Error { message, stderr } => {
                             let is_stale_resume =
                                 stream_error_has_stale_resume_error(&message, &stderr);
-                            // A protected attempt is judged before provider recovery, presentation or reset.
+                            // A protected attempt is judged before provider recovery, presentation or reset; a held body stays.
                             let ordinary = crate::services::discord::replay_policy::error_is_ordinary(shared_owned.pg_pool.as_ref(), ctx.cancel_token, inflight_state, is_stale_resume).await;
                             recovery_retry = recovery_retry || (ordinary && super::provider_recovery::on_error(&shared_owned, &provider, channel_id, ctx.recovery_lease, expected_identity, inflight_state, !done, any_tool_used || !active_background_child_session_ids.is_empty(), &full_response, &message, &stderr).await);
-                            let session_reset_required = ordinary
-                                && stream_error_requires_terminal_session_reset(&message, &stderr);
+                            let session_reset_required = ordinary && stream_error_requires_terminal_session_reset(&message, &stderr);
                             let error_resolution = resolve_tui_error(&provider, &message, &stderr);
                             tui_error_classification =
                                 error_resolution.tui_error_classification;
                             transport_error = !recovery_retry;
                             match error_resolution.presentation {
-                                // A held protected body stays; its stale resume waits for the exact decision.
-                                _ if !ordinary => {
-                                    transport_error &= !is_stale_resume;
-                                    resume_failure_detected |= is_stale_resume;
-                                }
+                                _ if !ordinary => { transport_error &= !is_stale_resume; resume_failure_detected |= is_stale_resume; }
                                 ProviderErrorPresentation::PromptTooLong(guidance) => {
                                     // Prompt too long is not a terminal failure — user can retry
                                     // with a shorter message or /compact. Don't mark as transport error.
@@ -455,14 +450,8 @@ pub(super) async fn handle_stream_content_message(
                                 }
                             }
                             if ordinary {
-                                sync_terminal_error_delivery_state_for_bridge_owner(
-                                    &full_response,
-                                    &mut response_sent_offset,
-                                    &mut bridge_confirmed_response_sent_offset,
-                                    inflight_state,
-                                    channel_id,
-                                    watcher_owns_assistant_relay && watcher_relay_available_for_turn,
-                                );
+                                sync_terminal_error_delivery_state_for_bridge_owner(&full_response, &mut response_sent_offset, &mut bridge_confirmed_response_sent_offset,
+                                    inflight_state, channel_id, watcher_owns_assistant_relay && watcher_relay_available_for_turn);
                             }
                             push_transcript_event(
                                 &mut transcript_events,

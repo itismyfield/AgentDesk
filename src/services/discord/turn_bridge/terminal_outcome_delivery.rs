@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use super::intake_settlement;
 use super::output_lifecycle::BridgeOutputOwner;
-use super::retry_state::{StaleRetry, StaleRetryState, retry_stale_resume};
 use super::stream_tick::{
     LongRunningPlaceholderActive, PendingLongRunningOpenAfterStateSave,
     PendingLongRunningRetargetAfterStateSave,
@@ -284,8 +283,8 @@ pub(super) async fn run_terminal_outcome_delivery(
                 "  [{ts}] ⚠ Resume failed (error in response), clearing session_id (channel {})",
                 channel_id
             );
-            retry_stale_resume(
-                StaleRetry {
+            retry_state::retry_stale_resume(
+                retry_state::StaleRetry {
                     shared: &shared_owned,
                     gateway: &gateway,
                     cancel_token: &cancel_token,
@@ -295,7 +294,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                     user_text: &user_text_owned,
                     reason: "resume failed in response output",
                 },
-                StaleRetryState {
+                retry_state::StaleRetryState {
                     full_response: &mut full_response,
                     new_session_id: &mut new_session_id,
                     new_raw_provider_session_id: &mut new_raw_provider_session_id,
@@ -770,19 +769,12 @@ pub(super) async fn run_terminal_outcome_delivery(
         epilogue_response = Some((delivery_response, spoken_delivery_response));
     }
     if let Some((delivery_response, spoken_delivery_response)) = epilogue_response {
-        // A protected request settles its dispatch only after an ordinary classification.
-        let pool = shared_owned.pg_pool.as_ref();
-        let replay_ordinary = crate::services::discord::replay_policy::ordinary_outcome(
-            pool,
-            &cancel_token,
-            &inflight_state,
-        )
-        .await;
         handle_delivery_epilogue(
             DeliveryEpilogueMessage::PostCommit,
             DeliveryEpilogueContext {
                 shared_owned: &shared_owned,
                 gateway: &gateway,
+                cancel_token: &cancel_token,
                 provider: &provider,
                 channel_id,
                 user_msg_id,
@@ -809,10 +801,8 @@ pub(super) async fn run_terminal_outcome_delivery(
                 already_receipted,
                 terminal_body_visible,
                 preserve_inflight_for_cleanup_retry,
-                should_complete_work_dispatch_after_delivery:
-                    should_complete_work_dispatch_after_delivery && replay_ordinary,
-                should_fail_dispatch_after_delivery: should_fail_dispatch_after_delivery
-                    && replay_ordinary,
+                should_complete_work_dispatch_after_delivery,
+                should_fail_dispatch_after_delivery,
                 bridge_relay_delegated_to_watcher,
                 watcher_delivery_pin: ctx.watcher_delivery_pin.as_ref(),
                 inflight_generation,
