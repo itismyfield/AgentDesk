@@ -438,9 +438,8 @@ async fn stale_after_text_preserves_body_without_replay_pg() {
     }
 }
 
-// A complete observation with no activity is the only stale resume that retries, and only
-// through its exact continuation: no reset, kill, session clear or legacy history retry. A
-// later error in the same turn cannot classify it ordinary before that decision.
+// Only a quiet complete attempt retries, through its exact continuation alone: no reset, kill,
+// session clear or legacy retry, and a later error in the turn cannot classify it ordinary.
 #[tokio::test]
 async fn stale_no_effect_attempt_retries_only_through_its_exact_permit_pg() {
     let facts = seen(&[Seen::Terminal(TerminalKind::Error)]);

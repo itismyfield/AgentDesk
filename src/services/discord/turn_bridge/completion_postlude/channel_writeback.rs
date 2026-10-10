@@ -15,10 +15,10 @@
 //!
 //! # Isolation invariant (single source of truth)
 //!
-//! `run_completion_postlude` combines scheduled-snapshot isolation, a fresh
-//! `ChannelEpisodeScope` decision and the replay policy. A turn whose session key is
-//! isolated, whose mailbox is foreign, whose ownership is unprovable, or whose
-//! protected request is held or unclassified must produce ZERO
+//! `run_completion_postlude` combines scheduled-snapshot isolation with a fresh
+//! `ChannelEpisodeScope` decision. A turn whose session key is isolated, whose
+//! mailbox is foreign, whose ownership is unprovable, or whose protected request
+//! is held or unclassified by the replay policy must produce ZERO
 //! channel-scoped side-effects that a LATER LIVE TURN can observe. Every such
 //! effect is gated on the combined `channel_effects_suppressed` predicate:
 //!   1. sessions-map writeback — provider `session_id` + history into
