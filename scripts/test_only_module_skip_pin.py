@@ -658,6 +658,8 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/runtime_bootstrap/boot_retirement/completion.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/publication.rs",
         "src/services/discord/watchers/lifecycle/o_only_install.rs",
+        "src/services/discord/inflight/o_seed_observation.rs",
+        "src/services/discord/tmux_watcher/turn_stream_collector/observations.rs",
     }
 )
 

@@ -15,6 +15,10 @@ mod entry;
 use self::entry::WatcherLegacyMode;
 pub(in crate::services::discord) use self::entry::tmux_output_watcher;
 
+#[path = "tmux_watcher/legacy_state.rs"]
+mod legacy_state;
+use self::legacy_state::*;
+
 #[path = "tmux_watcher/liveness.rs"]
 pub(in crate::services::discord) mod liveness;
 
@@ -232,12 +236,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             crate::services::provider::ProviderKind::Claude,
             String::new(),
         ));
-    let legacy_mode = WatcherLegacyMode::for_channel(&watcher_provider, channel_id);
-    #[cfg(test)]
-    crate::services::discord::inflight::o_seed_observation::watcher_initialized(
-        &watcher_provider,
-        channel_id.get(),
-    );
+    let legacy_mode = initialize_watcher_mode(&watcher_provider, channel_id);
     let Some(mut cancellation_custody) = cancel_handoff::Custody::acquire(
         &shared,
         channel_id,
@@ -290,19 +289,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     let mut active_stream_inflight_reacquire_logged = false;
     let mut completion_footer_idle = WatcherCompletionFooterIdleState::default();
     let mut completion_footer_spin_idx: usize = 0;
-    #[cfg(test)]
-    if !legacy_mode.is_legacy() && restored_turn.is_some() {
-        crate::services::discord::inflight::o_seed_observation::record_event(
-            &watcher_provider,
-            channel_id.get(),
-            "restored_turn_argument_rejected",
-        );
-    }
-    let mut restored_turn = if legacy_mode.is_legacy() {
-        restored_turn
-    } else {
-        None
-    };
+    let mut restored_turn =
+        mode_restored_turn(legacy_mode, restored_turn, &watcher_provider, channel_id);
     // #3107 codex re-review (P2#3, F3): the #3099 hourglass anchor
     // (`injected_prompt_message_id`) pinned by the restored turn, captured ONCE
     // up front before `restored_turn` is consumed by the streaming path's
@@ -495,40 +483,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &mut render_seed_state,
         )
         .await;
-        let checkpoint_row = legacy_mode
-            .is_legacy()
-            .then(|| {
-                crate::services::discord::inflight::load_inflight_state(
-                    &watcher_provider,
-                    channel_id.get(),
-                )
-            })
-            .flatten()
-            .filter(|row| {
-                turn_parse_state
-                    .watcher_turn_identity
-                    .as_ref()
-                    .is_some_and(|identity| identity.matches_state(row))
-                    && row.turn_nonce == watcher_turn_nonce
-            });
+        let checkpoint_row = checkpoint_row(&poll_context, &turn_parse_state, &watcher_turn_nonce);
         let checkpoint_turn = match &collection_outcome {
             CollectOutcome::Fallthrough(turn) => Some(turn),
             _ => None,
         };
         #[cfg(test)]
-        if let Some(turn) = checkpoint_turn {
-            crate::services::discord::inflight::o_seed_observation::record_parser_response(
-                &watcher_provider,
-                channel_id.get(),
-                &turn.full_response,
-            );
-        }
-        #[cfg(test)]
-        crate::services::discord::inflight::o_seed_observation::record_event(
-            &watcher_provider,
-            channel_id.get(),
-            "checkpoint",
-        );
+        record_checkpoint(&poll_context, checkpoint_turn);
         cancellation_custody.checkpoint(
             &turn_parse_state,
             &supervisor_relay_state,
@@ -2585,15 +2546,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
     // Publish custody before the old task's independently fenced registry cleanup.
     drop(cancellation_custody);
-    // Rowless cancellation releases only its own registry slot; Legacy teardown reads rows.
-    if !legacy_mode.is_legacy() {
-        shared
-            .tmux_watchers
-            .remove_tmux_session_if_current(&tmux_session_name, &cancel);
-        tracing::info!(
-            instance = watcher_instance_id,
-            "tmux watcher stopped for #{tmux_session_name}"
-        );
+    if rowless_exit(&poll_context, &cancel) {
         return;
     }
     // #4229 S5: post-stream-exit finalize tail moved verbatim to tmux_watcher/post_stream_exit.rs.
@@ -2612,3 +2565,5 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 #[cfg(test)]
 #[path = "tmux_watcher/tests.rs"]
 mod tests;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use self::tests::streaming_harness_tests::cancel_for_test;

@@ -6,17 +6,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 mod provider_output_guard;
 use provider_output_guard::{guard_rollover, guard_streaming_frame};
-const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StreamingStatusTickOutcome {
-    ContinueStreamingLoop,
-    Fallthrough,
-}
-
 #[path = "streaming_status_tick/types.rs"]
 mod types;
 pub(super) use types::*;
+
+#[path = "streaming_status_tick/legacy_state.rs"]
+mod legacy_state;
 
 #[path = "streaming_status_tick/existing_panel_update.rs"]
 mod existing_panel_update;
@@ -184,13 +179,7 @@ pub(super) async fn update_streaming_status_tick(
         // Headless silent trigger (metadata.silent=true): skip both
         // status-panel and streaming-chunk edits to keep the channel
         // at zero bytes for the assistant turn.
-        let streaming_silent_turn = ctx.legacy_mode.is_legacy()
-            && crate::services::discord::inflight::load_inflight_state(
-                &watcher_provider,
-                channel_id.get(),
-            )
-            .map(|state| state.silent_turn)
-            .unwrap_or(false);
+        let streaming_silent_turn = legacy_state::streaming_silent_turn(ctx);
         if streaming_silent_turn {
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
@@ -269,12 +258,7 @@ pub(super) async fn update_streaming_status_tick(
         } else {
             None
         };
-        let inflight_missing_for_streaming = ctx.legacy_mode.is_legacy()
-            && crate::services::discord::inflight::load_inflight_state(
-                &watcher_provider,
-                channel_id.get(),
-            )
-            .is_none();
+        let inflight_missing_for_streaming = legacy_state::inflight_missing_for_streaming(ctx);
         // #3107: lazy pane-capture probe — only when inflight is
         // missing (expensive signal stays off the hot path).
         let pane_actively_streaming_for_streaming = inflight_missing_for_streaming
@@ -862,17 +846,11 @@ pub(super) async fn update_streaming_status_tick(
 
         // #3805 P2 (PR-D): re-anchor the stranded panel below a rollover tail; OFF-inert.
         let two_message_panel_enabled = shared.ui.two_message_panel_enabled;
-        let inflight_for_reanchor = if ctx.legacy_mode.is_legacy()
-            && two_message_panel_enabled
-            && watcher_did_rollover_this_interval
-        {
-            crate::services::discord::inflight::load_inflight_state(
-                &watcher_provider,
-                channel_id.get(),
-            )
-        } else {
-            None
-        };
+        let inflight_for_reanchor = legacy_state::reanchor_inflight(
+            ctx,
+            two_message_panel_enabled,
+            watcher_did_rollover_this_interval,
+        );
         if ctx.legacy_mode.is_legacy()
             && watcher_did_rollover_this_interval
             && watcher_two_message_should_reanchor_panel_on_rollover(

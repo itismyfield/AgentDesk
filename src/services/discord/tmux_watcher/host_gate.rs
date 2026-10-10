@@ -117,10 +117,8 @@ fn retired_tmux_evidence(
     SourceFileIdentity,
 )> {
     use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
-    use crate::services::session_host::HostKind;
-    use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
     if host.refresh_sync(name) != WatchHost::Legacy
-        || read_host_kind_marker(name) != HostKindMarker::Known(HostKind::Tmux)
+        || !crate::services::discord::inflight::tmux_marker_is_known(name)
     {
         return None;
     }

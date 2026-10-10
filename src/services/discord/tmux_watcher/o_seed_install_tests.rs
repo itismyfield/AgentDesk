@@ -189,7 +189,7 @@ pub(super) fn spawn_legacy(
 
 pub(super) async fn cancel_join(handle: &crate::services::discord::TmuxWatcherHandle) {
     let ticket = watcher_completion::observe(&handle.cancel).expect("observed predecessor");
-    handle.cancel.store(true, Ordering::Release);
+    cancel_for_test(&handle.cancel, Ordering::Release);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(10), ticket.wait())
             .await

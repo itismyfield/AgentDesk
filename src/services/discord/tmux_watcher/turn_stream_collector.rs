@@ -14,25 +14,12 @@ use chunk_forward::{forward_turn_chunk_to_supervisor_relay, forwarded_chunk};
 mod state;
 pub(super) use state::*;
 
-pub(super) async fn collect_turn_stream_until_terminal(
-    ctx: &TurnStreamCollectorContext,
-    io: TurnStreamCollectorIo,
-    parser: &mut TurnParseState<'_>,
-    relay: &mut SupervisorRelayState<'_>,
-    monitor: &mut MonitorAutoTurnState,
-    render_seed: &mut RenderSeedState,
-) -> CollectOutcome {
-    // Keep the collector's state on the heap instead of embedding its large future in callers.
-    Box::pin(collect_turn_stream_body(
-        ctx,
-        io,
-        parser,
-        relay,
-        monitor,
-        render_seed,
-    ))
-    .await
-}
+#[path = "turn_stream_collector/entry.rs"]
+mod entry;
+#[cfg(test)]
+#[path = "turn_stream_collector/observations.rs"]
+mod o_test;
+pub(super) use entry::collect_turn_stream_until_terminal;
 
 async fn collect_turn_stream_body(
     ctx: &TurnStreamCollectorContext,
@@ -43,8 +30,6 @@ async fn collect_turn_stream_body(
     render_seed: &mut RenderSeedState,
 ) -> CollectOutcome {
     let mut continuation = parser.continuation.take();
-    // A terminal already parsed by the outgoing task goes through the ordinary
-    // receipt/lease path. EOF is not a new terminal and no frame is forwarded twice.
     if continuation.as_ref().is_some_and(|turn| turn.found_result) {
         return CollectOutcome::Fallthrough(continuation.take().unwrap());
     }
@@ -234,13 +219,6 @@ async fn collect_turn_stream_body(
         )
         .await
     };
-    // #3805 P2 (PR-C): this turn's status-panel generation epoch, SEEDED from
-    // the on-disk row so a restart re-hydrating an existing panel carries the
-    // SAME epoch it was created with (a stale-epoch completion is thus never
-    // falsely skipped). The two-message create bumps it (opens the epoch on a
-    // fresh bind); the completion guard proves it against the on-disk epoch.
-    // Inert on the default-OFF path (stays 0) and while no mid-turn re-anchor
-    // exists yet (PR-D) — this turn's epoch always equals the on-disk epoch.
     let mut this_turn_status_panel_generation: u64 = startup_inflight_snapshot
         .as_ref()
         .map(|state| state.status_panel_generation)
@@ -361,11 +339,7 @@ async fn collect_turn_stream_body(
     macro_rules! ensure_monitor_auto_turn_inflight_now {
         () => {
             #[cfg(test)]
-            crate::services::discord::inflight::o_seed_observation::record_event(
-                &watcher_provider,
-                channel_id.get(),
-                "monitor_upsert_call",
-            );
+            o_test::upsert(watcher_provider.clone(), channel_id);
             let _ = ensure_monitor_auto_turn_inflight(
                 &shared,
                 &watcher_provider,
@@ -399,24 +373,7 @@ async fn collect_turn_stream_body(
         Some(turn_terminal_start_offset),
     );
     #[cfg(test)]
-    if !full_response.is_empty() {
-        crate::services::discord::inflight::o_seed_observation::record_parser_response(
-            &watcher_provider,
-            channel_id.get(),
-            &full_response,
-        );
-    }
-    // #3041 P1-3 (Part a, B1): DEFERRED forward of the outer-read chunk. We now
-    // know — from `initial_outcome.found_result` — whether THIS chunk is the
-    // RESULT-bearing (terminal) one. If so, forward it as a TERMINAL frame
-    // carrying the commit fence (`terminal_event_consumed_offset(..)` + the
-    // pinned turn identity loaded at turn start), so the SAME frame that
-    // triggers the sink's terminal delivery carries the consumed_end + identity
-    // (FIFO single-task: a separate later frame would arrive after the sink
-    // already dispatched). Non-terminal chunks forward exactly as before (no
-    // fence, no streaming-latency change beyond the synchronous parse reorder).
-    // The ACK target is captured from THIS forward, so the watcher's wait now
-    // correlates to the terminal frame's sequence (more precise).
+    o_test::response_outer(watcher_provider.clone(), channel_id, full_response.clone());
     let initial_chunk_forward = forwarded_chunk(
         &decoded_data.text,
         initial_buffer_len,
@@ -526,16 +483,7 @@ async fn collect_turn_stream_body(
         );
     }
     #[cfg(test)]
-    if matches!(
-        task_notification_kind,
-        Some(TaskNotificationKind::MonitorAutoTurn)
-    ) {
-        crate::services::discord::inflight::o_seed_observation::record_event(
-            &watcher_provider,
-            channel_id.get(),
-            "monitor_initial_candidate",
-        );
-    }
+    o_test::initial(watcher_provider.clone(), channel_id, task_notification_kind);
     if ctx.legacy_mode.is_legacy()
         && !monitor_auto_turn_claimed
         && !cancel.load(Ordering::Acquire)
@@ -545,11 +493,7 @@ async fn collect_turn_stream_body(
         )
     {
         #[cfg(test)]
-        crate::services::discord::inflight::o_seed_observation::record_event(
-            &watcher_provider,
-            channel_id.get(),
-            "monitor_start_call",
-        );
+        o_test::start(watcher_provider.clone(), channel_id);
         let start = start_monitor_auto_turn_when_available(
             &shared,
             &watcher_provider,
@@ -586,8 +530,6 @@ async fn collect_turn_stream_body(
         }
     }
 
-    // Keep reading until result or timeout
-    // Check if a Discord turn claimed this data since our epoch snapshot
     let epoch_changed = pause_epoch.load(Ordering::Relaxed) != epoch_snapshot;
     let mut was_paused = paused.load(Ordering::Relaxed) || epoch_changed;
     if was_paused && !monitor_auto_turn_deferred && !cancel.load(Ordering::Acquire) {
@@ -718,11 +660,11 @@ async fn collect_turn_stream_body(
                         Some(turn_terminal_start_offset),
                     );
                     #[cfg(test)]
-                    if !full_response.is_empty() {
-                        crate::services::discord::inflight::o_seed_observation::record_parser_response(
-                            &watcher_provider, channel_id.get(), &full_response,
-                        );
-                    }
+                    o_test::response_inner(
+                        watcher_provider.clone(),
+                        channel_id,
+                        full_response.clone(),
+                    );
                     // #3041 P1-3 (Part a, B1): deferred forward of THIS streaming
                     // chunk. `outcome.found_result` now tells us whether this is
                     // the RESULT-bearing chunk; if so it rides a TERMINAL frame
@@ -806,16 +748,7 @@ async fn collect_turn_stream_body(
                     assistant_text_seen |= outcome.assistant_text_seen;
                     fresh_assistant_text_seen |= outcome.assistant_text_seen;
                     #[cfg(test)]
-                    if matches!(
-                        task_notification_kind,
-                        Some(TaskNotificationKind::MonitorAutoTurn)
-                    ) {
-                        crate::services::discord::inflight::o_seed_observation::record_event(
-                            &watcher_provider,
-                            channel_id.get(),
-                            "monitor_inner_candidate",
-                        );
-                    }
+                    o_test::inner(watcher_provider.clone(), channel_id, task_notification_kind);
                     if ctx.legacy_mode.is_legacy()
                         && matches!(
                             task_notification_kind,
@@ -824,11 +757,7 @@ async fn collect_turn_stream_body(
                     {
                         if !monitor_auto_turn_claimed {
                             #[cfg(test)]
-                            crate::services::discord::inflight::o_seed_observation::record_event(
-                                &watcher_provider,
-                                channel_id.get(),
-                                "monitor_start_call",
-                            );
+                            o_test::start(watcher_provider.clone(), channel_id);
                             let start = start_monitor_auto_turn_when_available(
                                 &shared,
                                 &watcher_provider,
@@ -875,11 +804,7 @@ async fn collect_turn_stream_body(
                 }
                 Ok(Ok(Ok((_, off, _)))) => {
                     #[cfg(test)]
-                    crate::services::discord::inflight::o_seed_observation::record_event(
-                        &watcher_provider,
-                        channel_id.get(),
-                        "inner_eof",
-                    );
+                    o_test::eof(watcher_provider.clone(), channel_id);
                     current_offset = off;
                     if should_probe_tmux_liveness(
                         last_liveness_probe_at.elapsed(),
@@ -995,13 +920,13 @@ async fn collect_turn_stream_body(
                                     "  [{ts}] 👁 watcher observed fresh ready-for-input idle for {tmux_session_name} at offset {current_offset}; leaving session untouched"
                                 );
                                 #[cfg(test)]
-                                crate::services::discord::inflight::o_seed_observation::record_event(&watcher_provider, channel_id.get(), "fresh_idle_classified");
+                                o_test::fresh_idle(watcher_provider.clone(), channel_id);
                                 fresh_ready_for_input_idle = true;
                                 break;
                             }
                             crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout => {
                                 #[cfg(test)]
-                                crate::services::discord::inflight::o_seed_observation::record_event(&watcher_provider, channel_id.get(), "post_work_idle_classified");
+                                o_test::post_work_idle(watcher_provider.clone(), channel_id);
                                 if !ctx.legacy_mode.is_legacy() {
                                     continue;
                                 }

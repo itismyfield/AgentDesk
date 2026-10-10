@@ -7,84 +7,9 @@ use crate::services::discord::tmux::tmux_output_stream::watcher_source_witness;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct WatcherSourceAuthority {
-    pub(super) source_file: crate::services::cluster::stream_relay::SourceFileIdentity,
-    pub(super) generation_mtime_ns: i64,
-    pub(super) reset_incarnation: u64,
-    pub(super) source_stamp: Option<crate::services::cluster::stream_relay::SourceStamp>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PollOutcome {
-    ContinueWatcherLoop,
-    /// #4911 R10: the 20 MB cap rewrote the jsonl from its head, so every byte
-    /// still pending in the watcher's accumulation buffer belongs to a coordinate
-    /// space that no longer exists. The root must drop that buffer before the next
-    /// poll, otherwise pre-rotation bytes would be delivered under the NEW source
-    /// incarnation captured after the rewrite.
-    DiscardPendingBufferAndContinue,
-    BreakWatcherLoop,
-    OutputReady {
-        data: Vec<u8>,
-        data_start_offset: u64,
-        epoch_snapshot: u64,
-        source_authority: WatcherSourceAuthority,
-    },
-}
-
-pub(super) struct PollWatcherContext<'a> {
-    pub(super) http: &'a Arc<serenity::Http>,
-    pub(super) shared: &'a Arc<SharedData>,
-    pub(super) channel_id: ChannelId,
-    pub(super) watcher_provider: &'a ProviderKind,
-    pub(super) tmux_session_name: &'a str,
-    pub(super) output_path: &'a str,
-    pub(super) watcher_thread_channel_id: Option<u64>,
-    pub(super) watcher_instance_id: u64,
-    pub(super) host: &'a Arc<HostSnapshot>,
-    pub(super) legacy_mode: WatcherLegacyMode,
-}
-
-pub(super) struct PollWatcherControls<'a> {
-    pub(super) cancel: &'a Arc<AtomicBool>,
-    pub(super) paused: &'a Arc<AtomicBool>,
-    pub(super) resume_offset: &'a Arc<std::sync::Mutex<Option<u64>>>,
-    pub(super) pause_epoch: &'a Arc<AtomicU64>,
-    pub(super) turn_delivered: &'a Arc<AtomicBool>,
-    pub(super) last_heartbeat_ts_ms: &'a Arc<AtomicI64>,
-    pub(super) jsonl_notify: &'a Arc<tokio::sync::Notify>,
-    pub(super) dead_marker_notify: &'a Arc<tokio::sync::Notify>,
-}
-
-pub(super) struct RelayOffsetState<'a> {
-    pub(super) current_offset: &'a mut u64,
-    pub(super) terminal_delivery_observed: &'a mut bool,
-    pub(super) last_relayed_offset: &'a mut Option<u64>,
-    pub(super) last_observed_generation_mtime_ns: &'a mut Option<i64>,
-    pub(super) rotation_tick: &'a mut u32,
-    pub(super) watcher_turn_identity:
-        &'a mut Option<crate::services::discord::inflight::InflightTurnIdentity>,
-    pub(super) watcher_turn_nonce: &'a mut Option<String>,
-}
-
-pub(super) struct LoopPollState<'a> {
-    pub(super) retained_source: &'a mut Option<std::sync::Arc<std::fs::File>>,
-    pub(super) prompt_too_long_killed: bool,
-    pub(super) all_data: &'a String,
-    pub(super) utf8_decoder: &'a mut Utf8ChunkDecoder,
-    pub(super) completion_footer_idle: &'a mut WatcherCompletionFooterIdleState,
-    pub(super) last_activity_heartbeat_at: &'a mut Option<std::time::Instant>,
-}
-
-pub(super) struct PostTerminalState<'a> {
-    pub(super) turn_result_relayed: bool,
-    pub(super) post_terminal_continuation_logged: &'a mut bool,
-    pub(super) last_post_terminal_suppressed_range: &'a mut Option<(u64, u64)>,
-    pub(super) active_stream_inflight_reacquire_logged: &'a mut bool,
-    pub(super) restored_turn: &'a Option<RestoredWatcherTurn>,
-    pub(super) restored_injected_prompt_message_id: Option<u64>,
-}
+#[path = "loop_poll_prologue/types.rs"]
+mod types;
+pub(super) use types::*;
 
 pub(super) async fn poll_watcher_output_or_continue(
     context: &PollWatcherContext<'_>,

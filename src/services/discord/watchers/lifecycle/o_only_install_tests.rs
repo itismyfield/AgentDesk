@@ -106,7 +106,10 @@ impl InstallFixture {
     pub async fn cancel_and_join(&self) {
         let handle = self.handle();
         let ticket = watcher_completion::observe(&handle.cancel).expect("observed task registered");
-        handle.cancel.store(true, Ordering::SeqCst);
+        crate::services::discord::tmux::tmux_watcher::cancel_for_test(
+            &handle.cancel,
+            Ordering::SeqCst,
+        );
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(8), ticket.wait())
                 .await

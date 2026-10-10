@@ -479,7 +479,7 @@ impl Harness {
     /// Cancels the running watcher, if any.
     pub(super) fn cancel(&self) {
         if let Some(watcher) = self.watcher.as_ref() {
-            watcher.cancel.store(true, Ordering::Release);
+            cancel_for_test(&watcher.cancel, Ordering::Release);
         }
     }
 
@@ -645,4 +645,8 @@ impl Harness {
         }
         observed
     }
+}
+
+pub(in crate::services::discord) fn cancel_for_test(cancel: &Arc<AtomicBool>, ordering: Ordering) {
+    cancel.store(true, ordering);
 }
