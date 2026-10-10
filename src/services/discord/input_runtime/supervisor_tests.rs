@@ -917,6 +917,41 @@ async fn unbound_keys_are_reported_before_a_crash_left_clear_resumes() {
 
 #[tokio::test]
 async fn unused_registry_leaves_health_to_the_fence() {
+    if std::env::var("ADK_G1A_OFF_CHILD").as_deref() != Ok("1") {
+        let name = format!(
+            "{}::unused_registry_leaves_health_to_the_fence",
+            module_path!()
+        );
+        let name = name.split_once("::").unwrap().1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--nocapture", "--test-threads=1"])
+            .env("ADK_G1A_OFF_CHILD", "1")
+            .output()
+            .unwrap();
+        let result = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{result}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(result.contains("1 passed; 0 failed; 0 ignored"), "{result}");
+        return;
+    }
+    let unused = sandbox();
+    if mutant("off_register") {
+        let registration = REGISTRY
+            .register(&ProviderKind::Claude, 6_325_717, unused.path())
+            .unwrap();
+        drop(registration);
+    }
+    let before = super::super::health_reasons();
+    assert!(before.is_empty());
+    assert!(fence::lookup(&ProviderKind::Claude, 6_325_717).is_none());
+    assert!(!fence::modes::order_barrier(
+        &ProviderKind::Claude,
+        6_325_717
+    ));
+    assert!(!unused.path().join("input_ledger").exists());
     assert!(
         !REGISTRY.used(),
         "no test or production path registers globally"
