@@ -65,6 +65,8 @@ pub(crate) struct Attribution {
     pub(crate) unattributed: BTreeSet<u64>,
     /// The payload under a footer that is not this piece's intact marker.
     pub(crate) damaged: BTreeSet<u64>,
+    /// A marker-like footer this build cannot read, such as an older format: never absence.
+    pub(crate) unreadable: BTreeSet<u64>,
 }
 
 impl Attribution {
@@ -74,6 +76,7 @@ impl Attribution {
             && self.recorded.is_empty()
             && self.unattributed.is_empty()
             && self.damaged.is_empty()
+            && self.unreadable.is_empty()
     }
 
     /// Distinct ids known to be this piece's messages.
@@ -91,6 +94,26 @@ fn carries(footer: &str, marker: &str) -> bool {
     footer
         .strip_suffix(marker)
         .is_some_and(|rest| rest.ends_with(' '))
+}
+
+/// `Some(true)` when the footer carries a well-formed marker of `channel`, `Some(false)` when it
+/// carries something marker-like that is not, `None` when it claims no marker.
+fn marker_claim(footer: &str, channel: u64) -> Option<bool> {
+    let at = match footer.find(" o:") {
+        Some(space) => space + 1,
+        None => footer.starts_with("o:").then_some(0)?,
+    };
+    let rest = footer[at..].strip_prefix(&format!("o:{channel}:"));
+    let readable = rest.and_then(|rest| {
+        let (fields, index) = rest.rsplit_once('#')?;
+        let mut fields = fields.splitn(3, ':');
+        let (provider, kind, native) = (fields.next()?, fields.next()?, fields.next()?);
+        let digits = !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit());
+        let named =
+            ["claude", "codex"].contains(&provider) && ["body", "tool_result"].contains(&kind);
+        (digits && named && !native.is_empty()).then_some(())
+    });
+    Some(readable.is_some())
 }
 
 /// Adds what `seen` shows about the piece of `scope` to `into`; repeated ids count once.
@@ -153,8 +176,14 @@ pub(crate) fn match_observations<'m>(
                     .iter()
                     .any(|footer| carries(footer, &theirs))
             });
+            let unreadable = message
+                .footers
+                .iter()
+                .any(|footer| marker_claim(footer, channel) == Some(false));
             if (exact || own_nonce) && !elsewhere {
                 into.damaged.insert(message.id);
+            } else if unreadable && !elsewhere {
+                into.unreadable.insert(message.id);
             }
             None
         } else if message.nonce.is_some() {
@@ -163,6 +192,14 @@ pub(crate) fn match_observations<'m>(
             } else {
                 (RecoveryKind::OriginalRecovered, Some(0))
             };
+            // A nonce of no known piece on the payload may be an older format of this one's.
+            let rival_nonce = rivals.iter().any(|rival| {
+                let theirs = RepostIds::for_piece(&marker(rival));
+                theirs.is_some_and(|ids| message.nonce.as_deref() == Some(ids.nonce()))
+            });
+            if exact && !own_nonce && !rival_nonce {
+                into.unattributed.insert(message.id);
+            }
             own_nonce.then(|| found(ReceiptMethod::Nonce, recovery, slot))
         } else if exact && receipts.is_some() && rivals.is_empty() {
             Some(found(

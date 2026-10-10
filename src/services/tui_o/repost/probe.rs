@@ -14,6 +14,7 @@ use std::future::Future;
 
 use tokio::time::{Duration, Instant};
 
+use crate::services::tui_o::repost::identity::payload_sha256;
 use evidence::{
     CompletedPass, EvidenceScope, FIRST_PASS_AFTER, NotFoundEvidence, PermissionProof, RunScope,
     SECOND_PASS_AFTER,
@@ -125,18 +126,36 @@ impl ProbeSession {
         &self.seen
     }
 
-    /// The latest read of an id replaces the earlier one, except a nonce once seen stays.
+    /// Keeps every identifying fact read for an id: footers and nonces once seen, the most sent
+    /// embeds, and the payload once it matched. A later, poorer read never erases them.
     fn observe(&mut self, message: &ObservedMessage) {
-        let kept = self
-            .observed
-            .get(&message.id)
-            .and_then(|old| old.nonce.clone());
-        let nonce = message.nonce.clone().or(kept);
-        let latest = ObservedMessage {
-            nonce,
+        let Some(old) = self.observed.get(&message.id) else {
+            self.observed.insert(message.id, message.clone());
+            return;
+        };
+        let mut footers = old.footers.clone();
+        footers.extend(
+            message
+                .footers
+                .iter()
+                .filter(|f| !old.footers.contains(f))
+                .cloned(),
+        );
+        let exact =
+            |read: &ObservedMessage| payload_sha256(&read.content) == self.scope.payload_sha256;
+        let content = if exact(old) && !exact(message) {
+            old.content.clone()
+        } else {
+            message.content.clone()
+        };
+        let merged = ObservedMessage {
+            content,
+            footers,
+            rich_embeds: old.rich_embeds.max(message.rich_embeds),
+            nonce: message.nonce.clone().or_else(|| old.nonce.clone()),
             ..message.clone()
         };
-        self.observed.insert(message.id, latest);
+        self.observed.insert(message.id, merged);
     }
 
     fn judge(&mut self, snapshot: &AttributionSnapshot) {
@@ -272,6 +291,10 @@ impl ProbeSession {
             cursor.started_at,
             cursor.proof,
         );
+        if !self.seen.unreadable.is_empty() {
+            self.first = None;
+            return Progress::Incomplete("a re-post marker this build cannot read".into());
+        }
         if !self.seen.is_clear() {
             self.first = None;
             return Progress::Present;

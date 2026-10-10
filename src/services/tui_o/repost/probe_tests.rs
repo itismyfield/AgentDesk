@@ -820,46 +820,126 @@ impl DiscordPort for Legacy {
     }
 }
 
-/// Production files outside the probe that name its entry points.
-fn probe_callers(dir: &std::path::Path, found: &mut Vec<String>) {
-    let own = [
-        "probe.rs",
-        "evidence.rs",
-        "matcher.rs",
-        "o_writer_repost_io.rs",
+/// The probe's own definition files; everything else is checked line by line.
+const PROBE_FILES: [&str; 3] = [
+    "src/services/tui_o/repost/probe.rs",
+    "src/services/tui_o/repost/evidence.rs",
+    "src/services/tui_o/repost/matcher.rs",
+];
+const ADAPTER: &str = "src/services/discord/outbound/o_writer_repost_io.rs";
+/// The adapter may only declare the probe and implement its reads.
+const ADAPTER_LINES: [&str; 4] = [
+    "use probe::ProbeRead;",
+    "use probe::matcher::ObservedMessage;",
+    "pub(crate) mod probe;",
+    "impl ProbeRead for RepostHttp {",
+];
+
+/// Whether a line names a probe entry point or reaches into the re-post `io` module.
+fn names_the_probe(path: &str, line: &str) -> bool {
+    let entries = [
+        "ProbeSession",
+        "ProbeRead",
+        "match_observations",
+        "NotFoundEvidence",
+        "EvidenceScope",
+        "AttributionSnapshot",
+        "repost::io",
+        "io::probe",
     ];
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if path.is_dir() {
-            probe_callers(&path, found);
-        } else if name.ends_with(".rs")
-            && !name.ends_with("_tests.rs")
-            && !own.contains(&name.as_str())
-        {
+    let words = line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'));
+    entries.iter().any(|entry| line.contains(entry))
+        || words.clone().any(|word| word.starts_with("probe::"))
+        || (path.contains("tui_o/repost/")
+            && words.into_iter().any(|word| word.starts_with("super::io")))
+}
+
+/// `path:line` of every production line under `root/src` that names the probe outside what is
+/// allowed. Unrecognised forms are reported, never skipped.
+fn probe_edges(root: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut dirs = vec![root.join("src")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if !name.ends_with(".rs")
+                || name.ends_with("_tests.rs")
+                || PROBE_FILES.contains(&relative.as_str())
+            {
+                continue;
+            }
             let text = std::fs::read_to_string(&path).unwrap();
-            let names = [
-                "ProbeSession",
-                "ProbeRead",
-                "match_observations",
-                "NotFoundEvidence",
-                "io::probe",
-            ];
-            if names.iter().any(|name| text.contains(name)) {
-                found.push(path.display().to_string());
+            for (number, line) in text.lines().enumerate() {
+                let allowed = relative == ADAPTER && ADAPTER_LINES.contains(&line.trim());
+                if names_the_probe(&relative, line) && !allowed {
+                    found.push(format!("{relative}:{}", number + 1));
+                }
             }
         }
     }
+    found.sort();
+    found
+}
+
+#[test]
+fn f4r2_the_dormancy_scan_reports_a_wrapper_in_the_adapter_and_its_caller() {
+    let write = |root: &std::path::Path, relative: &str, text: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let declared = "#[path = \"../../tui_o/repost/probe.rs\"]\npub(crate) mod probe;\nuse probe::ProbeRead;\nimpl ProbeRead for RepostHttp {\n}\n";
+    let clean = tempfile::tempdir().unwrap();
+    write(clean.path(), ADAPTER, declared);
+    write(
+        clean.path(),
+        PROBE_FILES[0],
+        "pub(crate) struct ProbeSession;\n",
+    );
+    write(
+        clean.path(),
+        "src/services/tui_o/repost/mod.rs",
+        "pub(crate) mod io;\n",
+    );
+    assert_eq!(probe_edges(clean.path()), Vec::<String>::new());
+
+    let wired = tempfile::tempdir().unwrap();
+    let wrapper = format!(
+        "{declared}pub(crate) fn start_reader() {{\n    let _ = probe::ProbeSession::new;\n}}\n"
+    );
+    write(wired.path(), ADAPTER, &wrapper);
+    let caller = "fn tick() {\n    crate::services::tui_o::repost::io::start_reader();\n}\n";
+    write(wired.path(), "src/services/tui_o/writer/host.rs", caller);
+    let sibling = "use super::io;\nfn go() { io::start_reader(); }\n";
+    write(wired.path(), "src/services/tui_o/repost/runner.rs", sibling);
+    assert_eq!(
+        probe_edges(wired.path()),
+        [
+            "src/services/discord/outbound/o_writer_repost_io.rs:7",
+            "src/services/tui_o/repost/runner.rs:1",
+            "src/services/tui_o/writer/host.rs:2",
+        ]
+    );
 }
 
 #[tokio::test(start_paused = true)]
 async fn f4_has_no_operational_probe_edges_and_preserves_legacy_confirmation() {
-    let mut callers = Vec::new();
-    probe_callers(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut callers,
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert_eq!(
+        probe_edges(root),
+        Vec::<String>::new(),
+        "no production caller yet"
     );
-    assert_eq!(callers, Vec::<String>::new(), "no production caller yet");
 
     let gateway = GatewayPort::new(Arc::new(serenity::Http::new("test-token")), BOT);
     let legacy = Legacy(gateway);
@@ -1124,4 +1204,94 @@ fn f4r_the_marker_names_the_channel_and_is_the_same_on_every_node_and_slot() {
         slot(&node_b),
         "slot 1 and slot 2 on any node"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn f4r2_identifying_evidence_outlives_a_poorer_later_read() {
+    // A: an exact payload under a sent embed is damaged; the embed vanishing later changes nothing.
+    let damaged = ObservedMessage {
+        rich_embeds: 1,
+        ..message(450, BOT, PAYLOAD)
+    };
+    let reader = Fake::with([message(900, BOT, "earlier"), damaged]);
+    let mut session = ProbeSession::new(scope(&[0, 1]), vec![900], Instant::now());
+    assert_eq!(
+        drive(&mut session, &reader, &known(), 1).await,
+        [Progress::Present]
+    );
+    reader.add(message(450, BOT, PAYLOAD));
+    assert_eq!(
+        drive(&mut session, &reader, &known(), 1).await,
+        [Progress::Present]
+    );
+    let seen = session.attribution();
+    assert!(seen.found.is_empty(), "a known damage is never a success");
+    assert_eq!(seen.damaged.iter().copied().collect::<Vec<_>>(), [450]);
+
+    // B: the proof read shows the intact marker; history then lists the same id truncated.
+    let footer = repost_footer(&key("f4"));
+    let read_by_id = ObservedMessage {
+        rich_embeds: 1,
+        footers: vec![footer.clone()],
+        ..message(450, BOT, "변형된 본문")
+    };
+    let listed = ObservedMessage {
+        footers: vec![footer[..footer.len() - 3].to_owned()],
+        ..read_by_id.clone()
+    };
+    let mut reader = Fake::with([message(900, BOT, "earlier"), listed]);
+    reader.singles.insert(450, Some(read_by_id));
+    let mut session = ProbeSession::new(scope(&[0, 1]), vec![450], Instant::now());
+    for progress in drive(&mut session, &reader, &known(), 4).await {
+        assert_eq!(progress, Progress::Present);
+    }
+    let found = &session.attribution().found[&450];
+    assert_eq!(found.receipt.method, ReceiptMethod::Marker);
+}
+
+/// What F3/F4 derived for `key("f4")` before the marker named its channel, fixed as data.
+const OLD_MARKER: &str = "o:claude:body:f4#0";
+const OLD_NONCE: &str = "r983159e99d7b1b1c01cd382d";
+
+#[tokio::test(start_paused = true)]
+async fn f4r2_an_older_or_unreadable_identifier_is_never_absence() {
+    let old_footer = format!("재확인 후 추가 전달 {OLD_MARKER}");
+    let old_marked = ObservedMessage {
+        rich_embeds: 1,
+        footers: vec![old_footer.clone()],
+        ..message(450, BOT, "변형된 본문")
+    };
+    let reader = Fake::with([message(900, BOT, "earlier"), old_marked.clone()]);
+    let mut session = ProbeSession::new(scope(&[0, 1]), vec![900], Instant::now());
+    for progress in drive(&mut session, &reader, &known(), 4).await {
+        assert!(matches!(progress, Progress::Incomplete(_)), "{progress:?}");
+    }
+    assert_eq!(session.attribution().unreadable.len(), 1);
+
+    let own = scope(&[0]);
+    let attribute = |snapshot: &AttributionSnapshot, seen: &ObservedMessage| {
+        let mut into = Attribution::default();
+        match_observations(&own, snapshot, [seen], &mut into);
+        into
+    };
+    let old_original = ObservedMessage {
+        nonce: Some(OLD_NONCE.into()),
+        ..message(451, BOT, PAYLOAD)
+    };
+    let seen = attribute(&known(), &old_original);
+    assert!(seen.found.is_empty());
+    assert_eq!(seen.unattributed.iter().copied().collect::<Vec<_>>(), [451]);
+
+    // Controls: another author, another piece's receipt, a readable marker of another piece.
+    let other_author = ObservedMessage {
+        author_id: OTHER,
+        ..old_marked.clone()
+    };
+    assert!(attribute(&known(), &other_author).is_clear());
+    assert!(attribute(&receipts(&[(450, key("f4-other"))]), &old_marked).is_clear());
+    let readable_other = ObservedMessage {
+        footers: vec![repost_footer(&key("f4-other"))],
+        ..old_marked
+    };
+    assert!(attribute(&known(), &readable_other).is_clear());
 }
