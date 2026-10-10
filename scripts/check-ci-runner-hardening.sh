@@ -1137,7 +1137,7 @@ targets = {
     # Pin the accepted-turn regressions and removal of the retired timeout test.
     # All remaining commands and execution settings retain their reviewed values.
     # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
-    "job_sha256" => "dfab413f16cb8751ca2d8521dc1a18c39c0739b9565c7d7041ea7a847b5d7935",
+    "job_sha256" => "587bf998a8800dafebc80161eb3c1684d672f347b33bbb63cddba697b444449f",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [

@@ -144,6 +144,8 @@ use crate::services::discord::router::{TurnKind, admit_queued_intake};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
+mod replay_hold;
+
 struct ScopedIntakeTestEnv {
     _lock: std::sync::MutexGuard<'static, ()>,
     _root: tempfile::TempDir,
@@ -733,6 +735,7 @@ async fn queued_foreign_owner_forwards_without_local_body_pg() {
         QueuedAdmissionDisposition::Admitted(admitted) => admitted,
         QueuedAdmissionDisposition::Deferred
         | QueuedAdmissionDisposition::RejectedNonPortableAttachment
+        | QueuedAdmissionDisposition::ConsumedToHold
         | QueuedAdmissionDisposition::RejectedRestore => {
             panic!("live foreign owner should forward")
         }

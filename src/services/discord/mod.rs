@@ -58,6 +58,7 @@ mod queue_dispatch;
 mod queue_io;
 mod queue_marker;
 mod queue_overflow_dlq;
+mod queue_park_ledger;
 mod queue_reactions;
 // #5191: catch-up recovery dedup identity set (queue + active + reservation).
 mod queued_placeholders_store;
@@ -74,6 +75,13 @@ pub(crate) mod response_sanitizer;
 mod session_banner;
 #[cfg(unix)]
 mod session_relay_sink;
+#[cfg(unix)]
+pub(crate) use session_relay_sink::journal::append_exact_metadata;
+#[cfg(all(test, unix))]
+pub(crate) use session_relay_sink::journal::{
+    exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt,
+    exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged,
+};
 mod sidecar_interaction;
 // #2011 Phase 5.3: standalone JSONL → Discord relay loop on cluster-standby nodes (leader uses tmux_watcher's relay path).
 #[cfg(unix)]
@@ -928,6 +936,7 @@ pub(crate) struct SharedData {
     pub(super) core: Mutex<CoreState>,
     /// Per-channel request lifecycle actor registry.
     mailboxes: ChannelMailboxRegistry,
+    queue_park_ledger: queue_park_ledger::QueueParkLedger,
     /// Serializes `/resume` rebinds with intake session selection for each channel.
     /// Weak entries let inactive channels disappear once the final intake/resume
     /// guard drops; the map is opportunistically pruned on each lookup, so channel
@@ -1264,6 +1273,7 @@ fn make_shared_data_for_tests_with_storage_and_intake_capabilities(
             active_meetings: std::collections::HashMap::new(),
         }),
         mailboxes: ChannelMailboxRegistry::default(),
+        queue_park_ledger: Default::default(),
         session_transition_locks: dashmap::DashMap::new(),
         settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
         api_timestamps: dashmap::DashMap::new(),
@@ -1886,6 +1896,7 @@ async fn apply_queue_exit_feedback(
     channel_id: ChannelId,
     queue_exit_events: &[QueueExitEvent],
 ) {
+    shared.queue_park_ledger.exit(channel_id, queue_exit_events);
     let queue_exit_events: Vec<&QueueExitEvent> = queue_exit_events
         .iter()
         .filter(|event| event.intervention.author_id.get() > 1)
