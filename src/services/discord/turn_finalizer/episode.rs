@@ -60,11 +60,9 @@ pub(in crate::services::discord) async fn claim_normal_episode(
     {
         return Err(());
     }
-    let row =
-        super::super::inflight::load_inflight_state(provider, key.channel_id.get()).filter(|row| {
-            row.effective_finalizer_turn_id() == key.user_msg_id
-                && key.matches_episode_nonce(row.turn_nonce.as_deref())
-        });
+    let loaded = super::super::inflight::load_inflight_state(provider, key.channel_id.get());
+    let row_miss = episode_row_miss(loaded.as_ref(), key);
+    let row = loaded.as_ref().filter(|_| row_miss.is_none());
     let finish = if let Some(active) = observed.as_ref().filter(|s| s.cancel_token.is_some()) {
         super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
             shared,
@@ -94,22 +92,69 @@ pub(in crate::services::discord) async fn claim_normal_episode(
     // Only the separately gated reconciler may release that residual anchor.
     // Row cleanup is independently authorized by the captured row identity;
     // the lock-held recheck still preserves any successor that replaced it.
-    if clear_inflight && let Some(row) = row.as_ref() {
-        let _ = super::super::inflight::clear_inflight_state_for_captured_episode(
+    if clear_inflight && let Some(row) = row {
+        let outcome = super::super::inflight::clear_inflight_state_for_captured_episode(
             provider,
             key.channel_id.get(),
             &super::super::inflight::InflightTurnIdentity::from_state(row),
             row.turn_nonce.as_deref(),
         );
+        if outcome != super::super::inflight::GuardedClearOutcome::Cleared {
+            warn_episode_row_retained(provider, key, Some(row), "cas", &format!("{outcome:?}"));
+        }
+    } else if clear_inflight
+        && finish.removed_token.is_some()
+        && let Some(reason) = row_miss
+    {
+        // Only a release this call made can strand a row; a late duplicate finds none.
+        warn_episode_row_retained(provider, key, loaded.as_ref(), "row_filter", reason);
     }
     Ok(Some(CapturedFinish {
-        snapshot: row.as_ref().map(|row| {
+        snapshot: row.map(|row| {
             let mut snapshot = SyntheticClaimSnapshot::from_row(row);
             snapshot.recovery_actor = captured_actor;
             snapshot
         }),
         finish,
     }))
+}
+
+/// Why the loaded row is not this episode's cleanup target; `None` when it is.
+fn episode_row_miss(
+    row: Option<&super::super::inflight::InflightTurnState>,
+    key: TurnKey,
+) -> Option<&'static str> {
+    match row {
+        None => Some("row_missing"),
+        Some(row) if row.effective_finalizer_turn_id() != key.user_msg_id => {
+            Some("finalizer_id_mismatch")
+        }
+        Some(row) if !key.matches_episode_nonce(row.turn_nonce.as_deref()) => {
+            Some("episode_nonce_mismatch")
+        }
+        Some(_) => None,
+    }
+}
+
+/// A requested row cleanup that left the durable row in place (or found none);
+/// the mailbox release may still have succeeded, so this is the only trace.
+fn warn_episode_row_retained(
+    provider: &ProviderKind,
+    key: TurnKey,
+    row: Option<&super::super::inflight::InflightTurnState>,
+    gate: &str,
+    reason: &str,
+) {
+    tracing::warn!(
+        provider = provider.as_str(),
+        channel_id = key.channel_id.get(),
+        user_msg_id = key.user_msg_id,
+        gate,
+        reason,
+        row_finalizer_turn_id = row.map(|row| row.effective_finalizer_turn_id()),
+        row_has_nonce = row.map(|row| row.turn_nonce.is_some()),
+        "episode_row_cleanup_skipped: finalizer did not remove the inflight row"
+    );
 }
 
 pub(super) struct TerminalEvidence {
@@ -440,6 +485,143 @@ mod tests {
         let evidence = TerminalEvidence::from_snapshot(None);
         assert!(!evidence.episode_captured);
         assert!(evidence.turn_nonce.is_none());
+    }
+
+    #[derive(Clone, Default)]
+    struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Runs the real claim with cleanup requested and returns its cleanup-skip WARN lines.
+    async fn claim_capturing_skip_warns(
+        shared: &Arc<SharedData>,
+        key: TurnKey,
+    ) -> (Option<CapturedFinish>, Vec<String>) {
+        let sink = LogSink::default();
+        let writer = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        crate::logging::test_capture::pin_callsite_interest();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let claimed = claim_normal_episode(shared, &ProviderKind::Codex, key, true, None).await;
+        drop(guard);
+        let logs = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        let warns = logs
+            .lines()
+            .filter(|line| line.contains("episode_row_cleanup_skipped"))
+            .map(str::to_owned)
+            .collect();
+        (claimed.expect("claim"), warns)
+    }
+
+    /// A released episode whose row survives names the filter or delete that kept it; a cleared
+    /// row and a late duplicate that releases nothing stay silent.
+    #[tokio::test]
+    async fn a_retained_cleanup_row_names_the_gate_that_kept_it() {
+        super::super::tests::with_isolated_runtime_root(|| async {
+            let cases = [
+                (
+                    None::<(u64, &str, bool)>,
+                    Some("gate=\"row_filter\" reason=\"row_missing\""),
+                ),
+                (
+                    Some((124, "episode-a", false)),
+                    Some("reason=\"finalizer_id_mismatch\""),
+                ),
+                (
+                    Some((123, "episode-b", false)),
+                    Some("reason=\"episode_nonce_mismatch\""),
+                ),
+                (
+                    Some((123, "episode-a", true)),
+                    Some("gate=\"cas\" reason=\"RebindOriginSkipped\""),
+                ),
+                (Some((123, "episode-a", false)), None),
+            ];
+            for (index, (row, expected)) in cases.into_iter().enumerate() {
+                let shared = super::super::super::make_shared_data_for_tests_with_storage(None);
+                let channel = ChannelId::new(648_401 + index as u64);
+                let token = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
+                    "episode-a".to_string(),
+                )));
+                shared
+                    .mailbox(channel)
+                    .restore_active_turn(token, UserId::new(7), MessageId::new(123))
+                    .await;
+                if let Some((user_msg_id, nonce, rebind_origin)) = row {
+                    let mut state = super::super::super::inflight::InflightTurnState::new(
+                        ProviderKind::Codex,
+                        channel.get(),
+                        None,
+                        7,
+                        user_msg_id,
+                        124,
+                        "prompt".to_string(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        0,
+                    );
+                    state.turn_nonce = Some(nonce.to_string());
+                    state.rebind_origin = rebind_origin;
+                    super::super::super::inflight::save_inflight_state(&state).expect("seed row");
+                }
+                let key = TurnKey::new(channel, 123, shared.restart.current_generation)
+                    .with_episode_nonce(Some("episode-a"));
+                let (captured, warns) = claim_capturing_skip_warns(&shared, key).await;
+                let captured = captured.expect("episode captured");
+                assert!(
+                    captured.finish.removed_token.is_some(),
+                    "case {index}: released"
+                );
+                let left = super::super::super::inflight::load_inflight_state(
+                    &ProviderKind::Codex,
+                    channel.get(),
+                );
+                match expected {
+                    Some(fragment) => {
+                        assert_eq!(warns.len(), 1, "case {index}: {warns:?}");
+                        assert!(warns[0].contains(fragment), "case {index}: {}", warns[0]);
+                        assert_eq!(left.is_some(), row.is_some(), "case {index}: row untouched");
+                    }
+                    None => {
+                        assert!(warns.is_empty(), "case {index}: {warns:?}");
+                        assert!(left.is_none(), "case {index}: matching row cleared");
+                    }
+                }
+            }
+
+            let shared = super::super::super::make_shared_data_for_tests_with_storage(None);
+            let key =
+                TurnKey::new(ChannelId::new(648_499), 123, 0).with_episode_nonce(Some("episode-a"));
+            let (captured, warns) = claim_capturing_skip_warns(&shared, key).await;
+            assert!(
+                captured
+                    .expect("episode captured")
+                    .finish
+                    .removed_token
+                    .is_none()
+            );
+            assert!(
+                warns.is_empty(),
+                "late duplicate on an idle mailbox: {warns:?}"
+            );
+        })
+        .await;
     }
 }
 

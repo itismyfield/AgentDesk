@@ -3834,6 +3834,7 @@ services::discord::health::turn_deliver::inject_tests::a_paste_its_rows_cannot_p
 services::discord::health::turn_deliver::inject_tests::a_rebound_transcript_or_input_queued_during_the_last_lookups_vetoes_the_paste_pg
 services::discord::health::turn_deliver::inject_tests::a_row_replaced_after_its_last_read_does_not_stop_the_reservation_allowed_range_pg
 services::discord::health::turn_deliver::inject_tests::a_session_of_another_runtime_stops_before_the_transition_and_the_pane
+services::discord::health::turn_deliver::inject_tests::a_vetoed_delivery_logs_its_veto_and_ids_without_the_text
 services::discord::health::turn_deliver::inject_tests::a_vetoed_paste_hands_the_input_back_ahead_of_input_sent_after_its_reservation_pg
 services::discord::health::turn_deliver::inject_tests::a_wrapped_paste_is_injected_only_when_its_rows_are_predicted_pg
 services::discord::health::turn_deliver::inject_tests::an_effect_that_dies_outside_its_guard_is_still_reported_once_pg
@@ -8375,6 +8376,7 @@ services::discord::turn_bridge::bridge_entry_persist::tests::adopting_a_self_dup
 services::discord::turn_bridge::bridge_entry_persist::tests::adopting_an_ordinary_body_raises_no_invariant_violation
 services::discord::turn_bridge::bridge_entry_persist::tests::an_empty_seed_is_not_an_adoption_and_records_nothing
 services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder
+services::discord::turn_bridge::bridge_entry_persist::tests::an_identity_refused_entry_notifies_the_channel_once_and_keeps_the_row
 services::discord::turn_bridge::bridge_entry_persist::tests::bridge_entry_failure_gate_precedes_emit_stream_and_finalize
 services::discord::turn_bridge::bridge_entry_persist::tests::bridge_entry_failure_outcomes_abort_without_arming_cleanup
 services::discord::turn_bridge::bridge_entry_persist::tests::cancelled_watcher_is_unavailable_and_not_pinned_during_reconcile
@@ -9119,6 +9121,7 @@ services::discord::turn_finalizer::delivery_lease::tests::release_compare_and_re
 services::discord::turn_finalizer::delivery_lease::tests::same_key_range_stale_bridge_attempt_cannot_touch_successor
 services::discord::turn_finalizer::delivery_lease::tests::same_turn_stale_range_release_is_noop_after_reacquire
 services::discord::turn_finalizer::delivery_lease::tests::stale_turn_commit_and_release_are_noops_after_reacquire
+services::discord::turn_finalizer::episode::tests::a_retained_cleanup_row_names_the_gate_that_kept_it
 services::discord::turn_finalizer::episode::tests::missing_snapshot_is_not_an_observed_legacy_episode
 services::discord::turn_finalizer::episode::tests::normal_successor_keeps_admission_and_cleanup_for_modern_and_legacy_episode
 services::discord::turn_finalizer::episode::tests::recovery_retains_captured_nonce_and_refuses_same_id_successor

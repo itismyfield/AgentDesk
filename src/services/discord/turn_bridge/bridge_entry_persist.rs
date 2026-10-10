@@ -436,6 +436,9 @@ pub(super) async fn establish_bridge_entry_authority(
         outcome == crate::services::discord::inflight::GuardedSaveOutcome::RowAbsent;
     if !bridge_entry_disposition_continues(outcome, !anchor_was_absent) {
         signal_bridge_entry_abort_completion(&mut ctx.bridge.completion_tx);
+        if outcome.is_identity_mismatch_legacy() {
+            notify_bridge_entry_identity_abort(ctx.bridge, outcome).await;
+        }
         return false;
     }
 
@@ -469,6 +472,94 @@ pub(super) async fn establish_bridge_entry_authority(
         }
     }
     true
+}
+
+/// Channel, finalizer turn id, nonce and start stamp of an attempted turn.
+type EntryAbortNoticeKey = (u64, u64, Option<String>, String);
+
+/// Attempted turns already told about an entry refusal; bounded, since losing an old
+/// key only risks one repeated notice.
+static ENTRY_ABORT_NOTICED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::VecDeque<EntryAbortNoticeKey>>,
+> = std::sync::LazyLock::new(Default::default);
+const ENTRY_ABORT_NOTICE_MEMORY: usize = 256;
+const ENTRY_ABORT_NOTICE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Posts one channel notice per attempted turn whose entry another row's identity refused.
+/// Nothing is deleted or finalized; the notice only explains the dropped start.
+async fn notify_bridge_entry_identity_abort(
+    bridge: &TurnBridgeContext,
+    outcome: crate::services::discord::inflight::GuardedSaveOutcome,
+) {
+    let attempted = &bridge.inflight_state;
+    let key = (
+        attempted.channel_id,
+        attempted.effective_finalizer_turn_id(),
+        attempted.turn_nonce.clone(),
+        attempted.started_at.clone(),
+    );
+    {
+        let mut noticed = ENTRY_ABORT_NOTICED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if noticed.contains(&key) {
+            return;
+        }
+        if noticed.len() >= ENTRY_ABORT_NOTICE_MEMORY {
+            noticed.pop_front();
+        }
+        noticed.push_back(key);
+    }
+    let preserved = crate::services::discord::inflight::load_inflight_state_read_only(
+        &bridge.provider,
+        attempted.channel_id,
+    );
+    let notice = bridge_entry_abort_notice(outcome, attempted, preserved.as_ref());
+    // Bounded: the caller unwinds the mailbox claim only after this returns.
+    let sent = TurnGateway::send_message(bridge.gateway.as_ref(), bridge.channel_id, &notice);
+    let error = match tokio::time::timeout(ENTRY_ABORT_NOTICE_TIMEOUT, sent).await {
+        Ok(Ok(_)) => return,
+        Ok(Err(error)) => error,
+        Err(_) => "timed out".to_string(),
+    };
+    tracing::warn!(
+        channel_id = attempted.channel_id,
+        error = %error,
+        "bridge-entry identity abort notice failed to send"
+    );
+}
+
+/// Cause, attempted turn, the row left in place and what to do next; never the prompt text.
+fn bridge_entry_abort_notice(
+    outcome: crate::services::discord::inflight::GuardedSaveOutcome,
+    attempted: &InflightTurnState,
+    preserved: Option<&InflightTurnState>,
+) -> String {
+    use crate::services::discord::inflight::GuardedSaveOutcome;
+    let cause = match outcome {
+        GuardedSaveOutcome::SuccessorOwned => "다른 턴의 진행 기록이 채널을 점유 중",
+        GuardedSaveOutcome::AuthorityPinned => "재시작·재바인딩 표시 등 기존 기록의 권한이 고정됨",
+        GuardedSaveOutcome::Unnameable => "이 턴의 식별 정보로 진행 기록을 특정할 수 없음",
+        _ => "진행 기록 소유자 불일치",
+    };
+    let preserved = preserved.map_or_else(
+        || "확인되지 않음".to_string(),
+        |row| {
+            format!(
+                "턴 {} ({:?}, 시작 {})",
+                row.effective_finalizer_turn_id(),
+                row.turn_source,
+                row.started_at
+            )
+        },
+    );
+    format!(
+        "⚠️ 이번 턴을 시작하지 못했습니다: {cause}.\n\
+         시도한 턴: {}\n\
+         보존한 기존 기록: {preserved} (삭제하지 않음)\n\
+         기존 턴이 끝난 뒤 다시 보내 주세요. 계속 막히면 운영자에게 남은 inflight 기록 확인을 요청하세요.",
+        attempted.effective_finalizer_turn_id()
+    )
 }
 
 #[cfg(test)]
@@ -899,6 +990,87 @@ mod tests {
             Ok(BridgeCompletionSignal::EntryAborted)
         );
         assert_eq!(std::fs::read(path).expect("successor survives"), before);
+    }
+
+    /// An entry refused because another episode owns the row tells the channel once per
+    /// attempted turn, without the prompt, and leaves that row and the mailbox as they were.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_identity_refused_entry_notifies_the_channel_once_and_keeps_the_row() {
+        use super::super::stream_tick::provider_output_guard_tests::CapturingGateway;
+
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let channel_id = 4_259_648;
+        let successor = InflightTurnState::new(
+            provider.clone(),
+            channel_id,
+            Some("notice-successor".to_string()),
+            343_742_347_365_974_026,
+            77_648,
+            91,
+            "successor prompt".to_string(),
+            Some("successor-session".to_string()),
+            Some("AgentDesk-notice-successor".to_string()),
+            Some("/tmp/notice-successor.jsonl".to_string()),
+            Some("/tmp/notice-successor.input".to_string()),
+            9_100,
+        );
+        let mut stale = successor.clone();
+        stale.started_at = "stale-started-at".to_string();
+        stale.tmux_session_name = Some("AgentDesk-notice-stale-owner".to_string());
+        stale.user_text = "stale prompt text".to_string();
+        crate::services::discord::inflight::save_inflight_state(&successor)
+            .expect("seed successor row");
+        let root =
+            crate::services::discord::inflight::inflight_runtime_root().expect("runtime root");
+        let path =
+            crate::services::discord::inflight::inflight_state_path(&root, &provider, channel_id);
+        let before = std::fs::read(&path).expect("read successor bytes");
+        let gateway = std::sync::Arc::new(CapturingGateway::default());
+        let mut bridge = seed_context("", stale);
+        let dyn_gateway: std::sync::Arc<dyn TurnGateway> = gateway.clone();
+        bridge.gateway = dyn_gateway;
+
+        for attempt in 0..2 {
+            let (completion_tx, mut completion_rx) = tokio::sync::oneshot::channel();
+            bridge.completion_tx = Some(completion_tx);
+            let mut durable = bridge.inflight_state.clone();
+            let harness = ReconcileHarness::new(&mut durable, ChannelId::new(channel_id));
+            let (mut rowless, mut created, mut last_edit, mut cleared) =
+                (false, None, String::new(), false);
+            let ctx = BridgeEntryAuthorityContext {
+                entry_was_rowless: &mut rowless,
+                bridge: &mut bridge,
+                shared: &shared,
+                bridge_created_placeholder: &mut created,
+                last_edit_text: &mut last_edit,
+                resumed_placeholder_clear_applied: &mut cleared,
+            };
+            assert!(
+                !establish_bridge_entry_authority(ctx, harness.runtime, "processing").await,
+                "attempt {attempt}: entry must abort"
+            );
+            assert_eq!(
+                completion_rx.try_recv(),
+                Ok(BridgeCompletionSignal::EntryAborted)
+            );
+        }
+
+        let sends = gateway.sends.lock().expect("sends lock").clone();
+        assert_eq!(sends.len(), 1, "one notice per attempted turn: {sends:?}");
+        assert!(sends[0].contains("시도한 턴: 77648"), "{}", sends[0]);
+        assert!(
+            sends[0].contains("보존한 기존 기록: 턴 77648 (Managed, 시작 "),
+            "{}",
+            sends[0]
+        );
+        assert!(!sends[0].contains("prompt"), "no prompt text: {}", sends[0]);
+        assert_eq!(std::fs::read(&path).expect("successor survives"), before);
+        let mailbox =
+            crate::services::discord::mailbox_snapshot(&shared, ChannelId::new(channel_id)).await;
+        assert!(mailbox.cancel_token.is_none() && mailbox.intervention_queue.is_empty());
     }
 
     #[test]

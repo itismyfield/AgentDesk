@@ -381,6 +381,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::turn_deliver::inject_tests::a_headless_claim_returns_the_token_it_registered
   services::discord::health::turn_deliver::inject_tests::a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox
   services::discord::health::turn_deliver::inject_tests::a_session_of_another_runtime_stops_before_the_transition_and_the_pane
+  services::discord::health::turn_deliver::inject_tests::a_vetoed_delivery_logs_its_veto_and_ids_without_the_text
   services::discord::health::turn_deliver::inject_tests::an_idle_transcript_stops_before_the_reservation_and_the_pane
   services::discord::health::turn_deliver::inject_tests::any_holder_takes_input_unless_a_claimed_input_has_not_reached_its_row
   services::discord::health::turn_deliver::inject_tests::the_row_stamp_or_the_first_bound_pane_decides_whether_a_session_is_tui

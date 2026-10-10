@@ -67,6 +67,17 @@ pub enum HumanInputError {
     InvalidTarget(String),
 }
 
+impl HumanInputError {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::AuthorNotAllowed => "author_not_allowed",
+            Self::RuntimeUnavailable(_) => "runtime_unavailable",
+            Self::QueueRefused(_) => "queue_refused",
+            Self::InvalidTarget(_) => "invalid_target",
+        }
+    }
+}
+
 /// Stricter than Discord intake auth: an explicit owner is required and
 /// `allow_all_users` is never honored for remote input.
 pub(crate) fn author_allowed_for_human_input(
@@ -258,6 +269,8 @@ struct LivePorts {
     /// Gateway context and bot token; only a start needs them, a queued delivery does not.
     runtime: Result<(serenity::Context, String), String>,
     request: HumanInputRequest,
+    /// Set once a pane injection was asked for, for the delivery result log.
+    inject_attempted: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -345,6 +358,8 @@ impl DeliveryPorts for LivePorts {
     }
 
     async fn try_inject(&self) -> InjectAttempt {
+        let attempted = &self.inject_attempted;
+        attempted.store(true, std::sync::atomic::Ordering::Relaxed);
         inject::attempt(&self.shared, &self.request, inject::Origin::External).await
     }
 }
@@ -382,9 +397,67 @@ pub async fn deliver_human_input(
     registry: &HealthRegistry,
     request: HumanInputRequest,
 ) -> Result<HumanInputDelivery, HumanInputError> {
-    let shared = resolve_direct_meeting_shared(registry, request.channel_id, &request.provider)
-        .await
-        .map_err(HumanInputError::RuntimeUnavailable)?;
+    let channel_id = request.channel_id.get();
+    let provider = request.provider.clone();
+    let source = request.source.clone();
+    let origin_id = request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.pointer("/human_input/origin_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let (result, inject_attempted) = deliver_resolved(registry, request).await;
+    // One line per delivery, keyed by ids only; the input text never reaches the log.
+    let (outcome, turn_id, reason, inject_veto) = match &result {
+        Ok(HumanInputDelivery::Started { turn_id }) => {
+            ("started", Some(turn_id.clone()), None, None)
+        }
+        Ok(HumanInputDelivery::Queued {
+            turn_id,
+            reason,
+            inject_veto,
+        }) => (
+            "queued",
+            Some(turn_id.clone()),
+            Some(reason.clone()),
+            inject_veto.clone(),
+        ),
+        Ok(HumanInputDelivery::Injected { turn_id }) => ("injected", turn_id.clone(), None, None),
+        Ok(HumanInputDelivery::Unconfirmed { turn_id, detail }) => {
+            ("unconfirmed", turn_id.clone(), Some(detail.clone()), None)
+        }
+        // Only the error kind: router and runtime details are free text.
+        Err(error) => ("refused", None, Some(error.kind().to_string()), None),
+    };
+    tracing::info!(
+        channel_id,
+        provider = provider.as_str(),
+        source = source.as_str(),
+        origin_id = origin_id.as_deref(),
+        turn_id = turn_id.as_deref(),
+        outcome,
+        reason = reason.as_deref(),
+        inject_veto = inject_veto.as_deref(),
+        inject_attempted,
+        "human_input_delivery"
+    );
+    result
+}
+
+async fn deliver_resolved(
+    registry: &HealthRegistry,
+    request: HumanInputRequest,
+) -> (Result<HumanInputDelivery, HumanInputError>, bool) {
+    let shared = match resolve_direct_meeting_shared(
+        registry,
+        request.channel_id,
+        &request.provider,
+    )
+    .await
+    {
+        Ok(shared) => shared,
+        Err(error) => return (Err(HumanInputError::RuntimeUnavailable(error)), false),
+    };
     let allowed = {
         let settings = shared.settings.read().await;
         author_allowed_for_human_input(
@@ -394,7 +467,7 @@ pub async fn deliver_human_input(
         )
     };
     if !allowed {
-        return Err(HumanInputError::AuthorNotAllowed);
+        return (Err(HumanInputError::AuthorNotAllowed), false);
     }
     let runtime = match shared.http.cached_serenity_ctx.get().cloned() {
         None => Err("provider runtime is not ready".to_string()),
@@ -411,8 +484,11 @@ pub async fn deliver_human_input(
         shared,
         runtime,
         request,
+        inject_attempted: Default::default(),
     };
-    deliver_with_ports(&ports).await
+    let result = deliver_with_ports(&ports).await;
+    let inject_attempted = ports.inject_attempted.into_inner();
+    (result, inject_attempted)
 }
 
 /// Registers a bot runtime bound to `channel_id` with the given auth settings.

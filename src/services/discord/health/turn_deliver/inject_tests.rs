@@ -1505,3 +1505,80 @@ async fn an_injection_without_a_discord_message_records_no_disposition_pg() {
     let injected = "Ok(Injected { turn_id: None })".to_string();
     assert_eq!(observed, (injected, true, false, false));
 }
+
+/// The delivery result log carries the veto beside the queue reason, the caller's ids and the
+/// attempt flag, and none of the input text.
+#[tokio::test(flavor = "current_thread")]
+async fn a_vetoed_delivery_logs_its_veto_and_ids_without_the_text() {
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let ch = 6_484_301;
+    let registry = HealthRegistry::new();
+    register_inject_runtime(&registry, &[ch], None).await;
+    let pane = InjectPane::new(ch, "all");
+    let ended = format!("{BUSY_TURN}{{\"type\":\"result\",\"subtype\":\"success\"}}\n");
+    pane.set("transcript.jsonl", &ended);
+    let request = HumanInputRequest {
+        channel_id: ChannelId::new(ch),
+        provider: ProviderKind::Claude,
+        text: "secret-6484 body".to_string(),
+        author_id: 200,
+        source: "imessage".to_string(),
+        metadata: Some(serde_json::json!({"human_input": {"origin_id": "origin-6484"}})),
+        channel_name_hint: None,
+    };
+    let sink = Sink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || writer.clone())
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let delivered = deliver_human_input(&registry, request).await;
+    drop(guard);
+
+    let Ok(HumanInputDelivery::Queued {
+        turn_id,
+        reason,
+        inject_veto,
+    }) = delivered
+    else {
+        panic!("expected a vetoed queue: {delivered:?}");
+    };
+    assert_eq!(
+        (reason.as_str(), inject_veto.as_deref()),
+        ("external_turn_active", Some("not_busy"))
+    );
+    let logs = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+    let lines: Vec<_> = logs
+        .lines()
+        .filter(|line| line.contains("human_input_delivery"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{logs}");
+    for field in [
+        format!("turn_id=\"{turn_id}\""),
+        "source=\"imessage\"".to_string(),
+        "origin_id=\"origin-6484\"".to_string(),
+        "outcome=\"queued\"".to_string(),
+        "reason=\"external_turn_active\"".to_string(),
+        "inject_veto=\"not_busy\"".to_string(),
+        "inject_attempted=true".to_string(),
+    ] {
+        assert!(lines[0].contains(&field), "missing {field}: {}", lines[0]);
+    }
+    assert!(!logs.contains("secret-6484"), "input text leaked: {logs}");
+}
