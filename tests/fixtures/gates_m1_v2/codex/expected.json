@@ -1,0 +1,130 @@
+{
+  "captured_through": 10631,
+  "channel_id": 632502,
+  "delivered_frontier": 101,
+  "excluded": [
+    {
+      "reason": "tool_call_panel",
+      "unit_key": {
+        "channel_id": 632502,
+        "kind": "tool",
+        "native_key": "codex-tool-before-abort",
+        "provider": "codex"
+      }
+    },
+    {
+      "reason": "tool_call_panel",
+      "unit_key": {
+        "channel_id": 632502,
+        "kind": "tool",
+        "native_key": "codex-tool-after-abort",
+        "provider": "codex"
+      }
+    },
+    {
+      "reason": "codex_tool_output",
+      "unit_key": {
+        "channel_id": 632502,
+        "kind": "tool_result",
+        "native_key": "call-codex-tool-after-abort",
+        "provider": "codex"
+      }
+    },
+    {
+      "reason": "tool_call_panel",
+      "unit_key": {
+        "channel_id": 632502,
+        "kind": "tool",
+        "native_key": "codex-next-tool",
+        "provider": "codex"
+      }
+    }
+  ],
+  "pieces": [
+    {
+      "index": 0,
+      "payload": "Codex body before abort",
+      "posted": 101,
+      "unit_key": {
+        "channel_id": 632502,
+        "kind": "body",
+        "native_key": "codex-before-abort",
+        "provider": "codex"
+      }
+    },
+    {
+      "index": 1,
+      "payload": "이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존.",
+      "posted": null,
+      "unit_key": {
+        "channel_id": 632502,
+        "kind": "body",
+        "native_key": "codex-before-abort",
+        "provider": "codex"
+      }
+    },
+    {
+      "index": 2,
+      "payload": " 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. \n```rust\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\n```",
+      "posted": null,
+      "unit_key": {
+        "channel_id": 632502,
+        "kind": "body",
+        "native_key": "codex-before-abort",
+        "provider": "codex"
+      }
+    },
+    {
+      "index": 3,
+      "payload": "```rust\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\n```",
+      "posted": null,
+      "unit_key": {
+        "channel_id": 632502,
+        "kind": "body",
+        "native_key": "codex-before-abort",
+        "provider": "codex"
+      }
+    },
+    {
+      "index": 4,
+      "payload": "```rust\nlet value = \"🚀\";\n\n```",
+      "posted": null,
+      "unit_key": {
+        "channel_id": 632502,
+        "kind": "body",
+        "native_key": "codex-before-abort",
+        "provider": "codex"
+      }
+    },
+    {
+      "index": 0,
+      "payload": "Codex body after abort 🚀",
+      "posted": null,
+      "unit_key": {
+        "channel_id": 632502,
+        "kind": "body",
+        "native_key": "codex-after-abort",
+        "provider": "codex"
+      }
+    },
+    {
+      "index": 0,
+      "payload": "Codex following turn body 🚀",
+      "posted": null,
+      "unit_key": {
+        "channel_id": 632502,
+        "kind": "body",
+        "native_key": "codex-next-body",
+        "provider": "codex"
+      }
+    }
+  ],
+  "prefix_hash": "861fdeebd8c33065a5d5acb2ffb869dc2ae437131c0f36b92ed94aed2a9f9daf",
+  "provider": "codex",
+  "source": {
+    "dev": 16777230,
+    "ino": 852354356,
+    "path": "/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i6325-n3b-gates/logs/m1-r1b-v2-oracle-fixture/codex/source.jsonl",
+    "session_id": "v2-codex-source"
+  }
+}

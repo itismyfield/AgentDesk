@@ -135,12 +135,24 @@ fn context_window(value: &str) -> bool {
 mod tests {
     use super::super::*;
 
+    fn own_draft(pane: &str) -> String {
+        pane.replace(
+            "\x1b[2mAsk Codex to do anything\x1b[0m",
+            "fixture follow-up",
+        )
+        .replace(
+            "\x1b[2mUse /skills to list available skills\x1b[0m",
+            "fixture follow-up",
+        )
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn current_codex_status_fixture_allows_followup_without_kill() {
         use super::super::super::host_input::spy::{SpyGuard, SpyState};
         let pane = include_str!("../../../../tests/fixtures/tui_input/codex-0.160.0-idle.ansi");
+        let draft = own_draft(pane);
         let guard = SpyGuard::install(SpyState {
-            captures: [pane, pane, pane, pane]
+            captures: [pane, pane, pane, &draft, pane]
                 .into_iter()
                 .map(|p| Some(p.to_string()))
                 .collect(),
@@ -229,8 +241,25 @@ new output"
                     "Fixture answer\nApproval required: this is answer prose.",
                 )
             };
+            let plain = strip_ansi_escape_sequences(&pane);
+            let separator = if model == "legacy-fast-first" {
+                "Approval required: this is answer prose.\n\n›"
+            } else {
+                "Approval required: this is answer prose.\n\n  Worked for"
+            };
+            assert!(
+                plain.contains(separator),
+                "historical prose lost its separator: {model}"
+            );
+            let draft = own_draft(&pane);
             let guard = SpyGuard::install(SpyState {
-                captures: vec![Some(pane); 3].into(),
+                captures: vec![
+                    Some(pane.clone()),
+                    Some(draft),
+                    Some(pane.clone()),
+                    Some(pane),
+                ]
+                .into(),
                 ..SpyState::default()
             });
             let session = "composer-generalized-fixture";
@@ -282,9 +311,12 @@ new output"
             "Sign in to continue",
             "Authentication required",
         ] {
-            let pane = idle
-                .replace("GPT-6.1-Sol xhigh", "codex-next none")
-                .replace("Worked for 2s • 7:26 AM", state);
+            let pane = idle.replace("GPT-6.1-Sol xhigh", "codex-next none");
+            let pane = if state == "• Working (2s • esc to interrupt)" {
+                pane.replace("Worked for 2s • 7:26 AM", state)
+            } else {
+                pane.replace("\x1b[1m›\x1b[0m", &format!("{state}\n\x1b[1m›\x1b[0m"))
+            };
             for pane in [
                 pane.clone(),
                 pane.replace(

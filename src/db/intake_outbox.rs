@@ -633,6 +633,10 @@ pub(crate) async fn claim_pending_for_target_except(
         return Ok(None);
     };
 
+    // Test-only checkpoint: lets a test move the home between this SELECT and the confirming UPDATE.
+    #[cfg(test)]
+    crate::services::cluster::intake_worker::test_executor::claim_selected().await;
+
     let Some(row) = confirm_claim(&mut tx, id, claim_owner).await? else {
         tx.rollback().await?;
         return Ok(None);

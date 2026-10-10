@@ -9,6 +9,11 @@ use super::super::bounded_tmux::{BoundedTmuxError, run_with_budget};
 use super::gate::{PaneVerdict, judge_pane, own_draft};
 use crate::services::tui_o::shadow::ShadowProvider;
 
+#[cfg(test)]
+mod ownership;
+#[cfg(test)]
+mod ownership_tests;
+
 /// Larger prompts are refused before any tmux call.
 pub const MAX_PROMPT_BYTES: usize = 64 * 1024;
 const CAPTURE_SCROLLBACK: &str = "-80";
@@ -55,6 +60,8 @@ pub struct TmuxPane {
     pre_empty: bool,
     #[cfg(test)]
     test_nonce: Option<String>,
+    #[cfg(test)]
+    offer: Option<crate::services::discord::input_runtime::offer::Offer>,
 }
 
 impl TmuxPane {
@@ -71,12 +78,23 @@ impl TmuxPane {
             pre_empty: false,
             #[cfg(test)]
             test_nonce: None,
+            #[cfg(test)]
+            offer: None,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn attest_test_nonce(&mut self, nonce: &str) {
         self.test_nonce = Some(nonce.into());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_offer(
+        mut self,
+        offer: crate::services::discord::input_runtime::offer::Offer,
+    ) -> Self {
+        self.offer = Some(offer);
+        self
     }
 
     fn command(&self, args: &[&str]) -> std::io::Result<Command> {
@@ -99,7 +117,24 @@ impl TmuxPane {
                         .enable_all()
                         .build()
                         .map_err(BoundedTmuxError::Spawn)?
-                        .block_on(run_with_budget(&mut command, self.budget))
+                        .block_on(async {
+                            #[cfg(test)]
+                            if let Some(offer) = &self.offer {
+                                let effect = args.first().copied();
+                                if matches!(effect, Some("paste-buffer" | "send-keys")) {
+                                    let pending = ownership::spawn(
+                                        offer,
+                                        self.provider,
+                                        &tokio::runtime::Handle::current(),
+                                        &mut command,
+                                        self.budget,
+                                        effect == Some("send-keys"),
+                                    )?;
+                                    return pending.wait().await;
+                                }
+                            }
+                            run_with_budget(&mut command, self.budget).await
+                        })
                 })
                 .join()
                 .unwrap_or_else(|_| {
@@ -292,9 +327,14 @@ impl Pane for TmuxPane {
         let session = self.session.clone();
         let provider = self.provider;
         let callback = || {
-            self.pre_empty = self
-                .capture()
-                .is_ok_and(|c| judge_pane(provider, &c) == PaneVerdict::Ready);
+            let capture = self.capture();
+            #[cfg(test)]
+            if self.offer.is_some()
+                && let Err(error) = &capture
+            {
+                eprintln!("offer fixture composer capture failed: {error}");
+            }
+            self.pre_empty = capture.is_ok_and(|c| judge_pane(provider, &c) == PaneVerdict::Ready);
             let result = operation(self);
             self.pre_empty = false;
             result

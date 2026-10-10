@@ -475,5 +475,8 @@ mod recovery_tests;
 mod renumber_tests;
 #[path = "retire_tests.rs"]
 mod retire_tests;
+#[cfg(unix)]
+#[path = "source_identity_tests.rs"]
+mod source_identity_tests;
 #[path = "switch_tests.rs"]
 mod switch_tests;
