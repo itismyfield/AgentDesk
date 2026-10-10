@@ -185,6 +185,19 @@ impl HostIo for TestHost {
         std::future::ready(Ok(locked(&self.facts).clone()))
     }
 
+    async fn intake_fence(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> Result<FencedFacts, String> {
+        let facts = self.activation_facts(channel, provider).await?;
+        Ok(FencedFacts {
+            hold: crate::db::o_channel_activation::IntakeFence::empty_for_test(),
+            facts,
+            queued_bodies: 0,
+        })
+    }
+
     fn local_custody(&self, channel: u64, _: ShadowProvider) -> Result<Custody, String> {
         let custody = *locked(&self.custody);
         let row = custody.is_some_and(|custody| custody(channel));

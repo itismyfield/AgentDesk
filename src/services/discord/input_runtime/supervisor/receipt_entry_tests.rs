@@ -53,7 +53,7 @@ async fn g1a_real_loop_receipts_while_running_or_draft_held_and_finishes_after_r
                 })
                 .await
                 .unwrap();
-            assert_eq!(response.await.unwrap().sources, [10]);
+            assert_eq!(response.await.unwrap().unwrap().sources, [10]);
             let (reply, response) = oneshot::channel();
             commands
                 .send(SupervisorCmd::FetchTicket { reply })
@@ -1075,4 +1075,146 @@ async fn g1a_uncertain_other_deferred_dirty_race_retains_only_prevalidated_retry
         }
         assert!(driven.release());
     }
+}
+
+fn external(rig: &Rig, text: &str, origin: &str) -> Box<Source> {
+    use crate::services::discord::input_runtime::supervisor::external::source;
+    Box::new(source(rig.channel, 7, text, Some("imessage"), origin).unwrap())
+}
+
+type External = crate::services::discord::input_runtime::supervisor::external::ExternalReceipt;
+
+async fn submit_external(driven: &mut Driven, source: Box<Source>) -> External {
+    let (reply, response) = oneshot::channel();
+    driven
+        .supervisor
+        .input_command(SupervisorCmd::SubmitExternal { source, reply }, true)
+        .await;
+    response.await.unwrap()
+}
+
+#[tokio::test]
+async fn submit_external_same_origin_keeps_first_body_and_seq() {
+    let rig = Rig::new(6_325_940);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let screen = Arc::new(Screen::default());
+    screen.busy.store(true, Ordering::SeqCst);
+    let mut supervisor = admitted(&rig, &[]).await;
+    let (commands, received) = tokio::sync::mpsc::channel(4);
+    let script = async {
+        // The first reply is dropped; the receipt it asked for still lands once.
+        let (reply, response) = oneshot::channel();
+        let source = external(&rig, "first", "guid-1");
+        let command = SupervisorCmd::SubmitExternal { source, reply };
+        commands.send(command).await.unwrap();
+        drop(response);
+        let (reply, response) = oneshot::channel();
+        let source = external(&rig, "second", "guid-1");
+        let command = SupervisorCmd::SubmitExternal { source, reply };
+        commands.send(command).await.unwrap();
+        let answer = response.await.unwrap();
+        drop(commands);
+        answer
+    };
+    let ((), answer) = tokio::join!(supervisor.run(DriveFake(screen.clone()), received), script);
+    let External::Received {
+        receipt,
+        duplicate: true,
+        state: RowState::Received,
+    } = answer
+    else {
+        panic!("not a duplicate receipt: {answer:?}")
+    };
+    let rows = supervisor.slot().reopen().unwrap().rows().unwrap();
+    let row = rows.row(receipt.key).unwrap();
+    assert_eq!(row.input["text"], "first");
+    assert_eq!(row.received_seq, Some(receipt.received_seq));
+    // The retry appended nothing after the one receipt.
+    assert_eq!(rows.folded_seq(), receipt.received_seq);
+    assert_eq!(rows.open_rows().count(), 1);
+    assert_eq!(screen.sent.lock().unwrap().len(), 0);
+    assert!(supervisor.release());
+}
+
+#[tokio::test]
+async fn external_receipt_does_not_require_discord_scan() {
+    let rig = Rig::new(6_325_941);
+    let screen = Arc::new(Screen::default());
+    let mut driven = Driven::start(admitted(&rig, &[]).await, &screen).await;
+    // An unscanned Discord notice is pending and no fetch ticket exists.
+    let (reply, response) = oneshot::channel();
+    let pending = SupervisorCmd::PendingSource {
+        sources: vec![10],
+        reply,
+    };
+    driven.supervisor.input_command(pending, true).await;
+    let before = response.await.unwrap().unwrap();
+    let answer = submit_external(&mut driven, external(&rig, "hi", "guid-1")).await;
+    assert!(
+        matches!(
+            answer,
+            External::Received {
+                duplicate: false,
+                ..
+            }
+        ),
+        "{answer:?}"
+    );
+    let after = driven.supervisor.pending_snapshot();
+    assert_eq!(after.sources, before.sources);
+    assert_eq!(after.dirty_generation, before.dirty_generation);
+    assert!(driven.release());
+}
+
+#[tokio::test]
+async fn external_receipt_busy_waits_for_existing_actor_without_reactions() {
+    let rig = Rig::new(6_325_942);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let screen = Arc::new(Screen::default());
+    *screen.record.lock().unwrap() = Some(a.path.clone());
+    screen.busy.store(true, Ordering::SeqCst);
+    let mut driven = Driven::start(admitted(&rig, &[]).await, &screen).await;
+    let answer = submit_external(&mut driven, external(&rig, "from imessage", "guid-1")).await;
+    let External::Received { receipt, .. } = answer else {
+        panic!("not received: {answer:?}")
+    };
+    driven.idle(3).await;
+    assert_eq!(driven.sent(), 0, "a busy pane takes no write");
+    assert_eq!(state(&rig, receipt.key), RowState::Received);
+    screen.busy.store(false, Ordering::SeqCst);
+    driven.idle(2).await;
+    assert_eq!(driven.sent(), 1);
+    assert!(screen.sent.lock().unwrap()[0].contains("from imessage"));
+    assert_eq!(state(&rig, receipt.key), RowState::Running);
+    turn_end(&a);
+    driven.idle(1).await;
+    let done = RowState::Done(DoneReason::Completed);
+    assert_eq!(state(&rig, receipt.key), done);
+    assert!(
+        screen.reactions.lock().unwrap().is_empty(),
+        "an external key has no Discord message to react on"
+    );
+    assert!(driven.release());
+}
+
+#[tokio::test(start_paused = true)]
+async fn hm1_normal_boot_has_no_external_receipts() {
+    // Discord, voice and headless keys move in and hand back as before; none reads as external.
+    let keys = [REAL, 9_000_000_000_000_000_002, 9_100_000_000_000_000_003];
+    let rig = Rig::new(6_325_943);
+    let mut supervisor = rig.supervisor(Request::Ledger, keys.to_vec());
+    assert_eq!(supervisor.boot().await, Landing::Admitted);
+    let rows = supervisor.slot().get().unwrap().rows().unwrap();
+    let moved: Vec<u64> = rows.open_rows().map(|(key, _)| key).collect();
+    assert_eq!(moved, keys);
+    assert!(
+        rows.open_rows()
+            .all(|(_, row)| row.input.get("http_origin").is_none())
+    );
+    assert!(supervisor.release());
+    let mut legacy = rig.supervisor(Request::Legacy, vec![]);
+    assert_eq!(legacy.boot().await, Landing::HandedBack);
+    assert_eq!(*rig.world.enqueued.lock().unwrap(), keys);
 }

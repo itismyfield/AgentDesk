@@ -58,6 +58,14 @@ impl OwnershipGate {
         self.locked().ownership
     }
 
+    #[cfg(test)]
+    pub(crate) fn locked_for_test(&self) -> bool {
+        matches!(
+            self.state.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<GatewayOwnership> {
         self.tx.subscribe()
     }
