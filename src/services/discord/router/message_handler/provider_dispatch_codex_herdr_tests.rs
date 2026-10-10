@@ -1532,5 +1532,9 @@ fn coldstop_execute_fresh_pending_bound_closed_arm_releases_hold_pg() {
             panic!("{kind}: no execution");
         };
         assert!(!hold_of(&record.execution_nonce).exists(), "{kind}");
+        assert!(
+            crate::services::claude::herdr_turn::not_held(&record.execution_nonce).is_ok(),
+            "{kind}"
+        );
     }
 }
