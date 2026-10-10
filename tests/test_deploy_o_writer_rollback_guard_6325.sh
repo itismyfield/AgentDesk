@@ -174,23 +174,57 @@ $SWITCH_ON" "$LEGACY_MANIFEST"
 expect "two definitions that disagree" refused
 
 echo "== switch on: only this source's own build is deployed =="
+# Buffer the bounded selection range so a missing boundary cannot include later deploy steps.
 selection="$(awk '
-    /^if _external_artifact_would_skip_o_writer; then$/ { printing = 1 }
-    printing { print }
-    printing && /^fi$/ { exit }
+    /^_check_repo_remote_freshness$/ { collecting = 1; next }
+    collecting && /^# Cluster peers are pinned to this commit,/ { print body; exit }
+    collecting { body = body $0 ORS }
 ' "$DEPLOY_SH")"
-[ -n "$selection" ] || fail "the binary selection block does not run the external artifact guard"
-_resolve_default_release_binary() { echo "own-build"; }
+if [ -z "$selection" ] || ! bash -n <<<"$selection" 2>/dev/null; then
+    fail "the source floor and binary selection range is missing or invalid"
+    exit 1
+fi
+for guard in _source_would_revert_o_ledger _external_artifact_would_skip_o_writer; do
+    if ! grep -qx "if $guard; then" <<<"$selection"; then
+        fail "the source floor and binary selection range does not run $guard"
+        exit 1
+    fi
+done
+_resolve_default_release_binary() {
+    echo "select own-build" >>"$TMP_ROOT/calls"
+    echo "own-build"
+}
+run_selection() {
+    AGENTDESK_DEPLOY_BINARY="$1" REPO="$REPO" ADK_REL="$ADK_REL" TMP_ROOT="$TMP_ROOT" \
+        DEPLOY_BUILD_PROFILE=release bash -euo pipefail -c "$(declare -f _source_o_tui_writer \
+        _source_o_ledger_operator_resume _source_would_revert_o_ledger \
+        _external_artifact_would_skip_o_writer _resolve_default_release_binary)
+$selection
+echo \"\$SOURCE_BINARY\""
+}
 # $1 label, $2 topology.rs body, $3 AGENTDESK_DEPLOY_BINARY, $4 expected binary or "refused"
 expect_binary() {
     local actual
     setup_case "$2" ""
-    actual="$(AGENTDESK_DEPLOY_BINARY="$3" bash -c "$(declare -f _source_o_tui_writer _source_o_ledger_operator_resume \
-        _external_artifact_would_skip_o_writer _resolve_default_release_binary)
-REPO='$REPO' DEPLOY_BUILD_PROFILE=release
-$selection
-echo \"\$SOURCE_BINARY\"" 2>/dev/null)" || actual=refused
+    actual="$(run_selection "$3" 2>/dev/null)" || actual=refused
     if [ "$actual" = "$4" ]; then pass "$1 → $4"; else fail "$1 → expected $4, got $actual"; fi
+}
+expect_source_floor() {
+    local actual status=0 calls
+    actual="$(run_selection "" 2>"$TMP_ROOT/selection-error")" || status=$?
+    calls="$(cat "$TMP_ROOT/calls" 2>/dev/null || true)"
+    if [ "$2" = refused ]; then
+        if [ "$status" -eq 1 ] && [ -z "$actual" ] && [ -z "$calls" ] \
+            && grep -q "OperatorResume floor refuses" "$TMP_ROOT/selection-error"; then
+            pass "$1 → refused before binary selection"
+        else
+            fail "$1 → expected refusal before selection, got rc=$status output='$actual' calls='$calls'"
+        fi
+    elif [ "$status" -eq 0 ] && [ "$actual" = "$2" ] && [ "$calls" = "select own-build" ]; then
+        pass "$1 → $2 with binary selection observed"
+    else
+        fail "$1 → expected $2 with selection, got rc=$status output='$actual' calls='$calls'"
+    fi
 }
 expect_binary "switch on, external artifact" "$SWITCH_ON" /tmp/artifact refused
 expect_binary "unreadable switch, external artifact" \
@@ -224,9 +258,24 @@ if AGENTDESK_DEPLOY_BINARY=/tmp/artifact _external_artifact_would_skip_o_writer;
 else fail "external artifact could be assigned an unverified capability"; fi
 mkdir -p "$ADK_REL/o_store"
 printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
-if _source_would_revert_o_ledger; then fail "compatible source refused"; else pass "compatible source passes floor"; fi
+expect_source_floor "source floor, compatible source" own-build
+setup_case "$SWITCH_OFF" ""
+mkdir -p "$REPO/src/services/tui_o/store"
 printf 'pub const OPERATOR_RESUME_SUPPORTED: bool = false;\n' >"$REPO/src/services/tui_o/store/ledger.rs"
-if _source_would_revert_o_ledger; then pass "source downgrade refused"; else fail "source downgrade passed floor"; fi
+expect_source_floor "no source floor, legacy source" own-build
+for capability in missing false unknown unreadable; do
+    setup_case "$SWITCH_OFF" ""
+    mkdir -p "$ADK_REL/o_store" "$REPO/src/services/tui_o/store"
+    printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
+    case "$capability" in
+        false) printf 'pub const OPERATOR_RESUME_SUPPORTED: bool = false;\n' \
+            >"$REPO/src/services/tui_o/store/ledger.rs" ;;
+        unknown) printf 'pub const OPERATOR_RESUME_SUPPORTED: bool = cfg!(feature = "o");\n' \
+            >"$REPO/src/services/tui_o/store/ledger.rs" ;;
+        unreadable) mkdir "$REPO/src/services/tui_o/store/ledger.rs" ;;
+    esac
+    expect_source_floor "source floor, $capability capability" refused
+done
 
 echo "== this repository's switch reads as one value =="
 real="$(REPO="$REPO_ROOT" _source_o_tui_writer)"
