@@ -1035,6 +1035,11 @@ src/
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
 │   │   ├── input_runtime/
+│   │   │   ├── activation/
+│   │   │   │   ├── plan.rs
+│   │   │   │   ├── scope.rs
+│   │   │   │   ├── scope_tests.rs
+│   │   │   │   └── selection_tests.rs
 │   │   │   ├── fence/
 │   │   │   │   ├── modes.rs
 │   │   │   │   └── modes_tests.rs
@@ -1043,6 +1048,7 @@ src/
 │   │   │   │   ├── drive_entry_tests.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   └── receipt_entry_tests.rs
+│   │   │   ├── activation.rs
 │   │   │   ├── admission.rs
 │   │   │   ├── clear.rs
 │   │   │   ├── clear_tests.rs
@@ -1054,6 +1060,7 @@ src/
 │   │   │   ├── fence.rs
 │   │   │   ├── fence_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── offer.rs
 │   │   │   ├── ordering.rs
 │   │   │   ├── ordering_tests.rs
 │   │   │   ├── receipt.rs
@@ -2350,6 +2357,9 @@ src/
 │   │   └── tests_pg.rs
 │   ├── tui_input/
 │   │   ├── actor/
+│   │   │   ├── pane/
+│   │   │   │   ├── ownership.rs
+│   │   │   │   └── ownership_tests.rs
 │   │   │   ├── gate.rs
 │   │   │   ├── pane.rs
 │   │   │   ├── token.rs
