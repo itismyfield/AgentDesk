@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::*;
-use crate::services::tui_o::repost::send::{DispatchReport, RepostIds, send_within};
+use crate::services::tui_o::repost::send::{DispatchReport, RepostIds, hand_over, send_within};
 
 const CHANNEL: u64 = 63250101;
 const MARKER: &str = "o:63250101:claude:msg_01:body:0";
@@ -447,4 +447,76 @@ async fn bounded_dispatch_times_out_with_the_request_gone_and_waits_429s_inside_
     let report = dispatch(&mock.port(), Arc::new(|| false)).await;
     assert_eq!(summary(&report), ("unsent", 0, 0, 0));
     assert!(mock.requests().is_empty());
+}
+
+/// A live check that counts how often the guard consulted it.
+fn counted_live(
+    calls: &Arc<std::sync::atomic::AtomicUsize>,
+    answer: bool,
+) -> Arc<dyn Fn() -> bool + Send + Sync> {
+    let calls = Arc::clone(calls);
+    Arc::new(move || {
+        calls.fetch_add(1, Ordering::SeqCst);
+        answer
+    })
+}
+
+#[tokio::test]
+async fn f1r_a_handed_over_request_carries_its_guard_and_counts_like_send_within() {
+    let replies = || vec![route_429("0.01"), created(None)];
+    let mock = Mock::start(replies()).await;
+    let calls = Arc::default();
+    let (request, counts) = hand_over(&mock.port(), &envelope(), counted_live(&calls, true));
+    assert_eq!(
+        summary(&counts.report(WireOutcome::TimedOut)),
+        ("timed_out", 0, 0, 0)
+    );
+    assert_eq!(
+        (mock.requests().len(), calls.load(Ordering::SeqCst)),
+        (0, 0),
+        "not polled yet"
+    );
+
+    // The first poll may run anywhere, e.g. under the gate; the rest runs in its own task.
+    let mut request = Box::pin(request);
+    let first = std::future::poll_fn(|cx| std::task::Poll::Ready(request.as_mut().poll(cx))).await;
+    assert!(first.is_pending());
+    let outcome = tokio::spawn(request).await.unwrap();
+    let handed = counts.report(outcome);
+    assert_eq!(summary(&handed), ("created", 2, 1, 1));
+    assert_eq!(mock.requests().len(), 2);
+
+    let reference = Mock::start(replies()).await;
+    let sent = dispatch(&reference.port(), always()).await;
+    assert_eq!(
+        summary(&sent),
+        summary(&handed),
+        "the same counts as send_within"
+    );
+}
+
+#[tokio::test]
+async fn f1r_an_unpolled_request_dropped_sends_and_counts_nothing() {
+    let mock = Mock::start(vec![created(None)]).await;
+    let calls = Arc::default();
+    let (request, counts) = hand_over(&mock.port(), &envelope(), counted_live(&calls, true));
+    drop(request);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        summary(&counts.report(WireOutcome::Unsent("dropped".into()))),
+        ("unsent", 0, 0, 0)
+    );
+    assert_eq!(
+        (mock.requests().len(), calls.load(Ordering::SeqCst)),
+        (0, 0)
+    );
+
+    // A withdrawn guard stops the polled request before it leaves.
+    let (request, counts) = hand_over(&mock.port(), &envelope(), counted_live(&calls, false));
+    let outcome = request.await;
+    assert_eq!(summary(&counts.report(outcome)), ("unsent", 0, 0, 0));
+    assert_eq!(
+        (mock.requests().len(), calls.load(Ordering::SeqCst)),
+        (0, 1)
+    );
 }
