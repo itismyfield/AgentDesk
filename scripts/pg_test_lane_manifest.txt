@@ -174,6 +174,8 @@ src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
 src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs
+src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs
+src/services/discord/runtime_bootstrap/scoped_inflight_restore_tests.rs
 src/services/discord/session_idle_cleanup_tests.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
@@ -430,6 +432,8 @@ services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests
+services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests
 services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
@@ -1461,6 +1465,15 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settle
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_live_interactive_turn_without_dispatch_binding_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
+services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_invalidation_preserves_replay_and_foreign_rows_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_admitted_kinds_resume_only_after_installation_and_output_admission_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_fresh_receipt_precedes_admitted_settlement_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_install_defers_active_source_queue_feedback_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_install_is_effect_free_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_old_generation_cannot_install_a_mailbox_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_resume_rechecks_home_epoch_and_input_fence_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_retained_terminal_keeps_reason_and_obligation_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_unverified_receipts_block_without_durable_error_holds_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::exact_owned_row_with_null_cwd_is_channel_scoped_empty_path

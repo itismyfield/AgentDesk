@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "21d20b49ee3a6c841fd3be69475cb5d0f913c202",
+  "measured_at_sha": "08c180c5983548188de912e01254ab5b832f7234",
   "records": [
     {
       "root": "migrations/postgres",
@@ -29899,6 +29899,51 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:b1352ea05b095a3d0c229a00a37e035f282f44342ec6f364900726c7bd0a8932"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ac7db2ff44f2fd49196e01d0a6c490da09b6c52fb225d94807fbbe8ceefef487"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/scoped_inflight_restore_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1c5e3b01fcd132f32989a3190fd90c622df169a21066376f2b178f5154909606"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/scoped_inflight_restore_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:80b66f83956a8fb75249b465b317f54cdeefa7ca079570f0b67a172e7731f729"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/scoped_inflight_restore_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a287da1a72f7220988aed9c101b6a51779814320a4bf3f50cc5479612e95fcd5"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/scoped_inflight_restore_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b471bff129347780e43958b9c3e261b3e30471f0b1bcc319afe0a35933ea5221"
     },
     {
       "root": "src",

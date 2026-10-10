@@ -137,6 +137,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_sweep::tests
   --skip services::discord::runtime_bootstrap::orphan_recovery::fence_tests
+  --skip services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
+  --skip services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests
   --skip services::discord::session_idle_cleanup::tests
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   --skip services::discord::task_notification_delivery::tests
@@ -533,6 +535,12 @@ NON_PG_FILTER_REPLAY=(
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_cutoffs_do_not_panic_for_extreme_values
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_spawns_exactly_once_per_process
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_task_can_restart_after_task_death
+  services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_checked_reads_distinguish_absence_from_corruption
+  services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_install_rolls_back_on_required_persistence_failure
+  services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_old_format_backfill_requires_save_ack
+  services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_protected_probe_does_not_backfill
+  services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_probe_requires_complete_read_and_backfill
+  services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_readers_preserve_foreign_files_and_mailboxes
   services::discord::session_relay_sink::journal::pg_store::mixed_tests::mixed_strict_rows_leave_legacy_fold_frontier_and_shadow_bytes_unchanged
   services::discord::session_relay_sink::journal::pg_store::tests::stored_journal_event_mapping_is_closed_and_fail_closed
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reconcile_noop_when_db_matches_tmux
@@ -852,6 +860,8 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests
   services::discord::runtime_bootstrap::orphan_recovery::fence_tests
+  services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
+  services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests
   services::discord::session_idle_cleanup::tests
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   services::discord::task_notification_delivery::tests
