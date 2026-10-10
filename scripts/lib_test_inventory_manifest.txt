@@ -10912,8 +10912,9 @@ services::tui_o::repost::io::probe::tests::f4_scan_uses_original_anchor_and_froz
 services::tui_o::repost::io::probe::tests::f4_slot_two_requires_new_closed_attempt_evidence
 services::tui_o::repost::io::probe::tests::f4_timeout_budget_and_nonprogress_remain_incomplete
 services::tui_o::repost::io::probe::tests::f4_two_passes_wait_after_completion
+services::tui_o::repost::io::probe::tests::f4r2_a_known_damage_outlives_a_later_read_without_the_embed
+services::tui_o::repost::io::probe::tests::f4r2_an_intact_marker_read_by_id_outlives_a_truncated_listing
 services::tui_o::repost::io::probe::tests::f4r2_an_older_or_unreadable_identifier_is_never_absence
-services::tui_o::repost::io::probe::tests::f4r2_identifying_evidence_outlives_a_poorer_later_read
 services::tui_o::repost::io::probe::tests::f4r2_the_dormancy_scan_reports_a_wrapper_in_the_adapter_and_its_caller
 services::tui_o::repost::io::probe::tests::f4r_a_damaged_identifier_is_kept_apart_from_success_and_absence
 services::tui_o::repost::io::probe::tests::f4r_a_proof_read_of_the_piece_is_an_observation

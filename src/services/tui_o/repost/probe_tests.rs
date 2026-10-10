@@ -1207,7 +1207,7 @@ fn f4r_the_marker_names_the_channel_and_is_the_same_on_every_node_and_slot() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn f4r2_identifying_evidence_outlives_a_poorer_later_read() {
+async fn f4r2_a_known_damage_outlives_a_later_read_without_the_embed() {
     // A: an exact payload under a sent embed is damaged; the embed vanishing later changes nothing.
     let damaged = ObservedMessage {
         rich_embeds: 1,
@@ -1227,7 +1227,10 @@ async fn f4r2_identifying_evidence_outlives_a_poorer_later_read() {
     let seen = session.attribution();
     assert!(seen.found.is_empty(), "a known damage is never a success");
     assert_eq!(seen.damaged.iter().copied().collect::<Vec<_>>(), [450]);
+}
 
+#[tokio::test(start_paused = true)]
+async fn f4r2_an_intact_marker_read_by_id_outlives_a_truncated_listing() {
     // B: the proof read shows the intact marker; history then lists the same id truncated.
     let footer = repost_footer(&key("f4"));
     let read_by_id = ObservedMessage {
