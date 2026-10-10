@@ -674,35 +674,6 @@ pub(crate) fn run_legacy(
     with_transport(|transport| run_plan(&target, &LegacyTmuxGate, transport, actions, cancel_token))
 }
 
-// A necessary capacity veto; the captured whole draft still proves actual ownership.
-fn prompt_submission_fits_pane(
-    frame: &str,
-    payload: &[TuiInputAction],
-    size: Option<(usize, usize)>,
-) -> bool {
-    use unicode_width::UnicodeWidthStr;
-    size.is_some_and(|(width, height)| {
-        let width = width.saturating_sub(4);
-        let rows = height.saturating_sub(10);
-        if width == 0 || rows == 0 {
-            return false;
-        }
-        let lf = frame.matches('\n').count();
-        let paste =
-            matches!(payload, [TuiInputAction::PasteBuffer(text)] if text.as_str() == frame);
-        if paste && (frame.encode_utf16().count() > 800 || lf > rows.min(2)) {
-            return lf > 0 || frame.chars().count() > 800;
-        }
-        frame
-            .split('\n')
-            .try_fold(0usize, |total, line| {
-                let cells = line.replace('\t', "    ").width();
-                total.checked_add(cells.div_ceil(width).max(1))
-            })
-            .is_some_and(|needed| needed <= rows)
-    })
-}
-
 /// Submits only a prompt plan; the caller holds the existing composer mutex throughout.
 pub(crate) fn run_prompt_submission_legacy(
     session_name: &str,
@@ -710,7 +681,7 @@ pub(crate) fn run_prompt_submission_legacy(
     cancel_token: Option<&CancelToken>,
 ) -> InputRun {
     use crate::services::tui_input::submission::{
-        Refusal, Submission, run_prompt_submission_using,
+        Refusal, Submission, claude_prompt_fits_pane, run_prompt_submission_using,
     };
     use crate::services::tui_o::shadow::ShadowProvider;
     let Some((TuiInputAction::Enter, payload)) = actions.split_last() else {
@@ -753,7 +724,7 @@ pub(crate) fn run_prompt_submission_legacy(
                     if cancel_requested(cancel_token) {
                         return InputRun::Cancelled { confirmed: 0 };
                     }
-                    if !prompt_submission_fits_pane(&frame, payload, current_size) {
+                    if !claude_prompt_fits_pane(&frame, payload, current_size) {
                         return InputRun::Refused(InputRefusal::Composer(
                             Refusal::UnpredictableRender,
                         ));
