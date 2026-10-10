@@ -235,6 +235,7 @@ jobs:
               - 'src/db/postgres/test_db_reclaim.rs'
               - 'src/db/prompt_manifests/tests.rs'
               - 'src/db/relay_dead_letter.rs'
+              - 'src/db/replay_disposition/write_tests.rs'
               - 'src/db/replay_disposition_tests.rs'
               - 'src/db/replay_disposition_tests/compatibility_tests.rs'
               - 'src/db/replay_disposition_tests/concurrency_tests.rs'

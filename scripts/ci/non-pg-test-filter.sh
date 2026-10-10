@@ -32,6 +32,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::prompt_manifests::tests
   --skip db::relay_dead_letter::tests
   --skip db::replay_disposition::tests
+  --skip db::replay_disposition::write_tests
   --skip dispatch::dispatch_status::terminal_timestamp_tests
   --skip engine::ops::auto_queue_ops::tests
   --skip engine::ops::config_ops::tests
@@ -746,6 +747,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::prompt_manifests::tests
   db::relay_dead_letter::tests
   db::replay_disposition::tests
+  db::replay_disposition::write_tests
   dispatch::dispatch_status::terminal_timestamp_tests
   engine::ops::auto_queue_ops::tests
   engine::ops::config_ops::tests

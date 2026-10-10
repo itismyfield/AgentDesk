@@ -29,6 +29,7 @@ src/db/postgres/advisory_lock_tests.rs
 src/db/postgres/test_db_reclaim.rs
 src/db/prompt_manifests/tests.rs
 src/db/relay_dead_letter.rs
+src/db/replay_disposition/write_tests.rs
 src/db/replay_disposition_tests.rs
 src/db/replay_disposition_tests/compatibility_tests.rs
 src/db/replay_disposition_tests/concurrency_tests.rs
@@ -279,6 +280,7 @@ db::replay_disposition::tests
 db::replay_disposition::tests::compatibility_tests
 db::replay_disposition::tests::concurrency_tests
 db::replay_disposition::tests::consumer_tests
+db::replay_disposition::write_tests
 db::scheduled_messages::postgres_tests
 db::session_observability::tests_pg
 db::session_transcripts::clear_fence_pg_tests
@@ -793,6 +795,13 @@ db::replay_disposition::tests::consumer_tests::held_session_canonical_identity_r
 db::replay_disposition::tests::consumer_tests::legacy_null_link_cannot_requeue_via_held_history_pg
 db::replay_disposition::tests::consumer_tests::normal_retry_parent_absorbed_sources_survive_sweep_and_old_writer_child_pg
 db::replay_disposition::tests::receipt_transitions_old_writers_and_delivery_settlement_preserve_authority_pg
+db::replay_disposition::write_tests::begin_commit_failure_reports_ack_unknown_not_a_start_pg
+db::replay_disposition::write_tests::begin_commits_one_start_per_registered_attempt_pg
+db::replay_disposition::write_tests::classification_commits_only_for_its_exact_attempt_pg
+db::replay_disposition::write_tests::database_refuses_inexact_attempt_transitions_pg
+db::replay_disposition::write_tests::exact_attempt_migration_preserves_0136_rows_and_reapplies_pg
+db::replay_disposition::write_tests::exact_retry_moves_session_off_stale_resume_once_pg
+db::replay_disposition::write_tests::live_evidence_requires_a_complete_observation_and_one_provider_terminal_pg
 db::scheduled_messages::postgres_tests::postgres_agent_claim_waits_for_runtime_and_cancel_fences_turn_start
 db::scheduled_messages::postgres_tests::postgres_agent_launch_intent_crash_rearms_without_phantom_lease_renewal
 db::scheduled_messages::postgres_tests::postgres_agent_turn_start_waits_for_parent_lock_and_observes_cancel
