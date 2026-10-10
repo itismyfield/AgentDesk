@@ -732,10 +732,43 @@ use crate::services::termination_audit::host_terminate::herdr_terminate::{
     HerdrTerminateResult, OperatorTerminateWarrant, TerminateRefusal, terminate_herdr_once,
 };
 
+const TERMINATE_TEST_CHILD: &str = "ADK_HERDR_TERMINATE_TEST_CHILD";
+
+// Isolate the live config snapshot from parallel tests that install their own config.
+fn run_terminate_child(name: &str) -> bool {
+    let name = format!("services::session_host::herdr_gate::tests::{name}");
+    if let Some(child) = std::env::var_os(TERMINATE_TEST_CHILD) {
+        assert_eq!(child, name.as_str());
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &name, "--nocapture"])
+        .env(TERMINATE_TEST_CHILD, &name)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success()
+            && stdout
+                .lines()
+                .filter(|line| line.starts_with("test result:"))
+                .count()
+                == 1
+            && stdout.lines().any(|line| line
+                .starts_with("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")),
+        "{name}: {}\n{stdout}\n{stderr}",
+        output.status
+    );
+    eprintln!("isolated child verified: {name}; selected=1");
+    true
+}
+
 struct LiveTerminateSwitch(crate::config::Config);
 
 impl LiveTerminateSwitch {
     fn new() -> Self {
+        assert!(std::env::var_os(TERMINATE_TEST_CHILD).is_some());
         let previous = crate::config_live_reload::current()
             .map(|c| (*c).clone())
             .unwrap_or_default();
@@ -763,6 +796,9 @@ fn terminate(target: &InputTarget) -> HerdrTerminateResult {
 
 #[test]
 fn m0_terminate_off_has_zero_effect() {
+    if run_terminate_child("m0_terminate_off_has_zero_effect") {
+        return;
+    }
     let rig = rig();
     let switch = LiveTerminateSwitch::new();
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
@@ -810,6 +846,9 @@ fn m0_terminate_off_has_zero_effect() {
 
 #[test]
 fn m0_close_effect_positive() {
+    if run_terminate_child("m0_close_effect_positive") {
+        return;
+    }
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
@@ -829,6 +868,9 @@ fn m0_close_effect_positive() {
 
 #[test]
 fn m0_terminate_admission_off_still_judges() {
+    if run_terminate_child("m0_terminate_admission_off_still_judges") {
+        return;
+    }
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
     let _off = herdr_admission::force_for_test(Admission::new(Some("off".as_ref()), None));
@@ -869,6 +911,9 @@ fn m0_terminate_admission_off_still_judges() {
 
 #[test]
 fn m0_close_witness_mismatch_zero_bytes() {
+    if run_terminate_child("m0_close_witness_mismatch_zero_bytes") {
+        return;
+    }
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
     let target = hosted_target(
@@ -890,6 +935,9 @@ fn m0_close_witness_mismatch_zero_bytes() {
 
 #[test]
 fn m0_close_requires_both_stamps() {
+    if run_terminate_child("m0_close_requires_both_stamps") {
+        return;
+    }
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
     for (os, why) in [
@@ -923,20 +971,26 @@ fn m0_close_requires_both_stamps() {
 
 #[test]
 fn m0_terminate_request_pair_is_exact() {
+    if run_terminate_child("m0_terminate_request_pair_is_exact") {
+        return;
+    }
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
     let gate = herdr(&target);
     let mut close_results = Vec::new();
     let mut input_results = Vec::new();
+    let close = HerdrRequest::PaneClose {
+        pane_id: PANE.into(),
+    };
     for input in [Mutation::Input, Mutation::Cancel] {
         gate.pin(input).unwrap();
         close_results.push(gate.send_close_pinned());
         gate.pin(input).unwrap();
-        input_results.push(gate.send_pinned(HerdrRequest::PaneClose {
-            pane_id: PANE.into(),
-        }));
+        input_results.push(gate.send_pinned(close.clone()));
     }
+    gate.pin_terminate().unwrap();
+    input_results.push(gate.send_pinned(close));
     for request in [
         HerdrRequest::PaneSendText {
             pane_id: PANE.into(),
@@ -970,6 +1024,9 @@ fn m0_terminate_request_pair_is_exact() {
 
 #[test]
 fn m0_close_unknown_version_refused() {
+    if run_terminate_child("m0_close_unknown_version_refused") {
+        return;
+    }
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
     *rig.server.version.lock().unwrap() = "0.9.4".into();
@@ -986,6 +1043,9 @@ fn m0_close_unknown_version_refused() {
 
 #[test]
 fn m0_confirmation_required_no_escalation() {
+    if run_terminate_child("m0_confirmation_required_no_escalation") {
+        return;
+    }
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
@@ -1001,6 +1061,9 @@ fn m0_confirmation_required_no_escalation() {
 
 #[test]
 fn m0_close_uncertain_reply_never_retries() {
+    if run_terminate_child("m0_close_uncertain_reply_never_retries") {
+        return;
+    }
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
