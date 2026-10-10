@@ -1081,6 +1081,7 @@ async fn each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_
                 cache_ttl_minutes: None,
                 dispatch_type: None,
                 force_fresh: false,
+                submission: None,
             };
             let dispatched = execute(turn, sender);
             let clear = crate::services::discord::admin_host_guard::read_herdr_clear(

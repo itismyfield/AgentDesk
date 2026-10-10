@@ -137,6 +137,29 @@ impl LockedInflightEpisode {
         }
     }
 
+    /// Persists `updated` and re-reads the row under the same lock, so `Saved` means the
+    /// durable row is exactly this write.
+    pub(in crate::services::discord) fn persist_verified_under_guard(
+        &mut self,
+        updated: &InflightTurnState,
+        caller: &'static str,
+    ) -> GuardedSaveOutcome {
+        let saved = match super::store::persist_under_lock_with_snapshot(
+            &self.root, &self.path, updated, caller,
+        ) {
+            Ok(Some(saved)) => saved,
+            Ok(None) => return GuardedSaveOutcome::AuthorityPinned,
+            Err(_) => return GuardedSaveOutcome::IoError,
+        };
+        match load_inflight_state_unlocked(&self.path) {
+            Some(durable) if durable.save_generation == saved.save_generation => {
+                self.state = durable;
+                GuardedSaveOutcome::Saved
+            }
+            _ => GuardedSaveOutcome::IoError,
+        }
+    }
+
     pub(in crate::services::discord) fn mark_readopted_under_guard(
         &mut self,
     ) -> GuardedSaveOutcome {
@@ -186,6 +209,23 @@ pub(in crate::services::discord) fn lock_inflight_episode(
 ) -> Result<LockedInflightEpisode, InflightEpisodeLockError> {
     let root = inflight_runtime_root().ok_or(InflightEpisodeLockError::Missing)?;
     lock_inflight_episode_in_root(&root, provider, channel_id, expected)
+}
+
+/// Locks the row of the same seven birth axes; progress the live turn already persisted
+/// (session, output path, relay owner) does not refuse it.
+pub(in crate::services::discord) fn lock_inflight_birth_episode(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightEpisodePin,
+) -> Result<LockedInflightEpisode, InflightEpisodeLockError> {
+    let root = inflight_runtime_root().ok_or(InflightEpisodeLockError::Missing)?;
+    let path = inflight_state_path(&root, provider, channel_id);
+    let lock = lock_inflight_state_path(&path).map_err(|_| InflightEpisodeLockError::Io)?;
+    let state = load_inflight_state_unlocked(&path).ok_or(InflightEpisodeLockError::Missing)?;
+    if !expected.is_same_episode_as(&InflightEpisodePin::from_state(&state)) {
+        return Err(InflightEpisodeLockError::Mismatch);
+    }
+    Ok(LockedInflightEpisode::new(lock, root, path, state))
 }
 
 fn lock_inflight_episode_in_root(

@@ -9,6 +9,18 @@ pub(in crate::services::discord::turn_bridge) enum StreamLoopOutcome {
     AuthorityLost,
 }
 
+/// The managed attempt's fence refused before any payload, so the request stays in its Waiting
+/// row; a user stop still ends the turn as before.
+pub(in crate::services::discord::turn_bridge) fn held_before_submit(
+    creator_state: &crate::services::discord::inflight::InflightTurnState,
+    cancelled: bool,
+) -> bool {
+    !cancelled
+        && creator_state
+            .managed_submission_capability()
+            .is_some_and(|submission| submission.refusal().is_some())
+}
+
 /// A Herdr turn whose input may have been submitted, or that took a user stop, ends only on its
 /// provider's admitted terminal; EOF, a dead pane or a disconnect leave the turn, row and slot held.
 pub(in crate::services::discord::turn_bridge) fn herdr_stop_unconfirmed(

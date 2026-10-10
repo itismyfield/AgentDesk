@@ -674,6 +674,8 @@ pub fn execute_command_streaming(
     if session_selection.driver == crate::services::provider_hosting::ProviderSessionDriver::ClaudeE
     {
         debug_log("Routing to claude_e::execute_streaming (runtime=claude-e)");
+        // A managed turn routed away from the TUI fences before this driver writes the prompt.
+        crate::services::claude_tui::submission_fence::before_first_payload()?;
         return crate::services::claude_e::execute_streaming(
             prompt,
             session_id,
@@ -797,6 +799,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
             }
         }
 
+        crate::services::claude_tui::submission_fence::before_first_payload()?;
         args.push("--input-format".to_string());
         args.push("stream-json".to_string());
 
@@ -1912,6 +1915,10 @@ fn run_claude_tui_fresh_turn_and_finalize(
     );
     let (read_result, harvest, turn_read_start_offset) = match fresh_turn_result {
         Ok(result) => result,
+        // The prompt never reached the pane: keep the session and its owner marker.
+        Err(error) if crate::services::claude_tui::submission_fence::refusal().is_some() => {
+            return Err(error);
+        }
         Err(error) => {
             let reason = format!("claude tui fresh turn failed: {error}");
             let component = "claude_tui_provider";
