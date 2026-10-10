@@ -1670,6 +1670,7 @@ src/
 │   │   │   │   ├── catch_up_pagination_e2e.rs
 │   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
+│   │   │   │   ├── herdr_terminate_e2e_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
