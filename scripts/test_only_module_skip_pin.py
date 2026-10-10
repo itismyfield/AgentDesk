@@ -34,12 +34,6 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
-        "src/services/tui_o/store/operator_resume_ledger_tests.rs",
-        "src/services/tui_o/store/operator_resume_tests.rs",
-        "src/services/tui_o/writer/operator_resume_actor_tests.rs",
-        "src/services/tui_o/writer/operator_resume_delivery_tests.rs",
-        "src/services/tui_o/writer/operator_resume_source_tests.rs",
-        "src/services/tui_o/writer/operator_resume_tests.rs",
         "src/services/tui_o/exact_episode_tests.rs",
         "src/services/tui_o/exact_pg_tests.rs",
         "src/services/discord/health/recovery/legacy_send_tests.rs",
@@ -154,6 +148,12 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/router/message_handler/watchdog_host_tests.rs",
         "src/services/discord/tmux_watcher/herdr_entry_host_tests.rs",
         "src/services/tui_o/writer/herdr_resume_tests.rs",
+        "src/services/tui_o/store/operator_resume_ledger_tests.rs",
+        "src/services/tui_o/store/operator_resume_tests.rs",
+        "src/services/tui_o/writer/operator_resume_actor_tests.rs",
+        "src/services/tui_o/writer/operator_resume_delivery_tests.rs",
+        "src/services/tui_o/writer/operator_resume_source_tests.rs",
+        "src/services/tui_o/writer/operator_resume_tests.rs",
         "src/services/discord/turn_bridge/runtime_handoff_loop/herdr_owner_tests.rs",
         "src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs",
         "src/services/discord/execution_identity/herdr_agent_hint_tests.rs",
