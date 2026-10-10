@@ -310,7 +310,7 @@ async fn restart_cases(phase: &Phase) {
                 runtime_root: phase.root.display().to_string(),
             };
             let intent = token.prepare_herdr_interrupt(phase.provider.clone(), &owner);
-            *intent.submission.lock().unwrap() = if n == 11 {
+            intent.submission.lock().unwrap().submission = if n == 11 {
                 HerdrSubmission::Unsubmitted
             } else if n == 2 {
                 HerdrSubmission::Unknown
@@ -373,7 +373,7 @@ async fn restart_cases(phase: &Phase) {
             assert!(token.herdr_interrupt_state().is_some());
             if n == 11 {
                 assert_eq!(
-                    *intent.submission.lock().unwrap(),
+                    intent.submission.lock().unwrap().submission,
                     HerdrSubmission::Unsubmitted
                 );
                 assert!(intent.user_stop.load(Ordering::Acquire));
