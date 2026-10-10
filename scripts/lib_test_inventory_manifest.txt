@@ -223,6 +223,7 @@ config::runtime_hook_registry_config_tests::retired_relay_authority_dial_keys_ar
 config::runtime_profile::tests::omitted_cluster_roles_keep_single_machine_full_runtime
 config::runtime_profile::tests::runner_and_legacy_profiles_have_identical_modules_and_canonical_output
 config::runtime_profile::tests::runner_profile_is_explicit_validated_and_does_not_change_legacy_roles
+config::runtime_settings::herdr_terminate_tests::m0_terminate_switch_defaults_off_and_round_trips
 config::runtime_settings::tests::native_clear_channel_allowlist_preserves_absent_empty_and_selected_values
 config::runtime_settings::tests::native_clear_channel_policy_requires_enabled_and_matches_optional_allowlist
 config::scheduled_message_required_mention_config_tests::required_mentions_allow_empty_or_valid_lists
@@ -10562,6 +10563,15 @@ services::session_host::herdr_gate::tests::a_marker_not_naming_herdr_refuses_eve
 services::session_host::herdr_gate::tests::a_server_changed_after_the_gate_gets_no_byte
 services::session_host::herdr_gate::tests::herdr_plan_pastes_once_bracketed_then_enter_each_on_its_own_connection
 services::session_host::herdr_gate::tests::host_for_herdr_reads_the_registry_endpoint_and_never_writes
+services::session_host::herdr_gate::tests::m0_close_effect_positive
+services::session_host::herdr_gate::tests::m0_close_requires_both_stamps
+services::session_host::herdr_gate::tests::m0_close_uncertain_reply_never_retries
+services::session_host::herdr_gate::tests::m0_close_unknown_version_refused
+services::session_host::herdr_gate::tests::m0_close_witness_mismatch_zero_bytes
+services::session_host::herdr_gate::tests::m0_confirmation_required_no_escalation
+services::session_host::herdr_gate::tests::m0_terminate_admission_off_still_judges
+services::session_host::herdr_gate::tests::m0_terminate_off_has_zero_effect
+services::session_host::herdr_gate::tests::m0_terminate_request_pair_is_exact
 services::session_host::herdr_gate::tests::only_a_registered_local_endpoint_makes_a_herdr_target
 services::session_host::herdr_gate::tests::stopped_admission_refuses_input_but_lets_a_cancel_key_through
 services::session_host::herdr_gate::tests::the_boot_registry_holds_only_this_nodes_endpoints
@@ -10585,6 +10595,8 @@ services::session_host::herdr_host::tests::herdr_requests_serialize_with_schema_
 services::session_host::herdr_host::tests::herdr_send_text_keeps_ambiguous_outcomes_indeterminate
 services::session_host::herdr_host::tests::herdr_unconfigured_host_fails_every_call_explicitly
 services::session_host::herdr_host::tests::herdr_working_dir_prefers_foreground_cwd
+services::session_host::herdr_host::tests::m0_close_variant_alias_fixture
+services::session_host::herdr_host::tests::m0_close_variant_closed_world
 services::session_host::herdr_host::tests::name_only_scan_follows_reexports_and_function_values
 services::session_host::herdr_host::tests::name_only_teardown_calls_stay_on_the_reviewed_list
 services::session_host::herdr_host::tests::session_target_guard_stays_behind_the_keyed_gate

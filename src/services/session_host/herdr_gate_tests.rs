@@ -55,6 +55,8 @@ struct Server {
     path: PathBuf,
     conns: Arc<Mutex<BTreeMap<usize, Seen>>>,
     stop: Arc<AtomicBool>,
+    version: Arc<Mutex<String>>,
+    close_reply: Arc<Mutex<Option<Value>>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -72,7 +74,10 @@ fn serve() -> Server {
     listener.set_nonblocking(true).unwrap();
     let conns = Arc::new(Mutex::new(BTreeMap::new()));
     let stop = Arc::new(AtomicBool::new(false));
+    let version = Arc::new(Mutex::new("0.9.3".into()));
+    let close_reply = Arc::new(Mutex::new(None));
     let (state, stopped) = (conns.clone(), stop.clone());
+    let (hello_version, closed) = (version.clone(), close_reply.clone());
     let thread = thread::spawn(move || {
         let mut handlers = Vec::new();
         let mut index = 0;
@@ -83,7 +88,10 @@ fn serve() -> Server {
             };
             state.lock().unwrap().insert(index, Seen::default());
             let state = state.clone();
-            handlers.push(thread::spawn(move || answer(stream, index, &state)));
+            let (version, close_reply) = (hello_version.clone(), closed.clone());
+            handlers.push(thread::spawn(move || {
+                answer(stream, index, &state, &version, &close_reply)
+            }));
             index += 1;
         }
         for handler in handlers {
@@ -94,12 +102,21 @@ fn serve() -> Server {
         path,
         conns,
         stop,
+        version,
+        close_reply,
         thread: Some(thread),
     }
 }
 
-fn reply(request: &Value) -> Value {
+fn reply(request: &Value, version: &str, close_reply: Option<Value>) -> Value {
+    if request["method"] == "pane.close"
+        && let Some(mut reply) = close_reply
+    {
+        reply["id"] = request["id"].clone();
+        return reply;
+    }
     let result = match request["method"].as_str().unwrap_or("") {
+        "ping" => json!({"type": "pong", "version": version, "protocol": 22}),
         "pane.process_info" => json!({"type": "pane_process_info", "process_info": {
             "pane_id": PANE, "shell_pid": SHELL, "foreground_process_group_id": PROVIDER,
             "foreground_processes": [{"pid": PROVIDER, "name": "claude"}, {"pid": CHILD, "name": "node"}]
@@ -114,7 +131,13 @@ fn reply(request: &Value) -> Value {
     json!({"id": request["id"], "result": result})
 }
 
-fn answer(stream: UnixStream, index: usize, conns: &Mutex<BTreeMap<usize, Seen>>) {
+fn answer(
+    stream: UnixStream,
+    index: usize,
+    conns: &Mutex<BTreeMap<usize, Seen>>,
+    version: &Mutex<String>,
+    close_reply: &Mutex<Option<Value>>,
+) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
     let mut writer = stream.try_clone().unwrap();
@@ -124,7 +147,12 @@ fn answer(stream: UnixStream, index: usize, conns: &Mutex<BTreeMap<usize, Seen>>
     let request: Option<Value> = serde_json::from_str(&line).ok();
     conns.lock().unwrap().get_mut(&index).unwrap().request = request.clone();
     if let Some(request) = request {
-        let _ = writer.write_all(format!("{}\n", reply(&request)).as_bytes());
+        let reply = reply(
+            &request,
+            &version.lock().unwrap(),
+            close_reply.lock().unwrap().clone(),
+        );
+        let _ = writer.write_all(format!("{reply}\n").as_bytes());
     }
     // One reply, then Herdr's side is closed; later bytes are only counted.
     let _ = writer.shutdown(Shutdown::Write);
@@ -134,6 +162,19 @@ fn answer(stream: UnixStream, index: usize, conns: &Mutex<BTreeMap<usize, Seen>>
 }
 
 impl Server {
+    fn mutations(&self) -> Vec<Value> {
+        self.conns()
+            .into_iter()
+            .filter_map(|seen| seen.request)
+            .filter(|r| {
+                !matches!(
+                    r["method"].as_str(),
+                    Some("ping" | "session.snapshot" | "pane.process_info")
+                )
+            })
+            .collect()
+    }
+
     /// Every connection, once no new one has been accepted for a few polls: a refused write
     /// dials and hangs up, which the accept loop sees a moment later.
     fn conns(&self) -> Vec<Seen> {
@@ -230,6 +271,21 @@ fn off_elsewhere(_: &dyn HerdrTransport, endpoint: &HerdrEndpoint) -> RestoreRes
         start: start(1_000).identity,
     };
     RestoreResume::Off { witness }
+}
+
+fn audited_version(transport: &dyn HerdrTransport, _: &HerdrEndpoint) -> RestoreResume {
+    match transport.hello() {
+        Ok(hello)
+            if super::super::herdr::model::VERIFIED_HERDR_VERSIONS
+                .contains(&hello.version.as_str()) =>
+        {
+            RestoreResume::Off {
+                witness: hello.witness,
+            }
+        }
+        Ok(_) => RestoreResume::Unverified(RestoreUnverified::VersionNotVerified),
+        Err(why) => RestoreResume::Unverified(why),
+    }
 }
 
 fn not_canonical(_: &dyn HerdrTransport, _: &HerdrEndpoint) -> RestoreResume {
@@ -336,6 +392,33 @@ fn replaced_provider(rig: &Rig) -> Arc<dyn ProcessOs> {
 fn replaced_root(rig: &Rig) -> Arc<dyn ProcessOs> {
     let os = FakeOs::launched(env_naming(&rig.context));
     Arc::new(os.starting(SHELL, &[start(9)]))
+}
+
+struct MissingProviderStamp(FakeOs);
+
+impl ProcessOs for MissingProviderStamp {
+    fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified> {
+        self.0.parent(pid)
+    }
+    fn start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+        if pid == PROVIDER {
+            Err(RestoreUnverified::ProcessUnreadable)
+        } else {
+            self.0.start(pid)
+        }
+    }
+    fn environ(&self, pid: u32) -> Result<Vec<String>, RestoreUnverified> {
+        self.0.environ(pid)
+    }
+    fn exec_path(&self, pid: u32) -> Option<String> {
+        self.0.exec_path(pid)
+    }
+}
+
+fn missing_provider_stamp(rig: &Rig) -> Arc<dyn ProcessOs> {
+    Arc::new(MissingProviderStamp(FakeOs::launched(env_naming(
+        &rig.context,
+    ))))
 }
 
 fn other_nonce(_: &Rig) -> Arc<dyn ProcessOs> {
@@ -643,4 +726,310 @@ fn the_boot_registry_holds_only_this_nodes_endpoints() {
     assert!(built(Some("mac-mini"), &[(1, "mac-book")]).is_empty());
     assert!(built(None, &[(1, "mac-mini")]).is_empty());
     assert!(built(Some("mac-mini"), &[]).is_empty());
+}
+
+use crate::services::termination_audit::host_terminate::herdr_terminate::{
+    HerdrTerminateResult, OperatorTerminateWarrant, TerminateRefusal, terminate_herdr_once,
+};
+
+struct LiveTerminateSwitch(crate::config::Config);
+
+impl LiveTerminateSwitch {
+    fn new() -> Self {
+        let previous = crate::config_live_reload::current()
+            .map(|c| (*c).clone())
+            .unwrap_or_default();
+        let guard = Self(previous);
+        guard.set(Some(true));
+        guard
+    }
+
+    fn set(&self, enabled: Option<bool>) {
+        let mut config = self.0.clone();
+        config.runtime.herdr_terminate_enabled = enabled;
+        crate::config_live_reload::install(config);
+    }
+}
+
+impl Drop for LiveTerminateSwitch {
+    fn drop(&mut self) {
+        crate::config_live_reload::install(self.0.clone());
+    }
+}
+
+fn terminate(target: &InputTarget) -> HerdrTerminateResult {
+    terminate_herdr_once(OperatorTerminateWarrant::issue(herdr(target).clone()))
+}
+
+#[test]
+fn m0_terminate_off_has_zero_effect() {
+    let rig = rig();
+    let switch = LiveTerminateSwitch::new();
+    let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
+    for off in [None, Some(false)] {
+        switch.set(off);
+        let before = rig.server.conns().len();
+        let result = terminate(&target);
+        assert!(rig.server.mutations().is_empty());
+        assert_eq!(
+            result,
+            HerdrTerminateResult::Refused(TerminateRefusal::Disabled)
+        );
+        assert_eq!(
+            rig.server.conns().len(),
+            before,
+            "disabled owner performs no I/O"
+        );
+        herdr(&target).pin_terminate().unwrap();
+        assert_eq!(
+            herdr(&target).send_close_pinned(),
+            CloseEffect::NotSent("herdr_terminate_disabled".into())
+        );
+        assert!(rig.server.mutations().is_empty());
+    }
+    switch.set(Some(true));
+    herdr(&target).pin_terminate().unwrap();
+    switch.set(Some(false));
+    assert_eq!(
+        herdr(&target).send_close_pinned(),
+        CloseEffect::NotSent("herdr_terminate_disabled".into())
+    );
+    assert!(
+        rig.server.mutations().is_empty(),
+        "a pinned on snapshot cannot survive switch off"
+    );
+    switch.set(Some(true));
+    assert_eq!(terminate(&target), HerdrTerminateResult::Acknowledged);
+    switch.set(Some(false));
+    assert_eq!(
+        terminate(&target),
+        HerdrTerminateResult::Refused(TerminateRefusal::Disabled)
+    );
+    assert_eq!(rig.server.mutations().len(), 1);
+}
+
+#[test]
+fn m0_close_effect_positive() {
+    let rig = rig();
+    let _switch = LiveTerminateSwitch::new();
+    let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
+    let result = terminate(&target);
+    let mutations = rig.server.mutations();
+    assert_eq!(mutations.len(), 1);
+    assert_eq!(result, HerdrTerminateResult::Acknowledged);
+    assert_eq!(mutations[0]["method"], "pane.close");
+    assert_eq!(mutations[0]["params"], json!({"pane_id": PANE}));
+    assert!(rig.server.conns().iter().all(|seen| seen.after_reply == 0));
+    assert!(matches!(
+        herdr(&target).send_close_pinned(),
+        CloseEffect::NotSent(_)
+    ));
+    assert_eq!(rig.server.mutations().len(), 1, "one consumed judgment");
+}
+
+#[test]
+fn m0_terminate_admission_off_still_judges() {
+    let rig = rig();
+    let _switch = LiveTerminateSwitch::new();
+    let _off = herdr_admission::force_for_test(Admission::new(Some("off".as_ref()), None));
+    let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
+    let result = terminate(&target);
+    assert_eq!(rig.server.mutations().len(), 1);
+    assert_eq!(result, HerdrTerminateResult::Acknowledged);
+    for (restore, os, why) in [
+        (
+            off_where_dialled as Restore,
+            replaced_provider as Os,
+            HerdrGateRefusal::ProviderReplaced,
+        ),
+        (
+            not_canonical as Restore,
+            launched_os as Os,
+            HerdrGateRefusal::RestoreUnverified(RestoreUnverified::ConfigNotCanonical),
+        ),
+        (
+            off_where_dialled as Restore,
+            other_nonce as Os,
+            HerdrGateRefusal::OtherNonce,
+        ),
+    ] {
+        let refused = hosted_target(&rig, vec![SERVER], restore, os(&rig));
+        assert_eq!(
+            terminate(&refused),
+            HerdrTerminateResult::Refused(TerminateRefusal::Gate(why))
+        );
+    }
+    std::fs::write(marker_path(), "tmux").unwrap();
+    assert_eq!(
+        terminate(&target),
+        HerdrTerminateResult::Refused(TerminateRefusal::Gate(HerdrGateRefusal::MarkerOtherHost))
+    );
+    assert_eq!(rig.server.mutations().len(), 1);
+}
+
+#[test]
+fn m0_close_witness_mismatch_zero_bytes() {
+    let rig = rig();
+    let _switch = LiveTerminateSwitch::new();
+    let target = hosted_target(
+        &rig,
+        vec![SERVER, SERVER, SERVER, SERVER, 8],
+        off_where_dialled,
+        launched_os(&rig),
+    );
+    assert!(
+        matches!(terminate(&target), HerdrTerminateResult::NotSent(why) if why.contains("server changed"))
+    );
+    assert!(rig.server.mutations().is_empty());
+    let write = rig.server.conns().last().cloned().unwrap();
+    assert!(
+        write.request.is_none() && write.after_reply == 0,
+        "{write:?}"
+    );
+}
+
+#[test]
+fn m0_close_requires_both_stamps() {
+    let rig = rig();
+    let _switch = LiveTerminateSwitch::new();
+    for (os, why) in [
+        (replaced_root as Os, HerdrGateRefusal::RootReplaced),
+        (replaced_provider as Os, HerdrGateRefusal::ProviderReplaced),
+        (
+            missing_provider_stamp as Os,
+            HerdrGateRefusal::PaneUnverified,
+        ),
+    ] {
+        let target = hosted_target(&rig, vec![SERVER], off_where_dialled, os(&rig));
+        let result = terminate(&target);
+        assert!(rig.server.mutations().is_empty());
+        assert_eq!(
+            result,
+            HerdrTerminateResult::Refused(TerminateRefusal::Gate(why))
+        );
+    }
+    let mut unproven = stored(&rig.server, HostedState::Bound);
+    unproven.expected = None;
+    assert!(
+        HerdrTarget::new(
+            endpoint(&rig.server),
+            transport(&rig.server, vec![SERVER]),
+            &unproven
+        )
+        .is_none()
+    );
+    assert!(rig.server.mutations().is_empty());
+}
+
+#[test]
+fn m0_terminate_request_pair_is_exact() {
+    let rig = rig();
+    let _switch = LiveTerminateSwitch::new();
+    let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
+    let gate = herdr(&target);
+    let mut close_results = Vec::new();
+    let mut input_results = Vec::new();
+    for input in [Mutation::Input, Mutation::Cancel] {
+        gate.pin(input).unwrap();
+        close_results.push(gate.send_close_pinned());
+        gate.pin(input).unwrap();
+        input_results.push(gate.send_pinned(HerdrRequest::PaneClose {
+            pane_id: PANE.into(),
+        }));
+    }
+    for request in [
+        HerdrRequest::PaneSendText {
+            pane_id: PANE.into(),
+            text: "x".into(),
+        },
+        HerdrRequest::PaneSendKeys {
+            pane_id: PANE.into(),
+            keys: vec!["esc".into()],
+        },
+        HerdrRequest::PaneSendInput {
+            pane_id: PANE.into(),
+            text: "x".into(),
+            keys: vec!["enter".into()],
+        },
+    ] {
+        gate.pin_terminate().unwrap();
+        input_results.push(gate.send_pinned(request));
+    }
+    assert!(rig.server.mutations().is_empty());
+    assert!(
+        close_results
+            .iter()
+            .all(|r| matches!(r, CloseEffect::NotSent(_)))
+    );
+    assert!(
+        input_results
+            .iter()
+            .all(|r| matches!(r, Ok(HostMutation::Refused(_))))
+    );
+}
+
+#[test]
+fn m0_close_unknown_version_refused() {
+    let rig = rig();
+    let _switch = LiveTerminateSwitch::new();
+    *rig.server.version.lock().unwrap() = "0.9.4".into();
+    let target = hosted_target(&rig, vec![SERVER], audited_version, launched_os(&rig));
+    let result = terminate(&target);
+    assert!(rig.server.mutations().is_empty());
+    assert_eq!(
+        result,
+        HerdrTerminateResult::Refused(TerminateRefusal::Gate(
+            HerdrGateRefusal::TerminateUnsupportedServer
+        ))
+    );
+}
+
+#[test]
+fn m0_confirmation_required_no_escalation() {
+    let rig = rig();
+    let _switch = LiveTerminateSwitch::new();
+    let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
+    *rig.server.close_reply.lock().unwrap() = Some(json!({"error": {
+        "code": "confirmation_required", "message": "closing this pane would close a worktree group"
+    }}));
+    let result = terminate(&target);
+    let mutations = rig.server.mutations();
+    assert_eq!(mutations.len(), 1);
+    assert_eq!(result, HerdrTerminateResult::ConfirmationRequired);
+    assert_eq!(mutations[0]["method"], "pane.close");
+}
+
+#[test]
+fn m0_close_uncertain_reply_never_retries() {
+    let rig = rig();
+    let _switch = LiveTerminateSwitch::new();
+    let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
+    for body in [
+        json!({"result": {"type": "future_close"}}),
+        json!({"error": {"code": "other", "message": "unknown"}}),
+    ] {
+        *rig.server.close_reply.lock().unwrap() = Some(body);
+        assert!(matches!(
+            terminate(&target),
+            HerdrTerminateResult::Indeterminate(_)
+        ));
+    }
+    assert_eq!(
+        rig.server.mutations().len(),
+        2,
+        "one mutation per explicit request"
+    );
+    let call = HerdrCall {
+        id: "closed".into(),
+        request: HerdrRequest::PaneClose {
+            pane_id: PANE.into(),
+        },
+    };
+    assert!(matches!(
+        contract::close_result(
+            &call,
+            Err(contract::HerdrTransportError::AfterWrite("lost ACK".into()))
+        ),
+        CloseEffect::Indeterminate(_)
+    ));
 }

@@ -67,6 +67,52 @@ pub(crate) fn terminate_hosted_session(
     })
 }
 
+// No production caller until the termination service owns revalidation and settlement.
+#[cfg(test)]
+pub(crate) mod herdr_terminate {
+    use crate::services::session_host::{HerdrGateRefusal, HerdrTarget};
+
+    /// Explicit operator intent bound to one gate; a cancel warrant cannot convert into it.
+    pub(crate) struct OperatorTerminateWarrant {
+        target: HerdrTarget,
+    }
+
+    impl OperatorTerminateWarrant {
+        pub(crate) fn issue(target: HerdrTarget) -> Self {
+            Self { target }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub(crate) enum TerminateRefusal {
+        Disabled,
+        Gate(HerdrGateRefusal),
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub(crate) enum HerdrTerminateResult {
+        Refused(TerminateRefusal),
+        Acknowledged,
+        NotSent(String),
+        Indeterminate(String),
+        ConfirmationRequired,
+    }
+
+    /// One fresh judgment and one witnessed close; ACK never retires or settles a turn.
+    pub(crate) fn terminate_herdr_once(warrant: OperatorTerminateWarrant) -> HerdrTerminateResult {
+        if !crate::config_live_reload::current()
+            .is_some_and(|config| config.runtime.herdr_terminate_enabled == Some(true))
+        {
+            warrant.target.discard_pin();
+            return HerdrTerminateResult::Refused(TerminateRefusal::Disabled);
+        }
+        if let Err(why) = warrant.target.pin_terminate() {
+            return HerdrTerminateResult::Refused(TerminateRefusal::Gate(why));
+        }
+        warrant.target.send_close_pinned().into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

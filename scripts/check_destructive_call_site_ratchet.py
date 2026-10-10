@@ -106,14 +106,14 @@ spans a join so no piece counts twice; and the method names as identifier word
 parts in any case style (``PaneClose``, ``RPCPaneClose``, ``herdr_server_stop``,
 ``CLOSE_PANE``), which also covers ``use ... as`` aliases and wrapper
 definitions. Array elements, tuple items and call arguments are never joined, and
-completed-state names (``PANE_CLOSED``) do not count. It is owner-only, not merely
-no-growth: a count in any file but ``HOST_TERMINATE_OWNER`` fails even when the
-baseline lists it, and owner growth still needs a reviewed baseline diff. Pieces
+completed-state names (``PANE_CLOSED``) do not count. Spellings are limited to
+``HOST_TERMINATE_OWNER`` and fixed declaration sites with per-file maxima.
+The baseline pins owner growth only and cannot relax declaration maxima. Pieces
 passed through a variable, built at runtime (``push_str``, ``+=``) or read from a
 non-Rust file stay unseen, and the count proves nothing about the warrant a call receives.
 
 ``--check`` rejects growth in an existing file, every UNLISTED file, any
-host_terminate spelling outside its owner, and any identity/delivery pairing
+host_terminate spelling outside its declared sites, and any identity/delivery pairing
 mismatch.  A decrease is allowed for growth: this is a
 no-growth ratchet.  For an intentional change, run ``--write-baseline`` and
 review the JSON diff in the same commit.
@@ -205,6 +205,14 @@ INFLIGHT_ROW_CLEAR_PATTERN = re.compile(
 )
 INFLIGHT_ROW_CLEAR_OWNER_PREFIX = "src/services/discord/inflight/clear_store/"
 HOST_TERMINATE_OWNER = "src/services/termination_audit/host_terminate.rs"
+# Fixed model, judged leaf and test spellings need no baseline growth;
+# any additional spelling still exceeds a measured per-file ceiling.
+HOST_TERMINATE_DECLARED_SITES = {
+    "src/services/session_host/herdr/model.rs": 2,
+    "src/services/session_host/herdr_gate.rs": 3,
+    "src/services/session_host/herdr_gate_tests.rs": 5,
+    "src/services/session_host/herdr_host_tests.rs": 5,
+}
 HOST_TERMINATE_LITERAL_PATTERN = re.compile(
     r"(?i)\bpane\s*\.\s*close\b|\bserver\s*\.\s*stop\b"
 )
@@ -670,7 +678,11 @@ def growth_errors(
     for category in CATEGORIES:
         expected = baseline.get(category, {})
         for path, found in sorted(actual.get(category, {}).items()):
-            pinned = expected.get(path, 0)
+            pinned = (
+                HOST_TERMINATE_DECLARED_SITES.get(path, expected.get(path, 0))
+                if category == "host_terminate"
+                else expected.get(path, 0)
+            )
             if found <= pinned:
                 continue
             if pinned == 0:
@@ -715,10 +727,10 @@ def owner_only_errors(
     actual: Mapping[str, Mapping[str, int]],
     baseline: Mapping[str, Mapping[str, int]],
 ) -> list[str]:
-    """Close RPC spellings may live only in the owner, whatever the baseline says."""
+    """Only the owner and fixed declaration sites may spell close RPCs."""
     errors: list[str] = []
     for path, found in sorted(actual.get("host_terminate", {}).items()):
-        if path != HOST_TERMINATE_OWNER:
+        if path != HOST_TERMINATE_OWNER and path not in HOST_TERMINATE_DECLARED_SITES:
             errors.append(
                 f"host_terminate: close RPC spelled outside {HOST_TERMINATE_OWNER} "
                 f"in {path} ({found}x)"

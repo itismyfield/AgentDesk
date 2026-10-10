@@ -1449,18 +1449,27 @@ fn item_uses_by_file(
     uses
 }
 
-/// Files outside `owners` reaching the `Herdr` variant through `HostKind` or one of
-/// its aliases: a variant or glob import, or a path to the variant.
-fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str]) -> Vec<String> {
+/// Files outside `owners` reaching a guarded variant through its enum or an alias,
+/// including variant imports and globs.
+fn guarded_variant_violations(
+    sources: &BTreeMap<String, String>,
+    enum_name: &str,
+    variant_name: &str,
+    owners: &[&str],
+) -> Vec<String> {
     let mut violations = Vec::new();
     let files = scan_files(sources, &mut violations);
-    let kinds = bindings(&files, "HostKind");
-    let variant = regex::Regex::new(r"\b(\w+)\s*::\s*Herdr\b").unwrap();
+    let kinds = bindings(&files, enum_name);
+    let variant = regex::Regex::new(&format!(
+        r"\b(\w+)\s*::\s*{}\b",
+        regex::escape(variant_name)
+    ))
+    .unwrap();
     for (relative, file) in files.iter().filter(|(r, _)| !owners.contains(&r.as_str())) {
-        // Whether `path[k]`, reached through `path[..k]`, may name HostKind or an alias of it;
+        // Whether `path[k]`, reached through `path[..k]`, may name the enum or an alias of it;
         // a qualifier that globs the alias's module, or names no scanned module, counts.
         let kind_at = |path: &[String], k: usize| {
-            path[k] == "HostKind"
+            path[k] == enum_name
                 || kinds.iter().any(|(name, at)| {
                     let module = &files[at].module;
                     *name == path[k]
@@ -1475,12 +1484,12 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
             (0..leaf.path.len()).any(|k| {
                 kind_at(&leaf.path, k)
                     && match leaf.path.get(k + 1) {
-                        Some(next) => next == "Herdr",
+                        Some(next) => next == variant_name,
                         None => leaf.binds.is_none(),
                     }
             })
         });
-        let pathed = file.code.contains("Herdr")
+        let pathed = file.code.contains(variant_name)
             && variant.captures_iter(&file.code).any(|found| {
                 let name = found.get(1).unwrap();
                 let mut path = qualifier(&file.code, name.start());
@@ -1488,10 +1497,14 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
                 kind_at(&path, path.len() - 1)
             });
         if imported || pathed {
-            violations.push(format!("{relative}: HostKind::Herdr import"));
+            violations.push(format!("{relative}: {enum_name}::{variant_name} import"));
         }
     }
     violations
+}
+
+fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str]) -> Vec<String> {
+    guarded_variant_violations(sources, "HostKind", "Herdr", owners)
 }
 
 const GUARD_ADAPTER: &str = "src/services/discord/inflight/host_recovery_guard.rs";
@@ -2762,5 +2775,184 @@ fn claude_warm_followup_reaches_tmux_only_through_the_executor() {
     assert!(
         violations.is_empty(),
         "warm follow-up bypasses the executor: {violations:?}"
+    );
+}
+
+const CLOSE_GATE: &str = "src/services/session_host/herdr_gate.rs";
+const CLOSE_MODEL: &str = "src/services/session_host/herdr/model.rs";
+const CLOSE_OWNER: &str = "src/services/termination_audit/host_terminate.rs";
+
+fn close_owner_violations(sources: &BTreeMap<String, String>) -> Vec<String> {
+    let mut violations = guarded_variant_violations(
+        sources,
+        "HerdrRequest",
+        "PaneClose",
+        &[CLOSE_GATE, CLOSE_OWNER],
+    );
+    violations.extend(guarded_variant_violations(
+        sources,
+        "Mutation",
+        "Terminate",
+        &[CLOSE_GATE],
+    ));
+    violations.extend(guarded_item_violations(
+        sources,
+        &[
+            ("terminate_herdr_once", &[]),
+            ("pin_terminate", &[]),
+            ("send_close_pinned", &[]),
+            (
+                "call_with_witness",
+                &[
+                    (CLOSE_GATE, 2),
+                    ("src/services/session_host/herdr/launch_host.rs", 2),
+                    ("src/services/session_host/herdr_host.rs", 1),
+                    ("src/services/session_host/herdr_registry.rs", 1),
+                ],
+            ),
+        ],
+    ));
+    for (path, source) in sources {
+        for forbidden in [
+            "server.stop",
+            "workspace.close",
+            "tab.close",
+            "group.close",
+            "worktree_group.close",
+        ] {
+            if source.contains(&format!("\"{forbidden}\"")) {
+                violations.push(format!("{path}: destructive wire {forbidden}"));
+            }
+        }
+        if path != CLOSE_MODEL && source.contains("\"pane.close\"") {
+            violations.push(format!("{path}: raw pane.close"));
+        }
+        for variant in [
+            "ServerStop",
+            "WorkspaceClose",
+            "TabClose",
+            "GroupClose",
+            "WorktreeGroupClose",
+        ] {
+            if !word_uses(&code_tokens(source), variant).is_empty() {
+                violations.push(format!("{path}: destructive variant {variant}"));
+            }
+        }
+    }
+    violations
+}
+
+#[test]
+fn m0_close_variant_closed_world() {
+    let sources = production_sources();
+    assert!(
+        close_owner_violations(&sources).is_empty(),
+        "{:?}",
+        close_owner_violations(&sources)
+    );
+    let gate = code_tokens(&sources[CLOSE_GATE]);
+    let files = scan_files(&sources, &mut Vec::new());
+    let uses = item_uses_by_file(&files, "PaneClose", &bindings(&files, "PaneClose"));
+    assert_eq!(uses[CLOSE_GATE].0, 3);
+    assert_eq!(uses[CLOSE_MODEL].0, 1, "only the variant declaration");
+    let calls = item_uses_by_file(
+        &files,
+        "call_with_witness",
+        &bindings(&files, "call_with_witness"),
+    );
+    assert_eq!(calls.values().map(|(count, _)| count).sum::<usize>(), 6);
+    assert_eq!(
+        word_uses(&gate, "PaneClose").len(),
+        3,
+        "constructor and two request checks"
+    );
+    let leaf = &gate[fn_body(&gate, "fn send_close_pinned(")];
+    assert_eq!(word_uses(leaf, "call_with_witness").len(), 1);
+    assert!(leaf.contains("let request = HerdrRequest::PaneClose"));
+    let owner =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(CLOSE_OWNER)).unwrap();
+    let owner = code_tokens(&owner);
+    let body = &owner[fn_body(&owner, "fn terminate_herdr_once(")];
+    assert_eq!(word_uses(body, "pin_terminate").len(), 1);
+    assert_eq!(word_uses(body, "send_close_pinned").len(), 1);
+    for forbidden in [
+        "interrupt",
+        "kill_session",
+        "kill",
+        "retire_pg",
+        "record_termination",
+        "clear_legacy_session",
+        "terminate_hosted_session",
+        "submit_terminal",
+    ] {
+        assert!(
+            word_uses(body, forbidden).is_empty(),
+            "owner escaped to {forbidden}"
+        );
+    }
+    let model = &sources[CLOSE_MODEL];
+    let requests = model
+        .split("pub(crate) enum HerdrRequest {")
+        .nth(1)
+        .unwrap()
+        .split("impl HerdrRequest")
+        .next()
+        .unwrap();
+    let names: Vec<_> = regex::Regex::new(r#"serde\(rename = "([^"]+)"\)"#)
+        .unwrap()
+        .captures_iter(requests)
+        .map(|c| c[1].to_string())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "ping",
+            "session.snapshot",
+            "pane.get",
+            "pane.process_info",
+            "pane.read",
+            "pane.close",
+            "pane.send_text",
+            "pane.send_keys",
+            "pane.send_input",
+            "workspace.create"
+        ]
+    );
+}
+
+#[test]
+fn m0_close_variant_alias_fixture() {
+    let outsider = "src/services/termination_audit.rs";
+    for source in [
+        "fn f() { let _ = HerdrRequest::PaneClose { pane_id: String::new() }; }",
+        "use crate::services::session_host::herdr::model::HerdrRequest as R; fn f() { let _ = R::PaneClose { pane_id: String::new() }; }",
+        "use crate::services::session_host::herdr::model::HerdrRequest::*; fn f() { let _ = PaneClose { pane_id: String::new() }; }",
+        "pub use crate::services::session_host::herdr::model::HerdrRequest::PaneClose as End;",
+        "use crate::services::session_host::herdr::model::HerdrRequest as R; use R::*;",
+        "type R = crate::services::session_host::herdr::model::HerdrRequest; fn f() { let _ = R::PaneClose { pane_id: String::new() }; }",
+        "fn f() { let close = terminate_herdr_once; use_fn(close); }",
+        "fn f(t: Transport) { t.call_with_witness(request, witness); }",
+        "use crate::services::termination_audit::host_terminate::terminate_herdr_once as close; fn f() { close(); }",
+        "fn f() { raw(\"workspace.close\"); }",
+        "fn f() { raw(\"pane.close\"); }",
+        "use crate::services::session_host::HerdrMutation; fn f() { let _ = HerdrMutation::Terminate; }",
+    ] {
+        let mut sources = BTreeMap::from([(outsider.into(), source.into())]);
+        sources.insert(
+            "src/services/session_host.rs".into(),
+            "pub use herdr_gate::Mutation as HerdrMutation;".into(),
+        );
+        assert!(
+            !close_owner_violations(&sources).is_empty(),
+            "missed {source}"
+        );
+    }
+    let sources = BTreeMap::from([
+        (CLOSE_OWNER.into(), "pub use crate::services::session_host::herdr::model::HerdrRequest as R;".into()),
+        (outsider.into(), "use crate::services::termination_audit::host_terminate::*; fn f() { let _ = R::PaneClose { pane_id: String::new() }; }".into()),
+    ]);
+    assert!(
+        !close_owner_violations(&sources).is_empty(),
+        "reexport + glob"
     );
 }
