@@ -145,7 +145,7 @@ impl Runtime {
         ticket.transition(self, |registration| {
             registration.reset();
             tracing::debug!(
-                channel = ticket.channel,
+                channel_id = ticket.channel,
                 cause,
                 "presence approval invalidated"
             );
