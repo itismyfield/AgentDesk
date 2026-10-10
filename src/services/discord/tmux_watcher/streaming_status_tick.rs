@@ -52,7 +52,11 @@ pub(super) async fn update_streaming_status_tick(
     // Update Discord placeholder at configurable interval
     if render.last_status_update.elapsed() >= crate::services::discord::status_update_interval() {
         #[cfg(test)]
-        crate::services::discord::inflight::o_seed_observation::record_event(watcher_provider, channel_id.get(), "streaming_tick");
+        crate::services::discord::inflight::o_seed_observation::record_event(
+            watcher_provider,
+            channel_id.get(),
+            "streaming_tick",
+        );
         let mut last_status_update = *render.last_status_update;
         let mut spin_idx = *render.spin_idx;
         let mut placeholder_msg_id = *render.placeholder_msg_id;
@@ -148,21 +152,29 @@ pub(super) async fn update_streaming_status_tick(
         // long tool hold must not leave the durable row at its initial empty state.
         // Silent turns suppress rendering, not durable state; the helper validates
         // complete turn identity under the sidecar lock to block stale overwrites.
-        let progress_outcome = ctx.legacy_mode.is_legacy().then(|| persist_watcher_stream_progress(
-            &watcher_provider,
-            channel_id,
-            &tmux_session_name,
-            turn_identity_for_panel.as_ref(),
-            placeholder_msg_id,
-            &full_response,
-            response_sent_offset,
-            tool_state.current_tool_line.as_deref(),
-            tool_state.prev_tool_status.as_deref(),
-            task_notification_kind,
-            tool_state.any_tool_used,
-            tool_state.has_post_tool_text,
-            &watcher_streaming_rollover_frozen_msg_ids,
-        ));
+        let progress_outcome = ctx.legacy_mode.is_legacy().then(|| {
+            #[cfg(test)]
+            crate::services::discord::inflight::o_seed_observation::record_event(
+                watcher_provider,
+                channel_id.get(),
+                "stream_progress_call",
+            );
+            persist_watcher_stream_progress(
+                &watcher_provider,
+                channel_id,
+                &tmux_session_name,
+                turn_identity_for_panel.as_ref(),
+                placeholder_msg_id,
+                &full_response,
+                response_sent_offset,
+                tool_state.current_tool_line.as_deref(),
+                tool_state.prev_tool_status.as_deref(),
+                task_notification_kind,
+                tool_state.any_tool_used,
+                tool_state.has_post_tool_text,
+                &watcher_streaming_rollover_frozen_msg_ids,
+            )
+        });
         // #5191: the locked writer rejected this frame because the pinned owner's
         // row is already terminal-committed. Suppress this tick's preview/status
         // writes, but only AFTER the pre-existing cleanup paths below have run.
@@ -174,11 +186,11 @@ pub(super) async fn update_streaming_status_tick(
         // at zero bytes for the assistant turn.
         let streaming_silent_turn = ctx.legacy_mode.is_legacy()
             && crate::services::discord::inflight::load_inflight_state(
-            &watcher_provider,
-            channel_id.get(),
-        )
-        .map(|state| state.silent_turn)
-        .unwrap_or(false);
+                &watcher_provider,
+                channel_id.get(),
+            )
+            .map(|state| state.silent_turn)
+            .unwrap_or(false);
         if streaming_silent_turn {
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
@@ -316,11 +328,13 @@ pub(super) async fn update_streaming_status_tick(
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
         }
-        if ctx.legacy_mode.is_legacy() && should_suppress_streaming_placeholder_after_recent_stop(
-            has_assistant_response_for_streaming,
-            inflight_missing_for_streaming,
-            recent_stop_for_streaming.is_some(),
-        ) {
+        if ctx.legacy_mode.is_legacy()
+            && should_suppress_streaming_placeholder_after_recent_stop(
+                has_assistant_response_for_streaming,
+                inflight_missing_for_streaming,
+                recent_stop_for_streaming.is_some(),
+            )
+        {
             if let Some(msg_id) = placeholder_msg_id {
                 if watcher_should_delete_suppressed_placeholder(placeholder_from_restored_inflight)
                 {
@@ -794,19 +808,19 @@ pub(super) async fn update_streaming_status_tick(
                             last_edit_text = status_block;
                             if ctx.legacy_mode.is_legacy() {
                                 persist_watcher_stream_progress(
-                                &watcher_provider,
-                                channel_id,
-                                &tmux_session_name,
-                                turn_identity_for_panel.as_ref(),
-                                placeholder_msg_id,
-                                &full_response,
-                                response_sent_offset,
-                                tool_state.current_tool_line.as_deref(),
-                                tool_state.prev_tool_status.as_deref(),
-                                task_notification_kind,
-                                tool_state.any_tool_used,
-                                tool_state.has_post_tool_text,
-                                &watcher_streaming_rollover_frozen_msg_ids,
+                                    &watcher_provider,
+                                    channel_id,
+                                    &tmux_session_name,
+                                    turn_identity_for_panel.as_ref(),
+                                    placeholder_msg_id,
+                                    &full_response,
+                                    response_sent_offset,
+                                    tool_state.current_tool_line.as_deref(),
+                                    tool_state.prev_tool_status.as_deref(),
+                                    task_notification_kind,
+                                    tool_state.any_tool_used,
+                                    tool_state.has_post_tool_text,
+                                    &watcher_streaming_rollover_frozen_msg_ids,
                                 );
                             }
                         }
@@ -848,16 +862,19 @@ pub(super) async fn update_streaming_status_tick(
 
         // #3805 P2 (PR-D): re-anchor the stranded panel below a rollover tail; OFF-inert.
         let two_message_panel_enabled = shared.ui.two_message_panel_enabled;
-        let inflight_for_reanchor =
-            if ctx.legacy_mode.is_legacy() && two_message_panel_enabled && watcher_did_rollover_this_interval {
-                crate::services::discord::inflight::load_inflight_state(
-                    &watcher_provider,
-                    channel_id.get(),
-                )
-            } else {
-                None
-            };
-        if ctx.legacy_mode.is_legacy() && watcher_did_rollover_this_interval
+        let inflight_for_reanchor = if ctx.legacy_mode.is_legacy()
+            && two_message_panel_enabled
+            && watcher_did_rollover_this_interval
+        {
+            crate::services::discord::inflight::load_inflight_state(
+                &watcher_provider,
+                channel_id.get(),
+            )
+        } else {
+            None
+        };
+        if ctx.legacy_mode.is_legacy()
+            && watcher_did_rollover_this_interval
             && watcher_two_message_should_reanchor_panel_on_rollover(
                 two_message_panel_enabled,
                 status_panel_msg_id.is_some(),
@@ -953,19 +970,19 @@ pub(super) async fn update_streaming_status_tick(
                 last_edit_text = display_text;
                 if ctx.legacy_mode.is_legacy() {
                     persist_watcher_stream_progress(
-                    &watcher_provider,
-                    channel_id,
-                    &tmux_session_name,
-                    turn_identity_for_panel.as_ref(),
-                    placeholder_msg_id,
-                    &full_response,
-                    response_sent_offset,
-                    tool_state.current_tool_line.as_deref(),
-                    tool_state.prev_tool_status.as_deref(),
-                    task_notification_kind,
-                    tool_state.any_tool_used,
-                    tool_state.has_post_tool_text,
-                    &watcher_streaming_rollover_frozen_msg_ids,
+                        &watcher_provider,
+                        channel_id,
+                        &tmux_session_name,
+                        turn_identity_for_panel.as_ref(),
+                        placeholder_msg_id,
+                        &full_response,
+                        response_sent_offset,
+                        tool_state.current_tool_line.as_deref(),
+                        tool_state.prev_tool_status.as_deref(),
+                        task_notification_kind,
+                        tool_state.any_tool_used,
+                        tool_state.has_post_tool_text,
+                        &watcher_streaming_rollover_frozen_msg_ids,
                     );
                 }
             }

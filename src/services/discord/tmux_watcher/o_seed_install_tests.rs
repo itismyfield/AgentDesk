@@ -105,6 +105,11 @@ pub(super) fn assert_zero_loaders(snapshot: &Snapshot) {
     assert_eq!(snapshot.readonly_inflight_load_calls, 0, "{snapshot:?}");
     assert_eq!(snapshot.compatibility_backfill_attempts, 0, "{snapshot:?}");
     assert_eq!(snapshot.legacy_prefix_restore_calls, 0, "{snapshot:?}");
+    assert_eq!(
+        snapshot.event_count("stream_progress_call"),
+        0,
+        "{snapshot:?}"
+    );
 }
 
 pub(super) fn assert_rowless(observed: &Guard) {
@@ -246,13 +251,29 @@ async fn t6_c_installer_reaches_expired_streaming_tick_without_legacy_row_effect
     if !isolated_in(
         "o_seed_install_tests",
         test,
-        &[("AGENTDESK_STATUS_INTERVAL_SECS", "1")],
+        &[
+            ("AGENTDESK_STATUS_INTERVAL_SECS", "1"),
+            ("AGENTDESK_SINGLE_MESSAGE_PANEL", "0"),
+        ],
     ) {
         return;
     }
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let (fixture, discord) = fixture(632_511_003).await;
-    seed(&fixture, 0);
+    let (mut fixture, discord) = fixture(632_511_003).await;
+    fixture.registry.provider_entries_guard().await.clear();
+    Arc::get_mut(&mut fixture.shared)
+        .unwrap()
+        .ui
+        .status_panel_v2_enabled = true;
+    fixture
+        .registry
+        .register("claude".into(), fixture.shared.clone())
+        .await;
+    // An undelivered old row keeps its offset compatible with an accidental write.
+    let mut old_row = row(&fixture, 0);
+    old_row.response_sent_offset = 0;
+    let path = seed_backfill_row(&old_row);
+    drop(crate::services::discord::inflight::lock_inflight_state_path(&path).unwrap());
     let _retired = RetiredForTest::new("claude", fixture.channel.get());
     let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
     let before = tree_fingerprint(&root);
@@ -444,6 +465,25 @@ async fn t6_e_installed_successor_resumes_real_o_partial_utf8_capsule() {
             .any(|r| r == "안녕 O successor"),
         "{snapshot:?}"
     );
+    let final_capsules =
+        cancel_handoff::capsule_observation::pending(&fixture.shared, fixture.channel).await;
+    assert_eq!(final_capsules.len(), 1, "{final_capsules:?}");
+    let final_capsule = &final_capsules[0];
+    assert_eq!(final_capsule.body, "안녕 O successor", "{final_capsules:?}");
+    assert!(!final_capsule.origin.is_legacy(), "{final_capsules:?}");
+    assert!(
+        !final_capsule.has_identity
+            && final_capsule.identity.is_none()
+            && final_capsule.nonce.is_none(),
+        "checkpoint startup fallback imported identity/nonce: {final_capsules:?}"
+    );
+    assert!(
+        !final_capsule.has_startup_snapshot
+            && final_capsule.startup_snapshot.is_none()
+            && !final_capsule.has_turn_identity_for_panel
+            && final_capsule.restored_response_seed.is_empty(),
+        "O checkpoint must sanitize continuation fields: {final_capsules:?}"
+    );
     assert_eq!(tree_fingerprint(&root), before);
 }
 
@@ -456,6 +496,12 @@ async fn legacy_control(channel: u64, n1_only: bool) {
     let before = tree_fingerprint(&root);
     let restored = restored_watcher_turn_from_inflight(&old_row, &fixture.session, false).unwrap();
     let observed = observe(&fixture);
+    assert_eq!(
+        fixture.install().await,
+        OOnlyInstallOutcome::Deferred(
+            crate::services::discord::tmux::OOnlyInstallReason::NotRetired
+        )
+    );
     let handle = spawn_legacy(&fixture, 0, Some(restored));
     until(&observed, "Legacy control actual EOF", |s| {
         s.event_count("outer_eof") > 0
@@ -563,6 +609,12 @@ async fn native_legacy_control(channel: u64, n1_only: bool) {
     let before = tree_fingerprint(&root);
     let restored = restored_watcher_turn_from_inflight(&old_row, &fixture.session, false).unwrap();
     let observed = observe(&fixture);
+    assert_eq!(
+        fixture.install().await,
+        OOnlyInstallOutcome::Deferred(
+            crate::services::discord::tmux::OOnlyInstallReason::NotRetired
+        )
+    );
     let handle = spawn_legacy(&fixture, prefix.len() as u64, Some(restored));
     until(&observed, "native Legacy initial EOF", |s| {
         s.event_count("outer_eof") > 0

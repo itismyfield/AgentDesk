@@ -405,11 +405,16 @@ fn committed_progress_preserves_exact_row() {
 fn retired_o_tick_preserves_row_and_observes_actual_legacy_control() {
     const CHILD: &str = "AGENTDESK_N4D1_TICK_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let name = format!("{}::retired_o_tick_preserves_row_and_observes_actual_legacy_control", module_path!().split_once("::").unwrap().1);
+        let name = format!(
+            "{}::retired_o_tick_preserves_row_and_observes_actual_legacy_control",
+            module_path!().split_once("::").unwrap().1
+        );
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &name, "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("AGENTDESK_SINGLE_MESSAGE_PANEL", "0")
-            .output().unwrap();
+            .env(CHILD, "1")
+            .env("AGENTDESK_SINGLE_MESSAGE_PANEL", "0")
+            .output()
+            .unwrap();
         assert!(output.status.success(), "tick child: {output:?}");
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
         return;
@@ -420,24 +425,85 @@ fn retired_o_tick_preserves_row_and_observes_actual_legacy_control() {
     let mtime = std::fs::metadata(fx.path()).unwrap().modified().unwrap();
     capture_warns(async {
         let mut shared = crate::services::discord::make_shared_data_for_tests();
-        Arc::get_mut(&mut shared).unwrap().ui.status_panel_v2_enabled = true;
+        Arc::get_mut(&mut shared)
+            .unwrap()
+            .ui
+            .status_panel_v2_enabled = true;
         let rec = recorder(fx.channel, false).await;
         let mut locals = tick_locals(&fx, None);
-        let observation = crate::services::discord::inflight::o_seed_observation::Guard::new(&fx.provider, fx.channel.get());
-        run_tick_mode(&mut locals, &rec, &shared, &fx, false, TRAILING_BODY, WatcherLegacyMode::RetiredO).await;
+        let observation = crate::services::discord::inflight::o_seed_observation::Guard::new(
+            &fx.provider,
+            fx.channel.get(),
+        );
+        run_tick_mode(
+            &mut locals,
+            &rec,
+            &shared,
+            &fx,
+            false,
+            TRAILING_BODY,
+            WatcherLegacyMode::RetiredO,
+        )
+        .await;
         let seen = observation.raw_process_snapshot();
-        assert_eq!(seen, observation.snapshot(), "raw tick events must be keyed without exclusions");
-        assert_eq!(seen.event_count("streaming_tick"), 1, "actual expired interval reached");
-        assert_eq!((seen.writable_inflight_load_calls, seen.readonly_inflight_load_calls, seen.compatibility_backfill_attempts), (0, 0, 0), "{seen:?}");
+        assert_eq!(
+            seen,
+            observation.snapshot(),
+            "raw tick events must be keyed without exclusions"
+        );
+        assert_eq!(
+            seen.event_count("streaming_tick"),
+            1,
+            "actual expired interval reached"
+        );
+        assert_eq!(seen.event_count("stream_progress_call"), 0, "{seen:?}");
+        assert_eq!(
+            (
+                seen.writable_inflight_load_calls,
+                seen.readonly_inflight_load_calls,
+                seen.compatibility_backfill_attempts
+            ),
+            (0, 0, 0),
+            "{seen:?}"
+        );
         assert_eq!(fx.row_bytes(), before);
-        assert_eq!(std::fs::metadata(fx.path()).unwrap().modified().unwrap(), mtime);
-        assert_eq!(locals.spin, 1, "tick state advances without Legacy persistence");
+        assert_eq!(
+            std::fs::metadata(fx.path()).unwrap().modified().unwrap(),
+            mtime
+        );
+        assert_eq!(
+            locals.spin, 1,
+            "tick state advances without Legacy persistence"
+        );
         drop(observation);
-        let observation = crate::services::discord::inflight::o_seed_observation::Guard::new(&fx.provider, fx.channel.get());
-        run_tick_mode(&mut locals, &rec, &shared, &fx, false, TRAILING_BODY, WatcherLegacyMode::Legacy).await;
+        let observation = crate::services::discord::inflight::o_seed_observation::Guard::new(
+            &fx.provider,
+            fx.channel.get(),
+        );
+        run_tick_mode(
+            &mut locals,
+            &rec,
+            &shared,
+            &fx,
+            false,
+            TRAILING_BODY,
+            WatcherLegacyMode::Legacy,
+        )
+        .await;
         let seen = observation.raw_process_snapshot();
-        assert!(seen.writable_inflight_load_calls > 0, "Legacy tick still loads and persists: {seen:?}");
-        assert_ne!(fx.row_bytes(), before, "Legacy active progress still persists");
+        assert!(
+            seen.writable_inflight_load_calls > 0,
+            "Legacy tick still loads and persists: {seen:?}"
+        );
+        assert!(
+            seen.event_count("stream_progress_call") > 0,
+            "Legacy tick submits actual progress persistence: {seen:?}"
+        );
+        assert_ne!(
+            fx.row_bytes(),
+            before,
+            "Legacy active progress still persists"
+        );
         println!("RetiredO and Legacy tick raw observations: {seen:?}");
     });
 }

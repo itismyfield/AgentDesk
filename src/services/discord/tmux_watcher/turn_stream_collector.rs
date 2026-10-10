@@ -401,7 +401,9 @@ async fn collect_turn_stream_body(
     #[cfg(test)]
     if !full_response.is_empty() {
         crate::services::discord::inflight::o_seed_observation::record_parser_response(
-            &watcher_provider, channel_id.get(), &full_response,
+            &watcher_provider,
+            channel_id.get(),
+            &full_response,
         );
     }
     // #3041 P1-3 (Part a, B1): DEFERRED forward of the outer-read chunk. We now

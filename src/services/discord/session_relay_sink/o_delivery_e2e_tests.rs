@@ -672,21 +672,27 @@ async fn retired_registered_supervisor_consumers_hold_legacy_while_o_delivers_on
     fixture.cancel_and_join().await;
     // Closing source bytes reach the registered Legacy consumer only after the watcher joins.
     // The O actor independently reads the same complete source and owns its delivery.
-    let mut append = std::fs::OpenOptions::new().append(true).open(&source).unwrap();
-    std::io::Write::write_all(&mut append, payload[nonterminal.len()..].as_bytes()).unwrap();
+    let mut append = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&source)
+        .unwrap();
+    std::io::Write::write_all(&mut append, &payload.as_bytes()[nonterminal.len()..]).unwrap();
     let mut source_file = std::fs::File::open(&source).unwrap();
     let file_identity = SourceFileIdentity::from_open_file(&source_file);
     let mut forwarded_source = String::new();
     std::io::Read::read_to_string(&mut source_file, &mut forwarded_source).unwrap();
     let witness = source_epoch_observer::read_source_epoch_witness(&session);
     let stamp = source_epoch_observer::source_stamp(&session, witness, file_identity).unwrap();
-    let closing_outcome = producers.get_producer(&session).unwrap().try_send_frame_with_source(
-        forwarded_source[nonterminal.len()..].to_owned(),
-        None,
-        dr::current_generation_mtime_ns(&session),
-        Some(stamp),
-        Some((nonterminal.len() as u64, forwarded_source.len() as u64)),
-    );
+    let closing_outcome = producers
+        .get_producer(&session)
+        .unwrap()
+        .try_send_frame_with_source(
+            forwarded_source[nonterminal.len()..].to_owned(),
+            None,
+            dr::current_generation_mtime_ns(&session),
+            Some(stamp),
+            Some((nonterminal.len() as u64, forwarded_source.len() as u64)),
+        );
     writer.acquired();
     tokio::time::sleep(Duration::from_secs(3)).await;
     let second_idle_tick = next_registered_idle_tick().await;
@@ -722,7 +728,10 @@ async fn retired_registered_supervisor_consumers_hold_legacy_while_o_delivers_on
         "real installer watcher must decode the new body: {checkpointed:?}"
     );
     assert!(
-        checkpointed.parser_responses.iter().any(|body| body == BODY),
+        checkpointed
+            .parser_responses
+            .iter()
+            .any(|body| body == BODY),
         "real provider parser checkpoint must retain BODY through watcher join: {checkpointed:?}"
     );
     assert_eq!(forwarded_source, payload);

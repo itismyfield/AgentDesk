@@ -555,18 +555,28 @@ pub(super) mod capsule_observation {
                     .turn
                     .as_ref()
                     .is_some_and(|turn| turn.startup_inflight_snapshot.is_some()),
-                startup_snapshot: capsule.turn.as_ref()
+                startup_snapshot: capsule
+                    .turn
+                    .as_ref()
                     .and_then(|turn| turn.startup_inflight_snapshot.as_ref())
                     .map(|row| serde_json::to_value(row).unwrap()),
-                restored_response_seed: capsule.turn.as_ref()
-                    .map(|turn| turn.restored_response_seed.clone()).unwrap_or_default(),
+                restored_response_seed: capsule
+                    .turn
+                    .as_ref()
+                    .map(|turn| turn.restored_response_seed.clone())
+                    .unwrap_or_default(),
                 authority: capsule.authority,
-                opened_source: crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&capsule.source),
+                opened_source:
+                    crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(
+                        &capsule.source,
+                    ),
                 cancel_address: Arc::as_ptr(&capsule.cancel) as usize,
                 has_restored_seed: capsule.restored.is_some() || capsule.rewind.is_some(),
                 has_rewind_key: capsule.rewind_key.is_some(),
                 rewind_attempts: capsule.rewind_attempts,
-                has_turn_identity_for_panel: capsule.turn.as_ref()
+                has_turn_identity_for_panel: capsule
+                    .turn
+                    .as_ref()
                     .is_some_and(|turn| turn.turn_identity_for_panel.is_some()),
                 utf8_state: format!("{:?}", capsule.utf8),
             })

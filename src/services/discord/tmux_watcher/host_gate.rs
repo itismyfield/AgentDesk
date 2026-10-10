@@ -39,7 +39,11 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn tmux_alive_for_mod
     output_path: &str,
 ) -> bool {
     #[cfg(test)]
-    crate::services::discord::inflight::o_seed_observation::record_event(&watcher_provider(name), channel_id.get(), "host_probe");
+    crate::services::discord::inflight::o_seed_observation::record_event(
+        &watcher_provider(name),
+        channel_id.get(),
+        "host_probe",
+    );
     if legacy_mode.is_legacy() {
         return tmux_alive(shared, name, channel_id, host).await;
     }
@@ -52,7 +56,11 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn tmux_alive_for_mod
     };
     let name_owned = name.to_string();
     #[cfg(test)]
-    crate::services::discord::inflight::o_seed_observation::record_event(&watcher_provider(name), channel_id.get(), "rowless_host_probe");
+    crate::services::discord::inflight::o_seed_observation::record_event(
+        &watcher_provider(name),
+        channel_id.get(),
+        "rowless_host_probe",
+    );
     let observed = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         tokio::task::spawn_blocking(move || host_liveness::observe_liveness(&name_owned, None)),
@@ -76,10 +84,18 @@ pub(in crate::services::discord::tmux::tmux_watcher) mod retired_probe_test {
     type Pause = (oneshot::Sender<()>, oneshot::Receiver<()>);
     static PAUSES: LazyLock<Mutex<HashMap<u64, Pause>>> = LazyLock::new(Mutex::default);
 
-    pub(in crate::services::discord::tmux::tmux_watcher) fn pause_after_probe(channel: u64) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    pub(in crate::services::discord::tmux::tmux_watcher) fn pause_after_probe(
+        channel: u64,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
         let (entered, entry) = oneshot::channel();
         let (release, resume) = oneshot::channel();
-        assert!(PAUSES.lock().unwrap().insert(channel, (entered, resume)).is_none());
+        assert!(
+            PAUSES
+                .lock()
+                .unwrap()
+                .insert(channel, (entered, resume))
+                .is_none()
+        );
         (entry, release)
     }
 
@@ -96,7 +112,10 @@ fn retired_tmux_evidence(
     name: &str,
     output_path: &str,
     host: &HostSnapshot,
-) -> Option<(crate::services::tui_prompt_dedupe::TuiRuntimeBinding, SourceFileIdentity)> {
+) -> Option<(
+    crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    SourceFileIdentity,
+)> {
     use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
     use crate::services::session_host::HostKind;
     use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
@@ -110,12 +129,18 @@ fn retired_tmux_evidence(
         return None;
     };
     let valid = matches!(
-        (parse_provider_and_channel_from_tmux_name(name).map(|(p, _)| p), binding.runtime_kind),
+        (
+            parse_provider_and_channel_from_tmux_name(name).map(|(p, _)| p),
+            binding.runtime_kind
+        ),
         (Some(ProviderKind::Claude), ClaudeTui) | (Some(ProviderKind::Codex), CodexTui)
     ) && crate::services::tmux_common::resolve_tmux_runtime_kind_marker(name)
         == Some(binding.runtime_kind)
         && binding.output_path == output_path
-        && binding.session_id.as_deref().is_some_and(|id| !id.trim().is_empty());
+        && binding
+            .session_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty());
     if !valid {
         return None;
     }
