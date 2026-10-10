@@ -440,6 +440,13 @@ impl HealthRegistry {
                 .all(|entry| entry.role == ProviderRuntimeRole::Standby)
     }
 
+    #[cfg(test)]
+    pub(in crate::services::discord) async fn provider_entries_guard(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, Vec<ProviderEntry>> {
+        self.providers.lock().await
+    }
+
     pub(in crate::services::discord) async fn provider_runtimes(&self) -> Vec<Arc<SharedData>> {
         self.providers
             .lock()

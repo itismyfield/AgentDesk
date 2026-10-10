@@ -69,6 +69,13 @@ pub(crate) use watcher_lifecycle::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use watcher_lifecycle::commit_codex_watcher_restore_to_empty_registry_for_tests;
 
+#[cfg(test)]
+pub(in crate::services::discord) use watcher_lifecycle::InstallFixture;
+#[cfg(test)]
+pub use watcher_lifecycle::{
+    OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
+};
+
 use self::monitor_auto_turn_inflight::ensure_monitor_auto_turn_inflight;
 use self::placeholder_suppression::*;
 use self::tmux_reattach_offsets::matching_recent_watcher_reattach_offset;
