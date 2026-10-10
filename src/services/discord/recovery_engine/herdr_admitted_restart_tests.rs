@@ -368,8 +368,11 @@ fn cleanup_keeps_a_current_generation_row_that_matches_its_snapshot() {
     fixture.overwrite(&row);
     let before = std::fs::read(fixture.path()).unwrap();
     let outcome = inflight::clear_admitted_restart_terminal(&fixture.provider, &row, NONCE, 9);
-    assert_ne!(outcome, inflight::GuardedClearOutcome::Cleared);
+    assert_eq!(outcome, inflight::GuardedClearOutcome::UserMsgMismatch);
     assert_eq!(std::fs::read(fixture.path()).ok(), Some(before));
+    let outcome = inflight::clear_admitted_restart_terminal(&fixture.provider, &row, NONCE, 10);
+    assert_eq!(outcome, inflight::GuardedClearOutcome::Cleared);
+    assert!(fixture.durable().is_none());
 }
 
 /// An actor that arrives before cleanup is another turn's: it keeps its token and the row stays.
