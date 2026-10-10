@@ -217,11 +217,13 @@ pub(in crate::services::discord) use catch_up::{
     CatchUpRetryState, catch_up_missed_messages, catch_up_missed_messages_for_retry,
     should_trigger_catch_up_retry, take_catch_up_retry_checkpoint_after_queue_drain,
 };
+#[cfg(test)]
+pub(in crate::services::discord) use mailbox_finish::mailbox_finish_cancelled_turn;
 pub(in crate::services::discord) use mailbox_finish::{
     MailboxLookup, mailbox_clear_channel, mailbox_clear_recovery_marker,
-    mailbox_finish_cancelled_turn, mailbox_finish_cancelled_turn_on, mailbox_finish_judged_turn,
-    mailbox_finish_turn, mailbox_finish_turn_if_matches,
-    mailbox_finish_turn_if_matches_episode_started_before, unavailable_finish_turn_result,
+    mailbox_finish_cancelled_turn_on, mailbox_finish_judged_turn, mailbox_finish_turn,
+    mailbox_finish_turn_if_matches, mailbox_finish_turn_if_matches_episode_started_before,
+    unavailable_finish_turn_result,
 };
 #[cfg(unix)]
 pub(in crate::services::discord) use mailbox_probe::{

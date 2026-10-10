@@ -34,6 +34,13 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/commands/cancel_backstop_tests.rs",
+        "src/services/discord/queue_dispatch/cancel_backstop_race_support_tests.rs",
+        "src/services/discord/queue_io/cancel_backstop_tests.rs",
+        "src/services/discord/queue_io/idle_queue_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs",
+        "src/services/discord/zombie_foreground_release/cancel_backstop_tests.rs",
         "src/services/discord/health/recovery/legacy_send_tests.rs",
         "src/db/session_observability/background_ordering_pg_tests.rs",
         "src/services/cluster/home_supervisor_tests.rs",
@@ -496,6 +503,10 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/discord/queue_io/cancel_reclaim_support_test.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests/autoheal.rs",
+        "src/services/discord/turn_bridge/cancel_backstop_test_support.rs",
+        "src/services/discord/zombie_foreground_release/cancel_backstop_test_support.rs",
         "src/services/codex_tui/rollout_tail/provenance.rs",
         "src/services/tui_o/writer/rotation/provenance.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant.rs",

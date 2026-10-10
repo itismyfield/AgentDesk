@@ -49,6 +49,16 @@ impl StopReply {
                         shared, provider, channel, "/stop",
                     )
                     .await;
+                if matches!(
+                    release.verdict,
+                    Some(super::super::zombie_foreground_release::ZombieForegroundVerdict::HoldInflightPresent
+                        | super::super::zombie_foreground_release::ZombieForegroundVerdict::HoldTuiNotIdle)
+                ) {
+                    super::super::queue_io::arm_slow_idle_queue_backstop_if_queue_nonempty(
+                        shared, provider, channel, "slash_stop_held_release",
+                    )
+                    .await;
+                }
                 log_info_event!(
                     "discord_cancel_signal_sent",
                     channel_id = channel.get(),

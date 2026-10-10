@@ -15,6 +15,9 @@
 #[cfg(unix)]
 #[path = "busy_inject_e2e_tests.rs"]
 mod busy_inject_e2e;
+#[cfg(unix)]
+#[path = "cancel_backstop_e2e_tests.rs"]
+mod cancel_backstop_e2e;
 mod catch_up_pagination_e2e;
 mod consumed_command_guard_e2e;
 pub(in crate::services::discord) mod discord_mock;
@@ -23,6 +26,9 @@ mod n1a_turn_mode;
 #[path = "prompt_identity_e2e_tests.rs"]
 mod prompt_identity_e2e;
 mod queue_recovery_e2e;
+#[cfg(unix)]
+#[path = "reconcile_stale_turn_e2e_tests.rs"]
+mod reconcile_stale_turn_e2e;
 mod registered_bootstrap_e2e;
 mod stale_resume_retry_e2e;
 mod stop_command_catch_up_e2e;
