@@ -172,7 +172,7 @@ async fn exact_off_pg_statement_trace_and_files_zero() {
                     .unwrap();
                 let value = count().await;
                 same = if value == previous { same + 1 } else { 0 };
-                if same >= 5 {
+                if same >= 20 {
                     return value;
                 }
                 assert!(
@@ -182,6 +182,7 @@ async fn exact_off_pg_statement_trace_and_files_zero() {
                 previous = value;
             }
         };
+        let _migration_flush = flushed().await;
         let initial = flushed().await;
         let open = || async {
             crate::db::postgres::connect_test_pool_with_max_connections(
