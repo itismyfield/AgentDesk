@@ -1,0 +1,112 @@
+{
+  "captured_through": 9930,
+  "channel_id": 632501,
+  "delivered_frontier": 101,
+  "excluded": [
+    {
+      "reason": "tool_call_panel",
+      "unit_key": {
+        "channel_id": 632501,
+        "kind": "tool",
+        "native_key": "claude-tool:0",
+        "provider": "claude"
+      }
+    },
+    {
+      "reason": "normal_tool_result",
+      "unit_key": {
+        "channel_id": 632501,
+        "kind": "tool_result",
+        "native_key": "claude-call",
+        "provider": "claude"
+      }
+    }
+  ],
+  "pieces": [
+    {
+      "index": 0,
+      "payload": "Claude first body",
+      "posted": 101,
+      "unit_key": {
+        "channel_id": 632501,
+        "kind": "body",
+        "native_key": "claude-first:0",
+        "provider": "claude"
+      }
+    },
+    {
+      "index": 1,
+      "payload": "이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존.",
+      "posted": null,
+      "unit_key": {
+        "channel_id": 632501,
+        "kind": "body",
+        "native_key": "claude-first:0",
+        "provider": "claude"
+      }
+    },
+    {
+      "index": 2,
+      "payload": " 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. 이전 본문 🚀 UTF16 보존. \n```rust\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\n```",
+      "posted": null,
+      "unit_key": {
+        "channel_id": 632501,
+        "kind": "body",
+        "native_key": "claude-first:0",
+        "provider": "claude"
+      }
+    },
+    {
+      "index": 3,
+      "payload": "```rust\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\nlet value = \"🚀\";\n```",
+      "posted": null,
+      "unit_key": {
+        "channel_id": 632501,
+        "kind": "body",
+        "native_key": "claude-first:0",
+        "provider": "claude"
+      }
+    },
+    {
+      "index": 4,
+      "payload": "```rust\nlet value = \"🚀\";\n\n```",
+      "posted": null,
+      "unit_key": {
+        "channel_id": 632501,
+        "kind": "body",
+        "native_key": "claude-first:0",
+        "provider": "claude"
+      }
+    },
+    {
+      "index": 0,
+      "payload": "error output survives",
+      "posted": null,
+      "unit_key": {
+        "channel_id": 632501,
+        "kind": "tool_result",
+        "native_key": "claude-error",
+        "provider": "claude"
+      }
+    },
+    {
+      "index": 0,
+      "payload": "Claude body after tool 🚀",
+      "posted": null,
+      "unit_key": {
+        "channel_id": 632501,
+        "kind": "body",
+        "native_key": "claude-last:0",
+        "provider": "claude"
+      }
+    }
+  ],
+  "prefix_hash": "9b9effe2b7c89622a1309f780125e79c00b6b6db1e6e3c8a58fc0a65629cc99f",
+  "provider": "claude",
+  "source": {
+    "dev": 16777230,
+    "ino": 852354335,
+    "path": "/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i6325-n3b-gates/logs/m1-r1b-v2-oracle-fixture/claude/source.jsonl",
+    "session_id": "v2-claude-source"
+  }
+}

@@ -89,6 +89,7 @@ pub(crate) enum IntakeAdmission {
         outbox_id: i64,
     },
     SkippedDuplicate,
+    ConsumedToHold,
     DeferredOpenRoute {
         target_instance_id: String,
         prepared_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
@@ -102,6 +103,34 @@ pub(crate) async fn admit_text_intake(
     deps: &IntakeDeps<'_>,
     submission: &IntakeSubmission,
 ) -> IntakeAdmission {
+    let channel_id = submission.request.channel_id.get().to_string();
+    if let Some(pool) = deps.shared.pg_pool.as_ref() {
+        let mut sources: Vec<String> = std::iter::once(submission.request.user_msg_id)
+            .chain(submission.request.source_message_ids.iter().copied())
+            .map(|id| id.get().to_string())
+            .collect();
+        sources.sort_unstable();
+        sources.dedup();
+        // Consume every absorbed source before routing or attachment effects; mixed items stay intact.
+        let detail = match crate::db::replay_disposition::unblocked_sources(
+            pool,
+            submission.provider.as_str(),
+            &channel_id,
+            &sources,
+        )
+        .await
+        {
+            Ok(unblocked) if unblocked.len() == sources.len() => None,
+            Ok(unblocked) if unblocked.is_empty() => return IntakeAdmission::ConsumedToHold,
+            Ok(_) => Some("intake mixes held and new sources".to_string()),
+            Err(error) => Some(format!("replay hold lookup failed: {error}")),
+        };
+        if let Some(detail) = detail {
+            return IntakeAdmission::Blocked {
+                reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
+            };
+        }
+    }
     // Before any routing or Postgres-less local fallback: an O channel runs only on its gateway.
     let (provider, destination) = (submission.provider.as_str(), submission.request.channel_id);
     // A delegated channel's home row decides first, in the router; without Postgres it holds here.
@@ -118,7 +147,6 @@ pub(crate) async fn admit_text_intake(
     let effective_config =
         crate::services::cluster::intake_router_hook::effective_intake_routing_config();
     let mode = effective_config.mode;
-    let channel_id = submission.request.channel_id.get().to_string();
     let user_msg_id = submission.request.user_msg_id.get().to_string();
     let authority_channel_opt_in = effective_config.owner_authority_channel_opt_in(&channel_id);
     let Some(pool) = deps.shared.pg_pool.as_ref() else {
@@ -428,6 +456,7 @@ pub(crate) async fn finish_text_intake_admission(
         }
         IntakeAdmission::Forwarded { .. }
         | IntakeAdmission::SkippedDuplicate
+        | IntakeAdmission::ConsumedToHold
         | IntakeAdmission::Blocked { .. } => {}
     }
     Ok(())
@@ -518,7 +547,7 @@ fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_ms
             user_msg_id,
             "[intake_dispatch] forwarded; local execution fenced"
         ),
-        IntakeAdmission::SkippedDuplicate => tracing::info!(
+        IntakeAdmission::SkippedDuplicate | IntakeAdmission::ConsumedToHold => tracing::info!(
             channel_id,
             user_msg_id,
             "[intake_dispatch] duplicate skipped; local execution fenced"
