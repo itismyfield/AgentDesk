@@ -72,10 +72,6 @@ impl SubmissionTmux {
 }
 
 impl InputTransport for SubmissionTmux {
-    fn pane_size(&mut self, session: &str) -> Option<(usize, usize)> {
-        SubmissionTmux::pane_size(self, session)
-    }
-
     fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String> {
         let target = format!("={session}:");
         self.run(&["send-keys", "-t", &target, "-l", "--", text])
@@ -114,10 +110,6 @@ impl InputTransport for SubmissionTmux {
 
     fn capture(&mut self, session: &str, scroll_back: i32) -> Option<String> {
         self.capture_raw(session, scroll_back)
-    }
-
-    fn capture_draft(&mut self, session: &str) -> Option<String> {
-        self.capture_raw(session, -80)
     }
 
     fn pane_alive(&mut self, session: &str) -> bool {

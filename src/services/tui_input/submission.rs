@@ -70,12 +70,8 @@ pub(crate) fn run_prompt_submission_using(
     let Some(after) = observed else {
         return late_refusal(Refusal::CaptureUnavailable);
     };
-    // Compare the provider's visible form while preserving the transmitted byte limit above.
+    // Compare pane line endings while the byte limit above keeps the transmitted frame.
     let canonical = submission.frame.replace("\r\n", "\n").replace('\r', "\n");
-    let canonical = match submission.provider {
-        ShadowProvider::Claude => canonical.replace('\t', "    "),
-        ShadowProvider::Codex => canonical,
-    };
     let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&after);
     let busy = super::actor::gate::submission_busy(submission.provider, &plain);
     if busy || !own_draft(submission.provider, &after, &canonical, true) {

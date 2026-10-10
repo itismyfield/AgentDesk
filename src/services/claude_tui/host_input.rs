@@ -253,10 +253,6 @@ pub(crate) trait InputTransport {
     fn capture_draft(&mut self, _session: &str) -> Option<String> {
         None
     }
-    /// A bounded geometry read for submission preflight; unavailable dimensions prove no fit.
-    fn pane_size(&mut self, _session: &str) -> Option<(usize, usize)> {
-        None
-    }
     fn pane_alive(&mut self, session: &str) -> bool;
     fn present(&mut self, session: &str) -> bool;
     /// Records the termination and exit reason, then kills the session.
@@ -986,15 +982,6 @@ mod spy {
             state.capture()
         }
 
-        fn pane_size(&mut self, _session: &str) -> Option<(usize, usize)> {
-            let mut state = self.0.borrow_mut();
-            state.record("size".to_string());
-            match state.pane_size_after_send {
-                Some(after) if state.sends > 0 => after,
-                _ => state.pane_size,
-            }
-        }
-
         fn pane_alive(&mut self, _session: &str) -> bool {
             let mut state = self.0.borrow_mut();
             state.record("alive".to_string());
@@ -1077,11 +1064,27 @@ mod spy {
     /// Routes this thread's legacy input through a spy until dropped.
     pub(crate) struct SpyGuard(pub Rc<RefCell<SpyState>>);
 
+    thread_local! {
+        static INSTALLED: RefCell<Option<Rc<RefCell<SpyState>>>> = const { RefCell::new(None) };
+    }
+
+    /// Geometry of the installed spy, as the dormant guarded submission reads it.
+    pub(super) fn pane_size() -> Option<(usize, usize)> {
+        let state = INSTALLED.with(|slot| slot.borrow().clone())?;
+        let mut state = state.borrow_mut();
+        state.record("size".to_string());
+        match state.pane_size_after_send {
+            Some(after) if state.sends > 0 => after,
+            _ => state.pane_size,
+        }
+    }
+
     impl SpyGuard {
         pub(crate) fn install(state: SpyState) -> Self {
             let state = Rc::new(RefCell::new(state));
             let spy: Box<dyn InputTransport> = Box::new(Spy(state.clone()));
             INJECTED.with(|slot| *slot.borrow_mut() = Some(spy));
+            INSTALLED.with(|slot| *slot.borrow_mut() = Some(state.clone()));
             Self(state)
         }
 
@@ -1093,11 +1096,13 @@ mod spy {
     impl Drop for SpyGuard {
         fn drop(&mut self) {
             INJECTED.with(|slot| slot.borrow_mut().take());
+            INSTALLED.with(|slot| slot.borrow_mut().take());
         }
     }
 }
 
 /// Dormant guarded Claude submission: operating Claude prompts still go through `run_legacy`.
+/// Its pane geometry comes from the test spy; no production transport supplies one.
 #[cfg(test)]
 pub(crate) mod guarded_submission {
     use super::*;
@@ -1190,7 +1195,7 @@ pub(crate) mod guarded_submission {
                     },
                     cancel_token,
                     || {
-                        let current_size = transport.borrow_mut().pane_size(session_name);
+                        let current_size = super::spy::pane_size();
                         size.set(current_size);
                         if cancel_requested(cancel_token) {
                             return InputRun::Cancelled { confirmed: 0 };
@@ -1213,7 +1218,7 @@ pub(crate) mod guarded_submission {
                             std::thread::sleep(POST_LITERAL_SETTLE);
                         }
                         let mut transport = transport.borrow_mut();
-                        if transport.pane_size(session_name) != size.get()
+                        if super::spy::pane_size() != size.get()
                             || !transport.pane_alive(session_name)
                         {
                             return None;
