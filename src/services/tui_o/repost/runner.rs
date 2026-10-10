@@ -277,6 +277,7 @@ impl Runner {
                 (row, revision, Intent::OperatorResume { approval_id })
             }
         };
+        let auto = matches!(intent, Intent::AutoReconfirm);
         let request = GrantRequest {
             key: &row.key,
             expected_revision,
@@ -290,6 +291,8 @@ impl Runner {
                 let permit = DispatchPermit::new(grant, row.payload, asked + GRANT_TTL);
                 Admission::Granted { permit, lease }
             }
+            // Auto evidence whose row went before the lock proves nothing: observe, never legacy.
+            GrantOutcome::NotAdmitted if auto => Admission::ObserveOnly,
             GrantOutcome::NotAdmitted => Admission::LegacyOff,
             GrantOutcome::Resolved => Admission::AlreadyResolved,
             GrantOutcome::Failed(Failure::CapUnknown) => Admission::CapUnknown,

@@ -885,3 +885,56 @@ async fn auto_missing_row_is_observe_only_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// The row is there for the checks and gone by the grant's lock: Auto still only observes.
+#[tokio::test]
+async fn auto_row_gone_before_the_grant_lock_is_observe_only_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let dir = tempfile::tempdir().unwrap();
+    let key = admit_on(&pool, &mut sidecar(&dir), &[(3, "gone")], "piece").await[0].clone();
+    let run = holder("a");
+    let evidence = evidence(&pool, &key, &run).await;
+    let mut blocker = pool.begin().await.unwrap();
+    let unit = key.unit();
+    let piece = (unit.channel_id.to_string(), unit.native_key.clone());
+    sqlx::query(
+        "SELECT 1 FROM o_piece_delivery WHERE channel_id = $1 AND native_key = $2 FOR UPDATE",
+    )
+    .bind(&piece.0)
+    .bind(&piece.1)
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+    let waiting = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let mut writer = TestWriter::new();
+            let mut runner = runner(&pool, true, &run);
+            let intent = DispatchIntent::Auto(evidence);
+            let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+            (admission.await.unwrap(), writer)
+        })
+    };
+    lock_waiters(&pool, 1).await;
+    for table in ["o_piece_attempts", "o_piece_delivery"] {
+        let sql = format!("DELETE FROM {table} WHERE channel_id = $1 AND native_key = $2");
+        sqlx::query(&sql)
+            .bind(&piece.0)
+            .bind(&piece.1)
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+    }
+    blocker.commit().await.unwrap();
+    let (admission, writer) = waiting.await.unwrap();
+    assert!(matches!(admission, Admission::ObserveOnly), "{admission:?}");
+    assert_eq!(turn_step(&admission), TurnStep::Wait);
+    assert_eq!(
+        (writer.prepared().len(), writer.held.load(Ordering::SeqCst)),
+        (0, 0)
+    );
+    assert!(attempts(&pool, &key).await.unwrap().is_empty());
+    pool.close().await;
+    db.drop().await;
+}

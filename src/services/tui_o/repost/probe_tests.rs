@@ -861,13 +861,31 @@ fn names_the_probe(path: &str, line: &str) -> bool {
         || (in_repost && words.iter().any(|word| word.starts_with("super::io")))
         || group_names_io
         || line.contains("repost as ")
+        || escapes_by_path(path, line)
         || (path == ADAPTER && line.contains("probe"))
+}
+
+/// Imports a line scan cannot follow: a glob of the re-post module, `self` paths inside it, and a
+/// path split before its group. Reported, never skipped.
+fn escapes_by_path(path: &str, line: &str) -> bool {
+    let in_repost = path.contains("tui_o/repost/");
+    let glob = line.contains("repost::*") || (in_repost && line.contains("super::*"));
+    let words = line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'));
+    let selfish = in_repost
+        && (line.contains("self::{")
+            || line.contains("self::*")
+            || words.into_iter().any(|word| {
+                ["self::runner", "self::dispatch", "self::io"]
+                    .iter()
+                    .any(|module| word.starts_with(module))
+            }));
+    glob || selfish || line.trim_end().ends_with("repost::")
 }
 
 /// Whether a line names a dormant re-post module as a bare word, as a group member does.
 fn names_a_member(line: &str) -> bool {
     line.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .any(|word| ["io", "probe", "runner", "dispatch"].contains(&word))
+        .any(|word| ["io", "probe", "runner", "dispatch", "self"].contains(&word))
 }
 
 /// Whether `line` opens a grouped import of the re-post module that it does not also close.
@@ -991,7 +1009,9 @@ fn probe_edges(root: &std::path::Path) -> Vec<String> {
                 } else {
                     let named =
                         names_the_probe(&relative, line) || names_the_runner(&relative, line);
-                    (named || member) && !allowed
+                    // A macro could assemble any path; beside the re-post module it is an edge.
+                    let macro_beside = line.contains("macro_rules!") && text.contains("repost");
+                    (named || member || macro_beside) && !allowed
                 };
                 if edge {
                     found.push(format!("{relative}:{}", number + 1));
@@ -1577,6 +1597,42 @@ fn f5r4_the_dormancy_scan_reads_every_member_of_a_grouped_alias() {
             "src/services/tui_o/writer/host.rs:1",
             "src/services/tui_o/writer/host.rs:3",
             "src/services/tui_o/writer/host.rs:4",
+        ]
+    );
+}
+
+#[test]
+fn f6_the_dormancy_scan_fails_closed_on_globs_self_paths_and_macros() {
+    let write = |root: &std::path::Path, relative: &str, text: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let tree = tempfile::tempdir().unwrap();
+    let root = tree.path();
+    let glob = "use crate::services::tui_o::repost::*;\nfn go() { Runner::new(); }\n";
+    write(root, "src/services/tui_o/writer/a.rs", glob);
+    let reexport = "pub use crate::services::tui_o::repost::*;\n";
+    write(root, "src/services/tui_o/writer/b.rs", reexport);
+    let own = "use self::{runner as rr};\nfn go() { self::dispatch::start(); }\n";
+    write(root, "src/services/tui_o/repost/c.rs", own);
+    let aliased =
+        "use crate::services::tui_o::repost::{self as rp};\nfn go() { rp::runner::x(); }\n";
+    write(root, "src/services/tui_o/writer/d.rs", aliased);
+    let made = "macro_rules! reach {\n    ($m:ident) => { crate::services::tui_o::repost::$m::go() };\n}\n";
+    write(root, "src/services/tui_o/writer/e.rs", made);
+    let split = "use crate::services::tui_o::repost::\n    {runner as rr};\n";
+    write(root, "src/services/tui_o/writer/f.rs", split);
+    assert_eq!(
+        probe_edges(root),
+        [
+            "src/services/tui_o/repost/c.rs:1",
+            "src/services/tui_o/repost/c.rs:2",
+            "src/services/tui_o/writer/a.rs:1",
+            "src/services/tui_o/writer/b.rs:1",
+            "src/services/tui_o/writer/d.rs:1",
+            "src/services/tui_o/writer/e.rs:1",
+            "src/services/tui_o/writer/f.rs:1",
         ]
     );
 }
