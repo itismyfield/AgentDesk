@@ -356,6 +356,22 @@ async fn cleanup_keeps_a_row_that_is_no_longer_the_delivered_episode() {
     assert_eq!(outcome, inflight::GuardedClearOutcome::Cleared);
 }
 
+/// A current-generation row is kept even when the snapshot is that same row, so the generation
+/// check alone refuses it.
+#[test]
+fn cleanup_keeps_a_current_generation_row_that_matches_its_snapshot() {
+    let fixture = Fixture::new("current-generation");
+    let mut committed = fixture.row.clone();
+    committed.terminal_delivery_committed = true;
+    let mut row = fixture.persist(&committed);
+    row.born_generation = 9;
+    fixture.overwrite(&row);
+    let before = std::fs::read(fixture.path()).unwrap();
+    let outcome = inflight::clear_admitted_restart_terminal(&fixture.provider, &row, NONCE, 9);
+    assert_ne!(outcome, inflight::GuardedClearOutcome::Cleared);
+    assert_eq!(std::fs::read(fixture.path()).ok(), Some(before));
+}
+
 /// An actor that arrives before cleanup is another turn's: it keeps its token and the row stays.
 #[tokio::test(flavor = "current_thread")]
 async fn an_actor_registered_before_cleanup_is_left_alone() {

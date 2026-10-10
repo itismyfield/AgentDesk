@@ -665,13 +665,21 @@ pub(super) fn load_inflight_states_from_root_excluding(
     provider: &ProviderKind,
     exclude_channel: impl Fn(u64) -> bool,
 ) -> Vec<InflightTurnState> {
-    let states =
-        load_inflight_states_for_probe_from_root_excluding(root, provider, exclude_channel).states;
+    load_inflight_probe_from_root_excluding(root, provider, exclude_channel).states
+}
+
+/// The excluding scan with its completeness, for callers that must not read a short scan as empty.
+pub(super) fn load_inflight_probe_from_root_excluding(
+    root: &Path,
+    provider: &ProviderKind,
+    exclude_channel: impl Fn(u64) -> bool,
+) -> InflightProbeLoad {
+    let load = load_inflight_states_for_probe_from_root_excluding(root, provider, exclude_channel);
     #[cfg(test)]
     if let Some(hook) = super::AFTER_EXCLUDING_SCAN.with(|slot| slot.borrow_mut().take()) {
         hook();
     }
-    states
+    load
 }
 
 /// Rows the loader's verdict would retire are hidden, never unlinked or

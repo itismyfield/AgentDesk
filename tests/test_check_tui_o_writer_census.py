@@ -163,6 +163,20 @@ class CensusGateTests(unittest.TestCase):
                     "raw claim: src/services/tui_o/early.rs claims in early outside claim_then_send"
                 )
 
+    def test_reserving_claims_count_as_claims_and_stay_inside_their_sites(self) -> None:
+        held = f"pub fn deliver(ch: u64) {{\n    cutover::claim_then_send_held(Some(claim), || {SEND});\n}}\n"
+        self.write("src/services/discord/sink.rs", held)
+        ok, message = self.run_gate()
+        self.assertTrue(ok, message)
+        early = "fn early(ch: u64) { let _send = cutover::o_owns_tui_output_for_channel_reserving(ch, None); }\n"
+        self.write("src/services/discord/sink.rs", held + early)
+        self.maps["EXPECTED_GATES"]["src/services/discord/sink.rs"] = ("deliver:claim", "early:claim")
+        self.assert_fails_with("raw claim: src/services/discord/sink.rs claims in early outside")
+        for raw in ("adoption.claim_body(ch);", "channels.map(Candidate::claim_body);"):
+            with self.subTest(raw=raw):
+                self.write("src/services/tui_o/early.rs", f"fn early(ch: u64) {{ {raw} }}\n")
+                self.assert_fails_with("raw claim: src/services/tui_o/early.rs claims in early outside")
+
     def test_a_stale_raw_claim_exception_fails(self) -> None:
         self.maps["RAW_CLAIM_SITES"] = {"src/services/discord/sink.rs": ("early",)}
         self.assert_fails_with("raw claim: stale RAW_CLAIM_SITES entry src/services/discord/sink.rs early")

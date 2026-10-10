@@ -191,3 +191,65 @@ async fn a_task_response_posts_nothing_on_a_channel_o_committed() {
     assert!(matches!(transport.settle(sent), Ok(BodySend::OwnedByO)));
     assert_eq!(check.adoption(), Adoption::Committed);
 }
+
+/// A chunk sink that notes the channel's Legacy sends as each post lands; history is empty.
+struct Counting {
+    candidate: crate::services::tui_o::channel_policy::Candidate,
+    seen: std::sync::Mutex<Vec<(u64, u64)>>,
+}
+
+impl ResponseChunkTransport for Counting {
+    async fn bot_user_id(&self) -> Result<u64, String> {
+        Ok(BOT)
+    }
+
+    async fn post_chunk(
+        &self,
+        _channel_id: u64,
+        _content: &str,
+        _reference_message_id: Option<u64>,
+        _nonce: &str,
+    ) -> Result<u64, ResponseChunkPostError> {
+        let mut seen = self.seen.lock().unwrap();
+        seen.push(self.candidate.sends());
+        Ok(910_000 + seen.len() as u64)
+    }
+
+    async fn history_page(
+        &self,
+        _channel_id: u64,
+        _before_message_id: Option<u64>,
+        _limit: usize,
+    ) -> Result<Vec<ResponseChunkHistoryMessage>, ResponseChunkHistoryError> {
+        Ok(Vec::new())
+    }
+}
+
+/// A response's claimed send stays counted from its first chunk post through its last and until
+/// the transport drops, so no adoption lands between two chunks of one Legacy body.
+#[tokio::test]
+async fn a_task_response_stays_counted_across_its_chunks_until_the_transport_drops() {
+    let channel = 4_325_427;
+    let _candidates = test_override::force_candidates(&[(channel, ClaudeTui)]);
+    let candidate = test_override::with_channels(|boot| boot?.candidate(channel).cloned());
+    let candidate = candidate.unwrap();
+    let claim = owned(channel).await;
+    let sink = Counting {
+        candidate: candidate.clone(),
+        seen: Default::default(),
+    };
+    let body = "ADK-S1-chunked-response line\n".repeat(200);
+    let transport = claim_at_post(&sink, BodyClaim::new(channel, Some(ClaudeTui)));
+    let sent = send_task_response_chunks(None, &transport, &claim, &body).await;
+    assert!(matches!(transport.settle(sent), Ok(BodySend::Sent(Ok(_)))));
+    let seen = sink.seen.lock().unwrap().clone();
+    assert!(seen.len() > 1, "a multi-chunk body: {seen:?}");
+    assert!(seen.iter().all(|&sends| sends == (1, 0)), "{seen:?}");
+    assert_eq!(
+        candidate.sends(),
+        (1, 0),
+        "still counted after the last chunk"
+    );
+    drop(transport);
+    assert_eq!(candidate.sends(), (1, 1));
+}
