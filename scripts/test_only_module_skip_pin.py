@@ -88,7 +88,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_presence/activity_tests.rs",
         "src/services/discord/turn_presence/supervisor_tests.rs",
         "src/services/claude_tui/input/final_ready_tests.rs",
-        "src/services/claude_tui/input/submission_guard_tests.rs",
         "src/services/claude_tui/hook_server/codex_ingress_tests.rs",
         "src/services/codex_tui/rollout_tail/child_binding_tests.rs",
         "src/services/discord/tui_prompt_relay/rehydration/child_binding_tests.rs",
