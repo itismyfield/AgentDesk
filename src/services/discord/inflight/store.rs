@@ -555,6 +555,8 @@ fn persist_under_lock_inner(
     }
     bump_save_generation_for_write(path, &mut updated);
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
+    #[cfg(test)]
+    super::managed_submission::fault::check(path, updated.channel_id, caller, &json)?;
     atomic_write(path, &json)?;
     Ok(Some(updated))
 }

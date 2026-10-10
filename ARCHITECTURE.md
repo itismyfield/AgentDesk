@@ -213,6 +213,7 @@ src/
 │   ├── meetings.rs
 │   ├── mod.rs
 │   ├── o_channel_activation.rs
+│   ├── o_channel_activation_fence_tests.rs
 │   ├── o_channel_homes.rs
 │   ├── o_channel_homes_tests.rs
 │   ├── postgres.rs
@@ -654,6 +655,7 @@ src/
 │   │   ├── session.rs
 │   │   ├── source_verify.rs
 │   │   ├── startup_dialog.rs
+│   │   ├── submission_fence.rs
 │   │   ├── transcript_tail.rs
 │   │   └── tui_relay.rs
 │   ├── cluster/
@@ -1039,6 +1041,8 @@ src/
 │   │   │   ├── host_recovery_guard.rs
 │   │   │   ├── host_recovery_guard_keyed_tests.rs
 │   │   │   ├── invariant_test_capture.rs
+│   │   │   ├── managed_submission.rs
+│   │   │   ├── managed_submission_tests.rs
 │   │   │   ├── model.rs
 │   │   │   ├── orphan_relay_reclaim.rs
 │   │   │   ├── ownership_ops.rs
@@ -1075,6 +1079,8 @@ src/
 │   │   │   ├── effect_tests.rs
 │   │   │   ├── effects.rs
 │   │   │   ├── effects_tests.rs
+│   │   │   ├── external.rs
+│   │   │   ├── external_tests.rs
 │   │   │   ├── fence.rs
 │   │   │   ├── fence_tests.rs
 │   │   │   ├── mapping.rs
@@ -1381,6 +1387,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
+│   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
@@ -1757,6 +1764,11 @@ src/
 │   │   │   │   └── production_seam_tests.rs
 │   │   │   ├── intake_settlement/
 │   │   │   │   └── tests.rs
+│   │   │   ├── replay_policy/
+│   │   │   │   ├── live.rs
+│   │   │   │   ├── permit.rs
+│   │   │   │   ├── permit_tests.rs
+│   │   │   │   └── policy_tests.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
@@ -2434,6 +2446,8 @@ src/
 │   │   ├── durability_tests.rs
 │   │   ├── durable.rs
 │   │   ├── handover.rs
+│   │   ├── input_key.rs
+│   │   ├── input_key_tests.rs
 │   │   ├── ledger.rs
 │   │   ├── mod.rs
 │   │   ├── receipt_identity.rs
@@ -2510,6 +2524,7 @@ src/
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
 │   │   │   ├── adoption.rs
+│   │   │   ├── adoption_past_stall_tests.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── canary_policy_tests.rs
@@ -2518,6 +2533,7 @@ src/
 │   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deferred.rs
+│   │   │   ├── deferred_pg_tests.rs
 │   │   │   ├── deferred_tests.rs
 │   │   │   ├── deliver.rs
 │   │   │   ├── deliver_home_tests.rs
@@ -2552,6 +2568,7 @@ src/
 │   │   │   ├── rotation_unsettled_tests.rs
 │   │   │   ├── round_trip.rs
 │   │   │   ├── source_identity_tests.rs
+│   │   │   ├── stall_handoff_tests.rs
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs

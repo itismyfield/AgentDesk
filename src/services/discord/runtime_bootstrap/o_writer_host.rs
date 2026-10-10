@@ -17,7 +17,7 @@ use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::actor::POLL_INTERVAL;
 use crate::services::tui_o::writer::adoption::LegacyView;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
-use crate::services::tui_o::writer::host::{self, Custody, HostIo};
+use crate::services::tui_o::writer::host::{self, Custody, FencedFacts, HostIo};
 
 /// How long a first activation waits for the cluster bootstrap to publish this node's id.
 const SELF_ID_WAIT: Duration = Duration::from_secs(10);
@@ -140,6 +140,36 @@ impl HostIo for GatewayHost {
                 node_override: node_override.or(agent_node),
             })
         }
+    }
+
+    /// Reads other pool-backed policy before reserving the intake fence's connection.
+    async fn intake_fence(
+        &self,
+        channel: u64,
+        _provider: ShadowProvider,
+    ) -> Result<FencedFacts, String> {
+        let pool = self.shared.pg_pool.as_ref().ok_or("no PG pool")?;
+        let id = channel.to_string();
+        let local = local_id(self.configured_id.as_deref(), self.self_id_wait).await?;
+        // Finish pool lookups before the fence takes its connection, including a one-slot pool.
+        let agent_node = crate::services::cluster::agent_execution_node::for_channel(pool, &id)
+            .await
+            .map_err(|error| format!("agent node: {error}"))?;
+        let node_override =
+            super::super::commands::channel_node_override(&self.shared, ChannelId::new(channel));
+        let (hold, rows, queued_bodies) =
+            crate::db::o_channel_activation::fenced_activation_rows(pool, &id, &local)
+                .await
+                .map_err(|error| format!("activation fence: {error}"))?;
+        Ok(FencedFacts {
+            hold,
+            facts: ActivationFacts {
+                open_intake: rows.open_intake,
+                runner_sessions: rows.foreign_sessions,
+                node_override: node_override.or(agent_node),
+            },
+            queued_bodies,
+        })
     }
 
     /// Legacy inflight, delivery custody and pending starts, durable or in memory: all local files.
@@ -292,5 +322,136 @@ pub(super) mod test_host {
         http: Arc<serenity::Http>,
     ) -> Arc<impl HostIo<Port = GatewayPort>> {
         parts(shared, &ProviderKind::Claude, None, Some(http)).io
+    }
+}
+
+#[cfg(test)]
+mod fence_tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::tui_o::shadow::ShadowProvider::Claude;
+
+    /// Delegates host facts while retaining HostIo's fail-closed intake fence default.
+    struct Unfenced<I: HostIo>(Arc<I>);
+
+    impl<I: HostIo> HostIo for Unfenced<I> {
+        type Port = I::Port;
+        type Lease = I::Lease;
+        type Alarms = I::Alarms;
+        type Bindings = I::Bindings;
+
+        fn port(&self) -> impl Future<Output = Arc<Self::Port>> + Send {
+            self.0.port()
+        }
+
+        fn lease(&self) -> Self::Lease {
+            self.0.lease()
+        }
+
+        fn alarms(&self) -> Self::Alarms {
+            self.0.alarms()
+        }
+
+        fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Self::Bindings> {
+            self.0.bindings(channel, provider)
+        }
+
+        fn activation_facts(
+            &self,
+            channel: u64,
+            provider: ShadowProvider,
+        ) -> impl Future<Output = Result<ActivationFacts, String>> + Send {
+            self.0.activation_facts(channel, provider)
+        }
+
+        fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<Custody, String> {
+            self.0.local_custody(channel, provider)
+        }
+
+        fn legacy(&self) -> Arc<dyn LegacyView> {
+            self.0.legacy()
+        }
+
+        fn legacy_busy(&self, channel: u64) -> impl Future<Output = bool> + Send {
+            self.0.legacy_busy(channel)
+        }
+
+        fn relaying(&self, channel: u64) -> bool {
+            self.0.relaying(channel)
+        }
+
+        fn adopted(&self, channel: u64, provider: ShadowProvider) {
+            self.0.adopted(channel, provider);
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg() {
+        let fixture = TestPostgresDb::create().await;
+        let pool = fixture.connect_and_migrate_with_max_connections(1).await;
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, default_execution_node_id)
+             VALUES ('fence-agent', 'fence', '673702', 'worker-override')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, channel_id, instance_id)
+             VALUES ('fence-foreign', 'claude', 'idle', '673702', 'foreign')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let host = GatewayHost {
+            shared,
+            alarms: Arc::new(AlarmRouter::for_process(None, None)),
+            self_id_wait: Duration::ZERO,
+            configured_id: crate::services::cluster::node_registry::SELF_INSTANCE_ID
+                .get()
+                .cloned()
+                .or_else(|| Some("fence-local".into())),
+            turn: TurnConfig::default(),
+            rest: None,
+        };
+        let fenced =
+            tokio::time::timeout(Duration::from_secs(3), host.intake_fence(673702, Claude))
+                .await
+                .expect("a fence must not wait for a second pool connection")
+                .unwrap();
+        assert_eq!(fenced.facts.runner_sessions, 1);
+        assert_eq!(fenced.facts.open_intake, 0);
+        assert_eq!(
+            fenced.facts.node_override.as_deref(),
+            Some("worker-override")
+        );
+        assert_eq!(fenced.queued_bodies, 0);
+        assert_eq!(
+            pool.num_idle(),
+            0,
+            "the returned hold retains its connection"
+        );
+        fenced.hold.release().await.unwrap();
+        assert_eq!(
+            host.activation_facts(673702, Claude)
+                .await
+                .unwrap()
+                .runner_sessions,
+            1
+        );
+        pool.close().await;
+        fixture.drop().await;
+    }
+
+    #[tokio::test]
+    async fn a_host_without_an_intake_fence_refuses_deferred_activation_facts() {
+        let host = crate::services::tui_o::writer::host::test_io::TestHost::new([]);
+        let result = Unfenced(Arc::clone(&host))
+            .intake_fence(673702, Claude)
+            .await;
+        assert!(matches!(result, Err(detail) if detail == "this host has no intake fence"));
+        assert!(host.posts.to(673702).is_empty());
     }
 }

@@ -34,6 +34,10 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/tui_o/writer/adoption_past_stall_tests.rs",
+        "src/services/tui_o/writer/stall_handoff_tests.rs",
+        "src/services/tui_o/writer/deferred_pg_tests.rs",
+        "src/db/o_channel_activation_fence_tests.rs",
         "src/services/tui_o/n1_observation/sink_tests.rs",
         "src/services/tui_o/n1_observation_tests.rs",
         "src/db/replay_disposition_tests.rs",
@@ -105,9 +109,11 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/input_runtime/supervisor/drive_tests.rs",
         "src/services/discord/input_runtime/supervisor/drive_entry_tests.rs",
         "src/services/discord/input_runtime/supervisor/receipt_entry_tests.rs",
+        "src/services/discord/input_runtime/external_tests.rs",
         "src/services/turn_orchestrator/input_fence_tests.rs",
         "src/services/tui_input/transition_fixture_tests.rs",
         "src/services/tui_input/transition_tests.rs",
+        "src/services/tui_input/input_key_tests.rs",
         "src/services/discord/live_bridge/guard_tests.rs",
         "src/services/discord/runtime_store_checkpoint_lock_tests.rs",
         "src/services/routines/reliability_pg_tests.rs",
@@ -549,6 +555,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/session_forwarding/home_stop_tests.rs",
         "src/server/routes/queue_api_home_stop_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs",
+        "src/services/discord/inflight/managed_submission_tests.rs",
+        "src/services/discord/router/message_handler/provider_dispatch_submission_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/cohort_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/completion_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/publication_tests.rs",
