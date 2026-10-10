@@ -1504,6 +1504,9 @@ async fn handle_text_message_admitted(
                 None
             },
             false,
+            crate::services::tui_o::n1_observation::Context {
+                provider: provider.as_str(), origin: "discord_active", input_message_id: Some(user_msg_id.get()),
+            },
         )
         .await
         {
@@ -1602,6 +1605,9 @@ async fn handle_text_message_admitted(
             // "📬" notice) and is the one answering, so it must NOT gate behind a
             // multi-chunk answer flush — that would self-deadlock the active card.
             false,
+            crate::services::tui_o::n1_observation::Context {
+                provider: provider.as_str(), origin: "discord_active", input_message_id: Some(user_msg_id.get()),
+            },
         )
         .await
         {
@@ -2857,8 +2863,6 @@ mod feedback_reminder_take_order_tests {
 
 #[cfg(test)]
 mod queue_pending_reaction_clear_tests {
-    use super::*;
-
     /// The cleared set must match exactly what the intake gate ADDS via
     /// `queue_pending_reaction_for`, so no queued message can be reacted with an
     /// emoji the dequeue path will not later remove.

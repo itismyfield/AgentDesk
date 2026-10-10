@@ -1,6 +1,9 @@
 //! Channels whose input moved to the ledger stop Legacy supervision and cleanup.
 //! The set starts empty every boot and only grows; unmarked, every gate runs its Legacy body.
 
+#[cfg(test)]
+pub mod boot_status;
+
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::Duration;

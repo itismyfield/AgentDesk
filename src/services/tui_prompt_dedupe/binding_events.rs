@@ -375,6 +375,34 @@ pub(crate) fn subscribe_binding_events(channel_id: u64) -> io::Result<watch::Rec
     Ok(log.notify.subscribe())
 }
 
+#[cfg(all(test, unix))]
+pub(crate) use presence_admission::admit_committed_seq;
+
+#[cfg(all(test, unix))]
+mod presence_admission {
+    use super::*;
+
+    /// Hands off synchronously under the append/apply/committed-seq mutex without writing the log.
+    pub(crate) fn admit_committed_seq<R>(
+        channel_id: u64,
+        expected: u64,
+        hand_off: impl FnOnce() -> R,
+    ) -> io::Result<Option<R>> {
+        let Some(path) = log_path(channel_id)? else {
+            return Ok(None);
+        };
+        let logs = lock_logs();
+        let Some(log) = logs.get(&path) else {
+            return Ok(None);
+        };
+        let healthy = log
+            .writer
+            .as_ref()
+            .is_none_or(|writer| !writer.poisoned && !writer.tainted);
+        Ok((healthy && *log.notify.borrow() == expected).then(hand_off))
+    }
+}
+
 /// What a commit left in the log for its proposal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Committed {
@@ -984,3 +1012,6 @@ mod lane_tests;
 
 #[cfg(test)]
 mod codex_claim_tests;
+
+#[cfg(all(test, unix))]
+mod admission_tests;

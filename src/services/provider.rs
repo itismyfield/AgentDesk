@@ -9,6 +9,7 @@ pub(crate) mod cancel_token_claude_interrupt;
 pub(crate) mod cancel_token_cleanup;
 mod cancel_watchdog;
 pub(crate) mod channel_rules;
+pub(crate) mod herdr_before_start;
 mod output_reader;
 mod registry;
 pub(crate) mod session_probe;

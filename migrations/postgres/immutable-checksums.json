@@ -695,6 +695,11 @@
       "path": "migrations/postgres/0136_request_replay_disposition.sql",
       "sha256": "c8ed6585fadc1ec23945145ff609c4989e9bfc8e36d8f5ae28ef9aacc71a2d48",
       "version": 136
+    },
+    {
+      "path": "migrations/postgres/0137_request_replay_exact_attempt.sql",
+      "sha256": "d333ad80e1bce3e99c590d406f21682a5ca2ea7a97894663a36ee11a557d0634",
+      "version": 137
     }
   ],
   "version": 1

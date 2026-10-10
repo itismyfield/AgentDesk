@@ -176,28 +176,43 @@ pub(in crate::services::discord) fn confirm_turn_channels(
     config: Option<&TurnConfig>,
     owned: impl FnOnce() -> Vec<u64>,
 ) -> Vec<u64> {
-    let retire = |channel| match retire_channel(provider, channel) {
-        Ok(Retirement {
-            removed,
-            retry_pending: false,
-        }) => {
-            tracing::info!(
-                channel,
-                removed,
-                "[tui_o] turn mode confirmed after retirement"
-            );
-            true
+    let mut boundaries = Vec::new();
+    let retire = |channel| {
+        let boundary = crate::services::tui_o::n1_observation::confirmation_boundary(channel);
+        if boundaries.len() < 256 {
+            boundaries.push((channel, boundary));
         }
-        outcome => {
-            tracing::error!(
-                channel,
-                ?outcome,
-                "[tui_o] turn mode refused; Legacy keeps turns"
-            );
-            false
+        match retire_channel(provider, channel) {
+            Ok(Retirement {
+                removed,
+                retry_pending: false,
+            }) => {
+                tracing::info!(
+                    channel,
+                    removed,
+                    "[tui_o] turn mode confirmed after retirement"
+                );
+                true
+            }
+            outcome => {
+                tracing::error!(
+                    channel,
+                    ?outcome,
+                    "[tui_o] turn mode refused; Legacy keeps turns"
+                );
+                false
+            }
         }
     };
-    crate::services::tui_o::turn_mode::confirm_selected(config, owned, retire)
+    let confirmed = crate::services::tui_o::turn_mode::confirm_selected(config, owned, retire);
+    for &channel in &confirmed {
+        let before = boundaries
+            .iter()
+            .find(|(c, _)| *c == channel)
+            .and_then(|(_, b)| *b);
+        crate::services::tui_o::n1_observation::mode_confirmed(provider.as_str(), channel, before);
+    }
+    confirmed
 }
 
 /// Boot confirmation over the channels whose O adoption this provider's boot policy committed.

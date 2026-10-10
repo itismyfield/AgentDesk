@@ -354,18 +354,22 @@ pub(in crate::services::discord) fn collect_zombie_foreground_evidence(
     }
 }
 
-/// Release a zombie foreground turn, or explain which evidence held it.
-///
-/// Every cancel surface calls this AFTER its own stop attempt, so a cancel that
-/// had nothing to interrupt still ends with the mailbox actually free. The
-/// underlying `finish_cancelled_turn` mailbox message carries its own
-/// last-line-of-defence guard (it refuses to finalize an uncancelled token), so
-/// even a mis-evaluated evidence set cannot take a fresh turn's anchor.
+/// Terminal evidence and exact token identity must agree before releasing the anchor.
 pub(crate) async fn release_zombie_foreground_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     surface: &str,
+) -> ZombieForegroundReleaseOutcome {
+    release_zombie_foreground_turn_guarded(shared, provider, channel_id, surface, |_| true).await
+}
+
+pub(in crate::services::discord) async fn release_zombie_foreground_turn_guarded(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    surface: &str,
+    before_finish: impl Fn(&crate::services::turn_orchestrator::ChannelMailboxSnapshot) -> bool + Send,
 ) -> ZombieForegroundReleaseOutcome {
     let Some(handle) = shared.mailbox_peek(channel_id) else {
         return ZombieForegroundReleaseOutcome::default();
@@ -395,8 +399,43 @@ pub(crate) async fn release_zombie_foreground_turn(
         };
     }
 
-    let finish = super::mailbox_finish_cancelled_turn(shared, channel_id).await;
-    let released = finish.removed_token.is_some();
+    #[cfg(all(test, unix))]
+    cancel_backstop_test_support::pause_after_evidence(channel_id).await;
+    if !before_finish(&snapshot) {
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            surface,
+            "zombie release authority changed before finish"
+        );
+        return ZombieForegroundReleaseOutcome {
+            verdict: Some(verdict),
+            released: false,
+            queue_depth_after: snapshot.intervention_queue.len(),
+            queue_kickoff_scheduled: false,
+        };
+    }
+    let finish = super::mailbox_finish::mailbox_finish_judged_turn(
+        shared,
+        provider,
+        channel_id,
+        snapshot.cancel_token.as_ref(),
+        super::mailbox_finish::MailboxLookup::Peek,
+    )
+    .await;
+    #[cfg(all(test, unix))]
+    cancel_backstop_test_support::record_finish(channel_id, &finish);
+    let finish_status = match &finish {
+        crate::services::turn_orchestrator::TokenFinish::Finished(_) => "finished",
+        crate::services::turn_orchestrator::TokenFinish::NoActiveTurn(_) => "no_active_turn",
+        crate::services::turn_orchestrator::TokenFinish::TokenMismatch { .. } => "token_mismatch",
+        crate::services::turn_orchestrator::TokenFinish::Unavailable => "unavailable",
+        crate::services::turn_orchestrator::TokenFinish::NoMailbox => "no_mailbox",
+    };
+    let finished = match &finish {
+        crate::services::turn_orchestrator::TokenFinish::Finished(result) => Some(result),
+        _ => None,
+    };
+    let released = finished.is_some();
     if released {
         super::saturating_decrement_global_active(shared);
     }
@@ -404,7 +443,8 @@ pub(crate) async fn release_zombie_foreground_turn(
 
     // The queued user messages must not merely survive the release — the
     // channel is idle now, so nothing else will come along to promote them.
-    let queue_kickoff_scheduled = released && finish.mailbox_online && finish.has_pending;
+    let queue_kickoff_scheduled =
+        finished.is_some_and(|result| result.mailbox_online && result.has_pending);
     if queue_kickoff_scheduled {
         super::schedule_deferred_idle_queue_kickoff(
             shared.clone(),
@@ -419,12 +459,13 @@ pub(crate) async fn release_zombie_foreground_turn(
         channel_id = channel_id.get(),
         surface,
         verdict = verdict.as_str(),
+        finish_status,
         released,
         queue_depth_after,
         queue_kickoff_scheduled,
         inflight_state_present = evidence.inflight_state_present,
         tui_structurally_idle = ?evidence.tui_structurally_idle,
-        "[zombie-foreground] released mailbox foreground ownership after a cancel with nothing to interrupt"
+        "[zombie-foreground] evaluated terminal evidence after cancellation"
     );
 
     ZombieForegroundReleaseOutcome {
@@ -434,6 +475,13 @@ pub(crate) async fn release_zombie_foreground_turn(
         queue_kickoff_scheduled,
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "zombie_foreground_release/cancel_backstop_test_support.rs"]
+pub(in crate::services::discord) mod cancel_backstop_test_support;
+#[cfg(all(test, unix))]
+#[path = "zombie_foreground_release/cancel_backstop_tests.rs"]
+mod cancel_backstop_tests;
 
 #[cfg(test)]
 pub(in crate::services::discord) mod tests {

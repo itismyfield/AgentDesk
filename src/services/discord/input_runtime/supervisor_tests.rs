@@ -53,6 +53,10 @@ type Then = Option<Box<dyn FnOnce() + Send>>;
 // Everything the fakes observed, shared across the supervisor, its workers and the test.
 #[derive(Default)]
 struct World {
+    parents: dashmap::DashMap<ChannelId, ChannelId>,
+    mapping_unavailable: AtomicBool,
+    mapping_checks: AtomicUsize,
+    freeze_failed: AtomicBool,
     log: Mutex<Vec<&'static str>>,
     clears: Mutex<Vec<(Instant, Vec<String>)>>,
     record: Mutex<Option<NativeClearRecord>>,
@@ -261,8 +265,19 @@ struct Fake {
 impl Ports for Fake {
     type Clear = ClearFake;
     type Move = MoveFake;
+    fn mapping(&self, channel: u64) -> mapping::Check {
+        self.world.mapping_checks.fetch_add(1, Ordering::SeqCst);
+        if self.world.mapping_unavailable.load(Ordering::SeqCst) {
+            mapping::Check::Unavailable
+        } else {
+            mapping::inspect(&self.world.parents, channel)
+        }
+    }
     fn freeze(&mut self, closing: Arc<Closing>) -> Step<'_, Result<(), Failure>> {
         self.world.note("freeze");
+        if self.world.freeze_failed.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(Failure::Busy) });
+        }
         let handle = self.mailbox.handle(ChannelId::new(self.channel));
         Box::pin(async move {
             let context = QueuePersistenceContext::new(&ProviderKind::Claude, "token", None);
@@ -986,6 +1001,9 @@ async fn unused_registry_leaves_health_to_the_fence() {
 
 #[path = "supervisor/drive_entry_tests.rs"]
 mod drive_entry;
+
+#[path = "mapping_guard_tests.rs"]
+mod mapping_guard;
 
 #[test]
 fn registered_holds_join_fence_health_and_leave_on_release() {

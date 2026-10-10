@@ -299,6 +299,11 @@ pub(super) async fn handle_race_loss_enqueue(
             // QUEUED — its "📬" card is a trailing notice that must wait
             // behind any in-flight multi-chunk answer flush.
             true,
+            crate::services::tui_o::n1_observation::Context {
+                provider: provider.as_str(),
+                origin: "discord_race",
+                input_message_id: Some(user_msg_id.get()),
+            },
         )
         .await;
 

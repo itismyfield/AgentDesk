@@ -1019,7 +1019,7 @@ async fn act7_operator_release_reports_manual_settlement_and_preserves_herdr_inp
             discord_token_hash: shared.token_hash.clone(), logical_key: "herdr-held-operator".into(),
             owner_node: "test".into(), runtime_root: "test".into() };
         let state = token.prepare_herdr_interrupt(PROVIDER, &owner);
-        *state.submission.lock().unwrap() = HerdrSubmission::Unknown;
+        state.submission.lock().unwrap().submission = HerdrSubmission::Unknown;
         state.user_stop.store(true, Ordering::Release);
         let hold = crate::services::claude::herdr_turn::hold(&request.expected.turn_nonce).unwrap();
         let before = std::fs::read(&hold).unwrap();

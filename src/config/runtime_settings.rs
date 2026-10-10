@@ -129,6 +129,9 @@ pub struct RuntimeSettingsConfig {
     /// Requested Herdr Escape switch; delivery stays disabled until terminal settlement is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub herdr_cancel_enabled: Option<bool>,
+    /// Live operator pane-close switch; unset or false sends no close.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub herdr_terminate_enabled: Option<bool>,
     /// Switch for the `channel-home` delegate, reclaim and force commands and the boot start of
     /// delegated homes; unset or false refuses or skips them before any database access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,6 +193,7 @@ impl RuntimeSettingsConfig {
             && self.herdr_turn_enabled.is_none()
             && self.herdr_codex_turn_enabled.is_none()
             && self.herdr_cancel_enabled.is_none()
+            && self.herdr_terminate_enabled.is_none()
             && self.channel_home_delegation_enabled.is_none()
             && !self.reset_overrides_on_restart
     }
@@ -261,6 +265,31 @@ mod tests {
             assert!(serialized.contains("native_clear_channels:"));
             let reparsed: Config = serde_yaml::from_str(&serialized).unwrap();
             assert_eq!(reparsed.runtime, config.runtime);
+        }
+    }
+}
+
+#[cfg(test)]
+mod herdr_terminate_tests {
+    use super::*;
+
+    #[test]
+    fn m0_terminate_switch_defaults_off_and_round_trips() {
+        let absent: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(absent.herdr_terminate_enabled, None);
+        assert!(absent.is_empty());
+        for value in [false, true] {
+            let config: RuntimeSettingsConfig =
+                serde_yaml::from_str(&format!("herdr_terminate_enabled: {value}")).unwrap();
+            assert_eq!(config.herdr_terminate_enabled, Some(value));
+            assert!(!config.is_empty());
+            assert_eq!(
+                serde_yaml::from_str::<RuntimeSettingsConfig>(
+                    &serde_yaml::to_string(&config).unwrap()
+                )
+                .unwrap(),
+                config
+            );
         }
     }
 }

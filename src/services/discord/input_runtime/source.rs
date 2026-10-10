@@ -93,6 +93,9 @@ impl Source {
     pub(crate) fn identity(&self) -> &ReceiptIdentity {
         &self.identity
     }
+    pub(super) fn input(&self) -> &Value {
+        &self.input
+    }
     pub(super) fn into_entry(self) -> (Entry, Vec<BlobPin>) {
         (
             Entry::Received {

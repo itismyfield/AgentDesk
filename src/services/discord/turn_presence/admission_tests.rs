@@ -23,12 +23,14 @@ struct Fixture {
     _host: InjectedLivenessGuard,
     identity: Identity,
     home: Arc<HomeGate>,
+    runtime: Arc<crate::services::discord::PresenceRuntime>,
+    _lifetime: super::super::lifecycle::Lifetime,
     incarnation: Arc<Incarnation>,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let runtime = crate::config::TestRuntimeRootGuard::new();
+        let runtime_root = crate::config::TestRuntimeRootGuard::new();
         let root = tempfile::tempdir().unwrap();
         let binding = BindingRoot::enter(root.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -58,10 +60,13 @@ impl Fixture {
         )
         .unwrap();
         channel_home::register(home.clone());
-        let incarnation = Arc::new(Incarnation::default());
-        assert!(incarnation.replace(identity.clone()));
+        let runtime = Arc::new(crate::services::discord::PresenceRuntime::default());
+        let lifetime = runtime.own();
+        let ticket = runtime.register(channel).unwrap();
+        let incarnation = ticket.incarnation().unwrap();
+        assert!(incarnation.replace(&ticket, identity.clone()));
         Self {
-            _runtime: runtime,
+            _runtime: runtime_root,
             root,
             _binding: binding,
             shared,
@@ -69,18 +74,27 @@ impl Fixture {
             _host: host,
             identity,
             home,
+            runtime,
+            _lifetime: lifetime,
             incarnation,
         }
     }
 
+    fn ticket(&self) -> Ticket {
+        self.runtime.register(self.identity.channel).unwrap()
+    }
+
     async fn read(&self) -> Reading {
+        let ticket = self.ticket();
         for _ in 0..500 {
             let reading = activity::presence_reading_now(
                 &self.shared,
                 &ProviderKind::Claude,
                 poise::serenity_prelude::ChannelId::new(self.identity.channel),
+                &ticket,
             )
-            .await;
+            .await
+            .unwrap();
             if reading.observed.reason != "catching_up" {
                 return reading;
             }
@@ -93,7 +107,9 @@ impl Fixture {
         let reading = self.read().await;
         assert!(reading.identity(0).is_none());
         assert_eq!(reading.identity(42), Some(self.identity.clone()));
-        self.incarnation.approve(reading).expect("fresh live Busy")
+        self.incarnation
+            .approve(&self.ticket(), reading)
+            .expect("fresh live Busy")
     }
 
     fn append(&self, row: &str) {
@@ -138,7 +154,12 @@ async fn fresh_busy_admits_one_first_poll_and_response_waits_outside_locks() {
     fixture.home.close();
     tx.send("accepted").unwrap();
     assert_eq!(started.finish().await.unwrap(), "accepted");
-    assert!(fixture.incarnation.approve(fixture.read().await).is_none());
+    assert!(
+        fixture
+            .incarnation
+            .approve(&fixture.ticket(), fixture.read().await)
+            .is_none()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -151,7 +172,12 @@ async fn unstamped_or_legacy_busy_cannot_authorize_a_typing_effect() {
     };
     for session in [None, Some(fixture.identity.session.as_str())] {
         let reading = Reading::unwatched_for_tests(busy, session, Some("parent.jsonl"));
-        assert!(fixture.incarnation.approve(reading).is_none());
+        assert!(
+            fixture
+                .incarnation
+                .approve(&fixture.ticket(), reading)
+                .is_none()
+        );
     }
     let legacy = activity::reading_now(
         &fixture.shared,
@@ -161,7 +187,10 @@ async fn unstamped_or_legacy_busy_cannot_authorize_a_typing_effect() {
     .await;
     assert_eq!(legacy.observed.activity, Activity::Busy);
     assert!(
-        fixture.incarnation.approve(legacy).is_none(),
+        fixture
+            .incarnation
+            .approve(&fixture.ticket(), legacy)
+            .is_none(),
         "legacy observer is dormant"
     );
 }
@@ -193,9 +222,16 @@ async fn provider_channel_session_source_and_binding_seq_must_match_the_reading(
         )
         .unwrap();
         channel_home::register(home.clone());
-        assert!(fixture.incarnation.replace(foreign));
+        let runtime = Arc::new(crate::services::discord::PresenceRuntime::default());
+        let _lifetime = runtime.own();
+        let ticket = runtime.register(foreign.channel).unwrap();
+        let incarnation = ticket.incarnation().unwrap();
+        let channel = foreign.channel;
+        assert!(incarnation.replace(&ticket, foreign));
         assert!(
-            fixture.incarnation.approve(fixture.read().await).is_none(),
+            incarnation
+                .approve(&runtime.register(channel).unwrap(), fixture.read().await)
+                .is_none(),
             "field {which}"
         );
         channel_home::unregister_if_same(&home);
@@ -236,7 +272,12 @@ async fn unsupported_host_and_unreadable_inflight_are_unknown_without_writes() {
             reason: "host_unobservable"
         }
     );
-    assert!(fixture.incarnation.approve(reading).is_none());
+    assert!(
+        fixture
+            .incarnation
+            .approve(&fixture.ticket(), reading)
+            .is_none()
+    );
     std::fs::write(&marker, "tmux").unwrap();
     use crate::services::discord::inflight;
     let path = inflight::inflight_state_path(
@@ -255,7 +296,12 @@ async fn unsupported_host_and_unreadable_inflight_are_unknown_without_writes() {
             reason: "host_probe_failed"
         }
     );
-    assert!(fixture.incarnation.approve(reading).is_none());
+    assert!(
+        fixture
+            .incarnation
+            .approve(&fixture.ticket(), reading)
+            .is_none()
+    );
     assert_eq!(std::fs::read(path).unwrap(), broken);
 }
 
@@ -271,8 +317,23 @@ async fn zero_bot_or_channel_cannot_seed_runtime_authority() {
         } else {
             identity.channel = 0;
         }
-        assert!(!fixture.incarnation.replace(identity));
-        assert!(fixture.incarnation.approve(fixture.read().await).is_none());
+        let runtime = Arc::new(crate::services::discord::PresenceRuntime::default());
+        let _lifetime = runtime.own();
+        if identity.channel == 0 {
+            assert!(runtime.register(0).is_none());
+        } else {
+            let ticket = runtime.register(identity.channel).unwrap();
+            let incarnation = ticket.incarnation().unwrap();
+            assert!(!incarnation.replace(&ticket, identity));
+            assert!(
+                incarnation
+                    .approve(
+                        &runtime.register(fixture.identity.channel).unwrap(),
+                        fixture.read().await
+                    )
+                    .is_none()
+            );
+        }
     }
     gateway.lost();
 }
@@ -293,7 +354,9 @@ async fn an_unpolled_attempt_is_rechecked_after_confirmation_is_removed() {
 async fn replaced_and_restarted_incarnations_reject_previous_busy_approvals() {
     let fixture = Fixture::new();
     let old = fixture.approval().await;
-    assert!(fixture.incarnation.replace(fixture.identity.clone()));
+    let mut changed = fixture.identity.clone();
+    changed.source.ino += 1;
+    assert!(fixture.incarnation.replace(&fixture.ticket(), changed));
     assert!(
         old.start(
             42,
@@ -303,14 +366,27 @@ async fn replaced_and_restarted_incarnations_reject_previous_busy_approvals() {
         .await
         .is_none()
     );
+    assert!(
+        fixture
+            .incarnation
+            .replace(&fixture.ticket(), fixture.identity.clone())
+    );
     let old = fixture.approval().await;
     fixture.incarnation.invalidate();
-    let restarted = Arc::new(Incarnation::default());
+    let runtime = Arc::new(crate::services::discord::PresenceRuntime::default());
+    let _lifetime = runtime.own();
+    let ticket = runtime.register(fixture.identity.channel).unwrap();
+    let restarted = ticket.incarnation().unwrap();
     assert!(
-        restarted.approve(fixture.read().await).is_none(),
+        restarted
+            .approve(
+                &runtime.register(fixture.identity.channel).unwrap(),
+                fixture.read().await
+            )
+            .is_none(),
         "restart starts without authority"
     );
-    assert!(restarted.replace(fixture.identity.clone()));
+    assert!(restarted.replace(&ticket, fixture.identity.clone()));
     assert!(
         old.start(
             42,
@@ -320,7 +396,12 @@ async fn replaced_and_restarted_incarnations_reject_previous_busy_approvals() {
         .await
         .is_none()
     );
-    let fresh = restarted.approve(fixture.read().await).unwrap();
+    let fresh = restarted
+        .approve(
+            &runtime.register(fixture.identity.channel).unwrap(),
+            fixture.read().await,
+        )
+        .unwrap();
     assert_eq!(
         fresh
             .start(42, fixture.identity.channel, || std::future::ready(7))
@@ -353,8 +434,10 @@ async fn later_idle_backlog_or_host_failure_revokes_an_earlier_busy_stamp() {
                 &ProviderKind::Claude
             },
             poise::serenity_prelude::ChannelId::new(fixture.identity.channel),
+            &fixture.ticket(),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(
             later.observed.activity,
             if which == 0 || which == 3 {
@@ -363,7 +446,12 @@ async fn later_idle_backlog_or_host_failure_revokes_an_earlier_busy_stamp() {
                 Activity::Unknown
             }
         );
-        assert!(fixture.incarnation.approve(later).is_none());
+        assert!(
+            fixture
+                .incarnation
+                .approve(&fixture.ticket(), later)
+                .is_none()
+        );
         assert!(
             old.start(
                 42,
@@ -403,7 +491,11 @@ async fn home_epoch_loss_expiry_and_replacement_never_fall_back_to_gateway() {
         .await
         .is_none()
     );
-    assert!(fixture.incarnation.replace(fixture.identity.clone()));
+    assert!(
+        fixture
+            .incarnation
+            .replace(&fixture.ticket(), fixture.identity.clone())
+    );
     let old = fixture.approval().await;
     tokio::time::advance(channel_home::HOLD_FOR).await;
     assert!(
@@ -416,7 +508,9 @@ async fn home_epoch_loss_expiry_and_replacement_never_fall_back_to_gateway() {
         .is_none()
     );
     assert!(
-        !fixture.incarnation.replace(fixture.identity.clone()),
+        !fixture
+            .incarnation
+            .replace(&fixture.ticket(), fixture.identity.clone()),
         "registered lost home owns the refusal"
     );
     let replacement = Arc::new(HomeGate::new(
@@ -435,7 +529,11 @@ async fn home_epoch_loss_expiry_and_replacement_never_fall_back_to_gateway() {
         )
         .unwrap();
     channel_home::register(replacement.clone());
-    assert!(fixture.incarnation.replace(fixture.identity.clone()));
+    assert!(
+        fixture
+            .incarnation
+            .replace(&fixture.ticket(), fixture.identity.clone())
+    );
     let old = fixture.approval().await;
     channel_home::unregister_if_same(&replacement);
     assert!(
@@ -457,7 +555,11 @@ async fn gateway_epoch_unknown_and_loss_refuse_previously_approved_requests() {
     let gateway = ownership::gate("claude");
     for change in 0..3 {
         gateway.acquired();
-        assert!(fixture.incarnation.replace(fixture.identity.clone()));
+        assert!(
+            fixture
+                .incarnation
+                .replace(&fixture.ticket(), fixture.identity.clone())
+        );
         let old = fixture.approval().await;
         match change {
             0 => {
@@ -534,7 +636,205 @@ async fn an_external_wake_target_requires_fresh_receiver_authority() {
     );
     fixture.append("{\"type\":\"system\",\"subtype\":\"turn_duration\"}");
     assert!(
-        fixture.incarnation.approve(fixture.read().await).is_none(),
+        fixture
+            .incarnation
+            .approve(&fixture.ticket(), fixture.read().await)
+            .is_none(),
         "a wake cannot restore Busy"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn b2_unchanged_identity_and_owner_keep_the_ticket_and_approval() {
+    let fixture = Fixture::new();
+    let approved = fixture.approval().await;
+    let ticket = fixture.ticket();
+    assert!(
+        fixture
+            .incarnation
+            .replace(&ticket, fixture.identity.clone())
+    );
+    assert!(ticket.incarnation().is_some());
+    assert_eq!(
+        approved
+            .start(42, fixture.identity.channel, || std::future::ready(1))
+            .await
+            .unwrap()
+            .finish()
+            .await,
+        1
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn b2_reading_started_before_invalidation_cannot_reseed_after_await() {
+    let fixture = Fixture::new();
+    let ticket = fixture.ticket();
+    let reading = fixture.read().await;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let delayed = async {
+        rx.await.unwrap();
+        let identity = reading.identity(42).unwrap();
+        fixture.incarnation.replace(&ticket, identity)
+    };
+    assert!(
+        fixture
+            .runtime
+            .invalidate_if_current(&ticket, "await boundary")
+    );
+    tx.send(()).unwrap();
+    assert!(!delayed.await);
+    let current = fixture.ticket();
+    let successor = current.incarnation().unwrap();
+    assert!(successor.approve(&current, fixture.read().await).is_none());
+    let old_observer = activity::presence_reading_now(
+        &fixture.shared,
+        &ProviderKind::Claude,
+        poise::serenity_prelude::ChannelId::new(fixture.identity.channel),
+        &ticket,
+    )
+    .await;
+    assert!(old_observer.is_none());
+    assert!(successor.replace(&current, fixture.read().await.identity(42).unwrap()));
+    let fresh = fixture.ticket();
+    assert!(successor.approve(&fresh, fixture.read().await).is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn b2_strict_observer_rechecks_ticket_after_a_blocked_read() {
+    let fixture = Fixture::new();
+    let ticket = fixture.ticket();
+    let channel = poise::serenity_prelude::ChannelId::new(fixture.identity.channel);
+    fixture.shared.tmux_watchers.remove(&channel).unwrap();
+    let core = fixture.shared.core.lock().await;
+    let mut reading = Box::pin(activity::presence_reading_now(
+        &fixture.shared,
+        &ProviderKind::Claude,
+        channel,
+        &ticket,
+    ));
+    assert!(poll_fn(|cx| Poll::Ready(reading.as_mut().poll(cx).is_pending())).await);
+    assert!(
+        fixture
+            .runtime
+            .invalidate_if_current(&ticket, "blocked read")
+    );
+    drop(core);
+    assert!(reading.await.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn b2_identity_switch_makes_late_invalidate_harmless() {
+    let fixture = Fixture::new();
+    let old = fixture.ticket();
+    let mut successor = fixture.identity.clone();
+    successor.source.ino += 1;
+    assert!(fixture.incarnation.replace(&old, successor.clone()));
+    assert!(!fixture.runtime.invalidate_if_current(&old, "late identity"));
+    let current = fixture.ticket();
+    assert!(current.incarnation().is_some());
+    assert_eq!(
+        fixture
+            .incarnation
+            .0
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .identity,
+        successor
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn b2_suspend_blocks_first_poll_and_resume_requires_new_reading_authority() {
+    let fixture = Fixture::new();
+    let old = fixture.approval().await;
+    let ticket = fixture.ticket();
+    fixture.runtime.suspend_runtime();
+    let polls = AtomicUsize::new(0);
+    assert!(
+        old.start(42, fixture.identity.channel, || {
+            polls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(())
+        })
+        .await
+        .is_none()
+    );
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    assert!(
+        !fixture
+            .incarnation
+            .replace(&ticket, fixture.identity.clone())
+    );
+    fixture.runtime.resume_fresh();
+    let fresh = fixture.ticket();
+    let incarnation = fresh.incarnation().unwrap();
+    assert!(incarnation.approve(&fresh, fixture.read().await).is_none());
+    assert!(incarnation.replace(&fresh, fixture.read().await.identity(42).unwrap()));
+    assert!(
+        incarnation
+            .approve(&fixture.ticket(), fixture.read().await)
+            .is_some()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn b2_committed_seq_revokes_old_approval_without_a_watch_poll_or_wake() {
+    use crate::services::tui_prompt_dedupe::binding_events as p5;
+    let fixture = Fixture::new();
+    let old = fixture.approval().await;
+    let before = std::fs::read(
+        fixture
+            .root
+            .path()
+            .join(p5::BINDING_EVENTS_DIR)
+            .join(format!("{}.log", fixture.identity.channel)),
+    )
+    .unwrap();
+    let candidate = fixture.root.path().join("next.jsonl");
+    let path = candidate.to_str().unwrap();
+    let proposal = p5::Proposal {
+        channel_id: fixture.identity.channel,
+        provider: "claude",
+        tmux_session: &fixture.identity.session,
+        session_id: Some("next"),
+        path,
+        replaced: None,
+        cause: p5::CauseSource::Hook(p5::BindingCause::Startup),
+        hook: None,
+    };
+    assert_eq!(
+        p5::record_pending(&proposal).unwrap(),
+        p5::PendingRecord::Recorded
+    );
+    let after = std::fs::read(
+        fixture
+            .root
+            .path()
+            .join(p5::BINDING_EVENTS_DIR)
+            .join(format!("{}.log", fixture.identity.channel)),
+    )
+    .unwrap();
+    assert!(after.starts_with(&before));
+    let polls = AtomicUsize::new(0);
+    let result = old
+        .start(42, fixture.identity.channel, || {
+            polls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(())
+        })
+        .await;
+    assert!(result.is_none());
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        std::fs::read(
+            fixture
+                .root
+                .path()
+                .join(p5::BINDING_EVENTS_DIR)
+                .join(format!("{}.log", fixture.identity.channel))
+        )
+        .unwrap(),
+        after
     );
 }

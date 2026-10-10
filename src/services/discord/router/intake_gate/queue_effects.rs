@@ -997,6 +997,11 @@ pub(super) async fn render_visible_queued_ack(
         // in-flight multi-chunk answer flush so the card lands as a trailing
         // notice, never interleaved between answer chunks.
         true,
+        crate::services::tui_o::n1_observation::Context {
+            provider: data.provider.as_str(),
+            origin: "discord_queued",
+            input_message_id: Some(user_msg_id.get()),
+        },
     )
     .await;
     let placeholder_msg_id = match post_result {
