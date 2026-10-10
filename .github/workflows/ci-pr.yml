@@ -739,6 +739,8 @@ jobs:
               - 'src/services/discord/outbound/**'
               - 'src/services/discord/placeholder_live_events/**'
               - 'src/services/discord/placeholder_sweeper/**'
+              - 'src/services/discord/queue_io.rs'
+              - 'src/services/discord/queue_park_ledger.rs'
               - 'src/services/discord/queue_park_ledger/**'
               - 'src/services/discord/recovery_engine.rs'
               - 'src/services/discord/recovery_engine/**'
