@@ -61,7 +61,7 @@
 | `PATCH` | `/api/channels/{id}` | `provider_auth_profiles::patch_channel_auth_profile` | `src/server/routes/provider_auth_profiles.rs:368` | `src/server/routes/domains/integrations.rs:70` |
 | `GET` | `/api/channels/{id}/queue` | `queue_api::list_channel_queue` | `src/server/routes/queue_api.rs:21` | `src/server/routes/domains/runtime.rs:109` |
 | `POST` | `/api/channels/{id}/relay-recovery` | `health_api::relay_recovery_handler` | `src/server/routes/health_api.rs:1345` | `src/server/routes/domains/runtime.rs:114` |
-| `GET` | `/api/channels/{id}/watcher-state` | `queue_api::get_watcher_state` | `src/server/routes/queue_api.rs:275` | `src/server/routes/domains/runtime.rs:110` |
+| `GET` | `/api/channels/{id}/watcher-state` | `queue_api::get_watcher_state` | `src/server/routes/queue_api.rs:288` | `src/server/routes/domains/runtime.rs:110` |
 | `GET` | `/api/claude-accounts` | `claude_accounts_api::get_claude_accounts` | `src/server/routes/claude_accounts_api.rs:16` | `src/server/routes/domains/integrations.rs:42` |
 | `POST` | `/api/claude-accounts/switch` | `claude_accounts_api::switch_claude_account` | `src/server/routes/claude_accounts_api.rs:47` | `src/server/routes/domains/integrations.rs:46` |
 | `GET` | `/api/cluster/issue-specs` | `cluster::list_issue_specs` | `src/server/routes/cluster.rs:411` | `src/server/routes/domains/ops.rs:88` |
@@ -143,7 +143,7 @@
 | `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:1518` | `src/server/routes/domains/runtime.rs:26` |
 | `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:59` | `src/server/routes/domains/runtime.rs:48` |
 | `POST` | `/api/internal/escalation/emit` | `escalation::emit_escalation` | `src/server/routes/escalation.rs:1355` | `src/server/routes/domains/admin.rs:70` |
-| `POST` | `/api/internal/home-stop/v1` | `queue_api::home_stop_v1` | `src/server/routes/queue_api.rs:227` | `src/server/routes/domains/runtime.rs:127` |
+| `POST` | `/api/internal/home-stop/v1` | `queue_api::home_stop_v1` | `src/server/routes/queue_api.rs:232` | `src/server/routes/domains/runtime.rs:127` |
 | `POST` | `/api/internal/link-dispatch-thread` | `dispatches::link_dispatch_thread` | `src/server/routes/dispatches/thread_reuse.rs:37` | `src/server/routes/domains/runtime.rs:44` |
 | `GET` | `/api/internal/node-probe` | `cluster::node_probe` | `src/server/routes/cluster.rs:133` | `src/server/routes/domains/runtime.rs:158` |
 | `GET` | `/api/internal/pending-dispatch-for-thread` | `dispatches::get_pending_dispatch_for_thread` | `src/server/routes/dispatches/thread_reuse.rs:99` | `src/server/routes/domains/runtime.rs:49` |
@@ -315,7 +315,7 @@
 | `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:411` | `src/server/routes/domains/analytics.rs:19` |
 | `POST` | `/api/turn-lease/release` | `turn_lease::release` | `src/server/routes/turn_lease.rs:32` | `src/server/routes/domains/runtime.rs:20` |
 | `GET` | `/api/turn-lease/{provider}/{channel_id}` | `turn_lease::inspect` | `src/server/routes/turn_lease.rs:14` | `src/server/routes/domains/runtime.rs:16` |
-| `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:192` | `src/server/routes/domains/runtime.rs:126` |
+| `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:195` | `src/server/routes/domains/runtime.rs:126` |
 | `GET` | `/api/voice/conductor/jobs` | `voice_conductor::list_jobs` | `src/server/routes/voice_conductor.rs:86` | `src/server/routes/domains/runtime.rs:149` |
 | `GET` | `/api/voice/conductor/jobs/{id}` | `voice_conductor::get_job` | `src/server/routes/voice_conductor.rs:91` | `src/server/routes/domains/runtime.rs:150` |
 | `POST` | `/api/voice/conductor/say` | `voice_conductor::say` | `src/server/routes/voice_conductor.rs:21` | `src/server/routes/domains/runtime.rs:148` |

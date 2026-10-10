@@ -114,6 +114,86 @@ class FixtureCase(unittest.TestCase):
         self.fx = Fixture(self.root)
 
 
+class NonPgModuleSelectors(FixtureCase):
+    def test_parent_and_arbitrary_substrings_are_reduced_in_either_order(self) -> None:
+        parent = "db::replay_disposition::tests"
+        nested = parent + "::compatibility_tests::future"
+        wrapped = "prefix" + parent + "suffix"
+        independent = "service::independent"
+        for modules in (
+            (parent, nested, wrapped, independent),
+            (nested, independent, wrapped, parent),
+        ):
+            with self.subTest(modules=modules):
+                self.assertEqual(
+                    membership.non_pg_module_selectors(modules),
+                    tuple(value for value in modules if value in (parent, independent)),
+                )
+
+    def test_global_name_selectors_remain_and_cover_modules(self) -> None:
+        globals = membership.NON_PG_NAME_SKIPS
+        modules = globals + ("db::postgres::tests", "suite_pg::tests", "suite::pg_fixture", "pure")
+        (self.root / membership.MANIFEST_REL).write_text(
+            "[modules]\n" + "\n".join(modules) + "\n[tests]\npure::database\n", "utf-8"
+        )
+        (self.root / membership.LIB_TEST_INVENTORY_REL).write_text(
+            "[tests]\npure::database\nsuite::plain_pg_name\n", "utf-8"
+        )
+        skips, replay = membership.non_pg_selection(self.root)
+        self.assertEqual(skips, globals + ("pure",))
+        self.assertEqual(replay, ("suite::plain_pg_name",))
+        shard_0, shard_1 = membership.pg_include_shards(skips)
+        self.assertEqual(shard_0, membership.PG_SHARD_0_SELECTORS)
+        self.assertEqual(shard_1[-4:], ("--skip", "pg_", "--skip", "postgres"))
+
+    def test_existing_and_new_names_keep_selection_replay_and_both_shards(self) -> None:
+        modules = (
+            "db::replay_disposition::tests::consumer_tests",
+            "db::replay_disposition::tests",
+            "service::completion_postgres::replay_hold_tests",
+            "service::independent",
+        )
+        names = {
+            "db::replay_disposition::tests::dormant_control",
+            "db::replay_disposition::tests::consumer_tests::held_request",
+            "prefixdb::replay_disposition::testssuffix::future_name",
+            "service::completion_postgres::replay_hold_tests::new_case",
+            "service::independent::existing_pg",
+            "service::independent::future_pure_case",
+            "unrelated::ordinary",
+            "unrelated::future_pg_name",
+        }
+        pg_names = {name for name in names if "held_request" in name or "new_case" in name}
+        (self.root / membership.MANIFEST_REL).write_text(
+            "[modules]\n" + "\n".join(modules) + "\n[tests]\n" + "\n".join(sorted(pg_names)) + "\n",
+            "utf-8",
+        )
+        (self.root / membership.LIB_TEST_INVENTORY_REL).write_text(
+            "[tests]\n" + "\n".join(sorted(names)) + "\n", "utf-8"
+        )
+        original = membership.NON_PG_NAME_SKIPS + modules
+        reduced, replay = membership.non_pg_selection(self.root)
+        coverage = membership._load_coverage_module(self.root)
+        self.assertEqual(
+            coverage.LaneFilter((), original).selected_tests(names),
+            coverage.LaneFilter((), reduced).selected_tests(names),
+        )
+        self.assertEqual(
+            coverage.LaneFilter(original, ()).selected_tests(names),
+            coverage.LaneFilter(reduced, ()).selected_tests(names),
+        )
+        self.assertEqual(
+            replay,
+            tuple(sorted(name for name in names - pg_names if any(value in name for value in original))),
+        )
+        for old, new in zip(membership.pg_include_shards(original), membership.pg_include_shards(reduced)):
+            with self.subTest(shard=old):
+                def selection(args):
+                    command = shlex.join(["cargo", "test", "--lib", "--", *args])
+                    return coverage.cargo_test_filter(command).selected_tests(names)
+                self.assertEqual(selection(old), selection(new))
+
+
 class NonPgFilterContract(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
