@@ -15,6 +15,7 @@ struct Fixture {
     store: ChannelStore,
     header_end: u64,
     checkpoint: SourceCheckpoint,
+    floor: NativeSubmitFloor,
 }
 
 impl Fixture {
@@ -79,6 +80,13 @@ impl Fixture {
             through: header_end,
             prefix_hash: hex::encode(Sha256::digest(header.as_bytes())),
         };
+        let cursor = crate::services::tui_o::store::spool::Cursor {
+            source: proof.source.clone(),
+            captured_through: header_end,
+            prefix_hash: checkpoint.prefix_hash.clone(),
+            retired: false,
+        };
+        let floor = NativeSubmitFloor::capture_before_submit(&proof, &cursor).unwrap();
         Self {
             root,
             context,
@@ -87,6 +95,7 @@ impl Fixture {
             store,
             header_end,
             checkpoint,
+            floor,
         }
     }
 
@@ -130,7 +139,7 @@ impl Fixture {
         BootOwedRecord::from_scanned_row(
             self.proof.clone(),
             self.episode.clone(),
-            self.header_end,
+            &self.floor,
             self.len(),
             42,
         )
@@ -143,6 +152,38 @@ impl Fixture {
     ) -> Result<Option<CodexEpisodeSpan>, &'static str> {
         complete_boot_span(&mut self.store, row, &self.context, &self.checkpoint)
     }
+}
+
+#[test]
+fn confirmed_0162_metadata_persists_span_and_child_review_has_no_span() {
+    let mut fixture = Fixture::new();
+    for line in
+        include_str!("../../../../../../tests/fixtures/codex_provenance/0162_metadata_turn.jsonl")
+            .lines()
+    {
+        fixture.append(serde_json::from_str(line).unwrap());
+    }
+    let row = fixture.row();
+    let span = fixture.complete(Some(&row)).unwrap().unwrap();
+    assert_eq!(span.episode.native_turn_id, "old");
+    assert_eq!(
+        (span.start, span.end),
+        (fixture.header_end, Some(fixture.len()))
+    );
+    assert_eq!(
+        fixture.store.rotation().unwrap().codex_spans,
+        std::slice::from_ref(&span)
+    );
+    let mut fixture = Fixture::new();
+    for line in include_str!("../../../../../../tests/fixtures/codex_busy_inject/review_turn.jsonl")
+        .lines()
+        .take(10)
+    {
+        fixture.append(serde_json::from_str(line).unwrap());
+    }
+    let row = fixture.row();
+    assert_eq!(fixture.complete(Some(&row)), Err("child_native_turn"));
+    assert!(fixture.store.rotation().unwrap().codex_spans.is_empty());
 }
 
 #[test]
@@ -293,6 +334,32 @@ fn t4_boot_closes_saved_open_span_at_own_terminal_and_t5_keeps_tail_unknown() {
         "T4 matching terminal closes saved S"
     );
     assert_eq!(fixture.complete(Some(&row)).unwrap(), Some(closed));
+}
+
+#[test]
+fn historical_execution_closes_one_span_after_dev_renumber_without_new_identity() {
+    let mut fixture = Fixture::new();
+    fixture.event("task_started", "n1");
+    let row = fixture.row();
+    let open = fixture.complete(Some(&row)).unwrap().unwrap();
+    let key = crate::services::tui_o::store::spool::source_key(&fixture.proof.source);
+    let _renumber = crate::services::tui_o::shadow::capture::renumber::shift(
+        &fixture.proof.source.path,
+        0x4000,
+    );
+    let (_, end) = fixture.event("task_complete", "n1");
+    let closed = fixture.complete(Some(&row)).unwrap().unwrap();
+    assert_eq!(closed.execution, open.execution);
+    assert_eq!(closed.episode, open.episode);
+    assert_eq!(closed.end, Some(end));
+    assert_eq!(
+        crate::services::tui_o::store::spool::source_key(&closed.execution.source),
+        key
+    );
+    assert_eq!(
+        fixture.store.rotation().unwrap().codex_spans,
+        std::slice::from_ref(&closed)
+    );
 }
 
 #[test]

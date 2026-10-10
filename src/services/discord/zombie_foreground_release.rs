@@ -40,6 +40,8 @@ use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tmux_turn_liveness::IndependentTmuxReadiness;
 
 use super::SharedData;
+/// A holder's forwarded user stop, run as its own `/stop`.
+pub(crate) use super::commands::stop::run_holder_stop;
 
 /// Terminal evidence gathered at one cancel boundary. Deliberately plain data:
 /// the decision itself is a pure function so both directions (release the

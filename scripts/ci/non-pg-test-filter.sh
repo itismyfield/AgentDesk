@@ -187,6 +187,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+  --skip services::discord::runtime_bootstrap::orphan_recovery::fence_tests
   --skip services::discord::session_idle_cleanup::tests
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   --skip services::discord::task_notification_delivery::tests
@@ -217,6 +218,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests
   --skip services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
+  --skip services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop
   --skip services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   --skip services::discord::turn_bridge::tmux_runtime::stop_host::tests
   --skip services::discord::turn_bridge::voice_completion::voice_completion_tests
@@ -243,6 +245,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::routines::session_control::tests
   --skip services::scheduled_messages::context_snapshot::postgres_tests
   --skip services::scheduled_messages::postgres_tests
+  --skip services::session_forwarding::home_stop::tests
   --skip services::session_forwarding::tests
   --skip services::session_host::herdr_clear_adapter::tests
   --skip services::session_host::session_record::tests
@@ -252,6 +255,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::tmux_turn_liveness::tests_pg
   --skip services::tui_o::alarm::postgres_tests
   --skip services::tui_o::exact_pg::tests
+  --skip services::tui_o::exact_submission::tests
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
@@ -516,6 +520,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::placeholder_sweeper::abandon_guard::tests::uncertain_or_live_evidence_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::zero_id_rows_require_owner_probe_before_terminal_marker_cleanup
   services::discord::placeholder_sweeper::retirement_tests::inline_panel_rechecks_retirement_after_owner_probe
+  services::discord::placeholder_sweeper::retirement_tests::tick_leaves_input_protected_rows_before_and_after_probe
   services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_without_mutating_retired_rows
   services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_follows_the_restore_table
   services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_rebind_on_a_withheld_herdr_pane_reports_the_withhold_not_a_reused_watcher
@@ -684,6 +689,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::resume_pin_tests::c1_synthetic_and_handoff_stale_pins_leave_replacement_untouched
   services::discord::turn_bridge::resume_pin_tests::sa2_capture_hands_off_owned_provider_receiver
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_each_stop_reason_preserves_delivery_and_settlement_axes
+  services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::slash_stop_asks_the_home_before_the_legacy_owner_forward_and_ends_there
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_sends_one_escape_and_spends_the_claim_only_once_sent
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_writes_nothing_unless_every_fence_passes
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_stop_for_another_provider_is_refused_before_any_io
@@ -731,6 +737,7 @@ NON_PG_FILTER_REPLAY=(
   services::routines::session_control::tests::target_channel_prefers_session_thread_then_routine_thread_then_primary
   services::routines::session_control::tests::tmux_name_from_session_key_uses_suffix_after_host
   services::scheduled_messages::postgres_tests::postgres_precision_normalizes_linux_nanosecond_timestamps
+  services::session_forwarding::home_stop::tests::f1_receiver_shape_and_trust_refusals_run_nothing
   services::session_forwarding::tests::cancel_retry_accepts_ack_and_authenticated_structured_not_found
   services::session_forwarding::tests::cancel_retry_reloads_owner_only_for_conflict
   services::session_forwarding::tests::cleartext_rejection_never_yields_an_authenticated_request_target
@@ -774,6 +781,7 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::exact_pg::tests::exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt
   services::tui_o::exact_pg::tests::exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged
   services::tui_o::exact_pg::tests::exact_snapshot_sibling_construction_is_compile_rejected
+  services::tui_o::exact_submission::tests::exact_submission_none_preserves_result_without_runtime
   services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
   services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
@@ -969,6 +977,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
   services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+  services::discord::runtime_bootstrap::orphan_recovery::fence_tests
   services::discord::session_idle_cleanup::tests
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   services::discord::task_notification_delivery::tests
@@ -999,6 +1008,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
+  services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop
   services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   services::discord::turn_bridge::tmux_runtime::stop_host::tests
   services::discord::turn_bridge::voice_completion::voice_completion_tests
@@ -1025,6 +1035,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::routines::session_control::tests
   services::scheduled_messages::context_snapshot::postgres_tests
   services::scheduled_messages::postgres_tests
+  services::session_forwarding::home_stop::tests
   services::session_forwarding::tests
   services::session_host::herdr_clear_adapter::tests
   services::session_host::session_record::tests
@@ -1034,6 +1045,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::tmux_turn_liveness::tests_pg
   services::tui_o::alarm::postgres_tests
   services::tui_o::exact_pg::tests
+  services::tui_o::exact_submission::tests
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests
   voice::announce_meta::tests

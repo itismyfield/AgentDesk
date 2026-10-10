@@ -123,7 +123,8 @@ pub(crate) fn execute(
     let runtime = Handle::try_current().map_err(|error| format!("herdr turn: {error}"))?;
     // The turn takes its stop state before launch, so a stop is recorded whatever the switch says;
     // a stop that cancelled it first, or another turn's state, leaves it to write nothing.
-    if herdr_stop_settlement_available()
+    if (herdr_stop_settlement_available()
+        || crate::services::tui_o::exact_submission::logical_key().is_some())
         && let Some(token) = turn.cancel.as_deref()
         && token
             .try_prepare_herdr_interrupt(ProviderKind::Claude, &turn.owner)
@@ -599,7 +600,9 @@ fn prompt_and_read(
     ];
     let cancel = turn.cancel.as_deref();
     let held = hold(&attached.nonce)?;
-    let run = if herdr_stop_settlement_available()
+    crate::services::tui_o::exact_submission::begin_input()?;
+    let run = if (herdr_stop_settlement_available()
+        || crate::services::tui_o::exact_submission::logical_key().is_some())
         && let Some(state) = cancel.and_then(CancelToken::herdr_interrupt_state)
     {
         use crate::services::provider::cancel_token_claude_interrupt::{
@@ -624,6 +627,10 @@ fn prompt_and_read(
     } else {
         run_herdr(&attached.target, &plan, cancel)
     };
+    crate::services::tui_o::exact_submission::observe_untouched(matches!(
+        run,
+        InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }
+    ));
     if composer_settled(&run)
         && let Err(error) = std::fs::remove_file(&held)
     {
