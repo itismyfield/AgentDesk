@@ -4322,18 +4322,19 @@ line 37";
                     });
                     let result = submit_text(entry, &session, &prompt);
                     let calls = spy.calls();
-                    let count = |name: &str| calls.iter().filter(|c| *c == name).count();
                     assert_eq!(result, Ok(()), "{entry:?}: {calls:?}");
+                    // Every pane mutation, in order: the whole prompt once, then one Enter.
+                    let writes: Vec<&String> = calls
+                        .iter()
+                        .filter(|c| {
+                            ["literal:", "load:", "paste:", "keys:", "retire:"]
+                                .iter()
+                                .any(|prefix| c.starts_with(prefix))
+                        })
+                        .collect();
                     assert_eq!(
-                        count(&format!("literal:{prompt}")),
-                        1,
-                        "{entry:?}: {calls:?}"
-                    );
-                    assert_eq!(count("keys:Enter"), 1, "{entry:?}: {calls:?}");
-                    assert!(
-                        !calls
-                            .iter()
-                            .any(|c| c.starts_with("load:") || c.starts_with("paste:")),
+                        writes,
+                        [&format!("literal:{prompt}"), &"keys:Enter".to_string()],
                         "{entry:?}: {calls:?}"
                     );
                 }
