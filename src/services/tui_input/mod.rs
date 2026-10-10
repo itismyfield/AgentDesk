@@ -6,6 +6,7 @@ pub mod blob;
 pub mod bounded_tmux;
 mod durable;
 pub mod handover;
+pub mod input_key;
 pub mod ledger;
 pub mod rows;
 pub(crate) mod submission;
@@ -18,6 +19,8 @@ mod actor_tests;
 mod bounded_tmux_tests;
 #[cfg(test)]
 pub(crate) mod durability_tests;
+#[cfg(test)]
+mod input_key_tests;
 #[cfg(test)]
 mod rows_tests;
 #[cfg(test)]

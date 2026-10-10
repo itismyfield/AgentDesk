@@ -28,10 +28,12 @@ NON_PG_SKIP_ARGS=(
   --skip db::intake_outbox::home_tests
   --skip db::intake_outbox_delivery_proof::tests
   --skip db::intake_outbox_dispatch_stamp::tests
+  --skip db::o_channel_activation::fence_tests
   --skip db::o_channel_homes::tests
   --skip db::prompt_manifests::tests
   --skip db::relay_dead_letter::tests
   --skip db::replay_disposition::tests
+  --skip db::replay_disposition::write_tests
   --skip dispatch::dispatch_status::terminal_timestamp_tests
   --skip engine::ops::auto_queue_ops::tests
   --skip engine::ops::config_ops::tests
@@ -100,6 +102,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
   --skip services::discord::health::turn_deliver::inject_codex_tests
   --skip services::discord::health::turn_deliver::inject_tests
+  --skip services::discord::herdr_terminate::tests
   --skip services::discord::host_defer_gate::tests
   --skip services::discord::host_key_derivation::tests
   --skip services::discord::idle_cleanup_selector_tests
@@ -122,6 +125,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::relay_recovery::circuit_breaker::tests
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
   --skip services::discord::router::intake_dispatch::home_order_tests
+  --skip services::discord::router::intake_dispatch::replay_admission_tests
   --skip services::discord::router::intake_dispatch::tests
   --skip services::discord::router::intake_gate::stale_turn::host_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
@@ -137,6 +141,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::runtime_bootstrap::gateway_handback_integration_tests
   --skip services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+  --skip services::discord::runtime_bootstrap::o_writer_host::fence_tests
   --skip services::discord::runtime_bootstrap::orphan_recovery::fence_tests
   --skip services::discord::session_idle_cleanup::tests
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
@@ -158,6 +163,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
   --skip services::discord::turn_bridge::intake_settlement::tests
   --skip services::discord::turn_bridge::recovery_text::tests
+  --skip services::discord::turn_bridge::replay_policy::permit_tests
+  --skip services::discord::turn_bridge::replay_policy::policy_tests
   --skip services::discord::turn_bridge::resume_pin_tests
   --skip services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
@@ -184,6 +191,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::settings::tests
   --skip services::stale_turn_reconciler::tests
   --skip services::tui_o::exact_submission::tests
+  --skip services::tui_o::writer::tests::actor::host_start::deferred::pg
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
@@ -389,6 +397,9 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::turn_deliver::inject_tests::any_holder_takes_input_unless_a_claimed_input_has_not_reached_its_row
   services::discord::health::turn_deliver::inject_tests::the_row_stamp_or_the_first_bound_pane_decides_whether_a_session_is_tui
   services::discord::health::turn_deliver::inject_tests::the_switch_opens_only_on_external_or_all
+  services::discord::herdr_terminate::tests::m1_disabled_service_has_zero_io
+  services::discord::herdr_terminate::tests::m1_hold_release_window_preserves_input_until_settlement
+  services::discord::herdr_terminate::tests::m1_host_terminated_settles_exact_turn_and_publishes_queue_once
   services::discord::idle_recap_interaction::tests::claim_database_error_fails_closed_without_injection
   services::discord::idle_recap_interaction::tests::compact_uses_claimed_recap_target_and_native_prompt
   services::discord::idle_recap_interaction::tests::concurrent_compact_claims_allow_exactly_one_injection
@@ -537,6 +548,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_cutoffs_do_not_panic_for_extreme_values
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_spawns_exactly_once_per_process
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_task_can_restart_after_task_death
+  services::discord::runtime_bootstrap::o_writer_host::fence_tests::a_host_without_an_intake_fence_refuses_deferred_activation_facts
   services::discord::session_relay_sink::journal::pg_store::mixed_tests::mixed_strict_rows_leave_legacy_fold_frontier_and_shadow_bytes_unchanged
   services::discord::session_relay_sink::journal::pg_store::tests::stored_journal_event_mapping_is_closed_and_fail_closed
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reconcile_noop_when_db_matches_tmux
@@ -617,6 +629,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::intake_settlement::tests::terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags
   services::discord::turn_bridge::recovery_text::tests::direct_runtime_context_unavailable_matches_api_and_pg_errors
   services::discord::turn_bridge::recovery_text::tests::discord_recent_recovery_context_preserves_existing_format_and_limits
+  services::discord::turn_bridge::replay_policy::permit_tests::effect_permits_cannot_be_cloned_or_serialised
   services::discord::turn_bridge::resume_pin_tests::c1_actual_postlude_resume_pin_runtime_proof
   services::discord::turn_bridge::resume_pin_tests::c1_both_late_writers_consume_pin_without_registry_backfill
   services::discord::turn_bridge::resume_pin_tests::c1_cancelled_registered_pin_leaves_all_effects_untouched
@@ -692,6 +705,15 @@ NON_PG_FILTER_REPLAY=(
   services::session_forwarding::tests::resolve_forward_target_rejects_invalid_owner_and_local_instance_ids
   services::session_forwarding::tests::resolve_forward_target_returns_trusted_foreign_owner
   services::session_forwarding::tests::stale_capability_and_missing_trust_config_fail_before_forwarding
+  services::session_host::herdr_gate::tests::m1_afterwrite_never_auto_retries_pg
+  services::session_host::herdr_gate::tests::m1_confirmation_required_stops_pg
+  services::session_host::herdr_gate::tests::m1_last_pane_is_allowed_pg
+  services::session_host::herdr_gate::tests::m1_provider_survived_close_keeps_bound_pg
+  services::session_host::herdr_gate::tests::m1_replaced_root_refuses_before_send_pg
+  services::session_host::herdr_gate::tests::m1_retire_cas_failure_keeps_hold_pg
+  services::session_host::herdr_gate::tests::m1_service_missing_pane_absent_provider_retires_pg
+  services::session_host::herdr_gate::tests::m1_stale_a_never_releases_b_pg
+  services::session_host::herdr_gate::tests::m1_unreadable_process_never_means_absent_pg
   services::session_resume::tests::completed_critical_section_cancels_its_watchdog
   services::session_resume::tests::critical_section_watchdog_records_once_without_cancelling_work
   services::session_resume::tests::discover_excludes_live_bound_session
@@ -757,10 +779,12 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::intake_outbox::home_tests
   db::intake_outbox_delivery_proof::tests
   db::intake_outbox_dispatch_stamp::tests
+  db::o_channel_activation::fence_tests
   db::o_channel_homes::tests
   db::prompt_manifests::tests
   db::relay_dead_letter::tests
   db::replay_disposition::tests
+  db::replay_disposition::write_tests
   dispatch::dispatch_status::terminal_timestamp_tests
   engine::ops::auto_queue_ops::tests
   engine::ops::config_ops::tests
@@ -829,6 +853,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::health::recovery::stall_watchdog_auto_heal_tests
   services::discord::health::turn_deliver::inject_codex_tests
   services::discord::health::turn_deliver::inject_tests
+  services::discord::herdr_terminate::tests
   services::discord::host_defer_gate::tests
   services::discord::host_key_derivation::tests
   services::discord::idle_cleanup_selector_tests
@@ -851,6 +876,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::relay_recovery::circuit_breaker::tests
   services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
   services::discord::router::intake_dispatch::home_order_tests
+  services::discord::router::intake_dispatch::replay_admission_tests
   services::discord::router::intake_dispatch::tests
   services::discord::router::intake_gate::stale_turn::host_tests
   services::discord::router::message_handler::goal_lifecycle::host_guard_tests
@@ -866,6 +892,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::runtime_bootstrap::gateway_handback_integration_tests
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+  services::discord::runtime_bootstrap::o_writer_host::fence_tests
   services::discord::runtime_bootstrap::orphan_recovery::fence_tests
   services::discord::session_idle_cleanup::tests
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests
@@ -887,6 +914,8 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::turn_bridge::headless_delivery::production_seam_tests
   services::discord::turn_bridge::intake_settlement::tests
   services::discord::turn_bridge::recovery_text::tests
+  services::discord::turn_bridge::replay_policy::permit_tests
+  services::discord::turn_bridge::replay_policy::policy_tests
   services::discord::turn_bridge::resume_pin_tests
   services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
@@ -913,6 +942,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::settings::tests
   services::stale_turn_reconciler::tests
   services::tui_o::exact_submission::tests
+  services::tui_o::writer::tests::actor::host_start::deferred::pg
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests
   voice::announce_meta::tests

@@ -69,6 +69,8 @@ struct TestIo {
     calls: Mutex<Vec<(&'static str, u64)>>,
     facts: Mutex<Result<ActivationFacts, String>>,
     custody: Mutex<Result<Custody, String>>,
+    queued_bodies: std::sync::atomic::AtomicI64,
+    fence_error: Mutex<Option<String>>,
     /// Runs once while the next facts are read.
     on_facts: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// The gateway never comes up.
@@ -90,6 +92,8 @@ impl TestIo {
             calls: Mutex::default(),
             facts: Mutex::new(Ok(ActivationFacts::default())),
             custody: Mutex::new(Ok(Custody::Free)),
+            queued_bodies: Default::default(),
+            fence_error: Mutex::default(),
             on_facts: Mutex::default(),
             port_down: Default::default(),
             legacy: Mutex::default(),
@@ -154,6 +158,28 @@ impl HostIo for TestIo {
         }
         let facts = self.facts.lock().unwrap().clone();
         async move { facts }
+    }
+
+    fn intake_fence(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> impl Future<Output = Result<crate::services::tui_o::writer::host::FencedFacts, String>> + Send
+    {
+        self.calls.lock().unwrap().push(("fence", channel));
+        let error = self.fence_error.lock().unwrap().clone();
+        let queued_bodies = self.queued_bodies.load(Ordering::SeqCst);
+        async move {
+            if let Some(error) = error {
+                return Err(error);
+            }
+            let facts = self.activation_facts(channel, provider).await?;
+            Ok(crate::services::tui_o::writer::host::FencedFacts {
+                hold: crate::db::o_channel_activation::IntakeFence::empty_for_test(),
+                facts,
+                queued_bodies,
+            })
+        }
     }
 
     fn local_custody(&self, _: u64, _: ShadowProvider) -> Result<Custody, String> {

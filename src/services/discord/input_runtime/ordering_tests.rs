@@ -539,3 +539,75 @@ fn g1a_uncertain_handback_failure_dirty_race_preserves_cause_and_whole_retry_ran
         Ok(true)
     );
 }
+
+const EXTERNAL: u64 = crate::services::tui_input::input_key::EXTERNAL_KEY_BASE + 5;
+const VOICE: u64 = 9_000_000_000_000_000_000;
+
+#[test]
+fn pending_entry_rejects_mixed_without_partial_insert() {
+    let mut order = order(6_325_790);
+    for sources in [
+        vec![11, EXTERNAL],
+        vec![EXTERNAL, 11],
+        vec![11, VOICE],
+        vec![11, 0],
+    ] {
+        assert_eq!(
+            order.admit_pending(&sources).err(),
+            Some(Failure::StalePermit)
+        );
+        let snapshot = order.pending_snapshot();
+        assert!(snapshot.sources.is_empty(), "{sources:?}");
+        assert_eq!(snapshot.dirty_generation, 0, "{sources:?}");
+    }
+    assert_eq!(order.admit_pending(&[11, 12]).unwrap().sources, [11, 12]);
+}
+
+#[test]
+fn scan_namespace_rejection_preserves_frontier() {
+    let mut order = order(6_325_791);
+    for (sources, horizon) in [
+        (vec![11, EXTERNAL], EXTERNAL),
+        (vec![11], EXTERNAL),
+        (vec![], VOICE),
+    ] {
+        assert_eq!(
+            begin(&mut order, 7, sources, horizon, true).err(),
+            Some(Failure::StalePermit)
+        );
+        assert_eq!(order.stamp.frontier, 10);
+    }
+    let mut cap = scan(&mut order, 7, vec![11], 11, true);
+    order.settle(&mut cap, 7, 11).unwrap();
+    assert_eq!(order.stamp.frontier, 11);
+}
+
+#[test]
+fn handback_snapshot_rejects_before_release() {
+    let channel = 6_325_792;
+    let releases = std::cell::Cell::new(0);
+    let snapshot = PendingSource {
+        sources: vec![11, EXTERNAL],
+        dirty_generation: 3,
+        overflow: PendingOverflow::new(ProviderKind::Claude, channel),
+    };
+    let result = install_handback_snapshot(ProviderKind::Claude, channel, &snapshot, || {
+        releases.set(releases.get() + 1);
+        Ok(8)
+    });
+    assert_eq!(result, Err(Failure::StalePermit));
+    assert_eq!(releases.get(), 0);
+    assert!(!modes::order_barrier(&ProviderKind::Claude, channel));
+    // A refused live notice leaves a settled post-handback barrier settled.
+    release(channel, &[], 9);
+    let cap = handback_scan(channel, vec![], 11, true);
+    assert_eq!(
+        modes::settle_order_barrier(handback_complete(cap).unwrap()),
+        Ok(true)
+    );
+    assert_eq!(
+        handback_pending(&ProviderKind::Claude, channel, &[11, EXTERNAL]).err(),
+        Some(Failure::StalePermit)
+    );
+    assert!(!modes::order_barrier(&ProviderKind::Claude, channel));
+}
