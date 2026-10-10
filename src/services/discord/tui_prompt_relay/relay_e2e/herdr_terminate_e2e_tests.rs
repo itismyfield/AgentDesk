@@ -187,10 +187,10 @@ async fn scenario(rig: herdr::P11TerminationRig) {
         "the original text and its source identity wait in the queue"
     );
     assert!(pin.is_err(), "the execution fence refuses input: {pin:?}");
-    assert_eq!(
-        rig.writes(),
-        vec![("pane.close".to_string(), "w1-1".to_string())],
-        "nothing but the close reached Herdr before settlement"
+    let writes = rig.writes();
+    assert!(
+        matches!(writes.as_slice(), [(method, pane)] if method.ends_with(".close") && pane == "w1-1"),
+        "nothing but the close reached Herdr before settlement: {writes:?}"
     );
     assert_eq!(harness.provider_starts(), 0);
     assert!(

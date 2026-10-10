@@ -117,10 +117,9 @@ fn serve() -> Server {
     }
 }
 
+/// `close_reply` is set only for a close request.
 fn reply(request: &Value, version: &str, close_reply: Option<Value>, gone: bool) -> Value {
-    if request["method"] == "pane.close"
-        && let Some(mut reply) = close_reply
-    {
+    if let Some(mut reply) = close_reply {
         reply["id"] = request["id"].clone();
         return reply;
     }
@@ -166,13 +165,15 @@ fn answer(
     let request: Option<Value> = serde_json::from_str(&line).ok();
     conns.lock().unwrap().get_mut(&index).unwrap().request = request.clone();
     if let Some(request) = request {
+        let close = request["method"] == "pane.close";
+        let close_reply = close_reply.lock().unwrap().clone().filter(|_| close);
         let reply = reply(
             &request,
             &version.lock().unwrap(),
-            close_reply.lock().unwrap().clone(),
+            close_reply,
             gone.load(Ordering::SeqCst),
         );
-        if request["method"] == "pane.close" && vanish_on_close.load(Ordering::SeqCst) {
+        if close && vanish_on_close.load(Ordering::SeqCst) {
             gone.store(true, Ordering::SeqCst);
         }
         let _ = writer.write_all(format!("{reply}\n").as_bytes());
