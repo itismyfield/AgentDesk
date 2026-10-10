@@ -1,0 +1,30 @@
+{
+  "commit": "d91d59d1d5fb4bcdd1602e29b7e2c980f0cece25",
+  "paths": [
+    "ARCHITECTURE.md",
+    "scripts/destructive_call_site_baseline.json",
+    "scripts/lib_test_inventory_manifest.txt",
+    "scripts/test_only_module_skip_pin.py",
+    "src/services/discord/tui_prompt_relay.rs",
+    "src/services/discord/tui_prompt_relay/claude_idle_bridge.rs",
+    "src/services/discord/turn_bridge/bridge_entry_persist.rs",
+    "src/services/discord/turn_bridge/completion_postlude.rs",
+    "src/services/discord/turn_bridge/completion_postlude/channel_episode_scope.rs",
+    "src/services/discord/turn_bridge/completion_postlude/contracts.rs",
+    "src/services/discord/turn_bridge/context.rs",
+    "src/services/discord/turn_bridge/finalize_epilogue.rs",
+    "src/services/discord/turn_bridge/mod.rs",
+    "src/services/discord/turn_bridge/resume_pin_tests.rs",
+    "src/services/discord/turn_bridge/runtime_handoff_loop.rs",
+    "src/services/discord/turn_bridge/runtime_handoff_loop/tests.rs",
+    "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs",
+    "src/services/discord/turn_bridge/stream_loop/tool_arms/authority_tests.rs",
+    "src/services/discord/turn_bridge/stream_loop/types.rs",
+    "src/services/discord/turn_bridge/stream_tick.rs",
+    "src/services/discord/turn_bridge/terminal_outcome_delivery.rs",
+    "src/services/discord/turn_bridge/terminal_outcome_delivery/contracts.rs",
+    "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs",
+    "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests.rs",
+    "src/services/discord/watchers/lifecycle/claims.rs"
+  ]
+}

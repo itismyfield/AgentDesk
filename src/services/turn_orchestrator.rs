@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -8,6 +7,7 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 use tokio::sync::{Notify, mpsc, oneshot};
 
+use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
 use crate::services::provider::{CancelToken, ProviderKind};
 
 // #3293: non-creating registry lookup + operator-gated idle-entry purge.
@@ -29,8 +29,10 @@ pub(crate) mod input_fence;
 pub(crate) mod input_handback;
 mod intervention;
 mod lease_release;
+mod mailbox_observation;
 #[cfg(test)]
 mod mailbox_unreachable_tests;
+pub(crate) use mailbox_observation::MailboxObservationFailure;
 mod overflow;
 mod pending_queue_persistence;
 mod queue_cancellation;
@@ -1188,19 +1190,6 @@ impl ChannelMailboxRegistry {
             .map(|entry| entry.value().clone())
     }
 
-    pub(crate) async fn snapshot_all(&self) -> HashMap<ChannelId, ChannelMailboxSnapshot> {
-        let handles: Vec<_> = self
-            .handles
-            .iter()
-            .map(|entry| (*entry.key(), entry.value().clone()))
-            .collect();
-        let mut snapshots = HashMap::new();
-        for (channel_id, handle) in handles {
-            snapshots.insert(channel_id, handle.snapshot().await);
-        }
-        snapshots
-    }
-
     pub(crate) async fn restart_drain_all(
         &self,
         provider: &ProviderKind,
@@ -1291,6 +1280,12 @@ enum ChannelMailboxMsg {
         /// A Herdr user stop records its intent instead of cancelling the token.
         herdr_user_stop: bool,
         reply: oneshot::Sender<CancelActiveTurnResult>,
+    },
+    /// A user stop's cancel while `expected_token` is current, decided under its Herdr slot.
+    CancelActiveTurnIfCurrentUnlessHerdr {
+        expected_token: Arc<CancelToken>,
+        reason: String,
+        reply: oneshot::Sender<StopCancel>,
     },
     /// #2374 Codex round-1 fix (HIGH-1) — identity-guarded cancel by
     /// active `user_message_id`. See
@@ -1902,6 +1897,14 @@ fn input_mailbox_step(
                 token,
                 already_stopping,
             });
+        }
+        ChannelMailboxMsg::CancelActiveTurnIfCurrentUnlessHerdr {
+            expected_token,
+            reason,
+            reply,
+        } => {
+            let token = matching_cancel_token(&state, &expected_token);
+            let _ = reply.send(StopCancel::decide(token, reason));
         }
         ChannelMailboxMsg::CancelActiveTurnIfUserMessageWithReason {
             expected_user_message_id,

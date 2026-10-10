@@ -13,7 +13,12 @@ use super::ledger::{self, LedgerEntry};
 use super::spool::source_key;
 use super::{ChannelStore, LEDGER_FILE, OStore, StoreError, damage, durable};
 use crate::services::tui_o::shadow::SourceId;
-use crate::services::tui_o::shadow::capture::file_identity;
+use crate::services::tui_o::shadow::capture::{FileMatch, file_identity, file_match};
+use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
+    CodexEpisodeDeny, CodexEpisodeSpan,
+};
+
+mod provenance;
 
 pub const CHECKPOINT_FILE: &str = "binding_checkpoint";
 pub const BOUNDARY_FILE: &str = "boundary";
@@ -77,6 +82,10 @@ pub struct Rotation {
     pub links: BTreeMap<String, SourceLink>,
     /// The source each old one was rotated to; binding a source again clears its entry.
     pub successors: BTreeMap<String, Successor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub codex_spans: Vec<CodexEpisodeSpan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub codex_denies: Vec<CodexEpisodeDeny>,
 }
 
 impl Rotation {
@@ -117,6 +126,7 @@ impl ChannelStore {
     /// Refuses to drop a link or change a boundary that is no longer `Undecided`.
     pub fn write_rotation(&mut self, next: &Rotation) -> Result<(), StoreError> {
         let current = self.rotation()?;
+        provenance::validate(self.init.channel, &current, next)?;
         for (key, link) in &current.links {
             let kept = next.links.get(key).is_some_and(|next| {
                 let decided = link.boundary != Boundary::Undecided;
@@ -254,7 +264,7 @@ impl OStore {
 /// The byte offset `from` names in the source file, which must be the start of a record.
 fn record_start(source: &SourceId, from: &ResolveFrom) -> Result<u64, StoreError> {
     let file = File::open(&source.path)?;
-    if file_identity(&file.metadata()?) != (source.dev, source.ino) {
+    if file_match(source, file_identity(&file.metadata()?)) == FileMatch::Other {
         return Err(rejected("the source file was replaced".into()));
     }
     let (mut reader, mut line) = (BufReader::new(file), Vec::new());

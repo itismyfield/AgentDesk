@@ -898,3 +898,149 @@ fn a_rollout_rewritten_in_place_never_retargets_a_late_stop() {
         assert!(state.user_stop.load(Ordering::SeqCst), "the intent stays");
     });
 }
+
+#[test]
+fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
+    use crate::services::discord::commands::stop::run_slash_stop;
+    use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
+    with_cases(|case, fx, runtime| {
+        HERDR_SETTLEMENT_OVERRIDE.set(false);
+        assert!(!herdr_stop_settlement_available());
+        let base = runtime.block_on(begin_command_stop(
+            &case.shared,
+            &case.provider,
+            case.channel,
+            false,
+        ));
+        assert!(matches!(base, CommandStop::HostRefused));
+        let dormant = runtime.block_on(run_slash_stop(&case.shared, &case.provider, case.channel));
+        assert_eq!(
+            dormant.text(),
+            crate::services::discord::commands::HOST_REFUSED_STOP_RESPONSE
+        );
+        runtime.block_on(dormant.finish(&case.shared, &case.provider, case.channel));
+        assert_eq!(case.escapes(), 0);
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        let reply = runtime.block_on(run_slash_stop(&case.shared, &case.provider, case.channel));
+        assert_eq!(
+            reply.text(),
+            HerdrStop::Requested(HerdrDelivery::Sent).reply()
+        );
+        runtime.block_on(reply.finish(&case.shared, &case.provider, case.channel));
+        assert_eq!(case.escapes(), 1);
+        assert!(Arc::ptr_eq(
+            &current_token(case, runtime).unwrap(),
+            &case.token
+        ));
+        assert!(!case.token.cancelled.load(Ordering::SeqCst));
+        assert!(
+            crate::services::discord::tmux::recent_turn_stop_for_channel(case.channel).is_none()
+        );
+        assert!(fx.take_calls().is_empty());
+    });
+    let source = include_str!("../../commands/control.rs");
+    let body = source
+        .split("async fn cmd_stop")
+        .nth(1)
+        .unwrap()
+        .split("pub(super) fn parse_queued_message_id")
+        .next()
+        .unwrap();
+    assert_eq!(body.matches("run_slash_stop(").count(), 1);
+    assert!(!body.contains("begin_command_stop(") && !body.contains("begin_user_stop("));
+}
+
+#[test]
+fn act7_cold_start_accepts_intent_without_marker_then_sends_once() {
+    with_cases(|case, fx, runtime| {
+        mark(&case.owner.logical_key, Mark::Absent);
+        let pending = runtime.block_on(crate::services::discord::commands::stop::run_slash_stop(
+            &case.shared,
+            &case.provider,
+            case.channel,
+        ));
+        assert!(
+            case.token
+                .herdr_interrupt_state()
+                .unwrap()
+                .user_stop
+                .load(Ordering::Acquire)
+        );
+        assert!(!case.token.cancelled.load(Ordering::Acquire));
+        assert!(
+            crate::services::discord::tmux::recent_turn_stop_for_channel(case.channel).is_none()
+        );
+        assert_eq!(case.escapes(), 0);
+        assert!(pending.text().contains("기다리는"));
+        mark(&case.owner.logical_key, Mark::Herdr);
+        let state = case.token.herdr_interrupt_state().unwrap();
+        let binding_root = events::test_root();
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let _registry = case.rig.registry_on_this_thread();
+                let _binding = TestBindingRoot::enter(binding_root.as_deref());
+                crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE
+                    .set(true);
+                state.own_start_observed(1, "turn-a");
+            });
+            runtime.block_on(async {
+                while !reader.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            });
+            reader.join().unwrap();
+        });
+        assert_eq!(case.escapes(), 1);
+        assert_eq!(
+            runtime.block_on(interrupt_herdr(
+                case.shared.pg_pool.as_ref().unwrap(),
+                &case.token,
+                &case.provider
+            )),
+            HerdrDelivery::NotSent(HerdrNotSent::Duplicate)
+        );
+        assert_eq!(case.escapes(), 1);
+        assert!(fx.take_calls().is_empty());
+    });
+}
+
+#[test]
+fn act7_each_stop_reason_preserves_delivery_and_settlement_axes() {
+    use HerdrNotSent::*;
+    let reasons = [
+        Idle,
+        Unobserved,
+        Pending,
+        Generation,
+        Identity,
+        Holder,
+        Gate,
+        SwitchOff,
+        Duplicate,
+        NotAdmitted,
+        SettlementUnavailable,
+    ];
+    let mut replies = std::collections::HashSet::new();
+    for reason in reasons {
+        let refused = HerdrStop::Refused(reason);
+        assert!(
+            replies.insert(refused.reply()),
+            "distinct reason {reason:?}"
+        );
+        assert_eq!(refused.observation().intent, "refused");
+        assert_eq!(refused.observation().settlement, None);
+        let requested = HerdrStop::Requested(HerdrDelivery::NotSent(reason));
+        assert_eq!(requested.observation().delivery, "not_sent");
+        assert_eq!(requested.observation().reason, Some(reason.reason()));
+        assert_eq!(requested.observation().settlement, Some("host_owned"));
+    }
+    assert!(!HerdrStop::Refused(Pending).reply().contains("요청은 유지"));
+    assert!(
+        HerdrStop::Requested(HerdrDelivery::NotSent(Pending))
+            .reply()
+            .contains("요청은 유지")
+    );
+}
+
+#[path = "codex_stop_delivery_home_stop_tests.rs"]
+mod home_stop;

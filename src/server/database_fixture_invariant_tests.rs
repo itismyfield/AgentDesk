@@ -64,6 +64,10 @@ mod tests {
         ),
         ("db::postgres", include_str!("../db/postgres.rs")),
         (
+            "db::postgres::advisory_lock_tests",
+            include_str!("../db/postgres/advisory_lock_tests.rs"),
+        ),
+        (
             "db::postgres::test_db_reclaim",
             include_str!("../db/postgres/test_db_reclaim.rs"),
         ),

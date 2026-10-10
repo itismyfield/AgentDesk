@@ -28,7 +28,8 @@ extract_function() {
     ' "$DEPLOY_SH"
 }
 
-for fn in _rollback_release_binary _source_o_tui_writer _manifest_o_tui_writer \
+for fn in _rollback_release_binary _signal_release_lock_pid _wait_release_stopped \
+    _source_o_tui_writer _manifest_o_tui_writer \
     _rollback_would_revert_o_writer _write_release_source_manifest \
     _external_artifact_would_skip_o_writer; do
     body="$(extract_function "$fn")"
@@ -42,7 +43,10 @@ done
 
 # The migration guard has its own suite; here it always allows the rollback.
 _rollback_would_brick_on_migration() { return 1; }
-launchctl() { echo "launchctl $*" >>"$TMP_ROOT/calls"; return 0; }
+launchctl() {
+    echo "launchctl $*" >>"$TMP_ROOT/calls"
+    [ "$1" != print ]
+}
 chflags() { return 0; }
 tmux() { return 0; }
 xattr() { return 0; }

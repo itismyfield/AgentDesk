@@ -839,6 +839,14 @@ pub fn handle_restart_dcserver(
 mod startup;
 use startup::raise_fd_soft_limit;
 
+#[cfg(unix)]
+fn write_dcserver_lock_pid(mut file: &fs::File) -> std::io::Result<()> {
+    use std::io::Write;
+    // Clear the previous PID only after flock succeeds so shorter PIDs leave no suffix.
+    file.set_len(0)?;
+    file.write_all(std::process::id().to_string().as_bytes())
+}
+
 pub fn handle_dcserver(token: Option<String>) {
     #[cfg(windows)]
     if let Err(error) = crate::services::platform::windows_job::own_runtime_children() {
@@ -853,6 +861,10 @@ pub fn handle_dcserver(token: Option<String>) {
     // 24)". This makes the limit launch-model independent (works whether started
     // via launchd, tmux, or directly).
     raise_fd_soft_limit(16_384);
+
+    // The schema-ahead hold ends when this install path holds a new file, so
+    // record what it held at startup.
+    let exe_watch = crate::cli::dcserver_pg_bootstrap::BinaryWatch::capture_current_exe();
 
     // Ensure directory structure exists first (needed for lock file)
     if let Some(root) = agentdesk_runtime_root() {
@@ -893,9 +905,7 @@ pub fn handle_dcserver(token: Option<String>) {
             std::process::exit(1);
         }
         // Write our PID into the lock file
-        use std::io::Write;
-        let mut ff = &f;
-        let _ = ff.write_all(std::process::id().to_string().as_bytes());
+        let _ = write_dcserver_lock_pid(&f);
         f // keep File open — dropping it releases the lock
     };
 
@@ -1141,7 +1151,8 @@ pub fn handle_dcserver(token: Option<String>) {
         // silently dead. We now retry (1 + MAX_RETRIES attempts, 1→2→4→8→16s).
         // Both startup initialization and runtime pool activation remain inside
         // that envelope before any exit. #5993: exhaustion is reported by the
-        // stderr exit line below (the Discord DB-down alert is retired).
+        // stderr exit line below (the Discord DB-down alert is retired). A
+        // schema-ahead database instead holds until the binary is replaced.
         let discord_pg_pool = {
             let connect_cfg = ad_config.clone();
             let bootstrap = crate::cli::dcserver_pg_bootstrap::connect_with_backoff(
@@ -1169,6 +1180,10 @@ pub fn handle_dcserver(token: Option<String>) {
                     }
                 },
                 |delay| tokio::time::sleep(delay),
+                || {
+                    exe_watch.is_some()
+                        && crate::cli::dcserver_pg_bootstrap::schema_ahead_hold_enabled()
+                },
                 "cli::dcserver::postgres_startup_and_runtime",
             )
             .await;
@@ -1178,6 +1193,15 @@ pub fn handle_dcserver(token: Option<String>) {
                     pool
                 }
                 Err(failure) => {
+                    if let (true, Some(watch)) = (failure.schema_ahead, exe_watch.as_ref()) {
+                        crate::cli::dcserver_pg_bootstrap::hold_while_schema_ahead(
+                            watch,
+                            &failure.last_error,
+                            crate::cli::dcserver_pg_bootstrap::BinaryIdentity::of,
+                            tokio::time::sleep,
+                        )
+                        .await;
+                    }
                     eprintln!("  ✖ {}", failure.exhaustion_line());
                     std::process::exit(1);
                 }
@@ -1405,4 +1429,33 @@ pub fn handle_dcserver(token: Option<String>) {
 
 fn should_run_http_only_onboarding(token: Option<&str>, launch_config_count: usize) -> bool {
     token.is_none() && launch_config_count == 0
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lock_pid_write_removes_stale_suffix() {
+        let lock = tempfile::NamedTempFile::new().expect("temporary lock file");
+        let current_pid = std::process::id().to_string();
+        fs::write(lock.path(), format!("{current_pid}999")).expect("seed longer PID");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .open(lock.path())
+            .expect("open existing lock file");
+        assert_eq!(
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "acquire single-instance lock before PID write"
+        );
+
+        write_dcserver_lock_pid(&file).expect("write current PID");
+
+        assert_eq!(
+            fs::read(lock.path()).expect("read PID"),
+            current_pid.as_bytes()
+        );
+    }
 }

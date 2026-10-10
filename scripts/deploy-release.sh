@@ -53,6 +53,13 @@ fi
 #                                      exactly origin/main.
 #   AGENTDESK_DEPLOY_ALLOW_DIRTY=1     allow deploying with local changes.
 #   AGENTDESK_DEPLOY_TARGET_SHA=<sha>  deploy this CI-Main-green origin/main ancestor, not the tip.
+# Cluster schema order: Postgres is shared and an old binary cannot boot on a
+# schema newer than it embeds. Every --all-nodes peer builds the source built here,
+# never a newer origin/main; a deploy that advances the schema deploys the single
+# peer BEFORE this node migrates or restarts, and without --all-nodes it is refused
+# when peers exist.
+#   AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=1  skip that pin and order (peers
+#                                      may be left unable to boot until redeployed).
 #   AGENTDESK_DEPLOY_SKIP_FRESHNESS=1  skip both source-identity and remote
 #                                      freshness gates for an intentional
 #                                      offline/emergency deploy. In this mode,
@@ -190,6 +197,13 @@ DEPLOY_ALL_NODES="${AGENTDESK_DEPLOY_ALL_NODES:-0}"
 DEPLOY_PEERS_OVERRIDE=()
 DEPLOY_PEERS_FILE="${AGENTDESK_DEPLOY_PEERS_FILE:-$ADK_REL/config/deploy-peers.txt}"
 DEPLOY_PEER_INVOCATION="${AGENTDESK_DEPLOY_PEER_INVOCATION:-0}"
+# Schema-order state: running/unresolved keep the staged binary on exit; failed
+# after the schema advanced still finishes this node and then exits non-zero.
+SCHEMA_PEERS_FIRST_STATE=""
+SCHEMA_PEERS_FIRST_FAILED=0
+PEER_LEG_LAUNCHED=0
+PEER_VERDICT_MARKER="unknown"
+DEPLOY_BUILT_SOURCE_SHA=""
 DEPLOY_FAST="${AGENTDESK_DEPLOY_FAST:-0}"
 # Optional CI-green commit to deploy instead of the origin/main tip. A prebuilt
 # binary is refused with it because nothing ties that binary to the target commit.
@@ -1023,19 +1037,67 @@ _external_artifact_would_skip_o_writer() {
     return 0
 }
 
+_signal_release_lock_pid() {
+    local pid="$1" signal="$2" args=""
+    # A lock file can be stale or corrupt; recheck argv before every signal.
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        args=$(ps -ww -o args= -p "$pid" 2>/dev/null || true)
+    fi
+    case "$args" in
+        "$ADK_REL/bin/agentdesk dcserver"|"$ADK_REL/bin/agentdesk dcserver "*|\
+        "$ADK_REL/bin/agentdesk --json dcserver"|"$ADK_REL/bin/agentdesk --json dcserver "*)
+            kill "$signal" "$pid" 2>/dev/null ;;
+        *)
+            echo "  ⚠ Refusing signal $signal to lock PID $pid: not the release agentdesk dcserver" >&2
+            return 1 ;;
+    esac
+}
+
+_wait_release_stopped() {
+    local target="$1" pid="$2" allow_sigkill="${3:-0}" wait_secs=0 job_loaded pid_alive
+    while :; do
+        job_loaded=0
+        pid_alive=0
+        if launchctl print "$target" >/dev/null 2>&1; then job_loaded=1; fi
+        if [ -n "$pid" ] && _signal_release_lock_pid "$pid" -0; then
+            pid_alive=1
+        else
+            pid=""
+        fi
+        if [ "$job_loaded" = 0 ] && [ "$pid_alive" = 0 ]; then
+            echo "  ✓ release job unloaded and old process terminated (${wait_secs}s)"
+            return 0
+        fi
+        if [ "$wait_secs" -ge 15 ]; then
+            # Only the main stop path retains its existing SIGKILL escalation.
+            if [ "$allow_sigkill" = 1 ] && [ "$pid_alive" = 1 ] && [ "$wait_secs" -eq 15 ]; then
+                echo "  ⚠ PID $pid did not exit after 15s — checking before SIGKILL"
+                _signal_release_lock_pid "$pid" -9 || true
+                sleep 1
+                wait_secs=16
+                continue
+            fi
+            echo "  ✗ Release stop timed out for $target after ${wait_secs}s; refusing bootstrap" >&2
+            return 1
+        fi
+        sleep 1
+        wait_secs=$((wait_secs + 1))
+    done
+}
+
 # #3858: restore the last-known-good release binary and restart the service.
 # Invoked from the EXIT trap (via _cleanup_on_exit) whenever the binary was
 # promoted but the deploy never reached DEPLOY_OK — i.e. ANY non-zero exit after
 # promotion, not only the explicit health-check branch (an unguarded
 # post-promotion command failing under `set -e` is covered too). Every step
-# except the restart is best-effort so a failed re-lock can NEVER skip the
-# restart (#3858 finding 3): the service must always come back up.
+# except confirming the stop and restarting is best-effort: a failed re-lock
+# cannot skip restart, but an unfinished bootout must not race bootstrap.
 _rollback_release_binary() {
     local rel_binary="${REL_BINARY:-}"
     local rel_backup="${REL_BINARY_BACKUP:-}"
     local plist="${PLIST_REL:-}"
     local rel_port="${REL_PORT:-${AGENTDESK_REL_PORT:-${ADK_DEFAULT_PORT:-8791}}}"
-    local domain
+    local domain rollback_pid=""
 
     [ -n "$rel_binary" ] && [ -n "$plist" ] || return 0
     if [ ! -f "$rel_backup" ]; then
@@ -1092,8 +1154,17 @@ _rollback_release_binary() {
     # succeeds but process doesn't spawn, tmux fallback will restart via SSH.
     # Observed issue (#5151): explicit kickstart required after bootstrap. Scope: PG tunnel
     # only for now; release rollback suitable for future unification if measured necessary.
-    launchctl bootout "$domain/$plist" 2>/dev/null || true
+    if [ -f "$ADK_REL/runtime/dcserver.lock" ]; then
+        rollback_pid=$(cat "$ADK_REL/runtime/dcserver.lock" 2>/dev/null || true)
+    fi
+    if ! launchctl bootout "$domain/$plist"; then
+        echo "⚠ Rollback bootout failed for $domain/$plist — checking whether release stopped" >&2
+    fi
     tmux kill-session -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" 2>/dev/null || true
+    if ! _wait_release_stopped "$domain/$plist" "$rollback_pid"; then
+        echo "✗ Rollback stop was not confirmed — backup preserved; manual intervention required" >&2
+        return 0
+    fi
     # The bad binary is never locked (uchg is deferred to the success path), so
     # nouchg here is defensive. mv is an atomic same-dir rename: the backup
     # replaces the bad binary in one step — at no instant are both copies gone.
@@ -1356,6 +1427,15 @@ _cleanup_on_exit() {
         && [ "${DEPLOY_OK:-0}" != 1 ]; then
         _recover_or_preserve_past_migration_floor
     fi
+    # A peer leg that may still migrate leaves the schema unknown: keep, but do not
+    # install, the binary that can boot on it.
+    case "${SCHEMA_PEERS_FIRST_STATE:-}" in
+        running|unresolved)
+            if [ "${DEPLOY_OK:-0}" != 1 ] && [ "${MIGRATION_FLOOR_ARMED:-0}" != 1 ]; then
+                _preserve_staged_binary_for_recovery || true
+            fi
+            ;;
+    esac
     if [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
         rm -f "$STAGED_BINARY" 2>/dev/null || true
     fi
@@ -1671,6 +1751,7 @@ _wait_for_peer_deploy_verdict() {
                 marker_status marker_detail observed_repo_head repo_detail health_status health_detail \
                 health_body \
                 <<<"$probe_output"
+            PEER_VERDICT_MARKER="$marker_status"
         else
             marker_status="unknown"
             marker_detail="peer probe failed"
@@ -1879,6 +1960,7 @@ echo \"\$port\"")"'')"; then
         fi
     fi
 
+    PEER_LEG_LAUNCHED=1
     echo "▸ [peer:$peer] Running deploy-release.sh..."
     if ! ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$remote_deploy_command")"; then
         echo "✗ [peer:$peer] deploy-release.sh failed"
@@ -1918,9 +2000,188 @@ _deploy_to_all_peers() {
 
     if [ "$failures" -gt 0 ]; then
         echo "✗ Cluster deploy: $failures peer(s) failed"
-        exit 1
+        return 1
     fi
     echo "═══ Cluster Deploy Complete (all peer verdicts verified) ═══"
+}
+
+_schema_order_peers() {
+    # Peers the target pin and schema order apply to; empty for a peer leg or under the override.
+    [ "$DEPLOY_PEER_INVOCATION" != "1" ] || return 0
+    [ "${AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS:-0}" != "1" ] || return 0
+    _resolve_deploy_peers
+}
+
+_schema_order_refusal() {
+    # Refuses a schema-advancing deploy whose topology cannot deploy the peer first.
+    local peers="$1" peer_count peer_list
+    peer_count="$(printf '%s\n' "$peers" | grep -c .)"
+    peer_list="$(printf '%s\n' "$peers" | tr '\n' ' ')"
+    if [ "$DEPLOY_ALL_NODES" != "1" ]; then
+        echo "✗ [schema-order] this deploy advances the shared Postgres schema, but peer(s) ${peer_list}would keep a binary that cannot boot on it; rerun with --all-nodes"
+    elif [ "$peer_count" -gt 1 ]; then
+        echo "✗ [schema-order] a schema-advancing cluster deploy supports one peer; got $peer_count (${peer_list% })"
+    else
+        return 0
+    fi
+    echo "  Set AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=1 only when the peers may stay unable to boot until redeployed."
+    return 1
+}
+
+_cluster_target_refusal() {
+    # An external artifact has no source the cluster peers could be pinned to.
+    [ "$DEPLOY_ALL_NODES" = "1" ] && [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 0
+    echo "✗ [schema-order] AGENTDESK_DEPLOY_BINARY cannot be tied to the source the peers build; deploy a build of this source"
+    echo "  Set AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=1 only when the peers may build another source."
+    return 1
+}
+
+_schema_order_guard_before_build() {
+    # Cheap fail-closed check before the build; the doctor recheck runs before migrating.
+    local peers
+    peers="$(_schema_order_peers)"
+    [ -n "$peers" ] || return 0
+    _cluster_target_refusal || return 1
+    _migration_floor_may_advance || return 0
+    _schema_order_refusal "$peers"
+}
+
+_doctor_migration_snapshot() {
+    # One comparable line of the shared schema as this binary sees it; rc 1 = unknown.
+    local binary="$1" json_tmp
+    json_tmp=$(mktemp "${TMPDIR:-/tmp}/agentdesk-schema-snapshot.XXXXXX") || return 1
+    "$binary" doctor --json >"$json_tmp" 2>/dev/null || true
+    python3 - "$json_tmp" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+check = next((c for c in data.get("checks", []) if c.get("id") == "postgres_connection"), None)
+evidence = (check or {}).get("evidence")
+if not isinstance(evidence, dict):
+    sys.exit(1)
+pending = evidence.get("pending_versions")
+applied = evidence.get("applied_count")
+if not isinstance(pending, list) or not isinstance(applied, int):
+    sys.exit(1)
+
+def versions(key):
+    return json.dumps(sorted(evidence.get(key) or []), separators=(",", ":"))
+
+print(
+    f"applied_count={applied} pending={versions('pending_versions')}"
+    f" missing={versions('missing_from_resolved')}"
+    f" unsuccessful={versions('unsuccessful_versions')}"
+)
+PY
+    local rc=$?
+    rm -f "$json_tmp"
+    return "$rc"
+}
+
+_classify_schema_peer_failure() {
+    # unchanged needs a finished (or never launched) peer leg and an unmoved schema.
+    local launched="$1" marker="$2" before="$3" after="$4"
+    if [ -z "$before" ] || [ -z "$after" ]; then
+        echo unresolved
+    elif [ "$before" != "$after" ]; then
+        echo advanced
+    elif [ "$launched" = "1" ] && [ "$marker" != "failure" ] && [ "$marker" != "success" ]; then
+        echo unresolved
+    else
+        echo unchanged
+    fi
+}
+
+_pin_cluster_target_to_built_source() {
+    # Every cluster peer builds exactly the staged source, never a newer origin/main,
+    # whether or not this deploy advances the schema.
+    local head_sha
+    [ "$DEPLOY_ALL_NODES" = "1" ] && [ -n "$(_schema_order_peers)" ] || return 0
+    _cluster_target_refusal || return 1
+    head_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
+    if [ -z "$DEPLOY_BUILT_SOURCE_SHA" ] || [ "$head_sha" != "$DEPLOY_BUILT_SOURCE_SHA" ]; then
+        echo "✗ [schema-order] workspace HEAD (${head_sha:-unknown}) is not the source this node built (${DEPLOY_BUILT_SOURCE_SHA:-unknown}); refusing to send the peer another schema"
+        return 1
+    fi
+    if [ -n "$(git -C "$REPO" status --porcelain -- migrations/postgres 2>/dev/null)" ]; then
+        echo "✗ [schema-order] uncommitted changes under migrations/postgres cannot reach the peer; commit them first"
+        return 1
+    fi
+    if [ -n "${DEPLOY_TARGET_SHA:-}" ] && [ "$DEPLOY_TARGET_SHA" != "$DEPLOY_BUILT_SOURCE_SHA" ]; then
+        echo "✗ [schema-order] pinned target ${DEPLOY_TARGET_SHA} is not the built source ${DEPLOY_BUILT_SOURCE_SHA}"
+        return 1
+    fi
+    DEPLOY_TARGET_SHA="$DEPLOY_BUILT_SOURCE_SHA"
+    AGENTDESK_DEPLOY_TARGET_SHA="$DEPLOY_BUILT_SOURCE_SHA"
+    export AGENTDESK_DEPLOY_TARGET_SHA
+    echo "▸ [schema-order] peers pinned to the built source ${DEPLOY_BUILT_SOURCE_SHA}"
+}
+
+_run_schema_peers_first() {
+    # Deploys the peer before this node migrates when the shared schema advances.
+    local peers before after verdict
+    peers="$(_schema_order_peers)"
+    [ -n "$peers" ] || return 0
+    before="$(_doctor_migration_snapshot "$STAGED_BINARY")" || before=""
+    if ! _migration_floor_may_advance && [[ "$before" == *" pending=[] "* ]]; then
+        return 0
+    fi
+    _schema_order_refusal "$peers" || return 1
+    echo "▸ [schema-order] the shared Postgres schema advances — deploying the peer before this node migrates or restarts"
+    PEER_LEG_LAUNCHED=0
+    PEER_VERDICT_MARKER="unknown"
+    SCHEMA_PEERS_FIRST_STATE=running
+    # Arm before leaving running: a signal in between then recovers or keeps the binary.
+    if _deploy_to_all_peers "$@"; then
+        MIGRATION_FLOOR_ARMED=1
+        SCHEMA_PEERS_FIRST_STATE=completed
+        return 0
+    fi
+    after="$(_doctor_migration_snapshot "$STAGED_BINARY")" || after=""
+    verdict="$(_classify_schema_peer_failure "$PEER_LEG_LAUNCHED" "$PEER_VERDICT_MARKER" "$before" "$after")"
+    case "$verdict" in
+        unchanged)
+            SCHEMA_PEERS_FIRST_STATE=failed
+            echo "✗ [schema-order] the peer leg failed and the shared schema is unchanged ($after); this node was not migrated or restarted"
+            return 1
+            ;;
+        advanced)
+            MIGRATION_FLOOR_ARMED=1
+            SCHEMA_PEERS_FIRST_STATE=failed
+            SCHEMA_PEERS_FIRST_FAILED=1
+            echo "⚠ [schema-order] the peer leg failed after the shared schema moved (before: $before; after: $after); finishing this node on the new binary"
+            return 0
+            ;;
+        *)
+            SCHEMA_PEERS_FIRST_STATE=unresolved
+            echo "✗ [schema-order] the peer leg failed and the shared schema state is unknown (before: ${before:-unknown}; after: ${after:-unknown}; peer marker: $PEER_VERDICT_MARKER)"
+            echo "  The staged binary is kept, not installed; check the peer log and doctor, then redeploy."
+            return 1
+            ;;
+    esac
+}
+
+_finish_cluster_stage() {
+    # Peers deploy here unless they already ran before the migration; a failed
+    # peer-first leg still fails the run after this node finished.
+    if [ "$DEPLOY_ALL_NODES" = "1" ] && [ -z "$SCHEMA_PEERS_FIRST_STATE" ]; then
+        _deploy_to_all_peers "$@" || return 1
+    fi
+    if [ "$SCHEMA_PEERS_FIRST_FAILED" = "1" ]; then
+        echo "✗ [schema-order] this node finished on the new binary, but the peer leg failed after the shared schema advanced"
+        return 1
+    fi
+}
+
+_prepare_release_migrations() {
+    # The peer target is fixed first; the schema then decides only the order.
+    _pin_cluster_target_to_built_source || return 1
+    _run_schema_peers_first "$@"
 }
 
 _acquire_release_deploy_lock() {
@@ -1996,6 +2257,7 @@ export AGENTDESK_DEPLOY_FAST=$(printf '%q' "${AGENTDESK_DEPLOY_FAST:-0}")
 export AGENTDESK_DEPLOY_SKIP_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}")
 export AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}")
 export AGENTDESK_DEPLOY_TARGET_SHA=$(printf '%q' "${AGENTDESK_DEPLOY_TARGET_SHA:-}")
+export AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=$(printf '%q' "${AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS:-0}")
 export AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT=$(printf '%q' "${AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT:-0}")
 export AGENTDESK_DEPLOY_MAX_LOADAVG=$(printf '%q' "${AGENTDESK_DEPLOY_MAX_LOADAVG:-}")
 export AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL=$(printf '%q' "${AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL:-}")
@@ -2122,6 +2384,8 @@ if [ "$DEPLOY_TEST_MODE" = "1" ]; then
     exit 0
 fi
 
+_schema_order_guard_before_build || exit 1
+
 # Ensure release dir exists
 mkdir -p "$ADK_REL"/{bin,config,data,logs}
 
@@ -2149,6 +2413,11 @@ elif [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     SOURCE_BINARY="$AGENTDESK_DEPLOY_BINARY"
 else
     SOURCE_BINARY="$(_resolve_default_release_binary "$DEPLOY_BUILD_PROFILE")"
+fi
+# Cluster peers are pinned to this commit, so record it before building; an
+# external artifact has no source to record.
+if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ -n "$(_schema_order_peers)" ]; then
+    DEPLOY_BUILT_SOURCE_SHA="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
 fi
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     # #5855: the deploy lock is already held here, and a queued peer deploy only
@@ -2777,6 +3046,10 @@ if [ -f "$LOCK_FILE" ]; then
     OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || true)
 fi
 
+# Postgres is shared: pin the cluster peers to this build and, when the schema
+# advances, deploy the peer before this node migrates or restarts.
+_prepare_release_migrations "$@" || exit 1
+
 # Apply the forward-only database boundary before requesting restart_pending.
 # The runtime may consume a persisted restart request and exit on its own, so no
 # drain marker or self-exit trigger may exist when candidate migration runs. The
@@ -2839,23 +3112,10 @@ fi
 # Stop release only after migration and the durable persistence acknowledgement.
 echo "▸ Stopping release..."
 LAUNCHD_DOMAIN="$(_launchd_domain)"
-launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_REL" 2>/dev/null || true
-if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    echo "  waiting for PID $OLD_PID to exit..."
-    WAIT_SECS=0
-    while kill -0 "$OLD_PID" 2>/dev/null && [ "$WAIT_SECS" -lt 15 ]; do
-        sleep 1
-        WAIT_SECS=$((WAIT_SECS + 1))
-    done
-    if kill -0 "$OLD_PID" 2>/dev/null; then
-        echo "  ⚠ PID $OLD_PID did not exit after 15s — sending SIGKILL"
-        kill -9 "$OLD_PID" 2>/dev/null || true
-        sleep 1
-    fi
-    echo "  ✓ old process terminated (${WAIT_SECS}s)"
-else
-    sleep 2
+if ! launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_REL"; then
+    echo "⚠ Release bootout failed for $LAUNCHD_DOMAIN/$PLIST_REL — checking whether release stopped" >&2
 fi
+_wait_release_stopped "$LAUNCHD_DOMAIN/$PLIST_REL" "$OLD_PID" 1 || exit 1
 
 _post_deploy_smoke_log_identity_and_size() {
     local log_path="$1"
@@ -4271,8 +4531,6 @@ _write_release_source_manifest
 # Ordering is the fix, not a smarter regex: while peers are being deployed this
 # transcript carries NO terminal marker, which is the truth — there is no verdict
 # yet. A refused peer exits non-zero and the EXIT trap prints DEPLOY FAILED instead.
-if [ "$DEPLOY_ALL_NODES" = "1" ]; then
-    _deploy_to_all_peers "$@"
-fi
+_finish_cluster_stage "$@" || exit 1
 
 echo "═══ Deploy Complete ═══"

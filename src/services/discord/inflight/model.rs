@@ -585,6 +585,12 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// rows / turns that never rolled over.
     #[serde(default)]
     pub streaming_rollover_frozen_msg_ids: Vec<u64>,
+    /// Projection of this turn's durable replay receipt (`intake_outbox.id`); fixed once set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_receipt_id: Option<i64>,
+    /// Why this episode's replay is held; any reason forbids an automatic rerun of the turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replay_hold_reasons: Vec<String>,
 }
 
 #[cfg(test)]
@@ -1148,6 +1154,8 @@ impl InflightTurnState {
             followup_voice_announcement: None,
             followup_preserve_on_cancel: false,
             streaming_rollover_frozen_msg_ids: Vec::new(),
+            replay_receipt_id: None,
+            replay_hold_reasons: Vec::new(),
         }
     }
 
@@ -1406,3 +1414,7 @@ impl InflightTurnState {
         self.followup_preserve_on_cancel = preserve_on_cancel;
     }
 }
+
+#[cfg(test)]
+#[path = "replay_projection_tests.rs"]
+mod replay_projection_tests;

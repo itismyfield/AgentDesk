@@ -2,8 +2,7 @@
 //! read until it provably stops; a resumed or forked source skips what its parent already holds.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use chrono::{TimeDelta, Utc};
 use tokio::sync::watch;
@@ -12,6 +11,7 @@ use tokio::time::Instant;
 use super::binding::{BindingCause, BindingEvent, BindingEvents, BindingRecord, BindingTarget};
 use super::deliver::ChannelWriter;
 use super::pieces::{Derived, UnitDeriver};
+use super::renumbered::{self, Logged, Names, Reopen, reopen};
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm};
 use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::tui_o::shadow::capture::SourceCapture;
@@ -37,6 +37,8 @@ const PENDING_BIND_ALARM_SECS: i64 = 60;
 
 #[path = "fork_lineage.rs"]
 mod fork_lineage;
+#[cfg(test)]
+pub(crate) mod provenance;
 use fork_lineage::{Class, Lineage, RowIds};
 
 /// How a record names a native key: as the unit itself or as an announcement of it.
@@ -110,6 +112,7 @@ pub struct Sources<B> {
     log_alarmed: bool,
     /// Hop seq and pane of successor records written without them, as the binding log names them.
     legacy_hops: HashMap<String, (u64, String)>,
+    names: Names,
 }
 
 fn halted(context: &'static str) -> impl Fn(StoreError) -> WriterAlarm {
@@ -217,7 +220,7 @@ fn hop<'a>(
     (old != new).then_some((old, new))
 }
 
-fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
+pub(super) fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
     match &event.record {
         BindingRecord::Bound {
             new: BindingTarget::Source(source),
@@ -259,6 +262,7 @@ impl<B: BindingEvents> Sources<B> {
             pending_alarmed: None,
             log_alarmed: false,
             legacy_hops: HashMap::new(),
+            names: Names::new(provider),
         }
     }
 
@@ -272,16 +276,14 @@ impl<B: BindingEvents> Sources<B> {
     ) -> Result<(), WriterAlarm> {
         let resolved = writer.store().apply_resolved_boundaries();
         resolved.map_err(halted("resolved boundary"))?;
+        renumbered::unique(writer.store().cursors()).map_err(halt)?;
         self.rotation = writer.store().rotation().map_err(halted("rotation"))?;
         let checkpoint = writer.store().binding_checkpoint();
         self.checkpoint = checkpoint.map_err(halted("binding checkpoint"))?;
-        if let Some(events) = self.read_log(writer, 0) {
-            let store = writer.store();
-            let checkpoint = self
-                .checkpoint
-                .or_else(|| binding_baseline(&events, |source| store.cursor(source).is_some()));
+        if let Some(logged) = self.read_log(writer, 0)? {
+            let checkpoint = self.names.start(writer.store(), &logged, self.checkpoint)?;
             if let Some(checkpoint) = checkpoint {
-                self.restore_hops(writer, &events, checkpoint)?;
+                self.restore_hops(writer, &logged.1, checkpoint)?;
             }
         }
         let mut cursors: Vec<_> = writer.store().cursors().cloned().collect();
@@ -311,18 +313,11 @@ impl<B: BindingEvents> Sources<B> {
                 }
             });
             replay.map_err(halted("spool replay"))?;
-            let opened = SourceCapture::open(cursor.source.clone(), cursor.captured_through);
-            let capture = match opened {
+            let capture = match reopen(&cursor) {
                 Ok(capture) => Some(capture),
-                Err(_) if cursor.retired => None,
-                Err(error) => return Err(halt(format!("source reopen: {error}"))),
+                Err(Reopen::Unread(_)) if cursor.retired => None,
+                Err(failed) => return Err(failed.halt()),
             };
-            if capture
-                .as_ref()
-                .is_some_and(|capture| capture.prefix_hash() != cursor.prefix_hash)
-            {
-                return Err(halt("source bytes before the cursor changed"));
-            }
             let mut reader = Reader::new(cursor.source.clone(), capture);
             reader.captured_any = captured_any
                 || !writer
@@ -346,7 +341,7 @@ impl<B: BindingEvents> Sources<B> {
             }
             self.readers.push(reader);
         }
-        self.restore_legacy_hops();
+        self.restore_legacy_hops(writer);
         self.flush(writer)
     }
 
@@ -372,7 +367,10 @@ impl<B: BindingEvents> Sources<B> {
 
     /// Takes each unproven record's missing pane and seq from the last applied hop of its old
     /// source; a record that hop does not match stays unproven.
-    fn restore_legacy_hops(&mut self) {
+    fn restore_legacy_hops<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+    ) {
         let legacy = |next: &Successor| next.seq.is_none() && next.proof.is_none();
         let Some(checkpoint) = self.checkpoint else {
             return;
@@ -380,7 +378,8 @@ impl<B: BindingEvents> Sources<B> {
         if !self.rotation.successors.values().any(legacy) {
             return;
         }
-        let Ok(events) = self.bindings.binding_events_since(self.channel, 0) else {
+        let read = self.bindings.binding_events_since(self.channel, 0);
+        let Some(events) = self.names.history(writer.store(), read, Some(checkpoint)) else {
             return;
         };
         let applied = &events[..events.partition_point(|e| e.seq <= checkpoint)];
@@ -413,7 +412,7 @@ impl<B: BindingEvents> Sources<B> {
         if *self.notice.borrow() <= checkpoint {
             return Ok(());
         }
-        let Some(events) = self.read_log(writer, checkpoint) else {
+        let Some((events, _)) = self.read_log(writer, checkpoint)? else {
             return Ok(());
         };
         let resolved: HashMap<u64, SourceId> = events
@@ -486,20 +485,21 @@ impl<B: BindingEvents> Sources<B> {
     /// Reads binding events past `after`; a failed read alarms once per outage and applies nothing.
     fn read_log<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
-        writer: &ChannelWriter<P, L, A>,
+        writer: &mut ChannelWriter<P, L, A>,
         after: u64,
-    ) -> Option<Vec<BindingEvent>> {
-        match self.bindings.binding_events_since(self.channel, after) {
+    ) -> Result<Option<Logged>, WriterAlarm> {
+        let (store, from) = (writer.store(), self.names.from(after));
+        match self.bindings.binding_events_since(self.channel, from) {
             Ok(events) => {
                 self.log_alarmed = false;
-                Some(events)
+                self.names.read(store, events, after, self.checkpoint)
             }
             Err(detail) => {
                 if !std::mem::replace(&mut self.log_alarmed, true) {
                     let checkpoint = self.checkpoint;
                     writer.alarm(WriterAlarm::BindingLogUnavailable { checkpoint, detail });
                 }
-                None
+                Ok(None)
             }
         }
     }
@@ -510,14 +510,13 @@ impl<B: BindingEvents> Sources<B> {
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
     ) -> Result<Option<u64>, WriterAlarm> {
-        let Some(events) = self.read_log(writer, 0) else {
+        let Some(logged) = self.read_log(writer, 0)? else {
             return Ok(None);
         };
-        let store = writer.store();
-        let seq = binding_baseline(&events, |source| store.cursor(source).is_some()).ok_or_else(
-            || halt("no binding baseline: no event binds a source attached at the switch"),
-        )?;
-        self.restore_hops(writer, &events, seq)?;
+        let seq = self.names.start(writer.store(), &logged, None)?;
+        let no_baseline = "no binding baseline: no event binds a source attached at the switch";
+        let seq = seq.ok_or_else(|| halt(no_baseline))?;
+        self.restore_hops(writer, &logged.1, seq)?;
         for reader in &mut self.readers {
             if let Some(next) = self.rotation.successors.get(&source_key(&reader.source)) {
                 reader.rotated_at.get_or_insert(Instant::now());
@@ -552,7 +551,7 @@ impl<B: BindingEvents> Sources<B> {
                 _ => (self.legacy_hops.get(key)).map(|(seq, tmux)| (*seq, tmux.as_str())),
             };
             let old = self.readers.iter().find(|r| source_key(&r.source) == *key);
-            let left = old.is_some_and(|old| old.source.session_id != session);
+            let left = old.is_some_and(|old| self.names.session(&old.source) != session);
             let ours =
                 made.is_some_and(|(seq, tmux)| seq <= event.seq && tmux == event.tmux_session);
             if next.proof.is_none() && ours && left {
@@ -590,6 +589,12 @@ impl<B: BindingEvents> Sources<B> {
         cause: BindingCause,
         parent_hint: Option<&SourceId>,
     ) -> Result<(), WriterAlarm> {
+        // A source an earlier event of this batch attached is the stored name of its file now.
+        let mut stored = |source: &SourceId| self.names.bind_name(writer.store(), source);
+        let old = old.map(&mut stored).transpose()?;
+        let parent_hint = parent_hint.map(&mut stored).transpose()?;
+        let new = stored(&new)?;
+        let (old, parent_hint) = (old.as_ref(), parent_hint.as_ref());
         let key = source_key(&new);
         let cursor = writer.store().cursor(&new).cloned();
         if cursor.is_none() && !self.rotation.links.contains_key(&key) {
@@ -617,6 +622,10 @@ impl<B: BindingEvents> Sources<B> {
             self.rotation.links.insert(key.clone(), link);
         }
         self.rotation.successors.remove(&key);
+        // A source bound again leaves its old rotation, so a next one measures its own quiet.
+        if let Some(r) = self.readers.iter_mut().find(|r| r.source == new) {
+            (r.rotated_at, r.quiet, r.drain_to, r.growth_alarmed) = (None, None, None, false);
+        }
         if let Some(old) = old.filter(|old| **old != new) {
             if writer.store().cursor(old).is_none() {
                 return Err(halt("a bind names an old source this channel never read"));
@@ -645,8 +654,8 @@ impl<B: BindingEvents> Sources<B> {
         match cursor {
             None => {
                 let attached = writer.store().attach_source(&new);
-                attached.map_err(halted("attach"))?;
-                let opened = SourceCapture::open(new.clone(), 0);
+                let attached = attached.map_err(halted("attach"))?;
+                let opened = SourceCapture::reopen(new.clone(), 0, &attached.prefix_hash);
                 let capture = opened.map_err(|error| halt(format!("bound source: {error}")))?;
                 self.readers.push(Reader::new(new, Some(capture)));
                 Ok(())
@@ -670,12 +679,7 @@ impl<B: BindingEvents> Sources<B> {
         if reader.capture.is_none() {
             let cursor = writer.store().cursor(source).cloned();
             let cursor = cursor.ok_or_else(|| halt("retired source lost its cursor"))?;
-            let opened = SourceCapture::open(source.clone(), cursor.captured_through);
-            let capture = opened.map_err(|error| halt(format!("source reopen: {error}")))?;
-            if capture.prefix_hash() != cursor.prefix_hash {
-                return Err(halt("source bytes before the cursor changed"));
-            }
-            reader.capture = Some(capture);
+            reader.capture = Some(reopen(&cursor).map_err(Reopen::halt)?);
         }
         Ok(())
     }
@@ -991,5 +995,18 @@ impl<B: BindingEvents> Sources<B> {
         let keep = |reader: &Reader| usize::from(reader.pending.is_none());
         let readers = self.readers.iter().filter(decided);
         readers.map(|r| (r.source.clone(), keep(r))).collect()
+    }
+}
+#[cfg(test)]
+pub(crate) mod probe {
+    //! Reads a live reader's rotation start, which no store row or alarm shows.
+    use super::{Instant, SourceId, Sources};
+
+    pub(crate) fn rotated_at<B>(
+        sources: &Sources<B>,
+        source: &SourceId,
+    ) -> Option<Option<Instant>> {
+        let reader = sources.readers.iter().find(|r| r.source == *source);
+        reader.map(|r| r.rotated_at)
     }
 }

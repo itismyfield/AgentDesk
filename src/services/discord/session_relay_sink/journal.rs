@@ -93,6 +93,7 @@ pub(super) struct AttemptObservation {
 struct AppendCommand {
     pool: sqlx::PgPool,
     events: Vec<JournalEvent>,
+    ack: Option<tokio::sync::oneshot::Sender<Result<pg_store::AppendResult, String>>>,
 }
 
 #[derive(Default)]
@@ -150,6 +151,7 @@ impl JournalObserver {
             pool: pool.clone(),
         };
         self.submit(AppendCommand {
+            ack: None,
             pool,
             events: admission_events(obligation_id, attempt_id, key.payload(), key.frontier),
         });
@@ -188,6 +190,7 @@ impl JournalObserver {
         };
         let emitted_events = events.clone();
         self.submit(AppendCommand {
+            ack: None,
             pool: attempt.pool,
             events,
         });
@@ -216,7 +219,16 @@ impl JournalObserver {
             let counters = self.counters.clone();
             super::super::task_supervisor::spawn_observed("delivery_journal_observer", async move {
                 while let Some(command) = receiver.recv().await {
-                    match pg_store::append_delivery_journal_batch(&command.pool, &command.events).await {
+                    let result = pg_store::append_delivery_journal_batch(&command.pool, &command.events).await;
+                    if let Some(ack) = command.ack {
+                        let reply = match &result {
+                            Ok(value @ (pg_store::AppendResult::Persisted | pg_store::AppendResult::DuplicateNoOp)) => Ok(*value),
+                            Ok(pg_store::AppendResult::InvariantConflict) => Err("strict invariant conflict".into()),
+                            Err(error) => Err(error.to_string()),
+                        };
+                        let _ = ack.send(reply);
+                    }
+                    match result {
                         Ok(pg_store::AppendResult::Persisted) => &counters.persisted,
                         Ok(pg_store::AppendResult::DuplicateNoOp) => &counters.duplicate_noop,
                         Ok(pg_store::AppendResult::InvariantConflict) => &counters.invariant_conflict,
@@ -527,6 +539,8 @@ fn malformed_judgment() -> ObligationWindowJudgment {
 }
 
 fn exact_delivery_predicate(events: &[JournalEvent]) -> (bool, Option<i64>, bool) {
+    let events = legacy_events(events);
+    let events = events.as_slice();
     let Some(first) = events.first() else {
         return (false, None, false);
     };
@@ -636,6 +650,8 @@ fn receipt_is_exact(event: &JournalEvent) -> bool {
 /// Q3 classification for one obligation's shadow observation window.
 #[rustfmt::skip]
 pub(super) fn classify_shadow_observation(events: &[JournalEvent], grace_elapsed: bool) -> ShadowClassification {
+    let events = legacy_events(events);
+    let events = events.as_slice();
     let Some(first) = events.first() else { return ShadowClassification::ObservationGap };
     if events.iter().any(|event| event.obligation_id != first.obligation_id) { return ShadowClassification::Unknown; }
     let find = |kind: &'static str| events.iter().find(|event| event.kind == kind);
@@ -1109,4 +1125,67 @@ mod tests {
         assert_eq!(events[1].kind, "C");
         assert_eq!(events[1].seq, 3);
     }
+}
+
+// Strict envelopes use separate UUID slots, never a parent's transport slot.
+pub(crate) async fn append_exact_metadata(
+    pool: sqlx::PgPool,
+    metadata: &crate::services::tui_o::exact_episode::EpisodeMetadata,
+) -> Result<(), String> {
+    if !metadata.supported() {
+        return Err("unsupported strict metadata".into());
+    }
+    let payload = serde_json::to_value(metadata).map_err(|e| e.to_string())?;
+    let obligation = Uuid::new_v5(
+        &JOURNAL_NAMESPACE,
+        format!(
+            "strict:{}:{}",
+            metadata.episode,
+            if matches!(
+                metadata.evidence,
+                crate::services::tui_o::exact_episode::EpisodeEvidence::Settled { .. }
+            ) {
+                "settled".to_string()
+            } else {
+                metadata.record.to_string()
+            }
+        )
+        .as_bytes(),
+    );
+    let envelope = event(obligation, None, "O", 0, payload);
+    let (ack, receiver) = tokio::sync::oneshot::channel();
+    #[cfg(test)]
+    let observer = JournalObserver::default();
+    #[cfg(not(test))]
+    let observer = process_observer();
+    observer
+        .sender()
+        .send(AppendCommand {
+            pool,
+            events: vec![envelope],
+            ack: Some(ack),
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    receiver.await.map_err(|e| e.to_string())?.map(|_| ())
+}
+
+#[cfg(test)]
+pub(crate) use pg_store::exact_tests::{
+    exact_duplicate_pg_full_fields_and_legacy_same_key_other_attempt,
+    exact_namespace_pg_old_reader_and_legacy_binding_bytes_unchanged,
+};
+
+fn legacy_events(events: &[JournalEvent]) -> Vec<JournalEvent> {
+    events
+        .iter()
+        .filter(|event| {
+            event
+                .canonical_payload
+                .get("namespace")
+                .and_then(Value::as_str)
+                != Some(crate::services::tui_o::exact_episode::STRICT_NAMESPACE)
+        })
+        .cloned()
+        .collect()
 }

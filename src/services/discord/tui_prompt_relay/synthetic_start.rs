@@ -2493,6 +2493,7 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                     ssh_direct_observation_generation:
                         crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
                     hook_prompt_id: None,
+                    row_prompt_id: None,
                     native_turn_id: None,
                     steer_echo: false,
                 };

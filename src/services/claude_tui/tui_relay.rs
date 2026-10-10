@@ -286,6 +286,17 @@ fn handle_send_with_backend(
             if protected.is_err() {
                 return Err(draft_recovery_hold_json());
             }
+            // A new message submitted to a Claude pane must not carry text already in its composer.
+            if req.submit && !req.text.is_empty() && !foreign_provider_pane(&session_name) {
+                let capture = backend.capture(&session_name);
+                let refusal = crate::services::claude_tui::input::composer_refusal(
+                    &session_name,
+                    capture.as_deref(),
+                );
+                if let Some(reason) = refusal {
+                    return Err((StatusCode::CONFLICT, Json(error_json(reason))));
+                }
+            }
             if !req.text.is_empty() {
                 let buffer_name = allocate_buffer_name();
                 backend
@@ -607,6 +618,13 @@ fn bad_request_json(message: &str) -> (StatusCode, Json<Value>) {
     (StatusCode::BAD_REQUEST, Json(error_json(message)))
 }
 
+/// A pane named for a provider other than Claude, whose composer the Claude reader cannot read.
+fn foreign_provider_pane(session_name: &str) -> bool {
+    use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
+    parse_provider_and_channel_from_tmux_name(session_name)
+        .is_some_and(|(provider, _)| provider != ProviderKind::Claude)
+}
+
 /// Nothing was sent: the pane protects a person's draft, so the caller keeps the input.
 fn draft_recovery_hold_json() -> (StatusCode, Json<Value>) {
     (
@@ -645,6 +663,18 @@ impl SendBackend for FakeSendBackend {
     fn send_enter(&self, _session_name: &str) -> Result<(), String> {
         Ok(())
     }
+
+    fn capture(&self, _session_name: &str) -> Option<String> {
+        Some(empty_composer_for_tests())
+    }
+}
+
+/// An idle Claude pane with an empty composer, as `capture-pane -e` returns it.
+#[cfg(test)]
+pub(crate) fn empty_composer_for_tests() -> String {
+    let border = "\u{2500}".repeat(60);
+    let footer = "  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";
+    format!("\u{23fa} Done.\n\n\n{border}\n\u{276f}\u{a0}\n{border}\n{footer}\n")
 }
 
 #[cfg(test)]
@@ -769,6 +799,9 @@ mod tests {
             }
             fn send_enter(&self, _session_name: &str) -> Result<(), String> {
                 Ok(())
+            }
+            fn capture(&self, _session_name: &str) -> Option<String> {
+                Some(empty_composer_for_tests())
             }
         }
 
@@ -1476,7 +1509,10 @@ mod tests {
     #[test]
     fn tui_send_reaches_tmux_only_through_the_host_executor() {
         use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
-        let guard = SpyGuard::install(SpyState::default());
+        let guard = SpyGuard::install(SpyState {
+            captures: [Some(empty_composer_for_tests())].into(),
+            ..SpyState::default()
+        });
         let (status, body) =
             handle_send_with_backend(send_request("한글\n둘째 줄", true), &TmuxSendBackend);
         assert_eq!(status, StatusCode::OK);
@@ -1485,6 +1521,7 @@ mod tests {
             guard.calls(),
             [
                 "present",
+                "capture:draft",
                 "load:한글\n둘째 줄",
                 "paste:delete=true",
                 "keys:Enter"

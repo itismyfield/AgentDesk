@@ -41,6 +41,12 @@ fn recovery_output_path_with_tmux_fallback(
 
 #[cfg(unix)]
 fn herdr_turn_held(provider: &ProviderKind, state: &inflight::InflightTurnState) -> bool {
+    #[cfg(test)]
+    if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
+        "restart_none_as_complete",
+    ) {
+        return false;
+    }
     crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
         && state.tui_terminal_kind.is_none()
         && recovery_tmux_session_name(provider, state)
@@ -54,6 +60,8 @@ pub(in crate::services::discord) use kickoff_identity::finish_recovered_turn_mai
 mod output_paths;
 #[cfg(unix)]
 pub(super) use output_paths::detect_live_tmux_output_path;
+#[path = "restore_inflight/replay_hold.rs"]
+mod replay_hold;
 
 fn observe_restore_inflight_snapshot(
     provider: &ProviderKind,
@@ -104,6 +112,14 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         {
             continue;
         }
+        // An unverified projected receipt waits for another pass without persisting a read error.
+        if !replay_hold::hydrate_replay_hold(shared.pg_pool.as_ref(), &mut state).await {
+            continue;
+        }
+        if state.replay_rerun_blocked() {
+            replay_hold::deliver_held_debt(http, shared, provider, &mut state).await;
+            continue;
+        }
         if matches!(
             crate::services::agent_recovery::channel_recovery_intake(
                 provider,
@@ -149,6 +165,12 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 channel_id = state.channel_id,
                 "recovery kept a held Herdr turn"
             );
+            continue;
+        }
+        // An admitted Herdr terminal settles from its persisted kind, never from a transcript read.
+        #[cfg(unix)]
+        if let Some(terminal) = super::herdr_admitted_restart::admitted(provider, &state) {
+            terminal.settle(http, shared, &state).await;
             continue;
         }
 
@@ -2717,3 +2739,6 @@ mod kickoff_identity_tests;
 #[cfg(test)]
 #[path = "restore_inflight/ready_without_output_tests.rs"]
 mod ready_without_output_tests;
+#[cfg(all(test, unix))]
+#[path = "restore_inflight/replay_hold_tests.rs"]
+mod replay_hold_tests;

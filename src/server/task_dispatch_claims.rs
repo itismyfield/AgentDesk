@@ -9,6 +9,10 @@ use crate::config::{ClusterConfig, ClusterSemaphoreConfig};
 const DEFAULT_TASK_DISPATCH_CLAIM_TTL_SECS: i64 = 10 * 60;
 const DEFAULT_TASK_DISPATCH_CLAIM_LIMIT: i64 = 10;
 
+#[cfg(test)]
+#[path = "task_dispatch_claims_replay_tests.rs"]
+mod replay_tests;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TaskDispatchClaimRequest {
     pub claim_owner: String,
@@ -107,6 +111,7 @@ async fn claim_task_dispatches_with_cluster_config(
            )
            AND ($1::TEXT IS NULL OR to_agent_id = $1)
            AND ($2::TEXT IS NULL OR dispatch_type = $2)
+           AND NOT replay_disposition_blocks_rerun(replay_disposition)
          ORDER BY created_at ASC, id ASC
          FOR UPDATE SKIP LOCKED
          LIMIT $3

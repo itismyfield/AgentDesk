@@ -9,6 +9,7 @@ use crate::services::tui_o::shadow::ShadowProvider;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
     InvalidPrompt,
+    UnpredictableRender,
     NotReady,
     CaptureUnavailable,
     OwnDraft,
@@ -48,44 +49,36 @@ pub(crate) fn run_prompt_submission_using(
     if cancel_requested(cancel_token) {
         return InputRun::Cancelled { confirmed: 0 };
     }
+    let cancelled_after_payload = || InputRun::Cancelled {
+        confirmed: submission.mutations,
+    };
     let run = payload();
     if run != InputRun::Applied {
         return run;
     }
     if cancel_requested(cancel_token) {
-        return InputRun::Cancelled {
-            confirmed: submission.mutations,
-        };
+        return cancelled_after_payload();
     }
     let late_refusal = |reason| InputRun::Indeterminate {
         confirmed: submission.mutations,
         cause: StopCause::Refused(InputRefusal::Composer(reason)),
     };
-    let Some(after) = after() else {
+    let observed = after();
+    if cancel_requested(cancel_token) {
+        return cancelled_after_payload();
+    }
+    let Some(after) = observed else {
         return late_refusal(Refusal::CaptureUnavailable);
     };
-    // Compare the provider's visible form while preserving the transmitted byte limit above.
+    // Compare pane line endings while the byte limit above keeps the transmitted frame.
     let canonical = submission.frame.replace("\r\n", "\n").replace('\r', "\n");
-    let canonical = match submission.provider {
-        ShadowProvider::Claude => canonical.replace('\t', "    "),
-        ShadowProvider::Codex => canonical,
-    };
     let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&after);
-    let busy = match submission.provider {
-        ShadowProvider::Claude => {
-            crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&plain)
-        }
-        ShadowProvider::Codex => {
-            crate::services::codex_tui::input::pane_has_codex_active_turn_in_pane(&plain)
-        }
-    };
+    let busy = super::actor::gate::submission_busy(submission.provider, &plain);
     if busy || !own_draft(submission.provider, &after, &canonical, true) {
         return late_refusal(Refusal::OwnDraft);
     }
     if cancel_requested(cancel_token) {
-        return InputRun::Cancelled {
-            confirmed: submission.mutations,
-        };
+        return cancelled_after_payload();
     }
     match enter() {
         InputRun::Refused(reason) => InputRun::Indeterminate {
@@ -356,6 +349,23 @@ mod tests {
                 ),
                 expected
             );
+        }
+    }
+    #[test]
+    fn cancellation_during_capture_preserves_payload_effect_before_any_late_refusal() {
+        for after in [None, Some("unknown render".to_string())] {
+            let token = CancelToken::new();
+            let run = run_prompt_submission_using(
+                submission(FRAME),
+                Some(&token),
+                || InputRun::Applied,
+                || {
+                    token.cancelled.store(true, Ordering::Relaxed);
+                    after
+                },
+                || panic!("cancelled capture sent Enter"),
+            );
+            assert_eq!(run, InputRun::Cancelled { confirmed: 2 });
         }
     }
 }

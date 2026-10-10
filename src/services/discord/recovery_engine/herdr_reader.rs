@@ -239,7 +239,23 @@ async fn reconnect(pool: &PgPool, record: &HostedExecution) -> HerdrSourceAttach
         Some(reader) => attach_restarted_herdr_source(pool, &record.owner, channel, &reader).await,
         None => attach_restarted_herdr_source(pool, &record.owner, channel, &NoHerdrEndpoint).await,
     };
-    tracing::info!(channel, ?attached, "herdr reconnect after restart");
+    if crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available() {
+        tracing::info!(
+            event = "herdr_turn_held",
+            channel,
+            provider = record.owner.provider,
+            logical = record.owner.logical_key,
+            execution_nonce = record.execution_nonce,
+            hold_kind = "source_reconnect",
+            hold_reason = "restart_no_turn_anchor",
+            settlement = "host_owned",
+            terminal_confirmed = false,
+            ?attached,
+            "herdr reconnect after restart"
+        );
+    } else {
+        tracing::info!(channel, ?attached, "herdr reconnect after restart");
+    }
     attached
 }
 

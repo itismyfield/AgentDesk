@@ -359,6 +359,7 @@ impl Fixture {
                 let _registry = rig.registry_on_this_thread();
                 let _admission = open_admission();
                 let (sender, receiver) = std::sync::mpsc::channel();
+                let owner_for_strict = owner.logical_key.clone();
                 let turn = CodexHerdrTurn {
                     pool,
                     owner,
@@ -375,7 +376,29 @@ impl Fixture {
                     compact_token_limit: None,
                     cancel: Some(token),
                 };
-                let result = herdr_turn::execute(turn, ports, sender);
+                let strict_pin = if owner_for_strict.contains("strict-") {
+                    use crate::services::tui_o::exact_episode::{EpisodeEvidence, EpisodeMetadata};
+                    let EpisodeEvidence::Pin(mut pin) = crate::services::tui_o::exact_episode::tests::fixture().remove(0).evidence else { panic!("pin fixture"); };
+                    pin.episode = uuid::Uuid::new_v4();
+                    pin.owner = owner_for_strict.clone();
+                    pin.source = None;
+                    rt.block_on(crate::services::tui_o::exact_pg::record_episode_evidence(true, pool, &EpisodeMetadata::new(pin.episode, uuid::Uuid::new_v4(), EpisodeEvidence::Pin(pin.clone())))).unwrap();
+                    Some(pin)
+                } else { None };
+                let _strict = strict_pin.clone().map(|pin| crate::services::tui_o::exact_submission::install(pool.clone(), pin));
+                let result = crate::services::tui_o::exact_submission::dispatch(|| herdr_turn::execute(turn, ports, sender));
+                if let Some(pin) = strict_pin {
+                    rt.block_on(async {
+                        let mut connection = pool.acquire().await.unwrap();
+                        let resolution = crate::services::tui_o::exact_pg::resolve_in_tx(&mut connection, pin.episode).await.unwrap();
+                        let attempted: i64 = sqlx::query_scalar("SELECT count(*) FROM public.delivery_journal_events WHERE canonical_payload->>'episode'=$1 AND canonical_payload->'evidence'->>'type'='InputAttemptBegun'").bind(pin.episode.to_string()).fetch_one(&mut *connection).await.unwrap();
+                        if attempted == 0 {
+                            assert_eq!(resolution.authority(), crate::services::tui_o::exact_episode::Authority::Policy);
+                        } else {
+                            assert_eq!(resolution.authority(), crate::services::tui_o::exact_episode::Authority::Pending);
+                        }
+                    });
+                }
                 finished.store(true, Ordering::SeqCst);
                 (result, receiver.try_iter().collect())
             });
@@ -1396,4 +1419,51 @@ fn a_late_stop_refused_before_any_send_runs_at_the_next_complete_record_pg() {
         "none over the unfinished record, one after it"
     );
     assert_eq!(repeated, "AlreadyRequested");
+}
+
+// A stop that landed before the turn took its stop state leaves the turn to write nothing: it
+// launches nothing, sends nothing to the pane and takes no stop state.
+#[test]
+fn a_turn_cancelled_before_its_stop_state_writes_nothing_pg() {
+    let fx = Fixture::admitted("cancelled-first");
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let token = Arc::new(CancelToken::new());
+    token.publish_cancel("mailbox_cancel_active_turn");
+    let endpoint = HerdrLaunchEndpoint {
+        execution_node: NODE.into(),
+        config_key: KEY.into(),
+        socket_addr: fx.rig.socket().display().to_string(),
+        herdr_session: SESSION.into(),
+    };
+    let _runtime = fx.rt.enter();
+    let _registry = fx.rig.registry_on_this_thread();
+    let _admission = open_admission();
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    let turn = CodexHerdrTurn {
+        pool: &fx.pool,
+        owner: fx.owner.clone(),
+        channel_id: CHANNEL,
+        endpoint,
+        row: Some(&HostedRecord::Legacy),
+        prompt: "질문",
+        working_dir: fx.cwd.to_str().unwrap(),
+        system_prompt: None,
+        allowed_tools: &[],
+        model: None,
+        fast_mode: None,
+        goals: None,
+        compact_token_limit: None,
+        cancel: Some(token.clone()),
+    };
+    let result = herdr_turn::execute(turn, &ports, sender);
+    let cancelled = crate::services::codex_tui::input::PROMPT_READY_CANCELLED_ERROR;
+    assert_eq!(result, Err(cancelled.to_string()));
+    assert!(
+        launcher.nonces.lock().unwrap().is_empty(),
+        "nothing launched"
+    );
+    assert!(fx.rig.sends().is_empty(), "nothing sent to the pane");
+    assert!(token.herdr_interrupt_state().is_none());
+    assert!(token.tmux_session_name().is_none());
 }

@@ -416,12 +416,24 @@ fn file_identity(_: &std::fs::Metadata) -> Option<(u64, u64)> {
 }
 
 impl CancelToken {
-    /// Install observation before input; only Herdr executors use this slot.
+    /// [`Self::try_prepare_herdr_interrupt`] for a test turn that must take its state.
+    #[cfg(test)]
     pub(crate) fn prepare_herdr_interrupt(
         &self,
         provider: ProviderKind,
         owner: &crate::db::dispatched_sessions::hosted_execution::HostedOwner,
     ) -> Arc<HerdrInterruptState> {
+        let state = self.try_prepare_herdr_interrupt(provider, owner);
+        state.expect("a test turn takes its Herdr stop state")
+    }
+
+    /// Install observation before input; only Herdr executors use this slot. `None`, installing
+    /// nothing, once a cancel landed first or when the slot holds another owner's turn.
+    pub(crate) fn try_prepare_herdr_interrupt(
+        &self,
+        provider: ProviderKind,
+        owner: &crate::db::dispatched_sessions::hosted_execution::HostedOwner,
+    ) -> Option<Arc<HerdrInterruptState>> {
         let mut slot = self
             .herdr_interrupt
             .lock()
@@ -431,7 +443,14 @@ impl CancelToken {
             if herdr_interrupt_mutant("prepare_reset") {
                 self.claude_interrupt_claim.store(0, Ordering::Release);
             }
-            return state.clone();
+            return (state.owner == *owner).then(|| state.clone());
+        }
+        // A stop decided under this slot before it held a state cancelled a turn that wrote nothing.
+        let cancelled = self.cancelled.load(Ordering::Acquire);
+        #[cfg(test)]
+        let cancelled = cancelled && !herdr_interrupt_mutant("prepare_ignores_cancel");
+        if cancelled {
+            return None;
         }
         let state = Arc::new(HerdrInterruptState {
             owner: owner.clone(),
@@ -456,7 +475,7 @@ impl CancelToken {
             turns.entry(key).or_default().push(Arc::downgrade(&state));
         }
         *slot = Some(state.clone());
-        state
+        Some(state)
     }
 
     pub(crate) fn herdr_interrupt_state(&self) -> Option<Arc<HerdrInterruptState>> {
@@ -465,6 +484,89 @@ impl CancelToken {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+}
+
+/// A guarded channel stop's cancel, decided once under the token's Herdr slot and handed back as
+/// is: a later change to the token never turns one outcome into another.
+#[derive(Clone)]
+pub(crate) enum StopCancel {
+    /// The token was not the channel's turn: nothing was published.
+    NotCurrent,
+    /// The token was already cancelling: nothing was published.
+    AlreadyStopping(Arc<CancelToken>),
+    /// This stop published the cancel.
+    Published(Arc<CancelToken>),
+    /// The turn's Herdr state was installed first: nothing was published, the stop takes the
+    /// turn's intent path.
+    Herdr(Arc<CancelToken>),
+}
+
+impl StopCancel {
+    /// The mailbox's cancel of its current `token`, under the slot lock a Herdr prepare takes;
+    /// without settlement it is the existing guarded cancel and takes no slot.
+    pub(crate) fn decide(token: Option<Arc<CancelToken>>, reason: String) -> Self {
+        let Some(token) = token else {
+            return Self::NotCurrent;
+        };
+        let settled = herdr_stop_settlement_available();
+        #[cfg(test)]
+        let settled = settled || herdr_interrupt_mutant("p2b_settlement_unchecked");
+        let slot = settled.then(|| {
+            token
+                .herdr_interrupt
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        });
+        if token.cancelled.load(Ordering::Relaxed) {
+            return Self::AlreadyStopping(token.clone());
+        }
+        if slot.as_ref().is_some_and(|slot| slot.is_some()) {
+            return Self::Herdr(token.clone());
+        }
+        #[cfg(test)]
+        let slot = if herdr_interrupt_mutant("p2b_unlock_before_publish") {
+            drop(slot);
+            None
+        } else {
+            slot
+        };
+        #[cfg(test)]
+        run_decide_hook();
+        #[cfg(test)]
+        let slot = if herdr_interrupt_mutant("p2b_unlock_after_hook") {
+            drop(slot);
+            None
+        } else {
+            slot
+        };
+        token.publish_cancel(reason);
+        #[cfg(test)]
+        run_publish_hook();
+        drop(slot);
+        Self::Published(token)
+    }
+}
+
+/// Test seam between a stop's slot judgement and its publish: the decide thread's hook observes
+/// the window a concurrent prepare must not enter.
+#[cfg(test)]
+fn run_decide_hook() {
+    DECIDE_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook();
+        }
+    });
+}
+
+/// Test seam between a stop's publish and its slot release: the hook observes the published
+/// cancel while the slot is still held.
+#[cfg(test)]
+fn run_publish_hook() {
+    PUBLISH_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook();
+        }
+    });
 }
 
 /// Provider-terminal settlement is not yet wired; tests exercise only delivery machinery.
@@ -512,6 +614,8 @@ thread_local! {
     pub(crate) static HERDR_CANCEL_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     #[cfg(unix)]
     pub(crate) static HERDR_SETTLEMENT_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    static DECIDE_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+    static PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
 pub(crate) struct ClaudeInterruptDeliveryGuard<'a> {
@@ -956,5 +1060,229 @@ mod tests {
         drop((b, second));
         let survivor = herdr_turn(&logical, &nonce);
         assert!(survivor.is_some_and(|found| Arc::ptr_eq(&found, &a)));
+    }
+
+    /// A token's Herdr state is taken once, by its own owner: another owner's prepare gets none
+    /// and changes nothing.
+    #[test]
+    fn a_herdr_stop_state_is_prepared_again_only_by_its_owner() {
+        let logical = format!("AgentDesk-codex-prepare-owner-{}", std::process::id());
+        let token = CancelToken::new();
+        let state =
+            token.try_prepare_herdr_interrupt(ProviderKind::Codex, &herdr_owner("1", &logical));
+        let state = state.expect("a fresh token takes its state");
+        let again =
+            token.try_prepare_herdr_interrupt(ProviderKind::Codex, &herdr_owner("1", &logical));
+        assert!(again.is_some_and(|again| Arc::ptr_eq(&again, &state)));
+        let other = herdr_owner("2", "AgentDesk-codex-prepare-owner-other");
+        assert!(
+            token
+                .try_prepare_herdr_interrupt(ProviderKind::Codex, &other)
+                .is_none()
+        );
+        assert_eq!(token.tmux_session_name().as_deref(), Some(logical.as_str()));
+    }
+
+    /// Under the Herdr slot a stop before a prepare publishes and the prepare takes nothing; after
+    /// one it leaves the token to its intent path; without settlement it is the existing cancel.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_and_a_herdr_prepare_are_ordered_by_the_slot() {
+        let owner = herdr_owner("1", "AgentDesk-codex-stop-order");
+        let reason = || "mailbox_cancel_active_turn".to_string();
+        let first = Arc::new(CancelToken::new());
+        let decided = StopCancel::decide(Some(first.clone()), reason());
+        assert!(matches!(decided, StopCancel::Published(_)));
+        assert!(first.cancelled.load(Ordering::SeqCst));
+        assert!(
+            first
+                .try_prepare_herdr_interrupt(ProviderKind::Codex, &owner)
+                .is_none()
+        );
+        assert!(first.herdr_interrupt_state().is_none());
+        assert!(
+            first.tmux_session_name().is_none(),
+            "a refused prepare binds nothing"
+        );
+
+        let prepared = Arc::new(CancelToken::new());
+        prepared.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+        let decided = StopCancel::decide(Some(prepared.clone()), reason());
+        assert!(matches!(decided, StopCancel::Herdr(_)));
+        assert!(!prepared.cancelled.load(Ordering::SeqCst));
+        assert!(prepared.cancel_source().is_none());
+
+        prepared.publish_cancel("earlier");
+        let decided = StopCancel::decide(Some(prepared.clone()), reason());
+        assert!(matches!(decided, StopCancel::AlreadyStopping(_)));
+        assert_eq!(prepared.cancel_source().as_deref(), Some("earlier"));
+        assert!(matches!(
+            StopCancel::decide(None, reason()),
+            StopCancel::NotCurrent
+        ));
+
+        let unsettled = Arc::new(CancelToken::new());
+        unsettled.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+        HERDR_SETTLEMENT_OVERRIDE.set(false);
+        let decided = StopCancel::decide(Some(unsettled.clone()), reason());
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        assert!(
+            matches!(decided, StopCancel::Published(_)),
+            "without settlement it cancels"
+        );
+        assert!(unsettled.cancelled.load(Ordering::SeqCst));
+    }
+
+    /// With settlement a prepare racing into a stop's judgement-to-publish window waits on the
+    /// slot, then sees the cancel and installs nothing; without settlement the stop takes no slot.
+    #[cfg(unix)]
+    #[test]
+    fn p2b_decide_holds_slot_lock_until_publish() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct HookReset;
+        impl Drop for HookReset {
+            fn drop(&mut self) {
+                DECIDE_HOOK.with(|hook| hook.borrow_mut().take());
+                HERDR_SETTLEMENT_OVERRIDE.set(true);
+            }
+        }
+        let _reset = HookReset;
+        let owner = herdr_owner("1", "AgentDesk-codex-stop-lock-window");
+        let reason = || "mailbox_cancel_active_turn".to_string();
+
+        let token = Arc::new(CancelToken::new());
+        let (done_tx, done_rx) = mpsc::channel::<bool>();
+        let done_rx = std::rc::Rc::new(done_rx);
+        let hook_runs = Arc::new(AtomicUsize::new(0));
+        {
+            let token = token.clone();
+            let owner = owner.clone();
+            let hook_runs = hook_runs.clone();
+            let done_rx = done_rx.clone();
+            DECIDE_HOOK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    hook_runs.fetch_add(1, Ordering::SeqCst);
+                    let (started_tx, started_rx) = mpsc::channel::<()>();
+                    let racer = token.clone();
+                    let owner = owner.clone();
+                    let done_tx = done_tx.clone();
+                    std::thread::spawn(move || {
+                        started_tx.send(()).unwrap();
+                        let prepared =
+                            racer.try_prepare_herdr_interrupt(ProviderKind::Codex, &owner);
+                        done_tx.send(prepared.is_some()).unwrap();
+                    });
+                    started_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("the racing prepare starts");
+                    let raced = done_rx.recv_timeout(Duration::from_millis(500));
+                    assert!(
+                        matches!(raced, Err(mpsc::RecvTimeoutError::Timeout)),
+                        "the racing prepare is not past the slot while the stop holds it: {raced:?}"
+                    );
+                    assert!(
+                        token.herdr_interrupt.try_lock().is_err(),
+                        "the stop holds the slot between its judgement and its publish"
+                    );
+                    assert!(!token.cancelled.load(Ordering::SeqCst));
+                }));
+            });
+        }
+        let decided = StopCancel::decide(Some(token.clone()), reason());
+        assert_eq!(
+            hook_runs.load(Ordering::SeqCst),
+            1,
+            "the window was observed"
+        );
+        assert!(matches!(decided, StopCancel::Published(_)));
+        let installed = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the racing prepare finishes once the slot is released");
+        assert!(
+            !installed,
+            "the prepare sees the published cancel and takes nothing"
+        );
+        assert!(token.cancelled.load(Ordering::SeqCst));
+        assert!(token.herdr_interrupt_state().is_none());
+        assert!(
+            token.tmux_session_name().is_none(),
+            "a refused prepare binds nothing"
+        );
+
+        HERDR_SETTLEMENT_OVERRIDE.set(false);
+        let unsettled = Arc::new(CancelToken::new());
+        let unsettled_runs = Arc::new(AtomicUsize::new(0));
+        {
+            let unsettled = unsettled.clone();
+            let unsettled_runs = unsettled_runs.clone();
+            DECIDE_HOOK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    unsettled_runs.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        unsettled.herdr_interrupt.try_lock().is_ok(),
+                        "without settlement the stop takes no slot"
+                    );
+                }));
+            });
+        }
+        let decided = StopCancel::decide(Some(unsettled.clone()), reason());
+        assert_eq!(
+            unsettled_runs.load(Ordering::SeqCst),
+            1,
+            "the window was observed"
+        );
+        assert!(matches!(decided, StopCancel::Published(_)));
+        assert!(unsettled.cancelled.load(Ordering::SeqCst));
+    }
+
+    /// With settlement the stop still holds the slot after its publish: the published cancel and
+    /// the held slot are seen together, with no racing thread.
+    #[cfg(unix)]
+    #[test]
+    fn p2b_decide_publishes_before_releasing_the_slot() {
+        struct HookReset;
+        impl Drop for HookReset {
+            fn drop(&mut self) {
+                PUBLISH_HOOK.with(|hook| hook.borrow_mut().take());
+                HERDR_SETTLEMENT_OVERRIDE.set(true);
+            }
+        }
+        let _reset = HookReset;
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        let token = Arc::new(CancelToken::new());
+        let hook_runs = Arc::new(AtomicUsize::new(0));
+        {
+            let token = token.clone();
+            let hook_runs = hook_runs.clone();
+            PUBLISH_HOOK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    hook_runs.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        token.cancelled.load(Ordering::SeqCst),
+                        "the cancel is published"
+                    );
+                    assert!(
+                        token.herdr_interrupt.try_lock().is_err(),
+                        "the stop holds the slot through its publish"
+                    );
+                }));
+            });
+        }
+        let decided = StopCancel::decide(
+            Some(token.clone()),
+            "mailbox_cancel_active_turn".to_string(),
+        );
+        assert_eq!(
+            hook_runs.load(Ordering::SeqCst),
+            1,
+            "the publish was observed"
+        );
+        assert!(matches!(decided, StopCancel::Published(_)));
+        assert!(
+            token.herdr_interrupt.try_lock().is_ok(),
+            "the slot is released"
+        );
     }
 }

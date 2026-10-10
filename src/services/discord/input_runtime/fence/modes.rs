@@ -1,26 +1,22 @@
 //! Supervisor-only mode moves after a Legacy close; an effect admitted before the close keeps its
 //! epoch, so a held or aborted transition never strands that effect's cleanup.
 use super::{Closing, Failure, Mode};
+use crate::services::discord::input_runtime::supervisor::ordering::{
+    self, ValidatedOrderCapability,
+};
 use crate::services::provider::ProviderKind;
-use std::collections::BTreeSet;
-use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 pub(crate) const TRANSITION_HELD: &str = "turn_transition_held";
 
-// Channels whose handback finished while catch-up still has to queue the held-back messages in order.
-static ORDER_BARRIERS: Mutex<BTreeSet<(String, u64)>> = Mutex::new(BTreeSet::new());
-
 pub(crate) fn order_barrier(provider: &ProviderKind, channel: u64) -> bool {
-    let barriers = ORDER_BARRIERS.lock().unwrap_or_else(|e| e.into_inner());
-    barriers.contains(&(provider.as_str().to_owned(), channel))
+    ordering::order_barrier(provider, channel)
 }
 
-/// Ends the barrier once catch-up has settled every message held back during the transition.
-pub(crate) fn settle_order_barrier(provider: &ProviderKind, channel: u64) -> bool {
-    let mut barriers = ORDER_BARRIERS.lock().unwrap_or_else(|e| e.into_inner());
-    barriers.remove(&(provider.as_str().to_owned(), channel))
+/// Only the completed current sweep of this handback may reopen direct Legacy ingress.
+pub(crate) fn settle_order_barrier(cap: ValidatedOrderCapability) -> Result<bool, Failure> {
+    ordering::settle_handback(cap)
 }
 
 impl Closing {
@@ -73,21 +69,37 @@ impl Closing {
     }
 
     /// Releases protection after a complete handback while keeping the catch-up order barrier.
-    pub(crate) fn release_after_handback(&self) -> Result<(), Failure> {
-        let key = (self.provider().as_str().to_owned(), self.channel());
-        let inserted = ORDER_BARRIERS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key.clone());
-        let released = self.release_protection_after_handback();
-        // A refused retry keeps a barrier an earlier release installed; catch-up still owes its settle.
-        if released.is_err() && inserted {
-            ORDER_BARRIERS
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&key);
-        }
-        released
+    pub(crate) fn release_after_handback(
+        &self,
+        pending_snapshot: &[u64],
+        dirty_gen: u64,
+    ) -> Result<(), Failure> {
+        ordering::install_handback(
+            self.provider().clone(),
+            self.channel(),
+            pending_snapshot,
+            dirty_gen,
+            || {
+                self.release_protection_after_handback()?;
+                Ok(self.epoch.load(Ordering::Acquire) + 1)
+            },
+        )
+    }
+
+    /// Carries the live producer's overflow handle through the protection-release boundary.
+    pub(crate) fn release_after_handback_with_pending(
+        &self,
+        snapshot: &ordering::PendingSource,
+    ) -> Result<(), Failure> {
+        ordering::install_handback_snapshot(
+            self.provider().clone(),
+            self.channel(),
+            snapshot,
+            || {
+                self.release_protection_after_handback()?;
+                Ok(self.epoch.load(Ordering::Acquire) + 1)
+            },
+        )
     }
 
     // No permit can exist past the freeze, so these moves keep the epoch unchanged.

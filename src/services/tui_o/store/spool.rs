@@ -15,7 +15,7 @@ use super::{
     CURSOR_DIR, ChannelStore, HaltReason, Initialized, SPOOL_DIR, StoreError, damage, durable,
 };
 use crate::services::discord::runtime_store::fsync_parent_dir;
-use crate::services::tui_o::shadow::capture::file_identity;
+use crate::services::tui_o::shadow::capture::{FileMatch, file_identity, file_match};
 use crate::services::tui_o::shadow::{CaptureBatch, CapturedRecord, IDENTITY_VERSION, SourceId};
 
 /// A segment takes no more appends past this size; GC removes whole segments.
@@ -203,7 +203,9 @@ fn verify_tail(cursor: &Cursor, tail: &[SpoolFrame], end: u64) -> io::Result<Opt
         return Ok(None);
     };
     let meta = file.metadata()?;
-    if file_identity(&meta) != (source.dev, source.ino) || meta.len() < end {
+    // A renumbered dev passes here; the prefix hash below proves the file.
+    let replaced = file_match(source, file_identity(&meta)) == FileMatch::Other;
+    if replaced || meta.len() < end {
         return Ok(None);
     }
     let mut hasher = Sha256::new();
@@ -801,6 +803,40 @@ mod tests {
         file.write_all(b"X2\n").unwrap();
         assert_eq!(reason(fixture.open()), HaltReason::SpoolTailMismatch);
         assert_eq!(std::fs::read(fixture.cursor_path()).unwrap(), stale_cursor);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_renumbered_source_settles_its_spool_tail_unless_its_bytes_changed() {
+        use crate::services::tui_o::shadow::capture::renumber;
+        for changed in [None, Some(0), Some(3)] {
+            let fixture = Fixture::new(b"L1\n", None);
+            let mut channel = fixture.open().unwrap();
+            two_batches(&fixture, &mut channel);
+            let first_spooled = hex::encode(Sha256::digest(b"L1\n"));
+            let stale = Cursor {
+                source: fixture.source.clone(),
+                captured_through: 3,
+                prefix_hash: first_spooled,
+                retired: false,
+            };
+            std::fs::write(fixture.cursor_path(), serde_json::to_vec(&stale).unwrap()).unwrap();
+            let _reboot = renumber::shift(&fixture.path, 1 << 40);
+            if let Some(at) = changed {
+                let mut file = OpenOptions::new().write(true).open(&fixture.path).unwrap();
+                file.seek(SeekFrom::Start(at)).unwrap();
+                file.write_all(b"X").unwrap();
+            }
+            match changed {
+                None => {
+                    let mut reopened = fixture.open().unwrap();
+                    let cursor = reopened.cursor(&fixture.source).unwrap();
+                    assert_eq!(cursor.captured_through, 6);
+                    assert_eq!(lines(&mut reopened, &fixture.source), ["L1", "L2"]);
+                }
+                Some(_) => assert_eq!(reason(fixture.open()), HaltReason::SpoolTailMismatch),
+            }
+        }
     }
 
     #[test]

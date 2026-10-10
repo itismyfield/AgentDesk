@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -19,7 +20,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "2fa2a6eafb40adc53c8ec888ab1e118864e974dca0b7ad2131cea0c7e5916dbe"
+    "c976035f6d9a03a91fb23cd8c898e5cc147517a986f9de838e66577baf4d0031"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Job-level condition of every required-context mirror and its source line.
@@ -358,9 +359,11 @@ def selects(patterns: list[str], path: str) -> bool:
     return any(glob_matcher(pattern).match(path) for pattern in patterns)
 
 
-def derived_cross_os_consumers() -> tuple[str, ...]:
+def derived_cross_os_consumers(
+    output_format: str = "paths", scope: str = "src/services/discord"
+) -> tuple[str, ...]:
     completed = subprocess.run(
-        [sys.executable, str(CROSS_OS_CONSUMER_SCRIPT), "--format", "paths"],
+        [sys.executable, str(CROSS_OS_CONSUMER_SCRIPT), "--format", output_format, "--scope", scope],
         capture_output=True,
         text=True,
         check=True,
@@ -371,7 +374,7 @@ def derived_cross_os_consumers() -> tuple[str, ...]:
 
 def unreachable_rust_files() -> tuple[str, ...]:
     completed = subprocess.run(
-        [sys.executable, str(CROSS_OS_CONSUMER_SCRIPT), "--format", "unreachable"],
+        [sys.executable, str(CROSS_OS_CONSUMER_SCRIPT), "--format", "unreachable", "--scope", "src"],
         capture_output=True,
         text=True,
         check=True,
@@ -648,6 +651,45 @@ class FastCheckCiWiringTests(unittest.TestCase):
             for mutated in mutations:
                 self.assertNotEqual(self.run_hardening_fixture(mutated).returncode, 0)
 
+    def test_cross_os_derived_selectors_match_source(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        selectors = paths_filter_definitions(workflow)["cross_os_rust"]
+        self.assertEqual(
+            tuple(path for path in selectors if path.startswith("src/services/discord/")),
+            derived_cross_os_consumers("globs"),
+        )
+
+    def test_cfg_consumers_across_src_select_windows(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        filters = paths_filter_definitions(workflow)
+        consumers = derived_cross_os_consumers(scope="src")
+        self.assertTrue(consumers)
+        for selector in ("rust_compile", "cross_os_rust"):
+            with self.subTest(filter=selector):
+                self.assertEqual([path for path in consumers if not selects(filters[selector], path)], [])
+
+    def test_turn_bridge_and_historical_diff_select_windows(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        filters = paths_filter_definitions(workflow)
+        fixture = json.loads(
+            (REPO_ROOT / "tests/fixtures/ci_cross_os_5813.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(fixture["commit"], "d91d59d1d5fb4bcdd1602e29b7e2c980f0cece25")
+        turn_bridge = REPO_ROOT / "src/services/discord/turn_bridge"
+        paths = [path.relative_to(REPO_ROOT).as_posix() for path in turn_bridge.rglob("*.rs")]
+        self.assertTrue(paths)
+        cases = [(path, [path]) for path in paths]
+        cases.append(("new turn_bridge module", ["src/services/discord/turn_bridge/new/module.rs"]))
+        cases.append(("historical diff", fixture["paths"]))
+        self.assertTrue(fixture["paths"])
+        for name, changed_paths in cases:
+            with self.subTest(diff=name):
+                selected = {
+                    key: any(selects(filters[key], path) for path in changed_paths)
+                    for key in ("rust_compile", "cross_os_rust")
+                }
+                self.assertEqual(selected, {"rust_compile": True, "cross_os_rust": True})
+
     def test_cfg_gated_relay_consumers_select_windows(self) -> None:
         """cross_os_rust must select every derived cfg-shim consumer (#5832).
 
@@ -862,9 +904,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "set -o pipefail",
                 "mkdir -p target/clippy-observation",
                 "cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
-                "if ! python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json; then",
-                "echo '::warning::Clippy observation invalid; no warning baseline can be derived'",
-                "fi",
+                "python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1",
                 "source scripts/ci/non-pg-test-filter.sh",
                 *non_lib,
                 "sccache --show-stats || true",
@@ -2065,6 +2105,21 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_warning_ceiling_and_cap_adjacency_reject_bypass(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        main = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        command = 'python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref '
+        variants = (
+            (workflow.replace("      - name: Production PR cap\n", '      - run: echo PR_CAP_CI=0 >> "$GITHUB_ENV"\n\n      - name: Production PR cap\n', 1), main, "production PR cap"),
+            (workflow.replace(command + '"$CLIPPY_BASE_REF"', 'true', 1), main, "PR warning ceiling"),
+            (workflow, main.replace(command + "HEAD^1", "true", 1), "main Clippy observation"),
+        )
+        for pr, altered_main, expected in variants:
+            with self.subTest(expected=expected):
+                result = self.run_hardening_fixture(pr, {"ci-main.yml": altered_main})
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(expected, result.stderr)
 
     def test_documented_harmless_surface_edits_are_not_overblocked(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

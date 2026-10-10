@@ -304,3 +304,104 @@ async fn the_legacy_reset_runs_the_existing_reset_and_keeps_a_local_pane_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// Switched on without a PG pool or instance id, every selected Herdr channel takes no turn and gets
+/// no writer while a plain one keeps the old path; off or unset, every channel keeps it.
+#[tokio::test]
+async fn a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels() {
+    use crate::services::cluster::home_availability::{self, Availability, Unavailable};
+    use crate::services::tui_o::shadow::ShadowProvider;
+    use crate::services::tui_o::writer::host::{self, HostParts, test_io::TestHost};
+    use crate::services::turn_host::{HerdrRefusal, refusal_before_turn};
+    const HERDR: u64 = 9_300_000_000_000_011;
+    const PLAIN: u64 = 9_300_000_000_000_012;
+    const CODEX: u64 = 9_300_000_000_000_013;
+    let _hosts =
+        crate::config::session_hosts::force_for_test(Some("mini"), &[(HERDR, "gw"), (CODEX, "gw")]);
+    let _selected = test_override::force_candidates(&[
+        (HERDR, ClaudeTui),
+        (PLAIN, ClaudeTui),
+        (
+            CODEX,
+            crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+        ),
+    ]);
+    let turn =
+        |channel| refusal_before_turn(None, &ProviderKind::Claude, channel, || async { None });
+    let unavailable = |refusal: Option<HerdrRefusal>| {
+        matches!(refusal, Some(HerdrRefusal::DelegationUnavailable { .. }))
+    };
+    let root = tempfile::tempdir().unwrap();
+    let writers = || {
+        let io = TestHost::new([]);
+        let alarms = io.alarms.clone();
+        let parts = || HostParts {
+            io,
+            runtime_root: Some(root.path().to_path_buf()),
+            gate: Arc::default(),
+            readiness: Arc::default(),
+        };
+        let started = host::start(ShadowProvider::Claude, true, parts);
+        started.iter().for_each(tokio::task::JoinHandle::abort);
+        let alarmed = alarms.0.lock().unwrap();
+        let held = alarmed.iter().filter(|(channel, _)| *channel == HERDR);
+        (started.len(), held.count())
+    };
+
+    for switch in [None, Some(false)] {
+        let unset = HomeSettings {
+            switch,
+            instance_id: None,
+        };
+        let _availability = install_home_availability(&ProviderKind::Claude, &unset, false);
+        assert_eq!(home_availability::state("claude"), Availability::Off);
+        assert!(!unavailable(turn(HERDR).await), "off: the old judgement");
+    }
+    assert_eq!(writers(), (2, 0), "off: both channels hosted");
+
+    let cases = [
+        (Some("mini"), false, Unavailable::MissingPool),
+        (None, true, Unavailable::MissingInstanceId),
+    ];
+    for (instance_id, has_pool, reason) in cases {
+        let on = HomeSettings {
+            switch: Some(true),
+            instance_id: instance_id.map(str::to_owned),
+        };
+        let _availability = install_home_availability(&ProviderKind::Claude, &on, has_pool);
+        assert_eq!(
+            home_availability::state("claude"),
+            Availability::Unavailable(reason)
+        );
+        let refused = HerdrRefusal::DelegationUnavailable { reason };
+        assert_eq!(turn(HERDR).await, Some(refused));
+        assert_eq!(
+            home_availability::refusal(CODEX),
+            None,
+            "the other provider is unaffected"
+        );
+        assert!(matches!(
+            crate::services::tui_o::cutover::intake_route::route_for_placement("claude", HERDR),
+            crate::services::tui_o::cutover::intake_route::IntakeRoute::Hold(_)
+        ));
+        assert_eq!(
+            turn(PLAIN).await,
+            None,
+            "a plain channel keeps the old path"
+        );
+        assert_eq!(
+            writers(),
+            (1, 1),
+            "the Herdr channel is held with an alarm, not hosted"
+        );
+    }
+
+    let _availability =
+        install_home_availability(&ProviderKind::Claude, &settings(Some(true)), true);
+    assert_eq!(
+        home_availability::state("claude"),
+        Availability::PreflightPassed
+    );
+    assert!(!unavailable(turn(HERDR).await));
+    assert_eq!(writers(), (2, 0));
+}

@@ -482,7 +482,11 @@ fn zombie_release_never_reads_another_hosts_session_as_idle() {
             let name = format!("AgentDesk-claude-p6ao-zombie-{server:?}-{host:?}");
             mark(&name, host);
             let token = bound_token(&ProviderKind::Claude, &name);
-            assert!(!idle(&ProviderKind::Claude, &token), "{server:?} {host:?}");
+            assert_eq!(
+                idle(&ProviderKind::Claude, &token),
+                None,
+                "{server:?} {host:?}"
+            );
             assert_eq!(fx.take_calls(), Vec::<String>::new(), "{server:?} {host:?}");
         }
     }
@@ -490,7 +494,16 @@ fn zombie_release_never_reads_another_hosts_session_as_idle() {
     let name = "AgentDesk-claude-p6ao-zombie-legacy";
     mark(name, Mark::Absent);
     let token = bound_token(&ProviderKind::Claude, name);
-    assert!(idle(&ProviderKind::Claude, &token));
+    assert_eq!(idle(&ProviderKind::Claude, &token), Some(true));
+    fx.serve(Server::Live);
+    assert_eq!(idle(&ProviderKind::Claude, &token), Some(false));
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+        name,
+        crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper,
+    )
+    .unwrap();
+    fx.ready(name);
+    assert_eq!(idle(&ProviderKind::Claude, &token), Some(true));
 }
 
 // The runtime cancel reads no pane of another host and keeps its turn: a non-tmux session gets

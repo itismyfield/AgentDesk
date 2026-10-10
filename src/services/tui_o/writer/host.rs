@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::watch;
@@ -20,6 +21,7 @@ use super::resume::{self, Backoff};
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::cluster::channel_home::{self, HomeOwnership};
+use crate::services::cluster::home_availability;
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::cutover;
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
@@ -67,12 +69,48 @@ pub enum Custody {
     Active,
 }
 
-/// Channels with a hosted actor and those ready to take work.
+/// Channels with a hosted actor, by the claim that hosts each, and those ready to take work.
 #[derive(Default)]
 pub struct Readiness {
-    hosted: Mutex<BTreeSet<u64>>,
+    hosted: Mutex<BTreeMap<u64, u64>>,
     ready: Mutex<BTreeSet<u64>>,
     live: Mutex<BTreeMap<u64, Live>>,
+    claims: AtomicU64,
+}
+
+/// Keeps a channel reserved until every child settled; an abnormal exit closes readiness.
+pub struct ReadinessClaim {
+    readiness: Arc<Readiness>,
+    channel: u64,
+    generation: u64,
+    settled: Arc<AtomicBool>,
+}
+
+impl ReadinessClaim {
+    /// Ends this hosting: not ready, no live view, and the channel free to host again. Called
+    /// only once its host and actor ended, so a new actor never runs beside them.
+    fn release(self) {
+        self.clear(true);
+    }
+
+    fn clear(&self, release: bool) {
+        let readiness = &self.readiness;
+        let mut hosted = locked(&readiness.hosted);
+        if hosted.get(&self.channel) != Some(&self.generation) {
+            return;
+        }
+        locked(&readiness.ready).remove(&self.channel);
+        locked(&readiness.live).remove(&self.channel);
+        if release {
+            hosted.remove(&self.channel);
+        }
+    }
+}
+
+impl Drop for ReadinessClaim {
+    fn drop(&mut self) {
+        self.clear(false);
+    }
 }
 
 /// What a hosted channel's readiness is derived from, kept so intake can read it directly.
@@ -81,6 +119,7 @@ struct Live {
     resumed: watch::Receiver<bool>,
     unsettled: watch::Receiver<Option<usize>>,
     owed: OwedView,
+    stopping: watch::Receiver<bool>,
 }
 
 /// A hosted channel's owed pieces as a drain reads them: the actor's published view, and the
@@ -109,17 +148,39 @@ impl Readiness {
         }
     }
 
-    /// Only the first claim of a channel hosts it, so a channel never has two actors.
-    fn claim(&self, channel: u64) -> bool {
-        locked(&self.hosted).insert(channel)
+    /// Only the first claim of a channel hosts it until released, so a channel never has two actors.
+    fn claim(self: &Arc<Self>, channel: u64) -> Option<ReadinessClaim> {
+        let mut hosted = locked(&self.hosted);
+        if hosted.contains_key(&channel) {
+            return None;
+        }
+        let generation = self.claims.fetch_add(1, Ordering::SeqCst) + 1;
+        hosted.insert(channel, generation);
+        let readiness = Arc::clone(self);
+        Some(ReadinessClaim {
+            readiness,
+            channel,
+            generation,
+            settled: Arc::new(AtomicBool::new(true)),
+        })
     }
 
-    fn track(&self, channel: u64, gate: Arc<OwnershipGate>, (resumed, unsettled, owed): Watched) {
+    pub fn is_hosted(&self, channel: u64) -> bool {
+        locked(&self.hosted).contains_key(&channel)
+    }
+
+    fn track(
+        &self,
+        channel: u64,
+        gate: Arc<OwnershipGate>,
+        (resumed, unsettled, owed, stopping): Watched,
+    ) {
         let live = Live {
             gate,
             resumed,
             unsettled,
             owed,
+            stopping,
         };
         locked(&self.live).insert(channel, live);
     }
@@ -132,7 +193,10 @@ impl Readiness {
             return false;
         };
         let owned = owned_now(channel, &live.gate);
-        owned && live.resumed.has_changed().is_ok() && *live.resumed.borrow()
+        owned
+            && !*live.stopping.borrow()
+            && live.resumed.has_changed().is_ok()
+            && *live.resumed.borrow()
     }
 
     /// Rotated-away sources the channel's running actor has not retired, as its last poll read
@@ -158,15 +222,27 @@ impl Readiness {
         self.track(
             channel,
             gate,
-            (watch::channel(false).1, watch::channel(None).1, owed),
+            (
+                watch::channel(false).1,
+                watch::channel(None).1,
+                owed,
+                watch::channel(false).1,
+            ),
         );
     }
 }
+
+type Published = (
+    watch::Receiver<GatewayOwnership>,
+    watch::Receiver<bool>,
+    watch::Receiver<bool>,
+);
 
 type Watched = (
     watch::Receiver<bool>,
     watch::Receiver<Option<usize>>,
     OwedView,
+    watch::Receiver<bool>,
 );
 
 static PROCESS: LazyLock<Arc<Readiness>> = LazyLock::new(Arc::default);
@@ -231,7 +307,8 @@ pub fn start<I: HostIo>(
     pg_gateway: bool,
     prepare: impl FnOnce() -> HostParts<I>,
 ) -> Vec<JoinHandle<()>> {
-    spawn_hosts(provider, pg_gateway, cutover::boot_ownership(), prepare)
+    let owned = cutover::boot_ownership();
+    detached(start_managed(provider, pg_gateway, owned, prepare))
 }
 
 /// [`start`] off the gateway lease for `delegated`, each a channel with a registered home gate.
@@ -240,15 +317,105 @@ pub fn start_delegated<I: HostIo>(
     delegated: Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)>,
     prepare: impl FnOnce() -> HostParts<I>,
 ) -> Vec<JoinHandle<()>> {
-    spawn_hosts(provider, false, delegated, prepare)
+    detached(start_managed(provider, false, delegated, prepare))
 }
 
-fn spawn_hosts<I: HostIo>(
+fn detached(handles: Vec<ManagedWriterHandle>) -> Vec<JoinHandle<()>> {
+    handles
+        .into_iter()
+        .map(ManagedWriterHandle::into_detached)
+        .collect()
+}
+
+pub type OwnedChannels = Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)>;
+
+/// One hosted channel's writer: its host task, the stop it obeys and the claim that hosts it.
+pub struct ManagedWriterHandle {
+    channel: u64,
+    generation: u64,
+    authority: Arc<OwnershipGate>,
+    settled: Arc<AtomicBool>,
+    stop: StopOnDrop,
+    host: JoinHandle<()>,
+}
+
+struct StopOnDrop {
+    signal: watch::Sender<bool>,
+    armed: bool,
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.signal.send_replace(true);
+        }
+    }
+}
+
+/// A writer whose host, actor and admitted POST all ended, its claim released.
+#[derive(Debug, PartialEq, Eq)]
+pub struct WriterStopped {
+    pub channel: u64,
+    pub generation: u64,
+}
+
+impl ManagedWriterHandle {
+    pub fn channel(&self) -> u64 {
+        self.channel
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Process-local identity of the captured gate, independent of registry replacement.
+    pub fn authority(&self) -> usize {
+        Arc::as_ptr(&self.authority) as usize
+    }
+
+    /// Leaves shutdown to the existing gateway lifecycle; the host still owns its claim.
+    pub fn into_detached(mut self) -> JoinHandle<()> {
+        self.stop.armed = false;
+        self.host
+    }
+
+    /// Requests stop before returning the wait future; its cancellation never cancels cleanup.
+    pub fn stop_and_join(
+        self,
+    ) -> impl Future<Output = Result<WriterStopped, String>> + Send + 'static {
+        let Self {
+            channel,
+            generation,
+            authority: _,
+            settled,
+            stop,
+            host,
+        } = self;
+        stop.signal.send_replace(true);
+        let settle = tokio::spawn(async move {
+            let joined = host.await;
+            drop(stop);
+            joined.map_err(|error| format!("writer host ended abnormally: {error}"))?;
+            if !settled.load(Ordering::SeqCst) {
+                return Err("writer child ended without confirmed settlement".into());
+            }
+            Ok(WriterStopped {
+                channel,
+                generation,
+            })
+        });
+        async move { settle.await.map_err(|error| error.to_string())? }
+    }
+}
+
+/// [`start`] over `owned`, returning a handle per hosted channel. A channel whose delegation is
+/// unavailable is held with an alarm and not claimed.
+pub fn start_managed<I: HostIo>(
     provider: ShadowProvider,
     pg_gateway: bool,
-    owned: Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)>,
+    owned: OwnedChannels,
     prepare: impl FnOnce() -> HostParts<I>,
-) -> Vec<JoinHandle<()>> {
+) -> Vec<ManagedWriterHandle> {
     let kind = match provider {
         ShadowProvider::Claude => RuntimeHandoffKind::ClaudeTui,
         ShadowProvider::Codex => RuntimeHandoffKind::CodexTui,
@@ -268,9 +435,13 @@ fn spawn_hosts<I: HostIo>(
     } = prepare();
     let mut tasks = Vec::new();
     for (channel, candidate) in channels {
-        if !readiness.claim(channel) {
+        if let Some(reason) = home_availability::refusal(channel) {
+            hold(&io.alarms(), channel, reason.as_str());
             continue;
         }
+        let Some(claim) = readiness.claim(channel) else {
+            continue;
+        };
         let home = channel_home::registered_channel(channel);
         let root = match (pg_gateway || home.is_some(), &runtime_root) {
             (false, _) => Err("no PG gateway lease"),
@@ -281,23 +452,63 @@ fn spawn_hosts<I: HostIo>(
             Ok(root) => root,
             Err(detail) => {
                 hold(&io.alarms(), channel, detail);
+                claim.release();
                 continue;
             }
         };
         let gate = home.map_or_else(|| Arc::clone(&gate), |home| home.gate());
-        let readiness = Arc::clone(&readiness);
-        let host = host_channel(
-            Arc::clone(&io),
+        let generation = claim.generation;
+        let authority = Arc::clone(&gate);
+        let settled = Arc::clone(&claim.settled);
+        let (stop, stopping) = watch::channel(false);
+        let io = Arc::clone(&io);
+        let host = tokio::spawn(async move {
+            host_channel(
+                io,
+                channel,
+                candidate,
+                provider,
+                root,
+                gate,
+                (&claim, stopping),
+            )
+            .await;
+            if claim.settled.load(Ordering::SeqCst) {
+                claim.release();
+            }
+        });
+        tasks.push(ManagedWriterHandle {
             channel,
-            candidate,
-            provider,
-            root,
-            gate,
-            readiness,
-        );
-        tasks.push(tokio::spawn(host));
+            generation,
+            authority,
+            settled,
+            stop: StopOnDrop {
+                signal: stop,
+                armed: true,
+            },
+            host,
+        });
     }
     tasks
+}
+
+/// Resolves once the writer is told to stop; a detached writer, whose sender is gone, never is.
+async fn stopped(mut stop: watch::Receiver<bool>) {
+    if stop.wait_for(|stop| *stop).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// `step`'s output, or `None` once the writer was told to stop first.
+async fn unless_stopped<T>(
+    stop: &watch::Receiver<bool>,
+    step: impl Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        () = stopped(stop.clone()) => None,
+        output = step => Some(output),
+    }
 }
 
 fn hold(alarms: &impl AlarmSink, channel: u64, detail: &str) {
@@ -335,7 +546,7 @@ async fn host_channel<I: HostIo>(
     provider: ShadowProvider,
     runtime_root: PathBuf,
     gate: Arc<OwnershipGate>,
-    readiness: Arc<Readiness>,
+    (claim, stopping): (&ReadinessClaim, watch::Receiver<bool>),
 ) {
     let alarms = io.alarms();
     let mut bindings = None;
@@ -354,7 +565,8 @@ async fn host_channel<I: HostIo>(
                 provider == ShadowProvider::Claude && adoption::holds_output(&**log, channel);
             let legacy = held.then(|| io.legacy());
             if let Some(legacy) = &legacy
-                && !adoption::legacy_started(&**legacy).await
+                && unless_stopped(&stopping, adoption::legacy_started(&**legacy)).await
+                    != Some(true)
             {
                 return release(
                     &candidate,
@@ -364,8 +576,17 @@ async fn host_channel<I: HostIo>(
                 );
             }
             let facts = loop {
-                until_owned(&gate).await;
-                let facts = io.activation_facts(channel, provider).await;
+                if unless_stopped(&stopping, until_owned(&gate))
+                    .await
+                    .is_none()
+                {
+                    return;
+                }
+                let Some(facts) =
+                    unless_stopped(&stopping, io.activation_facts(channel, provider)).await
+                else {
+                    return;
+                };
                 // Facts read before a lost gate are not acted on; wait for Owned and read again.
                 if owned_now(channel, &gate) {
                     break facts;
@@ -382,9 +603,14 @@ async fn host_channel<I: HostIo>(
                     }
                     let events = log.binding_events_since(channel, 0);
                     let events = events.map_err(|error| format!("binding log: {error}"));
+                    // O's own copy names each file once; the shared log keeps every dev it read.
+                    let events = events.map(super::renumbered::first_named);
                     let seq = events.as_ref().map_or(0, |e| e.last().map_or(0, |e| e.seq));
                     let current = events.as_deref().ok().and_then(adoption::current);
-                    let first = deferred::first(&*io, channel, provider, &legacy, events).await;
+                    let first = deferred::first(&*io, channel, provider, &legacy, events);
+                    let Some(first) = unless_stopped(&stopping, first).await else {
+                        return;
+                    };
                     let snapshot = match first {
                         deferred::First::Adopt(snapshot) => snapshot,
                         deferred::First::Wait(refused) => {
@@ -407,7 +633,8 @@ async fn host_channel<I: HostIo>(
                                 legacy,
                                 bound: (source, seq),
                             };
-                            if !deferred::retry(waiting, refused, seq).await {
+                            let retried = deferred::retry(waiting, refused, seq);
+                            if unless_stopped(&stopping, retried).await != Some(true) {
                                 return;
                             }
                             break 'held Ok(());
@@ -443,7 +670,9 @@ async fn host_channel<I: HostIo>(
     };
     // Seeded before the port wait, so a recovered panel tick already knows O's newest post.
     super::deliver::seed_last_posted(channel, store.ledger());
-    let port = io.port().await;
+    let Some(port) = unless_stopped(&stopping, io.port()).await else {
+        return;
+    };
     let bindings = bindings.unwrap_or_else(|| io.bindings(channel, provider));
     let hosted = Hosted {
         io: &*io,
@@ -451,10 +680,11 @@ async fn host_channel<I: HostIo>(
         provider,
         runtime_root: &runtime_root,
         gate: &gate,
-        readiness: &readiness,
+        claim,
         port,
         bindings,
         alarms,
+        stopping,
     };
     hosted.serve(store).await;
 }
@@ -466,10 +696,11 @@ struct Hosted<'a, I: HostIo> {
     provider: ShadowProvider,
     runtime_root: &'a Path,
     gate: &'a Arc<OwnershipGate>,
-    readiness: &'a Readiness,
+    claim: &'a ReadinessClaim,
     port: Arc<I::Port>,
     bindings: Arc<I::Bindings>,
     alarms: I::Alarms,
+    stopping: watch::Receiver<bool>,
 }
 
 impl<I: HostIo> Hosted<'_, I> {
@@ -531,8 +762,10 @@ impl<I: HostIo> Hosted<'_, I> {
         let watches = (stop, resumed_tx, unsettled_tx, owing);
         let spawned = actor::spawn_projecting(&config, writer, self.provider, bindings, watches);
         let actor = spawned?;
-        let watched = (resumed.clone(), unsettled, owed);
-        self.readiness.track(channel, Arc::clone(gate), watched);
+        let watched = (resumed.clone(), unsettled, owed, self.stopping.clone());
+        self.claim
+            .readiness
+            .track(channel, Arc::clone(gate), watched);
         let on_resumed = || {
             if attempt > 0 {
                 self.alarms.resume_pending(channel, false);
@@ -543,14 +776,8 @@ impl<I: HostIo> Hosted<'_, I> {
                 );
             }
         };
-        let ended = publish(
-            channel,
-            self.readiness,
-            gate.subscribe(),
-            resumed,
-            actor,
-            on_resumed,
-        );
+        let watched = (gate.subscribe(), resumed, self.stopping.clone());
+        let ended = publish(channel, self.claim, watched, (actor, &stop_tx), on_resumed);
         let cause = ended.await;
         drop(stop_tx);
         cause
@@ -580,7 +807,13 @@ impl<I: HostIo> Hosted<'_, I> {
                 unsent_serial,
                 "[tui_o] writer halted on a transient store error; resuming after a wait"
             );
-            tokio::time::sleep(wait).await;
+            if unless_stopped(&self.stopping, tokio::time::sleep(wait))
+                .await
+                .is_none()
+            {
+                self.alarms.resume_pending(channel, false);
+                return None;
+            }
             match recover(self.runtime_root, channel, unsent.as_ref()) {
                 Ok(Recovered::Store(store)) => return Some(store),
                 Err(error) if error.transient => {
@@ -685,16 +918,15 @@ fn recover(
     }
 }
 
-/// Ready only while the actor has resumed and the gate is Owned; cleared once the actor ends.
-/// Returns how the actor stopped, read from its finished task; `None` when the gate closed first.
+/// Publishes readiness and joins the actor on every normal exit; failed joins retain the claim.
 async fn publish(
     channel: u64,
-    readiness: &Readiness,
-    mut gate: watch::Receiver<GatewayOwnership>,
-    mut resumed: watch::Receiver<bool>,
-    mut actor: JoinHandle<Option<StopCause>>,
+    claim: &ReadinessClaim,
+    (mut gate, mut resumed, stop): Published,
+    (mut actor, stop_actor): (JoinHandle<Option<StopCause>>, &watch::Sender<bool>),
     on_resumed: impl FnOnce(),
 ) -> Option<StopCause> {
+    let readiness = &claim.readiness;
     let mut on_resumed = Some(on_resumed);
     let ended = loop {
         let owned = matches!(*gate.borrow_and_update(), GatewayOwnership::Owned { .. });
@@ -702,232 +934,53 @@ async fn publish(
         if up && let Some(on_resumed) = on_resumed.take() {
             on_resumed();
         }
-        readiness.set(channel, owned && up);
+        readiness.set(channel, owned && up && !*stop.borrow());
         tokio::select! {
-            changed = gate.changed() => if changed.is_err() { break None },
+            changed = gate.changed() => if changed.is_err() {
+                stop_actor.send_replace(true);
+                break (&mut actor).await;
+            },
             // A closed flag means the actor is returning; its task settles right after.
             changed = resumed.changed() => if changed.is_err() {
                 readiness.set(channel, false);
-                break (&mut actor).await.ok().flatten();
+                break (&mut actor).await;
             },
-            ended = &mut actor => break ended.ok().flatten(),
+            ended = &mut actor => break ended,
+            () = stopped(stop.clone()) => {
+                readiness.set(channel, false);
+                stop_actor.send_replace(true);
+                break (&mut actor).await;
+            }
         }
     };
     readiness.set(channel, false);
-    ended
+    ended.unwrap_or_else(|error| {
+        claim.settled.store(false, Ordering::SeqCst);
+        tracing::error!(channel, %error, "writer actor ended abnormally; hosting remains reserved");
+        None
+    })
 }
 
 /// A gateway stand-in for tests that drive the real host: every POST is recorded with its
 /// channel, and each channel binds the one source it was given.
 #[cfg(test)]
-pub(crate) mod test_io {
+#[path = "host_io_tests.rs"]
+pub(crate) mod test_io;
+
+#[cfg(test)]
+mod claim_tests {
     use super::*;
-    use crate::services::tui_o::shadow::SourceId;
-    use crate::services::tui_o::writer::binding::{
-        BindingCause, BindingEvent, BindingEvidence, BindingRecord, BindingTarget,
-    };
-    use crate::services::tui_o::writer::{PostOutcome, SeenMessage};
 
-    #[derive(Default)]
-    pub(crate) struct Posts(Mutex<Vec<(u64, SeenMessage)>>);
-
-    impl Posts {
-        pub(crate) fn to(&self, channel: u64) -> Vec<String> {
-            let posts = locked(&self.0);
-            let to = posts.iter().filter(|(c, _)| *c == channel);
-            to.map(|(_, message)| message.content.clone()).collect()
-        }
-    }
-
-    impl DiscordPort for Posts {
-        fn bot_id(&self) -> u64 {
-            42
-        }
-
-        fn post(
-            &self,
-            channel: u64,
-            content: String,
-        ) -> impl Future<Output = PostOutcome> + Send + 'static {
-            let mut posts = locked(&self.0);
-            let id = 101 + posts.len() as u64;
-            let author_id = 42;
-            let receipt = SeenMessage {
-                id,
-                author_id,
-                content,
-            };
-            posts.push((channel, receipt.clone()));
-            std::future::ready(PostOutcome::Created(receipt))
-        }
-
-        fn history_after(
-            &self,
-            channel: u64,
-            after: u64,
-        ) -> impl Future<Output = Result<Vec<SeenMessage>, String>> + Send {
-            let posts = locked(&self.0);
-            let page = posts.iter().filter(|(c, m)| *c == channel && m.id > after);
-            std::future::ready(Ok(page.map(|(_, m)| m.clone()).collect()))
-        }
-
-        fn history_readable(&self, _: u64) -> bool {
-            true
-        }
-    }
-
-    pub(crate) struct AnyLease;
-
-    impl DeliveryLease for AnyLease {
-        type Held = ();
-        fn try_acquire(&self, _: u64, _: u64) -> Option<()> {
-            Some(())
-        }
-    }
-
-    #[derive(Clone, Default)]
-    pub(crate) struct Alarms(pub(crate) Arc<Mutex<Vec<(u64, WriterAlarm)>>>);
-
-    impl AlarmSink for Alarms {
-        fn raise(&self, channel: u64, alarm: WriterAlarm) {
-            locked(&self.0).push((channel, alarm));
-        }
-    }
-
-    pub(crate) struct Startup {
-        event: BindingEvent,
-        notice: watch::Sender<u64>,
-    }
-
-    impl BindingEvents for Startup {
-        fn binding_events_since(
-            &self,
-            channel: u64,
-            after: u64,
-        ) -> Result<Vec<BindingEvent>, String> {
-            let due = channel == self.event.channel_id && after < self.event.seq;
-            Ok(due.then(|| self.event.clone()).into_iter().collect())
-        }
-
-        fn subscribe(&self, _: u64) -> watch::Receiver<u64> {
-            self.notice.subscribe()
-        }
-    }
-
-    /// Reports `facts` for every channel (none blocking by default); the store's own checks and
-    /// the adoption still apply. `on_facts` runs once as the next facts are read.
-    pub(crate) struct TestHost {
-        pub(crate) posts: Arc<Posts>,
-        pub(crate) alarms: Alarms,
-        sources: BTreeMap<u64, SourceId>,
-        pub(crate) facts: Mutex<ActivationFacts>,
-        pub(crate) on_facts: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-        /// Legacy's relay state for channels that already hold output; fails closed when unset.
-        pub(crate) legacy: Mutex<Option<Arc<dyn LegacyView>>>,
-        /// The tmux session each channel's binding names, `host-<channel>` when unset.
-        pub(crate) sessions: Mutex<BTreeMap<u64, String>>,
-        /// Legacy's custody of a channel as the gateway reads it, as an inflight row; none when unset.
-        pub(crate) custody: Mutex<Option<fn(u64) -> bool>>,
-        /// Legacy's mailbox work and watcher emission for every channel; idle by default.
-        pub(crate) busy: std::sync::atomic::AtomicBool,
-        pub(crate) relaying: std::sync::atomic::AtomicBool,
-    }
-
-    impl TestHost {
-        pub(crate) fn new(sources: impl IntoIterator<Item = (u64, SourceId)>) -> Arc<Self> {
-            Arc::new(Self {
-                posts: Arc::default(),
-                alarms: Alarms::default(),
-                sources: sources.into_iter().collect(),
-                facts: Mutex::default(),
-                on_facts: Mutex::default(),
-                legacy: Mutex::default(),
-                sessions: Mutex::default(),
-                custody: Mutex::default(),
-                busy: Default::default(),
-                relaying: Default::default(),
-            })
-        }
-    }
-
-    impl HostIo for TestHost {
-        type Port = Posts;
-        type Lease = AnyLease;
-        type Alarms = Alarms;
-        type Bindings = Startup;
-
-        fn port(&self) -> impl Future<Output = Arc<Posts>> + Send {
-            std::future::ready(Arc::clone(&self.posts))
-        }
-
-        fn lease(&self) -> AnyLease {
-            AnyLease
-        }
-
-        fn alarms(&self) -> Alarms {
-            self.alarms.clone()
-        }
-
-        fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Startup> {
-            let source = self.sources.get(&channel).cloned();
-            let source = source.unwrap_or_else(|| panic!("no source for channel {channel}"));
-            let received_at = chrono::Utc::now();
-            let evidence = BindingEvidence {
-                hook_event: "SessionStart".into(),
-                received_at,
-                reclaims: false,
-            };
-            let record = BindingRecord::Bound {
-                old: None,
-                new: BindingTarget::Source(source),
-                cause: BindingCause::Startup,
-                parent_hint: None,
-                evidence,
-            };
-            let event = BindingEvent {
-                seq: 1,
-                channel_id: channel,
-                provider,
-                tmux_session: locked(&self.sessions)
-                    .get(&channel)
-                    .cloned()
-                    .unwrap_or_else(|| format!("host-{channel}")),
-                execution_nonce: "host".into(),
-                record,
-                committed_at: received_at,
-            };
-            let notice = watch::channel(1).0;
-            Arc::new(Startup { event, notice })
-        }
-
-        fn activation_facts(
-            &self,
-            _: u64,
-            _: ShadowProvider,
-        ) -> impl Future<Output = Result<ActivationFacts, String>> + Send {
-            if let Some(hook) = locked(&self.on_facts).take() {
-                hook();
-            }
-            std::future::ready(Ok(locked(&self.facts).clone()))
-        }
-
-        fn local_custody(&self, channel: u64, _: ShadowProvider) -> Result<Custody, String> {
-            let custody = *locked(&self.custody);
-            let row = custody.is_some_and(|custody| custody(channel));
-            Ok(if row { Custody::Row } else { Custody::Free })
-        }
-
-        fn legacy(&self) -> Arc<dyn LegacyView> {
-            let set = locked(&self.legacy).clone();
-            set.unwrap_or_else(|| Arc::new(crate::services::tui_o::writer::adoption::NoLegacy))
-        }
-
-        fn legacy_busy(&self, _: u64) -> impl Future<Output = bool> + Send {
-            std::future::ready(self.busy.load(std::sync::atomic::Ordering::SeqCst))
-        }
-
-        fn relaying(&self, _: u64) -> bool {
-            self.relaying.load(std::sync::atomic::Ordering::SeqCst)
-        }
+    #[test]
+    fn an_old_claim_drop_leaves_a_replacement_ready_and_hosted() {
+        let ready = Arc::new(Readiness::default());
+        let old = ready.claim(7).unwrap();
+        old.clear(true);
+        let current = ready.claim(7).unwrap();
+        ready.set(7, true);
+        drop(old);
+        assert!(ready.is_hosted(7) && ready.is_ready(7));
+        current.release();
+        assert!(!ready.is_hosted(7) && !ready.is_ready(7));
     }
 }

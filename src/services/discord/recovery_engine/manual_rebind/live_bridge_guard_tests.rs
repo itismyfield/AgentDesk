@@ -97,10 +97,19 @@ fn c2_closed_input_gate_refuses_rebind_before_any_write() {
     };
 
     let open_shared = make_shared_data_for_tests();
-    let rebound =
-        rebind(open_shared.clone(), open, &open_tmux, false).expect("an unprotected pane rebinds");
-    assert!(rebound.watcher_spawned);
-    assert_eq!(open_shared.tmux_watchers.len(), 1);
+    let rebound = rebind(open_shared.clone(), open, &open_tmux, false);
+    // Off Unix every pane reads absent, so the unfenced rebind passes the gate and stops there.
+    #[cfg(not(unix))]
+    assert!(
+        matches!(rebound, Err(RebindError::TmuxNotAlive { .. })),
+        "{rebound:?}"
+    );
+    #[cfg(unix)]
+    {
+        let rebound = rebound.expect("an unprotected pane rebinds");
+        assert!(rebound.watcher_spawned);
+        assert_eq!(open_shared.tmux_watchers.len(), 1);
+    }
 
     // Both rebind entries refuse before their first effect.
     for from_offset in [false, true] {
@@ -184,5 +193,88 @@ async fn c2_admitted_rebind_holds_the_input_drain_until_it_returns() {
             closing.drain().now_or_never().is_some(),
             "returning releases the drain"
         );
+    }
+}
+
+/// An admitted rebind on a protected open channel, through either entry and pinned or not, writes
+/// its row and claims its watcher from async code; returning releases the drain.
+#[test]
+fn c2b_admitted_rebind_writes_its_row_and_releases_the_drain() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        tmp.path(),
+    );
+    let provider = ProviderKind::Claude;
+    let http = Arc::new(serenity::Http::new("Bot test-token"));
+    for (from_offset, pinned) in [(false, false), (false, true), (true, false), (true, true)] {
+        let channel = 6_325_520_000_000_005_u64 + 2 * u64::from(from_offset) + u64::from(pinned);
+        let (tmux, row) = live_orphan(tmp.path(), channel);
+        let _live = InjectedLivenessGuard::set(HostSessionRef::tmux(&tmux), HostLiveness::Live);
+        let before = std::fs::read(&row).expect("orphan row");
+        let pin = pinned.then(|| {
+            inflight::InflightEpisodePin::from_state(
+                &inflight::load_inflight_state(&provider, channel).expect("orphan state"),
+            )
+        });
+        let gate = Gate::protect(provider.clone(), channel).unwrap();
+        let _health = input_runtime::fence::test_health::Clear::new(&gate);
+        let shared = make_shared_data_for_tests();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+
+        let rebind = async {
+            if from_offset {
+                rebind_inflight_for_channel_with_minimum_start_offset(
+                    &http,
+                    &shared,
+                    &provider,
+                    channel,
+                    Some(tmux.clone()),
+                    None,
+                    pin.as_ref(),
+                )
+                .await
+            } else {
+                rebind_inflight_for_channel(
+                    &http,
+                    &shared,
+                    &provider,
+                    channel,
+                    Some(tmux.clone()),
+                    ManualRebindOverrides::default(),
+                    pin.as_ref(),
+                )
+                .await
+            }
+        };
+        let rebound = runtime.block_on(rebind).unwrap_or_else(|error| {
+            panic!("from_offset={from_offset} pinned={pinned}: admitted rebind failed: {error:?}")
+        });
+
+        assert!(rebound.watcher_spawned, "pinned={pinned}");
+        assert_eq!(shared.tmux_watchers.len(), 1, "pinned={pinned}");
+        assert_ne!(
+            std::fs::read(&row).expect("rebound row"),
+            before,
+            "pinned={pinned}: the rebind rewrote its row"
+        );
+        assert!(
+            !input_runtime::health_reasons()
+                .iter()
+                .any(|reason| reason.contains(&format!("channel={channel}"))),
+            "pinned={pinned}: the admitted rebind saw a refused writer"
+        );
+        let closing = gate.close().unwrap();
+        assert!(
+            closing.drain().now_or_never().is_some(),
+            "pinned={pinned}: returning releases the drain"
+        );
+        drop(runtime);
     }
 }

@@ -20,13 +20,14 @@
 //! #5993: the Discord DB-down alert that used to fire on exhaustion (sent to
 //! the retired kanban human-alert channel) is gone. The DB-down signals are
 //! the stderr line [`PgBootstrapFailure::exhaustion_line`] written right
-//! before `exit(1)`.
+//! before `exit(1)`. A database already ahead of this binary is not retried:
+//! dcserver holds ([`hold_while_schema_ahead`]) until its install path holds a new file.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::db::postgres::{PgConnectFailure, PgConnectFailureKind};
+use crate::db::postgres::{MigrationStatus, PgConnectFailure, PgConnectFailureKind};
 
 /// Number of retries after the initial connect attempt. Total attempts =
 /// `1 + MAX_RETRIES` = 6, with retry delays `1,2,4,8,16s`.
@@ -37,6 +38,11 @@ pub(crate) const BACKOFF_BASE_SECS: u64 = 1;
 /// #4379 mutation test targets: removing the `.min(BACKOFF_CAP_SECS)` clamp in
 /// [`backoff_delay`] must make [`backoff_delay`]'s cap assertion FAIL.
 pub(crate) const BACKOFF_CAP_SECS: u64 = 30;
+/// `0` restores the plain retry-then-exit path for a schema-ahead database.
+pub(crate) const SCHEMA_AHEAD_HOLD_ENV: &str = "AGENTDESK_SCHEMA_AHEAD_HOLD";
+const SCHEMA_AHEAD_POLL: Duration = Duration::from_secs(30);
+/// Polls between reminder lines while holding (10 minutes).
+const SCHEMA_AHEAD_REMINDER_POLLS: u64 = 20;
 fn pool_acquire_timeout_diagnostic(
     timestamp: &str,
     source: &str,
@@ -68,6 +74,8 @@ pub struct PgBootstrapFailure {
     pub last_error: String,
     /// Total number of connect attempts made (`1 + MAX_RETRIES` when exhausted).
     pub attempts: u32,
+    /// The loop stopped early because the database is ahead of this binary.
+    pub schema_ahead: bool,
 }
 
 impl PgBootstrapFailure {
@@ -105,10 +113,12 @@ pub(crate) fn backoff_delay(retry: u32) -> Duration {
 /// `tokio::time::sleep`; tests pass a recorder that advances no clock).
 ///
 /// On exhaustion returns [`PgBootstrapFailure`] carrying the last observed
-/// error and the total attempt count.
-pub(crate) async fn connect_with_backoff<T, C, CFut, S, SFut>(
+/// error and the total attempt count. A schema-ahead failure returns at once
+/// when `hold_on_schema_ahead` (asked only on that failure) says so.
+pub(crate) async fn connect_with_backoff<T, C, CFut, S, SFut, H>(
     mut connect: C,
     mut sleep: S,
+    mut hold_on_schema_ahead: H,
     source: &str,
 ) -> Result<T, PgBootstrapFailure>
 where
@@ -116,6 +126,7 @@ where
     CFut: Future<Output = Result<Option<T>, PgConnectFailure>>,
     S: FnMut(Duration) -> SFut,
     SFut: Future<Output = ()>,
+    H: FnMut() -> bool,
 {
     let mut last_error = String::new();
     for attempt in 0..=MAX_RETRIES {
@@ -127,6 +138,13 @@ where
             Err(error) => {
                 log_pool_acquire_timeout(source, Some(attempt + 1), &error);
                 last_error = error.to_string();
+                if error.kind() == PgConnectFailureKind::SchemaAhead && hold_on_schema_ahead() {
+                    return Err(PgBootstrapFailure {
+                        last_error,
+                        attempts: attempt + 1,
+                        schema_ahead: true,
+                    });
+                }
             }
         }
         // Sleep only *between* attempts — never after the final one, so we do
@@ -138,7 +156,113 @@ where
     Err(PgBootstrapFailure {
         last_error,
         attempts: MAX_RETRIES + 1,
+        schema_ahead: false,
     })
+}
+
+/// Whether the launchd environment leaves the schema-ahead hold on (default on).
+pub(crate) fn schema_ahead_hold_enabled() -> bool {
+    std::env::var(SCHEMA_AHEAD_HOLD_ENV)
+        .map(|value| value.trim() != "0")
+        .unwrap_or(true)
+}
+
+/// Describes a database whose applied migrations are all newer than this
+/// binary's latest; a gap below that latest is drift, not "ahead".
+fn schema_ahead_detail(status: &MigrationStatus) -> Option<String> {
+    let latest = *status.resolved_versions.iter().max()?;
+    let ahead = &status.missing_from_resolved;
+    if ahead.is_empty() || ahead.iter().any(|version| *version <= latest) {
+        return None;
+    }
+    Some(format!(
+        "database has migration(s) {ahead:?} newer than this binary's latest embedded migration {latest}"
+    ))
+}
+
+/// What a file looked like; a rename over the path yields a different value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BinaryIdentity {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl BinaryIdentity {
+    pub(crate) fn of(path: &Path) -> std::io::Result<Self> {
+        let metadata = std::fs::metadata(path)?;
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Ok(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            dev: metadata.dev(),
+            #[cfg(unix)]
+            ino: metadata.ino(),
+        })
+    }
+}
+
+/// The install path this process started from and its identity at startup.
+#[derive(Clone, Debug)]
+pub(crate) struct BinaryWatch {
+    path: PathBuf,
+    identity: BinaryIdentity,
+}
+
+impl BinaryWatch {
+    /// Taken at startup so a replacement before the first bootstrap failure still counts.
+    pub(crate) fn capture_current_exe() -> Option<Self> {
+        Self::capture(std::env::current_exe().ok()?)
+    }
+
+    pub(crate) fn capture(path: PathBuf) -> Option<Self> {
+        let identity = BinaryIdentity::of(&path).ok()?;
+        Some(Self { path, identity })
+    }
+}
+
+/// Holds a dcserver that cannot boot on the shared schema until a different file is
+/// renamed over its install path; a failed stat is not a replacement.
+pub(crate) async fn hold_while_schema_ahead<P, S, SFut>(
+    watch: &BinaryWatch,
+    detail: &str,
+    mut probe: P,
+    mut sleep: S,
+) where
+    P: FnMut(&Path) -> std::io::Result<BinaryIdentity>,
+    S: FnMut(Duration) -> SFut,
+    SFut: Future<Output = ()>,
+{
+    eprintln!(
+        "  ✖ schema ahead of binary: {detail}; holding without exit until {} is replaced ({SCHEMA_AHEAD_HOLD_ENV}=0 in the launchd environment exits instead after a restart)",
+        watch.path.display()
+    );
+    let mut polls: u64 = 0;
+    loop {
+        sleep(SCHEMA_AHEAD_POLL).await;
+        polls += 1;
+        let remind = polls % SCHEMA_AHEAD_REMINDER_POLLS == 0;
+        match probe(&watch.path) {
+            Ok(identity) if identity != watch.identity => {
+                eprintln!(
+                    "  ▸ {} was replaced; exiting so launchd starts the new binary",
+                    watch.path.display()
+                );
+                return;
+            }
+            Ok(_) if remind => eprintln!("  ✖ still holding: schema ahead of binary: {detail}"),
+            Err(error) if remind => eprintln!(
+                "  ⚠ cannot stat {} ({error}); still holding",
+                watch.path.display()
+            ),
+            _ => {}
+        }
+    }
 }
 
 /// Run migration, config reconciliation, and reseeding on the eager startup
@@ -149,7 +273,7 @@ pub(crate) async fn initialize_postgres_for_bootstrap(
     runtime_root: Option<&Path>,
     legacy_scan: &crate::services::discord_config_audit::LegacySourceScan,
 ) -> Result<crate::config::Config, PgConnectFailure> {
-    crate::db::postgres::with_startup_advisory_lock(pool, || async {
+    let initialized = crate::db::postgres::with_startup_advisory_lock(pool, || async {
         crate::db::postgres::migrate(pool).await?;
         if let Some(root) = runtime_root {
             let loaded = crate::services::discord_config_audit::load_runtime_config(root)?;
@@ -165,10 +289,20 @@ pub(crate) async fn initialize_postgres_for_bootstrap(
         }
         crate::db::postgres::startup_reseed_with_warmup_pool(pool, &config).await
     })
-    .await
-    .map_err(|error| {
-        PgConnectFailure::other(format!("postgres startup initialization: {error}"))
-    })?;
+    .await;
+    if let Err(error) = initialized {
+        // Only a failure is classified, so a healthy boot runs no extra query.
+        if let Ok(status) = crate::db::postgres::migration_status(pool).await {
+            if let Some(detail) = schema_ahead_detail(&status) {
+                return Err(PgConnectFailure::schema_ahead(format!(
+                    "postgres startup initialization: {detail} ({error})"
+                )));
+            }
+        }
+        return Err(PgConnectFailure::other(format!(
+            "postgres startup initialization: {error}"
+        )));
+    }
     Ok(config)
 }
 
@@ -207,6 +341,22 @@ mod tests {
     fn run_backoff<T: Clone + 'static>(
         results: Vec<Result<Option<T>, PgConnectFailure>>,
     ) -> (Result<T, PgBootstrapFailure>, Vec<Duration>, usize) {
+        let (result, slept, calls, hold_asks) = run_backoff_with_hold(results, true);
+        assert_eq!(
+            hold_asks, 0,
+            "only a schema-ahead failure asks about the hold"
+        );
+        (result, slept, calls)
+    }
+
+    /// Like `run_backoff`, with the schema-ahead hold answer and the number of
+    /// times the loop asked for it.
+    fn run_backoff_with_hold<T: Clone + 'static>(
+        results: Vec<Result<Option<T>, PgConnectFailure>>,
+        hold: bool,
+    ) -> (Result<T, PgBootstrapFailure>, Vec<Duration>, usize, usize) {
+        let hold_asks = Rc::new(RefCell::new(0usize));
+        let hold_asks_c = hold_asks.clone();
         let script = Rc::new(RefCell::new(results.into_iter()));
         let calls = Rc::new(RefCell::new(0usize));
         let slept: Rc<RefCell<Vec<Duration>>> = Rc::new(RefCell::new(Vec::new()));
@@ -231,12 +381,17 @@ mod tests {
                 slept_c.borrow_mut().push(d);
                 async move {}
             },
+            move || {
+                *hold_asks_c.borrow_mut() += 1;
+                hold
+            },
             "cli::dcserver_pg_bootstrap::tests",
         );
         let result = futures::executor::block_on(fut);
         let slept_vec = slept.borrow().clone();
         let call_count = *calls.borrow();
-        (result, slept_vec, call_count)
+        let asks = *hold_asks.borrow();
+        (result, slept_vec, call_count, asks)
     }
 
     #[test]
@@ -277,6 +432,7 @@ mod tests {
             Err(PgBootstrapFailure {
                 last_error: "final boom".to_string(),
                 attempts: 6,
+                schema_ahead: false,
             })
         );
         assert_eq!(calls, 6, "1 initial + MAX_RETRIES attempts");
@@ -311,6 +467,7 @@ mod tests {
                 }
             },
             |_delay| async {},
+            || true,
             "cli::dcserver::postgres_startup_and_runtime",
         ))
         .unwrap_err();
@@ -375,5 +532,162 @@ mod tests {
             "Ok(None) exhaustion surfaces the required-message, got: {}",
             failure.last_error
         );
+    }
+
+    fn schema_ahead_failure() -> PgConnectFailure {
+        PgConnectFailure::schema_ahead("database has migration(s) [136] newer than 135")
+    }
+
+    /// A database ahead of the binary cannot become bootable by retrying, so the
+    /// loop stops at once while the hold is on and keeps the old schedule when off.
+    #[test]
+    fn a_schema_ahead_failure_stops_at_once_only_while_the_hold_is_on() {
+        let (result, slept, calls, asks) =
+            run_backoff_with_hold::<u32>(vec![Err(schema_ahead_failure())], true);
+        let failure = result.unwrap_err();
+        assert!(failure.schema_ahead, "hold on: {failure:?}");
+        assert_eq!((calls, asks, failure.attempts), (1, 1, 1));
+        assert!(slept.is_empty(), "no backoff before holding: {slept:?}");
+
+        let (result, slept, calls, _) =
+            run_backoff_with_hold::<u32>(vec![Err(schema_ahead_failure()); 6], false);
+        let failure = result.unwrap_err();
+        assert!(!failure.schema_ahead, "hold off: {failure:?}");
+        assert_eq!(calls, 6, "hold off keeps every retry");
+        assert_eq!(
+            slept,
+            [1, 2, 4, 8, 16].map(Duration::from_secs).to_vec(),
+            "hold off keeps the backoff schedule"
+        );
+    }
+
+    fn status(resolved: &[i64], missing: &[i64]) -> MigrationStatus {
+        MigrationStatus {
+            applied: Vec::new(),
+            resolved_versions: resolved.to_vec(),
+            missing_from_resolved: missing.to_vec(),
+            pending_versions: Vec::new(),
+        }
+    }
+
+    /// Only versions entirely past the binary's latest are "ahead"; a gap below
+    /// it is drift that a newer deploy does not explain.
+    #[test]
+    fn schema_ahead_needs_every_unknown_version_past_the_latest() {
+        assert!(schema_ahead_detail(&status(&[1, 2, 3], &[4, 5])).is_some());
+        assert!(schema_ahead_detail(&status(&[1, 2, 3], &[0, 4])).is_none());
+        assert!(schema_ahead_detail(&status(&[1, 2, 3], &[])).is_none());
+        assert!(schema_ahead_detail(&status(&[], &[4])).is_none());
+    }
+
+    /// Writes `bytes` beside `path` and renames it over, as the deploy does.
+    fn rename_over(path: &Path, bytes: &[u8]) {
+        let staged = path.with_extension("staged");
+        std::fs::write(&staged, bytes).expect("write staged binary");
+        std::fs::rename(&staged, path).expect("rename staged binary over the install path");
+    }
+
+    async fn hold_returns_within_an_hour(watch: &BinaryWatch) -> bool {
+        tokio::time::timeout(
+            Duration::from_secs(3600),
+            hold_while_schema_ahead(watch, "ahead", BinaryIdentity::of, tokio::time::sleep),
+        )
+        .await
+        .is_ok()
+    }
+
+    /// The hold survives an unchanged file and a missing path, and ends when a
+    /// same-sized file is renamed over the install path.
+    #[tokio::test(start_paused = true)]
+    async fn hold_ends_only_when_the_install_path_holds_a_new_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agentdesk");
+        std::fs::write(&path, b"old-binary").expect("write binary");
+        let watch = BinaryWatch::capture(path.clone()).expect("capture");
+
+        assert!(
+            !hold_returns_within_an_hour(&watch).await,
+            "unchanged file must keep holding"
+        );
+
+        std::fs::remove_file(&path).expect("remove binary");
+        assert!(
+            !hold_returns_within_an_hour(&watch).await,
+            "a missing path is not a replacement"
+        );
+
+        rename_over(&path, b"new-binary");
+        assert!(
+            hold_returns_within_an_hour(&watch).await,
+            "a renamed-in binary ends the hold"
+        );
+    }
+
+    /// The baseline is the file at startup, so a binary installed before the
+    /// first bootstrap failure still ends the hold.
+    #[tokio::test(start_paused = true)]
+    async fn hold_ends_for_a_binary_replaced_before_it_started() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agentdesk");
+        std::fs::write(&path, b"old-binary").expect("write binary");
+        let watch = BinaryWatch::capture(path.clone()).expect("capture");
+        rename_over(&path, b"new-binary");
+        assert!(hold_returns_within_an_hour(&watch).await);
+    }
+
+    /// A migration newer than this binary is SchemaAhead; an unknown version below
+    /// the latest stays an ordinary failure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_initialization_reports_a_database_ahead_of_the_binary_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let latest = crate::db::postgres::migration_status(&pool)
+            .await
+            .expect("migration status")
+            .resolved_versions
+            .into_iter()
+            .max()
+            .expect("embedded migrations");
+
+        let initialize_with_unknown = |version: i64| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "DELETE FROM _sqlx_migrations WHERE description = 'unknown to this binary'",
+                )
+                .execute(&pool)
+                .await
+                .expect("clear unknown row");
+                sqlx::query(
+                    "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+                     VALUES ($1, 'unknown to this binary', TRUE, '\\x00'::bytea, 0)",
+                )
+                .bind(version)
+                .execute(&pool)
+                .await
+                .expect("insert unknown migration row");
+                initialize_postgres_for_bootstrap(
+                    &pool,
+                    crate::config::Config::default(),
+                    None,
+                    &crate::services::discord_config_audit::LegacySourceScan::default(),
+                )
+                .await
+                .expect_err("an unknown applied migration must fail startup")
+            }
+        };
+
+        let ahead = initialize_with_unknown(latest + 1).await;
+        assert_eq!(ahead.kind(), PgConnectFailureKind::SchemaAhead, "{ahead}");
+        assert!(
+            ahead.to_string().contains(&format!("[{}]", latest + 1)),
+            "{ahead}"
+        );
+
+        let gap = initialize_with_unknown(0).await;
+        assert_eq!(gap.kind(), PgConnectFailureKind::Other, "{gap}");
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
