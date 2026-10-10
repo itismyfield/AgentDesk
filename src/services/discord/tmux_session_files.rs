@@ -3,6 +3,7 @@ use poise::serenity_prelude::ChannelId;
 use std::io::{Read, Seek, Write};
 
 use super::SharedData;
+use crate::services::discord::input_runtime::fence::{BootTarget, boot_skip};
 
 /// Read the `.generation` marker file mtime in nanoseconds since the unix
 /// epoch. Returns 0 when the marker is missing in BOTH the canonical
@@ -810,8 +811,6 @@ fn source_authority_stem_for_orphan_file(filename: &str) -> &str {
 /// before deleting. Legacy `/tmp/` files are *never* swept at startup —
 /// pre-migration wrappers may still be writing into them.
 pub(super) async fn sweep_orphan_session_files() {
-    const ORPHAN_MIN_AGE_SECS: u64 = 10 * 60; // 10 minutes
-
     let Some(dir) = crate::services::tmux_common::persistent_sessions_dir() else {
         return;
     };
@@ -829,8 +828,14 @@ pub(super) async fn sweep_orphan_session_files() {
         Ok(Ok(Ok(names))) => names.into_iter().collect(),
         _ => return, // tmux unavailable — skip sweep rather than risk false positives
     };
+    sweep_orphan_session_files_in(&dir, &live);
+}
 
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+/// Sweeps `dir` given the live tmux session names.
+fn sweep_orphan_session_files_in(dir: &std::path::Path, live: &std::collections::HashSet<String>) {
+    const ORPHAN_MIN_AGE_SECS: u64 = 10 * 60; // 10 minutes
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
 
@@ -891,8 +896,19 @@ pub(super) async fn sweep_orphan_session_files() {
         if age.as_secs() < ORPHAN_MIN_AGE_SECS {
             continue;
         }
+        // A protected channel's files, or ones no binding places while any channel is
+        // protected, stay for that channel's move or handback.
+        let ext = crate::services::tmux_common::TMUX_CHANNEL_TEMP_EXT;
+        let channel = std::fs::read_to_string(dir.join(format!("{stem}.{ext}")));
+        let channel = channel.ok().and_then(|id| id.trim().parse().ok());
+        let target = channel
+            .filter(|id| *id != 0)
+            .map_or(BootTarget::Unknown, BootTarget::AnyProvider);
+        if boot_skip(target) {
+            continue;
+        }
         // Delete every file under this stem.
-        let Ok(iter) = std::fs::read_dir(&dir) else {
+        let Ok(iter) = std::fs::read_dir(dir) else {
             continue;
         };
         crate::services::tmux_common::with_session_temp_source_authority(&stem, || {
@@ -915,6 +931,10 @@ pub(super) async fn sweep_orphan_session_files() {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tmux_session_files/input_fence_tests.rs"]
+mod input_fence_tests;
 
 #[cfg(test)]
 mod tests {

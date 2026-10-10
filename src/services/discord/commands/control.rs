@@ -539,6 +539,14 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
         crate::services::session_forwarding::ForwardCallerContext::from_live_globals(
             ctx.data().shared.pg_pool.clone(),
         );
+    // A channel delegated away goes to its holder, never to the legacy owner forward below.
+    let provider = &ctx.data().provider;
+    if let Some(reply) =
+        super::stop::gateway_stop_reply(&forward_context, provider, channel_id).await
+    {
+        ctx.say(reply).await?;
+        return Ok(());
+    }
     match crate::services::session_forwarding::forward_remote_cancel_if_needed(
         &forward_context,
         &axum::http::HeaderMap::new(),

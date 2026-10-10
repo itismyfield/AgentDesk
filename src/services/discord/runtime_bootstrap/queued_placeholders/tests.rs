@@ -228,3 +228,74 @@ fn recovery_consumer_routes_uninstalled_candidates_to_cleanup() {
     assert!(!region.contains(".insert("));
     assert!(!region.contains("persist_channel_from_map"));
 }
+
+/// Boot restore leaves a protected channel's queued cards on disk and in Discord: it neither
+/// installs nor prunes them and its stale-card cleanup deletes none; a sibling restores.
+#[tokio::test]
+async fn restore_and_cleanup_leave_a_protected_channel() {
+    use crate::services::discord::input_runtime::fence::{Gate, test_health};
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let shared = make_shared_data_for_tests();
+    let (protected, sibling) = (ChannelId::new(6_325_576_001), ChannelId::new(6_325_576_002));
+    let (u, x, y) = (MessageId::new(21), MessageId::new(81), MessageId::new(82));
+    for channel in [protected, sibling] {
+        seed(&shared, channel, &[u]).await;
+        queued_placeholders_store::save_channel_queued_placeholders(
+            &shared.provider,
+            &shared.token_hash,
+            channel,
+            &[(u, x)],
+        );
+    }
+    let gate = Gate::protect(shared.provider.clone(), protected.get()).unwrap();
+    let _health = test_health::Clear::new(&gate);
+    let disk = || {
+        queued_placeholders_store::load_queued_placeholders(&shared.provider, &shared.token_hash)
+    };
+    let before = disk();
+
+    let stale = std::collections::HashSet::new();
+    let live = vec![((protected, u), x), ((sibling, u), x)];
+    let late = install_restored_queued_placeholders(&shared, live, &stale).await;
+    assert!(late.is_empty());
+    assert!(
+        !shared
+            .queued
+            .queued_placeholders
+            .contains_key(&(protected, u))
+    );
+    assert_eq!(
+        shared
+            .queued
+            .queued_placeholders
+            .get(&(sibling, u))
+            .map(|v| *v),
+        Some(x)
+    );
+    assert_eq!(
+        disk(),
+        before,
+        "the protected channel's disk card is kept as stored"
+    );
+
+    // An idle protected channel's card would be released, and a queued one's rekeyed.
+    let idle = ChannelId::new(6_325_576_003);
+    let idle_gate = Gate::protect(shared.provider.clone(), idle.get()).unwrap();
+    let _idle_health = test_health::Clear::new(&idle_gate);
+    let recorder = Recorder::default();
+    let stale_cards = [
+        (protected, MessageId::new(23), MessageId::new(83)),
+        (idle, MessageId::new(24), MessageId::new(84)),
+        (sibling, MessageId::new(22), y),
+    ];
+    delete_stale_queued_placeholder_cards_with(&recorder, &shared, &stale_cards).await;
+    assert_eq!(
+        *recorder.0.lock().unwrap(),
+        vec![y],
+        "only the sibling's card is deleted"
+    );
+    let protected_cards = shared.queued.queued_placeholders.iter();
+    let protected_cards = protected_cards.filter(|e| [protected, idle].contains(&e.key().0));
+    assert_eq!(protected_cards.count(), 0, "no protected card is rekeyed");
+}
