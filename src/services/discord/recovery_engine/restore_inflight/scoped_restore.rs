@@ -33,6 +33,64 @@ fn check_restore_context(context: &RestoreContext, provider: &ProviderKind) -> R
     Ok(())
 }
 
+#[cfg(all(test, unix))]
+fn snapshot_episode(
+    provider: &ProviderKind,
+    expected: &inflight::InflightTurnState,
+) -> Result<inflight::InflightTurnState, String> {
+    let pin = inflight::InflightEpisodePin::from_state(expected);
+    let guard = inflight::lock_inflight_episode(provider, expected.channel_id, &pin)
+        .map_err(|error| format!("retryable: inflight episode unavailable: {error:?}"))?;
+    let state = guard.state().clone();
+    if state.runtime_kind_unknown_on_disk || state.version > inflight::inflight_state_version() {
+        return Err("unsupported inflight format/runtime".into());
+    }
+    Ok(state)
+}
+
+#[cfg(all(test, unix))]
+fn verify_snapshot(
+    provider: &ProviderKind,
+    snapshot: &inflight::InflightTurnState,
+) -> Result<(), String> {
+    let fresh = snapshot_episode(provider, snapshot)?;
+    if serde_json::to_value(&fresh).map_err(|e| e.to_string())?
+        != serde_json::to_value(snapshot).map_err(|e| e.to_string())?
+    {
+        return Err("retryable: inflight progress changed during restore".into());
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestoreEffect {
+    OutputOnly,
+    Provider,
+}
+
+#[cfg(all(test, unix))]
+fn restore_effect(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+) -> Option<RestoreEffect> {
+    if state.replay_rerun_blocked()
+        || super::herdr_admitted_restart::admitted(provider, state).is_some()
+    {
+        Some(RestoreEffect::OutputOnly)
+    } else if herdr_turn_held(provider, state)
+        || state.rebind_origin
+        || recovery_terminal_delivery_already_committed(state)
+        || state.tui_terminal_kind.is_some()
+        || !state.full_response.is_empty()
+        || state.request_owner_user_id == 0
+    {
+        None
+    } else {
+        Some(RestoreEffect::Provider)
+    }
+}
+
 /// Installs or observes exactly one canonical episode; delivery and provider work are separate.
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) async fn install_inflight_scoped(
@@ -64,13 +122,12 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
     let Some(expected) = probe.states.into_iter().next() else {
         return Ok(installed(None, InflightObservation::Empty));
     };
-    let pin = inflight::InflightEpisodePin::from_state(&expected);
-    let guard = inflight::lock_inflight_episode(provider, context.scope.channel, &pin)
-        .map_err(|error| format!("inflight episode unavailable: {error:?}"))?;
-    let mut state = guard.state().clone();
+    let snapshot = snapshot_episode(provider, &expected)?;
+    let mut state = snapshot.clone();
     if state.runtime_kind_unknown_on_disk || state.version > inflight::inflight_state_version() {
         return Err("unsupported inflight format/runtime".into());
     }
+    b3a2_tests::pause("install-hydrate").await;
     let lookup =
         replay_hold::hydrate_replay_hold_checked(shared.pg_pool.as_ref(), &mut state).await;
     if let replay_hold::ReplayLookup::Unverified { reason, .. } = lookup
@@ -78,7 +135,20 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
     {
         return Err(reason);
     }
+    verify_snapshot(provider, &snapshot)?;
     check_restore_context(context, provider)?;
+    let intake = if state.replay_rerun_blocked() {
+        None
+    } else {
+        let intake = crate::services::agent_recovery::channel_recovery_intake(
+            provider,
+            &state.channel_id.to_string(),
+        )
+        .await;
+        verify_snapshot(provider, &snapshot)?;
+        check_restore_context(context, provider)?;
+        intake
+    };
     let mut actor = None;
     let mut activated = false;
     let observation = if state.replay_rerun_blocked() {
@@ -88,11 +158,7 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
             delivery: None,
         }
     } else if matches!(
-        crate::services::agent_recovery::channel_recovery_intake(
-            provider,
-            &state.channel_id.to_string()
-        )
-        .await,
+        intake,
         Some(crate::services::agent_recovery::RecoveryIntake::Skip)
     ) {
         InflightObservation::Deferred("recovery intake owns the row".into())
@@ -109,7 +175,6 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
     } else {
         // Ordinary invalidation rechecks the locked snapshot and canonical replay authority.
         // Held and admitted rows never enter this destructive branch.
-        drop(guard);
         if inflight::invalidate_stale_generation_scoped(
             shared.pg_pool.as_ref(),
             provider,
@@ -120,20 +185,21 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
         {
             return Ok(installed(None, InflightObservation::Empty));
         }
-        let guard = inflight::lock_inflight_episode(provider, context.scope.channel, &pin)
-            .map_err(|error| format!("inflight episode changed: {error:?}"))?;
-        state = guard.state().clone();
+        verify_snapshot(provider, &snapshot)?;
         check_restore_context(context, provider)?;
         if recovery_terminal_delivery_already_committed(&state) || state.request_owner_user_id == 0
         {
             InflightObservation::Deferred("canonical row awaits authorized recovery".into())
         } else {
             let channel = ChannelId::new(state.channel_id);
+            b3a2_tests::pause("install-mailbox").await;
             let before = shared
                 .mailbox(channel)
                 .try_snapshot()
                 .await
                 .map_err(|e| format!("mailbox unavailable: {e:?}"))?;
+            verify_snapshot(provider, &snapshot)?;
+            check_restore_context(context, provider)?;
             if before.cancel_token.is_some()
                 && ((state.turn_nonce.as_deref().is_none_or(str::is_empty)
                     && !before.cancel_token.as_ref().is_some_and(|token| {
@@ -152,12 +218,15 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
                 return Err("mailbox belongs to another episode".into());
             }
             if before.cancel_token.is_none() {
+                b3a2_tests::pause("install-admission").await;
                 let _admission = crate::services::agent_recovery::admission::admit(
                     &state.channel_id.to_string(),
                     provider,
                 )
                 .await
                 .map_err(|e| format!("recovery installation admission refused: {e}"))?;
+                verify_snapshot(provider, &snapshot)?;
+                check_restore_context(context, provider)?;
                 let token = Arc::new(CancelToken::from_persisted_turn_nonce(
                     state.turn_nonce.clone(),
                 ));
@@ -179,12 +248,15 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
                         queue_persistence_context(shared, provider, channel),
                     )
                     .await;
+                verify_snapshot(provider, &snapshot)?;
+                check_restore_context(context, provider)?;
                 if !claim.started || claim.persistence_error.is_some() {
                     return Err("active claim or queue persistence refused".into());
                 }
                 let proof = actor_proof(context, &state, token)?;
                 if scoped_mutant("install-feedback") {
                     apply_queue_exit_feedback(shared, channel, &claim.queue_exit_events).await;
+                    verify_snapshot(provider, &snapshot)?;
                 }
                 activated = crate::services::turn_orchestrator::installed_actor_handoff::remember(
                     &proof,
@@ -199,11 +271,15 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
             {
                 return Err("active inflight installation refused".into());
             }
+            verify_snapshot(provider, &snapshot)?;
+            check_restore_context(context, provider)?;
             let after = shared
                 .mailbox(channel)
                 .try_snapshot()
                 .await
                 .map_err(|e| format!("mailbox unavailable: {e:?}"))?;
+            verify_snapshot(provider, &snapshot)?;
+            check_restore_context(context, provider)?;
             if after.cancel_token.is_none()
                 || after.active_request_owner != Some(UserId::new(state.request_owner_user_id))
                 || after.active_turn_nonce != state.turn_nonce
@@ -277,26 +353,61 @@ pub(in crate::services::discord) async fn resume_inflight_scoped(
     let Some(expected) = &installed.state else {
         return Ok(InflightObservation::Empty);
     };
-    let pin = inflight::InflightEpisodePin::from_state(expected);
-    let guard = inflight::lock_inflight_episode(provider, context.scope.channel, &pin)
-        .map_err(|e| format!("resume episode changed: {e:?}"))?;
-    let mut state = guard.state().clone();
+    let snapshot = snapshot_episode(provider, expected)?;
+    let mut state = snapshot.clone();
+    b3a2_tests::pause("resume-hydrate").await;
     if let replay_hold::ReplayLookup::Unverified { reason, .. } =
         replay_hold::hydrate_replay_hold_checked(Some(pool), &mut state).await
     {
         return Err(reason);
     }
-    drop(guard); // Canonical delivery/clear APIs take this same lock themselves.
+    b3a2_tests::pause("resume-receipt").await;
+    verify_snapshot(provider, &snapshot)?;
     check_restore_context(context, provider)?;
-    let permit = if state.replay_rerun_blocked()
-        || herdr_turn_held(provider, &state)
-        || super::herdr_admitted_restart::admitted(provider, &state).is_some()
-    {
-        gate.admit_recovery(provider.as_str())
-    } else {
-        gate.admit_command(provider.as_str())
+    if !state.replay_rerun_blocked() {
+        let intake = crate::services::agent_recovery::channel_recovery_intake(
+            provider,
+            &state.channel_id.to_string(),
+        )
+        .await;
+        verify_snapshot(provider, &snapshot)?;
+        check_restore_context(context, provider)?;
+        if matches!(
+            intake,
+            Some(crate::services::agent_recovery::RecoveryIntake::Skip)
+        ) || state.rebind_origin
+        {
+            return Ok(InflightObservation::Deferred(
+                "existing recovery owner retained the row".into(),
+            ));
+        }
     }
-    .ok_or("home execution admission refused")?;
+    // Receipt lookup may yield; the full home identity is read again immediately before admission.
+    let home = crate::db::o_channel_homes::read_home(pool, &context.scope.channel.to_string())
+        .await
+        .map_err(|e| format!("home lookup failed: {e:?}"))?
+        .ok_or("home identity absent")?;
+    verify_snapshot(provider, &snapshot)?;
+    check_restore_context(context, provider)?;
+    if !context.scope.matches(&home) {
+        return Err("home identity changed after receipt lookup".into());
+    }
+    let Some(effect) = restore_effect(provider, &state) else {
+        return Ok(if herdr_turn_held(provider, &state) {
+            InflightObservation::HerdrHeld
+        } else {
+            InflightObservation::Deferred(
+                "completion evidence or recovery effect classification unavailable".into(),
+            )
+        });
+    };
+    let permit = gate
+        .admit_at_epoch(
+            provider.as_str(),
+            context.scope.epoch,
+            effect == RestoreEffect::OutputOnly,
+        )
+        .ok_or("home execution admission refused")?;
     if installed
         .effects_started
         .swap(true, std::sync::atomic::Ordering::AcqRel)
@@ -361,6 +472,9 @@ pub(in crate::services::discord) async fn resume_inflight_scoped(
                     }
                 }
             });
+        }
+        if effect != RestoreEffect::Provider {
+            return Ok(InflightObservation::Deferred("output-only recovery retained the row".into()));
         }
         // An actor this installation merely observed retains its existing driver.
         if installed.observation == InflightObservation::Active && !installed.activated {
@@ -592,7 +706,11 @@ mod b3a1_tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn context(channel: u64, generation: u64, current: Arc<AtomicU64>) -> RestoreContext {
+    pub(super) fn context(
+        channel: u64,
+        generation: u64,
+        current: Arc<AtomicU64>,
+    ) -> RestoreContext {
         RestoreContext {
             scope: RestoreScope {
                 channel,
@@ -607,7 +725,7 @@ mod b3a1_tests {
             current,
         }
     }
-    fn row(channel: u64, nonce: Option<&str>) -> inflight::InflightTurnState {
+    pub(super) fn row(channel: u64, nonce: Option<&str>) -> inflight::InflightTurnState {
         let mut state = inflight::InflightTurnState::new(
             ProviderKind::Claude,
             channel,
@@ -627,7 +745,7 @@ mod b3a1_tests {
         state.born_generation = 0;
         state
     }
-    async fn fixture() -> (
+    pub(super) async fn fixture() -> (
         crate::db::auto_queue::test_support::TestPostgresDb,
         sqlx::PgPool,
         Arc<SharedData>,
@@ -1165,6 +1283,475 @@ mod b3a1_tests {
                 .recovery_started_at,
             Some(marker)
         );
+        pool.close().await;
+        db.drop().await;
+    }
+}
+
+#[cfg(all(test, unix))]
+#[cfg(test)]
+mod b3a2_tests {
+    use super::b3a1_tests::{context, fixture, row};
+    use super::*;
+    use crate::db::o_channel_homes::HomeState;
+    use crate::services::cluster::channel_home;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Barrier {
+        stage: &'static str,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    tokio::task_local! { static BARRIER: Arc<Barrier>; }
+    pub(super) async fn pause(stage: &str) {
+        if let Ok(barrier) = BARRIER.try_with(Clone::clone)
+            && stage == barrier.stage
+        {
+            barrier.entered.notify_one();
+            barrier.release.notified().await;
+        }
+    }
+    fn barrier(stage: &'static str) -> Arc<Barrier> {
+        Arc::new(Barrier {
+            stage,
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+    fn path(state: &inflight::InflightTurnState) -> std::path::PathBuf {
+        inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &ProviderKind::Claude,
+            state.channel_id,
+        )
+    }
+    async fn seed_home(pool: &sqlx::PgPool, channel: u64) {
+        sqlx::query("INSERT INTO o_channel_homes(channel_id,provider,state,holder,epoch,renewed_at) VALUES($1,'claude','worker','mini',1,NOW())")
+            .bind(channel.to_string()).execute(pool).await.unwrap();
+    }
+    fn witness(context: &RestoreContext, ticket: &InstalledInflight) -> RestoreWitness {
+        RestoreWitness {
+            scope: Some(context.scope.clone()),
+            generation: context.generation,
+            status: RestoreStatus::Restored,
+            inflight: Some(ticket.observation.clone()),
+        }
+    }
+    fn admitted_row(channel: u64) -> inflight::InflightTurnState {
+        let mut state = row(channel, Some("admitted"));
+        let name = ProviderKind::Claude.build_tmux_session_name(&format!("b3a2-{channel}"));
+        let marker = crate::services::tmux_common::session_temp_path(&name, "host_kind");
+        std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(marker, "herdr").unwrap();
+        state.tmux_session_name = Some(name);
+        state.tui_terminal_kind = Some(NativeTerminalKind::Aborted);
+        state.full_response = "captured result".into();
+        state
+    }
+    fn prior_generation() {
+        let generation = crate::services::discord::runtime_store::generation_path().unwrap();
+        std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
+        std::fs::write(generation, "7").unwrap();
+    }
+    async fn install_contention(stage: &'static str, channel: u64, mutate: bool) {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let (db, pool, shared) = fixture().await;
+        let state = row(channel, None);
+        inflight::save_inflight_state_create_new(&state).unwrap();
+        let context = context(channel, 1, Arc::new(AtomicU64::new(1)));
+        let http = Arc::new(serenity::Http::new("test"));
+        let barrier = barrier(stage);
+        let restore = BARRIER.scope(
+            barrier.clone(),
+            install_inflight_scoped(&http, &shared, &ProviderKind::Claude, &context),
+        );
+        let probe = async {
+            barrier.entered.notified().await;
+            let first = inflight::try_lock_inflight_state_path(&path(&state));
+            let released = first.is_ok();
+            let contended =
+                released && inflight::try_lock_inflight_state_path(&path(&state)).is_err();
+            if mutate && released {
+                let mut changed = state.clone();
+                changed.full_response = "new canonical progress".into();
+                std::fs::write(path(&state), serde_json::to_vec(&changed).unwrap()).unwrap();
+            }
+            drop(first);
+            let mailbox = shared
+                .mailbox(ChannelId::new(channel))
+                .try_snapshot()
+                .await
+                .is_ok();
+            barrier.release.notify_one();
+            (released, contended, mailbox)
+        };
+        let (result, (released, contended, mailbox)) = tokio::join!(restore, probe);
+        assert!(
+            released,
+            "scoped await must release the actual episode flock: {stage}"
+        );
+        assert!(
+            contended,
+            "the test must create actual competing flock ownership"
+        );
+        assert!(mailbox, "mailbox must progress while restore awaits");
+        if mutate {
+            assert!(
+                result.is_err(),
+                "changed mutable snapshot must refuse installation"
+            );
+            assert!(
+                shared
+                    .mailbox(ChannelId::new(channel))
+                    .snapshot()
+                    .await
+                    .cancel_token
+                    .is_none()
+            );
+            assert_eq!(
+                inflight::load_inflight_probe_scoped(&ProviderKind::Claude, channel).states[0]
+                    .full_response,
+                "new canonical progress"
+            );
+        } else {
+            assert!(
+                result.is_ok(),
+                "uncontended restoration must progress after release"
+            );
+        }
+        pool.close().await;
+        db.drop().await;
+    }
+    #[tokio::test]
+    async fn s3act_b3a2_hydrate_releases_lock_pg() {
+        install_contention("install-hydrate", 5340501, false).await;
+    }
+    #[tokio::test]
+    async fn s3act_b3a2_admission_releases_lock_pg() {
+        install_contention("install-admission", 5340502, false).await;
+    }
+    #[tokio::test]
+    async fn s3act_b3a2_mailbox_snapshot_releases_lock_pg() {
+        install_contention("install-mailbox", 5340503, false).await;
+    }
+    #[tokio::test]
+    async fn s3act_b3a2_changed_snapshot_refuses_install_pg() {
+        install_contention("install-hydrate", 5340504, true).await;
+    }
+
+    async fn resume_contention(channel: u64, mutate: bool) {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        let (db, pool, shared) = fixture().await;
+        prior_generation();
+        seed_home(&pool, channel).await;
+        let gate = channel_home::register_for_test(channel, Some(HomeState::Worker));
+        let state = admitted_row(channel);
+        inflight::save_inflight_state_create_new(&state).unwrap();
+        let context = context(channel, 1, Arc::new(AtomicU64::new(1)));
+        let discord =
+            crate::services::discord::recovery_engine::o_cut_recorder::start(channel).await;
+        let installed =
+            install_inflight_scoped(&discord.http, &shared, &ProviderKind::Claude, &context)
+                .await
+                .unwrap();
+        let witness = witness(&context, &installed);
+        let barrier = barrier("resume-hydrate");
+        let resume = BARRIER.scope(
+            barrier.clone(),
+            resume_inflight_scoped(
+                &discord.http,
+                &shared,
+                &ProviderKind::Claude,
+                &context,
+                &witness,
+                &installed,
+            ),
+        );
+        let compete = async {
+            barrier.entered.notified().await;
+            let guard = inflight::try_lock_inflight_state_path(&path(&state));
+            let released = guard.is_ok();
+            let contended =
+                released && inflight::try_lock_inflight_state_path(&path(&state)).is_err();
+            if mutate && released {
+                let mut changed = state.clone();
+                changed.full_response = "new resume progress".into();
+                std::fs::write(path(&state), serde_json::to_vec(&changed).unwrap()).unwrap();
+            }
+            drop(guard);
+            barrier.release.notify_one();
+            (released, contended)
+        };
+        let (result, (released, contended)) = tokio::join!(resume, compete);
+        assert!(
+            released && contended,
+            "resume receipt await must release actual episode flock and permit competing ownership"
+        );
+        if mutate {
+            assert!(
+                result.is_err(),
+                "resume must reject a changed mutable canonical snapshot"
+            );
+            assert!(discord.calls().is_empty());
+            assert!(!installed.effects_started.load(Ordering::Acquire));
+            assert_eq!(
+                inflight::load_inflight_probe_scoped(&ProviderKind::Claude, channel).states[0]
+                    .full_response,
+                "new resume progress"
+            );
+        } else {
+            assert!(matches!(
+                result,
+                Ok(InflightObservation::Settled {
+                    kind: NativeTerminalKind::Aborted
+                })
+            ));
+        }
+        channel_home::unregister_if_same(&gate);
+        pool.close().await;
+        db.drop().await;
+    }
+    #[tokio::test]
+    async fn s3act_b3a2_resume_hydrate_releases_lock_pg() {
+        resume_contention(5340505, false).await;
+    }
+    #[tokio::test]
+    async fn s3act_b3a2_resume_snapshot_change_is_preserved_pg() {
+        resume_contention(5340506, true).await;
+    }
+
+    #[tokio::test]
+    async fn s3act_b3a2_receipt_then_full_home_revalidation_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        let (db, pool, shared) = fixture().await;
+        prior_generation();
+        for (i, column, value) in [
+            (0, "target", "remote"),
+            (1, "holder", "remote"),
+            (2, "provider", "codex"),
+            (3, "state", "releasing"),
+        ] {
+            let channel = 5340510 + i;
+            seed_home(&pool, channel).await;
+            sqlx::query("UPDATE o_channel_homes SET state='reclaiming',target='gateway' WHERE channel_id=$1")
+                .bind(channel.to_string()).execute(&pool).await.unwrap();
+            let gate = channel_home::register_for_test(channel, Some(HomeState::Reclaiming));
+            let state = admitted_row(channel);
+            inflight::save_inflight_state_create_new(&state).unwrap();
+            let before = std::fs::read(path(&state)).unwrap();
+            let mut context = context(channel, 1, Arc::new(AtomicU64::new(1)));
+            context.scope.state = HomeState::Reclaiming;
+            context.scope.target = Some("gateway".into());
+            let discord =
+                crate::services::discord::recovery_engine::o_cut_recorder::start(channel).await;
+            let installed =
+                install_inflight_scoped(&discord.http, &shared, &ProviderKind::Claude, &context)
+                    .await
+                    .unwrap();
+            let witness = witness(&context, &installed);
+            let barrier = barrier("resume-receipt");
+            let resume = BARRIER.scope(
+                barrier.clone(),
+                resume_inflight_scoped(
+                    &discord.http,
+                    &shared,
+                    &ProviderKind::Claude,
+                    &context,
+                    &witness,
+                    &installed,
+                ),
+            );
+            let change = async {
+                barrier.entered.notified().await;
+                sqlx::query(&format!(
+                    "UPDATE o_channel_homes SET {column}=$1 WHERE channel_id=$2"
+                ))
+                .bind(value)
+                .bind(channel.to_string())
+                .execute(&pool)
+                .await
+                .unwrap();
+                barrier.release.notify_one();
+            };
+            let (result, ()) = tokio::join!(resume, change);
+            assert!(
+                discord.calls().is_empty(),
+                "full home identity must be rechecked after receipt: {column}; forbidden REST effects: {:?}",
+                discord.calls()
+            );
+            assert!(
+                !installed.effects_started.load(Ordering::Acquire),
+                "changed home must not start an effect attempt"
+            );
+            assert_eq!(
+                std::fs::read(path(&state)).ok(),
+                Some(before),
+                "changed home must preserve the canonical row"
+            );
+            assert!(
+                result.is_err(),
+                "full home identity must be rechecked after receipt: {column}; {result:?}"
+            );
+            assert_eq!(gate.commands_in_flight(), 0);
+            channel_home::unregister_if_same(&gate);
+        }
+        pool.close().await;
+        db.drop().await;
+    }
+    #[tokio::test]
+    async fn s3act_b3a2_epoch_change_between_receipt_and_permit_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        let (db, pool, shared) = fixture().await;
+        prior_generation();
+        let channel = 5340515;
+        seed_home(&pool, channel).await;
+        let gate = channel_home::register_for_test(channel, Some(HomeState::Worker));
+        let state = admitted_row(channel);
+        inflight::save_inflight_state_create_new(&state).unwrap();
+        let before = std::fs::read(path(&state)).unwrap();
+        let context = context(channel, 1, Arc::new(AtomicU64::new(1)));
+        let discord =
+            crate::services::discord::recovery_engine::o_cut_recorder::start(channel).await;
+        let installed =
+            install_inflight_scoped(&discord.http, &shared, &ProviderKind::Claude, &context)
+                .await
+                .unwrap();
+        let witness = witness(&context, &installed);
+        let barrier = barrier("resume-receipt");
+        let resume = BARRIER.scope(
+            barrier.clone(),
+            resume_inflight_scoped(
+                &discord.http,
+                &shared,
+                &ProviderKind::Claude,
+                &context,
+                &witness,
+                &installed,
+            ),
+        );
+        let change = async {
+            barrier.entered.notified().await;
+            gate.confirm(
+                &crate::db::o_channel_homes::HeldHome::for_test(
+                    &channel.to_string(),
+                    "mini",
+                    2,
+                    HomeState::Worker,
+                ),
+                tokio::time::Instant::now(),
+            )
+            .unwrap();
+            barrier.release.notify_one();
+        };
+        let (result, ()) = tokio::join!(resume, change);
+        assert!(
+            discord.calls().is_empty(),
+            "permit must belong to the epoch named by installation proof; forbidden REST effects: {:?}",
+            discord.calls()
+        );
+        assert!(
+            !installed.effects_started.load(Ordering::Acquire),
+            "wrong epoch must not start an effect attempt"
+        );
+        assert_eq!(std::fs::read(path(&state)).ok(), Some(before));
+        assert!(
+            result.is_err(),
+            "permit must belong to the epoch named by installation proof: {result:?}"
+        );
+        assert_eq!(gate.commands_in_flight(), 0);
+        channel_home::unregister_if_same(&gate);
+        pool.close().await;
+        db.drop().await;
+    }
+    #[tokio::test]
+    async fn s3act_b3a2_proven_output_settles_with_intake_closed_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        let (db, pool, shared) = fixture().await;
+        prior_generation();
+        let channel = 5340521;
+        seed_home(&pool, channel).await;
+        let gate = channel_home::register_for_test(channel, Some(HomeState::Worker));
+        let state = admitted_row(channel);
+        inflight::save_inflight_state_create_new(&state).unwrap();
+        let context = context(channel, 1, Arc::new(AtomicU64::new(1)));
+        let discord =
+            crate::services::discord::recovery_engine::o_cut_recorder::start(channel).await;
+        let installed =
+            install_inflight_scoped(&discord.http, &shared, &ProviderKind::Claude, &context)
+                .await
+                .unwrap();
+        gate.close_intake();
+        let result = resume_inflight_scoped(
+            &discord.http,
+            &shared,
+            &ProviderKind::Claude,
+            &context,
+            &witness(&context, &installed),
+            &installed,
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                Ok(InflightObservation::Settled {
+                    kind: NativeTerminalKind::Aborted
+                })
+            ),
+            "existing output must use recovery admission while new commands are closed: {result:?}"
+        );
+        assert!(!path(&state).exists());
+        assert!(!discord.calls().is_empty());
+        assert!(
+            shared
+                .mailbox(ChannelId::new(channel))
+                .snapshot()
+                .await
+                .cancel_token
+                .is_none()
+        );
+        assert_eq!(gate.commands_in_flight(), 0);
+        channel_home::unregister_if_same(&gate);
+        pool.close().await;
+        db.drop().await;
+    }
+    #[tokio::test]
+    async fn s3act_b3a2_uncertain_output_is_preserved_without_admission_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let (db, pool, shared) = fixture().await;
+        let channel = 5340520;
+        seed_home(&pool, channel).await;
+        let gate = channel_home::register_for_test(channel, Some(HomeState::Worker));
+        let mut state = row(channel, None);
+        state.full_response = "partial output without completion proof".into();
+        inflight::save_inflight_state_create_new(&state).unwrap();
+        let before = std::fs::read(path(&state)).unwrap();
+        let context = context(channel, 1, Arc::new(AtomicU64::new(1)));
+        let http = Arc::new(serenity::Http::new("test"));
+        let installed = install_inflight_scoped(&http, &shared, &ProviderKind::Claude, &context)
+            .await
+            .unwrap();
+        gate.close_intake();
+        let result = resume_inflight_scoped(
+            &http,
+            &shared,
+            &ProviderKind::Claude,
+            &context,
+            &witness(&context, &installed),
+            &installed,
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(InflightObservation::Deferred(_))),
+            "uncertain output must be preserved and deferred before effect admission: {result:?}"
+        );
+        assert!(!installed.effects_started.load(Ordering::Acquire));
+        assert_eq!(gate.commands_in_flight(), 0);
+        assert_eq!(std::fs::read(path(&state)).unwrap(), before);
+        channel_home::unregister_if_same(&gate);
         pool.close().await;
         db.drop().await;
     }

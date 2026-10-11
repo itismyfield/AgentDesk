@@ -427,6 +427,7 @@ services::discord::recovery_engine::restore_inflight::host_probe_tests
 services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
 services::discord::recovery_engine::restore_inflight::replay_hold_tests
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests
+services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
 services::discord::recovery_engine::routing_orphan::host_guard_tests
 services::discord::relay_recovery::apply::host_deferred_tests
 services::discord::relay_recovery::circuit_breaker::tests
@@ -1400,6 +1401,16 @@ services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_parent_fsync_failure_is_retryable_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_pending_driver_survives_ticket_drop_and_generation_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_receipt_lookup_failure_is_retryable_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_admission_releases_lock_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_changed_snapshot_refuses_install_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_epoch_change_between_receipt_and_permit_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_hydrate_releases_lock_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_mailbox_snapshot_releases_lock_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_proven_output_settles_with_intake_closed_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_receipt_then_full_home_revalidation_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_resume_hydrate_releases_lock_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_resume_snapshot_change_is_preserved_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_uncertain_output_is_preserved_without_admission_pg
 services::discord::recovery_engine::routing_orphan::host_guard_tests::routing_orphan_finalizes_only_a_dead_pane_the_host_guard_admits_pg
 services::discord::relay_recovery::apply::host_deferred_tests::automatic_orphan_apply_keeps_a_turn_on_an_unconfirmed_host_pg
 services::discord::relay_recovery::apply::host_deferred_tests::manual_orphan_recovery_keeps_a_turn_on_an_unconfirmed_host_pg
