@@ -6,9 +6,10 @@ use serde::{Deserialize, Serialize};
 use super::{ChannelStore, durable};
 use crate::services::tui_o::shadow::capture::same_file;
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
-    CodexEpisodeDeny, CodexEpisodeSpan,
+    CodexEpisodeDeny, CodexEpisodeSpan, ExecutionProofRef, TurnEpisodeRef,
 };
 
+#[cfg(test)]
 mod mutation;
 
 pub(crate) const CODEX_PROVENANCE_FILE: &str = "codex_provenance";
@@ -24,15 +25,44 @@ pub(crate) struct CodexProvenance {
     pub denies: Vec<CodexEpisodeDeny>,
 }
 
+/// A snapshot only this module's validation constructs; an origin is read from nothing else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ValidatedCodexProvenance(CodexProvenance);
+
+impl ValidatedCodexProvenance {
+    pub(crate) fn spans(&self) -> &[CodexEpisodeSpan] {
+        &self.0.spans
+    }
+
+    #[cfg(test)]
+    pub(crate) fn raw(&self) -> &CodexProvenance {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checked(channel: u64, read: CodexProvenance) -> Option<Self> {
+        let identity = read.schema == SCHEMA && read.channel == channel;
+        (identity && valid(channel, &read)).then_some(Self(read))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Sidecar {
     Missing,
-    Present(CodexProvenance),
+    Present(ValidatedCodexProvenance),
     Unavailable(&'static str),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Sidecar reads and mutations on this thread, so a test can prove production made none.
+    pub(crate) static SIDECAR_IO: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
 impl ChannelStore {
     pub(crate) fn codex_provenance(&self) -> Sidecar {
+        #[cfg(test)]
+        SIDECAR_IO.with(|io| io.set((io.get().0 + 1, io.get().1)));
         let channel = self.init.channel;
         match durable::read_json::<CodexProvenance>(&self.dir.join(CODEX_PROVENANCE_FILE)) {
             Ok(None) => Sidecar::Missing,
@@ -42,7 +72,7 @@ impl ChannelStore {
             Ok(Some(read)) if !valid(channel, &read) => {
                 Sidecar::Unavailable("codex_provenance_conflict")
             }
-            Ok(Some(read)) => Sidecar::Present(read),
+            Ok(Some(read)) => Sidecar::Present(ValidatedCodexProvenance(read)),
             Err(_) => Sidecar::Unavailable("codex_provenance_unreadable"),
         }
     }
@@ -64,43 +94,59 @@ fn retained(current: &CodexProvenance, next: &CodexProvenance) -> bool {
     kept && current.denies.iter().all(|deny| next.denies.contains(deny))
 }
 
+/// The episode names this channel and an owner, and the execution its whole proof identity.
+fn whole(channel: u64, episode: &TurnEpisodeRef, execution: &ExecutionProofRef) -> bool {
+    episode.channel_id == channel
+        && episode.user_message_id != 0
+        && episode.request_owner_id != 0
+        && !episode.turn_nonce.trim().is_empty()
+        && !execution.owner_runtime_root.trim().is_empty()
+        && !execution.tmux_session.trim().is_empty()
+        && !execution.execution_nonce.trim().is_empty()
+        && !execution.source.session_id.trim().is_empty()
+        && !execution.source.path.as_os_str().is_empty()
+}
+
 /// Every span names this channel and a whole identity; no two share an episode, put one
-/// execution on two files, or overlap or repeat a native turn on one file.
+/// execution on two files, or overlap or repeat a native turn on one file. A deny may predate
+/// its native turn, but never names another execution for a stored episode.
 fn valid(channel: u64, next: &CodexProvenance) -> bool {
-    next.spans.iter().enumerate().all(|(index, span)| {
-        let (episode, execution) = (&span.episode, &span.execution);
-        let whole = episode.channel_id == channel
-            && span.delivery_channel_id == channel
-            && span.offset_authority_channel_id == channel
-            && episode.user_message_id != 0
-            && episode.request_owner_id != 0
-            && !episode.turn_nonce.trim().is_empty()
-            && !episode.native_turn_id.trim().is_empty()
-            && !execution.owner_runtime_root.trim().is_empty()
-            && !execution.tmux_session.trim().is_empty()
-            && !execution.execution_nonce.trim().is_empty()
-            && !execution.source.session_id.trim().is_empty()
-            && !execution.source.path.as_os_str().is_empty()
-            && span.end.is_none_or(|end| end > span.start);
-        whole
-            && next.spans[..index].iter().all(|other| {
-                let same_source = same_file(&execution.source, &other.execution.source);
-                let same_episode = episode.channel_id == other.episode.channel_id
-                    && episode.user_message_id == other.episode.user_message_id
-                    && episode.turn_nonce == other.episode.turn_nonce;
-                let same_execution = execution.owner_runtime_root
-                    == other.execution.owner_runtime_root
-                    && execution.tmux_session == other.execution.tmux_session
-                    && execution.execution_nonce == other.execution.execution_nonce
-                    && execution.proof_seq == other.execution.proof_seq;
-                let overlaps = span.start < other.end.unwrap_or(u64::MAX)
-                    && other.start < span.end.unwrap_or(u64::MAX);
-                !(same_episode
-                    || (same_execution && !same_source)
-                    || (same_source
-                        && (overlaps || episode.native_turn_id == other.episode.native_turn_id)))
-            })
-    })
+    let denies = next.denies.iter().all(|deny| {
+        let foreign = next.spans.iter().any(|span| {
+            let same = span.episode.user_message_id == deny.episode.user_message_id
+                && span.episode.turn_nonce == deny.episode.turn_nonce;
+            same && span.execution != deny.execution
+        });
+        whole(channel, &deny.episode, &deny.execution) && !foreign
+    });
+    denies
+        && next.spans.iter().enumerate().all(|(index, span)| {
+            let (episode, execution) = (&span.episode, &span.execution);
+            let whole = whole(channel, episode, execution)
+                && span.delivery_channel_id == channel
+                && span.offset_authority_channel_id == channel
+                && !episode.native_turn_id.trim().is_empty()
+                && span.end.is_none_or(|end| end > span.start);
+            whole
+                && next.spans[..index].iter().all(|other| {
+                    let same_source = same_file(&execution.source, &other.execution.source);
+                    let same_episode = episode.channel_id == other.episode.channel_id
+                        && episode.user_message_id == other.episode.user_message_id
+                        && episode.turn_nonce == other.episode.turn_nonce;
+                    let same_execution = execution.owner_runtime_root
+                        == other.execution.owner_runtime_root
+                        && execution.tmux_session == other.execution.tmux_session
+                        && execution.execution_nonce == other.execution.execution_nonce
+                        && execution.proof_seq == other.execution.proof_seq;
+                    let overlaps = span.start < other.end.unwrap_or(u64::MAX)
+                        && other.start < span.end.unwrap_or(u64::MAX);
+                    !(same_episode
+                        || (same_execution && !same_source)
+                        || (same_source
+                            && (overlaps
+                                || episode.native_turn_id == other.episode.native_turn_id)))
+                })
+        })
 }
 
 #[cfg(all(test, unix))]

@@ -20,6 +20,7 @@ impl ChannelStore {
         };
         let bytes = serde_json::to_vec(&empty)?;
         let path = self.dir.join(CODEX_PROVENANCE_FILE);
+        super::SIDECAR_IO.with(|io| io.set((io.get().0, io.get().1 + 1)));
         self.mutate(|_| Ok(durable::create_once(&path, &bytes)?))
     }
 
@@ -57,6 +58,7 @@ impl ChannelStore {
         let Sidecar::Present(current) = self.codex_provenance() else {
             return Err(StoreError::Rejected("codex provenance unavailable".into()));
         };
+        let current = current.0;
         let mut next = current.clone();
         change(&mut next);
         if !retained(&current, &next) || !valid(self.init.channel, &next) {
@@ -66,6 +68,7 @@ impl ChannelStore {
         }
         let bytes = serde_json::to_vec(&next)?;
         let path = self.dir.join(CODEX_PROVENANCE_FILE);
+        super::SIDECAR_IO.with(|io| io.set((io.get().0, io.get().1 + 1)));
         self.mutate(|_| Ok(durable::replace(&path, &bytes)?))
     }
 }

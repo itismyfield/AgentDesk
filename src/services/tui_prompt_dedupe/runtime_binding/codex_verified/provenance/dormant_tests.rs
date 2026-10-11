@@ -5,7 +5,9 @@ use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::{file_identity, renumber};
 use crate::services::tui_o::store::spool::{Cursor, source_key};
 use crate::services::tui_o::store::{Initialized, OStore, StoreConfig, fault};
-use crate::services::tui_o::writer::owed::tests::{Bindings, Collector, Writer, kept, owed_writer};
+use crate::services::tui_o::writer::owed::tests::{
+    Bindings, Collector, Port, Writer, kept, owed_writer,
+};
 use crate::services::tui_o::writer::owed::{OwedLog, reevaluate};
 use crate::services::tui_o::writer::pieces::Derived;
 use sha2::{Digest, Sha256};
@@ -17,6 +19,7 @@ struct Fixture {
     proof: ExecutionProofRef,
     episode: TurnEpisodeRef,
     writer: Writer,
+    port: Arc<Port>,
     header_end: u64,
     checkpoint: SourceCheckpoint,
     /// The header-only cursor the store first keeps for the proven file.
@@ -100,13 +103,14 @@ impl Fixture {
             retired: false,
         };
         let floor = NativeSubmitFloor::capture_before_submit(&proof, &cursor).unwrap();
-        let (writer, _) = owed_writer(store);
+        let (writer, port) = owed_writer(store);
         Self {
             root,
             context,
             proof,
             episode,
             writer,
+            port,
             header_end,
             checkpoint,
             cursor,
@@ -120,7 +124,7 @@ impl Fixture {
 
     fn spans(&mut self) -> Vec<CodexEpisodeSpan> {
         match self.store().codex_provenance() {
-            Sidecar::Present(read) => read.spans,
+            Sidecar::Present(read) => read.spans().to_vec(),
             other => panic!("sidecar not present: {other:?}"),
         }
     }
@@ -703,4 +707,75 @@ fn prefix_rewrite_after_terminal_scan_exposes_no_span_or_origin() {
     );
     assert_eq!(result, Err("source_checkpoint_changed"));
     assert!(fixture.spans().is_empty());
+}
+
+/// Issues the exact permit P4-2 would for `episode`, opens the gate and runs one actor pass.
+async fn deliver_permitted(fixture: &mut Fixture, episodes: &[TurnEpisodeRef]) -> Vec<String> {
+    use super::super::super::admission::{issue_for_tests, set_ready_for_tests};
+    for episode in episodes {
+        let nonce = Some(episode.turn_nonce.clone());
+        let token = Arc::new(CancelToken::from_persisted_turn_nonce(nonce));
+        issue_for_tests(fixture.proof.clone(), episode.clone(), &token).unwrap();
+    }
+    set_ready_for_tests(7, true);
+    let mut log = fixture.collect();
+    crate::services::tui_o::writer::owed::deliver_owed(&mut fixture.writer, &mut log).await;
+    set_ready_for_tests(7, false);
+    fixture.port.posts()
+}
+
+/// P2-R2 to POST: a turn whose metadata the scanner refuses has no span, so even its issued
+/// permit posts nothing; the well-formed turn under the same kind of permit posts its body.
+#[tokio::test(start_paused = true)]
+async fn r2_a_refused_metadata_turn_posts_nothing_even_under_an_issued_permit() {
+    for (message, malformed, posted) in [(51, false, true), (52, true, false)] {
+        let mut fixture = Fixture::new();
+        fixture.episode.user_message_id = message;
+        fixture.episode.turn_nonce = format!("r2-{message}");
+        fixture.event("task_started", "n1");
+        let token = match malformed {
+            true => serde_json::json!({"response_id": "r"}),
+            false => serde_json::json!({"turn_id": "n1"}),
+        };
+        fixture.append(serde_json::json!({"type": "token_usage_record", "payload": token}));
+        fixture.body();
+        fixture.event("task_complete", "n1");
+        let row = fixture.row();
+        let span = fixture.complete(Some(&row));
+        assert_eq!(span.is_ok(), posted, "{message}: {span:?}");
+        fixture.spool();
+        let mut episode = fixture.episode.clone();
+        episode.native_turn_id = "n1".into();
+        let posts = deliver_permitted(&mut fixture, &[episode]).await;
+        let expected: &[&str] = if posted { &["stored reply"] } else { &[] };
+        assert_eq!(posts, expected, "malformed token turn {message}");
+    }
+}
+
+/// P2-R1 to POST: each turn posts under its own permit, and the later turn's span starts only at
+/// the floor its submit recorded past the cursor, not at the cursor.
+#[tokio::test(start_paused = true)]
+async fn r1_each_turn_posts_under_its_own_permit_from_its_own_floor() {
+    let mut fixture = Fixture::new();
+    fixture.episode.user_message_id = 61;
+    fixture.episode.turn_nonce = "r1-old".into();
+    fixture.event("task_started", "n0");
+    fixture.reply("old-body", "old reply");
+    fixture.event("task_complete", "n0");
+    let row = fixture.row();
+    let old = fixture.complete(Some(&row)).unwrap().unwrap();
+    fixture.floor =
+        NativeSubmitFloor::capture_before_submit(&fixture.proof, &fixture.cursor).unwrap();
+    fixture.episode.user_message_id = 62;
+    fixture.episode.turn_nonce = "r1-new".into();
+    fixture.event("task_started", "n1");
+    fixture.reply("new-body", "new reply");
+    fixture.event("task_complete", "n1");
+    let row = fixture.row();
+    let new = fixture.complete(Some(&row));
+    fixture.spool();
+    let mut episode = fixture.episode.clone();
+    episode.native_turn_id = "n1".into();
+    let posts = deliver_permitted(&mut fixture, &[old.episode.clone(), episode]).await;
+    assert_eq!(posts, ["old reply", "new reply"], "later turn: {new:?}");
 }

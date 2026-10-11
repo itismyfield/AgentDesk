@@ -22,6 +22,8 @@ use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::{
     LedgerEntry, LedgerState, PieceDisposition, PieceOutcome, Unsent,
 };
+use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission::EpisodePermissionRecord;
+use crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::OwedOrigin;
 
 /// A POST still unanswered by then is treated as uncertain and settled from history.
 pub const POST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -36,7 +38,12 @@ pub enum Step {
     NoGateway,
     /// The channel stays stopped until an operator acts; its alarm is raised.
     Stopped,
+    /// The exact episode permit refused the piece before its `Prepared`; it stays owed.
+    Withheld,
 }
+
+/// Verified owed work's exact permit, checked under the gate before `Prepared` is appended.
+pub(crate) type Admission<'a> = (&'a EpisodePermissionRecord, &'a OwedOrigin);
 
 /// Highest message id O posted per channel in this process; Legacy keeps its live panel below it.
 static LAST_POSTED: LazyLock<Mutex<HashMap<u64, u64>>> = LazyLock::new(Mutex::default);
@@ -158,6 +165,7 @@ enum Refusal {
         unsent: Option<Box<Unsent>>,
     },
     Violation(String),
+    Withheld(&'static str),
 }
 
 /// A writer's first stop, the store I/O error behind it, and a prepared piece it never posted.
@@ -310,6 +318,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     pub async fn deliver(&mut self, item: &Derived) -> Step {
+        self.deliver_admitted(item, None).await
+    }
+
+    /// As [`Self::deliver`]; a piece with an admission posts only while its exact permit holds.
+    pub(crate) async fn deliver_admitted(
+        &mut self,
+        item: &Derived,
+        admission: Option<Admission<'_>>,
+    ) -> Step {
         if self.is_stopped() {
             return Step::Stopped;
         }
@@ -330,11 +347,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 self.record(LedgerEntry::Excluded { unit_key, reason })
                     .map_or_else(|step| step, |()| Step::Done)
             }
-            Derived::Piece(piece) => self.deliver_piece(piece).await,
+            Derived::Piece(piece) => self.deliver_piece(piece, admission).await,
         }
     }
 
-    async fn deliver_piece(&mut self, piece: &PieceWork) -> Step {
+    async fn deliver_piece(&mut self, piece: &PieceWork, admission: Option<Admission<'_>>) -> Step {
         let ledger = self.store.ledger();
         if ledger.excluded(&piece.unit_key).is_some() {
             return Step::Done;
@@ -383,42 +400,52 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         // transition; the rest runs outside the lock.
         let admitted = poll_fn(|cx| {
             Poll::Ready(admit(&gate, channel, |epoch| {
-                let prepared = || LedgerEntry::Prepared {
-                    serial,
-                    unit_key: piece.unit_key.clone(),
-                    piece_index: piece.index,
-                    payload: piece.payload.clone(),
-                    anchor_id,
-                    epoch,
-                };
-                // Returning here comes before `port.post`, so this piece's POST was never created.
-                store
-                    .append_ledger(prepared())
-                    .map_err(|error| Refusal::Store {
-                        detail: format!("{error:?}"),
-                        unsent: Unsent::new(prepared()).map(Box::new),
-                    })?;
-                if let Some(detail) = store.ledger().violation() {
-                    return Err(Refusal::Violation(detail.to_string()));
-                }
-                if let Some(rejected_serial) = approved {
-                    tracing::info!(channel, rejected_serial, serial, unit_key = ?piece.unit_key,
+                // The exact permit is checked first and its lock held through the first poll.
+                let mut start = || {
+                    let prepared = || LedgerEntry::Prepared {
+                        serial,
+                        unit_key: piece.unit_key.clone(),
+                        piece_index: piece.index,
+                        payload: piece.payload.clone(),
+                        anchor_id,
+                        epoch,
+                    };
+                    // Returning here comes before `port.post`, so this piece's POST was never created.
+                    store
+                        .append_ledger(prepared())
+                        .map_err(|error| Refusal::Store {
+                            detail: format!("{error:?}"),
+                            unsent: Unsent::new(prepared()).map(Box::new),
+                        })?;
+                    if let Some(detail) = store.ledger().violation() {
+                        return Err(Refusal::Violation(detail.to_string()));
+                    }
+                    if let Some(rejected_serial) = approved {
+                        tracing::info!(channel, rejected_serial, serial, unit_key = ?piece.unit_key,
                         "[tui_o] operator approval consumed by Prepared");
-                }
-                let running = posts.take().map(Running::start);
-                let post = port.post(channel, piece.payload.clone());
-                // `map` forwards each poll to the request; the count ends when it is ready or dropped.
-                let mut request: Request = match running {
-                    Some(running) => Box::pin(post.map(move |outcome| {
-                        drop(running);
-                        outcome
-                    })),
-                    None => Box::pin(post),
+                    }
+                    let running = posts.take().map(Running::start);
+                    let post = port.post(channel, piece.payload.clone());
+                    // `map` forwards each poll to the request; the count ends when it is ready or dropped.
+                    let mut request: Request = match running {
+                        Some(running) => Box::pin(post.map(move |outcome| {
+                            drop(running);
+                            outcome
+                        })),
+                        None => Box::pin(post),
+                    };
+                    Ok(match request.as_mut().poll(cx) {
+                        Poll::Ready(outcome) => Started::Done(outcome),
+                        Poll::Pending => Started::Running(request),
+                    })
                 };
-                Ok(match request.as_mut().poll(cx) {
-                    Poll::Ready(outcome) => Started::Done(outcome),
-                    Poll::Pending => Started::Running(request),
-                })
+                match admission {
+                    None => start(),
+                    Some((record, origin)) => {
+                        let started = record.admit(origin, start);
+                        started.unwrap_or_else(|reason| Err(Refusal::Withheld(reason)))
+                    }
+                }
             }))
         })
         .await;
@@ -434,6 +461,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             }
             Some(Err(Refusal::Violation(detail))) => {
                 return self.stop(WriterAlarm::LedgerViolation { detail });
+            }
+            Some(Err(Refusal::Withheld(reason))) => {
+                tracing::info!(channel, reason, unit_key = ?piece.unit_key,
+                    "[tui_o] verified piece withheld before Prepared");
+                return Step::Withheld;
             }
             Some(Ok(started)) => started,
         };

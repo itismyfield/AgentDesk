@@ -11,7 +11,6 @@ mod deferred;
 pub mod deliver;
 pub mod host;
 pub mod input_facts;
-#[cfg(test)]
 pub(crate) mod owed;
 pub mod pieces;
 pub mod resume;
@@ -76,6 +75,8 @@ pub trait DeliveryLease: Send + Sync {
     type Held: Send + 'static;
     /// `None` when another holder has it; the piece waits and is never posted without it.
     fn try_acquire(&self, channel: u64, serial: u64) -> Option<Self::Held>;
+    /// The channel's writer stopped for good; its verified episodes become Unknown, not settled.
+    fn writer_unavailable(&self, _channel: u64) {}
 }
 
 /// Raised from the first occurrence; A1-5 routes these to health and the operator channel.

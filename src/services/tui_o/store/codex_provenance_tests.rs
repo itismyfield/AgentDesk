@@ -60,7 +60,7 @@ impl Fixture {
 
     fn present(&self) -> CodexProvenance {
         match self.channel.codex_provenance() {
-            Sidecar::Present(read) => read,
+            Sidecar::Present(read) => read.raw().clone(),
             other => panic!("sidecar not present: {other:?}"),
         }
     }
@@ -140,7 +140,8 @@ fn episode_storage_closes_once_and_rejects_identity_or_deny_loss_without_failing
     }
     assert_eq!(fixture.channel.io_failure(), None, "Rejected is not a halt");
     fixture.channel.set_binding_checkpoint(1).unwrap();
-    assert_eq!(fixture.reopened(), Sidecar::Present(durable));
+    let reopened = fixture.reopened();
+    assert!(matches!(&reopened, Sidecar::Present(read) if *read.raw() == durable));
 }
 
 #[test]
@@ -198,12 +199,13 @@ fn a_failed_span_replace_publishes_no_closed_range_and_fails_the_store() {
     );
     let stored = fixture.present();
     assert_eq!(stored.spans, std::slice::from_ref(&open));
+    let stored = ValidatedCodexProvenance::checked(7, stored).unwrap();
     assert_eq!(origin(&stored, &source, &fixture.records[0]), None);
     drop(failure);
     let Sidecar::Present(reopened) = fixture.reopened() else {
         panic!("sidecar lost")
     };
-    assert_eq!(reopened.spans, [open]);
+    assert_eq!(reopened.spans(), [open]);
 }
 
 #[test]
@@ -211,12 +213,17 @@ fn origin_requires_one_complete_closed_native_range_without_union_or_current_ide
     let fixture = Fixture::new("{}\n{}\n");
     let (source, records) = (&fixture.source, &fixture.records);
     let closed = span(source, "old", 0, Some(records[0].end));
-    let mut snapshot = CodexProvenance {
-        schema: SCHEMA,
-        channel: 7,
-        spans: vec![closed.clone()],
-        denies: Vec::new(),
+    let validated = |spans: Vec<CodexEpisodeSpan>| {
+        let denies = Vec::new();
+        let read = CodexProvenance {
+            schema: SCHEMA,
+            channel: 7,
+            spans,
+            denies,
+        };
+        ValidatedCodexProvenance::checked(7, read).unwrap()
     };
+    let snapshot = validated(vec![closed.clone()]);
     let owed = origin(&snapshot, source, &records[0]).unwrap();
     assert_eq!(owed.span.execution.execution_nonce, "execution-old");
     assert_eq!(owed.range, records[0].start..records[0].end);
@@ -224,18 +231,17 @@ fn origin_requires_one_complete_closed_native_range_without_union_or_current_ide
     let mut renumbered = source.clone();
     renumbered.dev ^= 1;
     assert_eq!(origin(&snapshot, &renumbered, &records[0]), Some(owed));
-    snapshot.spans.push(closed);
-    let duplicate = origin(&snapshot, source, &records[0]);
-    assert_eq!(duplicate, None, "duplicate is Unknown");
-    snapshot.spans[1].start = records[0].end;
-    snapshot.spans[1].end = Some(records[1].end);
+    let mut next = span(source, "new", records[0].end, Some(records[1].end));
+    next.execution.execution_nonce = "execution-new".into();
+    let snapshot = validated(vec![closed.clone(), next]);
     let mut crossing = records[0].clone();
     crossing.end = records[1].end;
     crossing.line = b"{}\n{}".to_vec();
     let union = origin(&snapshot, source, &crossing);
     assert_eq!(union, None, "span union is forbidden");
-    snapshot.spans[0].end = None;
-    let open = origin(&snapshot, source, &records[0]);
+    let mut open = closed;
+    open.end = None;
+    let open = origin(&validated(vec![open]), source, &records[0]);
     assert_eq!(open, None, "EOF cannot close an open span");
 }
 
@@ -337,4 +343,47 @@ fn an_old_boundary_with_codex_fields_reads_rewrites_and_is_never_imported() {
     fixture.channel.init_codex_provenance().unwrap();
     let imported = fixture.present();
     assert!(imported.spans.is_empty() && imported.denies.is_empty());
+}
+
+/// P2-1: a deny names a whole episode of this channel and never another execution of a stored
+/// span; a refused deny changes no byte and fails nothing, and an invalid one on disk is Unavailable.
+#[test]
+fn a_foreign_partial_or_conflicting_deny_is_refused_and_unreadable_when_written_directly() {
+    let mut fixture = Fixture::new("{}\n");
+    let source = fixture.source.clone();
+    fixture.channel.init_codex_provenance().unwrap();
+    let stored = span(&source, "old", 0, Some(fixture.records[0].end));
+    fixture.channel.persist_codex_span(stored.clone()).unwrap();
+    let sidecar = fixture.path(CODEX_PROVENANCE_FILE);
+    let bytes = std::fs::read(&sidecar).unwrap();
+    let mut pending = deny(&span(&source, "new", 0, None));
+    pending.episode.native_turn_id.clear();
+    let mut cases = vec![deny(&stored); 4];
+    cases[0].episode.channel_id = 8;
+    cases[1].episode.request_owner_id = 0;
+    cases[2].episode.turn_nonce = " ".into();
+    cases[3].execution.execution_nonce = "another-execution".into();
+    for (case, refused) in cases.into_iter().enumerate() {
+        let persisted = fixture.channel.persist_codex_deny(refused.clone());
+        assert!(rejected(persisted), "deny {case} accepted");
+        assert_eq!(
+            std::fs::read(&sidecar).unwrap(),
+            bytes,
+            "deny {case} changed bytes"
+        );
+        assert_eq!(fixture.channel.io_failure(), None);
+        let mut written: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        written["denies"] = serde_json::json!([refused]);
+        std::fs::write(&sidecar, serde_json::to_vec(&written).unwrap()).unwrap();
+        let read = fixture.channel.codex_provenance();
+        assert_eq!(
+            read,
+            Sidecar::Unavailable("codex_provenance_conflict"),
+            "deny {case} read"
+        );
+        std::fs::write(&sidecar, &bytes).unwrap();
+    }
+    fixture.channel.persist_codex_deny(pending).unwrap();
+    fixture.channel.persist_codex_deny(deny(&stored)).unwrap();
+    assert_eq!(fixture.present().denies.len(), 2);
 }

@@ -38,6 +38,10 @@ pub trait HostIo: Send + Sync + 'static {
     /// Resolves once the gateway's HTTP client and the bot's own id are known.
     fn port(&self) -> impl Future<Output = Arc<Self::Port>> + Send;
     fn lease(&self) -> Self::Lease;
+    /// A channel's writer stopped for good; the shared lease turns its verified episodes Unknown.
+    fn writer_unavailable(&self, channel: u64) {
+        self.lease().writer_unavailable(channel);
+    }
     fn alarms(&self) -> Self::Alarms;
     fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Self::Bindings>;
     /// Asked only for a channel with no store yet, before its first `init`, while the gate is Owned.
@@ -739,6 +743,7 @@ impl<I: HostIo> Hosted<'_, I> {
             };
             if !resume::resumable(&cause) {
                 settle(attempt);
+                self.io.writer_unavailable(channel);
                 let alarm = &cause.alarm;
                 tracing::error!(channel, ?alarm, "[tui_o] writer stopped and stays stopped");
                 return;
@@ -842,11 +847,13 @@ impl<I: HostIo> Hosted<'_, I> {
                 }
                 Ok(Recovered::Fresh(_)) => {
                     self.alarms.resume_pending(channel, false);
+                    self.io.writer_unavailable(channel);
                     hold(&self.alarms, channel, "init missing on resume");
                     return None;
                 }
                 Err(error) => {
                     self.alarms.resume_pending(channel, false);
+                    self.io.writer_unavailable(channel);
                     hold(&self.alarms, channel, &error.detail);
                     return None;
                 }

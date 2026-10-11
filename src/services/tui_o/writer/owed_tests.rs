@@ -32,7 +32,17 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
 const CHANNEL: u64 = 584_521;
 
 #[derive(Default)]
-pub(crate) struct Port(Mutex<Vec<String>>);
+pub(crate) struct Port {
+    posts: Mutex<Vec<String>>,
+    /// Runs inside each POST's first poll, under the gate and any record lock.
+    on_post: Mutex<Option<Box<dyn Fn() + Send>>>,
+}
+
+impl Port {
+    pub(crate) fn posts(&self) -> Vec<String> {
+        self.posts.lock().unwrap().clone()
+    }
+}
 
 impl DiscordPort for Port {
     fn bot_id(&self) -> u64 {
@@ -44,9 +54,13 @@ impl DiscordPort for Port {
         _channel: u64,
         content: String,
     ) -> impl std::future::Future<Output = PostOutcome> + Send + 'static {
-        let mut posts = self.0.lock().unwrap();
+        let mut posts = self.posts.lock().unwrap();
         posts.push(content.clone());
         let (id, author_id) = (1000 + posts.len() as u64, 42);
+        drop(posts);
+        if let Some(hook) = self.on_post.lock().unwrap().as_ref() {
+            hook();
+        }
         let message = SeenMessage {
             id,
             author_id,
@@ -85,14 +99,23 @@ impl AlarmSink for Alarms {
 
 /// An in-memory Codex binding log whose seq notice moves with each bind.
 pub(crate) struct Bindings {
+    channel: u64,
     events: Mutex<Vec<BindingEvent>>,
     notice: watch::Sender<u64>,
 }
 
 impl Bindings {
     pub(crate) fn new() -> Arc<Self> {
+        Self::on(CHANNEL)
+    }
+
+    pub(crate) fn on(channel: u64) -> Arc<Self> {
         let (events, notice) = (Mutex::new(Vec::new()), watch::channel(0).0);
-        Arc::new(Self { events, notice })
+        Arc::new(Self {
+            channel,
+            events,
+            notice,
+        })
     }
 
     fn bind(&self, old: Option<&SourceId>, new: &SourceId, cause: BindingCause) {
@@ -112,7 +135,7 @@ impl Bindings {
         };
         events.push(BindingEvent {
             seq,
-            channel_id: CHANNEL,
+            channel_id: self.channel,
             provider: ShadowProvider::Codex,
             tmux_session: "pane".into(),
             execution_nonce: "nonce".into(),
@@ -221,6 +244,10 @@ fn transcript(beside: &Path, name: &str, session: &str, lines: &[String]) -> Sou
 
 /// A Codex channel switched over `a.jsonl` after its session header, and no sidecar.
 fn switched() -> (tempfile::TempDir, OStore, SourceId) {
+    switched_on(CHANNEL)
+}
+
+fn switched_on(channel: u64) -> (tempfile::TempDir, OStore, SourceId) {
     let runtime = tempfile::tempdir().unwrap();
     let head = header("s1");
     let path = runtime.path().join("a.jsonl");
@@ -246,22 +273,24 @@ fn switched() -> (tempfile::TempDir, OStore, SourceId) {
         })
     };
     store
-        .begin_era(&[CHANNEL], Utc::now(), initialized)
+        .begin_era(&[channel], Utc::now(), initialized)
         .unwrap();
     (runtime, store, source)
 }
 
 fn opened(store: &OStore) -> ChannelStore {
     let era = store.read_era().unwrap().unwrap();
-    store.open_channel(&era, CHANNEL).unwrap().unwrap()
+    let channel = era.initial_channels[0];
+    store.open_channel(&era, channel).unwrap().unwrap()
 }
 
 fn channel_file(runtime: &tempfile::TempDir, file: &str) -> PathBuf {
-    let dir = runtime
-        .path()
-        .join(STORE_DIR_NAME)
-        .join(CHANNEL.to_string());
-    dir.join(file)
+    channel_file_on(runtime, CHANNEL, file)
+}
+
+fn channel_file_on(runtime: &tempfile::TempDir, channel: u64, file: &str) -> PathBuf {
+    let dir = runtime.path().join(STORE_DIR_NAME);
+    dir.join(channel.to_string()).join(file)
 }
 
 fn span(source: &SourceId, start: u64, end: Option<u64>) -> CodexEpisodeSpan {
@@ -292,7 +321,7 @@ fn span(source: &SourceId, start: u64, end: Option<u64>) -> CodexEpisodeSpan {
 
 fn present(store: &ChannelStore) -> CodexProvenance {
     match store.codex_provenance() {
-        Sidecar::Present(read) => read,
+        Sidecar::Present(read) => read.raw().clone(),
         other => panic!("sidecar not present: {other:?}"),
     }
 }
@@ -475,17 +504,28 @@ async fn the_running_actor_posts_the_same_and_leaves_the_sidecar_alone() {
         let (stop, stopped) = watch::channel(false);
         let resumed = watch::channel(false).0;
         let codex = ShadowProvider::Codex;
+        use crate::services::tui_o::store::codex_provenance::SIDECAR_IO;
+        SIDECAR_IO.with(|io| io.set((0, 0)));
         let task = tokio::spawn(run_channel(writer, codex, bindings, stopped, resumed));
         tokio::time::sleep(POLL_INTERVAL * 4).await;
         stop.send(true).unwrap();
         assert_eq!(task.await.unwrap(), None, "the actor stopped: {sidecar:?}");
+        let (reads, writes) = SIDECAR_IO.with(std::cell::Cell::get);
+        assert_eq!(
+            (reads, writes),
+            (0, 0),
+            "production sidecar I/O: {sidecar:?}"
+        );
         assert_eq!(
             std::fs::read(&file).ok(),
             before,
             "sidecar touched: {sidecar:?}"
         );
-        seen.push(port.0.lock().unwrap().clone());
+        seen.push(port.posts());
     }
     assert_eq!(seen[0], ["first"]);
     assert!(seen.iter().all(|posts| *posts == seen[0]), "{seen:?}");
 }
+
+#[path = "verified_delivery_tests.rs"]
+mod verified;

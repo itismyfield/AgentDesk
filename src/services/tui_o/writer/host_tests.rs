@@ -126,6 +126,10 @@ impl HostIo for TestIo {
         }
     }
 
+    fn writer_unavailable(&self, channel: u64) {
+        self.lease.writer_unavailable(channel);
+    }
+
     fn lease(&self) -> Arc<FakeLease> {
         self.calls.lock().unwrap().push(("lease", 0));
         // This handle and the harness's own are the two that outlive every writer.

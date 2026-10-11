@@ -30,7 +30,6 @@ pub enum Derived {
     },
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OwedWork {
     pub derived: Derived,

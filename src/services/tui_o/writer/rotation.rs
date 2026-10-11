@@ -37,7 +37,6 @@ const PENDING_BIND_ALARM_SECS: i64 = 60;
 #[path = "fork_lineage.rs"]
 mod fork_lineage;
 mod owe;
-#[cfg(test)]
 pub(crate) mod provenance;
 use fork_lineage::Lineage;
 pub use owe::Owe;
