@@ -1360,6 +1360,8 @@ class KnownArrayProvenance(unittest.TestCase):
                 ((("if false; then", source, "fi", non_pg),), unsourced),
                 ((("setup() {", source, "}", non_pg),), unsourced),
                 ((("cat <<'EOF'", source, "EOF", non_pg),), unsourced),
+                ((('echo "', source, '"', non_pg),), unsourced),
+                ((("(", source, ")", non_pg),), unsourced),
                 ((('source "$FILTER"', non_pg),), unsourced),
                 (((f"{source} && {non_pg}",),), []),
                 ((f"'{source} && {non_pg}'",), []),
