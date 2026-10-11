@@ -595,6 +595,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/session_relay_sink/o_retired_terminal_race_tests.rs",
         "src/services/discord/session_relay_sink/o_retired_terminal_legacy_fixture_tests.rs",
         "src/services/discord/session_relay_sink/o_retired_terminal_source_tests.rs",
+        "src/server/routes/agents_turn_deliver/pg_tests.rs",
     }
 )
 
