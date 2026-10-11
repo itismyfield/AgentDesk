@@ -25,6 +25,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::dispatched_sessions::tests
   --skip db::dispatches::delivery_events::tests
   --skip db::dispatches::outbox::delivery::tests
+  --skip db::imsg_reply::tests
   --skip db::intake_outbox::home_tests
   --skip db::intake_outbox_delivery_proof::tests
   --skip db::intake_outbox_dispatch_stamp::tests
@@ -820,6 +821,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::dispatched_sessions::tests
   db::dispatches::delivery_events::tests
   db::dispatches::outbox::delivery::tests
+  db::imsg_reply::tests
   db::intake_outbox::home_tests
   db::intake_outbox_delivery_proof::tests
   db::intake_outbox_dispatch_stamp::tests
