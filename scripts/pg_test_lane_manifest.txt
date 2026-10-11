@@ -263,6 +263,7 @@ src/services/tui_o/exact_submission.rs
 src/services/tui_o/repost/admission_tests.rs
 src/services/tui_o/repost/runner_tests.rs
 src/services/tui_o/writer/deferred_pg_tests.rs
+src/services/tui_o/writer/repost_turn_tests.rs
 src/services/turn_host_tests.rs
 src/services/turn_lifecycle.rs
 src/voice/announce_meta.rs
@@ -544,6 +545,7 @@ services::tui_o::repost::admission_tests
 services::tui_o::repost::o_piece_ledger_tests
 services::tui_o::repost::runner_tests
 services::tui_o::writer::tests::actor::host_start::deferred::pg
+services::tui_o::writer::tests::actor::repost_turn
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
 voice::announce_meta::tests
@@ -1983,6 +1985,12 @@ services::tui_o::writer::tests::actor::host_start::deferred::pg::normal_deferred
 services::tui_o::writer::tests::actor::host_start::deferred::pg::queued_headless_pending_and_processing_block_expired_handoff_until_worker_sent_pg
 services::tui_o::writer::tests::actor::host_start::deferred::pg::sweep_before_expired_handoff_fence_observes_fresh_child_pg
 services::tui_o::writer::tests::actor::host_start::deferred::pg::sweep_before_normal_deferred_fence_observes_fresh_child_pg
+services::tui_o::writer::tests::actor::repost_turn::f6_a_dropped_writer_never_lets_its_repost_send_again_pg
+services::tui_o::writer::tests::actor::repost_turn::f6_general_auto_and_resume_never_overlap_posts_pg
+services::tui_o::writer::tests::actor::repost_turn::f6_t07_all_writer_guards_block_auto_pg
+services::tui_o::writer::tests::actor::repost_turn::f6_t09_open_prepared_blocks_every_sender_pg
+services::tui_o::writer::tests::actor::repost_turn::f6_t10_recovered_admitted_piece_never_becomes_new_original_pg
+services::tui_o::writer::tests::actor::repost_turn::f6_t11_pre_activation_backlog_never_posts_pg
 services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg
 services::turn_lifecycle::host_guard_tests::force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg

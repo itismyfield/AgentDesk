@@ -693,3 +693,20 @@ fn f3r_a_failed_append_refuses_more_until_a_reopen_cuts_its_bytes() {
     assert!(replayed.state().intent(4).is_some());
     assert_eq!(replayed.state().pending().collect::<Vec<_>>(), [4]);
 }
+
+#[test]
+fn f6_a_conflicting_record_of_an_activation_never_moves_its_frontier() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = sidecar(&dir);
+    let on = record("first-on", "a", Some(PieceOutcome::NotFound));
+    sent_while_on(&mut log, 3, &[(5, &on)]);
+    // Never written by the API: a second record of generation 1 that would put 5 before it.
+    let conflicting = ProvenanceEntry::Activated {
+        generation: 1,
+        frontier: 8,
+    };
+    log.append(conflicting).unwrap();
+    for state in [log.state().clone(), sidecar(&dir).state().clone()] {
+        assert!(matches!(classify(5, &on, &state), Candidate::Eligible(o) if o.serial == 5));
+    }
+}

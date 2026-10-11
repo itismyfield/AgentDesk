@@ -1043,6 +1043,32 @@ class TestIdOracleContract(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self.kinds(command, integration_test=True), kinds)
 
+    def test_union_evidence_needs_a_statically_known_skip(self) -> None:
+        # The other filter's candidate is the only union evidence; a skip
+        # whose value is unknown, or --ignored, may drop it at run time.
+        union = "cargo test --lib recovery_case -- integration_only_case"
+        for command, kinds in (
+                (f"{union} --skip other_case", []),
+                (f"{union} --skip recovery_case", ["target-mismatch"]),
+                (f"{union} --skip $SKIP", ["target-mismatch"]),
+                (f"{union} --skip=${{SKIP}}", ["target-mismatch"]),
+                (f"{union} --skip {{{{SKIP}}}}", ["target-mismatch"]),
+                (f"{union} --skip $(skips)", ["target-mismatch"]),
+                (f"{union} --skip `skips`", ["target-mismatch"]),
+                (f"{union} ${{NON_PG_SKIP_ARGS[@]}}", ["target-mismatch"]),
+                (f"{union} --ignored", ["target-mismatch"]),
+                ("cargo test --lib recovery_case -- missing_case --skip $SKIP",
+                 ["unproven-union"]),
+                ("cargo test --bins owned_case -- high_risk_recovery $EXTRA",
+                 ["unproven-union"]),
+                # A single filter never leans on another filter's candidates.
+                ("cargo test --lib recovery_case -- ${NON_PG_SKIP_ARGS[@]}", []),
+                ("cargo test --bins high_risk_recovery -- ${NON_PG_SKIP_ARGS[@]}",
+                 [])):
+            with self.subTest(command=command):
+                self.assertEqual(self.kinds(command, integration_test=True,
+                                            bin_test=True), kinds)
+
     def test_a_provable_empty_selection_is_judged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1078,7 +1104,12 @@ class TestIdOracleContract(unittest.TestCase):
                     ("cargo test --bins ghost", ["empty-target"]),
                     ("cargo test --bins high_risk_recovery", []),
                     ("cargo test --bins high_risk_recovery -- --skip high_risk_recovery",
-                     ["empty-target"])):
+                     ["empty-target"]),
+                    # No static ID is known to be #[ignore], so --ignored finds
+                    # no live test elsewhere; --include-ignored keeps them all.
+                    ("cargo test --bins high_risk_recovery -- --ignored",
+                     ["empty-target"]),
+                    ("cargo test --bins high_risk_recovery -- --include-ignored", [])):
                 with self.subTest(command=command):
                     self.assertEqual(self.judge(root, command), kinds)
 
