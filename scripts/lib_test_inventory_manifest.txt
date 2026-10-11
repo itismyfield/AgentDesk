@@ -8225,6 +8225,7 @@ services::discord::tui_prompt_relay::rehydration::discovery_pass_tests::discover
 services::discord::tui_prompt_relay::rehydration::discovery_pass_tests::discovery_success_requires_complete_bound_inventory
 services::discord::tui_prompt_relay::rehydration::discovery_pass_tests::failed_listing_is_not_an_empty_success
 services::discord::tui_prompt_relay::rehydration::discovery_pass_tests::off_pass_reads_no_binding_and_records_nothing
+services::discord::tui_prompt_relay::rehydration::discovery_pass_tests::relay_target::a_relay_left_without_a_runtime_serves_the_next_one
 services::discord::tui_prompt_relay::rehydration::discovery_pass_tests::relay_target::a_replaced_runtime_records_its_own_discovery_passes
 services::discord::tui_prompt_relay::rehydration::discovery_pass_tests::relay_target::a_replaced_runtime_takes_over_every_relay_use
 services::discord::tui_prompt_relay::rehydration::discovery_pass_tests::relay_target::a_single_runtime_keeps_its_one_relay
@@ -8455,6 +8456,8 @@ services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_t
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::claude_claim_beside_a_watcher_on_the_previous_transcript_picks_the_bridge_owner
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::codex_direct_answer_reaches_discord_once_beside_a_relay_jsonl_watcher
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::idle_observer_waits_out_a_session_bound_row_only_when_the_watcher_reads_its_output
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::runtime_switch_tests::a_replaced_runtime_relays_through_its_own_routing_and_output
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::runtime_switch_tests::codex_tui_recovery_has_no_pane_ready_fallback_yet
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::watcher_covers_only_the_output_file_it_reads
 services::discord::tui_prompt_relay::tests::codex_external_input_binding_refresh_replaces_under_source_authority
 services::discord::tui_prompt_relay::tests::codex_external_input_binding_refreshes_from_live_rollout_marker
