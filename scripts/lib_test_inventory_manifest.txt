@@ -4560,9 +4560,11 @@ services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_before_fi
 services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_during_poll_holds_effect_until_worker_cleanup
 services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_pending_returns_pool_thread_and_cleans_on_worker
 services::discord::input_runtime::fence::effect::tests::c1b_same_identity_stale_epoch_is_not_replaced_by_root_admission
+services::discord::input_runtime::fence::modes::g1b_tests::g1b_exhausted_gate_never_reopens
 services::discord::input_runtime::fence::modes::g1b_tests::g1b_generation_exhaustion_matrix_gate
 services::discord::input_runtime::fence::modes::g1b_tests::g1b_generation_exhaustion_matrix_gate_freeze
 services::discord::input_runtime::fence::modes::g1b_tests::g1b_restore_invalidates_every_handback_port
+services::discord::input_runtime::fence::modes::g1b_tests::g1b_restore_right_after_release_retires_the_proof
 services::discord::input_runtime::fence::modes::g1b_tests::g1b_restore_serializes_with_durable_callback
 services::discord::input_runtime::fence::modes::g1b_tests::g1b_settled_reinstall_requires_same_overflow
 services::discord::input_runtime::fence::modes::g1b_tests::g1b_unsettled_reinstall_refused_before_release
@@ -4622,6 +4624,7 @@ services::discord::input_runtime::supervisor::external::tests::external_source_i
 services::discord::input_runtime::supervisor::external::tests::external_terminal_origin_survives_compact_reopen
 services::discord::input_runtime::supervisor::external::tests::external_unknown_identity_never_becomes_absent
 services::discord::input_runtime::supervisor::external::tests::hm1_external_producer_census_is_zero
+services::discord::input_runtime::supervisor::ordering::g1b_tests::g1b_dirty_exhaustion_latches_the_order
 services::discord::input_runtime::supervisor::ordering::g1b_tests::g1b_generation_exhaustion_matrix_dirty
 services::discord::input_runtime::supervisor::ordering::g1b_tests::g1b_generation_exhaustion_matrix_handback
 services::discord::input_runtime::supervisor::ordering::g1b_tests::g1b_generation_exhaustion_matrix_scan

@@ -187,6 +187,12 @@ impl AdmissionOrder {
         #[cfg(test)]
         let full = full && !mutant("reuse_dirty_generation");
         if full {
+            // A refused notice cannot be tracked, so no later scan may prove this order complete.
+            #[cfg(test)]
+            let latch = !mutant("skip_dirty_exhaustion_latch");
+            #[cfg(not(test))]
+            let latch = true;
+            self.exhausted |= latch;
             return Err(EXHAUSTED);
         }
         Ok(self.pending(sources))
@@ -449,9 +455,12 @@ thread_local! {
 
 /// One lock covers release and installation, and every refusal precedes the release; a reinstall
 /// inherits only a settled entry of the same Gate and producer handle, so no obligation is lost.
+/// `release` is the Gate's own transition, reachable only through fence::modes, and only it can
+/// make the proof.
 pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
     closing: &Closing,
     snapshot: &PendingSource,
+    release: impl FnOnce() -> Result<ReleaseProof, Failure>,
 ) -> Result<(), Failure> {
     let (provider, channel) = (closing.provider().clone(), closing.channel());
     let foreign = snapshot.overflow.provider != provider
@@ -495,7 +504,7 @@ pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
             next_generation(value)
         })
         .map_err(|_| EXHAUSTED)?;
-    let release = closing.release_protection_after_handback()?;
+    let release = release()?;
     if foreign && late {
         return Err(Failure::StalePermit);
     }
@@ -693,6 +702,14 @@ pub(crate) fn settle_handback(cap: ValidatedOrderCapability) -> Result<bool, Fai
     }
     if entry.settled_overflow == Some(stamp.overflow) {
         return Ok(false);
+    }
+    // The settlement retires this capability by advancing scan, so it cannot settle at the limit.
+    let advances = next_generation(entry.order.stamp.scan).is_some();
+    #[cfg(test)]
+    let advances = advances || mutant("success_after_exhausted_settlement");
+    if !advances {
+        entry.order.exhausted = true;
+        return Err(EXHAUSTED);
     }
     // Keep the shared handle: overflow racing this acknowledgement re-arms the barrier.
     entry.settled_overflow = Some(stamp.overflow);

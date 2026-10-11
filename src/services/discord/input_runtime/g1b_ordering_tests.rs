@@ -326,11 +326,32 @@ fn g1b_generation_exhaustion_matrix_handback() {
         assert_eq!(closing.begin_handback(), Err(Failure::Mode(Mode::Handback)));
     }
     assert_eq!(NEXT_HANDBACK.load(Ordering::Acquire), u64::MAX - 1);
-    // A settle at the scan limit latches the entry, so its barrier and ports stay closed.
+    // A settle that cannot advance scan is refused before the marker moves, and latches the entry.
     with_entry(channel, |entry| entry.order.stamp.scan = u64::MAX - 2);
     let cap = scan(channel, vec![], 0).unwrap();
     let proof = handback_complete(cap).unwrap();
-    assert_eq!(modes::settle_order_barrier(proof), Ok(true));
+    let marker = with_entry(channel, |entry| entry.settled_overflow);
+    assert_eq!(modes::settle_order_barrier(proof), Err(EXHAUSTED));
+    assert_eq!(with_entry(channel, |entry| entry.settled_overflow), marker);
     assert!(modes::order_barrier(&ProviderKind::Claude, channel));
     assert_eq!(scan(channel, vec![], 0).err(), Some(EXHAUSTED));
+}
+
+#[test]
+fn g1b_dirty_exhaustion_latches_the_order() {
+    let mut order = producer(6_326_142);
+    exhaust_dirty(&mut order);
+    assert_eq!(order.admit_pending(&[11]).err(), Some(EXHAUSTED));
+    assert!(
+        order.pending_snapshot().sources.is_empty(),
+        "the refusal took nothing"
+    );
+    // Without the latch an empty fetch and complete would prove the order whole again.
+    assert_eq!(order.fetch_ticket(7).err(), Some(EXHAUSTED));
+    assert!(!order.offer_ready());
+    let mut stale = producer(6_326_143);
+    let ticket = stale.fetch_ticket(7).unwrap();
+    exhaust_dirty(&mut stale);
+    assert!(stale.admit_pending(&[11]).is_err());
+    assert!(stale.begin_scan(ticket, 7, vec![], 0, true).is_err());
 }

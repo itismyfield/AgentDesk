@@ -73,6 +73,8 @@ impl SharedData {
             .acquire_session_transition(channel)
             .await
             .map_err(|_| super::input_runtime::fence::Failure::Busy)?;
+        // An epoch that cannot advance refuses before the queue freeze persists anything.
+        closing.check_freeze()?;
         let ack = self
             .mailbox(channel)
             .freeze_input(closing.clone(), persistence)

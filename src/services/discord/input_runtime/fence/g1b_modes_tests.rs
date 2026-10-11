@@ -289,11 +289,91 @@ fn g1b_generation_exhaustion_matrix_gate_freeze() {
             let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
                 &CLAUDE, "session", None,
             );
+            let before = tree(root.path());
             let frozen = shared
                 .freeze_legacy_queue(closing.clone(), persistence)
                 .await;
             assert_eq!(frozen.err(), Some(Failure::GenerationExhausted));
+            assert_eq!(
+                tree(root.path()),
+                before,
+                "the queue freeze persisted nothing"
+            );
             assert_eq!(protected(&gate), (Mode::Closing, u64::MAX - 1, true));
             assert_eq!(closing.begin_handback(), Err(Failure::Mode(Mode::Closing)));
+            // The latch outlives the refusal: no later path opens the Gate to a new permit.
+            assert_eq!(
+                closing.abort_close(false),
+                Err(Failure::GenerationExhausted)
+            );
+            assert_eq!(gate.admit().err(), Some(Failure::GenerationExhausted));
+            assert_eq!(protected(&gate), (Mode::Closing, u64::MAX - 1, true));
         });
+}
+
+// Every file under `root` with its bytes, so a refused step can prove it wrote nothing.
+fn tree(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            match path.is_dir() {
+                true => {
+                    found.push((path.clone(), Vec::new()));
+                    pending.push(path);
+                }
+                false => found.push((path.clone(), std::fs::read(&path).unwrap_or_default())),
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn g1b_exhausted_gate_never_reopens() {
+    // A release refused at the limit latches the Gate; nothing reopens it afterwards.
+    let channel = 6_326_166;
+    let gate = Gate::protect(CLAUDE, channel).unwrap();
+    let _health = test_health::Clear::new(&gate);
+    gate.state.lock().unwrap().epoch = u64::MAX - 1;
+    let closing = handback(&gate);
+    let snapshot = producer(channel, &[]).pending_snapshot();
+    assert_eq!(
+        closing.release_after_handback_with_pending(&snapshot),
+        Err(Failure::GenerationExhausted)
+    );
+    // The Gate can only reach LegacyOpen through a test poke; even there no permit or close.
+    gate.state.lock().unwrap().mode = Mode::LegacyOpen;
+    assert_eq!(gate.admit().err(), Some(Failure::GenerationExhausted));
+    assert_eq!(gate.close().err(), Some(Failure::GenerationExhausted));
+    gate.state.lock().unwrap().mode = Mode::Closing;
+    assert_eq!(
+        closing.abort_close(false),
+        Err(Failure::GenerationExhausted)
+    );
+}
+
+#[test]
+fn g1b_restore_right_after_release_retires_the_proof() {
+    // The proof names the release's own epoch, so a restore landing right after it retires it.
+    let channel = 6_326_167;
+    let gate = Gate::protect(CLAUDE, channel).unwrap();
+    let _health = test_health::Clear::new(&gate);
+    let closing = handback(&gate);
+    let epoch = protected(&gate).1;
+    let snapshot = producer(channel, &[]).pending_snapshot();
+    closing
+        .release_after_handback_with_pending(&snapshot)
+        .unwrap();
+    assert_eq!(protected(&gate), (Mode::LegacyOpen, epoch + 1, false));
+    let ticket = ordering::handback_fetch_ticket(&CLAUDE, channel).unwrap();
+    gate.restore_protection().unwrap();
+    assert_eq!(protected(&gate), (Mode::LegacyOpen, epoch + 2, true));
+    let before = entry_state(channel);
+    assert!(ordering::handback_begin_scan(ticket, vec![], 0, true).is_err());
+    assert!(ordering::handback_fetch_ticket(&CLAUDE, channel).is_err());
+    assert_eq!(entry_state(channel), before);
+    assert!(order_barrier(&CLAUDE, channel));
 }

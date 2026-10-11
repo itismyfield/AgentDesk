@@ -80,6 +80,9 @@ impl Closing {
     /// Returns a channel the ledger never owned to Legacy; earlier permits stay valid.
     pub(crate) fn abort_close(&self, ledger_history: bool) -> Result<(), Failure> {
         let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.exhausted {
+            return Err(Failure::GenerationExhausted);
+        }
         if ledger_history
             || !self.gate.protected.load(Ordering::Acquire)
             || state.epoch != self.epoch.load(Ordering::Acquire)
@@ -99,7 +102,9 @@ impl Closing {
         &self,
         snapshot: &ordering::PendingSource,
     ) -> Result<(), Failure> {
-        ordering::install_handback_snapshot(self, snapshot)
+        ordering::install_handback_snapshot(self, snapshot, || {
+            self.release_protection_after_handback()
+        })
     }
 
     // No permit can exist past the freeze, so these moves keep the epoch unchanged.
