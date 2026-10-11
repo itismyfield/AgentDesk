@@ -205,13 +205,18 @@ def isolation(output: str) -> list[str]:
     return failures
 
 
-def judge_all(verdicts: dict[str, list[str]]) -> list[str]:
-    """Both gates, each with no failure."""
+def judge_all(verdicts: dict[str, list[str]], heads: dict[str, tuple[str, bool]],
+              pr_head: str) -> list[str]:
+    """W5 and the pair: both gates ran with no failure, each on the clean PR head."""
     failures = []
     for name in TESTS:
         if name not in verdicts:
             failures.append(f"{name}: not run")
-        failures += [f"{name}: {why}" for why in verdicts.get(name, [])]
+            continue
+        failures += [f"{name}: {why}" for why in verdicts[name]]
+        head, clean = heads.get(name, ("", False))
+        if (head, clean) != (pr_head, True):
+            failures.append(f"{name}: W5: ran on {head} clean={clean}, not the PR head {pr_head}")
     return failures
 
 
@@ -271,6 +276,7 @@ def main() -> int:
     parser.add_argument("--herdr-src", default=str(Path.home() / ".local/bin/herdr"))
     parser.add_argument("--worktree", type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument("--only", choices=sorted(TESTS), action="append")
+    parser.add_argument("--pr-head", help="the PR head both runs must be on (default: HEAD)")
     args = parser.parse_args()
     if not os.environ.get("POSTGRES_TEST_DATABASE_URL_BASE"):
         print("P11_M2_ACTIVATION FAIL: no throwaway PostgreSQL (run under pg_throwaway.sh)")
@@ -302,8 +308,10 @@ def main() -> int:
     offset = args.pids.stat().st_size if args.pids.exists() else 0
     env = dict(os.environ, ADK_TEST_HERDR_BIN=str(binary), ADK_TEST_HERDR_ROOT=str(run_root),
                ADK_TEST_HERDR_PIDS=str(args.pids))
-    verdicts = {}
+    verdicts, heads = {}, {}
+    pr_head = args.pr_head or head
     for name in args.only or sorted(TESTS):
+        heads[name] = head_state(args.worktree)
         test = TESTS[name][0]
         command = ["cargo", "test", "--lib", f"{MODULE}::{test}", "--", "--ignored", "--exact",
                    "--nocapture", "--test-threads=1"]
@@ -318,7 +326,7 @@ def main() -> int:
                                read_log=lambda path: Path(path).read_text() if path else "")
         say(f"{name.upper()} {'PASS' if not verdicts[name] else 'FAIL'} head={head} "
             f"log={out / (name + '.log')} " + "; ".join(verdicts[name]))
-    failures = judge_all(verdicts)
+    failures = judge_all(verdicts, heads, pr_head)
     left = [pid for pid in ledger_pids(args.pids, offset) if running(pid)]
     if left:
         failures.append(f"cleanup: recorded pids still running {left}")
@@ -329,9 +337,8 @@ def main() -> int:
                              "(test_p11_m2_activation: leftover recorded pid)\n")
     if production_sockets() != before:
         failures.append("isolation: production sockets changed")
-    after_head, after_clean = head_state(args.worktree)
-    if (after_head, after_clean, clean) != (head, True, True):
-        failures.append(f"W5: head {head} clean={clean} -> {after_head} clean={after_clean}")
+    if head_state(args.worktree) != (pr_head, True):
+        failures.append(f"W5: the worktree left the clean PR head {pr_head}")
     verdict = "PASS" if not failures else "FAIL"
     say(f"P11_M2_ACTIVATION {verdict} head={head} " + "; ".join(failures))
     (out / "summary.txt").write_text("\n".join(report) + "\n")

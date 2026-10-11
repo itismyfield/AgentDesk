@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Fixed-fixture checks of the P11 M2 activation judge: a real pair passes; a fake-only run, a
-skipped run, a missing witness, a binary of another hash, X1 without X2, and a write answered by a
-server other than the one the test started (N-2) each fail on exactly their own reason."""
+skipped run, a missing witness, a binary of another hash, X1 without X2, a pair run on another
+head, and a write answered by a server other than the one the test started (N-2) each fail on
+exactly their own reason."""
 from __future__ import annotations
 
 import importlib.util
@@ -17,6 +18,7 @@ SPEC.loader.exec_module(activation)
 BIN = "/scratch/x12/bin/herdr"
 SHA = activation.PINNED_SHA256
 TEST_PID = "500"
+HEAD = "c0ffee" + "0" * 34
 
 
 def sock(server: str) -> str:
@@ -110,7 +112,8 @@ def main() -> int:
         print(f"{'ok  ' if ok else 'FAIL'} {label}: {failures}")
 
     real = {name: judged(name, *fixture(name)) for name in activation.TESTS}
-    expect("real pair passes", activation.judge_all(real), [])
+    heads = {name: (HEAD, True) for name in activation.TESTS}
+    expect("real pair passes", activation.judge_all(real, heads, HEAD), [])
 
     # The write answered inside the test process: an in-process fake server.
     output, logs = fixture("x1")
@@ -133,10 +136,15 @@ def main() -> int:
 
     output, logs = fixture("x2")
     output = replace(output, f"sha256={SHA}", "sha256=" + "0" * 64)
-    expect("sha mismatch fails", judged("x2", output, logs),
+    expect("binary sha mismatch fails", judged("x2", output, logs),
            [f"W3: binary sha256 {'0' * 64} is not the pinned 0.9.3"])
 
-    expect("x1 only fails", activation.judge_all({"x1": real["x1"]}), ["x2: not run"])
+    expect("x1 only fails", activation.judge_all({"x1": real["x1"]}, heads, HEAD), ["x2: not run"])
+
+    # X2 ran on another head than X1 and the PR.
+    other = dict(heads, x2=("f" * 40, True))
+    expect("head sha mismatch fails", activation.judge_all(real, other, HEAD),
+           [f"x2: W5: ran on {'f' * 40} clean=True, not the PR head {HEAD}"])
 
     # N-2: a fake server outside the test process answered on the socket while the real server
     # the test started ran beside it; its log never took the request.

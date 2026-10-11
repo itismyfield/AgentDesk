@@ -176,6 +176,9 @@ fn act_route_rejects_unknown_or_empty_fields() {
     });
 }
 
+/// Request headers, then the status and `result` the route must answer.
+type Case<'a> = (&'a [(&'a str, &'a str)], u16, Option<&'a str>);
+
 async fn serve(app: Router) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -226,7 +229,7 @@ fn act_route_token_mode_requires_server_admin() {
         let (bearer, wrong) = (format!("Bearer {TOKEN}"), "Bearer nope".to_string());
         let token = serve(app(Some(TOKEN), registry.clone(), Some(pool.clone()))).await;
         let result = |reply: Value| reply["result"].as_str().map(str::to_string);
-        let cases: [(&[(&str, &str)], u16, Option<&str>); 4] = [
+        let cases: [Case; 4] = [
             (&[("origin", local.as_str())], 403, Some("forbidden")),
             (&[("referer", referer.as_str())], 401, Some("unauthorized")),
             (&[("authorization", bearer.as_str())], 409, Some("disabled")),
