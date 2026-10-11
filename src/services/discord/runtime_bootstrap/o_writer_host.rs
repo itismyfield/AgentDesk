@@ -217,9 +217,8 @@ impl HostIo for GatewayHost {
             .relay_emission_in_flight(ChannelId::new(channel))
     }
 
-    /// Built for gateway and delegated hosts alike, over the port's own client. Off, the turn
-    /// returns before PostgreSQL, the sidecar, the transport or Discord; the transport is built
-    /// on the first on turn.
+    /// Built for gateway and delegated hosts alike over the port's own client. Off, the turn reads
+    /// nothing, and the transport is built only on the first on turn.
     fn repost(&self, channel: u64, port: &Arc<GatewayPort>) -> Option<host::RepostTurn<Self>> {
         use crate::services::tui_o::repost::{
             config::RepostSwitch, io::probe::evidence::RunScope, runner,

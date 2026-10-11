@@ -1,6 +1,5 @@
-//! The re-post turn. Off, nothing past the switch runs: no PostgreSQL, probe or sidecar step.
-//! On, a tick finds admitted pieces and advances their probes, and a turn grants the next slot
-//! only on fresh absence evidence or a current approval.
+//! The re-post turn: off, nothing past the switch runs. On, a tick advances the probes of admitted
+//! pieces, and a slot is granted only on fresh absence evidence or a current approval.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -340,9 +339,8 @@ pub(crate) type Turned<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub(crate) trait RepostHook<W>: Send {
     /// One turn; off, it returns before PostgreSQL, the sidecar, the transport or Discord.
     fn turn<'a>(&'a mut self, writer: &'a mut W) -> Turned<'a, ()>;
-    /// Whether a fresh original at `serial` may be sent: off, always, with nothing read. On, an
-    /// admitted key is never sent again, an unknown admission holds it, and a sendable one has its
-    /// intent written first.
+    /// Whether a fresh original at `serial` may go: off, always, reading nothing; on, never for an
+    /// admitted key, not while admission is unknown, and only once its intent is written.
     fn original(&mut self, serial: u64, record: PieceRecord) -> Turned<'_, OriginalGate>;
 }
 

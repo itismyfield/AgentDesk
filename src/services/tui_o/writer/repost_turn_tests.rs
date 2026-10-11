@@ -230,10 +230,8 @@ impl<W, H: RepostHook<W>> RepostHook<W> for Counted<H> {
     }
 }
 
-/// The real actor with an off turn runs it every poll and it stops at the switch: the piece goes
-/// out at once as without a turn, nothing reads PostgreSQL (the pool cannot connect) or Discord,
-/// and no sidecar exists. On, the actor's turn activates the sidecar, and the next fresh piece
-/// waits on the PostgreSQL it cannot read.
+/// Off, the actor's turn stops at the switch: the piece posts as without one and nothing reads
+/// PostgreSQL, Discord or the sidecar. On, the sidecar activates and a fresh piece waits on PG.
 #[tokio::test(start_paused = true)]
 async fn f6_default_off_actor_turn_reads_nothing() {
     for on in [None, Some(false), Some(true)] {
@@ -297,11 +295,8 @@ async fn grant(runner: &mut Runner, writer: &mut Writer, pool: &PgPool, key: &Pi
     matches!(admitted.await.unwrap(), Admission::Granted { .. })
 }
 
-/// The real actor runs an operator resume, an ordinary piece and an Auto re-post of one channel,
-/// and no two of their POSTs are ever in flight together: the ordinary piece arriving while the
-/// re-post is in flight waits for it. The re-post goes once, through the writer, at the gate's
-/// epoch, and becomes both the ledger's Posted and the piece's receipt; an admitted piece whose
-/// unit is excluded gets no slot.
+/// An operator resume, an ordinary piece and an Auto re-post of one channel never overlap their
+/// POSTs; the re-post goes once at the gate's epoch, and an excluded unit gets no slot.
 #[tokio::test]
 async fn f6_general_auto_and_resume_never_overlap_posts_pg() {
     let db = TestPostgresDb::create().await;
@@ -461,9 +456,8 @@ async fn f6_t09_open_prepared_blocks_every_sender_pg() {
     db.drop().await;
 }
 
-/// After a restart under a new serial, an admitted piece is never posted as a fresh original, and
-/// an admission PostgreSQL cannot answer holds it. With re-post off nothing is asked of
-/// PostgreSQL and the piece posts as before.
+/// After a restart an admitted piece never posts as a fresh original and an unreadable admission
+/// holds it; off, nothing asks PostgreSQL and the piece posts as before.
 #[tokio::test]
 async fn f6_t10_recovered_admitted_piece_never_becomes_new_original_pg() {
     let db = TestPostgresDb::create().await;
@@ -495,10 +489,8 @@ async fn f6_t10_recovered_admitted_piece_never_becomes_new_original_pg() {
     db.drop().await;
 }
 
-/// Turning on never adopts what came before: neither a Prepared left open from before the
-/// activation nor, once settled, its uncertain result, nor an earlier uncertain piece, across a
-/// restart. An original sent while on has its intent in the sidecar before its POST, and once its
-/// result is uncertain the next turn admits it.
+/// Turning on never adopts earlier pieces, open or uncertain, across a restart; an original sent
+/// while on has its intent written before its POST, and the next turn admits its uncertain result.
 #[tokio::test]
 async fn f6_t11_pre_activation_backlog_never_posts_pg() {
     let db = TestPostgresDb::create().await;
