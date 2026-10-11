@@ -293,7 +293,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
 /// (`task_supervisor::TmuxWatcherTaskGuard`) already makes the identical helper
 /// call immediately after this function returns, and T3-A2 places that same
 /// call at the post-stream exit once more.
-fn release_registry_slot_at_exit(
+pub(super) fn release_registry_slot_at_exit(
     tmux_watchers: &TmuxWatcherRegistry,
     channel_id: ChannelId,
     tmux_session_name: &str,

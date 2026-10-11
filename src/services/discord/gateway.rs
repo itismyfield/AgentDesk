@@ -193,6 +193,29 @@ pub(super) trait TurnGateway: Send + Sync {
         })
     }
 
+    /// Schedules the exact retry of a protected request. The permit may only reach the request's
+    /// next start; without that start path the retry is dropped and the request stays held.
+    fn schedule_exact_retry_with_history<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        user_message_id: MessageId,
+        _user_text: &'a str,
+        retry: crate::services::discord::replay_policy::RetryPermit,
+        completion_tx: tokio::sync::oneshot::Sender<()>,
+    ) -> GatewayFuture<'a, ()> {
+        Box::pin(async move {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                user_message_id = user_message_id.get(),
+                receipt = retry.receipt_id(),
+                previous_nonce = retry.previous_nonce(),
+                next_nonce = retry.next_nonce(),
+                "exact replay retry has no start path to re-enter; the request stays held"
+            );
+            let _ = completion_tx.send(());
+        })
+    }
+
     fn dispatch_queued_turn<'a>(
         &'a self,
         channel_id: ChannelId,

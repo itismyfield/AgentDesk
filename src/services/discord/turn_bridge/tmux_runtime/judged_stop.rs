@@ -192,6 +192,10 @@ impl ChannelStop {
             StopCancel::AlreadyStopping(_) => false,
             StopCancel::NotCurrent | StopCancel::Herdr(_) => return,
         };
+        if cancelled_now {
+            let withdraw = crate::services::discord::turn_presence::entrypoints::withdraw;
+            withdraw(self.channel.get(), "channel_stop");
+        }
         let name = self.tombstone_name.as_deref();
         let record = crate::services::discord::record_turn_stop_tombstone;
         record(self.channel, name, CANCEL_REASON).await;

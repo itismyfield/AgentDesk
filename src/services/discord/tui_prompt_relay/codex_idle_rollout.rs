@@ -1,3 +1,4 @@
+use super::super::codex_adoption_runtime::boot::DiscoveryPass;
 use super::super::{inflight, task_supervisor};
 use super::idle_transcript_scan::CodexTurnPrompt;
 use super::*;
@@ -12,6 +13,29 @@ fn advance_codex_tui_runtime_binding_and_marker_offset(
         rollout_path,
         offset,
     );
+}
+
+/// Runs one discovery pass off the async runtime. Only the adoption runtime installed when it
+/// began gets its result, after it returned; a failed join is recorded as a failed pass.
+#[cfg(unix)]
+pub(super) async fn codex_discovery_pass(
+    shared: &Arc<SharedData>,
+    pass: impl FnOnce(bool) -> DiscoveryPass + Send + 'static,
+) {
+    let adoption = super::super::codex_adoption_runtime::installed(shared);
+    let observe = adoption.is_some();
+    let pass = tokio::task::spawn_blocking(move || pass(observe))
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "Codex TUI binding rehydrate task panicked or was cancelled"
+            );
+            Err(format!("rehydrate task: {error}"))
+        });
+    if let Some(adoption) = adoption {
+        adoption.record_discovery(pass);
+    }
 }
 
 #[cfg(unix)]
@@ -30,17 +54,11 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
             let now = tokio::time::Instant::now();
             if now >= next_rehydrate {
                 let shared_for_rehydrate = shared.clone();
-                let rehydrate_result = tokio::task::spawn_blocking(move || {
+                codex_discovery_pass(&shared, move |observe| {
                     crate::services::tui_prompt_dedupe::resolve_codex_claims();
-                    rehydrate_existing_codex_tui_bindings(&shared_for_rehydrate);
+                    rehydrate_existing_codex_tui_bindings(&shared_for_rehydrate, observe)
                 })
                 .await;
-                if let Err(error) = rehydrate_result {
-                    tracing::warn!(
-                        error = %error,
-                        "Codex TUI binding rehydrate task panicked or was cancelled"
-                    );
-                }
                 next_rehydrate = now + CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL;
             }
 

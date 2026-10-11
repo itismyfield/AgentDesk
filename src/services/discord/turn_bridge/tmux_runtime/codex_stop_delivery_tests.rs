@@ -1096,9 +1096,13 @@ fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
     assert!(!body.contains("begin_command_stop(") && !body.contains("begin_user_stop("));
 }
 
-/// Known defect: a cold stop survives an unsubmitted failure without an automatic terminal.
+/// A cold stop alone is no proof and holds; after the executor's no-attempt exit the exit seal
+/// is a policy close, with no Escape and no provider call.
 #[test]
-fn cold_unsubmitted_stop_keeps_the_bridge_hold_without_a_terminal() {
+fn cold_unsubmitted_stop_closes_only_after_a_no_attempt_exit() {
+    use crate::services::provider::herdr_before_start::{
+        ExitDecision, finish_execution, seal_exit,
+    };
     with_cases(|case, fx, runtime| {
         let state = case.token.herdr_interrupt_state().unwrap();
         state.submission.lock().unwrap().submission = HerdrSubmission::Unsubmitted;
@@ -1114,25 +1118,56 @@ fn cold_unsubmitted_stop_keeps_the_bridge_hold_without_a_terminal() {
         );
         runtime.block_on(reply.finish(&case.shared, &case.provider, case.channel));
         assert!(state.user_stop.load(Ordering::Acquire));
-        let unconfirmed = crate::services::discord::turn_bridge::stream_loop::exit_reconcile::herdr_stop_unconfirmed;
-        for _ in 0..2 {
-            assert!(
-                unconfirmed(&case.token, false, false),
-                "an input error has no admitted terminal"
-            );
-            assert!(Arc::ptr_eq(
-                &current_token(case, runtime).unwrap(),
-                &case.token
-            ));
-        }
-        assert!(
-            !unconfirmed(&case.token, false, true),
-            "an admitted terminal is the positive control"
+        // No-proof negative control: the stop alone closes nothing and keeps the token.
+        assert_eq!(state.closed_probe(), Some(false));
+        assert!(Arc::ptr_eq(
+            &current_token(case, runtime).unwrap(),
+            &case.token
+        ));
+        finish_execution(Some(&case.token));
+        assert_eq!(state.closed_probe(), Some(true));
+        let ExitDecision::PolicyClose(proof) = seal_exit(&case.token, false, false) else {
+            panic!("a no-attempt exit with a cold stop is a before-start proof");
+        };
+        assert_eq!(proof.owner, state.owner);
+        assert_eq!(proof.turn_nonce.as_str(), case.token.turn_nonce().unwrap());
+        assert_eq!(
+            seal_exit(&case.token, false, false),
+            ExitDecision::PolicyClose(proof),
+            "the exit decision is sealed once"
         );
         assert_eq!(
             state.submission.lock().unwrap().submission,
             HerdrSubmission::Unsubmitted
         );
+        assert!(!case.token.cancelled.load(Ordering::Acquire));
+        assert_eq!(case.escapes(), 0);
+        assert!(fx.take_calls().is_empty());
+    });
+}
+
+/// A stop that lands after the exit sealed Normal stays an intent: the unsubmitted turn sends no
+/// Escape, the sealed decision does not flip to a hold, and normal finalize owns the slot.
+#[test]
+fn cold_stop_after_a_normal_exit_seal_sends_nothing() {
+    use crate::services::provider::herdr_before_start::{ExitDecision, seal_exit};
+    with_cases(|case, fx, runtime| {
+        let state = case.token.herdr_interrupt_state().unwrap();
+        state.submission.lock().unwrap().submission = HerdrSubmission::Unsubmitted;
+        assert_eq!(seal_exit(&case.token, false, false), ExitDecision::Normal);
+        mark(&case.owner.logical_key, Mark::Herdr);
+        let reply = runtime.block_on(crate::services::discord::commands::stop::run_slash_stop(
+            &case.shared,
+            &case.provider,
+            case.channel,
+        ));
+        assert_eq!(
+            reply.text(),
+            HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Pending)).reply()
+        );
+        runtime.block_on(reply.finish(&case.shared, &case.provider, case.channel));
+        assert!(state.user_stop.load(Ordering::Acquire));
+        assert_eq!(seal_exit(&case.token, false, false), ExitDecision::Normal);
         assert!(!case.token.cancelled.load(Ordering::Acquire));
         assert_eq!(case.escapes(), 0);
         assert!(fx.take_calls().is_empty());
@@ -1233,3 +1268,33 @@ fn act7_each_stop_reason_preserves_delivery_and_settlement_axes() {
 
 #[path = "codex_stop_delivery_home_stop_tests.rs"]
 mod home_stop;
+
+#[test]
+fn b2b1_only_an_escape_that_leaves_withdraws_the_herdr_turn_approval() {
+    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
+    with_cases(|case, fx, runtime| {
+        let probe = Probe::install(&case.shared);
+        let ticket = probe.arm(case.channel.get());
+        case.screen(false);
+        assert_eq!(
+            runtime.block_on(case.delivery("/stop")),
+            HerdrDelivery::NotSent(HerdrNotSent::Idle)
+        );
+        assert!(
+            Probe::current(&ticket),
+            "an intent that sent nothing withdraws nothing"
+        );
+        case.screen(true);
+        let pool = case.shared.pg_pool.as_ref().unwrap();
+        assert_eq!(
+            runtime.block_on(interrupt_herdr(pool, &case.token, &case.provider)),
+            HerdrDelivery::Sent
+        );
+        assert_eq!(case.escapes(), 1);
+        assert!(
+            !Probe::current(&ticket),
+            "the Escape withdrew the turn's approval"
+        );
+        assert!(fx.take_calls().is_empty());
+    });
+}

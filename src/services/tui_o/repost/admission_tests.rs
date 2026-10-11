@@ -30,8 +30,8 @@ use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
 use crate::services::tui_o::store::ledger::{PieceOutcome, PieceRecord};
 
-const CHANNEL: u64 = 6325;
-const BOT: u64 = 900;
+pub(super) const CHANNEL: u64 = 6325;
+pub(super) const BOT: u64 = 900;
 
 fn unit(native_key: &str, kind: UnitKind) -> UnitKey {
     UnitKey {
@@ -54,7 +54,7 @@ fn record(native_key: &str, payload: &str, outcome: Option<PieceOutcome>) -> Pie
     }
 }
 
-fn switch(enabled: bool) -> RepostSwitch {
+pub(super) fn switch(enabled: bool) -> RepostSwitch {
     let boot = TuiOConfig {
         repost: RepostConfig { enabled },
         ..TuiOConfig::default()
@@ -62,7 +62,7 @@ fn switch(enabled: bool) -> RepostSwitch {
     RepostSwitch::new(Some(&boot), watch::channel(None).1)
 }
 
-fn sidecar(dir: &tempfile::TempDir) -> ProvenanceLog {
+pub(super) fn sidecar(dir: &tempfile::TempDir) -> ProvenanceLog {
     ProvenanceLog::open(&dir.path().join("repost-provenance.jsonl")).unwrap()
 }
 
@@ -87,7 +87,7 @@ fn request(key: &PieceKey, revision: i64, intent: Intent) -> GrantRequest<'_> {
 }
 
 /// Consumes the next slot and settles it as an uncertain send; returns its slot.
-async fn send_uncertain(pool: &PgPool, key: &PieceKey, intent: Intent) -> u8 {
+pub(super) async fn send_uncertain(pool: &PgPool, key: &PieceKey, intent: Intent) -> u8 {
     let revision = load(pool, key).await.unwrap().unwrap().revision;
     let granted: SlotGrant = match grant(pool, request(key, revision, intent)).await.unwrap() {
         GrantOutcome::Granted(granted) => granted,
@@ -99,7 +99,7 @@ async fn send_uncertain(pool: &PgPool, key: &PieceKey, intent: Intent) -> u8 {
     granted.slot()
 }
 
-async fn next_grant(pool: &PgPool, key: &PieceKey) -> GrantOutcome {
+pub(super) async fn next_grant(pool: &PgPool, key: &PieceKey) -> GrantOutcome {
     let revision = load(pool, key).await.unwrap().unwrap().revision;
     grant(pool, request(key, revision, Intent::AutoReconfirm))
         .await
@@ -453,7 +453,7 @@ async fn an_operator_retry_and_the_automatic_reconfirm_share_one_three_post_budg
 }
 
 /// Admits each `(serial, native_key)` as an on original of `payload` that went uncertain.
-async fn admit_on(
+pub(super) async fn admit_on(
     pool: &PgPool,
     log: &mut ProvenanceLog,
     pieces: &[(u64, &str)],
@@ -648,4 +648,48 @@ async fn f4_row_change_invalidates_absence_evidence_pg() {
     assert!(!evidence.validate_current(&row, &spent, &run_1));
     pool.close().await;
     db.drop().await;
+}
+
+#[test]
+fn f3r_an_original_sent_while_on_stays_eligible_across_off_and_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = sidecar(&dir);
+    let first = record("first-on", "a", Some(PieceOutcome::NotFound));
+    let second = record("second-on", "b", Some(PieceOutcome::NotFound));
+    let between = record("while-off", "c", Some(PieceOutcome::NotFound));
+    // On from 3, off at 6, prepared 7 while off, on again from 8.
+    sent_while_on(&mut log, 3, &[(5, &first)]);
+    sent_while_on(&mut log, 8, &[(9, &second)]);
+    for state in [log.state().clone(), sidecar(&dir).state().clone()] {
+        assert!(matches!(classify(5, &first, &state), Candidate::Eligible(o) if o.serial == 5));
+        assert!(matches!(classify(9, &second, &state), Candidate::Eligible(o) if o.serial == 9));
+        let off = Candidate::Backlog(BacklogReason::BeforeActivation);
+        assert_eq!(classify(7, &between, &state), off);
+    }
+}
+
+#[test]
+fn f3r_a_failed_append_refuses_more_until_a_reopen_cuts_its_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = sidecar(&dir);
+    log.activate(3).unwrap();
+    let on = record("torn", "a", Some(PieceOutcome::NotFound));
+    let intent = |serial| ProvenanceEntry::intent(serial, &on, 1).unwrap();
+    log.fail_after = Some(20);
+    assert!(log.append(intent(4)).is_err());
+    // The retry would land after the partial bytes; it is refused instead.
+    assert!(log.append(intent(4)).is_err());
+    assert!(log.activate(9).is_err());
+    assert!(log.state().intent(4).is_none());
+
+    let mut reopened = sidecar(&dir);
+    assert!(reopened.state().intent(4).is_none());
+    reopened.append(intent(4)).unwrap();
+    reopened
+        .append(ProvenanceEntry::AdmissionPending { serial: 4 })
+        .unwrap();
+    // Every line replays: nothing damaged sits in the middle of the file.
+    let replayed = sidecar(&dir);
+    assert!(replayed.state().intent(4).is_some());
+    assert_eq!(replayed.state().pending().collect::<Vec<_>>(), [4]);
 }

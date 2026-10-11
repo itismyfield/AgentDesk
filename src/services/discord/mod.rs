@@ -10,6 +10,7 @@ mod busy_followup_retry_store;
 pub(crate) mod herdr_terminate;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;
+mod codex_adoption_runtime;
 mod commands;
 mod compact_turn_authority;
 mod completion_footer_metadata;
@@ -141,6 +142,10 @@ mod terminal_ui_obligation;
 #[cfg(unix)]
 mod tmux;
 #[cfg(all(test, unix))]
+pub use tmux::{
+    OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
+};
+#[cfg(all(test, unix))]
 pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
     requested_channel_id: ChannelId,
     existing_channel_id: ChannelId,
@@ -186,10 +191,9 @@ pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
+pub(crate) mod replay_policy;
 mod tui_task_card;
 mod turn_bridge;
-#[cfg(test)]
-pub(crate) use turn_bridge::replay_policy;
 #[allow(clippy::too_many_arguments)]
 mod turn_finalizer;
 pub(crate) mod turn_lease;
