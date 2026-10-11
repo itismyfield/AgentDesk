@@ -10,6 +10,10 @@ fn sandbox() -> tempfile::TempDir {
     tempfile::tempdir_in(parent).unwrap()
 }
 
+fn snapshot(channel: u64) -> ordering::PendingSource {
+    ordering::AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0).pending_snapshot()
+}
+
 fn health(closing: &Closing) -> Option<String> {
     closing.gate.health.lock().unwrap().clone()
 }
@@ -86,17 +90,27 @@ fn e1_committed_move_opens_the_ledger_and_handback_release_keeps_the_order_barri
             assert_eq!(gate.mode(), Mode::LedgerOpen);
             assert!(matches!(gate.admit(), Err(Failure::Mode(Mode::LedgerOpen))));
             assert!(matches!(closing.population(&runtime), Err(Failure::Busy)));
-            assert_eq!(closing.release_after_handback(&[], 0), Err(Failure::Busy));
+            let pending = snapshot(channel);
+            assert_eq!(
+                closing.release_after_handback_with_pending(&pending),
+                Err(Failure::Busy)
+            );
             assert!(
                 !order_barrier(&ProviderKind::Claude, channel),
                 "a refused release leaves no barrier"
             );
             closing.begin_handback().unwrap();
             drop(closing.population(&runtime).unwrap());
-            closing.release_after_handback(&[], 0).unwrap();
+            closing
+                .release_after_handback_with_pending(&pending)
+                .unwrap();
             assert!(lookup(&ProviderKind::Claude, channel).is_none());
             assert!(order_barrier(&ProviderKind::Claude, channel));
-            assert_eq!(closing.release_after_handback(&[], 0), Err(Failure::Busy));
+            assert_eq!(
+                closing.release_after_handback_with_pending(&pending),
+                Err(Failure::StalePermit),
+                "an unsettled entry is never replaced"
+            );
             assert!(
                 order_barrier(&ProviderKind::Claude, channel),
                 "a stale release must preserve an already installed catch-up barrier"
@@ -124,7 +138,15 @@ fn g1a_handback_settle_rechecks_current_capability_and_retains_barrier_on_refusa
     let channel = 6_325_714;
     let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
     closing.begin_handback().unwrap();
-    closing.release_after_handback(&[], 7).unwrap();
+    let mut producer = ordering::AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0);
+    for key in 1..=7 {
+        producer.pending(&[key]);
+    }
+    let mut pending = producer.pending_snapshot();
+    pending.sources.clear();
+    closing
+        .release_after_handback_with_pending(&pending)
+        .unwrap();
     let cap = complete_handback(channel, 0);
     let hint = ordering::handback_pending(&ProviderKind::Claude, channel, &[11]).unwrap();
     assert_eq!(hint.dirty_generation, 8);
@@ -145,11 +167,19 @@ fn g1a_a_later_handback_rejects_the_previous_complete_capability() {
     let channel = 6_325_715;
     let first = Closing::frozen_for_test(ProviderKind::Claude, channel);
     first.begin_handback().unwrap();
-    first.release_after_handback(&[], 0).unwrap();
+    let pending = snapshot(channel);
+    first.release_after_handback_with_pending(&pending).unwrap();
     let old = complete_handback(channel, 0);
-    let second = Closing::frozen_for_test(ProviderKind::Claude, channel);
+    // A later release of the same Gate and producer handle replaces only a settled entry.
+    let earlier = complete_handback(channel, 0);
+    assert_eq!(settle_order_barrier(earlier), Ok(true));
+    first.gate.restore_protection().unwrap();
+    let second = first.gate.close().unwrap();
+    second.gate.state.lock().unwrap().mode = Mode::Frozen;
     second.begin_handback().unwrap();
-    second.release_after_handback(&[], 0).unwrap();
+    second
+        .release_after_handback_with_pending(&pending)
+        .unwrap();
     assert_eq!(settle_order_barrier(old), Err(Failure::StalePermit));
     assert!(order_barrier(&ProviderKind::Claude, channel));
     assert_eq!(
@@ -167,7 +197,7 @@ fn g1a_unrelated_order_cannot_issue_a_post_release_settle_capability() {
     let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
     closing.begin_handback().unwrap();
     closing
-        .release_after_handback(&snapshot.sources, snapshot.dirty_generation)
+        .release_after_handback_with_pending(&snapshot)
         .unwrap();
     drop(original);
     let mut other = ordering::AdmissionOrder::new(ProviderKind::Claude, channel, 2, 0);
