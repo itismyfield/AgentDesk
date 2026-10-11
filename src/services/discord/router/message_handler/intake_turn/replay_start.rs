@@ -19,6 +19,9 @@ pub(super) struct StartRequest<'a> {
     pub(super) prompt: &'a str,
 }
 
+/// A start and whether it is fresh, or the turn's result once a refused start is settled.
+type Checked = Result<(ReplayStart, bool), Result<(), Error>>;
+
 /// Runs `admit`, settling a refused start with `stop`; boxed inside this plain function so the
 /// check's store futures never sit in the intake turn's poll frame.
 pub(super) fn check<'a>(
@@ -26,13 +29,7 @@ pub(super) fn check<'a>(
     request: StartRequest<'a>,
     inflight: &'a mut InflightTurnState,
     cancel_token: &'a Arc<CancelToken>,
-) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<(ReplayStart, bool), Result<(), Error>>>
-            + Send
-            + 'a,
-    >,
-> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Checked> + Send + 'a>> {
     Box::pin(async move {
         let provider = request.provider;
         match admit(shared, request, inflight).await {
