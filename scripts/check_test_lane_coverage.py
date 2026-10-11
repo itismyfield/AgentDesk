@@ -13,7 +13,7 @@ snapshot, and any newly uncovered module or stale entry also fails. Baseline
 debt can therefore only shrink without a redundant scalar lock.
 
 Required-PR jobs alone form a second ratchet axis with its own baseline, and
-test_lane_source_parity.py judges each explicit justfile filter's PR parity.
+lane_source_parity.py judges each explicit justfile filter's PR parity.
 """
 
 from __future__ import annotations
@@ -816,8 +816,8 @@ def baseline_growth(
 
 def _parity_module():
     """The source/parity judge, loaded on use so scripts copied alone keep importing."""
-    path = Path(__file__).with_name("test_lane_source_parity.py")
-    spec = importlib.util.spec_from_file_location("test_lane_source_parity", path)
+    path = Path(__file__).with_name("lane_source_parity.py")
+    spec = importlib.util.spec_from_file_location("lane_source_parity", path)
     if spec is None or spec.loader is None:
         raise ValueError(f"cannot import the source parity judge: {path}")
     module = importlib.util.module_from_spec(spec)
