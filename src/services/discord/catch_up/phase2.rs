@@ -1,16 +1,74 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use crate::services::turn_orchestrator::{
     EnqueueRefusalReason, INTERVENTION_DEDUP_WINDOW, Intervention, MAX_INTERVENTIONS_PER_CHANNEL,
 };
-use poise::serenity_prelude::{ChannelId, MessageId};
+use poise::serenity_prelude::{ChannelId, Message, MessageId};
 
-use super::super::MailboxEnqueueOutcome;
 use super::super::recovery_known_ids::RecoveryKnownIdArm;
-use super::classification::CatchUpClassification;
+use super::super::{MailboxEnqueueOutcome, router};
+use super::classification::{CatchUpClassification, is_restart_gap_notice};
 use super::frontier_evidence::FrontierEvidence;
 use super::settled_frontier::{RetainedBarrier, clamp_retry_cursor, safe_durable_candidate};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Phase2PreGate {
+    Skip,
+    Duplicate,
+    TooOld { age_secs: i64 },
+    Proceed { age_secs: i64 },
+}
+
+pub(super) fn phase2_pre_gate(
+    message: &Message,
+    current_bot_user_id: Option<u64>,
+    existing_ids: &HashSet<u64>,
+    checkpoint: Option<u64>,
+    age_reference: chrono::DateTime<chrono::Utc>,
+) -> Phase2PreGate {
+    if !router::should_process_turn_message(message.kind)
+        || Some(message.author.id.get()) == current_bot_user_id
+    {
+        return Phase2PreGate::Skip;
+    }
+    let text = message.content.trim();
+    if text.is_empty() || is_restart_gap_notice(message.author.bot, text) {
+        return Phase2PreGate::Skip;
+    }
+    let message_id = message.id.get();
+    // Membership keeps its evidence-based frontier semantics before any age skip.
+    if existing_ids.contains(&message_id) {
+        return Phase2PreGate::Duplicate;
+    }
+    if checkpoint.is_some_and(|saved| message_id <= saved) {
+        return Phase2PreGate::Skip;
+    }
+    let age_secs = age_reference
+        .signed_duration_since(*message.id.created_at())
+        .num_seconds();
+    if age_secs > 600 {
+        Phase2PreGate::TooOld { age_secs }
+    } else {
+        Phase2PreGate::Proceed { age_secs }
+    }
+}
+
+pub(super) fn log_catch_up_phase2_age_out(
+    channel_id: ChannelId,
+    message_id: MessageId,
+    age_secs: i64,
+) {
+    tracing::warn!(
+        phase = "phase2",
+        channel_id = channel_id.get(),
+        message_id = message_id.get(),
+        age_secs,
+        max_age_secs = 600,
+        reason = "catch_up_age_out",
+        "catch-up phase2 message aged out"
+    );
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Phase2EnqueueCommit {

@@ -136,8 +136,8 @@ fn off_lookup_never_waits_for_gate_state_and_handback_can_release_and_restore() 
     let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let closing = gate.close().unwrap();
     assert_eq!(
-        closing.release_protection_after_handback(),
-        Err(Failure::Busy)
+        closing.release_protection_after_handback().err(),
+        Some(Failure::Busy)
     );
     gate.record_failure(&[], Failure::Mode(Mode::Closing));
     assert!(
@@ -177,8 +177,8 @@ fn off_lookup_never_waits_for_gate_state_and_handback_can_release_and_restore() 
     ));
     assert!(matches!(gate.admit(), Ok(_)));
     assert_eq!(
-        closing.release_protection_after_handback(),
-        Err(Failure::Busy)
+        closing.release_protection_after_handback().err(),
+        Some(Failure::Busy)
     );
 }
 

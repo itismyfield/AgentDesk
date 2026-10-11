@@ -265,7 +265,7 @@ jobs:
               - 'src/server/multinode_regression.rs'
               - 'src/server/resource_locks.rs'
               - 'src/server/routes/agents_host_guard_tests.rs'
-              - 'src/server/routes/agents_turn_deliver.rs'
+              - 'src/server/routes/agents_turn_deliver/pg_tests.rs'
               - 'src/server/routes/auto_queue_lifecycle_pg_tests.rs'
               - 'src/server/routes/campaigns.rs'
               - 'src/server/routes/dispatched_sessions_tests.rs'
@@ -377,6 +377,7 @@ jobs:
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
               - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/native_fresh_prompt_tests.rs'
+              - 'src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/runtime_transition/native_hold_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_followup_tests.rs'
@@ -420,6 +421,7 @@ jobs:
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs'
               - 'src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs'
               - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs'
@@ -1334,9 +1336,10 @@ jobs:
 
       # Run 34926677210 selected 845 serial tests and completed 642 without
       # failure before the 20-minute budget expired during active migrations.
-      # Preserve all tests and fail-closed results; bound the complete run at 40m.
+      # Preserve all tests and fail-closed results; bound the complete run at 60m,
+      # the same budget as each ci-main.yml PostgreSQL shard.
       - name: just test-postgres
-        timeout-minutes: 40
+        timeout-minutes: 60
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -2208,7 +2211,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=999cdd16b47a51a31e8744caa83e8f627d26827d01df27658b2b548ab5444418
+          expected=713459343783731b3a38d23259809855ff8e29aa22bbe493dd038e8b2dc21f43
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2441,7 +2444,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=999cdd16b47a51a31e8744caa83e8f627d26827d01df27658b2b548ab5444418
+          expected=713459343783731b3a38d23259809855ff8e29aa22bbe493dd038e8b2dc21f43
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

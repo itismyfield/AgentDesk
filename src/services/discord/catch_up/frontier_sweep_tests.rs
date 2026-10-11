@@ -1169,3 +1169,6 @@ mod duplicate_race_tests;
 
 #[path = "merged_alias_tests.rs"]
 mod merged_alias_tests;
+
+#[path = "phase2_age_tests.rs"]
+mod phase2_age_tests;

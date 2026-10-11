@@ -1139,6 +1139,30 @@ _wait_release_stopped() {
     done
 }
 
+_capture_deploy_preexisting_reader_alarms() {
+    local health_body
+    DEPLOY_PREEXISTING_READER_CHANNEL_IDS=""
+    if health_body=$(curl -s --max-time 5 "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}/api/health" 2>/dev/null); then
+        DEPLOY_PREEXISTING_READER_CHANNEL_IDS=$(printf '%s' "$health_body" | python3 -c '
+import json
+import re
+import sys
+
+body = json.load(sys.stdin)
+reasons = body.get("degraded_reasons") if isinstance(body, dict) else None
+if not isinstance(reasons, list) or not all(isinstance(reason, str) for reason in reasons):
+    raise ValueError("invalid degraded_reasons")
+ids = []
+for reason in reasons:
+    match = re.fullmatch(r"tui_o:too_many_readers:([0-9]+)", reason)
+    if match and match[1] not in ids:
+        ids.append(match[1])
+print("|".join(ids))
+' 2>/dev/null) || DEPLOY_PREEXISTING_READER_CHANNEL_IDS=""
+    fi
+    echo "▸ Pre-existing reader-count alarms (non-blocking after deploy): ${DEPLOY_PREEXISTING_READER_CHANNEL_IDS:-none}"
+}
+
 # #3858: restore the last-known-good release binary and restart the service.
 # Invoked from the EXIT trap (via _cleanup_on_exit) whenever the binary was
 # promoted but the deploy never reached DEPLOY_OK — i.e. ANY non-zero exit after
@@ -1778,6 +1802,8 @@ _wait_for_peer_deploy_verdict() {
     local expected_repo_head="$5"
     local timeout_secs="$DEPLOY_PEER_VERDICT_TIMEOUT_SECS"
     local poll_interval_secs="$DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS"
+    # The deploy host's reader snapshot is no evidence about a peer's old runtime.
+    local DEPLOY_PREEXISTING_READER_CHANNEL_IDS=""
 
     case "$timeout_secs" in
         ''|*[!0-9]*)
@@ -3139,6 +3165,9 @@ fi
 # delivery frontier before launchd is allowed to stop it. The runtime consumes
 # restart_pending only after queue/checkpoint state and DrainRestart markers are
 # durable; the replacement watcher then resumes from those committed offsets.
+# Read once before restart drain can make the old runtime exit; keep the same
+# local snapshot for promotion and rollback, so later reader alarms still block.
+_capture_deploy_preexisting_reader_alarms
 AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1
 export AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS
 # #5245 Phase 2A-S: `$ADK_REL` remains the sole canonical watched root.

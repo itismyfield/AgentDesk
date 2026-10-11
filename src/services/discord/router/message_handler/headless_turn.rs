@@ -885,6 +885,19 @@ async fn start_reserved_headless_turn_admitted(
     inflight_state.delivery_bot = metadata_delivery_bot(metadata.as_ref());
     inflight_state.silent_turn = metadata_silent_flag(metadata.as_ref());
     inflight_state.source = metadata_turn_source(source, metadata.as_ref());
+    // Headless starts have no protected start path yet; an active channel refuses before any effect.
+    let admission = super::super::intake_dispatch::replay_admission::dormant_start;
+    let Some(replay_start) = admission(&channel_id.get().to_string()) else {
+        crate::services::discord::mailbox_finish::unwind_unstarted_turn(
+            shared,
+            channel_id,
+            &cancel_token,
+        )
+        .await;
+        return Err(HeadlessTurnStartError::Internal(
+            "headless start has no replay start".into(),
+        ));
+    };
     let turn_host = crate::services::turn_host::for_turn(
         shared.pg_pool.as_ref(),
         &provider,
@@ -1039,6 +1052,7 @@ async fn start_reserved_headless_turn_admitted(
                                 force_fresh: force_fresh_provider_session,
                                 submission: submission.as_ref(),
                             },
+                            replay_start,
                             tx.clone(),
                         )
                     }))

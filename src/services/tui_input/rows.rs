@@ -219,6 +219,13 @@ impl Rows {
                         }
                     }
                 }
+                #[cfg(test)]
+                let checked = !receipt_identity::mutant("snapshot_conflict_to_none_fallback");
+                #[cfg(not(test))]
+                let checked = true;
+                if checked {
+                    rows.identity_conflict()?;
+                }
                 rows
             }
             None => Self::default(),
@@ -237,7 +244,14 @@ impl Rows {
         let seq = record.seq;
         match Entry::decode(record)? {
             Entry::Received { key, input } => {
-                if self.can_activate(key) {
+                let activate = self.activation(key, &input);
+                #[cfg(test)]
+                let activate = match receipt_identity::mutant("drop_reactivation_replay_preflight")
+                {
+                    true => Ok(self.can_activate(key)),
+                    false => activate,
+                };
+                if activate? {
                     self.activate(key, seq, seq, input, RowState::Received);
                 } else {
                     self.ignored += 1;
@@ -252,7 +266,7 @@ impl Rows {
             Entry::MoveCommitted {
                 first_staged_seq,
                 ids,
-            } => self.commit(seq, first_staged_seq, &ids),
+            } => self.commit(seq, first_staged_seq, &ids)?,
             Entry::Transition {
                 key,
                 state,
@@ -365,15 +379,39 @@ impl Rows {
         self.legacy_transition(seq, key, state, evidence);
     }
 
-    fn commit(&mut self, seq: u64, first: u64, ids: &[u64]) {
-        let staged = std::mem::take(&mut self.staged);
-        let mut bound = BTreeMap::new();
-        // A window reaching back past another commit or handback is malformed and binds nothing.
-        if first > self.boundary_seq {
-            for row in staged.into_iter().filter(|r| (first..seq).contains(&r.seq)) {
-                bound.insert(row.key, row);
+    // The last Staged record per key inside the window; one reaching back past another commit or
+    // handback is malformed and binds nothing.
+    fn bound(&self, seq: u64, first: u64) -> BTreeMap<u64, &StagedRow> {
+        let window = (first > self.boundary_seq).then_some(first..seq);
+        (self.staged.iter())
+            .filter(|row| window.as_ref().is_some_and(|w| w.contains(&row.seq)))
+            .map(|row| (row.key, row))
+            .collect()
+    }
+
+    // Every row this commit would activate is checked before staging is consumed.
+    fn check_commit(&self, seq: u64, first: u64, ids: &[u64]) -> io::Result<()> {
+        let bound = self.bound(seq, first);
+        for key in ids {
+            if let Some(row) = bound.get(key) {
+                self.activation(*key, &row.input)?;
             }
         }
+        Ok(())
+    }
+
+    fn commit(&mut self, seq: u64, first: u64, ids: &[u64]) -> io::Result<()> {
+        #[cfg(test)]
+        let checked = !receipt_identity::mutant("drop_reactivation_replay_preflight");
+        #[cfg(not(test))]
+        let checked = true;
+        if checked {
+            self.check_commit(seq, first, ids)?;
+        }
+        let bound = self.bound(seq, first);
+        let mut bound: BTreeMap<_, _> =
+            bound.into_iter().map(|(k, row)| (k, row.clone())).collect();
+        self.staged.clear();
         for &key in ids {
             match bound.remove(&key) {
                 Some(row) if self.can_activate(key) => {
@@ -387,6 +425,7 @@ impl Rows {
             }
         }
         self.boundary_seq = seq;
+        Ok(())
     }
 
     fn transition(&mut self, seq: u64, key: u64, state: RowState) {
@@ -410,9 +449,52 @@ impl Rows {
     }
 
     /// A key handed back after a tracked attempt; activating it again would erase its tombstone.
+    /// Retention outlives the attempt GC, so a collected tombstone still blocks reactivation.
     pub fn keeps_tracked_history(&self, key: u64) -> bool {
-        (self.rows.get(&key))
-            .is_some_and(|row| row.state.released_to_legacy() && !row.attempts.is_empty())
+        let collected = |row: &Row| row.retention.is_some();
+        #[cfg(test)]
+        let collected = |row: &Row| {
+            collected(row) && !receipt_identity::mutant("tracked_history_attempts_only")
+        };
+        (self.rows.get(&key)).is_some_and(|row| {
+            row.state.released_to_legacy() && (!row.attempts.is_empty() || collected(row))
+        })
+    }
+
+    /// Decides an activation before any effect. `Ok(false)` is the settled key's existing ignore;
+    /// a returning key must carry its row's receipt identity, so an unproved one refuses the record.
+    pub fn activation(&self, key: u64, input: &Value) -> io::Result<bool> {
+        if !self.can_activate(key) {
+            return Ok(false);
+        }
+        let returning = self.rows.contains_key(&key);
+        if !returning && !self.receipts.contains_key(&key) {
+            return Ok(true);
+        }
+        // A retained index without its row never lends its identity to a new row.
+        let previous = returning.then(|| self.receipt_identity(key)).flatten();
+        match (previous, ReceiptIdentity::from_input(key, input)) {
+            (Some(previous), Some(next)) if previous.same(&next) => Ok(true),
+            _ => Err(invalid(
+                "reactivation does not carry the row's receipt identity",
+            )),
+        }
+    }
+
+    // Two complete identities for one row cannot both be its receipt; nothing may pick one.
+    fn identity_conflict(&self) -> io::Result<()> {
+        for (key, row) in &self.rows {
+            if let Some(retained) = self.receipts.get(key)
+                && retained.validates(*key)
+                && let Some(input) = ReceiptIdentity::from_input(*key, &row.input)
+                && !retained.same(&input)
+            {
+                return Err(invalid(
+                    "retained receipt identity conflicts with its row input",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn activate(&mut self, key: u64, seq: u64, received_seq: u64, input: Value, state: RowState) {
@@ -544,6 +626,14 @@ impl Rows {
 
     /// Drops a settled row's attempt detail only once two checkpoints found it collectable.
     pub fn compact_with(&self, facts: &impl Retire, generation: u64) -> io::Result<Value> {
+        // Checked before any input is dropped: the input is the only witness of the conflict.
+        #[cfg(test)]
+        let checked = !receipt_identity::mutant("drop_compact_conflict_guard");
+        #[cfg(not(test))]
+        let checked = true;
+        if checked {
+            self.identity_conflict()?;
+        }
         let mut compacted = self.clone();
         let shared: Vec<_> = (self.open_rows())
             .flat_map(|(_, row)| {
@@ -566,7 +656,12 @@ impl Rows {
             {
                 compacted.receipts.insert(*key, identity);
             }
-            row.input = match is_external_key(*key) {
+            #[cfg(test)]
+            let external =
+                is_external_key(*key) && !receipt_identity::mutant("external_tombstone_to_null");
+            #[cfg(not(test))]
+            let external = is_external_key(*key);
+            row.input = match external {
                 true => external_tombstone(&row.input),
                 false => Value::Null,
             };
@@ -615,6 +710,18 @@ fn external_tombstone(input: &Value) -> Value {
 
 impl Ledger {
     pub fn append_entry(&mut self, entry: &Entry, pins: &[BlobPin]) -> io::Result<u64> {
+        // The fold refuses the same records, so a refused activation never reaches the WAL.
+        match entry {
+            #[cfg(test)]
+            Entry::Received { .. }
+                if receipt_identity::mutant("drop_received_append_preflight") => {}
+            Entry::Received { key, input } => self.rows()?.activation(*key, input).map(drop)?,
+            Entry::MoveCommitted {
+                first_staged_seq,
+                ids,
+            } => (self.rows()?).check_commit(u64::MAX, *first_staged_seq, ids)?,
+            _ => {}
+        }
         let (kind, payload) = entry.encode()?;
         Ok(self.append(&kind, payload, pins)?.seq)
     }
