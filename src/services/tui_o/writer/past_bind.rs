@@ -5,9 +5,8 @@ use super::rotation::bound_source;
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::store::rotation::Boundary;
 
-/// Whether `log` bound `source` before `seq` under a name `attached` does not hold: by its session
-/// and path, or by path and inode under an empty session on either side, whatever device number a
-/// remount gave it then. An unreadable log counts as bound.
+/// Whether `log` bound `source` before `seq` under an unattached name with its session and path, or
+/// its path and inode when either session is empty (any device); an unreadable log counts as bound.
 pub(super) fn unread_before(
     log: Result<Vec<BindingEvent>, String>,
     seq: u64,

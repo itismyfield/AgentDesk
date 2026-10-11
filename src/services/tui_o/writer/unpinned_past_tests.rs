@@ -1,4 +1,4 @@
-//! #6737 S4: a past source bound before O started is held when bound again unless it was pinned.
+//! A past source bound before O started is held when bound again unless it was pinned.
 
 use super::*;
 use crate::services::tui_o::store::rotation::{Boundary, ResolveFrom};
