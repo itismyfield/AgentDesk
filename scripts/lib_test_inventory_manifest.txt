@@ -11528,6 +11528,8 @@ services::tui_o::turn_mode::tests::b1_native_admission_does_not_confirm_turn_mod
 services::tui_o::turn_mode::tests::n1a_configuration_cannot_confirm_a_channel
 services::tui_o::turn_mode::tests::n1a_only_confirmation_enables_turn_mode
 services::tui_o::turn_mode::tests::n1a_output_adoption_and_readiness_do_not_confirm_turn_mode
+services::tui_o::writer::adoption::tests::a_bind_of_an_unpinned_past_source_while_waiting_refuses_the_pin
+services::tui_o::writer::adoption::tests::a_deleted_past_source_is_left_unpinned_and_the_rest_are_adopted
 services::tui_o::writer::adoption::tests::a_length_change_under_the_lock_alone_releases_the_channel
 services::tui_o::writer::adoption::tests::a_past_source_starts_at_its_length_when_the_channel_is_adopted
 services::tui_o::writer::adoption::tests::a_prompt_past_legacys_frontier_is_reported_undelivered
@@ -11537,7 +11539,9 @@ services::tui_o::writer::adoption::tests::a_turn_legacys_reader_has_not_ended_is
 services::tui_o::writer::adoption::tests::an_open_turn_before_legacys_cursor_is_not_adopted
 services::tui_o::writer::adoption::tests::assistant_text_past_legacys_frontier_is_reported_undelivered
 services::tui_o::writer::adoption::tests::o_starts_at_legacys_cursor_when_a_unit_lands_after_the_recheck
-services::tui_o::writer::adoption::tests::past_sources_over_the_boot_budget_are_not_adopted
+services::tui_o::writer::adoption::tests::past_sources_exactly_at_the_byte_budget_are_all_pinned_and_the_next_older_is_dropped
+services::tui_o::writer::adoption::tests::past_sources_over_the_byte_budget_pin_only_the_newest
+services::tui_o::writer::adoption::tests::past_sources_over_the_count_budget_pin_only_the_newest
 services::tui_o::writer::adoption::tests::past_stall::a_deferred_activation_waits_for_an_actual_legacy_body_send
 services::tui_o::writer::adoption::tests::past_stall::a_past_stall_recheck_keeps_named_sources_empty
 services::tui_o::writer::adoption::tests::past_stall::a_past_stall_recheck_refuses_a_moved_binding_seq
@@ -11807,6 +11811,11 @@ services::tui_o::writer::tests::actor::rotation::switch_tests::the_era_leaves_ou
 services::tui_o::writer::tests::actor::the_actor_posts_each_unit_after_the_switch_once_even_across_a_restart
 services::tui_o::writer::tests::actor::the_round_trip_reads_back_every_case_and_reports_any_difference
 services::tui_o::writer::tests::actor::the_writer_stays_dormant_unless_enabled
+services::tui_o::writer::tests::actor::unpinned_past::a_held_past_source_resolved_at_its_end_posts_only_later_records_across_restarts
+services::tui_o::writer::tests::actor::unpinned_past::a_pinned_past_source_bound_again_posts_only_what_follows_its_pinned_end
+services::tui_o::writer::tests::actor::unpinned_past::an_unpinned_past_source_bound_again_posts_none_of_its_records_whatever_the_cause
+services::tui_o::writer::tests::actor::unpinned_past::an_unpinned_past_source_logged_without_its_session_is_held_when_bound_with_it
+services::tui_o::writer::tests::actor::unpinned_past::another_file_at_an_unnamed_past_path_is_not_held
 services::tui_o::writer::tests::actor::verified_new_source_permission_does_not_release_a_prior_actor_source_or_owed_output
 services::tui_o::writer::tests::actor::verified_permission_hold_preserves_an_attached_actor_cursor_and_owed_output
 services::tui_o::writer::tests::actor::without_ownership_the_actor_keeps_spooling_and_posts_once_ownership_returns

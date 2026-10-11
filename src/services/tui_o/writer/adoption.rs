@@ -549,11 +549,18 @@ pub fn pin_at(
         return Err(open());
     }
     let mut pinned = vec![head];
-    // Only the newest past sources within budget are pinned; a later bind of an older one has no
-    // cursor, so O's rotation holds it as a pending boundary instead of posting it.
+    // Only the newest past sources within budget that still exist are pinned; a later bind of any
+    // other has no cursor, so O's rotation holds it as a pending boundary instead of posting it.
     let mut total = 0;
     for source in past_of(&bound).into_iter().take(PAST_BUDGET_SOURCES) {
-        let len = len_of(&source.path).map_err(Refused::retry)?;
+        let len = match std::fs::metadata(&source.path) {
+            Ok(meta) => meta.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                let detail = format!("source {}: {error}", source.path.display());
+                return Err(Refused::retry(detail));
+            }
+        };
         total += len;
         if total > PAST_BUDGET_BYTES {
             break;

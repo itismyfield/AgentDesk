@@ -325,6 +325,14 @@ fn past_sources_over_the_byte_budget_pin_only_the_newest() {
 }
 
 #[test]
+fn a_deleted_past_source_is_left_unpinned_and_the_rest_are_adopted() {
+    let (channel, past) = rotated(641012, 3);
+    std::fs::remove_file(&past[1].path).unwrap();
+    let kept = [past[0].clone(), past[2].clone()];
+    assert_eq!(adopted_sources(&channel), head_then(&channel, &kept));
+}
+
+#[test]
 fn a_bind_of_an_unpinned_past_source_while_waiting_refuses_the_pin() {
     let (mut channel, past) = rotated(641011, PAST_BUDGET_SOURCES + 1);
     let store = channel.store();
