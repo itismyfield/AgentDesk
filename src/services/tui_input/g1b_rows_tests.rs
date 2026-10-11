@@ -1,4 +1,4 @@
-//! G1b P2-3/F3/F4/P2-4: a returning row proves its receipt identity before any effect, and a
+//! A returning row proves its receipt identity before any effect, and a
 //! collected tombstone or a conflicting snapshot never reactivates or reads as a receipt.
 use std::fs;
 use std::io;

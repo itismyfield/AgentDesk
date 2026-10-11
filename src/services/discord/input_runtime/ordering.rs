@@ -447,9 +447,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// The same lock covers protection release and installation, so ingress never sees a gap. Every
-/// refusal precedes the release, and a reinstall must inherit a fully settled entry of the same
-/// Gate and producer handle, so neither pending sources nor a live overflow path is dropped.
+/// One lock covers release and installation, and every refusal precedes the release; a reinstall
+/// inherits only a settled entry of the same Gate and producer handle, so no obligation is lost.
 pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
     closing: &Closing,
     snapshot: &PendingSource,

@@ -1,4 +1,4 @@
-//! G1b P2-4: one envelope order for identity and coverage; an explicit identity never falls back.
+//! One envelope order for identity and coverage; an explicit identity never falls back.
 use super::*;
 use crate::services::tui_input::ledger::Record;
 use serde_json::json;

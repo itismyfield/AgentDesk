@@ -1,4 +1,4 @@
-//! G1b F3/F4 on a real Move: every candidate proves its identity before the first pin or stage,
+//! A real Move: every candidate proves its identity before the first pin or stage,
 //! at prepare and again on the fresh fold, and a collected tracked tombstone keeps the key Legacy.
 use super::super::rows_tests::g1b::{collect, input, tracked};
 use super::*;

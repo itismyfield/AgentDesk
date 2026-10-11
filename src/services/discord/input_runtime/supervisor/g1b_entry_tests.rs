@@ -1,4 +1,4 @@
-//! G1b P2-1 on the real loop: a merged receipt deferred by an append-time failure retries as the
+//! The real loop: a merged receipt deferred by an append-time failure retries as the
 //! same merged prefix once the cause is gone, and the next source follows.
 use super::*;
 

@@ -1,4 +1,4 @@
-//! G1b F5/F1 at the producer: only the namespace verdict disarms a live notice, and the handle a
+//! At the producer: only the namespace verdict disarms a live notice, and the handle a
 //! release carried keeps re-arming the barrier after the handback settles.
 use super::*;
 use crate::services::discord::input_runtime::fence::Closing;

@@ -1,4 +1,4 @@
-//! G1b P2-2/F1 on a real Gate lifecycle: a restore retires every handback port, and a reinstall
+//! A real Gate lifecycle: a restore retires every handback port, and a reinstall
 //! inherits only a settled entry of the same Gate and producer handle, refusing before release.
 use super::super::{Gate, test_health};
 use super::*;

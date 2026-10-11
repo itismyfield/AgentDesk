@@ -1,4 +1,4 @@
-//! G1b P2-1/F2/F5 on the real handback ports: the same merged prefix retries, an executed
+//! The real handback ports: the same merged prefix retries, an executed
 //! callback keeps its result apart from settlement, and no generation is reused or MAX.
 use super::*;
 use crate::services::discord::input_runtime::fence::{Closing, Mode, modes};
