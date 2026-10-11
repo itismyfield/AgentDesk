@@ -37,6 +37,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/adoption_past_stall_tests.rs",
         "src/services/tui_o/writer/stall_handoff_tests.rs",
         "src/services/tui_o/writer/deferred_pg_tests.rs",
+        "src/services/tui_o/writer/unpinned_past_tests.rs",
         "src/db/o_channel_activation_fence_tests.rs",
         "src/services/tui_o/n1_observation/sink_tests.rs",
         "src/services/tui_o/n1_observation_tests.rs",
