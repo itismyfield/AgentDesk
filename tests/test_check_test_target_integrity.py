@@ -1410,7 +1410,7 @@ class KnownArrayProvenance(unittest.TestCase):
                 # Quoted or escaped, `;`, `|` and `&&` are argument text, not a second command.
                 (((source, f"{non_pg} --logfile 'ci;pg.log'"),), []),
                 (((source, f"{non_pg} --logfile ci\\;pg.log"),), []),
-                (((f'{source} && cargo test --lib -- --logfile "a|b&&c" "${{PG_INCLUDE_ARGS[@]}}"',),),
+                (((f'{source} && cargo test --lib -- --logfile "a;b||c" "${{PG_INCLUDE_ARGS[@]}}"',),),
                  []),
                 ((('source "$FILTER"', non_pg),), unsourced),
                 (((f"{source} && {non_pg}",),), []),
