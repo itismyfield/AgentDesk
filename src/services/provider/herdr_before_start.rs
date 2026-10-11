@@ -16,7 +16,6 @@ pub(crate) enum InputPhase {
 pub(crate) struct HerdrInputState {
     pub(crate) submission: HerdrSubmission,
     pub(crate) phase: InputPhase,
-    #[cfg(test)]
     pub(crate) exit: Option<ExitDecision>,
 }
 
@@ -25,7 +24,6 @@ impl Default for HerdrInputState {
         Self {
             submission: HerdrSubmission::Unsubmitted,
             phase: InputPhase::BeforeInput,
-            #[cfg(test)]
             exit: None,
         }
     }
@@ -175,7 +173,6 @@ pub(crate) fn prelaunch_closed(token: Option<&CancelToken>) -> Result<bool, Stri
     Ok(!mutant("cold_preinput_check_removed") && state.close_before_start(&mut input))
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BeforeStartProof {
     pub(crate) owner: crate::db::dispatched_sessions::hosted_execution::HostedOwner,
@@ -183,7 +180,6 @@ pub(crate) struct BeforeStartProof {
     pub(crate) generation: u64,
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ExitDecision {
     Normal,
@@ -198,7 +194,6 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-#[cfg(test)]
 pub(crate) fn seal_exit(
     token: &CancelToken,
     cancelled: bool,
@@ -227,6 +222,7 @@ pub(crate) fn seal_exit(
         )
         && state.close_observed(&mut input, stop)
         && token.turn_nonce().is_some();
+    #[cfg(test)]
     if let Some(hook) = EXIT_OBSERVED.with(std::cell::Cell::get) {
         hook(&state);
     }

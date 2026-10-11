@@ -1,4 +1,5 @@
 mod activity_heartbeat;
+mod before_start_stop;
 mod bridge_entry_persist;
 mod bridge_latency_spans;
 mod cancel_finalize_policy;
@@ -697,11 +698,9 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         }
         #[rustfmt::skip]
         let terminal_admitted = stream_loop_output.codex_tui_terminal_range.is_some() || stream_loop_output.herdr_terminal.is_some();
-        let unconfirmed = stream_loop::exit_reconcile::herdr_stop_unconfirmed;
-        if (is_external_input_tui_direct && rx_disconnected)
-            || unconfirmed(&cancel_token, cancelled, terminal_admitted)
-            || stream_loop::exit_reconcile::held_before_submit(&bridge.inflight_state, cancelled)
-        {
+        #[rustfmt::skip]
+        let held = before_start_stop::exit_held(&shared_owned, &*gateway, &cancel_token, &inflight_state, current_msg_id, (cancelled, terminal_admitted, (is_external_input_tui_direct && rx_disconnected) || stream_loop::exit_reconcile::held_before_submit(&bridge.inflight_state, cancelled))).await;
+        if held {
             // No admitted terminal frame: leave the row (Waiting if held) to recovery or Herdr.
             completion_guard.relinquish_bridge_authority();
             inflight_guard.defuse();
