@@ -595,6 +595,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/retired_host_tick_tests.rs",
         "src/services/discord/tmux_watcher/retired_o_boundary_tests.rs",
         "src/cli/o_tests.rs",
+        "src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs",
         "src/services/discord/catch_up/phase2_age_tests.rs",
         "src/services/discord/session_relay_sink/o_retired_terminal_e2e_tests.rs",
         "src/services/discord/task_supervisor/n4d_spawn_observation_tests.rs",
@@ -610,11 +612,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
-        "src/db/replay_disposition/receipt.rs",
-        "src/db/replay_disposition/write/start.rs",
         "src/services/discord/turn_bridge/replay_policy.rs",
-        "src/services/discord/replay_policy/permit.rs",
-        "src/services/discord/router/intake_dispatch/replay_admission.rs",
         "src/services/discord/input_runtime/offer.rs",
         "src/services/tui_input/actor/pane/ownership.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",

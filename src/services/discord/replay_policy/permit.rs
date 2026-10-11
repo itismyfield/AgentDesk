@@ -6,8 +6,16 @@ use crate::db::replay_disposition::write::{BeginAck, ExactAttempt};
 /// Where a permitted first input lands: a new provider start, or an existing busy pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EffectTarget {
-    ProviderStart { provider: String, channel: String },
-    BusyPane { owner: String, pane: String },
+    ProviderStart {
+        provider: String,
+        channel: String,
+    },
+    /// The busy-pane injection path, which is not connected yet.
+    #[cfg(test)]
+    BusyPane {
+        owner: String,
+        pane: String,
+    },
 }
 
 impl EffectTarget {
@@ -17,6 +25,7 @@ impl EffectTarget {
             Self::ProviderStart { provider, channel } => {
                 serde_json::json!(["provider_start", provider, channel])
             }
+            #[cfg(test)]
             Self::BusyPane { owner, pane } => serde_json::json!(["busy_pane", owner, pane]),
         }
         .to_string()
@@ -28,6 +37,8 @@ pub(crate) enum PermitRefusal {
     TargetMismatch,
     InputMismatch,
     NotARetry,
+    /// The token already carries an attempt; one token runs one attempt.
+    Spent,
 }
 
 /// The one right to make the first provider input of an acknowledged attempt.

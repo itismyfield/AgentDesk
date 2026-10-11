@@ -1415,7 +1415,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     // Handle stdout error or non-zero exit code
     if stdout_error.is_some() || !status.success() {
-        let stderr_msg = tap.read_stderr(child.stderr.take());
+        let (stderr_msg, drained) = tap.read_stderr(child.stderr.take());
 
         let (message, stdout_raw) = if let Some((msg, raw)) = stdout_error {
             (msg, raw)
@@ -1447,6 +1447,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 exit_code,
             })
             .is_ok();
+        tap.finish(send_ok, drained);
         log_producer_exit(
             "child_exit_error",
             last_session_id.as_deref(),
@@ -1464,9 +1465,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
     }
 
     // A protected attempt's observation completes only once stderr is drained after its Done.
-    if tap.active() {
-        tap.read_stderr(child.stderr.take());
-    }
+    let drained = tap.active().then(|| tap.read_stderr(child.stderr.take()).1);
+    let mut delivered = true;
 
     // If we didn't get a proper Done message, send one now
     if final_result.is_none() {
@@ -1475,6 +1475,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
             result: String::new(),
             session_id: last_session_id.clone(),
         });
+        delivered = send_result.is_ok();
         log_producer_exit(
             "synthetic_done",
             last_session_id.as_deref(),
@@ -1502,6 +1503,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
         );
     }
 
+    if let Some(drained) = drained {
+        tap.finish(delivered, drained);
+    }
     debug_log("========================================");
     debug_log("=== execute_command_streaming END (success) ===");
     debug_log("========================================");

@@ -98,7 +98,29 @@ async fn replay_live_absorbed_sources_cannot_forward_and_keep_original_pg() {
             super::super::admit_text_intake(&deps, &mixed).await,
             IntakeAdmission::Blocked { .. }
         ));
-        assert_eq!(mixed.request.user_text, "admission policy");
+        // With replay starts active a mixed input is undecided: it waits whole in the queue.
+        let _active = super::super::replay_admission::test_activation::activate(channel.get());
+        let admission = super::super::admit_text_intake(&deps, &mixed).await;
+        assert!(matches!(admission, IntakeAdmission::ReplayDeferred(_)));
+        super::super::finish_text_intake_admission(&deps, admission, mixed)
+            .await
+            .expect("the deferred mixed input is in custody");
+        let queue = shared.mailbox(channel).snapshot().await.intervention_queue;
+        let kept: Vec<_> = queue
+            .iter()
+            .map(|item| {
+                (
+                    item.message_id.get(),
+                    item.source_message_ids.clone(),
+                    item.text.clone(),
+                )
+            })
+            .collect();
+        let sources = vec![MessageId::new(source_b + 1), MessageId::new(source_a)];
+        assert_eq!(
+            kept,
+            vec![(source_b + 1, sources, "admission policy".to_string())]
+        );
         let route_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1 AND NOT replay_only",
         )
