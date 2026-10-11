@@ -35,8 +35,10 @@ mod supported {
         Ledger::open(runtime, CHANNEL).unwrap()
     }
 
+    // A returning key must carry its receipt identity, so every staged input names one.
     fn stage(ledger: &mut Ledger, key: u64, state: RowState) -> u64 {
-        let input = json!({ "text": format!("input {key}") });
+        let identity = json!({"source_ids":[key],"author_id":7,"original_channel_id":8,"execution_channel_id":CHANNEL});
+        let input = json!({ "text": format!("input {key}"), "receipt_identity": identity });
         ledger
             .append_entry(&Entry::Staged { key, input, state }, &[])
             .unwrap()
@@ -246,7 +248,7 @@ mod supported {
         let rows = ledger.rows().unwrap();
         assert_eq!(open_keys(&rows), vec![1, 2, 3, 4]);
         assert_eq!(rows.row(1).unwrap().state, RowState::Running);
-        assert_eq!(rows.row(2).unwrap().input, json!({ "text": "input 2" }));
+        assert_eq!(rows.row(2).unwrap().input["text"], json!("input 2"));
 
         set(&mut ledger, 1, RowState::Done(DoneReason::Completed));
         set(&mut ledger, 2, RowState::Abandoned(AbandonReason::Handback));
@@ -1345,8 +1347,14 @@ mod tracked {
     fn a_tracked_handback_key_keeps_its_tombstone_against_reactivation() {
         let root = sandbox();
         let mut ledger = open(root.path());
+        // The untracked key returns only with its receipt identity.
+        let identity = json!({"source_ids":[2],"author_id":7,"original_channel_id":8,"execution_channel_id":CHANNEL});
+        let returning = Entry::Received {
+            key: 2,
+            input: json!({ "text": "input 2", "receipt_identity": identity }),
+        };
         received(&mut ledger, 1);
-        received(&mut ledger, 2);
+        ledger.append_entry(&returning, &[]).unwrap();
         let first = meta(1, "n1", 0);
         attempt(&mut ledger, 1, &first).unwrap();
         set(&mut ledger, 1, RowState::Ready);
@@ -1357,7 +1365,7 @@ mod tracked {
         assert!(!ledger.rows().unwrap().keeps_tracked_history(2));
 
         received(&mut ledger, 1);
-        received(&mut ledger, 2);
+        ledger.append_entry(&returning, &[]).unwrap();
         let staged = Entry::Staged {
             key: 1,
             input: json!({ "text": "again" }),
@@ -1428,3 +1436,7 @@ mod tracked {
         file.set_len(len - bytes).unwrap();
     }
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "g1b_rows_tests.rs"]
+mod g1b;

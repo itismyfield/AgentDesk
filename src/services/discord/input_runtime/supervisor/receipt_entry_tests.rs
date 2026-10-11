@@ -1218,3 +1218,6 @@ async fn hm1_normal_boot_has_no_external_receipts() {
     assert_eq!(legacy.boot().await, Landing::HandedBack);
     assert_eq!(*rig.world.enqueued.lock().unwrap(), keys);
 }
+
+#[path = "g1b_entry_tests.rs"]
+mod g1b;

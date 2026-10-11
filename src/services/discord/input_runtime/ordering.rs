@@ -1,5 +1,6 @@
 //! Supervisor and post-handback scan authority; fetch tickets precede all external IO.
-use crate::services::discord::input_runtime::fence::Failure;
+use crate::services::discord::input_runtime::fence::modes::ReleaseProof;
+use crate::services::discord::input_runtime::fence::{Closing, Failure};
 use crate::services::provider::ProviderKind;
 use crate::services::tui_input::input_key::is_discord_key;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -9,6 +10,18 @@ use std::sync::{Arc, Mutex};
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 static NEXT_HANDBACK: AtomicU64 = AtomicU64::new(1);
 static BARRIERS: Mutex<BTreeMap<(String, u64), HandbackEntry>> = Mutex::new(BTreeMap::new());
+
+/// Exhaustion refuses for good and is never the namespace verdict, so a producer stays armed.
+pub(crate) const EXHAUSTED: Failure = Failure::Busy;
+
+/// MAX is the exhausted sentinel, so no generation ever issues it as current.
+fn next_generation(value: u64) -> Option<u64> {
+    #[cfg(test)]
+    if mutant("max_generation_remains_valid") {
+        return value.checked_add(1);
+    }
+    value.checked_add(1).filter(|next| *next != u64::MAX)
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct PendingOverflow {
@@ -70,6 +83,8 @@ pub(crate) struct AdmissionOrder {
     barrier: Option<u64>,
     overflow: PendingOverflow,
     verified_overflow: u64,
+    // A scan or dirty generation that cannot advance closes this order for good.
+    exhausted: bool,
 }
 
 #[derive(Debug)]
@@ -90,9 +105,18 @@ pub(crate) struct ScanCapability {
 pub(crate) struct ValidatedOrderCapability(ScanCapability);
 
 struct HandbackEntry {
-    release_epoch: u64,
+    release: ReleaseProof,
     order: AdmissionOrder,
     settled_overflow: Option<u64>,
+}
+
+/// A callback that ran keeps its own result apart from the settlement that followed it.
+#[derive(Debug)]
+pub(crate) struct HandbackExecution<T> {
+    pub(crate) outcome: Result<T, Failure>,
+    pub(crate) settlement: Result<(), Failure>,
+    // Only a fully settled execution may continue the scan.
+    pub(crate) next: Option<ScanCapability>,
 }
 
 impl AdmissionOrder {
@@ -113,12 +137,21 @@ impl AdmissionOrder {
             barrier: None,
             overflow: PendingOverflow::new(provider, channel),
             verified_overflow: 0,
+            exhausted: false,
         }
     }
 
     pub(crate) fn invalidate(&mut self, epoch: u64) {
         self.stamp.epoch = epoch;
-        self.stamp.scan += 1;
+        self.next_scan();
+    }
+
+    // A scan generation that cannot advance would leave old capabilities current, so it latches.
+    fn next_scan(&mut self) {
+        match next_generation(self.stamp.scan) {
+            Some(scan) => self.stamp.scan = scan,
+            None => self.exhausted = true,
+        }
     }
 
     pub(crate) fn offer_ready(&self) -> bool {
@@ -126,7 +159,7 @@ impl AdmissionOrder {
         let proved = generation != u64::MAX && generation == self.verified_overflow;
         #[cfg(test)]
         let proved = proved || mutant("drop_offer_proof");
-        self.pending.is_empty() && self.barrier.is_none() && proved
+        self.pending.is_empty() && self.barrier.is_none() && proved && !self.exhausted
     }
 
     pub(crate) fn pending_overflow(&self) -> PendingOverflow {
@@ -141,15 +174,26 @@ impl AdmissionOrder {
         }
     }
 
-    /// The entry for a live notice: one non-Discord key refuses the whole notice before any change.
+    /// The entry for a live notice: one non-Discord key refuses the whole notice before any change,
+    /// and an order that cannot name a new dirty generation refuses it without taking it.
     pub(crate) fn admit_pending(&mut self, sources: &[u64]) -> Result<PendingSource, Failure> {
-        if !discord_sources(sources) {
+        let mixed = !discord_sources(sources);
+        #[cfg(test)]
+        let mixed = mixed && !mutant("drop_hm1_batch_namespace_preflight");
+        if mixed {
             return Err(Failure::StalePermit);
+        }
+        let full = self.exhausted || next_generation(self.stamp.dirty).is_none();
+        #[cfg(test)]
+        let full = full && !mutant("reuse_dirty_generation");
+        if full {
+            return Err(EXHAUSTED);
         }
         Ok(self.pending(sources))
     }
 
-    /// Retries re-record sources this order already checked, so they cannot fail.
+    /// Retries re-record sources this order already checked, so they cannot fail; when the dirty
+    /// generation cannot advance the sources still stay pending and the order latches exhausted.
     pub(crate) fn pending(&mut self, sources: &[u64]) -> PendingSource {
         debug_assert!(discord_sources(sources));
         let sources: Vec<_> = sources
@@ -159,7 +203,10 @@ impl AdmissionOrder {
             .collect();
         if !sources.is_empty() {
             self.pending.extend(&sources);
-            self.stamp.dirty += 1;
+            match next_generation(self.stamp.dirty) {
+                Some(dirty) => self.stamp.dirty = dirty,
+                None => self.exhausted = true,
+            }
         }
         PendingSource {
             sources,
@@ -170,11 +217,19 @@ impl AdmissionOrder {
 
     /// Only this pre-fetch snapshot can authorize the returned immutable page.
     pub(crate) fn fetch_ticket(&mut self, epoch: u64) -> Result<FetchTicket, Failure> {
-        self.stamp.overflow = self.overflow.generation();
-        if epoch != self.stamp.epoch || self.stamp.overflow == u64::MAX {
+        let overflow = self.overflow.generation();
+        if epoch != self.stamp.epoch || overflow == u64::MAX {
             return Err(Failure::StalePermit);
         }
-        self.stamp.scan += 1;
+        let scan = next_generation(self.stamp.scan);
+        #[cfg(test)]
+        let scan = scan.or(mutant("reuse_scan_generation").then_some(0));
+        let Some(scan) = scan.filter(|_| !self.exhausted) else {
+            self.exhausted = true;
+            return Err(EXHAUSTED);
+        };
+        self.stamp.overflow = overflow;
+        self.stamp.scan = scan;
         Ok(FetchTicket {
             stamp: self.stamp.clone(),
             post_pending_fetch: self.pending.is_empty() && self.barrier.is_none(),
@@ -192,9 +247,12 @@ impl AdmissionOrder {
         let current = self.current(&ticket.stamp, epoch);
         #[cfg(test)]
         let current = current || mutant("drop_ticket_validation");
+        let foreign_horizon = horizon != 0 && !is_discord_key(horizon);
+        #[cfg(test)]
+        let foreign_horizon = foreign_horizon && !mutant("allow_non_discord_scan_horizon");
         // Sources are sorted and bounded by the horizon, so a Discord horizon bounds them all.
         if !current
-            || (horizon != 0 && !is_discord_key(horizon))
+            || foreign_horizon
             || horizon < self.stamp.frontier
             || sources.first().is_some_and(|s| *s <= self.stamp.frontier)
             || sources.windows(2).any(|p| p[0] >= p[1])
@@ -227,7 +285,8 @@ impl AdmissionOrder {
             stamp.overflow != u64::MAX && stamp.overflow == self.overflow.generation();
         #[cfg(test)]
         let overflow_matches = overflow_matches || mutant("drop_overflow_generation");
-        stamp.provider == self.stamp.provider
+        !self.exhausted
+            && stamp.provider == self.stamp.provider
             && stamp.channel == self.stamp.channel
             && stamp.owner == self.stamp.owner
             && epoch_matches
@@ -259,9 +318,17 @@ impl AdmissionOrder {
             && sources
                 .iter()
                 .all(|s| *s > self.stamp.frontier && *s <= cap.horizon)
-            && self
-                .barrier
-                .is_none_or(|b| sources.last().is_none_or(|s| *s <= b));
+            // The deferred head bounds a prefix unless the prefix retries that head itself.
+            && self.barrier.is_none_or(|b| {
+                let before = sources.last().is_none_or(|s| *s <= b);
+                let retries_head = sources.binary_search(&b).is_ok();
+                #[cfg(test)]
+                let (before, retries_head) = (
+                    before && !mutant("require_barrier_in_every_prefix"),
+                    retries_head && !mutant("barrier_last_source_ceiling"),
+                );
+                before || retries_head
+            });
         #[cfg(test)]
         let range = range || mutant("drop_source_range");
         if !self.current(&cap.ticket.stamp, epoch) || !range {
@@ -313,7 +380,7 @@ impl AdmissionOrder {
             self.pending.insert(source);
         }
         self.barrier = Some(source);
-        self.stamp.scan += 1;
+        self.next_scan();
         Ok(())
     }
 
@@ -347,36 +414,27 @@ fn discord_sources(sources: &[u64]) -> bool {
     sources.iter().all(|source| is_discord_key(*source))
 }
 
+/// A stale release or an exhausted order keeps the barrier: neither can prove the sweep current.
 pub(crate) fn order_barrier(provider: &ProviderKind, channel: u64) -> bool {
     BARRIERS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(&(provider.as_str().to_owned(), channel))
-        .is_some_and(|entry| entry.settled_overflow != Some(entry.order.overflow.generation()))
+        .is_some_and(|entry| {
+            entry.settled_overflow != Some(entry.order.overflow.generation())
+                || entry.order.exhausted
+                || !entry.release.current()
+        })
 }
 
-/// The same lock covers protection release and installation, so ingress never sees a gap.
-pub(in crate::services::discord::input_runtime) fn install_handback(
-    provider: ProviderKind,
-    channel: u64,
-    pending: &[u64],
-    dirty: u64,
-    release: impl FnOnce() -> Result<u64, Failure>,
-) -> Result<(), Failure> {
-    let snapshot = PendingSource {
-        sources: pending.to_vec(),
-        dirty_generation: dirty,
-        overflow: PendingOverflow::new(provider.clone(), channel),
-    };
-    install_handback_snapshot(provider, channel, &snapshot, release)
-}
-
+/// The same lock covers protection release and installation, so ingress never sees a gap. Every
+/// refusal precedes the release, and a reinstall must inherit a fully settled entry of the same
+/// Gate and producer handle, so neither pending sources nor a live overflow path is dropped.
 pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
-    provider: ProviderKind,
-    channel: u64,
+    closing: &Closing,
     snapshot: &PendingSource,
-    release: impl FnOnce() -> Result<u64, Failure>,
 ) -> Result<(), Failure> {
+    let (provider, channel) = (closing.provider().clone(), closing.channel());
     if snapshot.overflow.provider != provider
         || snapshot.overflow.channel != channel
         || !discord_sources(&snapshot.sources)
@@ -384,16 +442,50 @@ pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
         return Err(Failure::StalePermit);
     }
     let mut entries = BARRIERS.lock().unwrap_or_else(|e| e.into_inner());
-    let release_epoch = release()?;
-    let mut order = AdmissionOrder::new(provider.clone(), channel, release_epoch, 0);
+    let key = (provider.as_str().to_owned(), channel);
+    if let Some(entry) = entries.get(&key) {
+        let order = &entry.order;
+        let settled = order.pending.is_empty()
+            && order.barrier.is_none()
+            && !order.exhausted
+            && entry.settled_overflow == Some(order.overflow.generation());
+        #[cfg(test)]
+        let settled = settled || mutant("replace_unsettled_handback");
+        let same_handle = Arc::ptr_eq(&order.overflow.generation, &snapshot.overflow.generation);
+        #[cfg(test)]
+        let same_handle = same_handle || mutant("accept_different_overflow_on_reinstall");
+        let inherits = settled
+            && same_handle
+            && entry.release.names(closing)
+            && snapshot.dirty_generation >= order.stamp.dirty;
+        if !inherits {
+            return Err(Failure::StalePermit);
+        }
+    }
+    // A failed allocation leaves a gap in the numbering but never reuses a generation.
+    let handback = NEXT_HANDBACK
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            #[cfg(test)]
+            if mutant("reuse_handback_generation") {
+                return Some(value.wrapping_add(1));
+            }
+            next_generation(value)
+        })
+        .map_err(|_| EXHAUSTED)?;
+    let release = closing.release_for_handback()?;
+    let mut order = AdmissionOrder::new(provider, channel, release.epoch(), 0);
     order.pending.extend(&snapshot.sources);
     order.stamp.dirty = snapshot.dirty_generation;
     order.overflow = snapshot.overflow.clone();
-    order.stamp.handback = Some(NEXT_HANDBACK.fetch_add(1, Ordering::Relaxed));
+    #[cfg(test)]
+    if mutant("fresh_overflow_on_release") {
+        order.overflow = PendingOverflow::new(order.stamp.provider.clone(), channel);
+    }
+    order.stamp.handback = Some(handback);
     entries.insert(
-        (provider.as_str().to_owned(), channel),
+        key,
         HandbackEntry {
-            release_epoch,
+            release,
             order,
             settled_overflow: None,
         },
@@ -401,20 +493,33 @@ pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
     Ok(())
 }
 
+// Every port first proves the release still stands; a refusal leaves the entry untouched, and only
+// an accepted change re-arms the barrier.
 fn with_handback<T>(
     provider: &ProviderKind,
     channel: u64,
+    rearm: bool,
     action: impl FnOnce(&mut AdmissionOrder, u64) -> Result<T, Failure>,
 ) -> Result<T, Failure> {
     let mut entries = BARRIERS.lock().unwrap_or_else(|e| e.into_inner());
     let entry = entries
         .get_mut(&(provider.as_str().to_owned(), channel))
         .ok_or(Failure::StalePermit)?;
-    if entry.order.stamp.provider != *provider {
+    #[cfg(test)]
+    if mutant("mutate_handback_before_validation") {
+        entry.settled_overflow = None;
+    }
+    let current = entry.release.current();
+    #[cfg(test)]
+    let current = current || mutant("drop_current_gate");
+    if entry.order.stamp.provider != *provider || !current {
         return Err(Failure::StalePermit);
     }
-    entry.settled_overflow = None;
-    action(&mut entry.order, entry.release_epoch)
+    let result = action(&mut entry.order, entry.release.epoch());
+    if rearm && result.is_ok() {
+        entry.settled_overflow = None;
+    }
+    result
 }
 
 pub(crate) fn handback_pending(
@@ -426,14 +531,18 @@ pub(crate) fn handback_pending(
     if !discord_sources(sources) {
         return Err(Failure::StalePermit);
     }
-    with_handback(provider, channel, |order, _| order.admit_pending(sources))
+    with_handback(provider, channel, true, |order, _| {
+        order.admit_pending(sources)
+    })
 }
 
 pub(crate) fn handback_fetch_ticket(
     provider: &ProviderKind,
     channel: u64,
 ) -> Result<FetchTicket, Failure> {
-    with_handback(provider, channel, |order, epoch| order.fetch_ticket(epoch))
+    with_handback(provider, channel, true, |order, epoch| {
+        order.fetch_ticket(epoch)
+    })
 }
 
 pub(crate) fn handback_begin_scan(
@@ -443,11 +552,12 @@ pub(crate) fn handback_begin_scan(
     complete_fetch: bool,
 ) -> Result<ScanCapability, Failure> {
     let (provider, channel) = (ticket.stamp.provider.clone(), ticket.stamp.channel);
-    with_handback(&provider, channel, |order, epoch| {
+    with_handback(&provider, channel, true, |order, epoch| {
         order.begin_scan(ticket, epoch, sources, horizon, complete_fetch)
     })
 }
 
+/// Observation only: it changes nothing and lends no authority to run outside the serializer.
 pub(crate) fn handback_permits_sources(
     cap: &ScanCapability,
     sources: &[u64],
@@ -455,46 +565,52 @@ pub(crate) fn handback_permits_sources(
     with_handback(
         &cap.ticket.stamp.provider,
         cap.ticket.stamp.channel,
+        false,
         |order, epoch| order.permits_sources(cap, epoch, sources),
     )
 }
 
 /// The synchronous durable callback shares the entry lock with validation and settlement.
 /// Fetch and materialization finish before this call; async Legacy ports need a serialized loan.
+/// The outer error means the callback never ran; once it ran, its result and the settlement are
+/// both returned, and any failure keeps every source as a retry obligation.
 pub(crate) fn handback_commit_from_scan<T>(
     mut cap: ScanCapability,
     sources: &[u64],
     commit: impl FnOnce() -> Result<T, Failure>,
-) -> Result<(T, ScanCapability), Failure> {
+) -> Result<HandbackExecution<T>, Failure> {
     let (provider, channel) = (cap.ticket.stamp.provider.clone(), cap.ticket.stamp.channel);
-    with_handback(&provider, channel, |order, epoch| {
+    with_handback(&provider, channel, true, |order, epoch| {
         order.permits_sources(&cap, epoch, sources)?;
-        let committed = match commit() {
-            Ok(committed) => committed,
-            Err(failure) => {
-                // Preserve the persistence cause and range even if dirty invalidates deferral.
-                if let Some(source) = sources.first() {
-                    let _ = order.defer(&cap, epoch, *source);
-                }
-                let retain = true;
-                #[cfg(test)]
-                let retain = retain && !mutant("drop_uncertain_retry");
-                if retain {
-                    order.pending(sources);
-                }
-                return Err(failure);
-            }
+        let outcome = commit();
+        // permits_sources refuses an empty range, so the head exists.
+        let settlement = match &outcome {
+            Ok(_) => order.settle_sources(&mut cap, epoch, sources),
+            Err(_) => order.defer(&cap, epoch, sources[0]),
         };
-        if let Err(failure) = order.settle_sources(&mut cap, epoch, sources) {
-            let retain = true;
-            #[cfg(test)]
-            let retain = retain && !mutant("drop_settlement_retry");
-            if retain {
-                order.pending(sources);
-            }
-            return Err(failure);
+        let settled = outcome.is_ok() && settlement.is_ok();
+        let retain = !settled;
+        #[cfg(test)]
+        let retain = retain && !mutant("drop_retry_sources_after_execution");
+        if retain {
+            order.pending(sources);
         }
-        Ok((committed, cap))
+        #[cfg(test)]
+        let outcome = match mutant("overwrite_persistence_with_deferral_error") {
+            true if outcome.is_err() => settlement.and(outcome),
+            _ => outcome,
+        };
+        #[cfg(test)]
+        if mutant("collapse_executed_result_to_error") {
+            settlement?;
+        }
+        #[cfg(test)]
+        let settled = settled || mutant("return_capability_after_failed_settlement");
+        Ok(HandbackExecution {
+            outcome,
+            settlement,
+            next: settled.then_some(cap),
+        })
     })
 }
 
@@ -503,7 +619,7 @@ pub(crate) fn handback_settle_sources(
     sources: &[u64],
 ) -> Result<ScanCapability, Failure> {
     let (provider, channel) = (cap.ticket.stamp.provider.clone(), cap.ticket.stamp.channel);
-    with_handback(&provider, channel, |order, epoch| {
+    with_handback(&provider, channel, true, |order, epoch| {
         order.settle_sources(&mut cap, epoch, sources)?;
         Ok(cap)
     })
@@ -513,6 +629,7 @@ pub(crate) fn handback_defer(cap: &ScanCapability, source: u64) -> Result<(), Fa
     with_handback(
         &cap.ticket.stamp.provider,
         cap.ticket.stamp.channel,
+        true,
         |order, epoch| order.defer(cap, epoch, source),
     )
 }
@@ -525,22 +642,22 @@ pub(crate) fn handback_complete(cap: ScanCapability) -> Result<ValidatedOrderCap
         return Err(Failure::StalePermit);
     }
     let (provider, channel) = (cap.ticket.stamp.provider.clone(), cap.ticket.stamp.channel);
-    with_handback(&provider, channel, |order, epoch| {
+    with_handback(&provider, channel, true, |order, epoch| {
         order.complete(cap, epoch)
     })
 }
 
+/// A missing entry or a stale release is refused, never reported as an already settled no-op.
 pub(crate) fn settle_handback(cap: ValidatedOrderCapability) -> Result<bool, Failure> {
     let stamp = &cap.0.ticket.stamp;
     let key = (stamp.provider.as_str().to_owned(), stamp.channel);
     let mut entries = BARRIERS.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(entry) = entries.get_mut(&key) else {
-        return Ok(false);
-    };
-    if entry.settled_overflow == Some(entry.order.overflow.generation()) {
-        return Ok(false);
-    }
-    let valid = entry.order.completed(&cap.0, entry.release_epoch)
+    let entry = entries.get_mut(&key).ok_or(Failure::StalePermit)?;
+    let current = entry.release.current();
+    #[cfg(test)]
+    let current = current || mutant("drop_current_gate_on_final");
+    let valid = current
+        && entry.order.completed(&cap.0, entry.release.epoch())
         && cap.0.ticket.post_pending_fetch
         && stamp.handback.is_some();
     #[cfg(test)]
@@ -548,9 +665,12 @@ pub(crate) fn settle_handback(cap: ValidatedOrderCapability) -> Result<bool, Fai
     if !valid {
         return Err(Failure::StalePermit);
     }
+    if entry.settled_overflow == Some(stamp.overflow) {
+        return Ok(false);
+    }
     // Keep the shared handle: overflow racing this acknowledgement re-arms the barrier.
     entry.settled_overflow = Some(stamp.overflow);
-    entry.order.stamp.scan += 1;
+    entry.order.next_scan();
     Ok(true)
 }
 
@@ -562,3 +682,7 @@ fn mutant(name: &str) -> bool {
 #[cfg(test)]
 #[path = "ordering_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "g1b_ordering_tests.rs"]
+pub(crate) mod g1b_tests;
