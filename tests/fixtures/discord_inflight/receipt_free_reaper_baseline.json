@@ -1,0 +1,18 @@
+[
+  {
+    "exists": false,
+    "logs": [
+      "claude:1479671301387250000:0:reap_abandoned_rebind_origin_locked"
+    ],
+    "result": "Reaped",
+    "watcher": false
+  },
+  {
+    "exists": false,
+    "logs": [
+      "claude:1479671301387250000:0:reap_dead_watcher_rebind_origin_locked"
+    ],
+    "result": "Reaped",
+    "watcher": true
+  }
+]

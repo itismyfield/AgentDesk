@@ -70,7 +70,8 @@ impl Fixture {
 
     /// Saves `row` and returns it as the loader reads it back.
     fn persist(&self, row: &inflight::InflightTurnState) -> inflight::InflightTurnState {
-        inflight::save_inflight_state(row).unwrap();
+        std::fs::create_dir_all(self.path().parent().unwrap()).unwrap();
+        std::fs::write(self.path(), serde_json::to_vec_pretty(row).unwrap()).unwrap();
         self.durable().unwrap()
     }
 
@@ -204,7 +205,7 @@ fn decode_takes_only_a_prior_readable_receipt_that_names_its_row() {
     HERDR_SETTLEMENT_OVERRIDE.set(false);
     let off = class(decode(shared, provider, &fixture.row));
     HERDR_SETTLEMENT_OVERRIDE.set(true);
-    assert_eq!(off, "existing path", "production's hard-false settlement");
+    assert_eq!(off, "held", "production's hard-false settlement");
 }
 
 /// A pending receipt shows one stop on the turn's own message, acks it and clears the row; an
@@ -379,4 +380,133 @@ async fn an_unshown_notice_waits_and_a_durable_ack_is_not_shown_again() {
     assert_eq!(outcome, BeforeStartRestartReport::Settled);
     assert!(discord.calls().is_empty(), "{:?}", discord.calls());
     assert!(fixture.durable().is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b_receipt_off_stays_held_no_effect_pg() {
+    let fixture = Fixture::new("b3b2-off", false);
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    std::fs::create_dir_all(fixture.path().parent().unwrap()).unwrap();
+    std::fs::write(
+        fixture.path(),
+        serde_json::to_vec_pretty(&fixture.row).unwrap(),
+    )
+    .unwrap();
+    let before = fixture.bytes();
+    HERDR_SETTLEMENT_OVERRIDE.set(false);
+    assert_eq!(
+        class(decode(&fixture.shared, &fixture.provider, &fixture.row)),
+        "held"
+    );
+    let discord = fixture.restore().await;
+    assert!(written(&discord).is_empty());
+    assert_eq!(fixture.bytes(), before);
+    assert!(
+        super::mailbox_snapshot(&fixture.shared, ChannelId::new(CHANNEL))
+            .await
+            .cancel_token
+            .is_none()
+    );
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b_all_raw_receipt_precedes_rebind_pg() {
+    let mut fixture = Fixture::new("b3b2-rebind", false);
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    Arc::get_mut(&mut fixture.shared).unwrap().pg_pool = Some(pool.clone());
+    fixture.row.rebind_origin = true;
+    std::fs::create_dir_all(fixture.path().parent().unwrap()).unwrap();
+    std::fs::write(
+        fixture.path(),
+        serde_json::to_vec_pretty(&fixture.row).unwrap(),
+    )
+    .unwrap();
+    let before = fixture.bytes();
+    HERDR_SETTLEMENT_OVERRIDE.set(false);
+    let discord = fixture.restore().await;
+    assert_eq!(
+        fixture.bytes(),
+        before,
+        "All raw classification precedes rebind clear"
+    );
+    assert!(written(&discord).is_empty());
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b_all_receipt_precedes_replay_debt_pg() {
+    let mut fixture = Fixture::new("b3b2-replay", false);
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    Arc::get_mut(&mut fixture.shared).unwrap().pg_pool = Some(pool.clone());
+    fixture.row.full_response = "saved receipt debt".into();
+    let id:i64=sqlx::query_scalar("INSERT INTO intake_outbox (target_instance_id,forwarded_by_instance_id,channel_id,user_msg_id,request_owner_id,user_text,turn_kind,agent_id,provider,status,replay_only,replay_disposition,replay_source_message_ids,replay_episode_nonce,replay_hold_reason,replay_preserved) VALUES ('worker','leader',$1,$2,'7',$3,'standard','agent','claude','unknown',TRUE,'withheld',$4,$5,'activity observed',$6) RETURNING id")
+        .bind(CHANNEL.to_string()).bind(fixture.row.user_msg_id.to_string()).bind(&fixture.row.user_text)
+        .bind(vec![fixture.row.user_msg_id.to_string()]).bind(&fixture.row.turn_nonce)
+        .bind(serde_json::json!({"body":fixture.row.full_response})).fetch_one(&pool).await.unwrap();
+    fixture.row.replay_receipt_id = Some(id);
+    std::fs::create_dir_all(fixture.path().parent().unwrap()).unwrap();
+    std::fs::write(
+        fixture.path(),
+        serde_json::to_vec_pretty(&fixture.row).unwrap(),
+    )
+    .unwrap();
+    let before = fixture.bytes();
+    HERDR_SETTLEMENT_OVERRIDE.set(false);
+    let discord = fixture.restore().await;
+    assert_eq!(
+        fixture.bytes(),
+        before,
+        "classification before replay hydration/debt mutation"
+    );
+    assert!(
+        discord.calls().is_empty(),
+        "receipt debt must not reach Discord"
+    );
+    let canonical: (String, serde_json::Value) =
+        sqlx::query_as("SELECT replay_disposition,replay_preserved FROM intake_outbox WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        canonical,
+        (
+            "withheld".into(),
+            serde_json::json!({"body":"saved receipt debt"})
+        )
+    );
+    assert!(
+        super::mailbox_snapshot(&fixture.shared, ChannelId::new(CHANNEL))
+            .await
+            .cancel_token
+            .is_none()
+    );
+    let mut ordinary = serde_json::to_value(&fixture.row).unwrap();
+    ordinary
+        .as_object_mut()
+        .unwrap()
+        .remove("herdr_before_start_stop");
+    std::fs::write(
+        fixture.path(),
+        serde_json::to_vec_pretty(&ordinary).unwrap(),
+    )
+    .unwrap();
+    let discord = fixture.restore().await;
+    assert!(
+        !discord.calls().is_empty(),
+        "receipt-free replay debt really reaches Discord"
+    );
+    assert!(fixture.durable().unwrap().terminal_delivery_completed());
+    pool.close().await;
 }

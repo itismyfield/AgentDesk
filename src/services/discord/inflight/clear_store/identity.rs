@@ -30,6 +30,11 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity_ret
     let Ok(data) = fs::read_to_string(&path) else {
         return (GuardedClearOutcome::Missing, None);
     };
+    if super::super::raw_before_start_receipt(&data)
+        && !super::super::receipt_mutant("identity-clear")
+    {
+        return (GuardedClearOutcome::IoError, None);
+    }
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
         return (GuardedClearOutcome::Missing, None);
     };
@@ -97,6 +102,20 @@ fn remove_identity_matched_state(
     state: InflightTurnState,
     reason: &'static str,
 ) -> (GuardedClearOutcome, Option<InflightTurnState>) {
+    if receipt_protected_path(path) && !receipt_mutant("identity-clear") {
+        return (GuardedClearOutcome::IoError, None);
+    }
+    remove_identity_matched_state_unchecked(path, provider, channel_id, expected, state, reason)
+}
+
+fn remove_identity_matched_state_unchecked(
+    path: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    state: InflightTurnState,
+    reason: &'static str,
+) -> (GuardedClearOutcome, Option<InflightTurnState>) {
     log_inflight_remove(provider, channel_id, state.user_msg_id, reason, path);
     match fs::remove_file(path) {
         Ok(()) => (GuardedClearOutcome::Cleared, Some(state)),
@@ -150,6 +169,11 @@ fn clear_inflight_state_if_matches_identity_turn_nonce_impl_in_root(
     let Ok(data) = fs::read_to_string(&path) else {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);
     };
+    if super::super::raw_before_start_receipt(&data)
+        && !super::super::receipt_mutant("identity-clear")
+    {
+        return ReconcileClearOutcome::Delegated(GuardedClearOutcome::IoError);
+    }
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);
     };
@@ -272,6 +296,9 @@ pub(in crate::services::discord) fn clear_admitted_restart_terminal(
     let Ok(data) = fs::read_to_string(&path) else {
         return GuardedClearOutcome::Missing;
     };
+    if raw_before_start_receipt(&data) {
+        return GuardedClearOutcome::IoError;
+    }
     let Ok(fresh) = serde_json::from_str::<InflightTurnState>(&data) else {
         return GuardedClearOutcome::Missing;
     };
@@ -321,6 +348,26 @@ impl InflightTurnState {
         &self,
         current_generation: u64,
     ) -> GuardedClearOutcome {
+        self.clear_before_start_receipt_matching(|fresh| {
+            self.before_start_receipt_clearable(fresh, current_generation)
+        })
+    }
+
+    /// Clear only the exact live policy receipt returned by the shown notice's ACK.
+    pub(in crate::services::discord) fn clear_before_start_policy_receipt(
+        &self,
+        generation: u64,
+    ) -> GuardedClearOutcome {
+        self.clear_before_start_receipt_matching(|fresh| {
+            crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
+                && self.before_start_policy_receipt_clearable(fresh, generation)
+        })
+    }
+
+    fn clear_before_start_receipt_matching(
+        &self,
+        clearable: impl FnOnce(&InflightTurnState) -> bool,
+    ) -> GuardedClearOutcome {
         let (Some(root), Some(provider)) = (inflight_runtime_root(), self.provider_kind()) else {
             return GuardedClearOutcome::Missing;
         };
@@ -334,7 +381,7 @@ impl InflightTurnState {
         else {
             return GuardedClearOutcome::Missing;
         };
-        if !self.before_start_receipt_clearable(&fresh, current_generation) {
+        if !clearable(&fresh) {
             return GuardedClearOutcome::UserMsgMismatch;
         }
         let expected = InflightTurnIdentity::from_state(self);
@@ -343,7 +390,15 @@ impl InflightTurnState {
             return outcome;
         }
         let reason = "clear_before_start_receipt";
-        remove_identity_matched_state(&path, &provider, self.channel_id, &expected, fresh, reason).0
+        remove_identity_matched_state_unchecked(
+            &path,
+            &provider,
+            self.channel_id,
+            &expected,
+            fresh,
+            reason,
+        )
+        .0
     }
 }
 
@@ -364,6 +419,11 @@ fn clear_rebind_origin_inflight_state_if_matches_identity_impl_in_root(
     let Ok(data) = fs::read_to_string(&path) else {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);
     };
+    if super::super::raw_before_start_receipt(&data)
+        && !super::super::receipt_mutant("identity-clear")
+    {
+        return ReconcileClearOutcome::Delegated(GuardedClearOutcome::IoError);
+    }
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);
     };

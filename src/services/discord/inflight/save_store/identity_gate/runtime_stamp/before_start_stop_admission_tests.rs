@@ -44,7 +44,14 @@ impl Fixture {
         row.turn_nonce = Some(NONCE.into());
         row.born_generation = 4;
         shape(&mut row);
-        inflight::save_inflight_state(&row).unwrap();
+        if row.herdr_before_start_stop.is_some() {
+            let root = inflight::inflight_runtime_root().unwrap();
+            let path = inflight::inflight_state_path(&root, &ProviderKind::Claude, CHANNEL);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, serde_json::to_vec_pretty(&row).unwrap()).unwrap();
+        } else {
+            inflight::save_inflight_state(&row).unwrap();
+        }
         let row = inflight::load_inflight_state(&ProviderKind::Claude, CHANNEL).unwrap();
         Self {
             _root: root,
@@ -113,10 +120,10 @@ async fn admission_refuses_every_fresh_row_that_is_not_this_bridge_turn() {
             row.set_relay_owner_kind(RelayOwnerKind::Watcher)
         }),
         ("other receipt", |row| {
-            row.herdr_before_start_stop = Some(BeforeStartReceipt {
-                admitted_generation: ADMITTED + 1,
-                ..pending()
-            })
+            row.herdr_before_start_stop = Some(changed_receipt(
+                "admitted_generation",
+                (ADMITTED + 1).into(),
+            ))
         }),
     ];
     for (case, change) in changes {
@@ -151,14 +158,15 @@ async fn admission_refuses_every_fresh_row_that_is_not_this_bridge_turn() {
 }
 
 fn pending() -> BeforeStartReceipt {
-    BeforeStartReceipt {
-        protocol: PROTOCOL,
-        kind: KIND.into(),
-        turn_nonce: NONCE.into(),
-        admitted_generation: ADMITTED,
-        basis: "no_attempt".into(),
-        notice: PENDING.into(),
-    }
+    BeforeStartReceipt(serde_json::json!({
+        "protocol": PROTOCOL, "kind": KIND, "turn_nonce": NONCE,
+        "admitted_generation": ADMITTED, "basis": "no_attempt", "notice": PENDING,
+    }))
+}
+fn changed_receipt(key: &str, value: serde_json::Value) -> BeforeStartReceipt {
+    let mut receipt = pending();
+    receipt.0[key] = value;
+    receipt
 }
 
 /// A row the live turn advanced since the bridge's snapshot gains only the receipt; the same
@@ -194,7 +202,7 @@ async fn admission_adds_only_the_receipt_to_the_advanced_row() {
     let fixture = Fixture::new();
     let admitted = admit(&fixture.row, CloseBasis::Untouched).await.unwrap();
     assert_eq!(
-        admitted.herdr_before_start_stop.unwrap().basis,
+        admitted.herdr_before_start_stop.unwrap().0["basis"],
         "untouched".to_string()
     );
 }
@@ -246,7 +254,7 @@ async fn a_failed_receipt_write_publishes_nothing() {
 }
 
 /// Every row write keeps the durable receipt of its birth episode: a stale snapshot neither drops
-/// nor lowers it, an unknown one is never lowered, and a successor episode does not inherit it.
+/// nor lowers it, an unknown one is never lowered, and a successor episode cannot erase it.
 #[tokio::test(flavor = "current_thread")]
 async fn the_durable_receipt_survives_stale_writes() {
     let fixture = Fixture::new();
@@ -266,25 +274,33 @@ async fn the_durable_receipt_survives_stale_writes() {
     let acked = admitted.ack_before_start_notice(&edited()).await.unwrap();
     inflight::save_inflight_state(&admitted).unwrap();
     assert_eq!(fixture.receipt(), acked.herdr_before_start_stop);
-    assert_eq!(fixture.receipt().unwrap().notice, DELIVERED);
+    assert_eq!(fixture.receipt().unwrap().0["notice"], DELIVERED);
     let mut unknown = fixture.durable().unwrap();
-    unknown.herdr_before_start_stop.as_mut().unwrap().notice = "shown_v2".into();
+    unknown.herdr_before_start_stop.as_mut().unwrap().0["notice"] = "shown_v2".into();
     fixture.overwrite(&unknown);
     inflight::save_inflight_state(&admitted).unwrap();
-    assert_eq!(fixture.receipt().unwrap().notice, "shown_v2");
+    assert_eq!(fixture.receipt().unwrap().0["notice"], "shown_v2");
     // The restart marker rewrite reads the durable row, so it keeps the receipt too.
     inflight::mark_restart_mode_blocking(ProviderKind::Claude, InflightRestartMode::DrainRestart)
         .await;
     let marked = fixture.durable().unwrap();
     assert!(marked.restart_mode.is_some());
-    assert_eq!(marked.herdr_before_start_stop.unwrap().notice, "shown_v2");
+    assert_eq!(
+        marked.herdr_before_start_stop.unwrap().0["notice"],
+        "shown_v2"
+    );
     // A create-only write never replaces an existing row.
     assert!(inflight::save_inflight_state_create_new(&fixture.row).is_err());
     let mut successor = fixture.row.clone();
     successor.turn_nonce = Some("successor".into());
     successor.started_at.push('9');
-    inflight::save_inflight_state(&successor).unwrap();
-    assert_eq!(fixture.receipt(), None, "a successor does not inherit it");
+    let before = fixture.bytes();
+    assert!(inflight::save_inflight_state(&successor).is_err());
+    assert_eq!(
+        fixture.bytes(),
+        before,
+        "a successor cannot erase the protected episode"
+    );
 }
 
 /// The ack needs a shown notice and the same admission on the fresh row; it is idempotent.
@@ -311,7 +327,7 @@ async fn the_ack_needs_a_shown_notice_and_the_same_admission() {
     let acked = admitted.ack_before_start_notice(&fallback).await.unwrap();
     let durable = fixture.durable().unwrap();
     assert_eq!(
-        durable.herdr_before_start_stop.as_ref().unwrap().notice,
+        durable.herdr_before_start_stop.as_ref().unwrap().0["notice"],
         DELIVERED
     );
     assert_eq!(acked.save_generation, durable.save_generation);
@@ -319,10 +335,10 @@ async fn the_ack_needs_a_shown_notice_and_the_same_admission() {
     assert_eq!(again.save_generation, durable.save_generation, "no rewrite");
     let conflicts: [(&str, Edit); 3] = [
         ("other admission", |row| {
-            row.herdr_before_start_stop = Some(BeforeStartReceipt {
-                admitted_generation: ADMITTED + 1,
-                ..pending()
-            })
+            row.herdr_before_start_stop = Some(changed_receipt(
+                "admitted_generation",
+                (ADMITTED + 1).into(),
+            ))
         }),
         ("no receipt", |row| row.herdr_before_start_stop = None),
         ("native terminal", |row| {
@@ -350,25 +366,20 @@ async fn the_ack_needs_a_shown_notice_and_the_same_admission() {
 fn restart_clear_rechecks_the_delivered_receipt_under_its_lock() {
     const CURRENT: u64 = 9;
     let fixture = Fixture::with(|row| {
-        row.herdr_before_start_stop = Some(BeforeStartReceipt {
-            notice: DELIVERED.into(),
-            ..pending()
-        })
+        row.herdr_before_start_stop = Some(changed_receipt("notice", DELIVERED.into()))
     });
     let snapshot = fixture.row.clone();
     let changes: [(&str, Edit); 12] = [
         ("receipt removed", |row| row.herdr_before_start_stop = None),
         ("notice pending", |row| {
-            row.herdr_before_start_stop.as_mut().unwrap().notice = PENDING.into()
+            row.herdr_before_start_stop.as_mut().unwrap().0["notice"] = PENDING.into()
         }),
         ("receipt replaced", |row| {
-            row.herdr_before_start_stop
-                .as_mut()
-                .unwrap()
-                .admitted_generation = ADMITTED - 1
+            row.herdr_before_start_stop.as_mut().unwrap().0["admitted_generation"] =
+                (ADMITTED - 1).into()
         }),
         ("unknown notice", |row| {
-            row.herdr_before_start_stop.as_mut().unwrap().notice = "shown_v2".into()
+            row.herdr_before_start_stop.as_mut().unwrap().0["notice"] = "shown_v2".into()
         }),
         ("save generation", |row| row.save_generation += 1),
         ("nonce", |row| row.turn_nonce = Some("other".into())),
