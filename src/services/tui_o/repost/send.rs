@@ -174,6 +174,38 @@ pub(crate) trait BoundedTransport {
     ) -> impl Future<Output = WireOutcome> + Send + 'static;
 }
 
+/// The counts of one handed-over dispatch: the same cells its guard writes.
+pub(crate) struct DispatchCounts(Arc<WireCount>);
+
+impl DispatchCounts {
+    pub(crate) fn report(&self, outcome: WireOutcome) -> DispatchReport {
+        DispatchReport {
+            outcome,
+            wire: self.0.wire.load(Ordering::SeqCst),
+            counted: self.0.counted.load(Ordering::SeqCst),
+            throttled: self.0.throttled.load(Ordering::SeqCst),
+        }
+    }
+}
+
+/// One dispatch's request, built with its guard inside but not yet polled, so the caller can
+/// poll it first under the gate and then own its timeout. Dropped unpolled, nothing was sent.
+pub(crate) fn hand_over(
+    transport: &impl BoundedTransport,
+    envelope: &RepostEnvelope,
+    live: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> (
+    impl Future<Output = WireOutcome> + Send + 'static,
+    DispatchCounts,
+) {
+    let count = Arc::new(WireCount::default());
+    let guard = AttemptGuard {
+        count: Arc::clone(&count),
+        live,
+    };
+    (transport.create(envelope, guard), DispatchCounts(count))
+}
+
 /// Sends `envelope` once under the writer's POST timeout, which also bounds every 429 wait.
 pub(crate) async fn send_bounded(
     transport: &impl BoundedTransport,

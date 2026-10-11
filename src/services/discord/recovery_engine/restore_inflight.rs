@@ -95,6 +95,19 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         return;
     }
 
+    Box::pin(restore_inflight_states(
+        http, shared, provider, states, false,
+    ))
+    .await;
+}
+
+async fn restore_inflight_states(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    states: Vec<inflight::InflightTurnState>,
+    resume_installed: bool,
+) {
     let settings_snapshot = shared.settings.read().await.clone();
 
     // Reconcile wrappers preserve planned-restart rows via `PlannedRestartSkipped`; the
@@ -2104,9 +2117,14 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 continue;
             }
         };
-        let cancel_token = Arc::new(CancelToken::from_persisted_turn_nonce(
+        let candidate = Arc::new(CancelToken::from_persisted_turn_nonce(
             state.turn_nonce.clone(),
         ));
+        let cancel_token = if resume_installed {
+            scoped_restore::installed_token(shared, channel_id, &state, candidate).await
+        } else {
+            candidate
+        };
         super::turn_bridge::bind_cancel_token_tmux_runtime(
             provider,
             &cancel_token,
@@ -2157,7 +2175,9 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         )
         .await;
 
-        if !kickoff.activated_turn() {
+        let resumed_same_episode = resume_installed
+            && kickoff == crate::services::turn_orchestrator::RecoveryKickoffResult::AlreadyActiveSameEpisode;
+        if !kickoff.activated_turn() && !resumed_same_episode {
             continue;
         }
         // Consume outgoing planned-restart authority (identity-guarded readoption)
@@ -2742,3 +2762,10 @@ mod ready_without_output_tests;
 #[cfg(all(test, unix))]
 #[path = "restore_inflight/replay_hold_tests.rs"]
 mod replay_hold_tests;
+
+#[path = "restore_inflight/scoped_restore.rs"]
+mod scoped_restore;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use scoped_restore::{
+    install_inflight_scoped, resume_inflight_scoped,
+};
