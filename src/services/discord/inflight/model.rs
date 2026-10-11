@@ -273,6 +273,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// The provider terminal a Herdr admission committed for this turn; `None` is unadmitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tui_terminal_kind: Option<crate::services::agent_protocol::NativeTerminalKind>,
+    /// The policy receipt of a stop before input started; `None` on every other turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::services::discord) herdr_before_start_stop: Option<super::save_store::identity_gate::runtime_stamp::before_start_stop_admission::BeforeStartReceipt>,
     #[serde(default)]
     pub current_tool_line: Option<String>,
     #[serde(default)]
@@ -1113,6 +1116,7 @@ impl InflightTurnState {
             tui_terminal_source_file_identity: None,
             tui_terminal_generation_mtime_ns: None,
             tui_terminal_kind: None,
+            herdr_before_start_stop: None,
             current_tool_line: None,
             last_tool_name: None,
             last_tool_summary: None,

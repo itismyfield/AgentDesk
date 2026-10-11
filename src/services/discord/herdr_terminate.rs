@@ -118,6 +118,7 @@ type ProbeSlot = std::cell::RefCell<Option<SettlementWindowProbe>>;
 thread_local! {
     static SETTLEMENT_WINDOW: ProbeSlot = const { std::cell::RefCell::new(None) };
     static AFTER_SETTLEMENT: ProbeSlot = const { std::cell::RefCell::new(None) };
+    static AFTER_CAPTURE: ProbeSlot = const { std::cell::RefCell::new(None) };
 }
 /// Runs once between the hold release and the captured-turn settlement on this thread.
 #[cfg(test)]
@@ -128,6 +129,11 @@ pub(crate) fn probe_settlement_window(probe: SettlementWindowProbe) {
 #[cfg(test)]
 pub(crate) fn probe_after_settlement(probe: SettlementWindowProbe) {
     AFTER_SETTLEMENT.with(|slot| *slot.borrow_mut() = Some(probe));
+}
+/// Runs once after the turn is captured and before the transition is taken.
+#[cfg(test)]
+pub(crate) fn probe_after_capture(probe: SettlementWindowProbe) {
+    AFTER_CAPTURE.with(|slot| *slot.borrow_mut() = Some(probe));
 }
 #[cfg(test)]
 async fn run_probe(slot: &'static std::thread::LocalKey<ProbeSlot>) {
@@ -263,6 +269,8 @@ pub(crate) async fn terminate_explicit_herdr(
         Ok(turn) => turn,
         Err(e) => return TerminationResult::Refused(e),
     };
+    #[cfg(test)]
+    run_probe(&AFTER_CAPTURE).await;
     let Ok(transition) = shared.acquire_session_transition(channel).await else {
         return TerminationResult::Refused("transition busy".into());
     };

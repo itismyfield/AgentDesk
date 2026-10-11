@@ -70,8 +70,14 @@ fn no_callback(_: RatelimitInfo) {}
 fn seconds(response: &reqwest::Response, name: &str) -> Option<Result<Duration, ()>> {
     let value = response.headers().get(name)?.to_str().ok()?;
     let seconds: f64 = value.trim().parse().ok()?;
-    Some(Duration::try_from_secs_f64(seconds).map_err(drop))
+    // A day is far past any Discord limit; a longer value would overflow the hook's clock math.
+    let bounded = Duration::try_from_secs_f64(seconds)
+        .ok()
+        .filter(|wait| *wait <= HOOK_LIMIT);
+    Some(bounded.ok_or(()))
 }
+
+const HOOK_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
 
 fn retry_after(response: &reqwest::Response) -> Option<Duration> {
     seconds(response, "retry-after")?.ok()
@@ -335,9 +341,16 @@ fn ids(channel: u64, id: Option<u64>) -> Result<(ChannelId, Option<MessageId>), 
         .ok_or_else(|| "a zero id".to_owned())
 }
 
+impl RepostHttp {
+    /// What reads over `http` name as their credentials; a token change discards every pass.
+    pub(crate) fn credentials_of(http: &serenity::Http) -> String {
+        hex::encode(Sha256::digest(http.token().as_bytes()))[..16].to_owned()
+    }
+}
+
 impl ProbeRead for RepostHttp {
     fn credentials(&self) -> String {
-        hex::encode(Sha256::digest(self.http.token().as_bytes()))[..16].to_owned()
+        Self::credentials_of(&self.http)
     }
 
     async fn message(&self, channel: u64, id: u64) -> Result<Option<ObservedMessage>, String> {

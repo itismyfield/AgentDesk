@@ -1,10 +1,15 @@
 use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
 use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
 use crate::services::tui_o::cutover::{self, test_override};
+use crate::services::tui_o::repost::admission::OriginalGate;
+use crate::services::tui_o::repost::runner::{RepostHook, Turned};
+use crate::services::tui_o::store::ledger::PieceRecord;
 use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::adoption::{LegacyCursor, LegacyView};
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
-use crate::services::tui_o::writer::host::{Custody, HostIo, HostParts, Readiness, start};
+use crate::services::tui_o::writer::host::{
+    Custody, HostIo, HostParts, Readiness, RepostTurn, start,
+};
 
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
@@ -81,6 +86,22 @@ struct TestIo {
     /// Each lease handed to a new writer: when, how many writers still held one, and how many
     /// piece leases were back by then.
     leases: Mutex<Vec<(tokio::time::Instant, usize, usize)>>,
+    /// Turns the hosted actors ran of the host's re-post hook.
+    repost_turns: Arc<AtomicUsize>,
+}
+
+/// A re-post hook that only counts its turns; every original still goes.
+pub(super) struct CountedTurn(pub(super) Arc<AtomicUsize>);
+
+impl<W> RepostHook<W> for CountedTurn {
+    fn turn<'a>(&'a mut self, _: &'a mut W) -> Turned<'a, ()> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(std::future::ready(()))
+    }
+
+    fn original(&mut self, _: u64, _: PieceRecord) -> Turned<'_, OriginalGate> {
+        Box::pin(std::future::ready(OriginalGate::Send))
+    }
 }
 
 impl TestIo {
@@ -100,6 +121,7 @@ impl TestIo {
             busy: Default::default(),
             relaying: Default::default(),
             leases: Mutex::default(),
+            repost_turns: Arc::default(),
         })
     }
 
@@ -206,6 +228,10 @@ impl HostIo for TestIo {
 
     fn adopted(&self, channel: u64, _: ShadowProvider) {
         self.calls.lock().unwrap().push(("adopted", channel));
+    }
+
+    fn repost(&self, _: u64, _: &Arc<FakePort>) -> Option<RepostTurn<Self>> {
+        Some(Box::new(CountedTurn(Arc::clone(&self.repost_turns))))
     }
 }
 
@@ -322,6 +348,20 @@ async fn a_published_flag_alone_does_not_accept_work() {
     polls(3).await;
     assert!(!ready.is_ready(CHANNEL), "the exited host closes readiness");
     assert!(!ready.accepts(CHANNEL), "an ended actor takes no work");
+}
+
+/// Each actor the host starts gets the host's re-post turn, and runs it every poll.
+#[tokio::test(start_paused = true)]
+async fn f6_every_hosted_actor_runs_the_hosts_repost_turn() {
+    let (harness, _, source) = switched_over(b"");
+    let startup = p5_event(CHANNEL, "claude", p5::BindingTarget::Source(source));
+    p5_log(harness._runtime.path(), CHANNEL, &startup);
+    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    harness.gate.acquired();
+    assert_eq!(host(&harness, &io, true, &ready), 1);
+    polls(3).await;
+    assert!(io.repost_turns.load(Ordering::SeqCst) >= 2);
 }
 
 #[test]

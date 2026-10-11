@@ -711,6 +711,9 @@ async fn the_round_trip_reads_back_every_case_and_reports_any_difference() {
 #[path = "rotation_tests.rs"]
 mod rotation;
 
+#[path = "unpinned_past_tests.rs"]
+mod unpinned_past;
+
 #[path = "host_tests.rs"]
 mod host_start;
 
@@ -841,3 +844,5 @@ async fn held_actor_preserves_cursor_and_owed_output(allowed_new_source: bool) {
 mod canary_policy;
 #[path = "operator_resume_actor_tests.rs"]
 mod operator_resume;
+#[path = "repost_turn_tests.rs"]
+mod repost_turn;

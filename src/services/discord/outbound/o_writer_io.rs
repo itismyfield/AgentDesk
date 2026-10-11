@@ -8,6 +8,7 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, CreateMessage, GetMessages, MessageId};
 
 use super::super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, SharedData, lease_now_ms};
+use crate::services::tui_o::repost::io::{RepostHttp, Unsupported};
 use crate::services::tui_o::writer::{
     DeliveryLease, DiscordPort, PostOutcome, SeenMessage, confirm,
 };
@@ -24,6 +25,16 @@ pub(crate) struct GatewayPort {
 impl GatewayPort {
     pub(crate) fn new(http: Arc<serenity::Http>, bot_id: u64) -> Self {
         Self { http, bot_id }
+    }
+
+    /// The re-post transport over this port's client, so both share its route buckets.
+    pub(crate) fn repost_http(&self) -> Result<RepostHttp, Unsupported> {
+        RepostHttp::new(Arc::clone(&self.http))
+    }
+
+    /// The credentials that transport reads with, named without building it.
+    pub(crate) fn repost_credentials(&self) -> String {
+        RepostHttp::credentials_of(&self.http)
     }
 }
 

@@ -10,6 +10,7 @@ use tokio::time::Instant;
 
 use super::binding::{BindingCause, BindingEvent, BindingEvents, BindingRecord, BindingTarget};
 use super::deliver::ChannelWriter;
+use super::past_bind;
 use super::pieces::{Derived, UnitDeriver};
 use super::renumbered::{self, Logged, Names, Reopen, reopen};
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm};
@@ -601,13 +602,10 @@ impl<B: BindingEvents> Sources<B> {
             let store = writer.store();
             let parent =
                 parent_hint.filter(|parent| **parent != new && store.cursor(parent).is_some());
-            let boundary = match (cause, parent) {
-                (BindingCause::Startup | BindingCause::Clear, _) => Boundary::Owed { from: 0 },
-                (BindingCause::Unknown, _) | (_, None) => Boundary::Pending {
-                    candidates: vec![0],
-                },
-                _ => Boundary::Undecided,
-            };
+            let log = self.bindings.binding_events_since(self.channel, 0);
+            let attached = |source: &SourceId| store.cursor(source).is_some();
+            let unread = past_bind::unread_before(log, event.seq, &new, attached);
+            let boundary = past_bind::first_boundary(cause, parent.is_some(), unread);
             if matches!(boundary, Boundary::Pending { .. }) {
                 let source = new.clone();
                 writer.alarm(WriterAlarm::BoundaryPending { source });

@@ -100,10 +100,7 @@ pub(super) fn freeze(
     }
     let result = hydrate_pending_queue_from_disk_if_present(state, channel, persistence)
         .persistence_error
-        .map_or_else(
-            || persist_queue(channel, &state.intervention_queue, persistence),
-            Err,
-        )
+        .map_or_else(|| persist_queue(state, channel, persistence), Err)
         .map_err(|_| Failure::Persistence);
     if state.pending_user_dispatch.is_some() || state.pending_user_dispatch_lease.is_some() {
         return Err(Failure::Busy);

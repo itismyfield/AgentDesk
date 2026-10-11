@@ -167,6 +167,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "placeholder_sweeper.rs": {"edit_outbound_message": 1},
     "queue_io/turn_admission.rs": {"send_channel_message*": 1},
     "recovery_engine/completion_delivery.rs": {"relay_recovered_body_to_placeholder": 3},
+    "recovery_engine/herdr_before_start_restart.rs": {"replace_message_with_outcome": 1},
     "recovery_engine/restore_inflight.rs": {"relay_recovered_terminal_text_to_placeholder": 2},
     "recovery_engine/terminal_text_idempotency.rs": {"replace_long_message*": 2, "send_long_message*": 2},
     "recovery_engine/two_message_panel.rs": {"send_channel_message*": 1},
@@ -286,6 +287,8 @@ CENSUS: dict[str, tuple[str, ...]] = {
     # Control Notice via the reference helper; no O body authority or original/body text.
     "queue_io/turn_admission.rs": ("INPUT-FENCE-notice", "KEEP_NONBODY"),
     "recovery_engine/completion_delivery.rs": ("W30,W31", "CUT_D"),
+    # Dormant restart stop notice on the turn's own message, sent only when O peek is Ok(false).
+    "recovery_engine/herdr_before_start_restart.rs": ("1-D-notice", "KEEP_NONBODY"),
     "recovery_engine/restore_inflight.rs": ("1-D-notice", "KEEP_NONBODY"),
     "recovery_engine/terminal_text_idempotency.rs": ("W32", "COV:W32"),
     "recovery_engine/two_message_panel.rs": ("1-D-panel", "KEEP_NONBODY"),
@@ -383,6 +386,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "relay_recovered_body_to_placeholder:claim",
     ),
     "src/services/discord/recovery_engine/herdr_admitted_restart.rs": ("o_owns:peek",),
+    "src/services/discord/recovery_engine/herdr_before_start_restart.rs": ("o_owns:peek",),
     "src/services/discord/recovery_engine/terminal_text_idempotency.rs": (
         "relay_no_anchor_terminal_text:claim",
         "relay_no_anchor_terminal_text:claim",
@@ -438,6 +442,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "apply_watcher_long_chunks_legacy:claim",
     ),
     "src/services/discord/tui_prompt_relay/claude_idle_bridge.rs": ("idle_tail_tool_opens:peek",),
+    "src/services/discord/turn_bridge/before_start_stop.rs": ("consume:peek",),
     "src/services/discord/turn_bridge/completion_postlude/o_panel_below.rs": (
         "follow:peek",
     ),
