@@ -592,7 +592,8 @@ src/
 │   │   ├── host_gate_tests.rs
 │   │   ├── process_session_launch.rs
 │   │   ├── stream_result.rs
-│   │   └── tui_session_launch.rs
+│   │   ├── tui_session_launch.rs
+│   │   └── tui_session_launch_geometry_tests.rs
 │   ├── claude_e/
 │   │   ├── cancellation.rs
 │   │   ├── jsonl_parser.rs
@@ -2255,7 +2256,9 @@ src/
 │   │   │   ├── liveness/
 │   │   │   │   └── tests.rs
 │   │   │   ├── availability.rs
-│   │   │   └── liveness.rs
+│   │   │   ├── liveness.rs
+│   │   │   ├── sized.rs
+│   │   │   └── sized_cleanup_tests.rs
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
 │   │   ├── mod.rs
