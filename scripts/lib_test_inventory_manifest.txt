@@ -8413,6 +8413,7 @@ services::discord::tui_prompt_relay::relay_e2e::stop_command_catch_up_e2e::a_sto
 services::discord::tui_prompt_relay::relay_e2e::stop_command_catch_up_e2e::a_stop_is_not_replayed_through_a_retry_cursor_armed_before_it
 services::discord::tui_prompt_relay::relay_e2e::stop_command_catch_up_e2e::a_stop_keeps_earlier_dropped_input_recoverable
 services::discord::tui_prompt_relay::relay_e2e::stop_command_catch_up_e2e::a_stop_that_interrupts_a_turn_is_not_replayed_by_catch_up
+services::discord::tui_prompt_relay::relay_e2e::test_thread_stack_budget::deliver_user_message_keeps_intake_off_the_test_thread_stack
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_committed_terminal_settles_even_with_bytes_left_over
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_fully_drained_frozen_transcript_settles_its_unfinalizable_inflight

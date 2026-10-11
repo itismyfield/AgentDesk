@@ -342,9 +342,8 @@ impl RelayE2eHarness {
         }
     }
 
-    /// The Discord-API injection path: production `FullEvent` intake, run to completion.
-    /// Intake runs on its own task so the test thread never polls its debug-sized
-    /// future (#6841); a panic in intake re-raises here and a dropped wait aborts it.
+    /// The Discord-API injection path: production `FullEvent` intake, run to completion on
+    /// its own task so the test thread never polls the debug-sized intake future.
     pub(super) async fn deliver_user_message(&self, id: u64, text: &str) -> Result<(), Error> {
         let mut intake = AbortOnDrop(Some(self.spawn_user_message(id, text)));
         match intake.0.as_mut().expect("intake task").await {
@@ -846,8 +845,8 @@ mod headless_turn_provider_tests {
     }
 }
 
-/// #6841: a debug intake future polled inline on a 2 MiB test thread overflows it,
-/// so the harness keeps what a scenario awaits for intake under this budget.
+/// A debug intake future polled inline overflows the 2 MiB test thread, so what a
+/// scenario awaits for intake stays under this budget.
 mod test_thread_stack_budget {
     use super::*;
 
