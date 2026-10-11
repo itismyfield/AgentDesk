@@ -29,7 +29,7 @@ enum Hook {
     /// the undelivered `AbsorbAndEnd`.
     PurgeAbsorbAndEnd(MessageId),
     AbsorbAndDeliverEpisode(MessageId),
-    /// The id's own turn is claimed between the scan snapshot and the enqueue.
+    /// The id's own text-intake turn is claimed between the scan snapshot and the enqueue.
     StartTurn,
 }
 
@@ -224,8 +224,9 @@ impl CatchUpDiscordApi for StrictApi {
             Some(Hook::StartTurn) => {
                 let token = Arc::new(crate::services::provider::CancelToken::new());
                 let owner = serenity::UserId::new(HUMAN_ID);
-                let started =
-                    discord::mailbox_try_start_turn(shared, channel_id, token, owner, message_id);
+                // The Discord text-intake claim: it waits behind anything already queued.
+                let start = discord::queue_io::mailbox_try_start_turn_behind_queue;
+                let started = start(shared, channel_id, token, owner, message_id);
                 assert!(started.await, "{message_id} claims its turn");
                 enqueue(intervention).await
             }
