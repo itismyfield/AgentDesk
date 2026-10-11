@@ -79,8 +79,7 @@ async fn a_reply_queued_behind_a_busy_turn_is_a_claimable_singleton_pg() {
     let channel = poise::serenity_prelude::ChannelId::new(cc);
     let handle = ChannelMailboxRegistry::global_handle(channel).expect("intake mailbox");
     let head = handle.snapshot().await.intervention_queue.remove(0);
-    let persistence =
-        QueuePersistenceContext::new(&ProviderKind::Claude, "test-token-hash", None);
+    let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, "test-token-hash", None);
     let claim = handle
         .claim_queued_head(QueueIdentity::of(&head), persistence)
         .await;
@@ -109,14 +108,12 @@ async fn the_route_injects_into_a_busy_tui_direct_turn_only_when_switched_on_pg(
     }
     let registry = Arc::new(HealthRegistry::new());
     let shared = register_inject_runtime(&registry, &channels, Some(pool.clone())).await;
-    let [on, off, attached, unconfirmed] =
-        agents.map(|(_, ch, mode)| InjectPane::new(ch, mode));
+    let [on, off, attached, unconfirmed] = agents.map(|(_, ch, mode)| InjectPane::new(ch, mode));
     attached.set("attach", "1");
     unconfirmed.set("fail_paste", "");
     let app = router(Some(pool), Some(registry));
 
-    let input =
-        json!({"text": "status?", "author_discord_user_id": "200", "source": "imessage"});
+    let input = json!({"text": "status?", "author_discord_user_id": "200", "source": "imessage"});
     let mut observed = Vec::new();
     for ((agent, channel, _), pane) in agents.iter().zip([&on, &off, &attached, &unconfirmed]) {
         let (status, body) = deliver(&app, agent, &input.to_string()).await;
@@ -305,10 +302,7 @@ async fn the_route_reports_contaminated_submit_and_protects_a_mixed_direct_draft
     assert_eq!(direct.alarm_count("busy_inject_draft_unrecovered"), 1);
     assert!(queue_texts(&shared, agents[1].1).await.is_empty());
     assert_eq!(
-        crate::services::claude_tui::composer_lock::composer_admission(
-            &direct.session(),
-            || None
-        ),
+        crate::services::claude_tui::composer_lock::composer_admission(&direct.session(), || None),
         crate::services::claude_tui::composer_lock::ComposerAdmission::Held,
     );
     let applied = direct.applied();
@@ -385,9 +379,8 @@ async fn the_switch_off_keeps_every_route_answer_field_for_field_pg() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_turn_mode_direct_turn_queues_deliver_and_refuses_start_pg() {
     use crate::services::discord::health::{
-        BindingRoot, ReadyPane, bind_turn_mode_transcript, inflight_rows_for_tests,
-        queue_texts, register_inject_runtime, seed_presence_for_tests, settled_reason,
-        start_without_gateway,
+        BindingRoot, ReadyPane, bind_turn_mode_transcript, inflight_rows_for_tests, queue_texts,
+        register_inject_runtime, seed_presence_for_tests, settled_reason, start_without_gateway,
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
     let bindings = tempfile::tempdir().unwrap();
