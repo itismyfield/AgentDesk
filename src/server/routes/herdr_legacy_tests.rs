@@ -83,9 +83,8 @@ async fn row(pool: &sqlx::PgPool, key: &str) -> Option<Value> {
         .unwrap()
 }
 
-// Bound, retired by the service, Pending, Unknown and a foreign-owned Retired row through each
-// route's real handler: only the service's own Retired row is deleted, no kill reaches tmux or
-// Herdr, and a legacy row is still killed and cleaned as before.
+// Each route's real handler deletes only the service's own Retired row and kills no Herdr or tmux
+// pane for Bound, Pending, Unknown or foreign rows, while a legacy row is still killed and cleaned.
 #[test]
 fn m2t_t8_legacy_delete_and_force_routes_preserve_host_guards_pg() {
     let path = concat!(

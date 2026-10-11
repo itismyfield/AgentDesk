@@ -1,7 +1,5 @@
-//! A Herdr execution's source reaching O through its first activation: the production launch, the
-//! launch session's SessionStart through the hook ingress and the attach that hook leads to, then
-//! a writer host that finds no store adopting the channel with that source, whose actor applies
-//! the source's bind before it captures and posts.
+//! A launched Herdr source reaches O by its first activation: launch, SessionStart hook and attach,
+//! then a storeless writer host whose actor applies the source's bind before it captures and posts.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

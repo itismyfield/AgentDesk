@@ -1,6 +1,5 @@
-//! `agentdesk herdr terminate` against real Herdr 0.9.3 servers from a scratch copy, run and
-//! judged by `scripts/test_p11_m2_activation.py` from the lines each test prints. X1 runs beside
-//! O's writer harness on this file's servers, CLI and API.
+//! `agentdesk herdr terminate` against real Herdr 0.9.3 scratch servers, judged by
+//! `scripts/test_p11_m2_activation.py` from printed lines; X1 reuses these servers, CLI and API.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -524,9 +523,8 @@ fn print_writes(transport: &Witnessing) -> Vec<(String, String, ServerWitness)> 
         .collect()
 }
 
-/// This node's boot section with `real` as its one endpoint, the registry over the witnessing
-/// transport on every runtime thread, and the terminate switch on.
-/// `on_thread` runs on every runtime thread after the registry and launch overrides.
+/// Boots this node with `real` as its one endpoint, the witnessing registry and the terminate
+/// switch on, then runs `on_thread` on every runtime thread after those overrides.
 pub(crate) fn boot(
     real: &Real,
     channel: u64,

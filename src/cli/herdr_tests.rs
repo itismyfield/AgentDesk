@@ -390,9 +390,8 @@ fn a_hold_a_retire_left_is_shown_and_removed_by_the_next_retire_pg() {
 
 const RACE_CHANNEL: u64 = 1_479_671_301_387_059_401;
 
-// A manual retire lands between the service's close and its retire CAS, on the real CLI path:
-// the service reports the stale CAS and settles nothing; the captured turn stays until an
-// operator releases its lease, which ends it as an operator release.
+// A manual retire inside the close-to-CAS window on the real CLI path: the service reports the
+// stale CAS and settles nothing, and the captured turn waits for the operator's lease release.
 #[test]
 fn m2t_u9_manual_retire_inside_the_terminate_cas_window_pg() {
     use crate::services::discord::herdr_terminate::{

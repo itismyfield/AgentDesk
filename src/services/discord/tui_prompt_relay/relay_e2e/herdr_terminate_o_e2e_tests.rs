@@ -1,6 +1,5 @@
-//! A terminated Herdr execution's output stays O's: the real writer over its store, spool and
-//! ledger posts the sealed tail once, a successor bind keeps that tail, and an announced unit stays
-//! unsealed. The service writes none of O's state and posts nothing of its own.
+//! A terminated Herdr execution's output stays O's: its sealed tail posts once, a successor bind
+//! keeps it, an announced unit stays unsealed, and the service writes or posts nothing of O's.
 
 use std::collections::BTreeMap;
 use std::io::Write;

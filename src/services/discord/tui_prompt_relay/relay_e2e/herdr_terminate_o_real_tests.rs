@@ -1,6 +1,5 @@
-//! X1 on real Herdr 0.9.3: `agentdesk herdr terminate` closes the last pane of the target's
-//! workspace and retires exactly its execution, while O's writer, down during the termination,
-//! afterwards delivers the target's sealed tail once and the service wrote none of O's state.
+//! X1 on real Herdr 0.9.3: the CLI closes the target's last pane and retires only its execution,
+//! and O's writer, down meanwhile, then posts its sealed tail once, untouched by the service.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

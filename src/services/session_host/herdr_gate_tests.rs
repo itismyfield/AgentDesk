@@ -1898,9 +1898,8 @@ fn m2_turn_changed_before_close_has_zero_effect_pg() {
     });
 }
 
-// A run that stops after its close and before the retire CAS, as a dying process would, leaves
-// the row Bound over a gone pane with the hold, turn and closing fence; a rerun in this process
-// retires without a second close. A real restart also drops the mailbox turn and the fence.
+// A stop between the close and the retire CAS leaves the row Bound with hold, turn and fence; a
+// rerun retires without a second close (a real restart also drops the mailbox turn and fence).
 #[test]
 fn m2t_u8_stop_between_close_and_cas_then_rerun_pg() {
     if run_terminate_child("m2t_u8_stop_between_close_and_cas_then_rerun_pg") {
