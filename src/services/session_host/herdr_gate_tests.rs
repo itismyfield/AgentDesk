@@ -2120,6 +2120,56 @@ pub(crate) mod p11 {
             record
         }
 
+        /// As `bind`, for an execution of `provider` whose launch context file is `context`.
+        pub(crate) async fn bind_as(
+            &self,
+            pool: &sqlx::PgPool,
+            (token_hash, session_key): (&str, &str),
+            state: HostedState,
+            provider: &str,
+            context: &std::path::Path,
+        ) -> LiveSwitches {
+            let logical = session_key.rsplit_once(':').unwrap().1;
+            let marker = crate::services::tmux_common::session_temp_path(logical, "host_kind");
+            std::fs::write(marker, "herdr").unwrap();
+            self.os
+                .swap(Arc::new(FakeOs::launched(env_naming(context))));
+            let record = self.record_as((token_hash, session_key), state, provider);
+            sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id, hosted_execution) VALUES ($1, $2, 'idle', 'discord_channel', $3, $4, $5)")
+                .bind(session_key).bind(provider).bind(token_hash).bind(self.channel.to_string())
+                .bind(serde_json::to_value(&record).unwrap())
+                .execute(pool).await.unwrap();
+            if state != HostedState::Retired {
+                crate::services::claude::herdr_turn::hold(NONCE).unwrap();
+            }
+            let switches = LiveSwitches(LiveTerminateSwitch::new());
+            let mut config = switches.0.0.clone();
+            config.runtime.herdr_terminate_enabled = Some(true);
+            config.runtime.herdr_turn_enabled = Some(true);
+            crate::config_live_reload::install(config);
+            switches
+        }
+
+        /// The record `bind_as` stores for `provider` in `state`.
+        pub(crate) fn record_as(
+            &self,
+            (token_hash, session_key): (&str, &str),
+            state: HostedState,
+            provider: &str,
+        ) -> HostedExecution {
+            let logical = session_key.rsplit_once(':').unwrap().1;
+            let mut record = stored(&self.server, state);
+            record.owner.provider = provider.into();
+            record.owner.discord_token_hash = token_hash.into();
+            record.owner.channel_id = self.channel.to_string();
+            record.owner.logical_key = logical.into();
+            record.expected.as_mut().unwrap().binding_provider = provider.into();
+            record.source_ref.provider = provider.into();
+            record.source_ref.channel = self.channel.to_string();
+            record.source_ref.logical_key = logical.into();
+            record
+        }
+
         /// Every write the server received, as `(method, params)`, in order.
         pub(crate) fn writes_with_params(&self) -> Vec<(String, Value)> {
             let method = |m: &Value| m["method"].as_str().unwrap_or("").to_owned();

@@ -16,7 +16,11 @@ use tokio::sync::watch;
 use super::{CHANNEL_ID, RelayE2eHarness, wait_until};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::dispatched_sessions::hosted_execution::{
-    ExpectedExecution, HostedLocation, HostedOwner,
+    ExpectedExecution, HostedExecution, HostedLocation, HostedOwner,
+};
+use crate::services::claude_tui::hook_server::adoption_retry::DurableKind;
+use crate::services::claude_tui::hook_server::observation_ingress::{
+    IngressOutcome, observe_binding_hook,
 };
 use crate::services::discord::herdr_terminate::{
     OperatorTerminate, TerminationResult, terminate_explicit_herdr, test_turn,
@@ -25,7 +29,7 @@ use crate::services::discord::recovery_engine::host_reconcile::{
     HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading,
 };
 use crate::services::discord::tui_prompt_relay::herdr_source::{
-    HerdrSourceAttach, attach_launched_herdr_source,
+    HerdrSourceAttach, attach_launched_codex_herdr_source, attach_launched_herdr_source,
 };
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchCommand,
@@ -40,19 +44,31 @@ use crate::services::tui_o::shadow::capture::SourceCapture;
 use crate::services::tui_o::shadow::{
     CaptureOutcome, CaptureSource, MAX_READ_BYTES, ShadowProvider, SourceId,
 };
-use crate::services::tui_o::store::{InitSource, Initialized, OStore, STORE_DIR_NAME, StoreConfig};
+use crate::services::tui_o::store::rotation::Successor as Rotated;
+use crate::services::tui_o::store::spool::source_key;
+use crate::services::tui_o::store::{
+    ChannelStore, InitSource, Initialized, OEra, OStore, STORE_DIR_NAME, StoreConfig,
+};
+use crate::services::tui_o::writer::actor::{Owing, Undelivered};
 use crate::services::tui_o::writer::binding::{
     BindingCause, BindingEvent, BindingEvents, BindingEvidence, BindingRecord, BindingTarget,
     ChannelBindingLog,
 };
-use crate::services::tui_o::writer::deliver::ChannelWriter;
+use crate::services::tui_o::writer::deliver::{ChannelWriter, StopCause};
 use crate::services::tui_o::writer::host::test_io::{Alarms, AnyLease, Posts};
-use crate::services::tui_o::writer::host::{self, Custody, HostIo, HostParts, Readiness};
+use crate::services::tui_o::writer::host::{self, Custody, HostIo, HostParts, OwedView, Readiness};
 use crate::services::tui_o::writer::{WriterAlarm, WriterConfig, actor};
+use crate::services::tui_prompt_dedupe::binding_context::{
+    BINDING_HEADER, BindingContext, HookBindingEnvelope, PreparedIncarnation,
+};
 use crate::services::tui_prompt_dedupe::{self as dedupe, TuiRuntimeBinding, binding_events};
 
+/// Hang guard only: a wait that runs out fails the test without deciding it.
 const WAIT: Duration = Duration::from_secs(30);
+/// How many actor polls a positive wait observes before its assertion decides.
+const POLLS: usize = 30;
 const TAIL: &str = "the sealed tail written just before the termination";
+const RESTART_OUTPUT: &str = "the restarted writer's own new output";
 
 /// Runs `scenario` in a child owning its runtime: the termination rig on every runtime thread,
 /// and the binding log under one root every thread reads.
@@ -103,15 +119,27 @@ fn m2t_t6b_successor_launch_preserves_a_tail_and_cursor_pg() {
 }
 
 #[test]
-fn m2t_t7_unsealed_survives_termination_and_rotation_stall_pg() {
+fn m2t_t7_codex_execution_unsealed_survives_its_own_termination_pg() {
     let path = concat!(
         module_path!(),
-        "::m2t_t7_unsealed_survives_termination_and_rotation_stall_pg"
+        "::m2t_t7_codex_execution_unsealed_survives_its_own_termination_pg"
     );
     in_child(path, |rig, _| Box::pin(unsealed(rig)));
 }
 
-/// A Bound execution of the rig on the harness's bound channel, its turn running.
+#[test]
+fn m2t_t7u_o_actor_unsealed_survives_rotation_stall_pg() {
+    let path = concat!(
+        module_path!(),
+        "::m2t_t7u_o_actor_unsealed_survives_rotation_stall_pg"
+    );
+    in_child(path, |rig, _| Box::pin(unsealed_actor(rig)));
+}
+
+/// The harness's bound channel, its isolated database and the session key under `provider`.
+type Opened = (RelayE2eHarness, TestPostgresDb, sqlx::PgPool, String);
+
+/// An execution of the rig on the harness's bound channel, Bound once its test binds it.
 struct Terminating {
     harness: RelayE2eHarness,
     database: TestPostgresDb,
@@ -120,12 +148,14 @@ struct Terminating {
     logical: String,
     owner: HostedOwner,
     location: HostedLocation,
-    token: Arc<crate::services::provider::CancelToken>,
+    expected: ExpectedExecution,
+    /// The running turn the service captures; a Codex execution here runs none.
+    token: Option<Arc<crate::services::provider::CancelToken>>,
     _switches: herdr::LiveSwitches,
 }
 
 impl Terminating {
-    async fn bind(rig: &herdr::P11TerminationRig) -> Self {
+    async fn open(provider: &ProviderKind) -> Opened {
         let mut database = None;
         let harness = RelayE2eHarness::start_bound_on(async {
             let fixture = TestPostgresDb::create().await;
@@ -147,21 +177,23 @@ impl Terminating {
             .replace("p11-m2t".into());
         assert!(named.is_none());
         drop(core);
-        let provider = ProviderKind::Claude;
         let session_key = crate::services::discord::adk_session::build_adk_session_key(
             &shared,
             harness.channel_id,
-            &provider,
+            provider,
             None,
         )
         .await
         .expect("a namespaced session key");
-        let bound = herdr::HostedState::Bound;
-        let token_hash = shared.token_hash.clone();
-        let switches = rig.bind(&pool, &token_hash, &session_key, bound).await;
-        let record = rig.record(&token_hash, &session_key);
-        let channel = harness.channel_id;
-        let token = test_turn::start(&shared, channel, 51, "turn-a").await;
+        (harness, database, pool, session_key)
+    }
+
+    fn new(
+        (harness, database, pool, session_key): Opened,
+        record: HostedExecution,
+        token: Option<Arc<crate::services::provider::CancelToken>>,
+        switches: herdr::LiveSwitches,
+    ) -> Self {
         Self {
             harness,
             database,
@@ -169,9 +201,94 @@ impl Terminating {
             logical: record.owner.logical_key.clone(),
             owner: record.owner,
             location: record.location.expect("a recorded pane"),
+            expected: record.expected.expect("the launch evidence"),
             session_key,
             token,
             _switches: switches,
+        }
+    }
+
+    /// The rig's Claude execution `EXECUTION`, Bound with its turn running.
+    async fn bind(rig: &herdr::P11TerminationRig) -> Self {
+        let opened = Self::open(&ProviderKind::Claude).await;
+        let (harness, _, pool, session_key) = &opened;
+        let bound = herdr::HostedState::Bound;
+        let token_hash = harness.shared.token_hash.clone();
+        let switches = rig.bind(pool, &token_hash, session_key, bound).await;
+        let record = rig.record(&token_hash, session_key);
+        let (shared, channel) = (&harness.shared, harness.channel_id);
+        let token = test_turn::start(shared, channel, 51, "turn-a").await;
+        Self::new(opened, record, Some(token), switches)
+    }
+
+    /// Codex execution `EXECUTION` Pending on the rig's pane as its launch and first prompt leave
+    /// it: its launch context and spawn marker, its pane's placeholder, and its sessions root.
+    async fn launch_codex(rig: &herdr::P11TerminationRig) -> (Self, PathBuf, PathBuf) {
+        let opened = Self::open(&ProviderKind::Codex).await;
+        let (harness, _, pool, session_key) = &opened;
+        let sessions = root().join("codex-home/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let sessions = sessions.canonicalize().unwrap();
+        let token_hash = harness.shared.token_hash.clone();
+        let logical = session_key.rsplit_once(':').unwrap().1.to_owned();
+        let context = BindingContext {
+            schema: 1,
+            provider: "codex".into(),
+            created_at: Utc::now(),
+            execution_nonce: herdr::EXECUTION.into(),
+            tmux_session: logical.clone(),
+            channel_id: Some(CHANNEL_ID),
+            owner_runtime_root: crate::services::tmux_common::current_tmux_owner_marker(),
+            host: None,
+            expected_native_session_id: None,
+            launch_mode: "fresh".into(),
+            provider_root: Some(sessions.clone()),
+            first_prompt_digest: None,
+            source_policy: None,
+        };
+        let prepared = PreparedIncarnation::create(context).unwrap();
+        let key = (token_hash.as_str(), session_key.as_str());
+        let pending = herdr::HostedState::Pending;
+        let switches = rig
+            .bind_as(pool, key, pending, "codex", &prepared.path)
+            .await;
+        dedupe::install_herdr_execution(&logical, herdr::EXECUTION);
+        crate::services::discord::stamp_spawn_markers(&logical, Some(&prepared)).unwrap();
+        dedupe::register_provider_session("codex", &logical, &logical);
+        dedupe::register_codex_herdr_placeholder(&logical, CHANNEL_ID);
+        let record = rig.record_as(key, herdr::HostedState::Bound, "codex");
+        let path = prepared.path.clone();
+        (Self::new(opened, record, None, switches), path, sessions)
+    }
+
+    /// A launch onto the execution's endpoint for the same owner.
+    fn launch(&self, native: Option<String>, provider_root: Option<PathBuf>) -> HerdrLaunch {
+        let location = &self.location;
+        HerdrLaunch {
+            endpoint: Some(HerdrLaunchEndpoint {
+                execution_node: location.execution_node.clone(),
+                config_key: location.endpoint_config_key.clone(),
+                socket_addr: location.socket_addr.clone(),
+                herdr_session: location.named_session.clone(),
+            }),
+            owner: self.owner.clone(),
+            channel_id: Some(CHANNEL_ID),
+            expected_native_session_id: native,
+            resume: false,
+            provider_root,
+        }
+    }
+
+    /// The execution's own pane as its attach reads it, running `session`.
+    fn own_pane(&self, session: &str) -> LaunchedPane {
+        LaunchedPane {
+            endpoint: HerdrEndpointId::of(&self.location),
+            evidence: HerdrPaneEvidence {
+                binding_nonce: Some(herdr::EXECUTION.into()),
+                root: Some(self.expected.root.clone()),
+                provider_process: Some(self.expected.provider_process.clone()),
+                agent_session_id: Some(session.into()),
+            },
         }
     }
 
@@ -192,7 +309,9 @@ impl Terminating {
                 .await
                 .is_none()
         );
-        assert!(!self.token.cancelled.load(Ordering::Relaxed));
+        if let Some(token) = &self.token {
+            assert!(!token.cancelled.load(Ordering::Relaxed));
+        }
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
         assert!(!herdr::held(), "the execution's hold is released");
     }
@@ -269,6 +388,7 @@ impl HostIo for Gateway {
 struct OHost {
     gateway: Arc<Gateway>,
     gate: Arc<OwnershipGate>,
+    readiness: Arc<Readiness>,
     running: Vec<host::ManagedWriterHandle>,
 }
 
@@ -283,19 +403,22 @@ impl OHost {
         Self {
             gateway,
             gate,
+            readiness: Arc::default(),
             running: Vec::new(),
         }
     }
 
     fn start(&mut self) {
         assert!(self.running.is_empty());
+        self.readiness = Arc::default();
         let root = crate::config::runtime_root().expect("the harness root");
         let (gateway, gate) = (Arc::clone(&self.gateway), Arc::clone(&self.gate));
+        let readiness = Arc::clone(&self.readiness);
         let parts = || HostParts {
             io: gateway,
             runtime_root: Some(root),
             gate,
-            readiness: Arc::new(Readiness::default()),
+            readiness,
         };
         let owned = crate::services::tui_o::cutover::boot_ownership();
         self.running = host::start_managed(ShadowProvider::Claude, true, owned, parts);
@@ -316,15 +439,31 @@ impl OHost {
         self.gateway.posts.to(CHANNEL_ID)
     }
 
-    async fn posted(&self, expected: &[&str]) -> bool {
-        let posts = Arc::clone(&self.gateway.posts);
-        let expected: Vec<String> = expected.iter().map(|p| p.to_string()).collect();
-        wait_until(WAIT, || {
-            let done = posts.to(CHANNEL_ID).len() >= expected.len();
-            Box::pin(async move { done })
+    /// The running actor's poll view, once the host started it.
+    async fn view(&self) -> OwedView {
+        let readiness = Arc::clone(&self.readiness);
+        let started = wait_until(WAIT, || {
+            let started = readiness.undelivered(CHANNEL_ID).is_some();
+            Box::pin(async move { started })
         })
-        .await
-            && self.posts() == expected
+        .await;
+        assert!(started, "hang guard: the host started no actor");
+        self.readiness
+            .undelivered(CHANNEL_ID)
+            .expect("a running actor")
+    }
+
+    /// Polls of the running actor until `done` holds of its posts, at most `POLLS` of them.
+    async fn until(&self, done: impl Fn(&[String]) -> bool) -> bool {
+        let view = self.view().await;
+        polls_until(&view, || done(&self.posts())).await
+    }
+
+    /// Polls until `expected` many posts arrived; then they are exactly `expected`.
+    async fn posted(&self, expected: &[&str]) {
+        let reached = self.until(|posts| posts.len() >= expected.len()).await;
+        assert!(reached, "{:?} {:?}", self.posts(), self.halts());
+        assert_eq!(self.posts(), expected, "{:?}", self.halts());
     }
 
     fn halts(&self) -> Vec<WriterAlarm> {
@@ -337,6 +476,37 @@ impl OHost {
         });
         halted.map(|(_, alarm)| alarm.clone()).collect()
     }
+}
+
+/// What the last of `n` polls published after this call asked, or `None` once the actor ended;
+/// an unreadable store publishes `Some(None)`. The first poll may have begun before the ask.
+async fn polled(view: &OwedView, n: usize) -> Option<Option<Undelivered>> {
+    let mut published = view.published.clone();
+    let wanting = view.demand.want();
+    published.borrow_and_update();
+    let mut last = None;
+    let mut seen = 0;
+    while seen < n {
+        let changed = tokio::time::timeout(WAIT, published.changed()).await;
+        changed
+            .expect("hang guard: the actor published no poll")
+            .ok()?;
+        let poll = *published.borrow_and_update();
+        if poll.is_none_or(|poll| poll.asked >= wanting.asked()) {
+            (last, seen) = (Some(poll), seen + 1);
+        }
+    }
+    last
+}
+
+/// Polls of the actor behind `view` until `done` holds or it ends, at most `POLLS` of them.
+async fn polls_until(view: &OwedView, done: impl Fn() -> bool) -> bool {
+    for _ in 0..POLLS {
+        if done() || polled(view, 1).await.is_none() {
+            break;
+        }
+    }
+    done()
 }
 
 fn root() -> PathBuf {
@@ -462,6 +632,28 @@ fn cursor_of(source: &SourceId) -> Option<u64> {
     channel.cursor(source).map(|cursor| cursor.captured_through)
 }
 
+/// A's rotation as the store keeps it: the successor B's bind left for A, if any.
+fn successor_of(source: &SourceId) -> Option<Rotated> {
+    let store = OStore::existing(&root())?;
+    let era = store.read_era().ok()??;
+    let channel = store.open_channel(&era, CHANNEL_ID).ok()??;
+    let rotation = channel.rotation().ok()?;
+    rotation.successors.get(&source_key(source)).cloned()
+}
+
+/// `source`'s spool segment files on disk with their bytes, read without opening the store.
+fn segments_of(source: &SourceId) -> BTreeMap<PathBuf, Vec<u8>> {
+    let prefix = format!("{}-", source_key(source));
+    let mut files = tree(&root().join(STORE_DIR_NAME));
+    files.retain(|path, _| {
+        let name = path.file_name().and_then(|name| name.to_str());
+        let spool = path.parent().and_then(Path::file_name);
+        spool.is_some_and(|dir| dir == "spool")
+            && name.is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".seg"))
+    });
+    files
+}
+
 /// T6 and T6b: A is terminated with its sealed tail unread, with or without a successor B bound
 /// before the writer reads that tail.
 async fn sealed_tail(rig: herdr::P11TerminationRig, events: PathBuf, successor: bool) {
@@ -476,12 +668,7 @@ async fn sealed_tail(rig: herdr::P11TerminationRig, events: PathBuf, successor: 
     let mut o = OHost::new();
     o.start();
     append(&a_path, &assistant("m1", "answered before the termination"));
-    assert!(
-        o.posted(&["answered before the termination"]).await,
-        "{:?} {:?}",
-        o.posts(),
-        o.halts()
-    );
+    o.posted(&["answered before the termination"]).await;
 
     // The tail lands while the writer is down, so the termination meets it unread.
     o.stop().await;
@@ -517,26 +704,54 @@ async fn sealed_tail(rig: herdr::P11TerminationRig, events: PathBuf, successor: 
     run.assert_settled().await;
 
     let mut expected = vec!["answered before the termination", TAIL];
+    let (mut current, mut b) = (a_path.clone(), None);
     if successor {
-        let b_path = launch_and_attach_successor(&rig, &run).await;
+        let (b_path, b_source) = launch_and_attach_successor(&rig, &run).await;
         let (store, log) = o_state(&events);
         assert_eq!(store, before.0, "B's bind leaves O's store as it was");
         assert_ne!(log, before.1, "B's bind is logged for the writer");
         assert_eq!(cursor_of(&a_source), cursor, "B's bind leaves A's cursor");
+        assert_eq!(
+            successor_of(&a_source),
+            None,
+            "no rotation before the writer applies it"
+        );
         append(&b_path, &assistant("n1", "the successor's first answer"));
         expected.push("the successor's first answer");
+        (current, b) = (b_path, Some(b_source));
     }
 
     o.start();
-    assert!(o.posted(&expected).await, "{:?} {:?}", o.posts(), o.halts());
+    let reached = o.until(|posts| posts.len() >= expected.len()).await;
     o.stop().await;
+    if let Some(b_source) = &b {
+        // The applied bind keeps A's backlog end as A's boundary, and A's cursor reached it.
+        let next = successor_of(&a_source).expect("the writer rotated A to B");
+        assert_eq!((&next.source, next.drain_to), (b_source, Some(written)));
+        assert_eq!(next.tmux_session.as_deref(), Some(run.logical.as_str()));
+        assert_eq!(
+            cursor_of(&a_source),
+            Some(written),
+            "A drained to its boundary"
+        );
+    }
+    assert!(reached, "{:?} {:?}", o.posts(), o.halts());
+    assert_eq!(o.posts(), expected, "{:?}", o.halts());
     assert_eq!(posted_in_ledger(TAIL), 1, "the tail is delivered once");
-    // A restart takes the store back and posts nothing again.
+    // The restart's positive control: its own new output posts once, and nothing else again.
     o.start();
-    tokio::time::sleep(actor::POLL_INTERVAL * 4).await;
+    append(&current, &assistant("c1", RESTART_OUTPUT));
+    expected.push(RESTART_OUTPUT);
+    let reached = o
+        .until(|posts| posts.iter().any(|p| p == RESTART_OUTPUT))
+        .await;
     o.stop().await;
+    let tails = o.posts().iter().filter(|post| *post == TAIL).count();
+    assert_eq!(tails, 1, "the restart reposts no tail: {:?}", o.posts());
+    assert!(reached, "the restart posts its new output: {:?}", o.halts());
     assert_eq!(o.posts(), expected, "a restart reposts nothing");
     assert_eq!(posted_in_ledger(TAIL), 1);
+    assert_eq!(posted_in_ledger(RESTART_OUTPUT), 1);
     assert_eq!(o.halts(), Vec::<WriterAlarm>::new());
     assert_eq!(
         run.harness.provider_starts(),
@@ -548,49 +763,39 @@ async fn sealed_tail(rig: herdr::P11TerminationRig, events: PathBuf, successor: 
 }
 
 /// B's launch over the retired row and its attach, through the production launch and attach;
-/// returns B's transcript, now the pane's logged source.
-async fn launch_and_attach_successor(rig: &herdr::P11TerminationRig, run: &Terminating) -> PathBuf {
+/// returns B's transcript, now the pane's logged source, and that source.
+async fn launch_and_attach_successor(
+    rig: &herdr::P11TerminationRig,
+    run: &Terminating,
+) -> (PathBuf, SourceId) {
     let b_session = uuid::Uuid::new_v4().to_string();
     let b_path = root().join("b.jsonl");
     std::fs::write(&b_path, b"").unwrap();
     let cwd = root().join("cwd");
     std::fs::create_dir_all(&cwd).unwrap();
-    let prepare =
-        |prepared: &crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation| {
-            let config = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
-                tmux_session_name: prepared.context.tmux_session.clone(),
-                working_dir: cwd.clone(),
-                claude_bin: crate::services::claude_command::ClaudeBinary::from_tmux_wrapper_argv(
-                    "/usr/local/bin/claude",
-                ),
-                agentdesk_exe: PathBuf::from("/usr/local/bin/agentdesk"),
-                hook_endpoint: "http://127.0.0.1:1".into(),
-                session_id: b_session.clone(),
-                system_prompt: None,
-                model: None,
-                resume: false,
-            };
-            let files = crate::services::claude_tui::session::prepare_claude_tui_launch(&config)?;
-            Ok(HerdrLaunchCommand {
-                cwd: cwd.clone(),
-                command: format!("bash {}", files.launch_script_path.display()),
-            })
+    let prepare = |prepared: &PreparedIncarnation| {
+        let config = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
+            tmux_session_name: prepared.context.tmux_session.clone(),
+            working_dir: cwd.clone(),
+            claude_bin: crate::services::claude_command::ClaudeBinary::from_tmux_wrapper_argv(
+                "/usr/local/bin/claude",
+            ),
+            agentdesk_exe: PathBuf::from("/usr/local/bin/agentdesk"),
+            hook_endpoint: "http://127.0.0.1:1".into(),
+            session_id: b_session.clone(),
+            system_prompt: None,
+            model: None,
+            resume: false,
         };
-    let location = &run.location;
-    let launch = HerdrLaunch {
-        endpoint: Some(HerdrLaunchEndpoint {
-            execution_node: location.execution_node.clone(),
-            config_key: location.endpoint_config_key.clone(),
-            socket_addr: location.socket_addr.clone(),
-            herdr_session: location.named_session.clone(),
-        }),
-        owner: run.owner.clone(),
-        channel_id: Some(CHANNEL_ID),
-        expected_native_session_id: Some(b_session.clone()),
-        resume: false,
-        provider_root: None,
+        let files = crate::services::claude_tui::session::prepare_claude_tui_launch(&config)?;
+        Ok(HerdrLaunchCommand {
+            cwd: cwd.clone(),
+            command: format!("bash {}", files.launch_script_path.display()),
+        })
     };
-    let outcome = launch_herdr_session(&run.pool, launch, prepare, Arc::new(Successor)).await;
+    let launch = run.launch(Some(b_session.clone()), None);
+    let host = Arc::new(Successor("claude"));
+    let outcome = launch_herdr_session(&run.pool, launch, prepare, host).await;
     let Ok(HerdrLaunchOutcome::Launched {
         execution_nonce,
         location,
@@ -599,15 +804,7 @@ async fn launch_and_attach_successor(rig: &herdr::P11TerminationRig, run: &Termi
     else {
         panic!("{outcome:?}");
     };
-    let reader = SuccessorPane {
-        endpoint: HerdrEndpointId::of(&location),
-        evidence: HerdrPaneEvidence {
-            binding_nonce: Some(execution_nonce.clone()),
-            root: Some(successor_stamps(&execution_nonce).root),
-            provider_process: Some(successor_stamps(&execution_nonce).provider_process),
-            agent_session_id: Some(b_session.clone()),
-        },
-    };
+    let reader = LaunchedPane::successor(&location, &execution_nonce, "claude", &b_session);
     let attached = attach_launched_herdr_source(
         &run.pool,
         &run.owner,
@@ -629,15 +826,18 @@ async fn launch_and_attach_successor(rig: &herdr::P11TerminationRig, run: &Termi
         1,
         "B's launch went through its own host"
     );
-    b_path
+    let b_source = source_id_for(&b_session, &b_path).unwrap();
+    (b_path, b_source)
 }
 
-fn successor_stamps(nonce: &str) -> ExpectedExecution {
-    crate::db::dispatched_sessions::hosted_execution::tests::expected(nonce, 300)
+fn successor_stamps(nonce: &str, provider: &str) -> ExpectedExecution {
+    let mut stamps = crate::db::dispatched_sessions::hosted_execution::tests::expected(nonce, 300);
+    stamps.binding_provider = provider.into();
+    stamps
 }
 
-/// B's launch host: E7 off, one created pane and its evidence.
-struct Successor;
+/// B's launch host for `provider`: E7 off, one created pane and its evidence.
+struct Successor(&'static str);
 
 impl HerdrLaunchHost for Successor {
     fn restore_resume(&self, _: &HerdrLaunchEndpoint) -> RestoreResume {
@@ -653,17 +853,33 @@ impl HerdrLaunchHost for Successor {
     }
 
     fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap> {
-        Ok(successor_stamps(&probe.execution_nonce))
+        Ok(successor_stamps(&probe.execution_nonce, self.0))
     }
 }
 
-/// B's pane as its attach reads it: running B's provider.
-struct SuccessorPane {
+/// A launched pane as its attach reads it: running its execution's provider.
+struct LaunchedPane {
     endpoint: HerdrEndpointId,
     evidence: HerdrPaneEvidence,
 }
 
-impl HerdrExecutionReader for SuccessorPane {
+impl LaunchedPane {
+    /// B's pane at `location`, as `Successor` stamped execution `nonce`, running `session`.
+    fn successor(location: &HostedLocation, nonce: &str, provider: &str, session: &str) -> Self {
+        let stamps = successor_stamps(nonce, provider);
+        Self {
+            endpoint: HerdrEndpointId::of(location),
+            evidence: HerdrPaneEvidence {
+                binding_nonce: Some(nonce.into()),
+                root: Some(stamps.root),
+                provider_process: Some(stamps.provider_process),
+                agent_session_id: Some(session.into()),
+            },
+        }
+    }
+}
+
+impl HerdrExecutionReader for LaunchedPane {
     fn endpoint(&self) -> Option<&HerdrEndpointId> {
         Some(&self.endpoint)
     }
@@ -742,134 +958,441 @@ fn announced(id: &str) -> Vec<u8> {
         "type": "item_completed", "item": {"type": "AgentMessage", "id": id}}}))
 }
 
-/// T7: A, whose announced unit has no sealing record, is terminated while its full spool refuses
-/// the tail; B's bind then stalls the rotation. The terminated execution stays as O left it.
-///
-/// The rig's Herdr fixture runs a Claude provider, so the terminated execution is Claude's while
-/// the writer reads a Codex rollout: only a Codex rollout announces a unit before sealing it.
+/// A new Codex rollout of `session` under `sessions`, holding only its header.
+fn rollout(sessions: &Path, session: &str) -> PathBuf {
+    let path = sessions.join(format!("rollout-2026-10-11T07-00-00-{session}.jsonl"));
+    let header = serde_json::json!({"timestamp": "2026-10-11T07:00:00.000Z",
+        "type": "session_meta", "payload": {"id": session, "session_id": session,
+            "cwd": sessions, "originator": "codex-tui", "cli_version": "0.160.0",
+            "source": "cli"}});
+    std::fs::write(&path, line(header)).unwrap();
+    path
+}
+
+/// Codex's SessionStart of `session` as its hook relays it, under the launch context `context`.
+fn session_start(logical: &str, context: &Path, session: &str, path: &Path) -> IngressOutcome {
+    let envelope = HookBindingEnvelope::capture_from_env("codex", |name| {
+        (name == "AGENTDESK_BINDING_CONTEXT").then(|| context.as_os_str().to_owned())
+    });
+    let mut headers = axum::http::HeaderMap::new();
+    let encoded = envelope.encode().unwrap();
+    headers.insert(BINDING_HEADER, encoded.parse().unwrap());
+    let payload = serde_json::json!({"session_id": session, "source": "startup",
+        "hook_event_name": "SessionStart", "transcript_path": path});
+    let ingress = observe_binding_hook;
+    ingress(
+        "codex",
+        "SessionStart",
+        Some(logical),
+        Some(session),
+        &payload,
+        &headers,
+    )
+}
+
+/// The Codex writer's side: the gate it posts under, its posts and its raised alarms.
+struct Out {
+    gate: Arc<OwnershipGate>,
+    posts: Arc<Posts>,
+    alarms: Alarms,
+}
+
+impl Out {
+    fn new() -> Self {
+        let gate = Arc::new(OwnershipGate::default());
+        gate.acquired();
+        Self {
+            gate,
+            posts: Arc::default(),
+            alarms: Alarms::default(),
+        }
+    }
+
+    fn posts(&self) -> Vec<String> {
+        self.posts.to(CHANNEL_ID)
+    }
+
+    fn raised(&self) -> Vec<WriterAlarm> {
+        let raised = self.alarms.0.lock().unwrap();
+        raised.iter().map(|(_, alarm)| alarm.clone()).collect()
+    }
+
+    /// The channel's Codex actor over `channel` following `bindings`, and its poll view.
+    fn run<B: BindingEvents>(&self, channel: ChannelStore, bindings: Arc<B>) -> Running {
+        let (gate, posts) = (Arc::clone(&self.gate), Arc::clone(&self.posts));
+        let writer = ChannelWriter::new(channel, gate, posts, AnyLease, self.alarms.clone());
+        let (stop, stopped) = watch::channel(false);
+        let owing = Owing::default();
+        let view = OwedView {
+            published: owing.published.subscribe(),
+            demand: owing.demand.clone(),
+        };
+        let watches = (
+            stopped,
+            watch::channel(false).0,
+            watch::channel(None).0,
+            owing,
+        );
+        let config = WriterConfig { enabled: true };
+        let provider = ShadowProvider::Codex;
+        let task = actor::spawn_projecting(&config, writer, provider, bindings, watches);
+        let task = task.expect("an enabled writer");
+        Running { stop, task, view }
+    }
+}
+
+struct Running {
+    stop: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<Option<StopCause>>,
+    view: OwedView,
+}
+
+impl Running {
+    async fn stop(self) -> Option<StopCause> {
+        self.stop.send_replace(true);
+        let ended = tokio::time::timeout(WAIT, self.task).await;
+        ended
+            .expect("hang guard: the writer did not stop")
+            .expect("the writer task")
+    }
+}
+
+/// T7's A: a settled message and a unit announced without its sealing record, spooled before
+/// the writer starts; the tail written after them no longer fits the spool.
+struct Unsealed {
+    store: OStore,
+    era: OEra,
+    a: SourceId,
+    /// A's spool segments as spooled before the writer started.
+    segments: BTreeMap<PathBuf, Vec<u8>>,
+    spooled: u64,
+    settled: String,
+    tail: String,
+}
+
+impl Unsealed {
+    fn spool(a: &SourceId, build: &str) -> (Self, ChannelStore) {
+        let (store, era) = begin_era(a, build);
+        let settled = "x".repeat(1800);
+        let body = [codex_message("msg_s", &settled), announced("msg_k")].concat();
+        append(&a.path, &body);
+        let mut channel = store.open_channel(&era, CHANNEL_ID).unwrap().unwrap();
+        let mut capture = SourceCapture::open(a.clone(), 0).unwrap();
+        let CaptureOutcome::Batch(batch) = capture.poll(MAX_READ_BYTES) else {
+            panic!("capture failed");
+        };
+        channel
+            .append_spool(&batch, &capture.prefix_hash())
+            .unwrap();
+        let spooled = capture.captured_through();
+        let segments = segments_of(a);
+        assert!(!segments.is_empty(), "A is spooled");
+        channel.set_limits_for_test(1, channel.spool_bytes() + 1024);
+        let tail = "y".repeat(1500);
+        append(&a.path, &codex_message("msg_t", &tail));
+        let a = a.clone();
+        let unsealed = Self {
+            store,
+            era,
+            a,
+            segments,
+            spooled,
+            settled,
+            tail,
+        };
+        (unsealed, channel)
+    }
+
+    /// The writer's first polls: the settled message posts and the tail is refused, while the
+    /// announced unit keeps A's spool from GC.
+    async fn refused(&self, out: &Out, running: &Running) {
+        let settled = [self.settled.clone()];
+        let refused = || out.posts() == settled && out.raised().contains(&WriterAlarm::SpoolFull);
+        polls_until(&running.view, refused).await;
+        let after = polled(&running.view, 2).await;
+        let (posts, raised) = (out.posts(), out.raised());
+        let kept = segments_of(&self.a) == self.segments;
+        assert!(
+            kept,
+            "the unsealed unit keeps A's spool from GC: {posts:?} {raised:?}"
+        );
+        let after = after.expect("the writer runs on with the tail refused");
+        let after = after.expect("the writer reads its store");
+        assert_eq!(
+            after.unsealed, 1,
+            "A's announced unit is unsealed: {after:?}"
+        );
+        assert_eq!(after.uncaptured, 1, "A's tail is unread: {after:?}");
+        assert_eq!(raised, [WriterAlarm::SpoolFull]);
+        assert_eq!(posts, settled);
+    }
+
+    /// The termination of A's execution while its writer runs: A's spool, unit and alarms stay
+    /// as O left them, and the log gains no bind.
+    async fn survives(&self, run: &Terminating, out: &Out, running: &Running) {
+        let logged = binding_events::binding_events_since(CHANNEL_ID, 0).unwrap();
+        assert_eq!(run.terminate().await, TerminationResult::Retired);
+        run.assert_settled().await;
+        let after = polled(&running.view, 2).await;
+        let kept = segments_of(&self.a) == self.segments;
+        assert!(
+            kept,
+            "A's spool is as O left it: {:?}",
+            segments_of(&self.a).keys()
+        );
+        let after = after.expect("the writer runs on past the termination");
+        let after = after.expect("the writer reads its store");
+        assert_eq!(after.unsealed, 1, "A's unit is still unsealed: {after:?}");
+        assert_eq!(out.raised(), [WriterAlarm::SpoolFull]);
+        assert_eq!(out.posts(), std::slice::from_ref(&self.settled));
+        let now = binding_events::binding_events_since(CHANNEL_ID, 0).unwrap();
+        assert_eq!(now, logged, "the service logs no bind");
+    }
+
+    /// B bound: the rotation stalls on A's refused tail and stops the writer before anything
+    /// else posts; A keeps its cursor, ledger and spool, and B's boundary waits on A's end.
+    async fn stalled(&self, out: &Out, running: Running, b: &SourceId) -> ChannelStore {
+        // The actor's view closes when it ends; a running one keeps publishing its polls.
+        let mut ended = false;
+        for _ in 0..POLLS {
+            if polled(&running.view, 1).await.is_none() {
+                ended = true;
+                break;
+            }
+        }
+        let cause = running.stop().await;
+        let stall = WriterAlarm::RotationStalled {
+            source: self.a.clone(),
+        };
+        assert_eq!(out.raised(), [WriterAlarm::SpoolFull, stall], "{cause:?}");
+        let settled = [self.settled.clone()];
+        assert_eq!(out.posts(), settled, "nothing is posted past the stall");
+        assert!(ended, "the stalled rotation stops the writer: {cause:?}");
+        let channel = self
+            .store
+            .open_channel(&self.era, CHANNEL_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            channel.cursor(&self.a).unwrap().captured_through,
+            self.spooled
+        );
+        let b_read = channel
+            .cursor(b)
+            .map_or(0, |cursor| cursor.captured_through);
+        assert_eq!(b_read, 0);
+        let ledger = channel.ledger();
+        let pieces: Vec<_> = (0..ledger.next_serial())
+            .filter_map(|serial| ledger.piece(serial))
+            .map(|piece| piece.unit_key.native_key.clone())
+            .collect();
+        assert_eq!(
+            pieces,
+            ["msg_s"],
+            "the announced unit was neither sealed nor posted"
+        );
+        assert!(
+            channel.retained_segments(&self.a) > 0,
+            "the unsealed unit keeps A's spool from GC"
+        );
+        assert!(
+            segments_of(&self.a) == self.segments,
+            "A's spool is as O left it"
+        );
+        let unit = |native: &str| crate::services::tui_o::shadow::UnitKey {
+            channel_id: CHANNEL_ID,
+            provider: ShadowProvider::Codex,
+            native_key: native.into(),
+            kind: crate::services::tui_o::shadow::UnitKind::Body,
+        };
+        assert_eq!(ledger.excluded(&unit("msg_k")), None, "nor excluded");
+        let rotation = channel.rotation().unwrap();
+        let next = rotation.successors.get(&source_key(&self.a));
+        let a_end = std::fs::metadata(&self.a.path).unwrap().len();
+        let boundary = next.map(|next| (&next.source, next.drain_to));
+        assert_eq!(boundary, Some((b, Some(a_end))), "B succeeds A at A's end");
+        channel
+    }
+
+    /// The operator's restart: B's own record seals the unit, posted once after A's tail; then a
+    /// new output of B posts once, the restarted writer's positive control.
+    async fn restarted<B>(&self, out: &Out, channel: ChannelStore, binds: Arc<B>, b_path: &Path)
+    where
+        B: BindingEvents,
+    {
+        let running = out.run(channel, binds);
+        let answer = "the answer".to_string();
+        let mut all = vec![self.settled.clone(), self.tail.clone(), answer];
+        polls_until(&running.view, || out.posts().len() >= all.len()).await;
+        assert_eq!(out.posts(), all, "{:?}", out.raised());
+        append(b_path, &codex_message("msg_c", RESTART_OUTPUT));
+        all.push(RESTART_OUTPUT.into());
+        let posted = polls_until(&running.view, || out.posts().len() >= all.len()).await;
+        let cause = running.stop().await;
+        assert!(posted, "{:?} {:?} {cause:?}", out.posts(), out.raised());
+        assert_eq!(out.posts(), all);
+        assert_eq!(
+            posted_in_ledger(&self.tail),
+            1,
+            "A's tail is delivered once"
+        );
+    }
+}
+
+/// T7: Codex execution A, attached to the rollout its own SessionStart logged, leaves an unsealed
+/// unit and a refused tail; its own termination keeps them as O left them, and B's launch stalls.
 async fn unsealed(rig: herdr::P11TerminationRig) {
+    let (run, context, sessions) = Terminating::launch_codex(&rig).await;
+    let a_session = uuid::Uuid::new_v4().to_string();
+    let a_path = rollout(&sessions, &a_session);
+    let a = own_source(&run, &context, &a_session, &a_path).await;
+    let (unsealed, channel) = Unsealed::spool(&a, "m2t-t7");
+    let out = Out::new();
+    let bindings = Arc::new(ChannelBindingLog::new(CHANNEL_ID, ShadowProvider::Codex));
+    let running = out.run(channel, Arc::clone(&bindings));
+    unsealed.refused(&out, &running).await;
+    unsealed.survives(&run, &out, &running).await;
+    let row = herdr::row(&run.pool, &run.session_key).await;
+    let retired = Some((herdr::HostedState::Retired, herdr::EXECUTION.to_string()));
+    assert_eq!(row, retired, "the terminated execution is A's");
+    // B's rollout seals A's announced unit, read only after A's refused tail.
+    let b_body = [announced("msg_k"), codex_message("msg_k", "the answer")].concat();
+    let (b, b_path) = launch_codex_successor(&run, &sessions, &a, &b_body).await;
+    let channel = unsealed.stalled(&out, running, &b).await;
+    unsealed.restarted(&out, channel, bindings, &b_path).await;
+    run.finish().await;
+}
+
+/// A's own SessionStart through the hook ingress, then its attach: one logged source naming this
+/// execution, provider and channel, which O's log reader binds as A.
+async fn own_source(run: &Terminating, context: &Path, session: &str, path: &Path) -> SourceId {
+    let started = session_start(&run.logical, context, session, path);
+    assert_eq!(started, IngressOutcome::Durable(DurableKind::Adopted));
+    let logged = binding_events::binding_events_since(CHANNEL_ID, 0).unwrap();
+    let [event] = logged.as_slice() else {
+        panic!("one logged bind: {logged:?}");
+    };
+    let binding_events::BindingTarget::Source(source) = &event.new else {
+        panic!("a logged source: {event:?}");
+    };
+    let named = (event.provider.as_str(), event.channel_id);
+    assert_eq!(
+        named,
+        (run.owner.provider.as_str(), CHANNEL_ID),
+        "{event:?}"
+    );
+    assert_eq!(run.owner.channel_id, CHANNEL_ID.to_string());
+    assert_eq!(event.execution_nonce.as_deref(), Some(herdr::EXECUTION));
+    assert_eq!(event.tmux_session, run.logical);
+    assert_eq!(
+        (source.session_id.as_str(), source.path.as_path()),
+        (session, path)
+    );
+    let reader = run.own_pane(session);
+    let nonce = herdr::EXECUTION;
+    let attach = attach_launched_codex_herdr_source;
+    let attached = attach(&run.pool, &run.owner, CHANNEL_ID, nonce, source, &reader).await;
+    assert!(
+        matches!(attached, HerdrSourceAttach::Published { bound: true, .. }),
+        "{attached:?}"
+    );
+    let row = herdr::row(&run.pool, &run.session_key).await;
+    assert_eq!(row, Some((herdr::HostedState::Bound, nonce.to_string())));
+    let read = ChannelBindingLog::new(CHANNEL_ID, ShadowProvider::Codex);
+    let read = read.binding_events_since(CHANNEL_ID, 0).unwrap();
+    let [read] = read.as_slice() else {
+        panic!("O reads one bind: {read:?}");
+    };
+    assert_eq!(read.execution_nonce, nonce);
+    let names = |new: &SourceId| new == source;
+    assert!(
+        matches!(&read.record, BindingRecord::Bound { new: BindingTarget::Source(new), .. } if names(new)),
+        "{read:?}"
+    );
+    source.clone()
+}
+
+/// B's launch over A's retired row through the production launch, its own SessionStart and its
+/// attach; the log names B after A for B's execution. Returns B's source and rollout.
+async fn launch_codex_successor(
+    run: &Terminating,
+    sessions: &Path,
+    a: &SourceId,
+    body: &[u8],
+) -> (SourceId, PathBuf) {
+    let b_session = uuid::Uuid::new_v4().to_string();
+    let b_path = rollout(sessions, &b_session);
+    append(&b_path, body);
+    let cwd = root().join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let context = Mutex::new(None);
+    let prepare = |prepared: &PreparedIncarnation| {
+        *context.lock().unwrap() = Some(prepared.path.clone());
+        let command = "codex".to_string();
+        Ok(HerdrLaunchCommand { cwd, command })
+    };
+    let launch = run.launch(None, Some(sessions.to_path_buf()));
+    let host = Arc::new(Successor("codex"));
+    let outcome = launch_herdr_session(&run.pool, launch, prepare, host).await;
+    let Ok(HerdrLaunchOutcome::Launched {
+        execution_nonce,
+        location,
+        evidence: Ok(()),
+    }) = outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    let context = context.lock().unwrap().clone().expect("B's launch context");
+    let started = session_start(&run.logical, &context, &b_session, &b_path);
+    assert_eq!(started, IngressOutcome::Durable(DurableKind::Adopted));
+    let logged = binding_events::binding_events_since(CHANNEL_ID, 0).unwrap();
+    let event = logged.last().expect("B's logged bind");
+    let binding_events::BindingTarget::Source(source) = &event.new else {
+        panic!("a logged source: {event:?}");
+    };
+    assert_eq!(
+        event.execution_nonce.as_deref(),
+        Some(execution_nonce.as_str())
+    );
+    assert_eq!(event.old.as_ref(), Some(a), "B succeeds A in the log");
+    let reader = LaunchedPane::successor(&location, &execution_nonce, "codex", &b_session);
+    let nonce = execution_nonce.as_str();
+    let attach = attach_launched_codex_herdr_source;
+    let attached = attach(&run.pool, &run.owner, CHANNEL_ID, nonce, source, &reader).await;
+    assert!(
+        matches!(attached, HerdrSourceAttach::Published { bound: true, .. }),
+        "{attached:?}"
+    );
+    let row = herdr::row(&run.pool, &run.session_key).await;
+    assert_eq!(
+        row,
+        Some((herdr::HostedState::Bound, execution_nonce.clone()))
+    );
+    (source.clone(), b_path)
+}
+
+/// T7u, the O actor's own regression: the rig's Claude execution and a listed log, unlinked to the
+/// Codex rollout whose unsealed unit keeps its spool through the termination and the stall.
+async fn unsealed_actor(rig: herdr::P11TerminationRig) {
     let run = Terminating::bind(&rig).await;
     let a_path = root().join("rollout-a.jsonl");
     std::fs::write(&a_path, b"").unwrap();
     let a = source_id_for("codex-a", &a_path).unwrap();
-    let (store, era) = begin_era(&a, "m2t-t7");
     let binds = LoggedBinds::new();
     binds.bind(None, &a, BindingCause::Startup);
-    let settled = "x".repeat(1800);
-    append(
-        &a_path,
-        &[codex_message("msg_s", &settled), announced("msg_k")].concat(),
-    );
-    let mut channel = store.open_channel(&era, CHANNEL_ID).unwrap().unwrap();
-    let mut capture = SourceCapture::open(a.clone(), 0).unwrap();
-    let CaptureOutcome::Batch(batch) = capture.poll(MAX_READ_BYTES) else {
-        panic!("capture failed");
-    };
-    channel
-        .append_spool(&batch, &capture.prefix_hash())
-        .unwrap();
-    let spooled = capture.captured_through();
-    channel.set_limits_for_test(1, channel.spool_bytes() + 1024);
-    let tail = "y".repeat(1500);
-    append(&a_path, &codex_message("msg_t", &tail));
-
-    let gate = Arc::new(OwnershipGate::default());
-    gate.acquired();
-    let (posts, alarms) = (Arc::new(Posts::default()), Alarms::default());
-    let start = |channel| {
-        let writer = ChannelWriter::new(
-            channel,
-            Arc::clone(&gate),
-            Arc::clone(&posts),
-            AnyLease,
-            alarms.clone(),
-        );
-        let (stop, stopped) = watch::channel(false);
-        let config = WriterConfig { enabled: true };
-        let resumed = watch::channel(false).0;
-        let provider = ShadowProvider::Codex;
-        let task =
-            actor::spawn_if_enabled(&config, writer, provider, binds.clone(), stopped, resumed);
-        (stop, task.expect("an enabled writer"))
-    };
-    let raised = |alarms: &Alarms| -> Vec<WriterAlarm> {
-        alarms
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(_, alarm)| alarm.clone())
-            .collect()
-    };
-    let (_stop, task) = start(channel);
-    let refused = wait_until(WAIT, || {
-        let ready = posts.to(CHANNEL_ID) == [settled.clone()]
-            && raised(&alarms).contains(&WriterAlarm::SpoolFull);
-        Box::pin(async move { ready })
-    })
-    .await;
-    assert!(refused, "{:?} {:?}", posts.to(CHANNEL_ID), raised(&alarms));
-
-    assert_eq!(run.terminate().await, TerminationResult::Retired);
-    run.assert_settled().await;
+    let (unsealed, channel) = Unsealed::spool(&a, "m2t-t7u");
+    let out = Out::new();
+    let running = out.run(channel, Arc::clone(&binds));
+    unsealed.refused(&out, &running).await;
+    unsealed.survives(&run, &out, &running).await;
     // The successor's bind: its rollout seals the announced unit only after A's refused tail.
     let b_path = a_path.with_file_name("rollout-b.jsonl");
     let b_body = [announced("msg_k"), codex_message("msg_k", "the answer")].concat();
     std::fs::write(&b_path, b_body).unwrap();
     let b = source_id_for("codex-b", &b_path).unwrap();
     binds.bind(Some(&a), &b, BindingCause::Resume);
-    let stalled = tokio::time::timeout(WAIT, task).await;
-    assert!(stalled.is_ok(), "a stalled rotation stops the channel");
-    let stall = WriterAlarm::RotationStalled { source: a.clone() };
-    assert_eq!(raised(&alarms), [WriterAlarm::SpoolFull, stall]);
-    assert_eq!(
-        posts.to(CHANNEL_ID),
-        [settled.clone()],
-        "nothing is posted past the stall"
-    );
-    let channel = store.open_channel(&era, CHANNEL_ID).unwrap().unwrap();
-    assert_eq!(channel.cursor(&a).unwrap().captured_through, spooled);
-    assert_eq!(
-        channel
-            .cursor(&b)
-            .map_or(0, |cursor| cursor.captured_through),
-        0
-    );
-    let ledger = channel.ledger();
-    let pieces: Vec<_> = (0..ledger.next_serial())
-        .filter_map(|serial| ledger.piece(serial))
-        .map(|piece| piece.unit_key.native_key.clone())
-        .collect();
-    assert_eq!(
-        pieces,
-        ["msg_s"],
-        "the announced unit was neither sealed nor posted"
-    );
-    assert!(
-        channel.retained_segments(&a) > 0,
-        "the unsealed unit keeps A's spool from GC"
-    );
-    let unit = |native: &str| crate::services::tui_o::shadow::UnitKey {
-        channel_id: CHANNEL_ID,
-        provider: ShadowProvider::Codex,
-        native_key: native.into(),
-        kind: crate::services::tui_o::shadow::UnitKind::Body,
-    };
-    assert_eq!(ledger.excluded(&unit("msg_k")), None, "nor excluded");
-
-    // The operator's restart: B's own record seals the unit, which is posted once, after A's tail.
-    let (stop, task) = start(channel);
-    let all = [settled.clone(), tail.clone(), "the answer".to_string()];
-    let posted = wait_until(WAIT, || {
-        let done = posts.to(CHANNEL_ID).len() >= all.len();
-        Box::pin(async move { done })
-    })
-    .await;
-    assert!(posted, "{:?} {:?}", posts.to(CHANNEL_ID), raised(&alarms));
-    tokio::time::sleep(actor::POLL_INTERVAL * 2).await;
-    assert_eq!(posts.to(CHANNEL_ID), all);
-    stop.send_replace(true);
-    let _ = task.await;
+    let channel = unsealed.stalled(&out, running, &b).await;
+    unsealed.restarted(&out, channel, binds, &b_path).await;
     run.finish().await;
 }
 

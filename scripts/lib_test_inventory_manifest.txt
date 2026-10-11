@@ -1288,6 +1288,7 @@ server::routes::health_api::tests::supported_provider_ids_contain_no_colon
 server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_nothing_for_a_measured_backlog
 server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_nothing_when_readiness_also_refuses
 server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_only_when_no_unrelayed_answer_refuses
+server::routes::herdr_legacy_tests::m2t_t8_auth_unlink_cleans_auth_only_and_refuses_a_herdr_claim_pg
 server::routes::herdr_legacy_tests::m2t_t8_legacy_delete_and_force_routes_preserve_host_guards_pg
 server::routes::herdr_terminate::tests::act_result_mapping_has_retired_as_the_only_success
 server::routes::herdr_terminate::tests::act_route_non_loopback_peer_or_browser_origin_refused
@@ -8350,7 +8351,8 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registe
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_session_starts_its_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6_sealed_tail_delivered_once_after_termination_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6b_successor_launch_preserves_a_tail_and_cursor_pg
-services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7_unsealed_survives_termination_and_rotation_stall_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7_codex_execution_unsealed_survives_its_own_termination_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7u_o_actor_unsealed_survives_rotation_stall_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real::a_p11_m2_last_pane_close_and_exact_retire
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e::act_route_disconnect_after_close_still_settles_pg
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_claude_idle_binding_does_not_resume_its_synthetic_row

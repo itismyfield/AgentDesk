@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "cda35abdf35b86d37536ea110debb4ae4597e481",
+  "measured_at_sha": "c69e0295c17cab5e47089514186b4019fe34b1f0",
   "records": [
     {
       "root": "migrations/postgres",
@@ -38503,6 +38503,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:52b1efa6b9e2eb90854a9717c6207b2ee4ea03e68a8d7a4721b3af02ec996478"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_host/herdr_gate_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:311e940a768b5eb67e4d80e6a791e090c2f17b29dd9c1317377441eccbcd6912"
     },
     {
       "root": "src",

@@ -284,3 +284,133 @@ async fn scenario(rig: herdr::P11TerminationRig) {
     pool.close().await;
     db.drop().await;
 }
+
+const AUTH_ONLY: &str = "p11-auth-only";
+const CLAIMED: &str = "p11-herdr-claimed";
+
+/// org.yaml naming both profiles as auth-only Claude accounts, each with its credential home.
+fn seed_profiles(accounts: &FsPath) -> std::path::PathBuf {
+    let root = crate::config::runtime_root().expect("the test runtime root");
+    let org = crate::services::discord::runtime_store::org_schema_path_for_root(&root);
+    std::fs::create_dir_all(org.parent().unwrap()).unwrap();
+    let mut yaml = String::from("version: 1\nprovider_auth_profiles:\n");
+    for profile in [AUTH_ONLY, CLAIMED] {
+        let home = accounts.join(profile);
+        std::fs::create_dir_all(&home).unwrap();
+        let entry = format!(
+            "  {profile}:\n    provider: claude\n    home: {}\n",
+            home.display()
+        );
+        yaml.push_str(&entry);
+    }
+    std::fs::write(&org, yaml).unwrap();
+    org
+}
+
+fn profiles(org: &FsPath) -> Vec<String> {
+    let document: serde_yaml::Value = serde_yaml::from_slice(&std::fs::read(org).unwrap()).unwrap();
+    let profiles = document["provider_auth_profiles"].as_mapping().unwrap();
+    let ids = profiles.keys().filter_map(|key| key.as_str());
+    ids.map(str::to_owned).collect()
+}
+
+// T8-b: an auth-only profile's unlink still drops it from org.yaml and kills its login tmux, while
+// a login target a Herdr marker claims, beside Bound and Retired rows, is refused with nothing changed.
+#[tokio::test]
+async fn m2t_t8_auth_unlink_cleans_auth_only_and_refuses_a_herdr_claim_pg() {
+    use super::provider_auth_profiles::remove_profile;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = tempfile::tempdir().unwrap();
+    let _path = recording_tmux(tmux.path());
+    let accounts = tempfile::tempdir().unwrap();
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _home = set("HOME", accounts.path());
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let org = seed_profiles(accounts.path());
+    let provider = crate::services::provider::ProviderKind::Claude;
+    let login = |profile| {
+        crate::services::provider_auth_profile::login_tmux_session_name(&provider, profile)
+    };
+    let (claimed, auth_only) = (login(CLAIMED), login(AUTH_ONLY));
+    let marker = crate::services::tmux_common::session_temp_path(&claimed, "host_kind");
+    std::fs::create_dir_all(FsPath::new(&marker).parent().unwrap()).unwrap();
+    std::fs::write(&marker, "herdr").unwrap();
+    let host = crate::services::platform::hostname_short();
+    let mut keys = Vec::new();
+    for (channel, state) in [
+        ("5340911", HostedState::Bound),
+        ("5340912", HostedState::Retired),
+    ] {
+        let mut claimant = owner(channel);
+        claimant.logical_key = claimed.clone();
+        let key = format!("{host}:{claimed}-{channel}");
+        seed(
+            &pool,
+            &key,
+            channel,
+            Some(wire(&record(&claimant, "n-claimed", state))),
+        )
+        .await;
+        keys.push(key);
+    }
+    let mut rows = Vec::new();
+    for key in &keys {
+        rows.push(row(&pool, key).await.expect("a seeded Herdr row"));
+    }
+    let org_before = std::fs::read(&org).unwrap();
+
+    let removed = remove_profile(Path(("claude".to_string(), CLAIMED.to_string()))).await;
+    let error = removed.expect_err("the claimed target's unlink is refused");
+    assert_eq!(error.status(), StatusCode::CONFLICT, "{error:?}");
+    assert_eq!(
+        std::fs::read(&org).unwrap(),
+        org_before,
+        "org.yaml is unchanged"
+    );
+    assert_eq!(
+        tmux_calls(tmux.path()),
+        Vec::<String>::new(),
+        "no tmux call"
+    );
+    for (key, before) in keys.iter().zip(&rows) {
+        assert_eq!(
+            row(&pool, key).await.as_ref(),
+            Some(before),
+            "the Herdr rows are unchanged"
+        );
+    }
+
+    // The positive control: the auth-only profile is unlinked and its login tmux killed.
+    let removed = remove_profile(Path(("claude".to_string(), AUTH_ONLY.to_string()))).await;
+    let (status, Json(body)) = removed.expect("the auth-only unlink succeeds");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["credentials_retained"], true, "{body}");
+    assert_eq!(
+        profiles(&org),
+        [CLAIMED],
+        "only the auth-only profile is unlinked"
+    );
+    let calls = tmux_calls(tmux.path());
+    let on =
+        |verb: &str, target: &str| calls.iter().any(|c| c.contains(verb) && c.contains(target));
+    assert!(on("has-session", &auth_only), "{calls:?}");
+    assert!(on("kill-session", &auth_only), "{calls:?}");
+    assert!(
+        calls.iter().all(|call| !call.contains(&claimed)),
+        "{calls:?}"
+    );
+    assert!(
+        accounts.path().join(AUTH_ONLY).is_dir(),
+        "credentials are kept"
+    );
+    for (key, before) in keys.iter().zip(&rows) {
+        assert_eq!(
+            row(&pool, key).await.as_ref(),
+            Some(before),
+            "the Herdr rows are unchanged"
+        );
+    }
+    pool.close().await;
+    db.drop().await;
+}
