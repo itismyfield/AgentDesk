@@ -5,6 +5,41 @@ use super::herdr_admitted_restart::ADMITTED_ABORT_NOTICE;
 use super::*;
 use crate::services::discord::gateway::{DiscordGateway, TurnGateway};
 
+/// Receipt rows stay outside ordinary replay recovery, even when settlement retains them.
+pub(super) async fn settle_receipt(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+) -> bool {
+    if inflight::receipt_mutant("all-early")
+        || (state.herdr_before_start_stop.is_none()
+            && !inflight::before_start_receipt_present(provider, state.channel_id))
+    {
+        return false;
+    }
+    if let Some(receipt) = decode(shared, provider, state) {
+        receipt.settle(http, shared, state).await;
+    }
+    true
+}
+
+pub(super) fn herdr_turn_held(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+) -> bool {
+    #[cfg(test)]
+    if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
+        "restart_none_as_complete",
+    ) {
+        return false;
+    }
+    crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
+        && state.tui_terminal_kind.is_none()
+        && recovery_tmux_session_name(provider, state)
+            .is_some_and(|name| crate::services::discord::turn_bridge::herdr_marked(&name))
+}
+
 /// A row that carries a policy receipt; a row without one never gets here.
 pub(super) enum BeforeStartRestart {
     /// A readable receipt of a prior process's turn: notice if pending, ack, clear.

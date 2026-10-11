@@ -40,18 +40,7 @@ fn recovery_output_path_with_tmux_fallback(
 }
 
 #[cfg(unix)]
-fn herdr_turn_held(provider: &ProviderKind, state: &inflight::InflightTurnState) -> bool {
-    #[cfg(test)]
-    if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
-        "restart_none_as_complete",
-    ) {
-        return false;
-    }
-    crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
-        && state.tui_terminal_kind.is_none()
-        && recovery_tmux_session_name(provider, state)
-            .is_some_and(|name| crate::services::discord::turn_bridge::herdr_marked(&name))
-}
+use super::herdr_before_start_restart::herdr_turn_held;
 
 #[path = "restore_inflight/kickoff_identity.rs"]
 mod kickoff_identity;
@@ -125,16 +114,15 @@ async fn restore_inflight_states(
         {
             continue;
         }
+        #[cfg(unix)]
+        if super::herdr_before_start_restart::settle_receipt(http, shared, provider, &state).await {
+            continue;
+        }
+        #[cfg(not(unix))]
         if !inflight::receipt_mutant("all-early")
             && (state.herdr_before_start_stop.is_some()
                 || inflight::before_start_receipt_present(provider, state.channel_id))
         {
-            #[cfg(unix)]
-            if let Some(receipt) =
-                super::herdr_before_start_restart::decode(shared, provider, &state)
-            {
-                receipt.settle(http, shared, &state).await;
-            }
             continue;
         }
         // An unverified projected receipt waits for another pass without persisting a read error.
