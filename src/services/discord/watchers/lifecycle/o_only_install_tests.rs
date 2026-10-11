@@ -486,7 +486,16 @@ fn o_install_direct_resume_commit_required_is_explicit_and_current_native_succee
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     test_rt().block_on(async {
+        use std::io::BufRead;
         use std::os::unix::fs::PermissionsExt;
+        use std::process::{Child, Command, Stdio};
+        struct ResumeProcess(Child);
+        impl Drop for ResumeProcess {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
         let root = tempfile::tempdir().unwrap();
         let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",
@@ -508,17 +517,26 @@ fn o_install_direct_resume_commit_required_is_explicit_and_current_native_succee
         std::fs::write(&native, &initial_bytes).unwrap();
         let bin = root.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
-        for (name, body) in [
-            ("tmux", "#!/bin/sh\nprintf '%s\n' 123\n".to_string()),
-            (
-                "ps",
-                format!("#!/bin/sh\nprintf '%s\n' 'codex resume {id}'\n"),
-            ),
-        ] {
-            let script = bin.join(name);
-            std::fs::write(&script, body).unwrap();
-            std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let codex = bin.join("codex");
+        // Keep the shell's resume argv live for both ps and /proc without descendants.
+        std::fs::write(&codex, "#!/bin/sh\nprintf 'ready\\n'\nread -r hold\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut resume = ResumeProcess(
+            Command::new(&codex)
+                .args(["resume", &id])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut ready = String::new();
+        std::io::BufReader::new(resume.0.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready, "ready\n");
+        let tmux = bin.join("tmux");
+        std::fs::write(&tmux, format!("#!/bin/sh\nprintf '%s\\n' {}\n", resume.0.id())).unwrap();
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _path = crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(&bin);
         assert_eq!(
             fixture.install().await,
