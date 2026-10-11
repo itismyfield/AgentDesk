@@ -18,6 +18,14 @@ type Seen = Arc<StdMutex<Vec<(String, Vec<u8>)>>>;
 /// Outcome kind, wire, counted and throttled.
 type Summary = (&'static str, u32, u32, u32);
 
+impl RepostHttp {
+    /// Keeps the factory's client and rate authority while directing test requests to loopback.
+    pub(crate) fn at_base(mut self, base: String) -> Self {
+        self.base = Some(base);
+        self
+    }
+}
+
 enum Reply {
     Raw(String),
     /// Closes the connection without answering.
@@ -294,6 +302,83 @@ async fn bounded_create_shares_the_gateway_route_bucket_and_refuses_a_lone_limit
         Some(Unsupported::Proxy)
     );
     assert!(RepostHttp::new(Arc::new(serenity::Http::new("test-token"))).is_ok());
+}
+
+#[tokio::test]
+async fn f6_gateway_and_delegated_transport_share_rate_authority() {
+    use crate::services::discord::outbound::o_writer_io::GatewayPort;
+
+    let gateway = Arc::new(serenity::Http::new("gateway-token"));
+    let delegated = Arc::new(serenity::Http::new("rest-token"));
+    let gateway_routes = gateway.ratelimiter.as_ref().unwrap().routes();
+    let delegated_routes = delegated.ratelimiter.as_ref().unwrap().routes();
+    assert!(!Arc::ptr_eq(&gateway_routes, &delegated_routes));
+    let bucket_key = Route::ChannelMessages {
+        channel_id: ChannelId::new(CHANNEL),
+    }
+    .ratelimiting_bucket();
+    for (name, http) in [("gateway", gateway), ("delegated REST", delegated)] {
+        let routes = http.ratelimiter.as_ref().unwrap().routes();
+        let authority = Arc::clone(routes.write().await.entry(bucket_key).or_default());
+        let mock = Mock::start(vec![
+            created_with(
+                None,
+                &[
+                    ("x-ratelimit-limit", "1"),
+                    ("x-ratelimit-remaining", "0"),
+                    ("x-ratelimit-reset-after", "0.30"),
+                ],
+            ),
+            created(None),
+        ])
+        .await;
+        let port = GatewayPort::new(Arc::clone(&http), 42);
+        let transport = port.repost_http().unwrap().at_base(mock.base.clone());
+        assert_eq!(
+            summary(&dispatch(&transport, always()).await),
+            ("created", 1, 1, 0),
+            "{name}"
+        );
+        assert_eq!(
+            mock.requests().len(),
+            1,
+            "{name}: first POST reached loopback"
+        );
+        assert!(
+            Arc::ptr_eq(routes.read().await.get(&bucket_key).unwrap(), &authority),
+            "{name}"
+        );
+        let bucket = authority.lock().await;
+        assert_eq!(
+            (bucket.limit(), bucket.remaining()),
+            (1, 0),
+            "{name}: the port's own bucket was charged"
+        );
+        assert!(bucket.reset().is_some(), "{name}");
+        drop(bucket);
+
+        let started = Instant::now();
+        assert_eq!(
+            summary(&dispatch(&transport, always()).await),
+            ("created", 1, 1, 0),
+            "{name}"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "{name}: shared route must actually pre-wait"
+        );
+        let requests = mock.requests();
+        assert_eq!(
+            requests.len(),
+            2,
+            "{name}: positive control reached loopback twice"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|(path, _)| path == &format!("/api/v10/channels/{CHANNEL}/messages"))
+        );
+    }
 }
 
 #[tokio::test]

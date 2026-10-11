@@ -456,8 +456,8 @@ async fn b2b1_clear_and_reset_withdraw_only_once_admitted_and_restore_nothing() 
 #[cfg(unix)]
 #[test]
 fn b2b1_a_clear_whose_persist_fails_still_withdraws_and_keeps_its_session() {
-    use super::super::clear_persist_failure_tests::{break_queue_persist, queue_file};
     use crate::services::discord::turn_presence::entrypoints::tests::Probe;
+    use crate::services::turn_orchestrator::test_support::{fail_queue_saves, queue_save_faults};
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     let provider = ProviderKind::Gemini;
@@ -472,9 +472,17 @@ fn b2b1_a_clear_whose_persist_fails_still_withdraws_and_keeps_its_session() {
         let probe = Probe::install(&shared);
         seed_session(&shared, channel).await;
         seed_backlog(&shared, &provider, channel).await;
-        break_queue_persist(&queue_file(root.path(), &shared, &provider, channel));
         let ticket = probe.arm(channel.get());
+        // Keep preflight readable and fail only the admitted clear's save, after backlog persistence.
+        fail_queue_saves(channel, 1);
+        let armed_faults = queue_save_faults(channel, false);
         assert!(!b2b1_effect("clear", shared.clone(), channel).await);
+        assert_eq!(armed_faults, 1, "one fault is armed after the backlog save");
+        assert_eq!(
+            queue_save_faults(channel, true),
+            0,
+            "the admitted clear's save consumes the armed fault"
+        );
         assert_eq!(queue_len(&shared, channel).await, 1, "backlog restored");
         let session = session_state(&shared, channel).await;
         assert_eq!(session, (Some(SESSION_ID.to_string()), false));

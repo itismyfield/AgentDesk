@@ -24,6 +24,23 @@ pub(super) struct AdoptionRuntime {
     boot: boot::BootState,
 }
 
+/// Names the runtime that observed a piece of evidence, so a later runtime never reuses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ObservationRuntimeId(u64);
+
+impl AdoptionRuntime {
+    pub(super) fn observation_runtime_id(&self) -> ObservationRuntimeId {
+        ObservationRuntimeId(self.id)
+    }
+}
+
+#[cfg(test)]
+impl ObservationRuntimeId {
+    pub(super) fn for_tests(id: u64) -> Self {
+        Self(id)
+    }
+}
+
 static RUNTIMES: Mutex<Vec<Arc<AdoptionRuntime>>> = Mutex::new(Vec::new());
 static NEXT_RUNTIME: AtomicU64 = AtomicU64::new(1);
 

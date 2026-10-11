@@ -291,16 +291,22 @@ fn an_unknown_head_blocks_every_consumer_and_survives_every_drain() {
         assert!(!starts(&handle, 22, TurnAdmissionOrder::BehindQueue).await);
         assert!(!starts(&handle, 23, TurnAdmissionOrder::Immediate).await);
         let _ = handle.finish_turn(ctx()).await;
+        let before = std::fs::read(queue_path(channel)).unwrap();
         let cleared = handle.clear(ctx()).await;
+        assert!(cleared.persistence_error.is_some());
+        assert!(cleared.queue_exit_events.is_empty());
         assert!(!cleared.discarded_message_ids.contains(&MessageId::new(21)));
-        let _ = handle.purge_queue(ctx(), true).await;
+        assert_eq!(std::fs::read(queue_path(channel)).unwrap(), before);
+        let purged = handle.purge_queue(ctx(), true).await;
+        assert!(purged.input_refusal.is_some());
+        assert_eq!(std::fs::read(queue_path(channel)).unwrap(), before);
         assert_eq!(
             queued(&handle)
                 .await
                 .iter()
                 .map(|q| q.0)
                 .collect::<Vec<_>>(),
-            [21]
+            [21, 22]
         );
         assert_eq!(disk(channel)["head_injection"]["phase"], "unknown");
     });
@@ -460,12 +466,19 @@ fn restore_cancel_clear_and_purge_keep_a_reserved_head() {
             [61, 62]
         );
         let cleared = handle.clear(ctx()).await;
-        assert!(cleared.persistence_error.is_none());
+        assert!(cleared.persistence_error.is_some());
         assert!(!cleared.discarded_message_ids.contains(&MessageId::new(61)));
         assert!(handle.enqueue(human(63, 8, "third"), ctx()).await.enqueued);
         let purged = handle.purge_queue(ctx(), true).await;
-        assert_eq!(purged.drained, 1);
-        assert_eq!(queued(&handle).await, [(61, vec![61], "first".to_string())]);
+        assert!(purged.input_refusal.is_some());
+        assert_eq!(purged.drained, 0);
+        assert_eq!(
+            queued(&handle).await,
+            [
+                (61, vec![61], "first".to_string()),
+                (63, vec![62, 63], "second\nthird".to_string()),
+            ]
+        );
         assert_eq!(disk(channel)["head_injection"]["phase"], "reserved");
     });
 }
