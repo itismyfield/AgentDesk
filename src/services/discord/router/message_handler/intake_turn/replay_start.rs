@@ -19,9 +19,8 @@ pub(super) struct StartRequest<'a> {
     pub(super) prompt: &'a str,
 }
 
-/// A dormant build keeps the legacy start without IO. An active one waits while another turn's
-/// owner holds the channel, then begins the request or its exact continuation; `true` means the
-/// stale resume was dropped and must not be passed.
+/// A dormant build keeps the legacy start without IO; an active one begins the request or its exact
+/// continuation once no other turn owns the channel. `true` means the stale resume was dropped.
 pub(super) async fn admit(
     shared: &Arc<SharedData>,
     request: StartRequest<'_>,

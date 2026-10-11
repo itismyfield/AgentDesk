@@ -121,14 +121,9 @@ impl ReplayStart {
     }
 
     /// An exact retry's start: the approved local reset runs only now, after its begin committed.
-    pub(crate) fn exact_reset(self, reset: impl FnOnce()) -> Result<Self, Self> {
-        let Some(permit) = self.0 else {
-            return Err(self);
-        };
-        let prepared = match PreparedRetryStart::new((), permit) {
-            Ok(prepared) => prepared,
-            Err((_, permit)) => return Err(Self(Some(permit))),
-        };
+    pub(crate) fn exact_reset(self, reset: impl FnOnce()) -> Result<Self, PermitRefusal> {
+        let permit = self.0.ok_or(PermitRefusal::NotARetry)?;
+        let prepared = PreparedRetryStart::new((), permit)?;
         Ok(prepared.launch(|_| reset(), |(), permit| Self(Some(permit))))
     }
 
@@ -371,8 +366,10 @@ pub(crate) async fn prepare_effect_start(
             write::begin(ctx.pool, receipt_id, from, &effect, ctx.incarnation).await
         }
         _ => return Err(StartRefusal::CandidateMismatch),
-    }
-    .map_err(StartRefusal::Write)?;
+    };
+    #[cfg(test)]
+    let ack = test_activation::lose_ack(&input.channel, ack);
+    let ack = ack.map_err(StartRefusal::Write)?;
     StartPermit::seal(ack, &projection.target).map_err(|_| StartRefusal::PermitMismatch)
 }
 
@@ -399,6 +396,27 @@ pub(crate) mod test_activation {
     impl Drop for Activated {
         fn drop(&mut self) {
             ACTIVE.lock().unwrap().retain(|active| active != &self.0);
+        }
+    }
+
+    static ACK_LOST: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    /// The channel's next committed begin loses its acknowledgement.
+    pub(crate) fn lose_next_ack(channel: u64) {
+        ACK_LOST.lock().unwrap().push(channel.to_string());
+    }
+
+    pub(super) fn lose_ack(
+        channel: &str,
+        ack: Result<super::write::BeginAck, super::WriteError>,
+    ) -> Result<super::write::BeginAck, super::WriteError> {
+        let mut lost = ACK_LOST.lock().unwrap();
+        match lost.iter().position(|lost| lost == channel) {
+            Some(index) if ack.is_ok() => {
+                lost.remove(index);
+                Err(super::WriteError::AckUnknown(sqlx::Error::PoolTimedOut))
+            }
+            _ => ack,
         }
     }
 }

@@ -92,13 +92,9 @@ pub(crate) struct PreparedRetryStart<P> {
 }
 
 impl<P> PreparedRetryStart<P> {
-    /// Refuses a permit that does not start an exact retry and hands it back unspent.
-    pub(crate) fn new(
-        prepared: P,
-        permit: StartPermit,
-    ) -> Result<Self, (PermitRefusal, StartPermit)> {
+    pub(crate) fn new(prepared: P, permit: StartPermit) -> Result<Self, PermitRefusal> {
         if permit.attempt.retry_of().is_none() {
-            return Err((PermitRefusal::NotARetry, permit));
+            return Err(PermitRefusal::NotARetry);
         }
         Ok(Self { prepared, permit })
     }

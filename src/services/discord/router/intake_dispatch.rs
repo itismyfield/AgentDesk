@@ -454,11 +454,11 @@ pub(crate) async fn finish_text_intake_admission(
             prepared_uploads, ..
         } => {
             submission.preloaded_uploads.extend(prepared_uploads);
-            defer_live_submission(deps, submission).await;
+            defer_live_submission(deps, submission, false).await;
         }
         IntakeAdmission::ReplayDeferred(defer) => {
             let channel_id = submission.request.channel_id.get();
-            if !defer_live_submission(deps, submission).await {
+            if !defer_live_submission(deps, submission, true).await {
                 return Err(format!(
                     "replay check deferred ({defer:?}); channel {channel_id} refused custody"
                 )
@@ -514,14 +514,19 @@ pub(crate) async fn finish_admitted_local(
     .await
 }
 
-/// Queues a live input behind the slow backstop; true once the queue durably holds it.
-async fn defer_live_submission(deps: &IntakeDeps<'_>, submission: IntakeSubmission) -> bool {
+/// Queues a live input behind the slow backstop, with every absorbed source when asked; true once
+/// the queue durably holds it.
+async fn defer_live_submission(
+    deps: &IntakeDeps<'_>,
+    submission: IntakeSubmission,
+    all_sources: bool,
+) -> bool {
     if matches!(submission.origin, IntakeOrigin::QueuedDrain) {
         return true;
     }
     let request = submission.request;
     let channel_id = request.channel_id;
-    let intervention = super::response_format::build_race_requeued_intervention(
+    let mut intervention = super::response_format::build_race_requeued_intervention(
         request.request_owner,
         request.user_msg_id,
         &request.user_text,
@@ -532,6 +537,22 @@ async fn defer_live_submission(deps: &IntakeDeps<'_>, submission: IntakeSubmissi
         submission.preloaded_uploads,
         submission.voice_announcement,
     );
+    let absorbed = request.source_message_ids.iter().copied();
+    for source in absorbed.filter(|&source| all_sources && source != request.user_msg_id) {
+        let generation = intervention.queued_generation;
+        let queued = match submission.preserve_on_cancel {
+            true => {
+                crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
+                    source, generation,
+                )
+            }
+            false => crate::services::turn_orchestrator::SourceMessageQueuedGeneration::new(
+                source, generation,
+            ),
+        };
+        intervention.source_message_ids.push(source);
+        intervention.source_message_queued_generations.push(queued);
+    }
     let outcome = super::super::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
         super::super::mailbox_enqueue_intervention(
             deps.shared,

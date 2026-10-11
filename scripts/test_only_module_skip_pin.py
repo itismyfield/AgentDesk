@@ -581,17 +581,14 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/retired_host_tick_tests.rs",
         "src/services/discord/tmux_watcher/retired_o_boundary_tests.rs",
         "src/cli/o_tests.rs",
+        "src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs",
     }
 )
 
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
-        "src/db/replay_disposition/receipt.rs",
-        "src/db/replay_disposition/write/start.rs",
         "src/services/discord/turn_bridge/replay_policy.rs",
-        "src/services/discord/replay_policy/permit.rs",
-        "src/services/discord/router/intake_dispatch/replay_admission.rs",
         "src/services/discord/input_runtime/activation.rs",
         "src/services/discord/input_runtime/activation/plan.rs",
         "src/services/discord/input_runtime/activation/scope.rs",

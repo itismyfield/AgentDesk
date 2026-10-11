@@ -191,15 +191,17 @@ fn ordinary_allowed(token: &CancelToken, inflight: &InflightTurnState) -> bool {
         || token.replay_attempt().and_then(|live| live.verdict()) == Some(Verdict::Ordinary)
 }
 
-/// Bars the legacy history retry; true when one already committed, so no exact retry may follow.
+/// Bars the legacy history retry; true when one already committed, which keeps its claim so no
+/// later decision of the request retries it exactly either.
 fn bar_legacy_retry(inflight: &InflightTurnState) -> bool {
     let messages = std::iter::once(inflight.user_msg_id).chain(inflight.source_message_ids.clone());
-    let barred = messages
-        .filter(|&id| id != 0)
-        .map(|message| RETRY_CLAIMS.insert((inflight.channel_id, message), RetryClaim::Barred));
-    barred.fold(false, |raced, claim| {
-        raced | (claim == Some(RetryClaim::Legacy))
-    })
+    let claims = messages.filter(|&id| id != 0).map(|message| {
+        let claim = RETRY_CLAIMS
+            .entry((inflight.channel_id, message))
+            .or_insert(RetryClaim::Barred);
+        *claim == RetryClaim::Legacy
+    });
+    claims.fold(false, |raced, legacy| raced | legacy)
 }
 
 /// Whether the legacy history retry must refuse this request.
@@ -251,8 +253,13 @@ pub(in crate::services::discord) async fn stale_resume(
         return StaleResume::Hold;
     };
     let receipt = attempt.receipt_id();
+    if legacy_raced {
+        withhold(pool, &attempt, "legacy retry claimed the request").await;
+        live.settle(Verdict::Held);
+        return StaleResume::Hold;
+    }
     match decide_stale(pool, Some(attempt), &observation).await {
-        ReplayDecision::AllowStartupRetry(retry) if !legacy_raced => {
+        ReplayDecision::AllowStartupRetry(retry) => {
             live.settle(Verdict::Retried);
             StaleResume::Exact(retry)
         }

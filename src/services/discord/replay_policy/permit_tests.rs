@@ -132,9 +132,7 @@ async fn start_permit_runs_one_effect_only_on_its_own_target_pg() {
     assert_eq!((spent, effects.get()), (Ok(receipt_id), 1));
     let fresh = StartPermit::seal(begun(&pool, "not-a-retry", &target).await, &target).unwrap();
     assert_eq!(
-        PreparedRetryStart::new("fresh args", fresh)
-            .err()
-            .map(|(refusal, _)| refusal),
+        PreparedRetryStart::new("fresh args", fresh).err(),
         Some(PermitRefusal::NotARetry),
         "a first-start permit is not a retry"
     );

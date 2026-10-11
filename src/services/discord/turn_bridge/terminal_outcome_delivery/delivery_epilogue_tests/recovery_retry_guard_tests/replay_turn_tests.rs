@@ -5,6 +5,7 @@ use super::*;
 use crate::db::replay_disposition::write::{self, BeginFrom, CanonicalInput, EffectProjection};
 use crate::services::discord::replay_policy::live::{Activity, LiveAttempt, Seen, TerminalKind};
 use crate::services::discord::replay_policy::{ExactHandoff, ExactRetry};
+use crate::services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::output_growth;
 use crate::services::discord::turn_bridge::{
     BridgeCompletionSignal, TurnBridgeContext, spawn_turn_bridge,
 };
@@ -180,10 +181,9 @@ enum Request<'a> {
 /// A user message of its own per case: a held request bars its source for the whole process.
 fn case_message(case: &str) -> u64 {
     6_008_000_000
-        + case
-            .bytes()
-            .fold(0u64, |hash, byte| hash * 31 + u64::from(byte))
-            % 1_000_000
+        + case.bytes().fold(0u64, |hash, byte| {
+            hash.wrapping_mul(31).wrapping_add(u64::from(byte))
+        }) % 1_000_000
 }
 
 async fn start_attempt(pool: &sqlx::PgPool, case: &str) -> write::ExactAttempt {
@@ -300,7 +300,7 @@ async fn bridge_turn_with(
         adk_session_name: None,
         adk_session_info: None,
         adk_cwd: None,
-        dispatch_id: None,
+        dispatch_id: driver.inflight.dispatch_id.clone(),
         dispatch_kind: None,
         memory_recall_usage: TokenUsage::default(),
         context_window_tokens: 0,
@@ -478,16 +478,31 @@ async fn quick_empty_resume_after_tool_is_withheld_pg() {
     assert_eq!((end.legacy, end.exact.len()), (0, 1), "{end:?}");
     assert!(!end.killed, "{end:?}");
 
-    let stale_file = |inflight: &mut InflightTurnState| {
-        let path = std::env::temp_dir().join(format!("replay-turn-{}.jsonl", std::process::id()));
-        let line = r#"{"type":"result","is_error":true,"result":"Error: No conversation found"}"#;
-        std::fs::write(&path, format!("{line}\n")).unwrap();
-        inflight.output_path = Some(path.display().to_string());
-        inflight.last_offset = 0;
-    };
-    let tool = seen(&[Seen::Activity(Activity::Tool)]);
-    let end = bridge_turn_with("scan", Request::Protected(&tool), Vec::new(), stale_file).await;
-    assert_held(&end, "activity after start");
+    // The marker is in the file at the first scan, or lands only before the second one.
+    let line = r#"{"type":"result","is_error":true,"result":"Error: No conversation found"}"#;
+    for (case, grows) in [("scan", false), ("scan-grown", true)] {
+        let stale_file = |inflight: &mut InflightTurnState| {
+            let name = format!("replay-turn-{}-{case}.jsonl", std::process::id());
+            let path = std::env::temp_dir().join(name).display().to_string();
+            std::fs::write(
+                &path,
+                if grows {
+                    String::new()
+                } else {
+                    format!("{line}\n")
+                },
+            )
+            .unwrap();
+            if grows {
+                output_growth::after_first_scan(&path, line);
+            }
+            inflight.output_path = Some(path);
+            inflight.last_offset = 0;
+        };
+        let tool = seen(&[Seen::Activity(Activity::Tool)]);
+        let end = bridge_turn_with(case, Request::Protected(&tool), Vec::new(), stale_file).await;
+        assert_held(&end, "activity after start");
+    }
 }
 
 // The recovery sentinel is never no-effect evidence: even a quiet attempt is held, with no
@@ -611,4 +626,144 @@ async fn held_request_refuses_the_legacy_history_retry_pg() {
         .await
         .expect("a held request returns before any Discord fetch");
     assert!(!retry_pending_contains(channel));
+}
+
+// A held request leaves its dispatch for the replay hold on the bridge's own terminal; an
+// ordinary classification still completes it.
+#[test]
+fn held_request_leaves_its_dispatch_unsettled_pg() {
+    use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
+    if !api_child(concat!(
+        "services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::",
+        "recovery_retry_guard_tests::replay_turn_tests::held_request_leaves_its_dispatch_unsettled_pg"
+    )) {
+        return;
+    }
+    // One thread, so the bridge's Discord calls reach this test's REST mock.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build();
+    runtime.unwrap().block_on(async {
+        // An open implementation dispatch, which this policy-less host completes through the API.
+        let open = Arc::new(|method: &axum::http::Method, path: &str| {
+            let read = method == axum::http::Method::GET && path.starts_with("/api/dispatches/");
+            read.then(|| {
+                serde_json::json!({
+                    "dispatch": {"dispatch_type": "implementation", "status": "dispatched"}
+                })
+            })
+        });
+        let api = Recorder::start_with(open).await;
+        crate::services::discord::internal_api::init(api.port, None);
+        let done = StreamMessage::Done {
+            result: String::new(),
+            session_id: Some("sid-next".into()),
+        };
+        let ordinary = seen(&[
+            Seen::Activity(Activity::Output),
+            Seen::Terminal(TerminalKind::Done),
+        ]);
+        let twice = seen(&[
+            Seen::Activity(Activity::Output),
+            Seen::Terminal(TerminalKind::Done),
+            Seen::Terminal(TerminalKind::Error),
+        ]);
+        let cases = [
+            ("dispatch-done", Request::Protected(&ordinary), true),
+            ("dispatch-held", Request::Protected(&twice), false),
+        ];
+        for (case, request, settles) in cases {
+            let dispatch = format!("replay-{case}");
+            let prepare = |inflight: &mut InflightTurnState| {
+                inflight.dispatch_id = Some(dispatch.clone());
+            };
+            let messages = vec![text("answer"), done.clone()];
+            let end = bridge_turn_with(case, request, messages, prepare).await;
+            let update = format!("PATCH /api/dispatches/{dispatch} ");
+            let calls = api.take();
+            let completed = |call: &String| call.starts_with(&update) && call.contains("completed");
+            assert_eq!(
+                calls.iter().any(completed),
+                settles,
+                "{case}: {end:?} {calls:?}"
+            );
+        }
+    });
+}
+
+// The history retry and the protected decision claim a request once: a committed retry holds the
+// no-effect attempt, and a hold landing during the history fetch stops the write and enqueue.
+#[tokio::test]
+async fn legacy_and_protected_retries_claim_a_request_once_pg() {
+    use crate::services::discord::replay_policy::claim_legacy_retry;
+    use crate::services::discord::turn_bridge::recovery_text::{
+        auto_retry_with_history, release_retry_pending,
+    };
+    let channel = ChannelId::new(DRIVER_CHANNEL_ID);
+    assert!(claim_legacy_retry(
+        DRIVER_CHANNEL_ID,
+        case_message("claimed")
+    ));
+    let quiet = seen(&[Seen::Terminal(TerminalKind::Error)]);
+    let end = bridge_turn("claimed", Request::Protected(&quiet), vec![error(STALE)]).await;
+    assert_eq!(
+        end.hold_reason.as_deref(),
+        Some("legacy retry claimed the request"),
+        "{end:?}"
+    );
+    assert_eq!((end.legacy, end.exact.len()), (0, 0), "{end:?}");
+    assert!(!end.killed, "{end:?}");
+
+    // Discord answers the history fetch only once the test lets it.
+    let (reached, release) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let (on_reach, on_release) = (reached.clone(), release.clone());
+    let app = axum::Router::new().fallback(move || {
+        let (on_reach, on_release) = (on_reach.clone(), on_release.clone());
+        async move {
+            on_reach.notify_one();
+            on_release.notified().await;
+            axum::Json(serde_json::json!([]))
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http = poise::serenity_prelude::HttpBuilder::new("test-token")
+        .proxy(format!("http://{}", listener.local_addr().unwrap()))
+        .ratelimiter_disabled(true)
+        .build();
+    let http = Arc::new(http);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    for (case, held) in [("unheld", false), ("raced", true)] {
+        release_retry_pending(channel);
+        let user = MessageId::new(case_message(case));
+        let retry = {
+            let (http, shared) = (http.clone(), shared.clone());
+            tokio::spawn(async move {
+                let provider = ProviderKind::Claude;
+                auto_retry_with_history(&http, &shared, &provider, channel, user, case).await
+            })
+        };
+        reached.notified().await;
+        if held {
+            let facts = seen(&[Seen::Activity(Activity::Output)]);
+            let end = bridge_turn(
+                case,
+                Request::Protected(&facts),
+                vec![text("partial"), error(STALE)],
+            )
+            .await;
+            assert!(end.barred, "{end:?}");
+        }
+        release.notify_one();
+        retry.await.unwrap();
+        let snapshot = shared.mailbox(channel).snapshot().await;
+        let queued = snapshot
+            .intervention_queue
+            .iter()
+            .any(|item| item.message_id == user);
+        assert_eq!(queued, !held, "{case}");
+    }
 }
