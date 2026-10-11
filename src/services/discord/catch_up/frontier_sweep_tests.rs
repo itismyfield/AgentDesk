@@ -29,6 +29,8 @@ enum Hook {
     /// the undelivered `AbsorbAndEnd`.
     PurgeAbsorbAndEnd(MessageId),
     AbsorbAndDeliverEpisode(MessageId),
+    /// The id's own text-intake turn is claimed between the scan snapshot and the enqueue.
+    StartTurn,
 }
 
 #[derive(Debug)]
@@ -217,6 +219,15 @@ impl CatchUpDiscordApi for StrictApi {
                 claim_cas_tests::purge(shared, channel_id).await;
                 let end = claim_cas_tests::absorb_and_end;
                 end(shared, provider, channel_id, message_id, primary, false).await;
+                enqueue(intervention).await
+            }
+            Some(Hook::StartTurn) => {
+                let token = Arc::new(crate::services::provider::CancelToken::new());
+                let owner = serenity::UserId::new(HUMAN_ID);
+                // The Discord text-intake claim: it waits behind anything already queued.
+                let start = discord::queue_io::mailbox_try_start_turn_behind_queue;
+                let started = start(shared, channel_id, token, owner, message_id);
+                assert!(started.await, "{message_id} claims its turn");
                 enqueue(intervention).await
             }
             None => enqueue(intervention).await,
@@ -1153,6 +1164,8 @@ impl Write for LogWriter {
 mod absorbed_active_tests;
 #[path = "claim_cas_tests.rs"]
 mod claim_cas_tests;
+#[path = "duplicate_race_tests.rs"]
+mod duplicate_race_tests;
 
 #[path = "merged_alias_tests.rs"]
 mod merged_alias_tests;

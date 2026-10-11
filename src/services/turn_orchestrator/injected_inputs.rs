@@ -83,6 +83,9 @@ pub(crate) enum InjectionMsg {
         ticket: InjectionTicket,
         reply: oneshot::Sender<()>,
     },
+    /// A queued head's claim or settlement; see `queued_head.rs`.
+    #[cfg(test)]
+    Head(super::queued_head::HeadMsg),
 }
 
 impl InjectionMsg {
@@ -92,6 +95,8 @@ impl InjectionMsg {
             Self::Reserve { input_permit, .. }
             | Self::Settle { input_permit, .. }
             | Self::Abandon { input_permit, .. } => input_permit.take(),
+            #[cfg(test)]
+            Self::Head(_) => None,
         }
     }
 
@@ -101,6 +106,8 @@ impl InjectionMsg {
                 Some(persistence)
             }
             Self::Abandon { .. } => None,
+            #[cfg(test)]
+            Self::Head(msg) => Some(msg.persistence()),
         }
     }
 
@@ -117,6 +124,11 @@ impl InjectionMsg {
                 "SettleInjectedInput"
             }
             Self::Abandon { .. } => "AbandonInjection",
+            #[cfg(test)]
+            Self::Head(msg) => {
+                msg.refuse(error);
+                "QueuedHead"
+            }
         }
     }
 }
@@ -146,6 +158,8 @@ pub(super) fn step(state: &mut ChannelMailboxState, channel_id: ChannelId, msg: 
             abandon(state, channel_id, ticket);
             let _ = reply.send(());
         }
+        #[cfg(test)]
+        InjectionMsg::Head(msg) => super::queued_head::step(state, channel_id, msg),
     }
 }
 

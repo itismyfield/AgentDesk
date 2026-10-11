@@ -3,9 +3,26 @@ use super::*;
 
 pub(super) fn enqueue_with_settlement(
     queue: &mut Vec<Intervention>,
+    intervention: Intervention,
+    active_user_message_id: Option<MessageId>,
+    settlement: Option<(&ProviderKind, ChannelId)>,
+) -> EnqueueInterventionResult {
+    enqueue_behind(
+        queue,
+        intervention,
+        active_user_message_id,
+        settlement,
+        false,
+    )
+}
+
+/// `enqueue_with_settlement`, except a `reserved_front` head is never the merge target.
+pub(super) fn enqueue_behind(
+    queue: &mut Vec<Intervention>,
     mut intervention: Intervention,
     active_user_message_id: Option<MessageId>,
     settlement: Option<(&ProviderKind, ChannelId)>,
+    reserved_front: bool,
 ) -> EnqueueInterventionResult {
     let mut queue_exit_events = prune_interventions(queue);
     ensure_source_message_ids(&mut intervention);
@@ -45,7 +62,8 @@ pub(super) fn enqueue_with_settlement(
         }
     }
 
-    let merge_index = queue.len().checked_sub(1);
+    // A reserved queued head keeps its payload, so later input queues behind it instead.
+    let merge_index = (queue.len().checked_sub(1)).filter(|index| !(reserved_front && *index == 0));
     if let Some(index) = merge_index
         && should_merge_intervention(&queue[index], &intervention)
         && let Some((provider, channel_id)) = settlement

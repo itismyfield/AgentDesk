@@ -285,7 +285,7 @@ async fn a2_exhausted_rearm_budget_leaves_h_to_the_periodic_backstop() {
 }
 
 /// Only the checkpoint reply is on the phase-1 page; `ids` reach phase 2 alone.
-fn phase2_only(fx: &Fixture, channel_id: ChannelId, ids: &[MessageId]) -> StrictApi {
+pub(super) fn phase2_only(fx: &Fixture, channel_id: ChannelId, ids: &[MessageId]) -> StrictApi {
     let checkpoint = MessageId::new(*fx.shared.last_message_ids.get(&channel_id).unwrap());
     let api = StrictApi::new(&fx.shared)
         .with_history(channel_id, vec![own_reply(channel_id, checkpoint)]);

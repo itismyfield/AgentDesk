@@ -428,16 +428,15 @@ pub async fn install_retired_o_watcher(request: OOnlyInstallRequest) -> OOnlyIns
         let pause_epoch = handle.pause_epoch.clone();
         let turn_delivered = handle.turn_delivered.clone();
         let last_heartbeat_ts_ms = handle.last_heartbeat_ts_ms.clone();
-        let claim = match claim_or_reuse_watcher_for_host(
+        let claim = match super::claims::claim_retired_o_watcher_for_host(
             &request.runtime.tmux_watchers,
             request.channel_id,
             handle,
             &request.provider,
-            "n4d_o_only_respawn",
-            None,
             host,
         ) {
-            Ok(claim) => claim,
+            Ok(Some(claim)) => claim,
+            Ok(None) => return Failed(SourceMismatch),
             Err(_) => return Failed(WatchWithheld),
         };
         if !claim.should_spawn() {

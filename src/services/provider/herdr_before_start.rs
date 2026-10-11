@@ -13,10 +13,19 @@ pub(crate) enum InputPhase {
     Closed,
 }
 
+/// The negative evidence a close rested on: no attempt began, or a typed attempt left it untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseBasis {
+    NoAttempt,
+    Untouched,
+}
+
 pub(crate) struct HerdrInputState {
     pub(crate) submission: HerdrSubmission,
     pub(crate) phase: InputPhase,
     pub(crate) exit: Option<ExitDecision>,
+    /// Recorded by the close itself, so a later seal still names its evidence.
+    pub(crate) closed_from: Option<CloseBasis>,
 }
 
 impl Default for HerdrInputState {
@@ -25,6 +34,7 @@ impl Default for HerdrInputState {
             submission: HerdrSubmission::Unsubmitted,
             phase: InputPhase::BeforeInput,
             exit: None,
+            closed_from: None,
         }
     }
 }
@@ -79,6 +89,10 @@ impl HerdrInterruptState {
             }
             OwnStart::Seen { .. } => return false,
         }
+        input.closed_from = Some(match input.phase {
+            InputPhase::FinishedUntouched => CloseBasis::Untouched,
+            _ => CloseBasis::NoAttempt,
+        });
         input.phase = InputPhase::Closed;
         true
     }
@@ -178,6 +192,7 @@ pub(crate) struct BeforeStartProof {
     pub(crate) owner: crate::db::dispatched_sessions::hosted_execution::HostedOwner,
     pub(crate) turn_nonce: String,
     pub(crate) generation: u64,
+    pub(crate) basis: CloseBasis,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,11 +247,12 @@ pub(crate) fn seal_exit(
     };
     let decision = if exception {
         ExitDecision::Normal
-    } else if closed {
+    } else if let (true, Some(basis)) = (closed, input.closed_from) {
         ExitDecision::PolicyClose(BeforeStartProof {
             owner: state.owner.clone(),
             turn_nonce: token.turn_nonce().unwrap().to_owned(),
             generation: token.claude_interrupt_generation(),
+            basis,
         })
     } else if stop || input.submission != HerdrSubmission::Unsubmitted {
         ExitDecision::Hold
