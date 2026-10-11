@@ -174,40 +174,63 @@ def justfile_sources(cti, coverage, repo_root: Path, expansions):
     return sources, findings
 
 
-def _line_owners(text: str, jobs) -> dict[int, str]:
-    """Map each line to its job; parse_jobs slices the jobs block contiguously in order."""
+def _line_owners(text: str, jobs) -> tuple[dict[int, str], list[str]]:
+    """Map each line to its job, and name the jobs whose text is no later slice of the file;
+    parse_jobs slices the jobs block contiguously in order."""
     starts = [0]
     for line in text.splitlines(keepends=True):
         starts.append(starts[-1] + len(line))
     owners: dict[int, str] = {}
+    unmatched: list[str] = []
     cursor = 0
     for job in jobs:
-        offset = text.find(job.text, cursor)
-        if offset < 0 or not job.text:
+        offset = text.find(job.text, cursor) if job.text else -1
+        if offset < 0:
+            unmatched.append(job.name)
             continue
         cursor = offset + len(job.text)
         first = bisect.bisect_right(starts, offset) + 1
         last = bisect.bisect_right(starts, cursor - 1)
         owners.update(dict.fromkeys(range(first, last + 1), job.name))
-    return owners
+    return owners, unmatched
 
 
 def _read_workflow(cti, pgm, repo_root: Path, rel: Path):
-    """Jobs, each run-scalar line with its owning job, and the extracted cargo argv."""
+    """Jobs, each run-scalar line with its owning job (None when no job owns it),
+    the extracted cargo argv and the jobs whose text the file does not contain."""
     path = repo_root / rel
     if not path.is_file():
         return None
     jobs = pgm.parse_jobs(path, repo_root)
     shells: list[list[tuple[int, str]]] = []
     commands = {line: words for line, words, _ in cti.extract_commands(path, None, shells)}
-    owners = _line_owners(path.read_text("utf-8"), jobs)
-    lines = [
-        (owners[line], line, snippet)
-        for shell in shells
-        for line, snippet in shell
-        if line in owners
+    owners, unmatched = _line_owners(path.read_text("utf-8"), jobs)
+    lines = [(owners.get(line), line, snippet) for shell in shells for line, snippet in shell]
+    return jobs, lines, commands, unmatched
+
+
+def _unowned(rel: Path, lines, commands, unmatched) -> list[Finding]:
+    """A PR job or selecting line tied to no job hides its origin, so it fails closed."""
+    findings = [
+        Finding(
+            "source-command-unresolved", f"{rel.as_posix()}:{name}",
+            f"job `{name}` text from parse_jobs is not a slice of the workflow, "
+            "so no command can be proven to run in it",
+        )
+        for name in unmatched
     ]
-    return jobs, lines, commands
+    for job, line, snippet in lines:
+        words = _words(snippet)
+        selects = line in commands or "cargo test" in snippet or words[:1] in (
+            ["just"], ["run_non_pg_filter_replay"]
+        )
+        if job is None and selects:
+            findings.append(Finding(
+                "source-command-unresolved", f"{rel.as_posix()}:{line}",
+                f"`{snippet.strip()}` sits outside every job parse_jobs returned, "
+                "so its CI origin cannot be proven",
+            ))
+    return findings
 
 
 def _needs(pgm, code: str) -> set[str]:
@@ -272,6 +295,8 @@ def _job_sources(cti, coverage, expansions, recipes, rel, lines, commands, origi
     sources: list[LaneSource] = []
     findings: list[Finding] = []
     for job, line, snippet in lines:
+        if job is None:
+            continue
         origin = origins[job]
         location = f"{rel.as_posix()}:{line}"
         words = _words(snippet)
@@ -317,9 +342,10 @@ def collect_sources(repo_root: Path, coverage) -> Sources:
         parsed = _read_workflow(cti, pgm, repo_root, rel)
         if parsed is None:
             continue
-        jobs, lines, commands = parsed
+        jobs, lines, commands, unmatched = parsed
         if name == "pr":
-            mirrors = {job for job, _, snippet in lines if _runs_mirror(_words(snippet))}
+            findings.extend(_unowned(rel, lines, commands, unmatched))
+            mirrors = {job for job, _, snippet in lines if job and _runs_mirror(_words(snippet))}
             required, unproven = _mirror_upstreams(pgm, rel, jobs, mirrors)
             findings.extend(unproven)
             origins = {
@@ -423,7 +449,8 @@ def judge_parity(
                     f"required PR named filter, e.g. {_sample(missing)}"
                     if chosen else "selects no id in the lib inventory manifest"
                 )
-                parity = source.lane in named or (bool(chosen) and not missing)
+                # An identical required lane (PG-only too) counts only when it selects ids.
+                parity = bool(chosen) and (source.lane in named or not missing)
                 proven = bool(chosen) and missing <= sweep_ids
             if parity:
                 matched += 1

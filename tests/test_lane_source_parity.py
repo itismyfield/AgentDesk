@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import importlib.util
 import io
 import subprocess
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_BASELINE = Path("scripts/test_lane_required_pr_baseline.txt")
@@ -70,6 +72,7 @@ class Repo:
         self.advisory: dict[str, list[str]] = {}
         self.nightly: list[str] = []
         self.exceptions: list[str] = []
+        self.trailer = ""
 
     def write(self, root: Path) -> None:
         for rel in ("src", "scripts/ci", ".github/workflows"):
@@ -92,7 +95,7 @@ class Repo:
         jobs += [mirror(name, needs) for name, needs in self.mirrors.items()]
         jobs += [job(name, *commands) for name, commands in self.advisory.items()]
         (root / ".github/workflows/ci-pr.yml").write_text(
-            "name: pr\non:\n  pull_request:\njobs:\n" + "".join(jobs), "utf-8"
+            "name: pr\non:\n  pull_request:\njobs:\n" + "".join(jobs) + self.trailer, "utf-8"
         )
         if self.nightly:
             (root / ".github/workflows/ci-nightly.yml").write_text(
@@ -252,6 +255,42 @@ class RequiredPrParityTests(unittest.TestCase):
                 self.assertEqual(result, 1)
                 unresolved = findings(output, "source-command-unresolved")
                 self.assertEqual(len(unresolved), 1, output)
+
+    def test_identical_filters_selecting_nothing_are_not_parity(self) -> None:
+        repo = Repo()
+        repo.just.append("cargo test --lib no_such_test")
+        repo.pr["targeted"].append("cargo test --lib no_such_test")
+        result, output = repo.check()
+        self.assertEqual(result, 1)
+        missing = findings(output, "pr-parity-missing")
+        self.assertEqual(len(missing), 1, output)
+        self.assertIn("selects no id in the lib inventory manifest", missing[0])
+
+    def test_job_text_the_workflow_does_not_contain_is_unresolved(self) -> None:
+        pgm = coverage._parity_module()._sibling("check_pg_test_lane_membership.py")
+        parse_jobs = pgm.parse_jobs
+
+        def drifted(path, repo_root, findings=None):
+            return [
+                dataclasses.replace(job, text=job.text + "# drifted")
+                if job.name == "targeted" else job
+                for job in parse_jobs(path, repo_root, findings)
+            ]
+
+        with mock.patch.object(pgm, "parse_jobs", drifted):
+            result, output = Repo().check()
+        self.assertEqual(result, 1)
+        unresolved = findings(output, "source-command-unresolved")
+        self.assertTrue(any("ci-pr.yml:targeted:" in line for line in unresolved), output)
+
+    def test_pr_cargo_run_outside_any_parsed_job_is_unresolved(self) -> None:
+        repo = Repo()
+        repo.trailer = "x-unparsed:\n  steps:\n    - run: cargo test --lib gamma\n"
+        result, output = repo.check()
+        self.assertEqual(result, 1)
+        unresolved = findings(output, "source-command-unresolved")
+        self.assertEqual(len(unresolved), 1, output)
+        self.assertIn("cargo test --lib gamma", unresolved[0])
 
     def test_malformed_or_unsorted_exceptions_are_invalid(self) -> None:
         repo = Repo()
