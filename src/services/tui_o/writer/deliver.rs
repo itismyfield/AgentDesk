@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
@@ -15,12 +15,16 @@ use tokio::sync::oneshot;
 
 use super::confirm::{self, Verdict};
 use super::pieces::{Derived, PieceWork};
-use super::{AlarmSink, DeliveryLease, DiscordPort, PostOutcome, WriterAlarm};
+use super::{AlarmSink, DeliveryLease, DiscordPort, PostOutcome, SeenMessage, WriterAlarm};
 use crate::services::cluster::channel_home;
 use crate::services::tui_o::ownership::OwnershipGate;
+use crate::services::tui_o::repost::admission::OriginalGate;
+use crate::services::tui_o::repost::dispatch::{DispatchPermit, RepostWriter};
+use crate::services::tui_o::repost::runner::{RepostHook, TurnWriter};
+use crate::services::tui_o::repost::send::{DispatchReport, WireOutcome};
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::{
-    LedgerEntry, LedgerState, PieceDisposition, PieceOutcome, Unsent,
+    LedgerEntry, LedgerState, PieceDisposition, PieceOutcome, PieceRecord, Unsent,
 };
 
 /// A POST still unanswered by then is treated as uncertain and settled from history.
@@ -194,6 +198,20 @@ pub struct ChannelWriter<P, L, A> {
     paused: bool,
     /// The channel's shared POST count; only a Herdr-configured channel keeps one.
     posts: Option<Arc<AtomicUsize>>,
+    /// The channel's re-post turn, run from the same actor turn as its posts.
+    repost: Option<Box<dyn RepostHook<Self>>>,
+    repost_live: RepostLive,
+}
+
+/// Whether a re-post request may still leave: re-post on and the writer neither stopped nor gone.
+#[derive(Default)]
+struct RepostLive(Arc<AtomicBool>);
+
+impl Drop for RepostLive {
+    /// A request still running after its writer was dropped never sends again.
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
@@ -222,6 +240,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             stopped,
             paused,
             posts,
+            repost: None,
+            repost_live: RepostLive::default(),
         };
         let ledger = writer.store.ledger();
         seed_last_posted(channel, ledger);
@@ -238,6 +258,24 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             writer.stop(WriterAlarm::Blocked { status });
         }
         writer
+    }
+
+    /// Gives the writer its re-post turn, if its host has one.
+    pub(crate) fn with_repost(mut self, hook: Option<Box<dyn RepostHook<Self>>>) -> Self {
+        self.repost = hook;
+        self
+    }
+
+    /// One re-post turn, after this poll's owed pieces; nothing without a turn or once stopped.
+    pub(crate) async fn repost_turn(&mut self) {
+        if self.is_stopped() {
+            return;
+        }
+        let Some(mut hook) = self.repost.take() else {
+            return;
+        };
+        hook.turn(self).await;
+        self.repost = Some(hook);
     }
 
     pub fn store(&mut self) -> &mut ChannelStore {
@@ -275,6 +313,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
 
     /// The store's I/O error is read now, as the error that caused the first stop is just behind it.
     fn stop_with(&mut self, alarm: WriterAlarm, unsent: Option<Unsent>) -> Step {
+        self.repost_live.0.store(false, Ordering::SeqCst);
         if self.stopped.is_none() {
             let (kept, io) = (alarm.clone(), self.store.io_failure());
             self.stopped = Some(StopCause {
@@ -373,6 +412,28 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             PieceDisposition::Fresh => (piece.clone(), None),
         };
         let (serial, anchor_id) = (ledger.next_serial(), ledger.anchor());
+        if approved.is_none()
+            && let Some(mut hook) = self.repost.take()
+        {
+            let record = PieceRecord {
+                unit_key: piece.unit_key.clone(),
+                piece_index: piece.index,
+                payload: piece.payload.clone(),
+                anchor_id,
+                epoch: 0,
+                prepared_at: chrono::Utc::now(),
+                outcome: None,
+            };
+            let gate = hook.original(serial, record).await;
+            self.repost = Some(hook);
+            match gate {
+                OriginalGate::Send => {}
+                // Re-post owns an admitted piece's sends; its original is never sent again.
+                OriginalGate::Admitted => return Step::Done,
+                // Unknown admission holds the piece and retries it on a later poll.
+                OriginalGate::Unknown => return Step::LeaseBusy,
+            }
+        }
         let Some(held) = self.lease.try_acquire(self.channel, serial) else {
             return Step::LeaseBusy;
         };
@@ -555,5 +616,109 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             self.alarms.raise(self.channel, alarm);
         }
         Ok(())
+    }
+}
+
+impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWriter<P, L, A> {
+    type Lease = L::Held;
+
+    async fn settle_open(&mut self) -> bool {
+        ChannelWriter::settle_open(self).await.is_ok() && self.store.ledger().unresolved().is_none()
+    }
+
+    /// Stop (a violation stops too), delegation, home availability and the switch. The actor runs
+    /// the turn only while delivery is allowed, and the turn skips an excluded unit.
+    fn guard(&self) -> Result<(), String> {
+        if let Some(cause) = &self.stopped {
+            return Err(format!("writer stopped: {:?}", cause.alarm));
+        }
+        // A delegated channel posts through its home gate, which a re-post does not use yet.
+        let delegated = channel_home::registered_channel(self.channel).is_some();
+        let unavailable = crate::services::cluster::home_availability::refusal(self.channel);
+        if delegated || unavailable.is_some() {
+            return Err("a delegated or unavailable channel".into());
+        }
+        if !self.repost_live.0.load(Ordering::SeqCst) {
+            return Err("re-post is off".into());
+        }
+        Ok(())
+    }
+
+    fn try_lease(&self) -> Option<L::Held> {
+        let serial = self.store.ledger().next_serial();
+        self.lease.try_acquire(self.channel, serial)
+    }
+
+    fn gate(&self) -> Arc<OwnershipGate> {
+        Arc::clone(&self.gate)
+    }
+
+    fn live(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let live = Arc::clone(&self.repost_live.0);
+        Arc::new(move || live.load(Ordering::SeqCst))
+    }
+
+    fn prepare(&mut self, epoch: u64, permit: &DispatchPermit) -> Result<(), String> {
+        let ledger = self.store.ledger();
+        let (serial, anchor_id) = (ledger.next_serial(), ledger.anchor());
+        let prepared = || LedgerEntry::Prepared {
+            serial,
+            unit_key: permit.key().unit().clone(),
+            piece_index: permit.key().piece_index(),
+            payload: permit.payload().to_owned(),
+            anchor_id,
+            epoch,
+        };
+        // As for an original: a failed append created no request, and recovery may drop it.
+        if let Err(error) = self.store.append_ledger(prepared()) {
+            let detail = format!("{error:?}");
+            let alarm = WriterAlarm::Halted {
+                detail: detail.clone(),
+            };
+            self.stop_with(alarm, Unsent::new(prepared()));
+            return Err(detail);
+        }
+        if let Some(detail) = self.store.ledger().violation().map(str::to_string) {
+            self.stop(WriterAlarm::LedgerViolation {
+                detail: detail.clone(),
+            });
+            return Err(detail);
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, report: &DispatchReport) -> impl Future<Output = ()> + Send {
+        let outcome = match &report.outcome {
+            WireOutcome::Created(created) => PostOutcome::Created(SeenMessage {
+                id: created.id,
+                author_id: created.author_id,
+                content: created.content.clone(),
+            }),
+            WireOutcome::Refused(status) => PostOutcome::Refused(*status),
+            other => PostOutcome::Uncertain(format!("{other:?}")),
+        };
+        async move {
+            // The re-post's Prepared is the open one; it settles like any other piece.
+            let Some((serial, open)) = self.store.ledger().unresolved() else {
+                return;
+            };
+            let payload = open.payload.clone();
+            self.record_outcome(serial, &payload, outcome).await;
+        }
+    }
+}
+
+impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> TurnWriter for ChannelWriter<P, L, A> {
+    fn channel(&self) -> u64 {
+        self.channel
+    }
+
+    fn ledger(&mut self) -> &LedgerState {
+        self.store.ledger()
+    }
+
+    fn set_live(&self, live: bool) {
+        let live = live && self.stopped.is_none();
+        self.repost_live.0.store(live, Ordering::SeqCst);
     }
 }

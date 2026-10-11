@@ -262,7 +262,7 @@ pub(super) fn persist_queue_or_restore(
     previous_queue: Vec<Intervention>,
     operation: &str,
 ) -> Result<(), String> {
-    match persist_queue(channel_id, &state.intervention_queue, persistence) {
+    match persist_queue(state, channel_id, persistence) {
         Ok(()) => Ok(()),
         Err(error) => {
             state.intervention_queue = previous_queue;

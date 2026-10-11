@@ -171,6 +171,12 @@ async fn restore_inflight_states(
             );
             continue;
         };
+        // A policy receipt settles or stays before the marker hold; without one nothing changes.
+        #[cfg(unix)]
+        if let Some(r) = super::herdr_before_start_restart::decode(shared, provider, &state) {
+            r.settle(http, shared, &state).await;
+            continue;
+        }
         // A held Herdr turn ends only on its admitted terminal, never on a transcript read here.
         #[cfg(unix)]
         if herdr_turn_held(provider, &state) {

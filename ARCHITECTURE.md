@@ -170,7 +170,10 @@ src/
 │   │   ├── storage_stats.rs
 │   │   └── tests.rs
 │   ├── replay_disposition/
+│   │   ├── write/
+│   │   │   └── start.rs
 │   │   ├── receipt.rs
+│   │   ├── register_tests.rs
 │   │   ├── write.rs
 │   │   └── write_tests.rs
 │   ├── replay_disposition_tests/
@@ -813,6 +816,7 @@ src/
 │   │   │   ├── classification_order_tests.rs
 │   │   │   ├── consumed_commands.rs
 │   │   │   ├── consumed_commands_tests.rs
+│   │   │   ├── duplicate_race_tests.rs
 │   │   │   ├── frontier_evidence.rs
 │   │   │   ├── frontier_sweep_tests.rs
 │   │   │   ├── handled_command.rs
@@ -1000,6 +1004,9 @@ src/
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── serde_adapters.rs
 │   │   │   │   └── turn_kinds.rs
+│   │   │   ├── o_seed_observation/
+│   │   │   │   ├── initial_parse_barrier_test.rs
+│   │   │   │   └── terminal_barrier_test.rs
 │   │   │   ├── rebind_reap/
 │   │   │   │   └── tests.rs
 │   │   │   ├── removal/
@@ -1013,6 +1020,8 @@ src/
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── runtime_stamp/
+│   │   │   │   │   │   ├── before_start_stop_admission.rs
+│   │   │   │   │   │   ├── before_start_stop_admission_tests.rs
 │   │   │   │   │   │   ├── captured_terminal_admission.rs
 │   │   │   │   │   │   ├── claude_terminal_tests.rs
 │   │   │   │   │   │   ├── herdr_terminal_admission.rs
@@ -1049,6 +1058,8 @@ src/
 │   │   │   ├── managed_submission.rs
 │   │   │   ├── managed_submission_tests.rs
 │   │   │   ├── model.rs
+│   │   │   ├── o_seed_observation.rs
+│   │   │   ├── o_seed_observation_tests.rs
 │   │   │   ├── orphan_relay_reclaim.rs
 │   │   │   ├── ownership_ops.rs
 │   │   │   ├── rebind_reap.rs
@@ -1074,7 +1085,8 @@ src/
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_entry_tests.rs
 │   │   │   │   ├── drive_tests.rs
-│   │   │   │   └── receipt_entry_tests.rs
+│   │   │   │   ├── receipt_entry_tests.rs
+│   │   │   │   └── reserve.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── admission.rs
 │   │   │   ├── clear.rs
@@ -1097,6 +1109,7 @@ src/
 │   │   │   ├── receipt.rs
 │   │   │   ├── receipt_tests.rs
 │   │   │   ├── reconcile.rs
+│   │   │   ├── reserve_tests.rs
 │   │   │   ├── source.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
@@ -1260,6 +1273,8 @@ src/
 │   │   │   ├── crash_resume_guard.rs
 │   │   │   ├── herdr_admitted_restart.rs
 │   │   │   ├── herdr_admitted_restart_tests.rs
+│   │   │   ├── herdr_before_start_restart.rs
+│   │   │   ├── herdr_before_start_restart_tests.rs
 │   │   │   ├── herdr_reader.rs
 │   │   │   ├── herdr_reader_tests.rs
 │   │   │   ├── host_reconcile.rs
@@ -1308,6 +1323,12 @@ src/
 │   │   │   ├── destructive_warrant.rs
 │   │   │   ├── idle_tmux.rs
 │   │   │   └── tests.rs
+│   │   ├── replay_policy/
+│   │   │   ├── live.rs
+│   │   │   ├── live_tests.rs
+│   │   │   ├── permit.rs
+│   │   │   ├── permit_tests.rs
+│   │   │   └── policy_tests.rs
 │   │   ├── restart_mode/
 │   │   │   └── protocol_v2/
 │   │   │       ├── fs/
@@ -1486,9 +1507,14 @@ src/
 │   │   │   ├── journal.rs
 │   │   │   ├── o_adoption_e2e_tests.rs
 │   │   │   ├── o_delivery_e2e_tests.rs
+│   │   │   ├── o_retired_terminal_e2e_tests.rs
+│   │   │   ├── o_retired_terminal_legacy_fixture_tests.rs
+│   │   │   ├── o_retired_terminal_race_tests.rs
+│   │   │   ├── o_retired_terminal_source_tests.rs
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
 │   │   │   ├── short_controller.rs
+│   │   │   ├── supervision.rs
 │   │   │   ├── task_notification_context.rs
 │   │   │   ├── terminal_handoff.rs
 │   │   │   ├── tests.rs
@@ -1523,6 +1549,7 @@ src/
 │   │   │   ├── terminal_identity.rs
 │   │   │   └── tests.rs
 │   │   ├── task_supervisor/
+│   │   │   ├── n4d_spawn_observation_tests.rs
 │   │   │   ├── watcher_completion.rs
 │   │   │   └── watcher_completion_tests.rs
 │   │   ├── terminal_delivery_custody/
@@ -1562,11 +1589,14 @@ src/
 │   │   │   │   ├── post_terminal_disposal_tests/
 │   │   │   │   │   └── compact_summary_tests.rs
 │   │   │   │   ├── post_terminal_disposal_tests.rs
+│   │   │   │   ├── types.rs
 │   │   │   │   └── watcher_resume.rs
 │   │   │   ├── streaming_status_tick/
 │   │   │   │   ├── committed_progress_tests.rs
 │   │   │   │   ├── existing_panel_update.rs
+│   │   │   │   ├── legacy_state.rs
 │   │   │   │   ├── native_collector_tests.rs
+│   │   │   │   ├── retired_transport_tests.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── supervisor_relay/
 │   │   │   │   └── supervisor_frame_source.rs
@@ -1577,6 +1607,8 @@ src/
 │   │   │   │   └── soft_terminal_authority.rs
 │   │   │   ├── turn_stream_collector/
 │   │   │   │   ├── chunk_forward.rs
+│   │   │   │   ├── entry.rs
+│   │   │   │   ├── observations.rs
 │   │   │   │   └── state.rs
 │   │   │   ├── cancel_handoff.rs
 │   │   │   ├── commit_decisions.rs
@@ -1589,14 +1621,18 @@ src/
 │   │   │   ├── entry.rs
 │   │   │   ├── herdr_entry_host_tests.rs
 │   │   │   ├── host_gate.rs
+│   │   │   ├── inherited_fixture_tests.rs
 │   │   │   ├── jsonl_rotation.rs
 │   │   │   ├── judged_stop_harness_tests.rs
+│   │   │   ├── legacy_state.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── loop_poll_prologue.rs
 │   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   ├── no_result_exits.rs
+│   │   │   ├── o_capsule_origin_tests.rs
 │   │   │   ├── o_delegated_arm.rs
 │   │   │   ├── o_delegated_watcher_tests.rs
+│   │   │   ├── o_seed_install_tests.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
 │   │   │   ├── owed_range_baseline_tests.rs
@@ -1611,6 +1647,8 @@ src/
 │   │   │   ├── prompt_observe.rs
 │   │   │   ├── provider_output_guard.rs
 │   │   │   ├── provider_session_persistence.rs
+│   │   │   ├── retired_host_tick_tests.rs
+│   │   │   ├── retired_o_boundary_tests.rs
 │   │   │   ├── rowless_delivery_authority.rs
 │   │   │   ├── session_bound_ack.rs
 │   │   │   ├── session_bound_ack_tests.rs
@@ -1770,11 +1808,6 @@ src/
 │   │   │   │   └── production_seam_tests.rs
 │   │   │   ├── intake_settlement/
 │   │   │   │   └── tests.rs
-│   │   │   ├── replay_policy/
-│   │   │   │   ├── live.rs
-│   │   │   │   ├── permit.rs
-│   │   │   │   ├── permit_tests.rs
-│   │   │   │   └── policy_tests.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
@@ -1815,6 +1848,8 @@ src/
 │   │   │   │   └── unix_journal.rs
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/
+│   │   │   │   │   ├── recovery_retry_guard_tests/
+│   │   │   │   │   │   └── replay_turn_tests.rs
 │   │   │   │   │   ├── rowless_receipt_tests/
 │   │   │   │   │   │   ├── background_child_ordering_tests.rs
 │   │   │   │   │   │   ├── o_after_done_chain_tests.rs
@@ -1934,6 +1969,8 @@ src/
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── admission.rs
 │   │   │   ├── admission_tests.rs
+│   │   │   ├── entrypoints.rs
+│   │   │   ├── entrypoints_tests.rs
 │   │   │   ├── lifecycle.rs
 │   │   │   ├── lifecycle_tests.rs
 │   │   │   ├── mod.rs
@@ -1972,6 +2009,8 @@ src/
 │   │   │   │   ├── claude_restore.rs
 │   │   │   │   ├── liveness.rs
 │   │   │   │   ├── liveness_tests.rs
+│   │   │   │   ├── o_only_install.rs
+│   │   │   │   ├── o_only_install_tests.rs
 │   │   │   │   ├── output_policy.rs
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
@@ -2081,6 +2120,7 @@ src/
 │   │   ├── relay_recovery_leaked_row_sweep.rs
 │   │   ├── relay_recovery_reattach_apply.rs
 │   │   ├── replace_outcome_policy.rs
+│   │   ├── replay_policy.rs
 │   │   ├── response_sanitizer.rs
 │   │   ├── restart_mode.rs
 │   │   ├── restart_report.rs
@@ -2570,11 +2610,13 @@ src/
 │   │   │   ├── operator_resume_delivery_tests.rs
 │   │   │   ├── operator_resume_source_tests.rs
 │   │   │   ├── operator_resume_tests.rs
+│   │   │   ├── past_bind.rs
 │   │   │   ├── pieces.rs
 │   │   │   ├── reclaim_tests.rs
 │   │   │   ├── recovery_tests.rs
 │   │   │   ├── renumber_tests.rs
 │   │   │   ├── renumbered.rs
+│   │   │   ├── repost_turn_tests.rs
 │   │   │   ├── resume.rs
 │   │   │   ├── resume_tests.rs
 │   │   │   ├── retire_tests.rs
@@ -2588,6 +2630,7 @@ src/
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── unpinned_past_tests.rs
 │   │   │   └── writer_tests.rs
 │   │   ├── alarm.rs
 │   │   ├── channel_policy.rs
@@ -2684,6 +2727,8 @@ src/
 │   │   ├── pending_queue_persistence.rs
 │   │   ├── queue_cancellation.rs
 │   │   ├── queue_enqueue.rs
+│   │   ├── queued_head.rs
+│   │   ├── queued_head_tests.rs
 │   │   ├── recovery_kickoff.rs
 │   │   ├── recovery_kickoff_tests.rs
 │   │   ├── registry_purge.rs

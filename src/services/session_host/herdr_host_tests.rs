@@ -849,17 +849,241 @@ fn production_text(text: &str) -> (String, Vec<(String, Option<String>)>) {
     (out, test_mods)
 }
 
+type ExternalModules = Vec<(String, Option<String>)>;
+
+/// Top-level paths are exact; nested declarations also protect uncertain production layouts.
+fn external_module_declarations(text: &str) -> (ExternalModules, ExternalModules) {
+    static PATH_ATTR: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"^\s*path\s*=\s*"([^"]+)"\s*$"#).unwrap());
+    let chars: Vec<char> = text.chars().collect();
+    let (mut modules, mut nested, mut path, mut depth, mut i) =
+        (Vec::new(), Vec::new(), None, 0usize, 0);
+    while i < chars.len() {
+        if let Some(end) = literal_end(&chars, i) {
+            i = end;
+        } else if chars[i..].starts_with(&['#', '[']) {
+            let (mut k, mut brackets) = (i + 2, 1usize);
+            while k < chars.len() && brackets > 0 {
+                if let Some(end) = literal_end(&chars, k) {
+                    k = end;
+                    continue;
+                }
+                match chars[k] {
+                    '[' => brackets += 1,
+                    ']' => brackets -= 1,
+                    _ => {}
+                }
+                k += 1;
+            }
+            if brackets == 0 {
+                let attribute: String = chars[i + 2..k - 1].iter().collect();
+                if let Some(found) = PATH_ATTR.captures(&attribute) {
+                    path = Some(found[1].to_string());
+                }
+            }
+            i = k;
+        } else if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            if word == "mod" {
+                while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+                    i += 1;
+                }
+                let start = i;
+                while chars
+                    .get(i)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+                {
+                    i += 1;
+                }
+                let name: String = chars[start..i].iter().collect();
+                while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+                    i += 1;
+                }
+                if !name.is_empty() && chars.get(i) == Some(&';') {
+                    if depth == 0 {
+                        modules.push((name, path.take()));
+                    } else {
+                        nested.push((name, path.take()));
+                    }
+                }
+                path = None;
+            } else if matches!(
+                word.as_str(),
+                "fn" | "struct"
+                    | "enum"
+                    | "use"
+                    | "impl"
+                    | "trait"
+                    | "type"
+                    | "const"
+                    | "static"
+                    | "extern"
+            ) {
+                path = None;
+            }
+        } else {
+            match chars[i] {
+                '{' => {
+                    depth += 1;
+                    path = None;
+                }
+                '(' | '[' => depth += 1,
+                '}' | ')' | ']' => depth = depth.saturating_sub(1),
+                ';' => path = None,
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    (modules, nested)
+}
+
+fn external_modules(text: &str) -> ExternalModules {
+    external_module_declarations(text).0
+}
+
+fn module_files(path: &Path, modules: ExternalModules) -> Vec<std::path::PathBuf> {
+    let base = match path.file_stem().and_then(|stem| stem.to_str()) {
+        Some("mod" | "lib" | "main") => path.parent().unwrap().to_path_buf(),
+        _ => path.with_extension(""),
+    };
+    modules
+        .into_iter()
+        .flat_map(|(name, file)| match file {
+            Some(file) => vec![path.parent().unwrap().join(file)],
+            None => vec![
+                base.join(format!("{name}.rs")),
+                base.join(name).join("mod.rs"),
+            ],
+        })
+        .map(|path| {
+            let mut normalized = std::path::PathBuf::new();
+            for component in path.components() {
+                match component {
+                    std::path::Component::ParentDir => {
+                        normalized.pop();
+                    }
+                    std::path::Component::CurDir => {}
+                    component => normalized.push(component.as_os_str()),
+                }
+            }
+            normalized
+        })
+        .collect()
+}
+
+/// Test ancestry cannot hide a child also reached by an ungated production parent.
+fn test_only_files(files: &BTreeMap<std::path::PathBuf, String>) -> BTreeSet<std::path::PathBuf> {
+    let mut candidates = BTreeSet::new();
+    let mut production = BTreeMap::new();
+    for (path, text) in files {
+        let (prod, tests) = production_text(text);
+        candidates.extend(module_files(path, tests));
+        production.insert(path.clone(), module_files(path, external_modules(&prod)));
+    }
+    let mut queue: Vec<_> = candidates.iter().cloned().collect();
+    while let Some(path) = queue.pop() {
+        if let Some(text) = files.get(&path) {
+            for child in module_files(&path, external_modules(text)) {
+                if candidates.insert(child.clone()) {
+                    queue.push(child);
+                }
+            }
+        }
+    }
+    for (path, text) in files {
+        let (prod, _) = production_text(text);
+        let nested = external_module_declarations(&prod).1;
+        for (name, file) in nested {
+            // An inline module's directory may be overridden; never hide a possible child.
+            production.get_mut(path).unwrap().extend(
+                candidates
+                    .iter()
+                    .filter(|child| {
+                        if let Some(file) = &file {
+                            let file = Path::new(file);
+                            child.file_name() == file.file_name()
+                        } else {
+                            child.file_stem().is_some_and(|stem| stem == name.as_str())
+                                || (child.file_name().is_some_and(|file| file == "mod.rs")
+                                    && child
+                                        .parent()
+                                        .and_then(Path::file_name)
+                                        .is_some_and(|stem| stem == name.as_str()))
+                        }
+                    })
+                    .cloned(),
+            );
+        }
+    }
+    let mut live: BTreeSet<_> = files
+        .keys()
+        .filter(|path| !candidates.contains(*path))
+        .cloned()
+        .collect();
+    let mut queue: Vec<_> = live.iter().cloned().collect();
+    while let Some(path) = queue.pop() {
+        for child in production.get(&path).into_iter().flatten() {
+            if live.insert(child.clone()) {
+                queue.push(child.clone());
+            }
+        }
+    }
+    candidates.retain(|path| !live.contains(path));
+    candidates
+}
+
 /// Production text of every non-test `src/**/*.rs`, keyed by repo-relative path.
 fn production_sources() -> BTreeMap<String, String> {
     let (probe, _) = production_text(
         "fn a() { b(\"}\"); }\n#[cfg(test)]\nmod t { const S: &str = \"{\"; }\nfn c() {}",
     );
     assert!(probe.contains("fn a()") && probe.contains("fn c()") && !probe.contains("mod t"));
+    let mut modules: BTreeMap<_, _> = [
+        (
+            "src/root.rs",
+            "#[cfg(test)]\n#[path = \"fixtures/root.rs\"]\nmod tests;",
+        ),
+        ("src/fixtures/root.rs", "mod nested;"),
+        (
+            "src/fixtures/root/nested.rs",
+            "#[path = \"../../shared.rs\"]\nmod shared;",
+        ),
+        ("src/shared.rs", "mod leaf;"),
+        ("src/shared/leaf.rs", "fn marker_reader() {}"),
+    ]
+    .into_iter()
+    .map(|(path, text)| (std::path::PathBuf::from(path), text.to_string()))
+    .collect();
+    let test_files = test_only_files(&modules);
+    assert_eq!(
+        test_files
+            .iter()
+            .filter(|path| modules.contains_key(*path))
+            .count(),
+        4
+    );
+    modules
+        .get_mut(Path::new("src/root.rs"))
+        .unwrap()
+        .push_str("\n#[path = \"shared.rs\"]\nmod live;");
+    let test_files = test_only_files(&modules);
+    assert!(!test_files.contains(Path::new("src/shared.rs")));
+    assert!(!test_files.contains(Path::new("src/shared/leaf.rs")));
+    assert!(test_files.contains(Path::new("src/fixtures/root/nested.rs")));
+    modules.insert("src/root.rs".into(), "#[cfg(test)]\n#[path = \"fixtures/root.rs\"]\nmod tests; mod inline { #[path = \"../../shared.rs\"] mod live; }".into());
+    let test_files = test_only_files(&modules);
+    assert!(!test_files.contains(Path::new("src/shared.rs")));
+    assert!(!test_files.contains(Path::new("src/shared/leaf.rs")));
+    assert!(external_modules("/* mod fake; */ const S: &str = \"mod fake;\"; mod inline { mod fake; } macro_call!(mod fake;);").is_empty());
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut stack = vec![root.join("src")];
     let mut files = BTreeMap::new();
-    let mut test_files = BTreeSet::new();
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry
@@ -875,25 +1099,12 @@ fn production_sources() -> BTreeMap<String, String> {
             let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
                 panic!("source scan: unreadable {}: {error}", path.display())
             });
-            let (prod, test_mods) = production_text(&text);
-            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-            let base = match stem.as_str() {
-                "mod" | "lib" | "main" => path.parent().unwrap().to_path_buf(),
-                _ => path.with_extension(""),
-            };
-            for (name, file) in test_mods {
-                if let Some(file) = file {
-                    test_files.insert(path.parent().unwrap().join(file));
-                    continue;
-                }
-                test_files.insert(base.join(format!("{name}.rs")));
-                test_files.insert(base.join(name).join("mod.rs"));
-            }
-            files.insert(path, (text.len(), prod));
+            files.insert(path, text);
         }
     }
+    let test_files = test_only_files(&files);
     let (mut total, mut kept, mut sources) = (0, 0, BTreeMap::new());
-    for (path, (len, prod)) in files {
+    for (path, text) in files {
         if test_files.contains(&path) {
             continue;
         }
@@ -902,7 +1113,8 @@ fn production_sources() -> BTreeMap<String, String> {
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        (total, kept) = (total + len, kept + prod.len());
+        let (prod, _) = production_text(&text);
+        (total, kept) = (total + text.len(), kept + prod.len());
         sources.insert(relative, prod);
     }
     assert!(

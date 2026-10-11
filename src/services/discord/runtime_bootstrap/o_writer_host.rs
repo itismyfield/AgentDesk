@@ -32,6 +32,8 @@ struct GatewayHost {
     turn: TurnConfig,
     /// Off the gateway: the bot token's REST client every hosted channel posts through.
     rest: Option<Arc<serenity::Http>>,
+    /// The boot `tui_o` section; the live config overrides its re-post switch once installed.
+    boot: Option<TuiOConfig>,
 }
 
 /// With clustering, the configured id the home judgement used, refused when bootstrap published
@@ -215,6 +217,45 @@ impl HostIo for GatewayHost {
             .relay_emission_in_flight(ChannelId::new(channel))
     }
 
+    /// Built for gateway and delegated hosts alike over the port's own client. Off, the turn reads
+    /// nothing, and the transport is built only on the first on turn.
+    fn repost(&self, channel: u64, port: &Arc<GatewayPort>) -> Option<host::RepostTurn<Self>> {
+        use crate::services::tui_o::repost::{
+            config::RepostSwitch, io::probe::evidence::RunScope, runner,
+        };
+        let pool = self.shared.pg_pool.clone()?;
+        let sidecar = crate::config::runtime_root()?
+            .join("tui_o")
+            .join("repost")
+            .join(format!("{channel}.jsonl"));
+        let switch = RepostSwitch::new(self.boot.as_ref(), crate::config_live_reload::subscribe());
+        let holder = self.configured_id.clone();
+        let run = RunScope {
+            holder: holder.unwrap_or_else(|| "o-writer".into()),
+            run: uuid::Uuid::new_v4().to_string(),
+            credentials: port.repost_credentials(),
+            evidence_generation: 1,
+        };
+        let sender = crate::services::tui_o::writer::DiscordPort::bot_id(&**port);
+        let runner = runner::Runner::new(switch, pool, sender, run);
+        let (port, mut warned) = (Arc::clone(port), false);
+        let open = move || match port.repost_http() {
+            Ok(http) => Some(Arc::new(http)),
+            Err(error) => {
+                if !std::mem::replace(&mut warned, true) {
+                    tracing::warn!(
+                        channel,
+                        ?error,
+                        "[tui_o] no re-post transport for this client"
+                    );
+                }
+                None
+            }
+        };
+        let turn = runner::ChannelTurn::new(runner, Box::new(open), channel, sidecar);
+        Some(Box::new(turn))
+    }
+
     fn adopted(&self, channel: u64, provider: ShadowProvider) {
         let kind = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
@@ -254,6 +295,7 @@ fn parts(
             configured_id,
             turn: config.map(|c| c.turn.clone()).unwrap_or_default(),
             rest,
+            boot: config.cloned(),
         }),
         runtime_root: crate::config::runtime_root(),
         gate: crate::services::tui_o::ownership::gate(provider.as_str()),
@@ -313,6 +355,7 @@ pub(super) mod test_host {
             configured_id: configured_id.map(str::to_owned),
             turn: TurnConfig::default(),
             rest: None,
+            boot: None,
         }
     }
 
@@ -415,6 +458,7 @@ mod fence_tests {
                 .or_else(|| Some("fence-local".into())),
             turn: TurnConfig::default(),
             rest: None,
+            boot: None,
         };
         let fenced =
             tokio::time::timeout(Duration::from_secs(3), host.intake_fence(673702, Claude))
@@ -453,5 +497,37 @@ mod fence_tests {
             .await;
         assert!(matches!(result, Err(detail) if detail == "this host has no intake fence"));
         assert!(host.posts.to(673702).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod repost_tests {
+    use super::*;
+
+    /// Gateway and delegated hosts both give each writer a re-post turn over its own port, and
+    /// only with a PostgreSQL pool; without one their writers run as before.
+    #[tokio::test]
+    async fn f6_gateway_and_delegated_hosts_build_a_repost_turn_only_with_a_pool() {
+        let unreachable = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://agentdesk@127.0.0.1:1/none")
+            .unwrap();
+        let http = Arc::new(serenity::Http::new("test-token"));
+        let port = Arc::new(GatewayPort::new(Arc::clone(&http), 42));
+        for pool in [Some(unreachable), None] {
+            let shared =
+                crate::services::discord::make_shared_data_for_tests_with_storage(pool.clone());
+            let gateway = GatewayHost {
+                shared: Arc::clone(&shared),
+                alarms: Arc::new(AlarmRouter::for_process(None, None)),
+                self_id_wait: Duration::ZERO,
+                configured_id: None,
+                turn: TurnConfig::default(),
+                rest: None,
+                boot: None,
+            };
+            let delegated = test_host::rest(&shared, Arc::clone(&http));
+            assert_eq!(gateway.repost(1, &port).is_some(), pool.is_some());
+            assert_eq!(delegated.repost(1, &port).is_some(), pool.is_some());
+        }
     }
 }

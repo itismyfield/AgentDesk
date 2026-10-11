@@ -1833,14 +1833,14 @@ fn m2_settlement_mailbox_unreadable_is_indeterminate_pg() {
     });
 }
 
-// The turn captured before the transition lock is replaced by B before the recheck; the
-// service refuses with no close, no settlement of B and B's execution hold kept.
+// The turn captured before the transition is replaced by B at the capture barrier; the
+// recheck refuses with no close, no settlement of B and the execution's hold kept.
 #[test]
 fn m2_turn_changed_before_close_has_zero_effect_pg() {
     if run_terminate_child("m2_turn_changed_before_close_has_zero_effect_pg") {
         return;
     }
-    use crate::services::discord::herdr_terminate::test_turn;
+    use crate::services::discord::herdr_terminate::{probe_after_capture, test_turn};
     let _lock = crate::config::shared_test_env_lock();
     let rig = rig();
     let pane = PaneLife::new(&rig, false, true);
@@ -1849,25 +1849,21 @@ fn m2_turn_changed_before_close_has_zero_effect_pg() {
         let service = Service::start(&rig, pane, os, NONCE).await;
         let channel = serenity::model::id::ChannelId::new(1);
         let token_a = test_turn::start(&service.shared, channel, 51, "turn-a").await;
-        assert_eq!(Arc::weak_count(&token_a), 0);
-        let transition = service
-            .shared
-            .session_transition_lock(channel)
-            .lock_owned()
-            .await;
-        let shared = service.shared.clone();
-        let (result, token_b) = tokio::join!(service.terminate(NONCE), async {
-            // The capture keeps a weak pointer to A; the service then waits on the transition.
-            let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            while Arc::weak_count(&token_a) == 0 {
-                assert!(std::time::Instant::now() < deadline, "A was never captured");
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            test_turn::finish_naturally(&shared, channel, 51, "turn-a", &token_a).await;
-            let token_b = test_turn::start(&shared, channel, 61, "turn-b").await;
-            drop(transition);
-            token_b
-        });
+        let token_b = Arc::new(Mutex::new(None));
+        let (shared, probe_a, probe_b) = (service.shared.clone(), token_a.clone(), token_b.clone());
+        probe_after_capture(Box::new(move || {
+            Box::pin(async move {
+                test_turn::finish_naturally(&shared, channel, 51, "turn-a", &probe_a).await;
+                let b = test_turn::start(&shared, channel, 61, "turn-b").await;
+                *probe_b.lock().unwrap() = Some(b);
+            })
+        }));
+        let result = service.terminate(NONCE).await;
+        let token_b = token_b
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the capture barrier ran");
         assert_eq!(
             result,
             TerminationResult::Refused("turn changed under transition".into())
@@ -1903,6 +1899,8 @@ pub(crate) mod p11 {
 
     pub(crate) const NODE: &str = "mac-mini";
     pub(crate) const EXECUTION: &str = NONCE;
+    pub(crate) const LAUNCHED_PANE: &str = LAUNCHED;
+    pub(crate) use crate::db::dispatched_sessions::hosted_execution::HostedState;
 
     /// Re-runs test `path` in a child owning its boot section, O writer list and Herdr
     /// provenance (config written before it started); returns whether this is that child.
@@ -2001,23 +1999,30 @@ pub(crate) mod p11 {
                 std::mem::forget(crate::services::herdr_launch::force_writer_accepts(Some(
                     true,
                 )));
+                // Intake's own O readiness read, as a writer that accepts answers it.
+                std::mem::forget(
+                    crate::services::tui_o::cutover::intake_route::test_probe::answer_with(|_| {
+                        true
+                    }),
+                );
             }
         }
 
-        /// Execution `EXECUTION` Bound on the server's pane under `session_key`, provider alive
-        /// and hold taken, with the live terminate and Herdr turn switches on.
+        /// Execution `EXECUTION` in `state` on the server's pane under `session_key`, provider
+        /// alive and, unless retired, its hold taken; the live terminate and turn switches on.
         pub(crate) async fn bind(
             &self,
             pool: &sqlx::PgPool,
             token_hash: &str,
             session_key: &str,
+            state: HostedState,
         ) -> LiveSwitches {
             let logical = session_key.rsplit_once(':').unwrap().1;
             let marker = crate::services::tmux_common::session_temp_path(logical, "host_kind");
             std::fs::write(marker, "herdr").unwrap();
             self.os
                 .swap(Arc::new(FakeOs::launched(env_naming(&context(NONCE)))));
-            let mut record = stored(&self.server, HostedState::Bound);
+            let mut record = stored(&self.server, state);
             record.owner.discord_token_hash = token_hash.into();
             record.owner.channel_id = self.channel.to_string();
             record.owner.logical_key = logical.into();
@@ -2027,7 +2032,9 @@ pub(crate) mod p11 {
                 .bind(session_key).bind(token_hash).bind(self.channel.to_string())
                 .bind(serde_json::to_value(&record).unwrap())
                 .execute(pool).await.unwrap();
-            crate::services::claude::herdr_turn::hold(NONCE).unwrap();
+            if state != HostedState::Retired {
+                crate::services::claude::herdr_turn::hold(NONCE).unwrap();
+            }
             let switches = LiveSwitches(LiveTerminateSwitch::new());
             let mut config = switches.0.0.clone();
             config.runtime.herdr_terminate_enabled = Some(true);
@@ -2066,6 +2073,24 @@ pub(crate) mod p11 {
     /// Whether the execution's input hold is still taken.
     pub(crate) fn held() -> bool {
         service::held(NONCE)
+    }
+
+    /// The execution `session_key`'s row records, if it is a readable known record.
+    pub(crate) async fn row(
+        pool: &sqlx::PgPool,
+        session_key: &str,
+    ) -> Option<(HostedState, String)> {
+        use crate::db::dispatched_sessions::hosted_execution::{
+            HostedLookup, HostedLookupKey, HostedRecord, load_hosted_execution_pg,
+        };
+        let lookup = load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(session_key)).await;
+        match lookup {
+            HostedLookup::Found(found) => match found.record {
+                HostedRecord::Known(record) => Some((record.state, record.execution_nonce)),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// A fresh input target of the execution, refused while its termination fence is shut.

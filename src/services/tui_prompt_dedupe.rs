@@ -332,7 +332,11 @@ mod shadow_peek;
 mod state;
 
 pub(crate) use session_rotation::*;
-pub(crate) use shadow_peek::peek_tmux_runtime_binding;
+#[cfg(test)]
+pub(crate) use shadow_peek::hold_binding_peek_lock_for_tests;
+pub(crate) use shadow_peek::{
+    BindingPeekBusy, peek_tmux_runtime_binding, try_peek_tmux_runtime_binding,
+};
 
 pub use extract::*;
 use extract::{
