@@ -813,6 +813,7 @@ src/
 │   │   │   ├── classification_order_tests.rs
 │   │   │   ├── consumed_commands.rs
 │   │   │   ├── consumed_commands_tests.rs
+│   │   │   ├── duplicate_race_tests.rs
 │   │   │   ├── frontier_evidence.rs
 │   │   │   ├── frontier_sweep_tests.rs
 │   │   │   ├── handled_command.rs
