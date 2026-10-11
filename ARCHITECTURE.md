@@ -1484,6 +1484,7 @@ src/
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   ├── queued_recovery_fence_tests.rs
+│   │   │   ├── queued_recovery_s2a_tests.rs
 │   │   │   ├── recovery_flush.rs
 │   │   │   ├── relay_dlq_redelivery.rs
 │   │   │   ├── restored_state.rs
@@ -2716,6 +2717,8 @@ src/
 │   ├── tui_turn_state/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
+│   │   ├── pending_queue_persistence/
+│   │   │   └── queued_recovery.rs
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs
 │   │   ├── active_source_dedup.rs
@@ -2744,6 +2747,7 @@ src/
 │   │   ├── queue_cancellation.rs
 │   │   ├── queue_enqueue.rs
 │   │   ├── queued_head.rs
+│   │   ├── queued_head_s2a_tests.rs
 │   │   ├── queued_head_tests.rs
 │   │   ├── recovery_kickoff.rs
 │   │   ├── recovery_kickoff_tests.rs
