@@ -429,15 +429,13 @@ mod tests {
                 Some(inherited.clone()),
             );
             assert!(refused.err().unwrap().to_string().contains("Closing"));
-            assert!(
-                final_admission(
-                    &ProviderKind::Claude,
-                    ChannelId::new(6_325_510),
-                    Some(inherited)
-                )
-                .unwrap()
-                .is_none()
+            // Another provider's protection covers the channel, so a foreign writer is refused.
+            let foreign = final_admission(
+                &ProviderKind::Claude,
+                ChannelId::new(6_325_510),
+                Some(inherited),
             );
+            assert!(foreign.err().unwrap().to_string().contains("Closing"));
         })
         .await;
         source_closing.drain().await;

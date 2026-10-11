@@ -99,10 +99,10 @@ mod input_effect_tests {
     }
 
     #[tokio::test]
-    async fn c1b_worker_actual_role_override_admits_final_provider_from_off_root() {
+    async fn c1b_worker_actual_role_override_onto_a_foreign_gate_is_refused_at_root() {
         if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
             "services::discord::router::message_handler::intake_turn::worker_entry::input_effect_tests::",
-            "c1b_worker_actual_role_override_admits_final_provider_from_off_root"
+            "c1b_worker_actual_role_override_onto_a_foreign_gate_is_refused_at_root"
         )) {
             return;
         }
@@ -230,13 +230,28 @@ mod input_effect_tests {
             turn_kind: TurnKind::Foreground,
             preserve_on_cancel: false,
         };
-        tokio::time::timeout(
+        let result = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             execute_intake_turn_core(&api.http, &shared, "", request, Vec::new()),
         )
         .await
-        .unwrap()
         .unwrap();
+        if override_provider {
+            // The root writer meets the other provider's protection (X13-C channel-wide lookup);
+            // E2 never protects a channel whose writer differs from its root runtime.
+            assert!(result.unwrap_err().to_string().contains("refused"));
+            assert!(
+                crate::services::discord::inflight::load_inflight_state(
+                    &final_provider,
+                    channel.get()
+                )
+                .is_none()
+            );
+            assert!(gate.close().unwrap().drain().now_or_never().is_some());
+            shared.mailboxes.remove_fixture_for_test(channel);
+            return;
+        }
+        result.unwrap();
         let provider = tokio::time::timeout(std::time::Duration::from_secs(10), provider_entered)
             .await
             .unwrap()

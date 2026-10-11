@@ -1075,7 +1075,8 @@ src/
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_entry_tests.rs
 │   │   │   │   ├── drive_tests.rs
-│   │   │   │   └── receipt_entry_tests.rs
+│   │   │   │   ├── receipt_entry_tests.rs
+│   │   │   │   └── reserve.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── admission.rs
 │   │   │   ├── clear.rs
@@ -1098,6 +1099,7 @@ src/
 │   │   │   ├── receipt.rs
 │   │   │   ├── receipt_tests.rs
 │   │   │   ├── reconcile.rs
+│   │   │   ├── reserve_tests.rs
 │   │   │   ├── source.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
