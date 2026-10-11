@@ -410,6 +410,35 @@ mod relay_target {
         });
     }
 
+    // A relay whose only runtime ended keeps polling with no target, and the next runtime to
+    // start it is served by that same task.
+    #[test]
+    fn a_relay_left_without_a_runtime_serves_the_next_one() {
+        relay_fixture(async || {
+            let a = make_shared();
+            spawn_codex_idle_rollout_relay(a.clone());
+            assert!(served(&a, Duration::from_secs(10)).await, "A never served");
+            let ended = Arc::downgrade(&a);
+            drop(a);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            while ended.upgrade().is_some() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(ended.upgrade().is_none(), "A outlived its last owner");
+            // Several 500ms polls pass with the target gone.
+            RELAY_TARGETS.lock().unwrap().clear();
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            assert!(
+                RELAY_TARGETS.lock().unwrap().is_empty(),
+                "a use served a dead runtime"
+            );
+            let b = make_shared();
+            spawn_codex_idle_rollout_relay(b.clone());
+            assert!(served(&b, Duration::from_secs(15)).await, "B never served");
+            assert_eq!(RELAY_SPAWNS.load(Ordering::Acquire), 1, "one relay task");
+        });
+    }
+
     // P2-3: a single runtime (the normal process) is served on every cycle by its one relay.
     #[test]
     fn a_single_runtime_keeps_its_one_relay() {
