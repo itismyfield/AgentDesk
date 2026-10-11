@@ -237,6 +237,7 @@ where
     A: AlarmSink,
     B: BindingEvents,
 {
+    let writer = writer.with_repost_stop(stop.clone());
     let deriver = UnitDeriver::new(writer.channel(), provider);
     let sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings));
     let owed = VecDeque::new();
@@ -442,22 +443,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     fn delivery_allowed(&mut self) -> bool {
-        let channel = self.writer.channel();
-        if !crate::services::tui_prompt_dedupe::codex_verified_channel_delivery_allowed(channel) {
-            return false;
-        }
-        // Derived items have no source field, so outstanding work keeps every retained source pinned.
-        let owing = !self.owed.is_empty();
-        self.writer
-            .store()
-            .cursors()
-            .filter(|cursor| !cursor.retired || owing)
-            .all(|cursor| {
-                crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
-                    channel,
-                    &cursor.source,
-                )
-            })
+        self.writer.delivery_allowed(!self.owed.is_empty())
     }
 
     async fn deliver_owed(&mut self) {

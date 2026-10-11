@@ -42,7 +42,7 @@ pub(crate) enum BacklogReason {
 pub(crate) enum Candidate {
     Eligible(OriginalAttempt),
     Backlog(BacklogReason),
-    /// Posted, rejected, or already in admission: nothing to admit here.
+    /// Posted, rejected, certainly unsent, or already in admission: nothing to admit here.
     Settled,
 }
 
@@ -58,7 +58,7 @@ pub(crate) fn classify(
         | Some(PieceOutcome::NotFound)
         | Some(PieceOutcome::Ambiguous(_))
         | Some(PieceOutcome::Unresolved(_)) => {}
-        Some(PieceOutcome::Posted(_)) | Some(PieceOutcome::Rejected(_)) => {
+        Some(PieceOutcome::Posted(_) | PieceOutcome::Rejected(_) | PieceOutcome::NotSent) => {
             return Candidate::Settled;
         }
     }
@@ -281,7 +281,12 @@ impl<'a> Admitter<'a> {
         }
         let new = self.delivery(&original.key, &original.payload, original.anchor, serial);
         let outcome = o_piece_delivery::admit(self.pool, &new).await?;
-        log.append(ProvenanceEntry::Admitted { serial })?;
+        if matches!(
+            &outcome,
+            AdmitOutcome::Admitted(_) | AdmitOutcome::Existing(_)
+        ) {
+            log.append(ProvenanceEntry::Admitted { serial })?;
+        }
         Ok(outcome)
     }
 
