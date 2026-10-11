@@ -10,6 +10,7 @@ use super::super::{
     SharedData, advance_last_message_checkpoint, is_synthetic_headless_message_id_raw,
     mailbox_clear_channel,
 };
+use super::clock::CatchUpClock;
 use super::{
     CATCH_UP_RETRY_DEFERRED_REARM_LIMIT, CATCH_UP_RETRY_FETCH_FAILURE_LIMIT, CatchUpRetryState,
 };
@@ -17,6 +18,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::ClearChannelResult;
 
 impl CatchUpRetryState {
+    #[cfg(test)]
     pub(super) fn new(checkpoint: u64) -> Self {
         Self::new_at(checkpoint, Instant::now())
     }
@@ -74,6 +76,39 @@ pub(super) fn merge_catch_up_retry_state(
         deferred_rearms: existing.deferred_rearms.max(retry_state.deferred_rearms),
         armed_at: existing.armed_at.min(retry_state.armed_at),
     }
+}
+
+pub(super) fn catch_up_retry_prior(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    threaded_prior: Option<CatchUpRetryState>,
+) -> Option<CatchUpRetryState> {
+    let map_prior = shared
+        .catch_up_retry_pending
+        .get(&channel_id)
+        .map(|entry| *entry.value());
+    match (threaded_prior, map_prior) {
+        (Some(threaded), Some(mapped)) => Some(merge_catch_up_retry_state(Some(threaded), mapped)),
+        (Some(state), None) | (None, Some(state)) => Some(state),
+        (None, None) => None,
+    }
+}
+
+// Capacity and membership waits retain the origin without spending Deferred budget.
+pub(super) fn arm_catch_up_retry_preserving_prior(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    retry_after: u64,
+    threaded_prior: Option<CatchUpRetryState>,
+    clock: &dyn CatchUpClock,
+) -> u64 {
+    let prior = catch_up_retry_prior(shared, channel_id, threaded_prior);
+    let base = prior.unwrap_or_else(|| CatchUpRetryState::new_at(retry_after, clock.sample().1));
+    let state = CatchUpRetryState {
+        checkpoint: retry_after,
+        ..base
+    };
+    super::arm_catch_up_retry_state(shared, channel_id, state).checkpoint
 }
 
 pub(super) fn merge_catch_up_retry_checkpoint(existing: Option<u64>, retry_after: u64) -> u64 {
