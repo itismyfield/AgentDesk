@@ -1407,6 +1407,11 @@ class KnownArrayProvenance(unittest.TestCase):
                 ((("echo |", source, non_pg),), unsourced),
                 ((("echo `", source, "`", pg),), pg_unsourced),
                 ((("true && echo ok", "echo `date`", source, pg),), []),
+                # A `#` right after the operator is a comment; inside a word it is not.
+                ((("false &&# note", source, pg),), pg_unsourced),
+                ((("true ||# note", source, pg),), pg_unsourced),
+                ((("echo |# note", source, non_pg),), unsourced),
+                ((("echo x#&&", source, pg),), pg_unsourced),
                 # Quoted or escaped, `;`, `|` and `&&` are argument text, not a second command.
                 (((source, f"{non_pg} --logfile 'ci;pg.log'"),), []),
                 (((source, f"{non_pg} --logfile ci\\;pg.log"),), []),
@@ -1642,12 +1647,29 @@ class ParserContract(unittest.TestCase):
                 (f"MODE=ci {GOOD_COMMAND} | tee test.log", unparsed),
                 (f"echo {GOOD_COMMAND} && true", []),
                 (f"time {GOOD_COMMAND} && true", []),
-                (f"{GOOD_COMMAND} --logfile 'ci;pg.log' 2>&1", [])):
+                (f"{GOOD_COMMAND} --logfile 'ci;pg.log' 2>&1", []),
+                # Only a `#` opening a word starts a comment; inside one it is literal.
+                ("cargo test --lib high_risk_recovery#tag; cargo test --lib missing", unparsed),
+                ("cargo test --lib high_risk_recovery#tag", ["zero-match"]),
+                (f"{GOOD_COMMAND} # note; cargo test --lib missing", [])):
             with self.subTest(command=command):
                 self.assertEqual([v.kind for v in run_fixture(command)], kinds)
         just_text = f"fixture:\n    {GOOD_COMMAND} && cargo test --lib does_not_exist\n"
         self.assertEqual([(v.workflow, v.kind) for v in run_fixture(
             GOOD_COMMAND, just_text=just_text)], [("justfile", "cargo-command-unparsed")])
+
+    def test_unaligned_shell_words_refuse_a_direct_cargo_test(self) -> None:
+        # Words the syntax scan cannot align leave its operators unproven: a direct
+        # cargo test is refused, and a line holding none stays unflagged.
+        real = integrity._syntax_words
+        with mock.patch.object(integrity, "_syntax_words", lambda code: real(code)[:-1]):
+            for command, kinds in (
+                    (GOOD_COMMAND, [("ci-fixture.yml", "cargo-command-unparsed"),
+                                    ("justfile", "cargo-command-unparsed")]),
+                    (f"echo {GOOD_COMMAND}", [("justfile", "cargo-command-unparsed")])):
+                with self.subTest(command=command):
+                    self.assertEqual([(Path(v.workflow).name, v.kind)
+                                      for v in run_fixture(command)], kinds)
 
     def test_recognized_unsupported_env_string_split_is_inconclusive(self) -> None:
         diagnostics: list[str] = []

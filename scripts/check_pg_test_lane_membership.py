@@ -286,8 +286,9 @@ def _block_scalar_style(value: str) -> str | None:
 def _strip_line_comment(line: str) -> str:
     """Cut one line at its first real comment, honouring quoted ``#``.
 
-    A ``#`` opens a comment only at the start of a line or after whitespace,
-    and never inside a quoted scalar. That rule holds in YAML and in the POSIX
+    A ``#`` opens a comment only at the start of a line or after whitespace
+    (in shell also after ``;``, ``&`` or ``|``), and never inside a quoted
+    scalar. That rule holds in YAML and in the POSIX
     shell that runs a ``run:`` body alike, which is why one scanner serves
     both: ``run: echo "a # b"`` keeps its ``#``, and a ``#`` line inside a
     ``run: |`` block is dropped because the shell would drop it too.
@@ -304,7 +305,7 @@ def _strip_line_comment(line: str) -> str:
         if quote is None:
             if char in "'\"":
                 quote = char
-            elif char == "#" and (index == 0 or line[index - 1] in " \t"):
+            elif char == "#" and (index == 0 or line[index - 1] in " \t;&|"):
                 return line[:index].rstrip()
         elif char == quote:
             if quote == "'" and line[index + 1:index + 2] == "'":

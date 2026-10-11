@@ -904,9 +904,31 @@ def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
     return modules
 
 
+def _shell_comment_start(snippet: str) -> int:
+    """Where Bash starts a comment on one line: an unquoted `#` that opens a word, so
+    one inside a word (`x#tag`) stays literal; the line's length when there is none."""
+    quote, word_start, index = "", True, 0
+    while index < len(snippet):
+        char = snippet[index]
+        if quote:
+            if char == quote:
+                quote = ""
+            elif quote == '"' and char == "\\":
+                index += 1
+        elif char == "#" and word_start:
+            return index
+        elif char in "'\"":
+            quote = char
+        elif char == "\\":
+            index += 1
+        word_start = not quote and char in " \t\r\n;&|()<>"
+        index += 1
+    return len(snippet)
+
+
 def _syntax_words(snippet: str) -> list[str]:
-    """``shlex.split(snippet, comments=True)``'s words with every quoted or escaped
-    character blanked to `_`, so only the shell syntax around them stays visible."""
+    """``shlex.split(snippet)``'s words with every quoted or escaped character
+    blanked to `_`, so only the shell syntax around them stays visible."""
     words: list[str] = []
     word: list[str] | None = None
     quote = ""
@@ -923,8 +945,6 @@ def _syntax_words(snippet: str) -> list[str]:
             if word is not None:
                 words.append("".join(word))
             word = None
-        elif char == "#":
-            break
         else:
             word = [] if word is None else word
             if char in "'\"":
@@ -1016,13 +1036,17 @@ def _parse_command_line(line: str, *, yaml_run_scalar: bool = False,
     snippet = _shell_text(line, yaml_run_scalar)
     if not snippet or snippet.startswith("#"):
         return None
+    code = snippet[:_shell_comment_start(snippet)]
     try:
-        words = shlex.split(snippet, comments=True)
+        words = shlex.split(code)
     except ValueError:
         return None
-    syntax = _syntax_words(snippet)
-    # Quoted text never ends a command; should the words not align, all text counts.
-    cargo = _direct_cargo_test(words, syntax if len(syntax) == len(words) else words)
+    syntax = _syntax_words(code)
+    aligned = len(syntax) == len(words)
+    # Quoted text never ends a command; unaligned words leave the syntax unproven.
+    cargo = _direct_cargo_test(words, syntax if aligned else words)
+    if cargo and not aligned:
+        cargo = []
     if cargo is None and diagnostics is not None and "cargo test" in snippet:
         first = next((word for word in words
                       if not SHELL_ASSIGNMENT.fullmatch(word)), "")
