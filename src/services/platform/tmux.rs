@@ -172,9 +172,8 @@ pub fn create_session(
 /// Server pid and the session, window and pane ids of one created session.
 const CREATED_IDENTITY: &str = "#{pid} #{session_id} #{window_id} #{pane_id}";
 
-/// Like [`create_session`], but the window opens at `cols`×`rows` and is held there in manual
-/// size mode so an attaching client cannot shrink it. A failed create returns its `Output` as
-/// `create_session` does; any later failure removes exactly the created session and is an `Err`.
+/// [`create_session`] at `cols`×`rows` held in manual size mode, so an attaching client cannot
+/// shrink it; a failure after create removes exactly the created session and is an `Err`.
 pub fn create_session_sized(
     session_name: &str,
     working_dir: Option<&str>,
