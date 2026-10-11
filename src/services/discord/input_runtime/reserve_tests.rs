@@ -228,7 +228,7 @@ async fn x13_e2_reservation_enforces_writer_scope_and_responsibility() {
     ];
     for (index, (name, mutate, reason)) in cases.iter().enumerate() {
         // Without responsibility: refused, reported, no gate, no WAL.
-        let channel = 6_325_200 + index as u64;
+        let channel = 6_325_260 + index as u64;
         {
             let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
             let (registry, dir) = (registry(), sandbox());
