@@ -522,7 +522,35 @@ fn save_channel_queue_locked(
             .provider(provider.as_str())
             .token_hash(token_hash)
             .channel_id(channel_id.get());
-    crate::services::discord::runtime_store::critical_atomic_write(&path, &json, context)
+    crate::services::discord::runtime_store::critical_atomic_write(&path, &json, context)?;
+    #[cfg(test)]
+    if post_save_fault::take(channel_id) {
+        return Err(format!(
+            "injected error after queue publication {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) mod post_save_fault {
+    use super::ChannelId;
+    static ARMED: std::sync::Mutex<Vec<ChannelId>> = std::sync::Mutex::new(Vec::new());
+
+    pub(crate) fn fail_next(channel: ChannelId) {
+        ARMED.lock().unwrap().push(channel);
+    }
+
+    pub(super) fn take(channel: ChannelId) -> bool {
+        let mut armed = ARMED.lock().unwrap();
+        if let Some(index) = armed.iter().position(|value| *value == channel) {
+            armed.remove(index);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// The actor's only queue write: its snapshot, once `prepare_write` accepts it.
@@ -540,7 +568,9 @@ pub(super) fn persist_queue(
     );
     crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
         save_channel_queue_locked(provider, token_hash, channel_id, queue, meta, role)
-    })
+    })?;
+    super::queued_head::record_write(state);
+    Ok(())
 }
 
 pub(super) fn log_queue_persistence_rollback(
@@ -842,8 +872,34 @@ pub(crate) fn load_pending_queues(
     HashMap<ChannelId, Vec<Intervention>>,
     HashMap<ChannelId, ChannelId>,
 ) {
+    let loaded = load_pending_queues_checked(provider, token_hash);
+    if !loaded.quarantined.is_empty() {
+        tracing::warn!(
+            provider = provider.as_str(),
+            quarantined_channels = loaded.quarantined.len(),
+            "pending queue recovery kept quarantined channels"
+        );
+        for (channel, error) in &loaded.quarantined {
+            tracing::warn!(channel_id = channel.get(), %error, "pending queue recovery quarantined channel");
+        }
+    }
+    (loaded.queues, loaded.overrides)
+}
+
+#[derive(Default)]
+pub(crate) struct PendingQueueRecovery {
+    pub(crate) queues: HashMap<ChannelId, Vec<Intervention>>,
+    pub(crate) overrides: HashMap<ChannelId, ChannelId>,
+    pub(crate) quarantined: Vec<(ChannelId, String)>,
+}
+
+pub(crate) fn load_pending_queues_checked(
+    provider: &ProviderKind,
+    token_hash: &str,
+) -> PendingQueueRecovery {
+    let mut recovery = PendingQueueRecovery::default();
     let Some(root) = pending_queue_root() else {
-        return (HashMap::new(), HashMap::new());
+        return recovery;
     };
     let dir = root.join(provider.as_str()).join(token_hash);
     let _ = cleanup_stale_pending_queue_tmp_files_in_dir(
@@ -854,12 +910,10 @@ pub(crate) fn load_pending_queues(
         STALE_PENDING_QUEUE_TMP_AGE,
     );
     let Ok(entries) = fs::read_dir(&dir) else {
-        return (HashMap::new(), HashMap::new());
+        return recovery;
     };
     let reference_instant = Instant::now();
     let reference_wall_time = SystemTime::now();
-    let mut result: HashMap<ChannelId, Vec<Intervention>> = HashMap::new();
-    let mut restored_overrides: HashMap<ChannelId, ChannelId> = HashMap::new();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         if pending_dispatch_marker_channel_id(&path).is_some() {
@@ -876,22 +930,32 @@ pub(crate) fn load_pending_queues(
             Some(id) => id,
             None => continue,
         };
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok((items, _)) = parse_snapshot(&content) else {
-            continue;
+        let items = match fs::read_to_string(&path)
+            .map_err(|error| format!("read {}: {error}", path.display()))
+            .and_then(|content| parse_snapshot(&content).map(|(items, _)| items))
+        {
+            Ok(items) => items,
+            Err(error) => {
+                recovery
+                    .quarantined
+                    .push((ChannelId::new(channel_id), error));
+                continue;
+            }
         };
         if let Some(override_id) = items.iter().find_map(|item| item.override_channel_id) {
-            restored_overrides.insert(ChannelId::new(channel_id), ChannelId::new(override_id));
+            recovery
+                .overrides
+                .insert(ChannelId::new(channel_id), ChannelId::new(override_id));
         }
         let interventions =
             pending_queue_items_to_interventions(items, reference_wall_time, reference_instant);
         if !interventions.is_empty() {
-            result.insert(ChannelId::new(channel_id), interventions);
+            recovery
+                .queues
+                .insert(ChannelId::new(channel_id), interventions);
         }
     }
-    (result, restored_overrides)
+    recovery
 }
 
 pub(crate) fn load_pending_dispatch_markers(
