@@ -401,6 +401,7 @@ jobs:
               - 'src/services/discord/terminal_ui_obligation.rs'
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
               - 'src/services/discord/tmux_watcher/herdr_entry_host_tests.rs'
+              - 'src/services/discord/tmux_watcher/inherited_fixture_tests.rs'
               - 'src/services/discord/tmux_watcher/path_b_record_tests.rs'
               - 'src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs'
               - 'src/services/discord/tmux_watcher/retired_host_tick_tests.rs'
@@ -782,6 +783,7 @@ jobs:
               - 'src/services/discord/runtime_store.rs'
               - 'src/services/discord/session_idle_cleanup.rs'
               - 'src/services/discord/settings/**'
+              - 'src/services/discord/task_supervisor.rs'
               - 'src/services/discord/terminal_delivery_custody/**'
               - 'src/services/discord/terminal_ui_obligation.rs'
               - 'src/services/discord/tmux_watcher_registry.rs'
@@ -1303,20 +1305,6 @@ jobs:
         run: |
           source scripts/ci/non-pg-test-filter.sh
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- "${NON_PG_SKIP_ARGS[@]}"
-
-      # #5040: `intake_dispatch::tests` predates the lane-coverage ratchet and is
-      # baselined debt. Select the telemetry-only admission regressions explicitly
-      # in this branch-protected lane so a zero-test filter cannot pass unnoticed.
-      - name: Telemetry-only intake authority regressions
-        timeout-minutes: 10
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          source scripts/ci/non-pg-test-filter.sh
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::tests::telemetry_only_unopted -- "${NON_PG_SKIP_ARGS[@]}"
 
       # #5025: this job is mirrored by the branch-protected
       # `Fast targeted tests (ubuntu-latest)` context above. Keep the router test
@@ -2211,7 +2199,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=c976035f6d9a03a91fb23cd8c898e5cc147517a986f9de838e66577baf4d0031
+          expected=999cdd16b47a51a31e8744caa83e8f627d26827d01df27658b2b548ab5444418
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2444,7 +2432,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=c976035f6d9a03a91fb23cd8c898e5cc147517a986f9de838e66577baf4d0031
+          expected=999cdd16b47a51a31e8744caa83e8f627d26827d01df27658b2b548ab5444418
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

@@ -277,12 +277,13 @@ cache를 먼저 설치한다. 이 wiring을 바꾸면 해당 workflow setup과 �
 다음 명령으로 정확히 한 번 실행한다.
 
 ```sh
-AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
+AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
 ```
 
-900초는 이 컴파일 포함 검사의 명시적 wall-clock 예산이며, report 플래그는 성공과
+1800초는 이 컴파일 포함 검사의 명시적 wall-clock 예산이며, report 플래그는 성공과
 실패 모두에서 실제 소요시간을 CI notice로 남긴다. #5145 close-out 때 특정 runner/cache
 상태에서 관측한 약 446–454초는 예산 산정 맥락일 뿐 현재 속도나 상한을 약속하지 않는다.
+2026-10-11 hosted runner 실측은 636–914초였고(#6827), 900초 예산에서 정상 실행이 시간 초과로 실패해 1800초로 올렸다.
 하드웨어, cache hit 여부, dependency 변경에 따라 실제 시간은 달라질 수 있다.
 
 ### Gate ↔ 실제 커맨드

@@ -1373,9 +1373,14 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
         if isinstance(ids, str):
             return findings + [("inventory-error", ids)]
         selected_ids.update(ids)
-    final = _lib_selection(spec, frozenset(selected_ids))
     selection_name = "/".join(judged) or "no target"
     sweep = spec.selection is not TargetSelection.EXPLICIT
+    restored = view.non_pg_skip_filters() if spec.non_pg_skip else ()
+    if restored is None:
+        # The array is known to carry skips; unread, it is not merely opaque.
+        return findings + [("non-pg-skip-unresolved", (
+            f"{NON_PG_FILTER_REL} holds no single readable NON_PG_SKIP_ARGS "
+            "literal of --skip pairs, so the skips this run passes are unknown"))]
     # The skip rule a sweep's evidence must survive; an opaque expansion or
     # --ignored (no static ID is known to be #[ignore]) leaves none provable.
     live_rule: CommandSpec | None = spec
@@ -1383,9 +1388,12 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
             or (spec.unknown_skip and not spec.non_pg_skip):
         live_rule = None
     elif spec.non_pg_skip:
-        restored = view.non_pg_skip_filters()
-        live_rule = None if restored is None else replace(
-            spec, skip_filters=spec.skip_filters + restored)
+        # Restored, the array is a known skip list, not a run-time unknown.
+        live_rule = replace(spec, skip_filters=spec.skip_filters + restored,
+                            unknown_skip=False)
+    # Restored skips drop the selected targets' own candidates too.
+    rule = live_rule if live_rule is not None else spec
+    final = _lib_selection(rule, frozenset(selected_ids))
     swept_elsewhere = 0
     empty: list[tuple[str, str]] = []
     for filt in spec.filters:
@@ -1428,14 +1436,14 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                 empty.append(("zero-match", (
                     f"module-path filter `{filt}` matches 0 test IDs in "
                     f"{selection_name}")))
-        elif final and not (spec.unknown_skip or spec.ignored_only):
+        elif final and not (rule.unknown_skip or spec.ignored_only):
             continue  # libtest ORs the filters; the union already selects tests
         elif elsewhere and not sweep:
             findings.append(mismatch)
         elif final:
             # The union rests on candidates a run-time restriction may drop.
             restriction = ("a dynamic --skip or libtest argument"
-                           if spec.unknown_skip else "--ignored")
+                           if rule.unknown_skip else "--ignored")
             findings.append(("unproven-union", (
                 f"filter `{filt}` matches 0 tests in {selection_name}; only "
                 f"the other filters' {len(final)} candidate test ID(s) keep "
@@ -1448,7 +1456,7 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                 notes.append(
                     f"sweep-empty: filter `{filt}` selects 0 tests in "
                     f"{selection_name}; it points at {elsewhere}")
-    if len(spec.filters) > 1 and spec.unknown_skip and final \
+    if len(spec.filters) > 1 and rule.unknown_skip and final \
             and not findings and not empty:
         # Every filter matched, yet a run-time skip may still drop all of them.
         names = ", ".join(f"`{filt}`" for filt in spec.filters)

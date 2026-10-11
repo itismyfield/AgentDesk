@@ -1055,18 +1055,18 @@ class TestIdOracleContract(unittest.TestCase):
                 (f"{union} --skip {{{{SKIP}}}}", ["target-mismatch"]),
                 (f"{union} --skip $(skips)", ["target-mismatch"]),
                 (f"{union} --skip `skips`", ["target-mismatch"]),
-                (f"{union} ${{NON_PG_SKIP_ARGS[@]}}", ["target-mismatch"]),
                 (f"{union} --ignored", ["target-mismatch"]),
                 ("cargo test --lib recovery_case -- missing_case --skip $SKIP",
                  ["unproven-union"]),
                 ("cargo test --bins owned_case -- high_risk_recovery $EXTRA",
                  ["unproven-union"]),
-                # A single filter never leans on another filter's candidates.
-                ("cargo test --lib recovery_case -- ${NON_PG_SKIP_ARGS[@]}", []),
-                # A sweep's evidence must survive the array, and this fixture
-                # has no filter file to read it from.
+                # This fixture has no filter file, so the generated array
+                # cannot be read and fails closed whatever the selection.
+                (f"{union} ${{NON_PG_SKIP_ARGS[@]}}", ["non-pg-skip-unresolved"]),
+                ("cargo test --lib recovery_case -- ${NON_PG_SKIP_ARGS[@]}",
+                 ["non-pg-skip-unresolved"]),
                 ("cargo test --bins high_risk_recovery -- ${NON_PG_SKIP_ARGS[@]}",
-                 ["zero-match"])):
+                 ["non-pg-skip-unresolved"])):
             with self.subTest(command=command):
                 self.assertEqual(self.kinds(command, integration_test=True,
                                             bin_test=True), kinds)
@@ -1082,7 +1082,7 @@ class TestIdOracleContract(unittest.TestCase):
                 (f"{both} --skip $SKIP", ["unproven-union"]),
                 (f"{both} --skip {{{{SKIP}}}}", ["unproven-union"]),
                 (f"{both} --skip `skips`", ["unproven-union"]),
-                (f"{both} ${{NON_PG_SKIP_ARGS[@]}}", ["unproven-union"]),
+                (f"{both} ${{NON_PG_SKIP_ARGS[@]}}", ["non-pg-skip-unresolved"]),
                 ("cargo test --lib recovery_case -- missing_case --skip $SKIP",
                  ["unproven-union"]),
                 ("cargo test --lib recovery_case -- --skip $SKIP", [])):
@@ -1149,8 +1149,8 @@ class TestIdOracleContract(unittest.TestCase):
                     (None, f"{sweep} --skip {{{{SKIP}}}}", ["empty-target"]),
                     (None, f"{sweep} --skip $(skips)", ["empty-target"]),
                     (None, f"{sweep} $EXTRA", ["empty-target"]),
-                    # Without the checked-in filter the array is unknown.
-                    (None, f"{sweep} {array}", ["empty-target"]),
+                    # Without a filter the reader can restore, the array fails closed.
+                    (None, f"{sweep} {array}", ["non-pg-skip-unresolved"]),
                     ("  --skip _pg\n  --skip postgres\n", f"{sweep} {array}", []),
                     ("  --skip _pg\n  --skip postgres\n", f"{sweep} {array} $EXTRA",
                      ["empty-target"]),
@@ -1159,17 +1159,86 @@ class TestIdOracleContract(unittest.TestCase):
                      f"cargo test --bins high_risk_recovery {array}", ["empty-target"]),
                     ("  --skip _pg\n  --skip high_risk_recovery\n", f"{sweep} {array}",
                      ["empty-target"]),
-                    ("  --skip _pg\n  --exact\n", f"{sweep} {array}", ["empty-target"]),
+                    ("  --skip _pg\n  --exact\n", f"{sweep} {array}",
+                     ["non-pg-skip-unresolved"]),
                     ("  --skip _pg\n  --skip $EXTRA\n", f"{sweep} {array}",
-                     ["empty-target"]),
+                     ["non-pg-skip-unresolved"]),
                     ("  --skip _pg\n)\nNON_PG_SKIP_ARGS+=(\n  --skip high_risk\n",
-                     f"{sweep} {array}", ["empty-target"])):
+                     f"{sweep} {array}", ["non-pg-skip-unresolved"])):
                 if body is not None:
                     filter_file.parent.mkdir(parents=True, exist_ok=True)
                     filter_file.write_text(f"NON_PG_SKIP_ARGS=(\n{body})\n",
                                            encoding="utf-8")
                 with self.subTest(body=body, command=command):
                     self.assertEqual(self.judge(root, command), kinds)
+
+    def test_a_restored_skip_also_empties_the_selected_target(self) -> None:
+        # The generated array also skips the selected target's own candidates,
+        # so a single filter it wipes out runs 0 tests; opaque stays unjudged.
+        array = "${NON_PG_SKIP_ARGS[@]}"
+        single = f"cargo test --lib high_risk_recovery -- {array}"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_fixture_repo(root, GOOD_COMMAND)
+            filter_file = root / "scripts/ci/non-pg-test-filter.sh"
+            filter_file.parent.mkdir(parents=True)
+            for skip, command, kinds in (
+                    ("high_risk_recovery", single, ["zero-match"]),
+                    ("high_risk_recovery", f"cargo test --lib high_risk_recovery:: "
+                     f"-- {array}", ["zero-match"]),
+                    ("postgres", single, []),
+                    ("high_risk_recovery", f"cargo test --lib case -- {array}", []),
+                    ("high_risk_recovery", f"{single} $EXTRA", [])):
+                filter_file.write_text(
+                    f"NON_PG_SKIP_ARGS=(\n  --skip _pg\n  --skip {skip}\n)\n",
+                    encoding="utf-8")
+                with self.subTest(skip=skip, command=command):
+                    self.assertEqual(self.judge(root, command), kinds)
+
+    def test_a_restored_array_is_a_known_skip_for_a_union(self) -> None:
+        # Once read, the array no longer leaves a union unproven; another
+        # opaque expansion still does, and wiping every candidate still fails.
+        array = "${NON_PG_SKIP_ARGS[@]}"
+        both = "cargo test --lib recovery_case -- nested_case"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_fixture_repo(root, GOOD_COMMAND, integration_test=True)
+            filter_file = root / "scripts/ci/non-pg-test-filter.sh"
+            filter_file.parent.mkdir(parents=True)
+            for skip, command, kinds in (
+                    ("postgres", f"{both} {array}", []),
+                    ("postgres", f"cargo test --lib recovery_case -- "
+                     f"integration_only_case {array}", []),
+                    ("postgres", f"{both} {array} $EXTRA", ["unproven-union"]),
+                    ("_case", f"{both} {array}", ["zero-match"])):
+                filter_file.write_text(
+                    f"NON_PG_SKIP_ARGS=(\n  --skip _pg\n  --skip {skip}\n)\n",
+                    encoding="utf-8")
+                with self.subTest(skip=skip, command=command):
+                    self.assertEqual(self.judge(root, command), kinds)
+
+    def test_an_unreadable_generated_array_fails_closed(self) -> None:
+        # The array is known to carry skips, so a shape the reader cannot
+        # restore fails; other opaque expansions keep their verdicts.
+        array = "${NON_PG_SKIP_ARGS[@]}"
+        single = "cargo test --lib high_risk_recovery --"
+        literal = "NON_PG_SKIP_ARGS=(\n  --skip _pg\n)\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_fixture_repo(root, GOOD_COMMAND)
+            filter_file = root / "scripts/ci/non-pg-test-filter.sh"
+            filter_file.parent.mkdir(parents=True)
+            for extra in ("NON_PG_SKIP_ARGS+=(\n  --skip high_risk_recovery\n)\n",
+                          "NON_PG_SKIP_ARGS=(\n  --skip high_risk_recovery\n)\n"):
+                filter_file.write_text(literal + extra, encoding="utf-8")
+                for command, kinds in (
+                        (f"{single} {array}", ["non-pg-skip-unresolved"]),
+                        (f"{single} {array} $EXTRA", ["non-pg-skip-unresolved"]),
+                        (f"{single} $EXTRA", []),
+                        ("cargo test --lib recovery_case -- nested_case $EXTRA",
+                         ["unproven-union"])):
+                    with self.subTest(extra=extra, command=command):
+                        self.assertEqual(self.judge(root, command), kinds)
 
     def test_checked_in_non_pg_filter_is_readable(self) -> None:
         skips = integrity.PackageTestIds(REPO_ROOT).non_pg_skip_filters()
@@ -1946,7 +2015,7 @@ mod after_string_brace {
         )
         verifier_line = (
             'AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure.sh '
-            'lib-inventory -- "$PYTHON" scripts/ci-timeout.py 900 '
+            'lib-inventory -- "$PYTHON" scripts/ci-timeout.py 1800 '
             '"$PYTHON" scripts/check_test_target_integrity.py '
             '--verify-lib-inventory'
         )

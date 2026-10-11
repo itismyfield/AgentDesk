@@ -201,6 +201,9 @@ fn o_install_same_source_reuses_live_incumbent_and_overlap_spawns_once() {
         );
         let fixture = InstallFixture::new(ProviderKind::Claude, 632_510_002).await;
         let _retired = RetiredForTest::new("claude", fixture.channel.get());
+        let submitted = crate::services::discord::task_supervisor::n4d_spawn_observation::Scope::new(&fixture.shared);
+        let coord = fixture.shared.tmux_relay_coord(fixture.channel);
+        let reconnects = coord.reconnect_count.load(Ordering::Acquire);
         let pause = pause_host(fixture.channel);
         let first_operation = fixture.install();
         tokio::pin!(first_operation);
@@ -212,6 +215,11 @@ fn o_install_same_source_reuses_live_incumbent_and_overlap_spawns_once() {
         assert_eq!(fixture.install().await, OOnlyInstallOutcome::AlreadyLive);
         assert!(Arc::ptr_eq(&first.cancel, &fixture.handle().cancel));
         fixture.cancel_and_join().await;
+        let joined = submitted.cancel_and_join_all().await;
+        assert_eq!(submitted.submissions(), 1, "actual task submissions: {joined:?}");
+        assert_eq!(joined.len(), 1);
+        assert!(joined.iter().all(|(_, outcome)| *outcome == Outcome::Returned));
+        assert_eq!(coord.reconnect_count.load(Ordering::Acquire), reconnects + 1);
     });
 }
 
@@ -722,38 +730,64 @@ fn o_install_other_channel_incumbent_is_not_already_live() {
             "AGENTDESK_ROOT_DIR",
             root.path(),
         );
-        let fixture = InstallFixture::new(ProviderKind::Claude, 632_510_042).await;
-        let _retired = RetiredForTest::new("claude", fixture.channel.get());
-        let other = ChannelId::new(fixture.channel.get() + 1);
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        fixture.shared.tmux_watchers.insert(
-            other,
-            TmuxWatcherHandle {
-                tmux_session_name: fixture.session.clone(),
-                output_path: fixture.output.clone(),
-                cancel: cancel.clone(),
-                paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                resume_offset: Arc::new(Mutex::new(None)),
-                pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
-                    crate::services::discord::tmux_watcher_now_ms(),
-                )),
-            },
-        );
-        assert_eq!(
-            fixture.install().await,
-            OOnlyInstallOutcome::Failed(OOnlyInstallReason::SourceMismatch)
-        );
-        assert!(!cancel.load(Ordering::SeqCst));
-        assert!(fixture.shared.tmux_watchers.get(&fixture.channel).is_none());
-        assert_eq!(
-            fixture
-                .shared
-                .tmux_watchers
-                .owner_channel_for_tmux_session(&fixture.session),
-            Some(other)
-        );
+        for (index, (other_path, paused)) in [(false, false), (true, false), (false, true)]
+            .into_iter()
+            .enumerate()
+        {
+            let fixture =
+                InstallFixture::new(ProviderKind::Claude, 632_510_042 + index as u64).await;
+            let _retired = RetiredForTest::new("claude", fixture.channel.get());
+            let other = ChannelId::new(fixture.channel.get() + 1);
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            fixture.shared.tmux_watchers.insert(
+                other,
+                TmuxWatcherHandle {
+                    tmux_session_name: fixture.session.clone(),
+                    output_path: if other_path {
+                        format!("{}.other", fixture.output)
+                    } else {
+                        fixture.output.clone()
+                    },
+                    cancel: cancel.clone(),
+                    paused: Arc::new(std::sync::atomic::AtomicBool::new(paused)),
+                    resume_offset: Arc::new(Mutex::new(None)),
+                    pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                        crate::services::discord::tmux_watcher_now_ms(),
+                    )),
+                },
+            );
+            assert!(fixture.shared.tmux_watchers.watcher_reservation_matches(
+                &fixture.session,
+                other,
+                &cancel
+            ));
+            let submitted =
+                crate::services::discord::task_supervisor::n4d_spawn_observation::Scope::new(
+                    &fixture.shared,
+                );
+            assert_eq!(
+                fixture.install().await,
+                OOnlyInstallOutcome::Failed(OOnlyInstallReason::SourceMismatch)
+            );
+            assert!(!cancel.load(Ordering::SeqCst));
+            assert_eq!(submitted.submissions(), 0);
+            assert!(submitted.join_all().await.is_empty());
+            assert!(fixture.shared.tmux_watchers.watcher_reservation_matches(
+                &fixture.session,
+                other,
+                &cancel
+            ));
+            assert!(fixture.shared.tmux_watchers.get(&fixture.channel).is_none());
+            assert_eq!(
+                fixture
+                    .shared
+                    .tmux_watchers
+                    .owner_channel_for_tmux_session(&fixture.session),
+                Some(other)
+            );
+        }
     });
 }
 
