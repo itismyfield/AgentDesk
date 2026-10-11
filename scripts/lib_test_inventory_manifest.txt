@@ -6608,6 +6608,7 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_spawns
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_task_can_restart_after_task_death
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::a_host_without_an_intake_fence_refuses_deferred_activation_facts
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
+services::discord::runtime_bootstrap::o_writer_host::repost_tests::f6_gateway_and_delegated_hosts_build_a_repost_turn_only_with_a_pool
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_checked_reads_distinguish_absence_from_corruption
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_install_rolls_back_on_required_persistence_failure
@@ -11509,6 +11510,7 @@ services::tui_o::repost::admission_tests::f3r_an_original_sent_while_on_stays_el
 services::tui_o::repost::admission_tests::f4_nonce_receipt_closes_the_existing_budget_pg
 services::tui_o::repost::admission_tests::f4_receipt_race_never_reattributes_a_message_pg
 services::tui_o::repost::admission_tests::f4_row_change_invalidates_absence_evidence_pg
+services::tui_o::repost::admission_tests::f6_a_conflicting_record_of_an_activation_never_moves_its_frontier
 services::tui_o::repost::admission_tests::only_an_uncertain_original_sent_while_on_is_eligible_and_the_rest_is_reported_once
 services::tui_o::repost::admission_tests::with_the_switch_off_no_admitter_exists_to_reach_postgres_or_the_sidecar
 services::tui_o::repost::config::tests::repost_is_off_by_default_and_a_saved_config_keeps_its_old_form
@@ -11545,11 +11547,13 @@ services::tui_o::repost::io::probe::tests::f4r_the_marker_names_the_channel_and_
 services::tui_o::repost::io::probe::tests::f5_has_no_operational_edges
 services::tui_o::repost::io::probe::tests::f5r4_the_dormancy_scan_reads_every_member_of_a_grouped_alias
 services::tui_o::repost::io::probe::tests::f6_the_dormancy_scan_fails_closed_on_globs_self_paths_and_macros
+services::tui_o::repost::io::probe::tests::f6_the_dormancy_scan_reads_parent_globs_everywhere_commented_ends_and_split_paths
 services::tui_o::repost::io::tests::bounded_create_counts_one_post_and_sends_again_only_after_a_confirmed_429
 services::tui_o::repost::io::tests::bounded_create_shares_the_gateway_route_bucket_and_refuses_a_lone_limiter
 services::tui_o::repost::io::tests::bounded_dispatch_times_out_with_the_request_gone_and_waits_429s_inside_the_timeout
 services::tui_o::repost::io::tests::f1r_a_handed_over_request_carries_its_guard_and_counts_like_send_within
 services::tui_o::repost::io::tests::f1r_an_unpolled_request_dropped_sends_and_counts_nothing
+services::tui_o::repost::io::tests::f6_hookable_overflow_on_success_never_reclassifies_or_reposts
 services::tui_o::repost::io::tests::repost_sends_keep_one_nonce_and_marker_outside_the_content
 services::tui_o::repost::o_piece_ledger_tests::a_new_holder_or_serial_reaches_the_same_row_and_a_failed_read_is_no_empty_row_pg
 services::tui_o::repost::o_piece_ledger_tests::a_receipt_resolves_its_piece_once_and_never_moves_to_another_piece_pg
@@ -11849,6 +11853,7 @@ services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::tra
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::unselected_pending_and_recovered_channels_preserve_their_paths
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::zombie_markers_expire_soft_at_exact_boundary
 services::tui_o::writer::tests::actor::host_start::deferred::stall::legacy_intake_open_when_the_stall_ends_restarts_it
+services::tui_o::writer::tests::actor::host_start::f6_every_hosted_actor_runs_the_hosts_repost_turn
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_released_boot_holds_the_herdr_store_and_the_next_adoption_posts_its_result_once
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_restarted_host_takes_a_herdr_launch_back_from_its_store_and_posts_each_result_once
 services::tui_o::writer::tests::actor::host_start::home::a_delegated_channel_waits_on_and_is_ready_by_its_home_gate
@@ -11901,6 +11906,14 @@ services::tui_o::writer::tests::actor::operator_resume::operator_resume_open_con
 services::tui_o::writer::tests::actor::operator_resume::operator_resume_projection_does_not_overtake_a_real_schema_blocked_record
 services::tui_o::writer::tests::actor::overdue_ready_is_observed_by_the_loop_at_strict_boundary_and_recurrence
 services::tui_o::writer::tests::actor::ready_item_ages_and_channels_are_independent
+services::tui_o::writer::tests::actor::repost_turn::f6_a_dropped_writer_never_lets_its_repost_send_again_pg
+services::tui_o::writer::tests::actor::repost_turn::f6_a_live_reload_switches_the_next_turn_without_a_restart
+services::tui_o::writer::tests::actor::repost_turn::f6_default_off_actor_turn_reads_nothing
+services::tui_o::writer::tests::actor::repost_turn::f6_general_auto_and_resume_never_overlap_posts_pg
+services::tui_o::writer::tests::actor::repost_turn::f6_t07_all_writer_guards_block_auto_pg
+services::tui_o::writer::tests::actor::repost_turn::f6_t09_open_prepared_blocks_every_sender_pg
+services::tui_o::writer::tests::actor::repost_turn::f6_t10_recovered_admitted_piece_never_becomes_new_original_pg
+services::tui_o::writer::tests::actor::repost_turn::f6_t11_pre_activation_backlog_never_posts_pg
 services::tui_o::writer::tests::actor::restored_prepared_uses_durable_utc_age_and_clamps_future_time
 services::tui_o::writer::tests::actor::rotation::a_bind_waiting_for_its_file_alarms_once_late_and_its_resolution_attaches_it
 services::tui_o::writer::tests::actor::rotation::a_body_the_parent_only_announced_is_posted_from_the_resumed_source
