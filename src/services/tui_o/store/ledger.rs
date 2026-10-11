@@ -50,6 +50,10 @@ pub enum LedgerEntry {
     NotFound {
         serial: u64,
     },
+    /// Re-post was certainly not sent; closes Prepared without any history finding.
+    NotSent {
+        serial: u64,
+    },
     Ambiguous {
         serial: u64,
         candidates: Vec<u64>,
@@ -90,6 +94,7 @@ pub enum PieceOutcome {
     Posted(u64),
     Rejected(u16),
     NotFound,
+    NotSent,
     Ambiguous(Vec<u64>),
     Unresolved(String),
 }
@@ -358,6 +363,7 @@ impl LedgerState {
                 self.resolve(serial, PieceOutcome::Rejected(status))
             }
             LedgerEntry::NotFound { serial } => self.resolve(serial, PieceOutcome::NotFound),
+            LedgerEntry::NotSent { serial } => self.resolve(serial, PieceOutcome::NotSent),
             LedgerEntry::Ambiguous { serial, candidates } => {
                 self.resolve(serial, PieceOutcome::Ambiguous(candidates))
             }

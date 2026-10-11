@@ -182,6 +182,9 @@ impl Move {
                 "committed input differs from captured Legacy source",
             ));
         }
+        if !claimed {
+            preflight(&rows, &inputs)?;
+        }
         let first = rows
             .folded_seq()
             .checked_add(1)
@@ -272,6 +275,14 @@ impl Move {
             return Ok(Outcome::Legacy);
         }
         if matches!(self.phase, Phase::Stage) {
+            // The fresh fold may differ from prepare's, so every candidate is proved again here.
+            #[cfg(test)]
+            let late = mutant("preflight_after_pin_or_stage");
+            #[cfg(not(test))]
+            let late = false;
+            if !late {
+                preflight(&rows, &self.inputs)?;
+            }
             let staged = rows.staged_since(self.first);
             for input in &mut self.inputs {
                 if staged.contains(&input.key) {
@@ -290,6 +301,9 @@ impl Move {
                 }
                 if !state.is_terminal() {
                     host.pin_input(ledger, input)?;
+                }
+                if late {
+                    rows.activation(input.key, &input.payload)?;
                 }
                 if matches!(
                     state,
@@ -378,6 +392,23 @@ impl Move {
     }
 }
 
+// Every candidate a move would activate proves its receipt identity before the first pin or stage.
+// A tracked tombstone already ends the whole move as Legacy, so nothing activates.
+fn preflight(rows: &Rows, inputs: &[Input]) -> io::Result<()> {
+    if (inputs.iter()).any(|input| rows.keeps_tracked_history(input.key)) {
+        return Ok(());
+    }
+    #[cfg(test)]
+    let inputs = match mutant("preflight_first_candidate_only") {
+        true => &inputs[..inputs.len().min(1)],
+        false => inputs,
+    };
+    for input in inputs {
+        rows.activation(input.key, &input.payload)?;
+    }
+    Ok(())
+}
+
 pub fn backoff(attempt: u32) -> Duration {
     Duration::from_secs(
         5u64.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX))
@@ -405,6 +436,11 @@ fn return_rows(lease: &mut LedgerLease, host: &mut impl Host) -> io::Result<Outc
     let external: Vec<u64> = (rows.open_rows().map(|(key, _)| key))
         .filter(|key| super::input_key::is_external_key(*key))
         .collect();
+    #[cfg(test)]
+    let external = match mutant("drop_external_handback_preflight") {
+        true => Vec::new(),
+        false => external,
+    };
     if !external.is_empty() {
         for key in external {
             host.notice(Some(key), "handback_external")?;

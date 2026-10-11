@@ -736,8 +736,8 @@ _health_json_deploy_nonblocking_ere() {
   # provider whose role the body verifies. A TUI O channel released to Legacy
   # before any store write keeps its output there, so it never blocks. Everything
   # else, including an unrecognised reason, blocks. No comma: the fallback splits on one.
-  # $5 is the post-deploy smoke E2E channel ids (`|`-joined); only for a deploy
-  # verdict, their reader-count alarm is accepted, since the smoke's own !clear raises it.
+  # $5 joins smoke E2E and pre-existing reader alarm channel ids; only their
+  # reader-count reason is accepted, and only for a deploy verdict.
   local ere='^(relay_verdict_[^,]+|tui_o:released:[0-9]+' ids_re='^[0-9]+([|][0-9]+)*$'
   [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:,]+:reconcile_in_progress"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:pending_queue_depth:[0-9]+"
@@ -748,14 +748,18 @@ _health_json_deploy_nonblocking_ere() {
 }
 
 _health_json_deploy_nonblocking_ere_for_body() {
-  # The only way to build the accepted set: structural proof comes from the
-  # body itself, so no caller can reconstruct a policy that drifts. The smoke
-  # E2E channels come from DEPLOY_E2E_SMOKE_CHANNEL_IDS, which deploy-release sets.
-  local health_json="$1" standby=0 tui
+  # Structural proof comes from this body; deploy-release supplies the smoke
+  # channels and the local reader alarms observed before restart.
+  local health_json="$1" standby=0 tui reader_ids="" ids ids_re='^[0-9]+([|][0-9]+)*$'
   _health_json_field_is_true "$health_json" "cluster_standby" && standby=1
   tui=$(_health_json_tui_gateway_verified_providers "$health_json")
+  for ids in "${DEPLOY_E2E_SMOKE_CHANNEL_IDS:-}" "${DEPLOY_PREEXISTING_READER_CHANNEL_IDS:-}"; do
+    if [[ "$ids" =~ $ids_re ]]; then
+      reader_ids="${reader_ids:+$reader_ids|}$ids"
+    fi
+  done
   _health_json_deploy_nonblocking_ere "${2:-0}" "${3:-0}" "$standby" "$tui" \
-    "${DEPLOY_E2E_SMOKE_CHANNEL_IDS:-}"
+    "$reader_ids"
 }
 
 _deploy_e2e_smoke_channel_ids() {

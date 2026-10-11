@@ -216,8 +216,11 @@ fn guard() -> OwnedMutexGuard<()> {
         .unwrap()
 }
 
+// A handed-back key returns only with its receipt identity, so every input names one.
 fn receive(ledger: &mut Ledger, key: u64) {
-    let input = json!({"text": format!("input {key}")});
+    let identity =
+        json!({"source_ids":[key],"author_id":7,"original_channel_id":8,"execution_channel_id":9});
+    let input = json!({"text": format!("input {key}"), "receipt_identity": identity});
     ledger
         .append_entry(&Entry::Received { key, input }, &[])
         .unwrap();

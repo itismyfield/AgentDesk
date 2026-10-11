@@ -1427,6 +1427,55 @@ def load_lib_test_inventory(repo_root: Path) -> set[str]:
     return tests
 
 
+# Arrays the generated filter owns: a consumer may read them, never rebind them.
+KNOWN_ARRAYS = ("NON_PG_SKIP_ARGS", "PG_INCLUDE_ARGS")
+# A whole-line source, or one heading an `&&` chain; `|| true` or a prefix can fail open.
+_CANONICAL_SOURCE = re.compile(
+    rf"(?m)^([ \t]*)source {re.escape(NON_PG_FILTER_REL.as_posix())}[ \t]*(?:$|&&)"
+)
+# What runs the rest of a line even when the `&&`-chained source failed.
+_CHAIN_BREAK = re.compile(r"\n|;|\|\||(?<![&<>])&(?![&>])")
+_ARRAY_USE = re.compile(rf"\$\{{?({'|'.join(KNOWN_ARRAYS)})\b")
+_ARRAY_READ = re.compile(
+    rf"\$\{{[!#]?(?:{'|'.join(KNOWN_ARRAYS)})\b[^}}\n]*\}}|{_ARRAY_USE.pattern}"
+)
+_ARRAY_NAME = re.compile(rf"\b({'|'.join(KNOWN_ARRAYS)})\b")
+
+
+def known_array_use(line: str) -> tuple[int, tuple[str, ...]] | None:
+    """Where one shell line first expands a generated array, and every one it expands."""
+    uses = list(_ARRAY_USE.finditer(_strip_line_comment(line)))
+    if not uses:
+        return None
+    return uses[0].start(), tuple(dict.fromkeys(use.group(1) for use in uses))
+
+
+def known_array_source_problem(shell: str) -> tuple[str, int] | None:
+    """Why a generated-array use that ends ``shell``, one shell's text, is unproven.
+
+    ``("unsourced", -1)`` without a covering canonical source, ``(array, line)`` when a
+    later word but a ``$`` read rebinds one (0-based line of ``shell``), else None.
+    """
+    shell = _strip_comments(shell)
+    # A source indented past the shell's outermost lines sits inside a compound command.
+    outer = min((len(line) - len(line.lstrip()) for line in shell.split("\n") if line.strip()),
+                default=0)
+    covering = [
+        source for source in _CANONICAL_SOURCE.finditer(shell)
+        if len(source.group(1)) == outer
+        and (not source.group().endswith("&&") or not _CHAIN_BREAK.search(shell, source.end()))
+    ]
+    if not covering:
+        return ("unsourced", -1)
+    start = covering[-1].end()
+    # Reads blank out at their own width, so offsets still locate the rebinding line.
+    unread = _ARRAY_READ.sub(lambda read: " " * len(read.group()), shell[start:])
+    rebound = _ARRAY_NAME.search(unread)
+    if rebound is None:
+        return None
+    return rebound.group(1), shell.count("\n", 0, start + rebound.start())
+
+
 def non_pg_filter_contract_errors(
     repo_root: Path, jobs: Iterable[Job]
 ) -> tuple[str, ...]:
@@ -1467,7 +1516,7 @@ def non_pg_filter_contract_errors(
                 f"{workflow}: literal --skip arguments duplicate the canonical "
                 f"definition in {NON_PG_FILTER_REL}"
             )
-        for array_name in ("NON_PG_SKIP_ARGS", "PG_INCLUDE_ARGS"):
+        for array_name in KNOWN_ARRAYS:
             if re.search(rf"(?m)^\s*{array_name}\s*(?:\+?=)", code):
                 errors.append(
                     f"{workflow}: redefines canonical {array_name} after sourcing "
@@ -1475,17 +1524,25 @@ def non_pg_filter_contract_errors(
                 )
 
     for job in relevant.values():
+        # A block scalar's shell text starts on the line after its indicator.
         run_headers = [
-            match.start()
-            for match in re.finditer(r"(?m)^\s*(?:-\s+)?run\s*:", job.code)
+            match.end() for match in re.finditer(
+                r"(?m)^\s*(?:-\s+)?run\s*:[ \t]*(?:[|>][-+0-9]*[ \t]*\n)?", job.code)
         ]
         for variable in variables:
             for match in re.finditer(re.escape(variable), job.code):
-                header = max((offset for offset in run_headers if offset < match.start()), default=-1)
-                if header < 0 or source_command not in job.code[header:match.start()]:
+                header = max((offset for offset in run_headers if offset <= match.start()), default=-1)
+                problem = ("unsourced", -1) if header < 0 else known_array_source_problem(
+                    job.code[header:match.start()])
+                if problem and problem[0] == "unsourced":
                     errors.append(
                         f"{job.key}: {variable} is used without sourcing "
                         f"{NON_PG_FILTER_REL} in the same run scalar"
+                    )
+                elif problem:
+                    errors.append(
+                        f"{job.key}: {problem[0]} is reassigned after sourcing "
+                        f"{NON_PG_FILTER_REL} and before a {variable} use"
                     )
 
     for key in sorted(NON_PG_FILTER_REQUIRED_JOBS):

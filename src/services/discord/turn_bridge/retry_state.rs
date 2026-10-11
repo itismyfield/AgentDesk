@@ -35,7 +35,7 @@ fn spawn_retry(
     channel_id: ChannelId,
     user_msg_id: MessageId,
     retry_text: String,
-    exact: Option<crate::services::discord::replay_policy::RetryPermit>,
+    exact: Option<crate::services::discord::replay_policy::ExactRetry>,
 ) {
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<()>();
     let permit = super::super::input_runtime::fence::effect::current();
@@ -54,15 +54,18 @@ fn spawn_retry(
                         .await
                 }
                 Some(retry) => {
-                    gateway
-                        .schedule_exact_retry_with_history(
-                            channel_id,
-                            user_msg_id,
-                            &retry_text,
-                            retry,
-                            completion_tx,
-                        )
-                        .await
+                    let receipt = retry.permit.receipt_id();
+                    let handoff = gateway
+                        .schedule_exact_retry_with_history(channel_id, retry)
+                        .await;
+                    if handoff == crate::services::discord::replay_policy::ExactHandoff::Refused {
+                        tracing::warn!(
+                            channel_id = channel_id.get(),
+                            receipt,
+                            "exact retry was not started; the request stays held"
+                        );
+                    }
+                    let _ = completion_tx.send(());
                 }
             }
         }),
@@ -127,14 +130,26 @@ pub(super) async fn retry_stale_resume(point: StaleRetry<'_>, state: StaleRetryS
             }
             state.full_response.clear();
         }
-        StaleResume::Exact(retry) => {
+        StaleResume::Exact(permit) => {
             if let Some(user_msg_id) = point.user_msg_id {
-                let text = point.user_text.to_string();
+                let inflight = &state.inflight_state;
+                let retry = crate::services::discord::replay_policy::ExactRetry {
+                    user_message_id: user_msg_id,
+                    sources: inflight
+                        .source_message_ids
+                        .iter()
+                        .map(|&id| MessageId::new(id))
+                        .collect(),
+                    request_owner: UserId::new(inflight.request_owner_user_id),
+                    text: point.user_text.to_string(),
+                    reply_context: inflight.followup_reply_context.clone(),
+                    permit,
+                };
                 spawn_retry(
                     point.gateway.clone(),
                     point.channel_id,
                     user_msg_id,
-                    text,
+                    String::new(),
                     Some(retry),
                 );
             }

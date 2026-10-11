@@ -880,7 +880,12 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
         submission: None,
     };
     let (sender, _receiver) = std::sync::mpsc::channel();
-    execute(turn, sender)
+    execute(
+        turn,
+        crate::services::discord::router::intake_dispatch::replay_admission::dormant_start("test")
+            .unwrap(),
+        sender,
+    )
 }
 
 // Off or unset, a configured turn is refused as before and reaches no executor; on, it enters the

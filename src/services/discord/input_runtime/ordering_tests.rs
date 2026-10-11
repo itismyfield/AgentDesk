@@ -26,10 +26,21 @@ fn scan(
     begin(order, epoch, sources, horizon, complete).unwrap()
 }
 
+// A producer order whose snapshot carries `pending` at dirty generation `dirty`.
+fn producer(channel: u64, pending: &[u64], dirty: u64) -> AdmissionOrder {
+    let mut order = AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0);
+    order.pending.extend(pending);
+    order.stamp.dirty = dirty;
+    order
+}
+
 fn release(channel: u64, pending: &[u64], dirty: u64) {
     let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
     closing.begin_handback().unwrap();
-    closing.release_after_handback(pending, dirty).unwrap();
+    let snapshot = producer(channel, pending, dirty).pending_snapshot();
+    closing
+        .release_after_handback_with_pending(&snapshot)
+        .unwrap();
 }
 
 fn handback_scan(channel: u64, sources: Vec<u64>, horizon: u64, complete: bool) -> ScanCapability {
@@ -334,27 +345,30 @@ fn g1a_handback_durable_callback_is_atomic_with_range_validation_and_settlement(
     let failed = handback_commit_from_scan(cap, &[11], || {
         calls.set(calls.get() + 1);
         Err::<(), _>(Failure::Persistence)
-    });
-    assert!(matches!(failed, Err(Failure::Persistence)));
+    })
+    .unwrap();
+    assert_eq!(failed.outcome, Err(Failure::Persistence));
     assert_eq!(calls.get(), 1);
     let cap = handback_scan(channel, vec![11, 12, 13], 13, true);
     assert_eq!(
         cap.ticket.stamp.frontier, 0,
         "failed commit settles no source"
     );
-    let (committed, cap) = handback_commit_from_scan(cap, &[11], || {
+    let executed = handback_commit_from_scan(cap, &[11], || {
         calls.set(calls.get() + 1);
         Ok("first durable")
     })
     .unwrap();
-    assert_eq!(committed, "first durable");
+    assert_eq!(executed.outcome, Ok("first durable"));
+    let cap = executed.next.unwrap();
     assert_eq!(handback_permits_sources(&cap, &[12, 13]), Ok(()));
-    let (committed, cap) = handback_commit_from_scan(cap, &[12, 13], || {
+    let executed = handback_commit_from_scan(cap, &[12, 13], || {
         calls.set(calls.get() + 1);
         Ok("rest durable")
     })
     .unwrap();
-    assert_eq!(committed, "rest durable");
+    assert_eq!(executed.outcome, Ok("rest durable"));
+    let cap = executed.next.unwrap();
     assert_eq!(calls.get(), 3);
     assert!(handback_complete(cap).is_err());
     let cap = handback_scan(channel, vec![], 13, true);
@@ -447,15 +461,20 @@ fn g1a_shared_overflow_during_durable_callback_settles_zero_and_keeps_barrier() 
         calls.set(calls.get() + 1);
         overflow.mark_dirty();
         Ok(())
-    });
-    assert!(matches!(result, Err(Failure::StalePermit)));
+    })
+    .unwrap();
+    assert_eq!(result.settlement, Err(Failure::StalePermit));
+    assert!(result.next.is_none());
     assert_eq!(calls.get(), 1);
     assert!(modes::order_barrier(&ProviderKind::Claude, channel));
     let ticket = handback_fetch_ticket(&ProviderKind::Claude, channel).unwrap();
     assert!(handback_begin_scan(ticket, vec![12], 12, true).is_err());
     let cap = handback_scan(channel, vec![11], 11, true);
     assert_eq!(cap.ticket.stamp.frontier, 0);
-    let (_, cap) = handback_commit_from_scan(cap, &[11], || Ok(())).unwrap();
+    let cap = (handback_commit_from_scan(cap, &[11], || Ok(()))
+        .unwrap()
+        .next)
+        .unwrap();
     assert!(handback_complete(cap).is_err());
     let cap = handback_scan(channel, vec![], 11, true);
     assert_eq!(
@@ -476,7 +495,8 @@ fn g1a_handback_rejects_another_channels_overflow_handle_before_release() {
         Err(Failure::StalePermit)
     );
     assert!(!modes::order_barrier(&ProviderKind::Claude, channel));
-    closing.release_after_handback(&[], 0).unwrap();
+    let own = producer(channel, &[], 0).pending_snapshot();
+    closing.release_after_handback_with_pending(&own).unwrap();
     let proof = handback_complete(handback_scan(channel, vec![], 0, true)).unwrap();
     assert_eq!(modes::settle_order_barrier(proof), Ok(true));
 }
@@ -524,14 +544,18 @@ fn g1a_uncertain_handback_failure_dirty_race_preserves_cause_and_whole_retry_ran
     let result = handback_commit_from_scan(cap, &[11, 12], || {
         overflow.mark_dirty();
         Err::<(), _>(Failure::Persistence)
-    });
-    assert!(matches!(result, Err(Failure::Persistence)));
+    })
+    .unwrap();
+    assert_eq!(result.outcome, Err(Failure::Persistence));
     assert!(modes::order_barrier(&ProviderKind::Claude, channel));
     let ticket = handback_fetch_ticket(&ProviderKind::Claude, channel).unwrap();
     assert!(handback_begin_scan(ticket, vec![12], 12, true).is_err());
     let cap = handback_scan(channel, vec![11, 12], 12, true);
     assert_eq!(cap.ticket.stamp.frontier, 0);
-    let (_, cap) = handback_commit_from_scan(cap, &[11, 12], || Ok(())).unwrap();
+    let cap = (handback_commit_from_scan(cap, &[11, 12], || Ok(()))
+        .unwrap()
+        .next)
+        .unwrap();
     assert!(handback_complete(cap).is_err());
     let cap = handback_scan(channel, vec![], 12, true);
     assert_eq!(
@@ -585,21 +609,20 @@ fn scan_namespace_rejection_preserves_frontier() {
 #[test]
 fn handback_snapshot_rejects_before_release() {
     let channel = 6_325_792;
-    let releases = std::cell::Cell::new(0);
     let snapshot = PendingSource {
         sources: vec![11, EXTERNAL],
         dirty_generation: 3,
         overflow: PendingOverflow::new(ProviderKind::Claude, channel),
     };
-    let result = install_handback_snapshot(ProviderKind::Claude, channel, &snapshot, || {
-        releases.set(releases.get() + 1);
-        Ok(8)
-    });
+    let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
+    closing.begin_handback().unwrap();
+    let result = closing.release_after_handback_with_pending(&snapshot);
     assert_eq!(result, Err(Failure::StalePermit));
-    assert_eq!(releases.get(), 0);
     assert!(!modes::order_barrier(&ProviderKind::Claude, channel));
+    // The same Closing still releases, so the refusal released nothing.
+    let own = producer(channel, &[], 9).pending_snapshot();
+    closing.release_after_handback_with_pending(&own).unwrap();
     // A refused live notice leaves a settled post-handback barrier settled.
-    release(channel, &[], 9);
     let cap = handback_scan(channel, vec![], 11, true);
     assert_eq!(
         modes::settle_order_barrier(handback_complete(cap).unwrap()),

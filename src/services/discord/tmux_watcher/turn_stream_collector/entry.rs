@@ -25,3 +25,17 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn collect_turn_strea
     ))
     .await
 }
+
+pub(super) async fn emit_compaction(
+    ctx: &TurnStreamCollectorContext,
+    state: &StreamLineState,
+) -> bool {
+    emit_context_compacted_lifecycle_from_watcher(
+        &ctx.shared,
+        ctx.channel_id,
+        &ctx.watcher_provider,
+        state.last_model.as_deref(),
+        stream_line_state_token_usage(state),
+    )
+    .await
+}

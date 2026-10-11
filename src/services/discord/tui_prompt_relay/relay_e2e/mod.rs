@@ -35,6 +35,8 @@ mod queue_recovery_e2e;
 #[path = "reconcile_stale_turn_e2e_tests.rs"]
 mod reconcile_stale_turn_e2e;
 mod registered_bootstrap_e2e;
+#[path = "replay_defer_intake_e2e_tests.rs"]
+mod replay_defer_intake_e2e;
 mod stale_resume_retry_e2e;
 mod stop_command_catch_up_e2e;
 #[cfg(unix)]

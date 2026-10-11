@@ -20,15 +20,32 @@ const O_LEASE_DEADLINE_MS: u64 = 180_000;
 pub(crate) struct GatewayPort {
     http: Arc<serenity::Http>,
     bot_id: u64,
+    #[cfg(test)]
+    repost_base: Option<String>,
 }
 
 impl GatewayPort {
     pub(crate) fn new(http: Arc<serenity::Http>, bot_id: u64) -> Self {
-        Self { http, bot_id }
+        Self {
+            http,
+            bot_id,
+            #[cfg(test)]
+            repost_base: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_repost_base(mut self, base: String) -> Self {
+        self.repost_base = Some(base);
+        self
     }
 
     /// The re-post transport over this port's client, so both share its route buckets.
     pub(crate) fn repost_http(&self) -> Result<RepostHttp, Unsupported> {
+        #[cfg(test)]
+        if let Some(base) = &self.repost_base {
+            return RepostHttp::at(Arc::clone(&self.http), base.clone());
+        }
         RepostHttp::new(Arc::clone(&self.http))
     }
 
