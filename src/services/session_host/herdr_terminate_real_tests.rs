@@ -585,6 +585,13 @@ pub(crate) struct Execution {
     pub(crate) provider: (u32, String),
 }
 
+/// The channel's Claude session row before its first Herdr launch: Legacy, with no execution.
+pub(crate) async fn legacy_row(pool: &PgPool, key: &str, token_hash: &str, channel: u64) {
+    sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id) VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3)")
+        .bind(key).bind(token_hash).bind(channel.to_string())
+        .execute(pool).await.unwrap();
+}
+
 pub(crate) async fn launch(
     real: &mut Real,
     pool: &PgPool,
@@ -594,9 +601,7 @@ pub(crate) async fn launch(
     cwd: PathBuf,
 ) -> Execution {
     let key = format!("claude/{token_hash}/{NODE}:{logical}");
-    sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id) VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3)")
-        .bind(&key).bind(token_hash).bind(channel.to_string())
-        .execute(pool).await.unwrap();
+    legacy_row(pool, &key, token_hash, channel).await;
     let owner = HostedOwner {
         provider: "claude".into(),
         discord_token_hash: token_hash.into(),

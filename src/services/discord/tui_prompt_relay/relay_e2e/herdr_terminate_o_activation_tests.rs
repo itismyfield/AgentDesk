@@ -24,6 +24,7 @@ use crate::services::herdr_launch::{
     HerdrLaunch, HerdrLaunchCommand, HerdrLaunchEndpoint, HerdrLaunchOutcome, launch_herdr_session,
 };
 use crate::services::provider::ProviderKind;
+use crate::services::session_host::herdr_terminate_real_tests::legacy_row;
 use crate::services::session_host::herdr_termination_rig as herdr;
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
@@ -72,10 +73,7 @@ fn act_o_first_activation_applies_the_launched_source_pg() {
 async fn first_activation(rig: herdr::P11TerminationRig) {
     let (harness, database, pool, session_key) = Terminating::open(&ProviderKind::Claude).await;
     let token_hash = harness.shared.token_hash.clone();
-    // The channel's session row before its first Herdr launch: Legacy, no execution.
-    sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id) VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3)")
-        .bind(&session_key).bind(&token_hash).bind(CHANNEL_ID.to_string())
-        .execute(&pool).await.unwrap();
+    legacy_row(&pool, &session_key, &token_hash, CHANNEL_ID).await;
     let record = rig.record(&token_hash, &session_key);
     let (owner, at) = (record.owner, record.location.expect("the rig's endpoint"));
     let a_session = uuid::Uuid::new_v4().to_string();
