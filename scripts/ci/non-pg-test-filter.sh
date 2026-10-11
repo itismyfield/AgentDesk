@@ -201,6 +201,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::tui_o::repost::o_piece_ledger_tests
   --skip services::tui_o::repost::runner_tests
   --skip services::tui_o::writer::tests::actor::host_start::deferred::pg
+  --skip services::tui_o::writer::tests::actor::repost_turn
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
@@ -774,6 +775,7 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::repost::admission_tests::a_torn_sidecar_tail_is_cut_and_any_other_damage_refuses_the_sidecar
   services::tui_o::repost::admission_tests::f3r_a_failed_append_refuses_more_until_a_reopen_cuts_its_bytes
   services::tui_o::repost::admission_tests::f3r_an_original_sent_while_on_stays_eligible_across_off_and_on
+  services::tui_o::repost::admission_tests::f6_a_conflicting_record_of_an_activation_never_moves_its_frontier
   services::tui_o::repost::admission_tests::only_an_uncertain_original_sent_while_on_is_eligible_and_the_rest_is_reported_once
   services::tui_o::repost::admission_tests::with_the_switch_off_no_admitter_exists_to_reach_postgres_or_the_sidecar
   services::tui_o::repost::runner_tests::f5_a_request_dropped_after_its_first_pending_is_gone_and_stays_counted
@@ -782,6 +784,8 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::repost::runner_tests::f5_default_off_tick_executes_zero_pg_statements
   services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
+  services::tui_o::writer::tests::actor::repost_turn::f6_a_live_reload_switches_the_next_turn_without_a_restart
+  services::tui_o::writer::tests::actor::repost_turn::f6_default_off_actor_turn_reads_nothing
   services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
   services::turn_host::tests::a_delegated_channel_runs_a_turn_only_where_its_home_is_held_with_intake_open
   services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
@@ -989,6 +993,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::tui_o::repost::o_piece_ledger_tests
   services::tui_o::repost::runner_tests
   services::tui_o::writer::tests::actor::host_start::deferred::pg
+  services::tui_o::writer::tests::actor::repost_turn
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests
   voice::announce_meta::tests

@@ -520,3 +520,21 @@ async fn f1r_an_unpolled_request_dropped_sends_and_counts_nothing() {
         (0, 1)
     );
 }
+
+/// A success whose rate header is finite but far too large for the bucket's clock stays a
+/// success with one POST: it never reaches the hook, is never reclassified and never sent again.
+#[tokio::test]
+async fn f6_hookable_overflow_on_success_never_reclassifies_or_reposts() {
+    for huge in ["1e19", "18446744073709551615", "9e15"] {
+        let headers = [
+            ("x-ratelimit-limit", "5"),
+            ("x-ratelimit-remaining", "4"),
+            ("x-ratelimit-reset-after", huge),
+            ("retry-after", huge),
+        ];
+        let mock = Mock::start(vec![created_with(Some(MARKER), &headers)]).await;
+        let report = dispatch(&mock.port(), always()).await;
+        assert_eq!(summary(&report), ("created", 1, 1, 0), "{huge}");
+        assert_eq!(mock.requests().len(), 1, "{huge}");
+    }
+}

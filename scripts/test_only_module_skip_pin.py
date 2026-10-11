@@ -111,6 +111,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/input_runtime/receipt_tests.rs",
         "src/services/discord/input_runtime/supervisor_tests.rs",
         "src/services/discord/input_runtime/mapping_guard_tests.rs",
+        "src/services/discord/input_runtime/reserve_tests.rs",
         "src/services/discord/input_runtime/fence/modes_tests.rs",
         "src/services/discord/input_runtime/supervisor/drive_tests.rs",
         "src/services/discord/input_runtime/supervisor/drive_entry_tests.rs",
@@ -341,6 +342,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/repost/admission_tests.rs",
         "src/services/tui_o/repost/probe_tests.rs",
         "src/services/tui_o/repost/runner_tests.rs",
+        "src/services/tui_o/writer/repost_turn_tests.rs",
         "src/services/discord/placeholder_controller/queued_card_gate/tests.rs",
         "src/services/discord/placeholder_live_events/probe_fixtures_tests.rs",
         "src/services/discord/placeholder_live_events/tests.rs",
@@ -589,9 +591,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
         "src/services/discord/turn_bridge/replay_policy.rs",
-        "src/services/discord/input_runtime/activation.rs",
-        "src/services/discord/input_runtime/activation/plan.rs",
-        "src/services/discord/input_runtime/activation/scope.rs",
         "src/services/discord/input_runtime/offer.rs",
         "src/services/tui_input/actor/pane/ownership.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",

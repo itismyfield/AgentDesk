@@ -52,8 +52,10 @@ pub(crate) fn population_root() -> Option<PathBuf> {
     super::super::runtime_store::runtime_root()
 }
 
+// Another provider's protection still covers the channel, so a foreign writer never reads None.
 pub(crate) fn lookup(provider: &ProviderKind, channel: u64) -> Option<Arc<Gate>> {
     find(|gate| gate.channel == channel && &gate.provider == provider)
+        .or_else(|| channel_gate(channel))
 }
 pub(crate) fn channel_gate(channel: u64) -> Option<Arc<Gate>> {
     find(|gate| gate.channel == channel)
