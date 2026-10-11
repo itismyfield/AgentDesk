@@ -8,7 +8,8 @@ pub(in crate::services::discord) async fn invalidate_stale_generation_scoped(
     expected: &InflightTurnState,
 ) -> Result<bool, RestoreFailure> {
     let protected = |row: &InflightTurnState| {
-        row.restart_mode.is_some()
+        (row.herdr_before_start_stop.is_some() && !receipt_mutant("scoped-snapshot"))
+            || row.restart_mode.is_some()
             || row.rebind_origin
             || (!scoped_restore_mutant("replay-front")
                 && (row.replay_rerun_blocked() || row.replay_receipt_id.is_some()))
@@ -31,6 +32,9 @@ pub(in crate::services::discord) async fn invalidate_stale_generation_scoped(
     let path = inflight_state_path(&root, provider, channel);
     let _guard = try_lock_inflight_state_path(&path).map_err(RestoreFailure::retryable)?;
     let bytes = fs::read_to_string(&path).map_err(RestoreFailure::retryable)?;
+    if raw_before_start_receipt(&bytes) && !receipt_mutant("scoped-fresh") {
+        return Ok(false);
+    }
     let fresh = parse_inflight_state_content(&bytes).map_err(|error| error.to_string())?;
     if !scoped_restore_mutant("snapshot")
         && serde_json::to_value(&fresh).map_err(|error| error.to_string())?

@@ -30,6 +30,8 @@ pub(crate) fn log_inflight_remove(
     reason: &'static str,
     path: &Path,
 ) {
+    #[cfg(test)]
+    receipt_test_events::record(provider, channel_id, user_msg_id, reason);
     tracing::warn!(
         target: "agentdesk::inflight_remove",
         provider = %provider.as_str(),
@@ -348,6 +350,9 @@ pub(super) fn invalidate_stale_generation_in_root(
         if state.provider_kind().as_ref() != Some(provider) {
             continue;
         }
+        if receipt_protected_path(&path) && !receipt_mutant("generation") {
+            continue;
+        }
         if state.restart_mode.is_some() {
             continue;
         }
@@ -436,6 +441,9 @@ pub(super) fn stale_removal_reason(
     age_secs: u64,
     current_generation: u64,
 ) -> Option<String> {
+    if state.herdr_before_start_stop.is_some() && !receipt_mutant("age") {
+        return None;
+    }
     match state.restart_mode {
         Some(restart_mode) => {
             // A planned-restart row is intentionally authored by the outgoing
@@ -561,7 +569,13 @@ fn relock(
     let lock = lock_inflight_state_path(path).map_err(|_| Box::new(RowVerdict::Skip(true)))?;
     match fs::read_to_string(path) {
         Ok(locked) => match parse_inflight_state_content(&locked) {
+            Ok(state) if state.herdr_before_start_stop.is_some() && !receipt_mutant("loader") => {
+                Err(Box::new(RowVerdict::Keep(state, false)))
+            }
             Ok(state) => Ok((state, lock)),
+            Err(_) if raw_before_start_receipt(&locked) && !receipt_mutant("malformed") => {
+                Err(Box::new(RowVerdict::Skip(true)))
+            }
             Err(_) => Err(Box::new(RowVerdict::HideMalformed(
                 content.to_string(),
                 locked,
@@ -629,6 +643,9 @@ fn classify_inflight_row_for_restore(
                 Ok(parsed) => parsed,
                 Err(_) => (relock(path, &content)?.0, false),
             };
+        if raw_before_start_receipt(&content) && !receipt_mutant("loader") {
+            return Ok(RowVerdict::Keep(state, false));
+        }
         let foreign = |row: &InflightTurnState| row.provider_kind().as_ref() != Some(provider);
         if foreign(&state) {
             let (locked, lock) = relock(path, &content)?;
@@ -891,6 +908,48 @@ mod custody_notice;
 pub(in crate::services::discord) use boot_reaper::reap_inflight_rows_at_boot_blocking;
 #[cfg(test)]
 use boot_reaper::*;
+#[cfg(all(test, unix))]
+pub(super) fn receipt_boundary_reap(root: &Path, provider: &ProviderKind) -> usize {
+    reap_inflight_rows_at_boot_in_root(root, provider).reaped_stale
+}
+#[cfg(all(test, unix))]
+pub(super) fn receipt_boundary_reap_total(root: &Path, provider: &ProviderKind) -> usize {
+    let report = reap_inflight_rows_at_boot_in_root(root, provider);
+    report.reaped_stale + report.reaped_provider_mismatch + report.reaped_malformed
+}
+#[cfg(test)]
+pub(super) mod receipt_test_events {
+    use std::cell::RefCell;
+    thread_local! { static EVENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) }; }
+    pub(super) fn record(provider: &super::ProviderKind, channel: u64, user: u64, reason: &str) {
+        EVENTS.with(|events| {
+            events
+                .borrow_mut()
+                .push(format!("{}:{channel}:{user}:{reason}", provider.as_str()))
+        });
+    }
+    pub(in crate::services::discord::inflight) fn take() -> Vec<String> {
+        EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
+    }
+    #[cfg(unix)]
+    pub(in crate::services::discord::inflight) fn reap_after_snapshot(
+        root: &std::path::Path,
+        entered: std::sync::mpsc::SyncSender<()>,
+        released: std::sync::mpsc::Receiver<()>,
+    ) -> (usize, usize) {
+        super::BEFORE_ROW_LOCK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |_| {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+            }));
+        });
+        let report = super::reap_inflight_rows_at_boot_in_root(root, &super::ProviderKind::Claude);
+        (
+            report.reaped_stale + report.reaped_provider_mismatch + report.reaped_malformed,
+            report.kept,
+        )
+    }
+}
 #[cfg(test)]
 pub(in crate::services::discord) use custody_notice::custody_notice_text;
 #[cfg(test)]
@@ -1172,7 +1231,10 @@ mod loader_gate_observation_tests {
     #[test]
     fn observation_labels_and_allocation_only_evaluation_api_are_exact() {
         let source = include_str!("removal.rs");
-        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let production = source
+            .split_once("/// Thread-local test seam for `tmux_pane_alive_for_stale_check`.")
+            .unwrap()
+            .0;
         let observation = source
             .split_once("fn loader_gate_refuses_with_allocation(")
             .expect("loader allocation observation must remain present")
@@ -1218,10 +1280,7 @@ mod loader_gate_observation_tests {
             } else {
                 end + text[end..].find(sentinel).expect(sentinel)
             };
-            assert!(
-                text[end..next].trim().is_empty(),
-                "extra item after {name}"
-            );
+            assert!(text[end..next].trim().is_empty(), "extra item after {name}");
             start..end
         };
         let ranges = [
@@ -1230,11 +1289,7 @@ mod loader_gate_observation_tests {
                 "async fn invalidate_stale_generation_scoped(",
                 "pub(super) fn backfill_scoped_restore(",
             ),
-            item(
-                scoped,
-                "fn backfill_scoped_restore(",
-                "",
-            ),
+            item(scoped, "fn backfill_scoped_restore(", ""),
         ];
         assert!(ranges[0].end < ranges[1].start);
         let scoped_reads = format!(
@@ -1255,7 +1310,10 @@ mod loader_gate_observation_tests {
         ] {
             let end = owned.find(connection).expect(connection) + connection.len();
             let next = end + owned[end..].find(sentinel).expect(sentinel);
-            assert!(owned[end..next].trim().is_empty(), "extra item after {connection}");
+            assert!(
+                owned[end..next].trim().is_empty(),
+                "extra item after {connection}"
+            );
         }
         let reads = owned.split_once("fn classify_inflight_row(").unwrap().1;
         let reads = reads.split_once("\nmod boot_reaper;").unwrap().0;

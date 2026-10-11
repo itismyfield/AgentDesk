@@ -125,6 +125,18 @@ async fn restore_inflight_states(
         {
             continue;
         }
+        if !inflight::receipt_mutant("all-early")
+            && (state.herdr_before_start_stop.is_some()
+                || inflight::before_start_receipt_present(provider, state.channel_id))
+        {
+            #[cfg(unix)]
+            if let Some(receipt) =
+                super::herdr_before_start_restart::decode(shared, provider, &state)
+            {
+                receipt.settle(http, shared, &state).await;
+            }
+            continue;
+        }
         // An unverified projected receipt waits for another pass without persisting a read error.
         if !replay_hold::hydrate_replay_hold(shared.pg_pool.as_ref(), &mut state).await {
             continue;
@@ -2173,7 +2185,14 @@ async fn restore_inflight_states(
         }
 
         let kickoff = if resume_installed {
-            scoped_restore::checked_kickoff(shared, provider, channel_id, cancel_token.clone(), &state).await
+            scoped_restore::checked_kickoff(
+                shared,
+                provider,
+                channel_id,
+                cancel_token.clone(),
+                &state,
+            )
+            .await
         } else {
             mailbox_recovery_kickoff(
                 shared,

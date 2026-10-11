@@ -20,21 +20,28 @@ pub(super) enum BeforeStartRestartReport {
     Retained(&'static str),
 }
 
-/// `None` keeps the existing recovery path: settlement is off or the row has no receipt.
+/// Only a receipt-free row takes the ordinary recovery path.
 pub(super) fn decode(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
 ) -> Option<BeforeStartRestart> {
+    let receipt = state.herdr_before_start_stop.as_ref()?;
     if !crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
     {
-        return None;
+        if inflight::receipt_mutant("off-decode") {
+            return None;
+        }
+        return Some(BeforeStartRestart::Held("policy settlement is unavailable"));
     }
-    let receipt = state.herdr_before_start_stop.as_ref()?;
     let current = shared.restart.current_generation;
     let admitted = receipt.admitted_generation();
     let held = if !receipt.supported() {
         "a receipt this binary cannot read"
+    } else if state.rebind_origin {
+        "a rebind origin owns the same row"
+    } else if state.replay_rerun_blocked() {
+        "replay authority owns the same row"
     } else if state.tui_terminal_kind.is_some() {
         "a native terminal was admitted on the same row"
     } else if state.turn_nonce.as_deref() != Some(receipt.turn_nonce()) {

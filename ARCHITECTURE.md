@@ -1000,6 +1000,9 @@ src/
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── operator_disposition.rs
 │   │   │   │   └── reconcile_gate.rs
+│   │   │   ├── fixtures/
+│   │   │   │   ├── receipt_free_reaper_baseline.json
+│   │   │   │   └── receipt_free_writer_baseline.json
 │   │   │   ├── model/
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── serde_adapters.rs
@@ -1063,6 +1066,7 @@ src/
 │   │   │   ├── orphan_relay_reclaim.rs
 │   │   │   ├── ownership_ops.rs
 │   │   │   ├── rebind_reap.rs
+│   │   │   ├── receipt_boundary_tests.rs
 │   │   │   ├── removal.rs
 │   │   │   ├── replay_projection_tests.rs
 │   │   │   ├── restart_mark.rs

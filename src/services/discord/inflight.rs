@@ -382,28 +382,196 @@ pub(super) fn load_inflight_states_for_sweep(
 /// Delete the inflight state file for a (provider, channel_id) pair if it
 /// still exists. Used by `placeholder_sweeper` to evict abandoned states
 /// after a final placeholder edit. Idempotent.
-pub(super) fn delete_inflight_state_file(provider: &ProviderKind, channel_id: u64) -> bool {
-    let Some(root) = inflight_runtime_root() else {
-        return false;
+pub(super) fn delete_inflight_state_file<'a>(
+    request: impl Into<InflightDeleteRequest<'a>>,
+    channel_id: u64,
+) -> bool {
+    let request = request.into();
+    let provider = request.provider;
+    let channel = channel_id;
+    let outcome = 'decision: {
+        let Some(root) = inflight_runtime_root() else {
+            break 'decision InflightDeleteOutcome::Failed;
+        };
+        let path = inflight_state_path(&root, provider, channel);
+        let Ok(_lock) = lock_inflight_state_path(&path) else {
+            break 'decision InflightDeleteOutcome::Failed;
+        };
+        if receipt_protected_path(&path) && !receipt_mutant("delete") {
+            break 'decision InflightDeleteOutcome::ProtectedReceipt;
+        }
+        log_inflight_remove_for_path(provider, channel, "delete_inflight_state_file", &path);
+        match fs::remove_file(path) {
+            Ok(()) => InflightDeleteOutcome::Deleted,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                InflightDeleteOutcome::AlreadyAbsent
+            }
+            _ => InflightDeleteOutcome::Failed,
+        }
     };
-    let path = inflight_state_path(&root, provider, channel_id);
-    let Ok(_lock) = lock_inflight_state_path(&path) else {
-        return false;
-    };
-    log_inflight_remove_for_path(provider, channel_id, "delete_inflight_state_file", &path);
-    fs::remove_file(path).is_ok()
+    if let Some(result) = request.result {
+        result.set(outcome);
+    }
+    outcome == InflightDeleteOutcome::Deleted
+}
+
+// Preserve the bool API while returning its exact lock-held decision to cleanup callers.
+pub(super) struct InflightDeleteRequest<'a> {
+    provider: &'a ProviderKind,
+    result: Option<&'a std::cell::Cell<InflightDeleteOutcome>>,
+}
+impl<'a> From<&'a ProviderKind> for InflightDeleteRequest<'a> {
+    fn from(provider: &'a ProviderKind) -> Self {
+        Self {
+            provider,
+            result: None,
+        }
+    }
 }
 
 fn now_string() -> String {
+    #[cfg(all(test, unix))]
+    if let Some(now) = receipt_boundary_tests::fixed_now() {
+        return now.into();
+    }
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-fn bump_save_generation_for_write(path: &Path, state: &mut InflightTurnState) {
-    let existing = fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<InflightTurnState>(&content).ok());
+#[cfg(all(test, unix))]
+#[path = "inflight/receipt_boundary_tests.rs"]
+mod receipt_boundary_tests;
+
+pub(in crate::services::discord) fn receipt_mutant(_name: &str) -> bool {
+    #[cfg(test)]
+    if std::env::var("ADK_B3B2_MUTANT").ok().as_deref() == Some(_name) {
+        return true;
+    }
+    false
+}
+
+pub(in crate::services::discord) fn raw_before_start_receipt(content: &str) -> bool {
+    #[cfg(all(test, unix))]
+    receipt_boundary_tests::note_guard_read();
+    if receipt_mutant("off-protection")
+        && !crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
+    {
+        return false;
+    }
+    if receipt_mutant("absent-blocks") {
+        return true;
+    }
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(value) => value
+            .as_object()
+            .is_some_and(|object| object.contains_key("herdr_before_start_stop")),
+        Err(_) => malformed_top_level_receipt_key(content),
+    }
+}
+// Detect an actual top-level key even when later bytes cannot be parsed.
+fn malformed_top_level_receipt_key(content: &str) -> bool {
+    if !content.trim_start().starts_with('{') {
+        return false;
+    }
+    let bytes = content.as_bytes();
+    let (mut depth, mut index, mut key) = (0usize, 0usize, false);
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' | b'[' => {
+                depth += 1;
+                if depth == 1 {
+                    key = bytes[index] == b'{';
+                }
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return false;
+                }
+            }
+            b',' if depth == 1 => key = true,
+            b':' if depth == 1 => key = false,
+            b'"' => {
+                let start = index;
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if bytes[index] == b'"' {
+                        break;
+                    }
+                    index += 1;
+                }
+                if index >= bytes.len() {
+                    return false;
+                }
+                let next = bytes[index + 1..]
+                    .iter()
+                    .find(|byte| !byte.is_ascii_whitespace());
+                if depth == 1
+                    && key
+                    && next == Some(&b':')
+                    && serde_json::from_str::<String>(&content[start..=index])
+                        .ok()
+                        .as_deref()
+                        == Some("herdr_before_start_stop")
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+fn receipt_protected_path(path: &Path) -> bool {
+    fs::read(path).is_ok_and(|bytes| raw_before_start_receipt(&String::from_utf8_lossy(&bytes)))
+}
+pub(in crate::services::discord) fn before_start_receipt_present(
+    provider: &ProviderKind,
+    channel: u64,
+) -> bool {
+    inflight_runtime_root()
+        .is_some_and(|root| receipt_protected_path(&inflight_state_path(&root, provider, channel)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum InflightDeleteOutcome {
+    Deleted,
+    AlreadyAbsent,
+    ProtectedReceipt,
+    Failed,
+}
+pub(in crate::services::discord) fn delete_inflight_state_file_checked(
+    provider: &ProviderKind,
+    channel: u64,
+) -> InflightDeleteOutcome {
+    let result = std::cell::Cell::new(InflightDeleteOutcome::Failed);
+    delete_inflight_state_file(
+        InflightDeleteRequest {
+            provider,
+            result: Some(&result),
+        },
+        channel,
+    );
+    result.into_inner()
+}
+
+fn bump_save_generation_for_write(
+    path: &Path,
+    state: &mut InflightTurnState,
+) -> Result<(), String> {
+    let content = fs::read_to_string(path).ok();
+    let existing = content
+        .as_deref()
+        .and_then(|content| serde_json::from_str::<InflightTurnState>(content).ok());
+    if existing.is_none() && receipt_protected_path(path) {
+        return Err("policy receipt row cannot be parsed".into());
+    }
     managed_submission::carry_forward(existing.as_ref(), state);
-    state.carry_before_start_receipt_from(existing.as_ref());
+    state.carry_before_start_receipt_from(existing.as_ref())?;
     let existing_generation = existing
         .map(|existing| existing.save_generation)
         .unwrap_or(0);
@@ -411,6 +579,7 @@ fn bump_save_generation_for_write(path: &Path, state: &mut InflightTurnState) {
         .saturating_add(1)
         .max(state.save_generation.saturating_add(1))
         .max(1);
+    Ok(())
 }
 
 fn turn_id_for_state(state: &InflightTurnState) -> Option<String> {
@@ -560,7 +729,9 @@ fn set_inflight_restart_mode_under_lock(path: &Path, restart_mode: InflightResta
     state.set_restart_mode(restart_mode);
     state.ensure_finalizer_turn_id();
     state.updated_at = now_string();
-    bump_save_generation_for_write(path, &mut state);
+    if bump_save_generation_for_write(path, &mut state).is_err() {
+        return false;
+    }
     match serde_json::to_string_pretty(&state) {
         Ok(json) => atomic_write(path, &json).is_ok(),
         Err(_) => false,
