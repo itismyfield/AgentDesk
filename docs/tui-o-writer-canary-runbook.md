@@ -248,3 +248,44 @@ the original piece once, then the output that followed. Run these on the O home,
 - The first approval creates `<runtime_root>/o_store/operator_resume.floor`. From then on the deploy
   script refuses a source or a rollback target that does not record `o_ledger_operator_resume` as
   `true`. Fix forward instead, and never delete approval lines from the ledger to get past it.
+
+## 8. Roll back after re-post activation
+
+An older binary that cannot read the `not_sent` ledger tag stops the channel writer with ledger
+damage if it encounters that tag. Turning re-post OFF does not end an existing request or prevent
+its terminal ledger append: a request waiting after HTTP 429 can append `not_sent` after OFF.
+Follow these steps in order before selecting that older binary:
+
+1. Confirm effective OFF.
+   Establish the complete list of channels that have ever had re-post enabled, including channels
+   no longer selected for activation. Confirm the effective re-post switch is OFF on every target
+   node, using its validated live value rather than a default or a file edit alone. Keep it OFF on
+   all nodes through the rollback decision.
+2. Wait for in-flight requests and writer quiescence.
+   Wait for existing requests to end and their terminal ledger appends to complete, then confirm
+   the affected writer tasks have ended and joined with no ledger writes still possible. An HTTP
+   in-flight count of zero alone does not prove writer quiescence. Keep the writers quiescent from
+   the ledger inspection through the decision; do not restart them between those steps.
+3. Inspect all activated channel ledgers.
+   Read every ledger in the complete activation list at
+   `<runtime_root>/o_store/<CHANNEL_ID>/ledger.jsonl`, using the runtime root that holds that channel.
+   Run this check for each ledger and retain every result:
+
+   ```sh
+   rg -n '"type"[[:space:]]*:[[:space:]]*"not_sent"' '<runtime_root>/o_store/<CHANNEL_ID>/ledger.jsonl'
+   ```
+
+   Exit 0 means the tag is present; exit 1 means it is absent in that file; exit 2 or higher means
+   the read failed. One tag-free file is not evidence for the other activated channels. Confirm
+   each ledger was read completely and that every channel in the activation list was checked.
+4. Decide whether the older binary may run.
+   REFUSE the older binary if any ledger contains `not_sent`, any ledger cannot be read completely,
+   or the full activation list cannot be established. Only complete, successful reads with zero
+   `not_sent` tags across all activated ledgers allow this reader compatibility check to pass.
+   The existing O writer rollback restrictions in §6 and operator-resume floor in §7 still apply.
+   OFF does not remove existing tags. Do not delete or automatically convert `not_sent` records,
+   or infer conversions from old Prepared/NotFound records. Keep a binary that supports the tag
+   until a separately verified compatible recovery procedure is available.
+
+This is a manual rollback procedure. A re-post rollback preflight in `scripts/deploy-release.sh`
+is follow-up work and is not implemented here.

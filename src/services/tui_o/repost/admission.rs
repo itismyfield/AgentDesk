@@ -281,7 +281,12 @@ impl<'a> Admitter<'a> {
         }
         let new = self.delivery(&original.key, &original.payload, original.anchor, serial);
         let outcome = o_piece_delivery::admit(self.pool, &new).await?;
-        log.append(ProvenanceEntry::Admitted { serial })?;
+        if matches!(
+            &outcome,
+            AdmitOutcome::Admitted(_) | AdmitOutcome::Existing(_)
+        ) {
+            log.append(ProvenanceEntry::Admitted { serial })?;
+        }
         Ok(outcome)
     }
 

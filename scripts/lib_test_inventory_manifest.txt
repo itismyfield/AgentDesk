@@ -6608,6 +6608,7 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_spawns_exactly_once_per_process
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_task_can_restart_after_task_death
+services::discord::runtime_bootstrap::o_writer_host::activation_tests::d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg
 services::discord::runtime_bootstrap::o_writer_host::activation_tests::d4act_host_stop_during_pending_finish_prevents_retry_pg
 services::discord::runtime_bootstrap::o_writer_host::activation_tests::f6_off_host_has_zero_pg_statements_with_on_positive_control_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::a_host_without_an_intake_fence_refuses_deferred_activation_facts
@@ -11922,6 +11923,7 @@ services::tui_o::writer::tests::actor::overdue_ready_is_observed_by_the_loop_at_
 services::tui_o::writer::tests::actor::ready_item_ages_and_channels_are_independent
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_actor_stop_during_429_wait_prevents_retry_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_actor_stop_receiver_reaches_a_running_repost_pg
+services::tui_o::writer::tests::actor::repost_turn::activation::d4act_channel_turn_binds_switch_before_real_repost_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_host_stop_during_pending_finish_prevents_retry_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_reload_off_during_429_wait_prevents_retry_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_scope_revoked_after_grant_and_during_429_wait_pg
@@ -11929,6 +11931,7 @@ services::tui_o::writer::tests::actor::repost_turn::activation::d4act_source_rev
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_source_revoked_after_tick_never_grants_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_source_revoked_during_429_wait_prevents_retry_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_switch_withdrawal_after_first_poll_keeps_started_http_and_slot_pg
+services::tui_o::writer::tests::actor::repost_turn::activation::d4act_unbound_writer_blocks_grant_prepared_and_wire_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::f6_delegated_admission_requires_sendable_home_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::f6_herdr_repost_counts_as_inflight_until_request_ends_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::f6_not_sent_replay_keeps_original_suppressed_and_budget_spent_pg

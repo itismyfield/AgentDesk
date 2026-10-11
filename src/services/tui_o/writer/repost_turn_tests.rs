@@ -417,11 +417,14 @@ async fn f6_t07_all_writer_guards_block_auto_pg() {
     let pool = db.connect_and_migrate().await;
     let key = admitted(&pool, "f6-t07", "piece").await;
     let harness = Harness::new();
-    let mut runner = Runner::new(switch(true), pool.clone(), BOT, run_scope());
+    let on = switch(true);
+    let effective = on.live();
+    let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
     for case in 0..4 {
         harness.gate.acquired();
         let mut writer = harness.writer();
         writer.set_live(case != 0);
+        writer.bind_switch(Arc::clone(&effective));
         if case == 1 {
             writer.stop(WriterAlarm::Halted { detail: "x".into() });
         }
@@ -439,6 +442,7 @@ async fn f6_t07_all_writer_guards_block_auto_pg() {
     harness.gate.acquired();
     let mut writer = harness.writer();
     writer.set_live(true);
+    writer.bind_switch(effective);
     assert!(grant(&mut runner, &mut writer, &pool, &key).await);
     pool.close().await;
     db.drop().await;
@@ -466,7 +470,9 @@ async fn f6_t09_open_prepared_blocks_every_sender_pg() {
     let mut writer = harness.writer();
     writer.set_live(true);
     let io = Io::over(&harness.port);
-    let mut runner = Runner::new(switch(true), pool.clone(), BOT, run_scope());
+    let on = switch(true);
+    writer.bind_switch(on.live());
+    let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
     let intent = evidence(&pool, &key).await;
     let admitted = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
     let Admission::Granted { permit, lease } = admitted.await.unwrap() else {
@@ -601,7 +607,9 @@ async fn f6_a_dropped_writer_never_lets_its_repost_send_again_pg() {
     writer.set_live(true);
     let io = Io::over(&harness.port);
     io.throttle_first.store(true, Ordering::SeqCst);
-    let mut runner = Runner::new(switch(true), pool.clone(), BOT, run_scope());
+    let on = switch(true);
+    writer.bind_switch(on.live());
+    let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
     let intent = evidence(&pool, &key).await;
     let admitted = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
     let Admission::Granted { permit, lease } = admitted.await.unwrap() else {

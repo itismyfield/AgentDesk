@@ -176,6 +176,7 @@ struct RealHost {
         crate::services::tui_o::repost::identity::PieceKey,
         Arc<RetryIo>,
     )>,
+    wire_turns: Option<Arc<WireTurns>>,
 }
 
 impl HostIo for RealHost {
@@ -216,6 +217,13 @@ impl HostIo for RealHost {
         self.gateway.relaying(channel)
     }
     fn repost(&self, channel: u64, port: &Arc<GatewayPort>) -> Option<host::RepostTurn<Self>> {
+        if let Some(turns) = &self.wire_turns {
+            return Some(Box::new(WireTurn {
+                inner: self.gateway.repost(channel, port)?,
+                turns: Arc::clone(turns),
+                used: false,
+            }));
+        }
         if let Some((pool, key, io)) = &self.send {
             return Some(Box::new(SendOnce {
                 pool: pool.clone(),
@@ -309,6 +317,7 @@ async fn f6_off_host_has_zero_pg_statements_with_on_positive_control_pg() {
             notice: Arc::new(Notify::new()),
             measure: Arc::new(Notify::new()),
             send: None,
+            wire_turns: None,
         });
         let gate = Arc::new(OwnershipGate::default());
         gate.acquired();
@@ -579,6 +588,7 @@ async fn d4act_host_stop_during_pending_finish_prevents_retry_pg() {
             notice: Arc::new(Notify::new()),
             measure: Arc::new(Notify::new()),
             send: Some((pool.clone(), key.clone(), Arc::clone(&retry))),
+            wire_turns: None,
         });
         let gate = Arc::new(OwnershipGate::default());
         gate.acquired();
@@ -639,4 +649,657 @@ async fn d4act_host_stop_during_pending_finish_prevents_retry_pg() {
     }
     pool.close().await;
     fixture.drop().await;
+}
+
+#[derive(Default)]
+struct WireTurns {
+    completed: AtomicUsize,
+    proceed: Notify,
+    notice: Notify,
+}
+
+impl WireTurns {
+    async fn wait(&self, count: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while self.completed.load(Ordering::SeqCst) < count {
+                self.notice.notified().await;
+            }
+        })
+        .await
+        .expect("the real channel turn completed");
+    }
+}
+
+struct WireTurn {
+    inner: host::RepostTurn<GatewayHost>,
+    turns: Arc<WireTurns>,
+    used: bool,
+}
+
+impl RepostHook<RealWriter> for WireTurn {
+    fn turn<'a>(&'a mut self, writer: &'a mut RealWriter) -> Turned<'a, ()> {
+        Box::pin(async move {
+            if std::mem::replace(&mut self.used, true) {
+                return;
+            }
+            for count in 1..=3 {
+                self.inner.turn(writer).await;
+                self.turns.completed.store(count, Ordering::SeqCst);
+                self.turns.notice.notify_one();
+                if count < 3 {
+                    self.turns.proceed.notified().await;
+                }
+            }
+        })
+    }
+    fn original(&mut self, serial: u64, piece: PieceRecord) -> Turned<'_, OriginalGate> {
+        self.inner.original(serial, piece)
+    }
+}
+
+struct WireServer {
+    base: String,
+    posts: Arc<AtomicUsize>,
+    valid_posts: Arc<AtomicUsize>,
+    reads: Arc<AtomicUsize>,
+    first_429: Arc<Notify>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl WireServer {
+    async fn start(channel: u64, key: &crate::services::tui_o::repost::identity::PieceKey) -> Self {
+        use serde_json::json;
+        let marker = crate::services::tui_o::repost::identity::marker(key);
+        let nonce = crate::services::tui_o::repost::send::RepostIds::for_piece(&marker)
+            .unwrap()
+            .nonce()
+            .to_owned();
+        let footer = format!("재확인 후 추가 전달 {marker}");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (posts, valid_posts, reads, first_429) = (
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(Notify::new()),
+        );
+        let (sent, valid, read, first) = (
+            posts.clone(),
+            valid_posts.clone(),
+            reads.clone(),
+            first_429.clone(),
+        );
+        let task = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut bytes = Vec::new();
+                let mut chunk = [0; 4096];
+                let head_end = loop {
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    if count == 0 {
+                        break None;
+                    }
+                    bytes.extend_from_slice(&chunk[..count]);
+                    if let Some(at) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break Some(at + 4);
+                    }
+                };
+                let Some(head_end) = head_end else { continue };
+                let head = String::from_utf8_lossy(&bytes[..head_end]).into_owned();
+                let length = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < head_end + length {
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk[..count]);
+                }
+                let mut request = head.lines().next().unwrap().split_whitespace();
+                let (method, path) = (request.next().unwrap(), request.next().unwrap());
+                let route = format!("/api/v10/channels/{channel}/messages");
+                let proof = json!({
+                    "id": "900", "channel_id": channel.to_string(),
+                    "author": {"id": "42"}, "content": "earlier permission", "embeds": []
+                });
+                let (status, headers, body, throttled) = if method == "GET" {
+                    read.fetch_add(1, Ordering::SeqCst);
+                    if path == format!("{route}/900") {
+                        ("200 OK", "", proof.to_string(), false)
+                    } else if path.starts_with(&format!("{route}?")) {
+                        ("200 OK", "", json!([proof]).to_string(), false)
+                    } else {
+                        ("404 Not Found", "", "{}".into(), false)
+                    }
+                } else if method == "POST" && path == route {
+                    let count = sent.fetch_add(1, Ordering::SeqCst);
+                    let message: serde_json::Value =
+                        serde_json::from_slice(&bytes[head_end..head_end + length])
+                            .unwrap_or_default();
+                    if message["content"] == "absent target"
+                        && message["nonce"] == nonce
+                        && message["enforce_nonce"] == true
+                        && message["embeds"][0]["footer"]["text"] == footer
+                    {
+                        valid.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if count == 0 {
+                        (
+                            "429 Too Many Requests",
+                            "retry-after: 2\r\nx-ratelimit-limit: 17\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset-after: 2\r\n",
+                            r#"{"retry_after":2,"global":false}"#.into(),
+                            true,
+                        )
+                    } else {
+                        (
+                            "200 OK",
+                            "",
+                            json!({
+                                "id": "9001", "author": {"id": "42"},
+                                "content": message["content"], "embeds": message["embeds"]
+                            })
+                            .to_string(),
+                            false,
+                        )
+                    }
+                } else {
+                    ("400 Bad Request", "", "{}".into(), false)
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{headers}\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                if throttled {
+                    first.notify_one();
+                }
+            }
+        });
+        Self {
+            base,
+            posts,
+            valid_posts,
+            reads,
+            first_429,
+            task,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RollbackStep {
+    Off,
+    Wait,
+    Scan,
+    Decide,
+}
+
+fn rollback_steps() -> Vec<RollbackStep> {
+    let runbook = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/tui-o-writer-canary-runbook.md"),
+    )
+    .unwrap();
+    let Some((_, section)) = runbook.split_once("## 8. Roll back after re-post activation") else {
+        return Vec::new();
+    };
+    section
+        .lines()
+        .take_while(|line| !line.starts_with("## "))
+        .filter_map(|line| {
+            let (number, action) = line.split_once(". ")?;
+            number.parse::<usize>().ok()?;
+            match action {
+                "Confirm effective OFF." => Some(RollbackStep::Off),
+                "Wait for in-flight requests and writer quiescence." => Some(RollbackStep::Wait),
+                "Inspect all activated channel ledgers." => Some(RollbackStep::Scan),
+                "Decide whether the older binary may run." => Some(RollbackStep::Decide),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn not_sent_tags(path: &std::path::Path) -> usize {
+    std::fs::read(path)
+        .unwrap()
+        .windows(b"\"type\":\"not_sent\"".len())
+        .filter(|part| *part == b"\"type\":\"not_sent\"")
+        .count()
+}
+
+fn validated_repost(path: &std::path::Path, enabled: bool) -> bool {
+    std::fs::write(
+        path,
+        format!("server:\n  port: 8791\ntui_o:\n  repost:\n    enabled: {enabled}\n"),
+    )
+    .unwrap();
+    matches!(
+        crate::config_live_reload::reload_from_path(path),
+        crate::config_live_reload::ReloadOutcome::Applied { .. }
+    ) && crate::config_live_reload::current().is_some_and(|config| {
+        config
+            .tui_o
+            .as_ref()
+            .is_some_and(|o| o.repost.enabled == enabled)
+    })
+}
+
+struct WireCase {
+    first_posts: usize,
+    posts: usize,
+    valid_posts: usize,
+    reads: usize,
+    early_tags: usize,
+    late_tags: usize,
+    allow_old: Option<bool>,
+    queue_pending: bool,
+    rate_headers: bool,
+    quiescent: bool,
+    old_bytes: bool,
+    spent: Vec<(
+        u8,
+        Option<crate::services::tui_o::repost::o_piece_attempts::AttemptResult>,
+    )>,
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::channel_policy::{Adoption, Candidate};
+    use crate::services::tui_o::ownership::OwnershipGate;
+    use crate::services::tui_o::repost::admission::{Admitter, OriginalAttempt};
+    use crate::services::tui_o::repost::identity::PieceKey;
+    use crate::services::tui_o::repost::io::probe::evidence::{
+        FIRST_PASS_AFTER, SECOND_PASS_AFTER,
+    };
+    use crate::services::tui_o::repost::o_piece_attempts::{AttemptResult, attempts};
+    use crate::services::tui_o::repost::provenance::{ProvenanceEntry, ProvenanceLog};
+    use crate::services::tui_o::shadow::{UnitKey, UnitKind};
+    use crate::services::tui_o::store::ledger::LedgerEntry;
+    use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
+    use ::serenity::{all::ChannelId, http::Route};
+    use std::task::Poll;
+
+    let _live = crate::config_live_reload::test_live_guard(
+        crate::config::test_env_lock::acquire_shared_test_env_lock(),
+    );
+    let runtime = tempfile::tempdir().unwrap();
+    let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        runtime.path(),
+    );
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let documented = rollback_steps();
+    let mut activated_ledgers = Vec::new();
+    let mut cases = Vec::new();
+    let mut reloads_applied = true;
+    for case in 0..3 {
+        let enabled = case != 0;
+        let channel = 63250731 + case;
+        let root = runtime.path().join(channel.to_string());
+        std::fs::create_dir_all(&root).unwrap();
+        let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root)
+            .unwrap()
+            .unwrap();
+        let era = store
+            .begin_era(&[channel], chrono::Utc::now(), |channel| {
+                Ok(Initialized {
+                    channel,
+                    sources: Vec::new(),
+                    initial_anchor: 100,
+                    build_digest: "loopback".into(),
+                    at: chrono::Utc::now(),
+                })
+            })
+            .unwrap();
+        let unit = |native: &str| UnitKey {
+            channel_id: channel,
+            provider: ShadowProvider::Claude,
+            native_key: native.into(),
+            kind: UnitKind::Body,
+        };
+        let key = PieceKey::new(unit("wire-target"), 0).unwrap();
+        let mut ledger = store.open_channel(&era, channel).unwrap().unwrap();
+        for entry in [
+            LedgerEntry::Prepared {
+                serial: 0,
+                unit_key: key.unit().clone(),
+                piece_index: 0,
+                payload: "absent target".into(),
+                anchor_id: 100,
+                epoch: 1,
+            },
+            LedgerEntry::NotFound { serial: 0 },
+            LedgerEntry::Prepared {
+                serial: 1,
+                unit_key: unit("permission-proof"),
+                piece_index: 0,
+                payload: "earlier permission".into(),
+                anchor_id: 100,
+                epoch: 1,
+            },
+            LedgerEntry::Posted {
+                serial: 1,
+                msg_id: 900,
+            },
+        ] {
+            ledger.append_ledger(entry).unwrap();
+        }
+        let original = ledger.ledger().piece(0).unwrap().clone();
+        drop(ledger);
+        let ledger_path = root
+            .join("o_store")
+            .join(channel.to_string())
+            .join("ledger.jsonl");
+        let old_bytes = std::fs::read(&ledger_path).unwrap();
+        activated_ledgers.push(ledger_path.clone());
+        let sidecar = runtime
+            .path()
+            .join("tui_o/repost")
+            .join(format!("{channel}.jsonl"));
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        let mut provenance = ProvenanceLog::open(&sidecar).unwrap();
+        let generation = provenance.activate(0).unwrap().generation;
+        provenance
+            .append(ProvenanceEntry::intent(0, &original, generation).unwrap())
+            .unwrap();
+        let mut on = on_switch();
+        Admitter::when_on(&mut on, &pool, "o-writer", 42)
+            .unwrap()
+            .adopt_uncertain(
+                &mut provenance,
+                &OriginalAttempt {
+                    serial: 0,
+                    key: key.clone(),
+                    payload: original.payload,
+                    anchor: original.anchor_id,
+                },
+            )
+            .await
+            .unwrap();
+        drop(provenance);
+        let config_path = runtime.path().join(format!("{channel}.yaml"));
+        reloads_applied &= validated_repost(&config_path, enabled);
+        let server = WireServer::start(channel, &key).await;
+        let http = Arc::new(serenity::Http::new(&format!("loopback-{channel}")));
+        let turns = Arc::new(WireTurns::default());
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let io = Arc::new(RealHost {
+            gateway: GatewayHost {
+                shared,
+                alarms: Arc::new(AlarmRouter::for_process(None, None)),
+                self_id_wait: Duration::ZERO,
+                configured_id: None,
+                turn: TurnConfig::default(),
+                rest: None,
+                boot: None,
+            },
+            port: Arc::new(
+                GatewayPort::new(http.clone(), 42).with_repost_base(server.base.clone()),
+            ),
+            completed: Arc::new(AtomicUsize::new(0)),
+            notice: Arc::new(Notify::new()),
+            measure: Arc::new(Notify::new()),
+            send: None,
+            wire_turns: Some(turns.clone()),
+        });
+        let gate = Arc::new(OwnershipGate::default());
+        gate.acquired();
+        let readiness = Arc::new(host::Readiness::default());
+        let mut handles = host::start_managed(
+            ShadowProvider::Claude,
+            true,
+            vec![(
+                channel,
+                Some(ClaudeTui),
+                Some(Candidate::new(Adoption::Committed)),
+            )],
+            || host::HostParts {
+                io,
+                runtime_root: Some(root),
+                gate,
+                readiness: readiness.clone(),
+            },
+        );
+        let mut handle = handles.pop();
+        turns.wait(1).await;
+        if enabled {
+            tokio::time::pause();
+            tokio::time::advance(FIRST_PASS_AFTER).await;
+            tokio::time::resume();
+        }
+        turns.proceed.notify_one();
+        turns.wait(2).await;
+        if enabled {
+            tokio::time::pause();
+            tokio::time::advance(SECOND_PASS_AFTER).await;
+            tokio::time::resume();
+        }
+        turns.proceed.notify_one();
+        let reached = if enabled {
+            tokio::select! {
+                () = server.first_429.notified() => true,
+                () = turns.wait(3) => false,
+            }
+        } else {
+            turns.wait(3).await;
+            false
+        };
+        let first_posts = server.posts.load(Ordering::SeqCst);
+        let (mut early_tags, mut allow_old, mut queue_pending, mut rate_headers) =
+            (0, None, false, false);
+        if reached {
+            let routes = http.ratelimiter.as_ref().unwrap().routes();
+            let bucket = routes
+                .read()
+                .await
+                .get(
+                    &Route::ChannelMessages {
+                        channel_id: ChannelId::new(channel),
+                    }
+                    .ratelimiting_bucket(),
+                )
+                .unwrap()
+                .clone();
+            // On this executor the sole lock holder can yield inside post_hook only at its 429 sleep.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while bucket.try_lock().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the actual route hook is waiting after 429");
+            let mut queued = Some(Box::pin(bucket.lock_owned()));
+            let mut already_held = None;
+            queue_pending =
+                std::future::poll_fn(|cx| match queued.as_mut().unwrap().as_mut().poll(cx) {
+                    Poll::Pending => Poll::Ready(true),
+                    Poll::Ready(guard) => {
+                        already_held = Some(guard);
+                        Poll::Ready(false)
+                    }
+                })
+                .await;
+            if !queue_pending {
+                queued = None;
+                drop(already_held.take());
+            }
+            if case == 1 {
+                if let Some(waiter) = queued.take() {
+                    let guard = waiter.await;
+                    rate_headers = guard.limit() == 17
+                        && guard.remaining() == 0
+                        && guard.reset_after() == Some(Duration::from_secs(2))
+                        && guard.reset().is_some();
+                    drop(guard);
+                }
+                turns.wait(3).await;
+            }
+            let canonical = [
+                RollbackStep::Off,
+                RollbackStep::Wait,
+                RollbackStep::Scan,
+                RollbackStep::Decide,
+            ];
+            let steps = if documented.len() == 4 {
+                &documented[..]
+            } else {
+                &canonical[..]
+            };
+            let mut scanned = None;
+            for step in steps {
+                match step {
+                    RollbackStep::Off => {
+                        reloads_applied &= validated_repost(&config_path, false);
+                        early_tags = not_sent_tags(&ledger_path);
+                    }
+                    RollbackStep::Wait => {
+                        if let Some(waiter) = queued.take() {
+                            let guard = waiter.await;
+                            rate_headers = guard.limit() == 17
+                                && guard.remaining() == 0
+                                && guard.reset_after() == Some(Duration::from_secs(2))
+                                && guard.reset().is_some();
+                            drop(guard);
+                        }
+                        turns.wait(3).await;
+                        if let Some(writer) = handle.take() {
+                            writer.stop_and_join().await.unwrap();
+                        }
+                    }
+                    RollbackStep::Scan => {
+                        scanned =
+                            Some(activated_ledgers.iter().any(|path| not_sent_tags(path) > 0));
+                    }
+                    RollbackStep::Decide => {
+                        allow_old = Some(scanned == Some(false));
+                    }
+                }
+            }
+            if let Some(waiter) = queued.take() {
+                drop(waiter.await);
+            }
+        }
+        if let Some(writer) = handle.take() {
+            writer.stop_and_join().await.unwrap();
+        }
+        let spent = attempts(&pool, &key)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|attempt| (attempt.slot, attempt.result))
+            .collect();
+        let bytes = std::fs::read(&ledger_path).unwrap();
+        cases.push(WireCase {
+            first_posts,
+            posts: server.posts.load(Ordering::SeqCst),
+            valid_posts: server.valid_posts.load(Ordering::SeqCst),
+            reads: server.reads.load(Ordering::SeqCst),
+            early_tags,
+            late_tags: not_sent_tags(&ledger_path),
+            allow_old,
+            queue_pending,
+            rate_headers,
+            quiescent: !readiness.is_hosted(channel),
+            old_bytes: if case == 0 {
+                bytes == old_bytes
+            } else {
+                bytes.starts_with(&old_bytes)
+            },
+            spent,
+        });
+        server.task.abort();
+        let _ = server.task.await;
+        if enabled && !reached {
+            break;
+        }
+    }
+    pool.close().await;
+    fixture.drop().await;
+    for case in cases.iter().skip(1) {
+        assert_eq!(
+            case.first_posts, 1,
+            "the third production turn must reach the actual first POST"
+        );
+    }
+    assert_eq!(
+        cases.len(),
+        3,
+        "all three cases use the same real factory harness"
+    );
+    assert!(
+        reloads_applied,
+        "every switch change came from a validated reload"
+    );
+    assert!(cases.iter().all(|case| case.quiescent && case.old_bytes));
+    assert!(
+        cases.iter().all(|case| case.valid_posts == case.posts),
+        "each actual POST, including the first 429, carried the original payload and identifiers"
+    );
+    assert_eq!(
+        (cases[0].posts, cases[0].reads, cases[0].late_tags),
+        (0, 0, 0)
+    );
+    for case in cases.iter().skip(1) {
+        assert!(
+            case.queue_pending && case.rate_headers,
+            "the factory's route hook really waited on 429"
+        );
+        assert_eq!(
+            case.reads, 4,
+            "two real permission/history passes supplied absence"
+        );
+        assert_eq!(
+            case.early_tags, 0,
+            "an effective OFF inspection can precede terminal recording"
+        );
+    }
+    assert_eq!((cases[1].posts, cases[1].late_tags), (2, 0));
+    assert_eq!((cases[2].posts, cases[2].late_tags), (1, 1));
+    assert!(
+        std::fs::read(&activated_ledgers[2])
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+            .any(|line| line["entry"]["type"] == "not_sent" && line["entry"]["serial"] == 2),
+        "late NotSent belongs to the new re-post; old Prepared/NotFound remain intact"
+    );
+    assert_eq!(
+        cases[1].spent,
+        vec![
+            (0, Some(AttemptResult::Uncertain)),
+            (1, Some(AttemptResult::Created))
+        ]
+    );
+    assert_eq!(
+        cases[2].spent,
+        vec![
+            (0, Some(AttemptResult::Uncertain)),
+            (1, Some(AttemptResult::NotSent))
+        ]
+    );
+    assert_eq!(
+        documented.len(),
+        4,
+        "the runbook must supply all four rollback operations"
+    );
+    assert_eq!(
+        cases[1].allow_old,
+        Some(true),
+        "quiescent ledgers without the tag permit compatibility assessment"
+    );
+    assert_eq!(
+        cases[2].allow_old,
+        Some(false),
+        "REFUSE an older reader after late NotSent; do not reuse an early scan"
+    );
 }

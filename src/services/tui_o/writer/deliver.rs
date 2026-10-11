@@ -706,7 +706,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
             .collect();
         Arc::new(move || {
             live.load(Ordering::SeqCst)
-                && effective.as_ref().is_none_or(|enabled| enabled())
+                && effective.as_ref().is_some_and(|enabled| enabled())
                 && stops.iter().all(|stop| !*stop.borrow())
                 && channel_home::registered_channel(channel).is_none()
                 && crate::services::cluster::home_availability::refusal(channel).is_none()

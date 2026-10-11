@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::services::cluster::channel_home::{self, HomeGate};
+use crate::services::tui_o::repost::io::probe::evidence::{FIRST_PASS_AFTER, SECOND_PASS_AFTER};
 use crate::services::tui_o::writer::deliver::POST_TIMEOUT;
 use sha2::Digest;
 
@@ -236,7 +237,9 @@ async fn d4act_scope_revoked_after_grant_and_during_429_wait_pg() {
         harness.gate.acquired();
         let mut writer = harness.writer();
         writer.set_live(true);
-        let mut runner = Runner::new(switch(true), pool.clone(), BOT, run_scope());
+        let on = switch(true);
+        writer.bind_switch(on.live());
+        let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
         let io = Io::over(&harness.port);
         io.throttle_first.store(waiting, Ordering::SeqCst);
         let intent = evidence(&pool, &key).await;
@@ -401,7 +404,9 @@ async fn f6_unsent_and_429_do_not_raise_uncertain_alarm_pg() {
         let io = Io::over(&harness.port);
         io.throttle_first.store(index == 1, Ordering::SeqCst);
         *io.outcome.lock().unwrap() = outcome;
-        let mut runner = Runner::new(switch(true), pool.clone(), BOT, run_scope());
+        let on = switch(true);
+        writer.bind_switch(on.live());
+        let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
         let admission = runner.try_next_dispatch(
             &mut writer,
             OriginalGate::Admitted,
@@ -469,7 +474,9 @@ async fn f6_not_sent_replay_keeps_original_suppressed_and_budget_spent_pg() {
             writer.set_live(true);
             io.throttle_first.store(true, Ordering::SeqCst);
             *io.outcome.lock().unwrap() = Some(WireOutcome::Throttled);
-            let mut runner = Runner::new(switch(true), pool.clone(), BOT, run_scope());
+            let on = switch(true);
+            writer.bind_switch(on.live());
+            let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
             start(&mut runner, &mut writer, &pool, &key, &io)
                 .await
                 .finish(&mut writer, &pool)
@@ -512,7 +519,9 @@ async fn f6_not_sent_replay_keeps_original_suppressed_and_budget_spent_pg() {
             recovered.set_live(true);
             io.throttle_first.store(false, Ordering::SeqCst);
             *io.outcome.lock().unwrap() = Some(WireOutcome::Uncertain("lost reply".into()));
-            let mut runner = Runner::new(switch(true), pool.clone(), BOT, run_scope());
+            let on = switch(true);
+            recovered.bind_switch(on.live());
+            let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
             start(&mut runner, &mut recovered, &pool, &later, &io)
                 .await
                 .finish(&mut recovered, &pool)
@@ -559,7 +568,9 @@ async fn f6_herdr_repost_counts_as_inflight_until_request_ends_pg() {
             "the Herdr constructor installed the actual drain counter"
         );
         let count = writer.repost_posts_counter();
-        let mut runner = Runner::new(switch(true), pool.clone(), BOT, run_scope());
+        let on = switch(true);
+        writer.bind_switch(on.live());
+        let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
         let io = Io::over(&harness.port);
         *io.drop_count.lock().unwrap() = Some(Arc::clone(&count));
         io.throttle_first.store(case == 1, Ordering::SeqCst);
@@ -769,7 +780,9 @@ async fn source_revocation(stage: u8) {
             writer.delivery_allowed(false),
             "the retained source begins Legacy"
         );
-        let mut runner = Runner::new(switch(true), pool.clone(), BOT, run_scope());
+        let on = switch(true);
+        writer.bind_switch(on.live());
+        let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
         let io = Io::over(&harness.port);
         io.throttle_first.store(stage == 2, Ordering::SeqCst);
         let intent = evidence(&pool, &key).await;
@@ -866,4 +879,115 @@ async fn d4act_source_revoked_during_429_wait_prevents_retry_pg() {
         return;
     }
     source_revocation(2).await;
+}
+
+#[tokio::test]
+async fn d4act_unbound_writer_blocks_grant_prepared_and_wire_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let key = admitted(&pool, "unbound-switch", "piece").await;
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    writer.set_live(true);
+    let on = switch(true);
+    let effective = on.live();
+    let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
+    let io = Io::over(&harness.port);
+    let admission = runner
+        .try_next_dispatch(
+            &mut writer,
+            OriginalGate::Admitted,
+            evidence(&pool, &key).await,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            admission,
+            Admission::GuardRejected(dispatch::GuardReason::Writer(_))
+        ),
+        "an unbound writer cannot consume a grant"
+    );
+    assert_eq!(results(&pool, &key).await, [Some(AttemptResult::Uncertain)]);
+    assert_eq!(writer.store().ledger().next_serial(), 0);
+    assert_eq!(
+        std::fs::read_to_string(ledger_path(&harness))
+            .unwrap()
+            .matches("\"type\":\"prepared\"")
+            .count(),
+        0,
+        "an unbound writer appends no Prepared"
+    );
+    assert_eq!(io.wire(), 0);
+    writer.bind_switch(effective);
+    start(&mut runner, &mut writer, &pool, &key, &io)
+        .await
+        .finish(&mut writer, &pool)
+        .await
+        .unwrap();
+    assert_eq!(io.wire(), 1, "the same writer dispatches when bound ON");
+    assert_eq!(writer.store().ledger().next_serial(), 1);
+    let bytes = std::fs::read_to_string(ledger_path(&harness)).unwrap();
+    assert_eq!(bytes.matches("\"type\":\"prepared\"").count(), 1);
+    assert!(matches!(
+        outcome(&mut writer, "unbound-switch"),
+        Some(PieceOutcome::Posted(_))
+    ));
+    assert_eq!(
+        results(&pool, &key).await,
+        [Some(AttemptResult::Uncertain), Some(AttemptResult::Created)]
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn d4act_channel_turn_binds_switch_before_real_repost_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let key = admitted(&pool, "channel-turn-binding", "absent piece").await;
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    // A real Posted and the same bot's history give both probe passes permission evidence.
+    assert_eq!(
+        writer
+            .deliver(&piece("binding-proof", "permission proof"))
+            .await,
+        Step::Done
+    );
+    let io = Io::over(&harness.port);
+    let mut hook = turn(&harness, pool.clone(), switch(true), &io);
+    hook.turn(&mut writer).await;
+    assert!(
+        writer.guard().is_ok(),
+        "ChannelTurn binds the writer before admission"
+    );
+    assert_eq!(io.wire(), 0);
+    tokio::time::sleep(FIRST_PASS_AFTER).await;
+    hook.turn(&mut writer).await;
+    assert!(io.reads.load(Ordering::SeqCst) > 0);
+    assert_eq!(io.wire(), 0, "one pass grants nothing");
+    assert_eq!(results(&pool, &key).await, [Some(AttemptResult::Uncertain)]);
+    tokio::time::sleep(SECOND_PASS_AFTER).await;
+    hook.turn(&mut writer).await;
+    assert_eq!(
+        io.wire(),
+        1,
+        "the actual ChannelTurn dispatches after two passes"
+    );
+    assert_eq!(harness.port.posts(), ["permission proof"]);
+    assert_eq!(writer.store().ledger().next_serial(), 2);
+    assert!(matches!(
+        outcome(&mut writer, "channel-turn-binding"),
+        Some(PieceOutcome::Posted(_))
+    ));
+    assert_eq!(
+        results(&pool, &key).await,
+        [Some(AttemptResult::Uncertain), Some(AttemptResult::Created)]
+    );
+    assert!(writer.store().ledger().unresolved().is_none());
+    pool.close().await;
+    db.drop().await;
 }

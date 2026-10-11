@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::Utc;
@@ -6,10 +7,11 @@ use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::repost::admission_tests::{BOT, CHANNEL, admit_on, sidecar, switch};
-use crate::services::tui_o::repost::identity::{marker, piece_of};
+use crate::services::tui_o::repost::identity::{marker, payload_sha256, piece_of};
 use crate::services::tui_o::repost::io::probe::evidence::{FIRST_PASS_AFTER, SECOND_PASS_AFTER};
 use crate::services::tui_o::repost::io::probe::matcher::ObservedMessage;
 use crate::services::tui_o::repost::io::probe::tests::{Fake, absent_evidence};
+use crate::services::tui_o::repost::o_piece_delivery::DeliveryRow;
 use crate::services::tui_o::repost::send::{
     AttemptGuard, CreatedMessage, DispatchReport, RepostEnvelope, RepostIds, WireOutcome, hand_over,
 };
@@ -350,9 +352,144 @@ async fn admission_failure_case(failure: Failure, broken: bool) {
                     .is_some()
             );
         }
+        if matches!(failure, Failure::IdentityConflict) {
+            conflict_turns(&mut turn, &mut writer, &io, &opened, &candidate, &ready).await;
+        }
     }
     pool.close().await;
     db.drop().await;
+}
+
+async fn conflict_turns(
+    turn: &mut ChannelTurn<Io>,
+    writer: &mut Writer,
+    io: &Io,
+    opened: &AtomicUsize,
+    candidate: &PieceKey,
+    ready: &PieceKey,
+) {
+    let pool = turn.runner.pool.clone();
+    let record = writer.store.ledger().piece(0).unwrap().clone();
+    let original = o_piece_attempts::attempts(&pool, candidate).await.unwrap();
+    let ready_original = o_piece_attempts::attempts(&pool, ready).await.unwrap();
+    let admitted: BTreeSet<_> = o_piece_delivery::admitted_keys(&pool, CHANNEL)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+
+    // Reopen the same durable sidecar; an unresolved collision must hold the next turn too.
+    turn.log = None;
+    turn.run(writer).await;
+    assert_eq!(
+        io.posts.load(Ordering::SeqCst),
+        0,
+        "the restored turn stays blocked until canonical identity is repaired"
+    );
+    assert_eq!(writer.prepared, 0);
+    assert_eq!(opened.load(Ordering::SeqCst), 0);
+    assert!(!writer.live.load(Ordering::SeqCst));
+    assert_eq!(
+        o_piece_attempts::attempts(&pool, ready).await.unwrap(),
+        ready_original
+    );
+    assert_eq!(
+        o_piece_attempts::attempts(&pool, candidate).await.unwrap(),
+        original
+    );
+    assert_eq!(
+        turn.log
+            .as_ref()
+            .unwrap()
+            .state()
+            .pending()
+            .collect::<Vec<_>>(),
+        [0]
+    );
+    assert_eq!(
+        turn.original_gate(0, record.clone()).await,
+        OriginalGate::Admitted
+    );
+
+    let repaired = repair_identity_conflict(&pool, candidate, &record).await;
+    turn.log = None;
+    turn.run(writer).await;
+    assert_eq!(io.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(writer.prepared, 1);
+    assert_eq!(opened.load(Ordering::SeqCst), 1);
+    assert!(
+        turn.log
+            .as_ref()
+            .unwrap()
+            .state()
+            .pending()
+            .next()
+            .is_none()
+    );
+    assert_eq!(
+        o_piece_attempts::attempts(&pool, candidate).await.unwrap(),
+        original
+    );
+    let ready_slots: Vec<_> = o_piece_attempts::attempts(&pool, ready)
+        .await
+        .unwrap()
+        .iter()
+        .map(|attempt| attempt.slot)
+        .collect();
+    assert_eq!(ready_slots, [0, 1]);
+    assert_eq!(
+        turn.original_gate(0, record.clone()).await,
+        OriginalGate::Admitted
+    );
+    let retained: BTreeSet<_> = o_piece_delivery::admitted_keys(&pool, CHANNEL)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(retained, admitted);
+    assert_eq!(
+        o_piece_delivery::load(&pool, candidate).await.unwrap(),
+        Some(repaired)
+    );
+}
+
+async fn repair_identity_conflict(
+    pool: &PgPool,
+    candidate: &PieceKey,
+    record: &PieceRecord,
+) -> DeliveryRow {
+    let conflicted = o_piece_delivery::load(pool, candidate)
+        .await
+        .unwrap()
+        .unwrap();
+    let payload_hash = payload_sha256(&record.payload);
+    assert_eq!(
+        conflicted.conflict_sha256.as_deref(),
+        Some(payload_hash.as_str())
+    );
+    // Repair only canonical identity, keeping the admitted key and every spent attempt.
+    let repaired = sqlx::query(
+        "UPDATE o_piece_delivery SET payload = $1, payload_sha256 = $2,
+         conflict_sha256 = NULL, conflict_at = NULL, revision = revision + 1, updated_at = NOW()
+         WHERE channel_id = $3 AND provider = 'claude' AND native_key = 'candidate'
+         AND kind = 'body' AND piece_index = 0 AND payload_sha256 = $4
+         AND conflict_sha256 = $2 AND revision = $5",
+    )
+    .bind(&record.payload)
+    .bind(&payload_hash)
+    .bind(CHANNEL.to_string())
+    .bind(&conflicted.payload_sha256)
+    .bind(conflicted.revision)
+    .execute(pool)
+    .await
+    .unwrap();
+    assert_eq!(repaired.rows_affected(), 1);
+    let mut expected = conflicted;
+    expected.payload = record.payload.clone();
+    expected.payload_sha256 = payload_hash;
+    expected.conflict_sha256 = None;
+    expected.revision += 1;
+    expected
 }
 
 #[tokio::test]

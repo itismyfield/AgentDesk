@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "5352be2a2a30e554878c5a8d9647caeb1ada5e56",
+  "measured_at_sha": "5f4ddfd317f7edc4c6c50b169908cbc7e3832666",
   "records": [
     {
       "root": "migrations/postgres",
@@ -39313,6 +39313,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:5bad81b145015316c4fdb6263a5e2fe779801cb51893afacbf47a09c927773f6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/repost/runner_activation_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f2109d9f1b53ae7dcc04f8942b479278e3814446d1f625aabf9c1f2fd19bc6a2"
     },
     {
       "root": "src",
