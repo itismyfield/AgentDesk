@@ -1006,8 +1006,6 @@ src/
 │   │   │   │   ├── operator_disposition.rs
 │   │   │   │   └── reconcile_gate.rs
 │   │   │   ├── fixtures/
-│   │   │   │   ├── receipt_free_reaper_baseline.json
-│   │   │   │   └── receipt_free_writer_baseline.json
 │   │   │   ├── model/
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── serde_adapters.rs
