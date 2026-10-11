@@ -292,8 +292,9 @@ pub(super) async fn run_completion_postlude(
         .await;
     let routine_attempt_owns_turn = routine_attempt_owns_turn && !cancelled;
     let completion_r2 = ownership.read("completion_r2").await;
-    let channel_effects_suppressed =
-        isolated_from_channel || !completion_r2.permits_channel_effects();
+    let channel_effects_suppressed = isolated_from_channel
+        || !completion_r2.permits_channel_effects()
+        || channel_writeback::replay_withheld(&shared_owned, &cancel_token, &inflight_state).await;
     // #5168: path-B reflect gate. Scanned once here and reused by the
     // tool_feedback analysis below, so the transcript is walked a single time.
     let memento_tool_call_observed =

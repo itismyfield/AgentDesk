@@ -32,6 +32,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::o_channel_homes::tests
   --skip db::prompt_manifests::tests
   --skip db::relay_dead_letter::tests
+  --skip db::replay_disposition::register_tests
   --skip db::replay_disposition::tests
   --skip db::replay_disposition::write_tests
   --skip dispatch::dispatch_status::terminal_timestamp_tests
@@ -124,6 +125,9 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::relay_recovery::apply::host_deferred_tests
   --skip services::discord::relay_recovery::circuit_breaker::tests
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
+  --skip services::discord::replay_policy::live_tests
+  --skip services::discord::replay_policy::permit_tests
+  --skip services::discord::replay_policy::policy_tests
   --skip services::discord::router::intake_dispatch::home_order_tests
   --skip services::discord::router::intake_dispatch::replay_admission_tests
   --skip services::discord::router::intake_dispatch::tests
@@ -167,8 +171,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
   --skip services::discord::turn_bridge::intake_settlement::tests
   --skip services::discord::turn_bridge::recovery_text::tests
-  --skip services::discord::turn_bridge::replay_policy::permit_tests
-  --skip services::discord::turn_bridge::replay_policy::policy_tests
   --skip services::discord::turn_bridge::resume_pin_tests
   --skip services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
@@ -499,6 +501,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::relay_recovery::circuit_breaker::tests::stale_stage_cancel_failure_becomes_a_durable_cleanup_obligation
   services::discord::relay_recovery::circuit_breaker::tests::zero_originating_message_reserves_with_a_distinct_mailbox_anchor
   services::discord::relay_recovery::circuit_breaker::tests::zero_originating_message_still_rejects_episode_identity_mismatches
+  services::discord::replay_policy::permit_tests::effect_permits_cannot_be_cloned_or_serialised
   services::discord::restart_mode::protocol_v2::disposition::high_risk_recovery::every_disposition_owns_exact_original_bytes
   services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::absolute_and_relative_root_traversal_record_exact_pairs_and_identity
   services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::directory_mutation_records_sync_facts_and_owned_fds_outlive_parents
@@ -652,7 +655,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::intake_settlement::tests::terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags
   services::discord::turn_bridge::recovery_text::tests::direct_runtime_context_unavailable_matches_api_and_pg_errors
   services::discord::turn_bridge::recovery_text::tests::discord_recent_recovery_context_preserves_existing_format_and_limits
-  services::discord::turn_bridge::replay_policy::permit_tests::effect_permits_cannot_be_cloned_or_serialised
   services::discord::turn_bridge::resume_pin_tests::c1_actual_postlude_resume_pin_runtime_proof
   services::discord::turn_bridge::resume_pin_tests::c1_both_late_writers_consume_pin_without_registry_backfill
   services::discord::turn_bridge::resume_pin_tests::c1_cancelled_registered_pin_leaves_all_effects_untouched
@@ -818,6 +820,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::o_channel_homes::tests
   db::prompt_manifests::tests
   db::relay_dead_letter::tests
+  db::replay_disposition::register_tests
   db::replay_disposition::tests
   db::replay_disposition::write_tests
   dispatch::dispatch_status::terminal_timestamp_tests
@@ -910,6 +913,9 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::relay_recovery::apply::host_deferred_tests
   services::discord::relay_recovery::circuit_breaker::tests
   services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
+  services::discord::replay_policy::live_tests
+  services::discord::replay_policy::permit_tests
+  services::discord::replay_policy::policy_tests
   services::discord::router::intake_dispatch::home_order_tests
   services::discord::router::intake_dispatch::replay_admission_tests
   services::discord::router::intake_dispatch::tests
@@ -953,8 +959,6 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::turn_bridge::headless_delivery::production_seam_tests
   services::discord::turn_bridge::intake_settlement::tests
   services::discord::turn_bridge::recovery_text::tests
-  services::discord::turn_bridge::replay_policy::permit_tests
-  services::discord::turn_bridge::replay_policy::policy_tests
   services::discord::turn_bridge::resume_pin_tests
   services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests

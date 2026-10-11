@@ -170,7 +170,10 @@ src/
 │   │   ├── storage_stats.rs
 │   │   └── tests.rs
 │   ├── replay_disposition/
+│   │   ├── write/
+│   │   │   └── start.rs
 │   │   ├── receipt.rs
+│   │   ├── register_tests.rs
 │   │   ├── write.rs
 │   │   └── write_tests.rs
 │   ├── replay_disposition_tests/
@@ -1311,6 +1314,12 @@ src/
 │   │   │   ├── destructive_warrant.rs
 │   │   │   ├── idle_tmux.rs
 │   │   │   └── tests.rs
+│   │   ├── replay_policy/
+│   │   │   ├── live.rs
+│   │   │   ├── live_tests.rs
+│   │   │   ├── permit.rs
+│   │   │   ├── permit_tests.rs
+│   │   │   └── policy_tests.rs
 │   │   ├── restart_mode/
 │   │   │   └── protocol_v2/
 │   │   │       ├── fs/
@@ -1783,11 +1792,6 @@ src/
 │   │   │   │   └── production_seam_tests.rs
 │   │   │   ├── intake_settlement/
 │   │   │   │   └── tests.rs
-│   │   │   ├── replay_policy/
-│   │   │   │   ├── live.rs
-│   │   │   │   ├── permit.rs
-│   │   │   │   ├── permit_tests.rs
-│   │   │   │   └── policy_tests.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
@@ -1828,6 +1832,8 @@ src/
 │   │   │   │   └── unix_journal.rs
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/
+│   │   │   │   │   ├── recovery_retry_guard_tests/
+│   │   │   │   │   │   └── replay_turn_tests.rs
 │   │   │   │   │   ├── rowless_receipt_tests/
 │   │   │   │   │   │   ├── background_child_ordering_tests.rs
 │   │   │   │   │   │   ├── o_after_done_chain_tests.rs
@@ -2098,6 +2104,7 @@ src/
 │   │   ├── relay_recovery_leaked_row_sweep.rs
 │   │   ├── relay_recovery_reattach_apply.rs
 │   │   ├── replace_outcome_policy.rs
+│   │   ├── replay_policy.rs
 │   │   ├── response_sanitizer.rs
 │   │   ├── restart_mode.rs
 │   │   ├── restart_report.rs
