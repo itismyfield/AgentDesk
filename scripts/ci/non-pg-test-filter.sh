@@ -168,6 +168,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
   --skip services::discord::turn_bridge::intake_settlement::tests
@@ -961,6 +962,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
   services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
+  services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
   services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
   services::discord::turn_bridge::headless_delivery::production_seam_tests
   services::discord::turn_bridge::intake_settlement::tests

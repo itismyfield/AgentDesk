@@ -1718,6 +1718,7 @@ src/
 │   │   │   │   ├── queue_recovery_e2e.rs
 │   │   │   │   ├── reconcile_stale_turn_e2e_tests.rs
 │   │   │   │   ├── registered_bootstrap_e2e.rs
+│   │   │   │   ├── replay_defer_intake_e2e_tests.rs
 │   │   │   │   ├── stale_resume_retry_e2e.rs
 │   │   │   │   ├── stop_command_catch_up_e2e.rs
 │   │   │   │   └── thread_guard_host_e2e.rs

@@ -207,6 +207,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs
+src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs
 src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs
@@ -489,6 +490,7 @@ services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
+services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
@@ -1666,6 +1668,9 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_rea
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e::reconcile_stale_turn_held_release_arms_backstop_and_runs_preserved_q_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg
+services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::active_deferral_of_an_attachment_is_refused_not_kept_text_only_pg
+services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::active_deferral_refused_by_the_queue_keeps_the_checkpoint_pg
+services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::dormant_replay_lookup_failure_keeps_the_legacy_hold_at_the_gateway_pg
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests::transcript_completions_close_their_own_background_children_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episode

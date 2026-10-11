@@ -583,8 +583,6 @@ pub(crate) async fn finish_admitted_local(
     .await
 }
 
-/// Queues a live input behind the slow backstop, with every absorbed source when asked; true once
-/// the queue durably holds it.
 /// Boxed inside a plain function: a second inline enqueue future would grow the caller's stack frame.
 fn defer_with_all_sources<'a, 'b: 'a>(
     deps: &'a IntakeDeps<'b>,
@@ -593,6 +591,8 @@ fn defer_with_all_sources<'a, 'b: 'a>(
     Box::pin(defer_live_submission(deps, submission, true))
 }
 
+/// Queues a live input behind the slow backstop, with every absorbed source when asked; true once
+/// the queue durably holds it.
 async fn defer_live_submission(
     deps: &IntakeDeps<'_>,
     submission: IntakeSubmission,
