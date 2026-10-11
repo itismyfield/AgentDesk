@@ -453,10 +453,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// One lock covers release and installation, and every refusal precedes the release; a reinstall
-/// inherits only a settled entry of the same Gate and producer handle, so no obligation is lost.
-/// `release` is the Gate's own transition, reachable only through fence::modes, and only it can
-/// make the proof.
+/// One lock covers the Gate's own `release` (only fence::modes can supply it) and installation;
+/// every refusal precedes it, and a reinstall inherits only a settled same-Gate, same-handle entry.
 pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
     closing: &Closing,
     snapshot: &PendingSource,
