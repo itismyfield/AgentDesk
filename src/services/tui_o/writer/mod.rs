@@ -11,6 +11,8 @@ mod deferred;
 pub mod deliver;
 pub mod host;
 pub mod input_facts;
+#[cfg(test)]
+pub(crate) mod owed;
 pub mod pieces;
 pub mod resume;
 pub mod rotation;

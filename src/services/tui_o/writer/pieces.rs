@@ -34,6 +34,9 @@ pub enum Derived {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OwedWork {
     pub derived: Derived,
+    /// The stored source and native record range the work came from; a coordinate, not a permit.
+    pub source: crate::services::tui_o::shadow::SourceId,
+    pub range: std::ops::Range<u64>,
     pub origin:
         Option<crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::OwedOrigin>,
 }

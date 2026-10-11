@@ -1,6 +1,8 @@
 //! Persistent state of the O writer under `<runtime_root>/o_store`: once-written `init` and
 //! `o_era`, the delivery ledger, and the raw spool with cursors. Damage halts; it never re-inits.
 
+#[cfg(test)]
+pub(crate) mod codex_provenance;
 mod durable;
 pub mod ledger;
 mod operator_resume;

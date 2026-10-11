@@ -9,6 +9,7 @@ use crate::services::provider::CancelToken;
 use crate::services::tui_o::shadow::capture::SourceCapture;
 use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource, MAX_READ_BYTES};
 use crate::services::tui_o::store::ChannelStore;
+use crate::services::tui_o::store::codex_provenance::Sidecar;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 use std::{ops::Range, sync::Arc};
 
@@ -182,7 +183,8 @@ pub(crate) struct SourceCheckpoint {
     pub prefix_hash: String,
 }
 
-/// Produces an origin only after prefix validation and the actor's durable replace succeed.
+/// Produces a span only after prefix validation, the actor's durable sidecar replace and a re-read
+/// of that sidecar; a missing sidecar is never created here.
 pub(crate) fn complete_boot_span(
     store: &mut ChannelStore,
     record: Option<&BootOwedRecord>,
@@ -223,10 +225,10 @@ fn complete_boot_span_with_hook(
     {
         return Err("source_checkpoint_changed");
     }
-    let spans = store
-        .rotation()
-        .map_err(|_| "span_store_unavailable")?
-        .codex_spans;
+    let Sidecar::Present(stored) = store.codex_provenance() else {
+        return Err("span_store_unavailable");
+    };
+    let spans = stored.spans;
     let candidates: Vec<_> = spans
         .iter()
         .filter(|s| {
@@ -310,11 +312,13 @@ fn complete_boot_span_with_hook(
     {
         return Err("source_checkpoint_changed");
     }
-    store
-        .persist_codex_span(span)
-        .map(Some)
-        .map_err(|_| "span_store_unavailable")
+    let span = (store.persist_codex_span(span)).map_err(|_| "span_store_unavailable")?;
+    match store.codex_provenance() {
+        Sidecar::Present(read) if read.spans.contains(&span) => Ok(Some(span)),
+        _ => Err("span_store_unavailable"),
+    }
 }
 
+#[cfg(test)]
 #[path = "dormant_tests.rs"]
 mod tests;

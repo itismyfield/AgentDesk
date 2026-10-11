@@ -1,7 +1,7 @@
 //! The sources one channel reads. A bind attaches its new source at offset 0 and the old one is
 //! read until it provably stops; a resumed or forked source skips what its parent already holds.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::{sync::Arc, time::Duration};
 
 use chrono::{TimeDelta, Utc};
@@ -17,8 +17,7 @@ use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::tui_o::shadow::capture::SourceCapture;
 use crate::services::tui_o::shadow::identity::{RecordFact, classify};
 use crate::services::tui_o::shadow::{
-    CaptureBatch, CaptureOutcome, CaptureSource, CapturedRecord, MAX_READ_BYTES, ShadowProvider,
-    SourceId, UnitKind,
+    CaptureBatch, CaptureOutcome, CaptureSource, MAX_READ_BYTES, ShadowProvider, SourceId, UnitKind,
 };
 use crate::services::tui_o::store::StoreError;
 use crate::services::tui_o::store::rotation::{Boundary, Rotation, SourceLink, Successor};
@@ -37,9 +36,11 @@ const PENDING_BIND_ALARM_SECS: i64 = 60;
 
 #[path = "fork_lineage.rs"]
 mod fork_lineage;
+mod owe;
 #[cfg(test)]
 pub(crate) mod provenance;
-use fork_lineage::{Class, Lineage, RowIds};
+use fork_lineage::Lineage;
+pub use owe::Owe;
 
 /// How a record names a native key: as the unit itself or as an announcement of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -272,7 +273,7 @@ impl<B: BindingEvents> Sources<B> {
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
         deriver: &mut UnitDeriver,
-        owed: &mut VecDeque<Derived>,
+        owed: &mut impl Owe,
     ) -> Result<(), WriterAlarm> {
         let resolved = writer.store().apply_resolved_boundaries();
         resolved.map_err(halted("resolved boundary"))?;
@@ -309,7 +310,7 @@ impl<B: BindingEvents> Sources<B> {
             let replay = writer.store().for_each_frame(&cursor.source, |frame| {
                 if let SpoolFrame::Record(record) = frame {
                     captured_any = true;
-                    self.owe(deriver, owed, &key, &record);
+                    self.owe(deriver, owed, &cursor.source, &record);
                 }
             });
             replay.map_err(halted("spool replay"))?;
@@ -690,7 +691,7 @@ impl<B: BindingEvents> Sources<B> {
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
         deriver: &mut UnitDeriver,
-        owed: &mut VecDeque<Derived>,
+        owed: &mut impl Owe,
     ) -> Result<(), WriterAlarm> {
         if self.checkpoint.is_none() {
             return Ok(());
@@ -711,7 +712,7 @@ impl<B: BindingEvents> Sources<B> {
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
         deriver: &mut UnitDeriver,
-        owed: &mut VecDeque<Derived>,
+        owed: &mut impl Owe,
         index: usize,
     ) -> Result<(), WriterAlarm> {
         let reader = &mut self.readers[index];
@@ -756,7 +757,7 @@ impl<B: BindingEvents> Sources<B> {
             store.cursor(parent).map(|c| c.captured_through)
         });
         for record in &batch.records {
-            self.owe(deriver, owed, &key, record);
+            self.owe(deriver, owed, &batch.source, record);
         }
         if at_end {
             self.pend_at_end(&key, batch.captured_through);
@@ -792,64 +793,6 @@ impl<B: BindingEvents> Sources<B> {
             .iter()
             .find(stuck)
             .map(|old| old.source.clone())
-    }
-
-    /// Derives a record unless the source's boundary withholds it or its parent already has it.
-    fn owe(
-        &mut self,
-        deriver: &mut UnitDeriver,
-        owed: &mut VecDeque<Derived>,
-        key: &str,
-        record: &CapturedRecord,
-    ) {
-        let Some(link) = self.rotation.links.get(key).cloned() else {
-            owed.extend(deriver.derive(record));
-            return;
-        };
-        match link.boundary {
-            Boundary::Pending { .. } => {}
-            Boundary::Owed { from } => {
-                if record.start >= from && !self.masked(&link, record) {
-                    owed.extend(deriver.derive(record));
-                }
-            }
-            Boundary::Undecided => {
-                let row = RowIds::of(self.provider, &record.line);
-                if row.as_ref().is_some_and(RowIds::is_empty) {
-                    return;
-                }
-                let parent = link.parent.as_ref();
-                let lineage = parent.and_then(|parent| self.lineage.get(&source_key(parent)));
-                let class = row.zip(lineage).map(|(row, lineage)| lineage.class(&row));
-                match class {
-                    Some(Class::Inherited) => {
-                        self.prefix_seen.insert(key.to_owned());
-                    }
-                    Some(Class::New) if self.prefix_seen.contains(key) => {
-                        owed.extend(deriver.derive(record));
-                        self.decide(key, Boundary::Owed { from: record.start });
-                    }
-                    _ => self.pend(key, record.start),
-                }
-            }
-        }
-    }
-
-    /// A row after a fork's start whose every identity the parent consumed is the parent's copy,
-    /// unless the parent is pending or undecided and so may never post it.
-    fn masked(&self, link: &SourceLink, record: &CapturedRecord) -> bool {
-        let Some(parent) = link.parent.as_ref() else {
-            return false;
-        };
-        let parent_link = self.rotation.link(parent).map(|l| &l.boundary);
-        if !matches!(parent_link, None | Some(Boundary::Owed { .. })) {
-            return false;
-        }
-        let Some(lineage) = self.lineage.get(&source_key(parent)) else {
-            return false;
-        };
-        RowIds::of(self.provider, &record.line)
-            .is_some_and(|row| !row.is_empty() && lineage.class(&row) == Class::Inherited)
     }
 
     /// Brings the parent identities a source is judged against to the parent's durable cursor.
