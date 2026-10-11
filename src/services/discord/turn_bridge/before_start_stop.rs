@@ -2,6 +2,7 @@
 //! recovery are not present yet, so a crash between admission and finalize stays held.
 use crate::services::discord::gateway::TurnGateway;
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
+#[cfg(unix)]
 use crate::services::discord::recovery_engine::herdr_admitted_restart::ADMITTED_ABORT_NOTICE;
 use crate::services::discord::turn_finalizer::{
     FinalizeContext, FinalizeOutcome, SyntheticClaimSnapshot, TerminalEvent, TurnFinalizer, TurnKey,
@@ -11,6 +12,11 @@ use crate::services::provider::CancelToken;
 use crate::services::provider::herdr_before_start::{BeforeStartProof, ExitDecision};
 use poise::serenity_prelude::{ChannelId, MessageId};
 use std::sync::Arc;
+
+// The restart module is Unix only; elsewhere the same text keeps the bridge building, though
+// settlement there is never available, so no policy close reaches it.
+#[cfg(not(unix))]
+const ADMITTED_ABORT_NOTICE: &str = "⏹ 중단됨";
 
 /// The bridge exit; true keeps the turn held. A held row is never sealed or closed by policy.
 pub(super) async fn exit_held(
