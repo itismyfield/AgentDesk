@@ -1048,6 +1048,8 @@ src/
 │   │   │   ├── managed_submission.rs
 │   │   │   ├── managed_submission_tests.rs
 │   │   │   ├── model.rs
+│   │   │   ├── o_seed_observation.rs
+│   │   │   ├── o_seed_observation_tests.rs
 │   │   │   ├── orphan_relay_reclaim.rs
 │   │   │   ├── ownership_ops.rs
 │   │   │   ├── rebind_reap.rs
@@ -1488,6 +1490,7 @@ src/
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
 │   │   │   ├── short_controller.rs
+│   │   │   ├── supervision.rs
 │   │   │   ├── task_notification_context.rs
 │   │   │   ├── terminal_handoff.rs
 │   │   │   ├── tests.rs
@@ -1561,10 +1564,12 @@ src/
 │   │   │   │   ├── post_terminal_disposal_tests/
 │   │   │   │   │   └── compact_summary_tests.rs
 │   │   │   │   ├── post_terminal_disposal_tests.rs
+│   │   │   │   ├── types.rs
 │   │   │   │   └── watcher_resume.rs
 │   │   │   ├── streaming_status_tick/
 │   │   │   │   ├── committed_progress_tests.rs
 │   │   │   │   ├── existing_panel_update.rs
+│   │   │   │   ├── legacy_state.rs
 │   │   │   │   ├── native_collector_tests.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── supervisor_relay/
@@ -1576,6 +1581,8 @@ src/
 │   │   │   │   └── soft_terminal_authority.rs
 │   │   │   ├── turn_stream_collector/
 │   │   │   │   ├── chunk_forward.rs
+│   │   │   │   ├── entry.rs
+│   │   │   │   ├── observations.rs
 │   │   │   │   └── state.rs
 │   │   │   ├── cancel_handoff.rs
 │   │   │   ├── commit_decisions.rs
@@ -1590,12 +1597,15 @@ src/
 │   │   │   ├── host_gate.rs
 │   │   │   ├── jsonl_rotation.rs
 │   │   │   ├── judged_stop_harness_tests.rs
+│   │   │   ├── legacy_state.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── loop_poll_prologue.rs
 │   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   ├── no_result_exits.rs
+│   │   │   ├── o_capsule_origin_tests.rs
 │   │   │   ├── o_delegated_arm.rs
 │   │   │   ├── o_delegated_watcher_tests.rs
+│   │   │   ├── o_seed_install_tests.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
 │   │   │   ├── owed_range_baseline_tests.rs
@@ -1610,6 +1620,8 @@ src/
 │   │   │   ├── prompt_observe.rs
 │   │   │   ├── provider_output_guard.rs
 │   │   │   ├── provider_session_persistence.rs
+│   │   │   ├── retired_host_tick_tests.rs
+│   │   │   ├── retired_o_boundary_tests.rs
 │   │   │   ├── rowless_delivery_authority.rs
 │   │   │   ├── session_bound_ack.rs
 │   │   │   ├── session_bound_ack_tests.rs
@@ -1933,6 +1945,8 @@ src/
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── admission.rs
 │   │   │   ├── admission_tests.rs
+│   │   │   ├── entrypoints.rs
+│   │   │   ├── entrypoints_tests.rs
 │   │   │   ├── lifecycle.rs
 │   │   │   ├── lifecycle_tests.rs
 │   │   │   ├── mod.rs
@@ -1971,6 +1985,8 @@ src/
 │   │   │   │   ├── claude_restore.rs
 │   │   │   │   ├── liveness.rs
 │   │   │   │   ├── liveness_tests.rs
+│   │   │   │   ├── o_only_install.rs
+│   │   │   │   ├── o_only_install_tests.rs
 │   │   │   │   ├── output_policy.rs
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
