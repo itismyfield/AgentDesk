@@ -519,6 +519,220 @@ async fn t20b_consumed_earlier_origin_merges_with_published_budgets() {
     assert_consumed_and_published_prior(true).await;
 }
 
+async fn assert_consumed_lower_checkpoint_progress(open_barrier: bool) {
+    let fx = Fixture::new().await;
+    // Phase 1 uses real UTC; the injected clock remains observable through both sweeps.
+    let (wall, _) = SystemClock.sample();
+    let clock = FakeClock::new(wall);
+    let instant = clock.pair().1;
+    let channel_id = ChannelId::new(if open_barrier { 4_604_341 } else { 4_604_340 });
+    let (a, i, b, m) = (
+        at(wall, 1, 900),
+        at(wall, 2, 60),
+        at(wall, 3, 30),
+        at(wall, 4, 10),
+    );
+    assert!(a < i && i < b && b < m);
+    fx.seed_checkpoint(channel_id, a);
+    let consumed = CatchUpRetryState {
+        checkpoint: a.get(),
+        fetch_failures: 4,
+        deferred_rearms: 2,
+        armed_at: instant - Duration::from_secs(40),
+    };
+    let published = CatchUpRetryState {
+        checkpoint: b.get(),
+        fetch_failures: 1,
+        deferred_rearms: 5,
+        armed_at: instant - Duration::from_secs(100),
+    };
+    fx.shared
+        .catch_up_retry_pending
+        .insert(channel_id, consumed);
+    let filled = MAX_INTERVENTIONS_PER_CHANNEL - if open_barrier { 2 } else { 1 };
+    for index in 0..filled {
+        let id = at(wall, 100 + index as u64, 10);
+        let outcome = discord::mailbox_enqueue_intervention(
+            &fx.shared,
+            &fx.provider,
+            channel_id,
+            queued_intervention(id, index),
+        )
+        .await;
+        assert!(super::super::super::catch_up_enqueue_accepted(&outcome));
+    }
+    assert_eq!(
+        discord::mailbox_snapshot(&fx.shared, channel_id)
+            .await
+            .intervention_queue
+            .len(),
+        filled
+    );
+    let mut history = vec![own_reply(channel_id, a)];
+    if open_barrier {
+        history.push(human(channel_id, i));
+    }
+    history.push(human(channel_id, b));
+    let strict = StrictApi::new(&fx.shared)
+        .with_history(channel_id, history.clone())
+        .arriving_at(1, human(channel_id, m));
+    let strict = if open_barrier {
+        strict.with_hooks(i, &[Hook::PreQueue])
+    } else {
+        strict
+    };
+    let api = AgeApi::new(strict, &clock).on_phase2(FetchAction {
+        publish: Some(published),
+        ..FetchAction::default()
+    });
+
+    sweep(&fx, &api, Some(channel_id)).await;
+
+    let phase1_ids = if open_barrier {
+        vec![b.get(), i.get()]
+    } else {
+        vec![b.get()]
+    };
+    let recent_ids = if open_barrier {
+        vec![m.get(), b.get(), i.get(), a.get()]
+    } else {
+        vec![m.get(), b.get(), a.get()]
+    };
+    assert_eq!(
+        api.strict.fetch_log(),
+        [
+            (channel_id, after(a), phase1_ids),
+            (channel_id, CatchUpFetchRequest::new(20), recent_ids.clone()),
+        ]
+    );
+    let fetch = api.phase2_fetch();
+    assert!(
+        fetch.before.is_empty(),
+        "C was consumed without a phase1 rearm"
+    );
+    assert_eq!(fetch.after.get(&channel_id), Some(&published));
+    assert_eq!(fetch.clock, (wall, instant));
+    let expected_enqueues = if open_barrier {
+        vec![
+            (
+                i.get(),
+                false,
+                Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
+            ),
+            (b.get(), true, None),
+        ]
+    } else {
+        vec![(b.get(), true, None)]
+    };
+    assert_eq!(api.strict.enqueue_log(), expected_enqueues);
+    let snapshot = discord::mailbox_snapshot(&fx.shared, channel_id).await;
+    assert_eq!(
+        snapshot.intervention_queue.len(),
+        MAX_INTERVENTIONS_PER_CHANNEL
+    );
+    assert_eq!(snapshot.active_user_message_id, None);
+    assert_eq!(snapshot.pending_user_dispatch, None);
+    assert_eq!(
+        snapshot
+            .intervention_queue
+            .iter()
+            .any(|item| item.message_id == i),
+        open_barrier,
+        "I is queued without dispatch evidence"
+    );
+    let retry_checkpoint = if open_barrier { a } else { b };
+    let retry = fx
+        .pending(channel_id)
+        .expect("actual phase2 capacity rearm");
+    assert_eq!(
+        retry,
+        CatchUpRetryState {
+            checkpoint: retry_checkpoint.get(),
+            fetch_failures: 4,
+            deferred_rearms: 5,
+            armed_at: published.armed_at,
+        }
+    );
+    if open_barrier {
+        assert!(
+            retry.checkpoint < i.get(),
+            "the open I barrier bounds the retry"
+        );
+    }
+    assert_eq!(
+        fx.surfaces(channel_id),
+        (Some(retry_checkpoint.get()), Some(retry_checkpoint.get()))
+    );
+    assert_eq!(clock.samples(), 1, "capacity inherits the original arm");
+
+    let cleared = discord::mailbox_clear_channel(&fx.shared, &fx.provider, channel_id).await;
+    assert!(cleared.persistence_error.is_none());
+    assert_eq!(
+        cleared
+            .discarded_message_ids
+            .iter()
+            .map(|id| id.get())
+            .collect::<HashSet<_>>()
+            .len(),
+        MAX_INTERVENTIONS_PER_CHANNEL
+    );
+    assert!(
+        discord::mailbox_snapshot(&fx.shared, channel_id)
+            .await
+            .intervention_queue
+            .is_empty()
+    );
+    clock.advance(7);
+    history.push(human(channel_id, m));
+    let reread = AgeApi::new(
+        StrictApi::new(&fx.shared).with_history(channel_id, history),
+        &clock,
+    );
+
+    sweep(&fx, &reread, Some(channel_id)).await;
+
+    let reread_ids = if open_barrier {
+        vec![m.get(), b.get(), i.get()]
+    } else {
+        vec![m.get()]
+    };
+    assert_eq!(
+        reread.strict.fetch_log(),
+        [
+            (channel_id, after(retry_checkpoint), reread_ids),
+            (channel_id, CatchUpFetchRequest::new(20), recent_ids),
+        ]
+    );
+    let recovered = if open_barrier {
+        vec![
+            (i.get(), true, None),
+            (b.get(), true, None),
+            (m.get(), true, None),
+        ]
+    } else {
+        vec![(m.get(), true, None)]
+    };
+    assert_eq!(reread.strict.enqueue_log(), recovered);
+    assert!(
+        reread.phase2_fetch().before.is_empty(),
+        "the retry was consumed again"
+    );
+    assert_eq!(reread.phase2_fetch().clock, clock.pair());
+    assert_eq!(clock.samples(), 2, "both actual sweeps used the fake clock");
+    assert_eq!(fx.surfaces(channel_id), (Some(m.get()), Some(m.get())));
+    assert_eq!(fx.pending(channel_id), None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t20c_a_consumed_lower_checkpoint_allows_settled_phase1_progress() {
+    assert_consumed_lower_checkpoint_progress(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t20c_b_consumed_lower_checkpoint_keeps_open_frontier_rereadable() {
+    assert_consumed_lower_checkpoint_progress(true).await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn t21a_600_seconds_without_retry_is_accepted() {
     let fx = Fixture::new().await;
