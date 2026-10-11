@@ -458,7 +458,7 @@ pub(crate) async fn finish_text_intake_admission(
         }
         IntakeAdmission::ReplayDeferred(defer) => {
             let channel_id = submission.request.channel_id.get();
-            if !defer_live_submission(deps, submission, true).await {
+            if !defer_with_all_sources(deps, submission).await {
                 return Err(format!(
                     "replay check deferred ({defer:?}); channel {channel_id} refused custody"
                 )
@@ -516,6 +516,14 @@ pub(crate) async fn finish_admitted_local(
 
 /// Queues a live input behind the slow backstop, with every absorbed source when asked; true once
 /// the queue durably holds it.
+/// Boxed inside a plain function: a second inline enqueue future would grow the caller's stack frame.
+fn defer_with_all_sources<'a, 'b: 'a>(
+    deps: &'a IntakeDeps<'b>,
+    submission: IntakeSubmission,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+    Box::pin(defer_live_submission(deps, submission, true))
+}
+
 async fn defer_live_submission(
     deps: &IntakeDeps<'_>,
     submission: IntakeSubmission,
