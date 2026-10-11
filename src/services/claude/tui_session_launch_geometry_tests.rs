@@ -295,8 +295,8 @@ fn guarded_launch_failure_after_create_leaves_nothing_and_the_next_launch_succee
     assert!(leftovers.is_empty(), "{leftovers:#?}");
 }
 
-// When removal of the created session cannot be confirmed, the launch still fails but keeps
-// every piece of ownership evidence: the session may run (failed kill) or be gone (failed probe).
+// An unconfirmed removal fails the launch and keeps all evidence; a retry relaunches only once tmux
+// confirms the session gone (failed probe), never over a live one (failed kill).
 #[test]
 fn guarded_launch_with_unconfirmed_cleanup_fails_and_keeps_the_ownership_evidence() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -322,24 +322,62 @@ fn guarded_launch_with_unconfirmed_cleanup_fails_and_keeps_the_ownership_evidenc
             "{cleanup_fault}: {error}"
         );
         assert_eq!(lab.alive(&name), survives, "{cleanup_fault}: {error}");
-        for evidence in [
+        let evidence = [
             tc::tmux_owner_path(&name),
             tc::session_temp_path(&name, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT),
+            tc::session_temp_path(&name, tc::CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT),
             tc::session_temp_path(&name, tc::TMUX_RUNTIME_KIND_TEMP_EXT),
             tc::session_temp_path(&name, "host_kind"),
-        ] {
-            assert!(
-                std::path::Path::new(&evidence).exists(),
-                "{cleanup_fault}: {evidence} must be kept"
-            );
+        ];
+        let read = || {
+            evidence
+                .iter()
+                .map(|path| std::fs::read(path).ok())
+                .collect::<Vec<_>>()
+        };
+        let kept = read();
+        for (path, bytes) in evidence.iter().zip(&kept) {
+            assert!(bytes.is_some(), "{cleanup_fault}: {path} must be kept");
         }
-
         for fault in &faults {
             std::fs::remove_file(fault).unwrap();
         }
-        lab.real(&["kill-session", "-t", &format!("={name}")]);
+        lab.take_calls();
+
+        // The retry runs with the faults cleared and no manual kill.
+        let session_id = |name: &str| {
+            let shown = lab.real(&[
+                "display-message",
+                "-p",
+                "-t",
+                &format!("={name}:"),
+                "#{session_id}",
+            ]);
+            String::from_utf8_lossy(&shown.stdout).trim().to_string()
+        };
+        if survives {
+            let before = session_id(&name);
+            let refused = lab.launch(&name, Some(TEST)).unwrap_err();
+            assert!(refused.contains("keeps its launch evidence"), "{refused}");
+            let calls = lab.take_calls();
+            assert!(
+                !calls.iter().any(|call| call.contains("new-session")),
+                "{calls:?}"
+            );
+            assert_eq!(
+                session_id(&name),
+                before,
+                "the live session is the same one"
+            );
+            assert_eq!(read(), kept, "the retry leaves the evidence byte-identical");
+            assert!(
+                lab.real(&["kill-session", "-t", &format!("={name}")])
+                    .status
+                    .success()
+            );
+        }
         lab.launch(&name, Some(TEST))
-            .expect("the next launch succeeds");
+            .expect("the launch after the session is gone succeeds");
         assert_eq!(lab.geometry(&name), HELD);
     }
 }

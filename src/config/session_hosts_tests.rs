@@ -200,3 +200,97 @@ fn claude_guard_channel_runtime_follows_the_hosting_resolver_fallback() {
         );
     }
 }
+
+// Provider keys match as the installed hosting resolver matches them (trimmed, case-folded, last
+// entry in key order wins), so the boot check and the resolver give the same TUI verdict.
+#[test]
+fn guard_and_herdr_checks_read_provider_keys_as_the_installed_resolver_does() {
+    use crate::services::provider::ProviderKind;
+    use crate::services::provider_hosting as hosting;
+    let root = tempfile::tempdir().unwrap();
+    let load = |providers: &str| {
+        let path = root.path().join("agentdesk.yaml");
+        let data_dir = serde_json::to_string(&root.path().join("data")).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "server: {{}}\ndata:\n  dir: {data_dir}\nproviders: {providers}\n\
+                 agents:\n  - id: keys-fixture\n    name: Keys fixture\n    channels:\n      claude: {{id: '41'}}\n      codex: {{id: '42'}}\n"
+            ),
+        )
+        .unwrap();
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        load_from_path(&path).unwrap()
+    };
+    let herdr_endpoint = EndpointConfig {
+        execution_node: "mac-mini".into(),
+        socket_path: root.path().join("herdr.sock"),
+        herdr_home: root.path().join("herdr"),
+        herdr_session: "agentdesk".into(),
+    };
+    let mut mismatched = Vec::new();
+    for (providers, provider, channel, tui) in [
+        (
+            "{Codex: {tui_hosting: true}}",
+            ProviderKind::Codex,
+            42,
+            true,
+        ),
+        ("{Claude: {runtime: pipe}}", ProviderKind::Claude, 41, false),
+        (
+            "{' CLAUDE ': {tui_hosting: false}}",
+            ProviderKind::Claude,
+            41,
+            false,
+        ),
+        (
+            "{' CLAUDE ': {runtime: '', tui_hosting: true}}",
+            ProviderKind::Claude,
+            41,
+            true,
+        ),
+        (
+            "{Claude: {runtime: pipe}, claude: {runtime: tui}}",
+            ProviderKind::Claude,
+            41,
+            true,
+        ),
+        (
+            "{claude: {tui_hosting: true}, Claude: {tui_hosting: false}}",
+            ProviderKind::Claude,
+            41,
+            true,
+        ),
+    ] {
+        let mut config = load(providers);
+        if provider == ProviderKind::Codex {
+            let herdr = &mut config.session_hosts.herdr;
+            herdr
+                .endpoints
+                .insert("mini".into(), herdr_endpoint.clone());
+            herdr.channels.insert(channel.to_string(), "mini".into());
+        } else {
+            config.session_hosts.claude_guard_channels.insert(channel);
+        }
+        let installed = {
+            let _lock = hosting::TEST_CONFIG_LOCK
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            hosting::install_provider_hosting_config(&config);
+            let selection = hosting::resolve_provider_session_selection_with_channel(
+                &provider,
+                true,
+                Some(channel),
+            );
+            hosting::install_provider_hosting_config(&Config::default());
+            selection.requested_tui_hosting
+        };
+        let validated = validate(&config).is_ok();
+        if (validated, installed) != (tui, tui) {
+            mismatched.push(format!(
+                "{providers}: validated={validated} installed={installed}"
+            ));
+        }
+    }
+    assert!(mismatched.is_empty(), "{mismatched:#?}");
+}

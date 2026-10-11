@@ -115,6 +115,11 @@ static PROVIDER_RUNTIME_MODE_BY_CHANNEL: LazyLock<RwLock<BTreeMap<(String, u64),
 /// flipped on without the ADR prerequisites in place.
 static CODEX_REMOTE_SSH_ENABLED: LazyLock<RwLock<bool>> = LazyLock::new(|| RwLock::new(false));
 
+/// Serializes tests that install the process-wide hosting config.
+#[cfg(test)]
+pub(crate) static TEST_CONFIG_LOCK: LazyLock<std::sync::Mutex<()>> =
+    LazyLock::new(Default::default);
+
 pub fn install_provider_hosting_config(config: &Config) {
     let mut values = BTreeMap::new();
     for provider_id in crate::services::provider::supported_provider_ids() {
@@ -402,11 +407,28 @@ pub fn resolve_provider_session_selection_with_channel(
 /// boot path (e.g. `claude_tui::hook_server` publish) does not skip the hook
 /// endpoint for operators who only set the new `runtime` field.
 fn provider_runtime_mode_explicit(config: &Config, provider_id: &str) -> Option<RuntimeMode> {
-    config
-        .providers
-        .get(&provider_id.trim().to_ascii_lowercase())
-        .and_then(|provider_config| provider_config.runtime.as_deref())
-        .and_then(|raw| RuntimeMode::parse(raw.trim()))
+    provider_setting(config, provider_id, |provider| {
+        provider.runtime.as_deref().and_then(RuntimeMode::parse)
+    })
+}
+
+/// A provider's `tui_hosting`, else the provider default, read as the installed resolver reads it.
+fn provider_tui_hosting(config: &Config, provider_id: &str) -> bool {
+    provider_setting(config, provider_id, |provider| provider.tui_hosting)
+        .unwrap_or_else(|| default_provider_tui_hosting(&provider_id.trim().to_ascii_lowercase()))
+}
+
+/// `install_provider_hosting_config`'s lookup: keys match trimmed and case-folded, and the last
+/// matching entry in key order that sets the field wins.
+fn provider_setting<T>(
+    config: &Config,
+    provider_id: &str,
+    field: impl Fn(&crate::config::ProviderConfig) -> Option<T>,
+) -> Option<T> {
+    let provider_id = provider_id.trim().to_ascii_lowercase();
+    let matching = config.providers.iter();
+    let matching = matching.filter(|(key, _)| key.trim().to_ascii_lowercase() == provider_id);
+    matching.filter_map(|(_, provider)| field(provider)).last()
 }
 
 fn channel_runtime_mode_explicit(channel: &crate::config::AgentChannel) -> Option<RuntimeMode> {
@@ -436,14 +458,14 @@ pub(crate) fn channel_effective_tui_request(
     if let Some(legacy) = channel.tui_hosting() {
         return legacy;
     }
-    config.provider_tui_hosting_enabled(provider_id)
+    provider_tui_hosting(config, provider_id)
 }
 
 fn provider_default_effective_tui_request(config: &Config, provider_id: &str) -> bool {
     if let Some(mode) = provider_runtime_mode_explicit(config, provider_id) {
         return matches!(mode, RuntimeMode::Tui);
     }
-    config.provider_tui_hosting_enabled(provider_id)
+    provider_tui_hosting(config, provider_id)
 }
 
 pub fn any_requested_tui_hosting_driver_available(config: &Config) -> bool {
@@ -488,9 +510,6 @@ mod tests {
         AgentChannel, AgentChannelConfig, AgentChannels, AgentDef, AgentVoiceConfig, Config,
         ProviderConfig,
     };
-    use std::sync::{LazyLock, Mutex};
-
-    static TEST_CONFIG_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn defaults_request_tui_for_claude_only() {
