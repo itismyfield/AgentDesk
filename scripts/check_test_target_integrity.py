@@ -904,8 +904,64 @@ def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
     return modules
 
 
-def _direct_cargo_test(words: list[str]) -> list[str] | None:
-    """Return cargo argv after only the deterministic supported wrappers."""
+def _shell_comment_start(snippet: str) -> int:
+    """Where Bash starts a comment on one line: an unquoted `#` that opens a word, so
+    one inside a word (`x#tag`) stays literal; the line's length when there is none."""
+    quote, word_start, index = "", True, 0
+    while index < len(snippet):
+        char = snippet[index]
+        if quote:
+            if char == quote:
+                quote = ""
+            elif quote == '"' and char == "\\":
+                index += 1
+        elif char == "#" and word_start:
+            return index
+        elif char in "'\"":
+            quote = char
+        elif char == "\\":
+            index += 1
+        word_start = not quote and char in " \t\r\n;&|()<>"
+        index += 1
+    return len(snippet)
+
+
+def _syntax_words(snippet: str) -> list[str]:
+    """``shlex.split(snippet)``'s words with every quoted or escaped character
+    blanked to `_`, so only the shell syntax around them stays visible."""
+    words: list[str] = []
+    word: list[str] | None = None
+    quote = ""
+    chars = iter(snippet)
+    for char in chars:
+        if quote:
+            if char == quote:
+                quote = ""
+                continue
+            if quote == '"' and char == "\\":
+                next(chars, "")
+            word.append("_")
+        elif char in " \t\r\n":
+            if word is not None:
+                words.append("".join(word))
+            word = None
+        else:
+            word = [] if word is None else word
+            if char in "'\"":
+                quote = char
+            elif char == "\\":
+                next(chars, "")
+                word.append("_")
+            else:
+                word.append(char)
+    if word is not None:
+        words.append("".join(word))
+    return words
+
+
+def _direct_cargo_test(words: list[str], syntax: list[str]) -> list[str] | None:
+    """Return cargo argv after only the deterministic supported wrappers; an empty argv
+    is a direct cargo test that a shell control operator joins to another command."""
     # The canonical filter sourced at the head of the command's own `&&` chain.
     index = 3 if words[:3] == ["source", NON_PG_FILTER_REL.as_posix(), "&&"] else 0
     while index < len(words):
@@ -913,8 +969,8 @@ def _direct_cargo_test(words: list[str]) -> list[str] | None:
             index += 1
         if words[index:index + 2] == ["cargo", "test"]:
             # A second command on the line would ride along as cargo argv, unjudged.
-            if any(SHELL_CONTROL.search(word) for word in words[index:]):
-                return None
+            if any(SHELL_CONTROL.search(word) for word in syntax[index:]):
+                return []
             return words[index:]
         if index >= len(words):
             return None
@@ -975,15 +1031,22 @@ def _shell_text(line: str, yaml_run_scalar: bool = False) -> str:
 def _parse_command_line(line: str, *, yaml_run_scalar: bool = False,
                         diagnostics: list[str] | None = None) \
         -> list[str] | None:
-    """Parse one shell line; YAML quote removal is explicitly contextual."""
+    """Parse one shell line; YAML quote removal is explicitly contextual. An empty
+    result is a direct cargo test that a shell control operator joins to another."""
     snippet = _shell_text(line, yaml_run_scalar)
     if not snippet or snippet.startswith("#"):
         return None
+    code = snippet[:_shell_comment_start(snippet)]
     try:
-        words = shlex.split(snippet, comments=True)
+        words = shlex.split(code)
     except ValueError:
         return None
-    cargo = _direct_cargo_test(words)
+    syntax = _syntax_words(code)
+    aligned = len(syntax) == len(words)
+    # Quoted text never ends a command; unaligned words leave the syntax unproven.
+    cargo = _direct_cargo_test(words, syntax if aligned else words)
+    if cargo and not aligned:
+        cargo = []
     if cargo is None and diagnostics is not None and "cargo test" in snippet:
         first = next((word for word in words
                       if not SHELL_ASSIGNMENT.fullmatch(word)), "")
@@ -997,11 +1060,13 @@ def _parse_command_line(line: str, *, yaml_run_scalar: bool = False,
 
 
 def extract_commands(workflow: Path, diagnostics: list[str] | None = None,
-                     shells: list[list[tuple[int, str]]] | None = None) \
+                     shells: list[list[tuple[int, str]]] | None = None,
+                     refused: list[int] | None = None) \
         -> list[tuple[int, list[str], str]]:
     """Extract literal commands only from workflow `run:` scalar context.
 
     ``shells`` collects each run scalar's (line, shell text) pairs: one shell each.
+    ``refused`` collects lines whose direct cargo test is joined to another command.
     """
     commands: list[tuple[int, list[str], str]] = []
     block_indent: int | None = None
@@ -1037,18 +1102,22 @@ def extract_commands(workflow: Path, diagnostics: list[str] | None = None,
             diagnostics.extend(
                 f"{workflow}:{lineno}: {detail}" for detail in line_diagnostics
             )
-        if words is not None:
+        if words:
             commands.append((lineno, words, " ".join(words)))
+        elif words == [] and refused is not None:
+            refused.append(lineno)
     return commands
 
 
 def extract_justfile_commands(justfile: Path,
                               diagnostics: list[str] | None = None,
-                              shells: list[list[tuple[int, str]]] | None = None) \
+                              shells: list[list[tuple[int, str]]] | None = None,
+                              refused: list[int] | None = None) \
         -> list[tuple[int, list[str], str]]:
     """Extract literal commands from recipe bodies, without evaluating just.
 
     ``shells`` collects every recipe line alone: just runs each in a new shell.
+    ``refused`` collects lines whose direct cargo test is joined to another command.
     """
     commands: list[tuple[int, list[str], str]] = []
     in_recipe = False
@@ -1066,8 +1135,10 @@ def extract_justfile_commands(justfile: Path,
             diagnostics.extend(
                 f"{justfile}:{lineno}: {detail}" for detail in line_diagnostics
             )
-        if words is not None:
+        if words:
             commands.append((lineno, words, " ".join(words)))
+        elif words == [] and refused is not None:
+            refused.append(lineno)
     return commands
 
 
@@ -1104,6 +1175,8 @@ class CommandSpec:
     # PG_INCLUDE_ARGS as one whole libtest word: restored per shard before judging,
     # and a restored selection running nothing is the generated array's fault.
     pg_include: bool = False
+    # Restored, the array's own positive filters: their selection alone must run tests.
+    pg_filters: tuple[str, ...] = ()
 
 
 def parse_command(words: list[str]) -> CommandSpec:
@@ -1495,12 +1568,17 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                             unknown_skip=False)
     # Restored skips drop the selected targets' own candidates too.
     rule = live_rule if live_rule is not None else spec
-    final = _lib_selection(rule, frozenset(selected_ids))
-    if spec.pg_include and not final:
-        # The generated selection itself runs nothing: no allowlist or doctest excuses it.
+    # --ignored proves no candidate runs, yet the restored skips still drop known ones.
+    candidate_rule = replace(rule, skip_filters=spec.skip_filters + restored) \
+        if spec.ignored_only and spec.non_pg_skip else rule
+    final = _lib_selection(candidate_rule, frozenset(selected_ids))
+    if spec.pg_include and not _lib_selection(replace(rule, filters=spec.pg_filters),
+                                              frozenset(selected_ids)):
+        # The generated selection itself runs nothing, whatever other filters add:
+        # no allowlist or doctest excuses it.
         return findings + [("pg-include-zero-match", (
-            f"restored PG_INCLUDE_ARGS selects 0 static test IDs in {selection_name} "
-            "after its positive and skip filters"))]
+            f"restored PG_INCLUDE_ARGS's own positive filters select 0 static test IDs "
+            f"in {selection_name} after the run's skip filters"))]
     swept_elsewhere = 0
     empty: list[tuple[str, str]] = []
     for filt in spec.filters:
@@ -1571,6 +1649,13 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
             f"filters {names} match {len(final)} candidate test ID(s) in "
             f"{selection_name}, and a dynamic --skip or libtest argument may "
             "remove them all")))
+    if spec.ignored_only and spec.non_pg_skip and not final:
+        # No known candidate is left for --ignored: no allowlist or doctest excuses it.
+        findings.append(("non-pg-ignored-zero-match", (
+            "--ignored with restored NON_PG_SKIP_ARGS leaves 0 known candidate test IDs in "
+            f"{selection_name} (before generated skips: "
+            f"{len(_lib_selection(rule, frozenset(selected_ids)))}); ignored execution "
+            "remains unproven")))
     if not findings and not empty and not final \
             and not (spec.filters and swept_elsewhere == len(spec.filters)):
         empty.append(("zero-match" if selected_ids else "empty-target", (
@@ -1992,10 +2077,11 @@ def pg_include_findings(words: list[str], spec: CommandSpec, shards: tuple[str, 
     findings: list[tuple[str, str]] = []
     for shard in shards:
         args = selections[shard]
-        if parse_command(["cargo", "test", "--", *args]).filters:
+        own = parse_command(["cargo", "test", "--", *args]).filters
+        if own:
             # Reparsed, the restored words keep libtest's meaning and every other expansion.
             found = judge(replace(parse_command([*words[:at], *args, *words[at + 1:]]),
-                                  pg_include=True))
+                                  pg_include=True, pg_filters=own))
         else:
             found = [("pg-include-empty", "PG_INCLUDE_ARGS contains no positive libtest "
                       "filters; an empty expansion would widen this run")]
@@ -2024,14 +2110,16 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str] 
             lib_test_ids = None
     view = PackageTestIds(repo_root, lib_test_ids)
     shells: dict[Path, list[list[tuple[int, str]]]] = {}
+    refused: dict[Path, list[int]] = {}
     workflow_sources = [
-        (path, extract_commands(path, diagnostics, shells.setdefault(path, [])))
+        (path, extract_commands(path, diagnostics, shells.setdefault(path, []),
+                                refused.setdefault(path, [])))
         for path in workflows
     ]
     justfile = repo_root / "justfile"
     just_commands = extract_justfile_commands(
-        justfile, diagnostics, shells.setdefault(justfile, [])) \
-        if justfile.is_file() else []
+        justfile, diagnostics, shells.setdefault(justfile, []),
+        refused.setdefault(justfile, [])) if justfile.is_file() else []
     sources = [*workflow_sources, (justfile, just_commands)]
     violations: list[Violation] = []
     active_commands = {normalized for _, commands in sources
@@ -2068,11 +2156,17 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str] 
             shards: tuple[str, ...] | None = ("", "0", "1")
         else:
             # A workflow that never names the shard leaves it unset where a job sources the file.
-            named = "PG_INCLUDE_SHARD" in _membership()._strip_comments(source.read_text("utf-8"))
+            named = "PG_INCLUDE_SHARD" in _membership().strip_shell_comments(
+                source.read_text("utf-8"))
             shards = None if named else ("",)
         violations.extend(Violation(rel, lineno, texts[lineno], kind, detail)
                           for lineno, found in sorted(known.items())
                           if lineno not in extracted for kind, detail in found)
+        # A known array on the line already names it; any other refusal is reported here.
+        violations.extend(Violation(rel, lineno, texts[lineno], "cargo-command-unparsed", (
+            "a shell control operator joins this cargo test invocation to another command, "
+            "so this gate cannot extract it and the run goes unchecked"))
+            for lineno in refused.get(source, []) if lineno not in known)
         for lineno, words, normalized in commands:
             if lineno in known:
                 # The array's value is unproven, so nothing restored from it is judged.

@@ -1394,6 +1394,7 @@ mod tests {
             },
             last_message_ids: dashmap::DashMap::new(),
             catch_up_retry_pending: dashmap::DashMap::new(),
+            catch_up_scan_in_progress: dashmap::DashMap::new(),
             turn_start_times: dashmap::DashMap::new(),
             channel_rosters: dashmap::DashMap::new(),
             http: super::super::RuntimeHttpCache {

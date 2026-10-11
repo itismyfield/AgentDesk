@@ -345,7 +345,7 @@ impl ScopedRestoreLane {
             if let Err(reason) = &result {
                 let mut witness = lane.witness.lock().unwrap();
                 if witness.generation == generation && witness.status != RestoreStatus::Restored {
-                    witness.status = RestoreStatus::Blocked(reason.clone());
+                    witness.status = RestoreStatus::Blocked(reason.clone().into());
                 }
             }
             result

@@ -40,18 +40,7 @@ fn recovery_output_path_with_tmux_fallback(
 }
 
 #[cfg(unix)]
-fn herdr_turn_held(provider: &ProviderKind, state: &inflight::InflightTurnState) -> bool {
-    #[cfg(test)]
-    if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
-        "restart_none_as_complete",
-    ) {
-        return false;
-    }
-    crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
-        && state.tui_terminal_kind.is_none()
-        && recovery_tmux_session_name(provider, state)
-            .is_some_and(|name| crate::services::discord::turn_bridge::herdr_marked(&name))
-}
+use super::herdr_before_start_restart::herdr_turn_held;
 
 #[path = "restore_inflight/kickoff_identity.rs"]
 mod kickoff_identity;
@@ -122,6 +111,17 @@ async fn restore_inflight_states(
         // An input-protected channel's row waits for its move or handback.
         if crate::services::discord::input_runtime::fence::lookup(provider, state.channel_id)
             .is_some()
+        {
+            continue;
+        }
+        #[cfg(unix)]
+        if super::herdr_before_start_restart::settle_receipt(http, shared, provider, &state).await {
+            continue;
+        }
+        #[cfg(not(unix))]
+        if !inflight::receipt_mutant("all-early")
+            && (state.herdr_before_start_stop.is_some()
+                || inflight::before_start_receipt_present(provider, state.channel_id))
         {
             continue;
         }
@@ -2172,14 +2172,25 @@ async fn restore_inflight_states(
             restore_recovered_session_worktree(session, &state);
         }
 
-        let kickoff = mailbox_recovery_kickoff(
-            shared,
-            channel_id,
-            cancel_token.clone(),
-            kickoff_identity.request_owner,
-            kickoff_identity.user_message_id,
-        )
-        .await;
+        let kickoff = if resume_installed {
+            scoped_restore::checked_kickoff(
+                shared,
+                provider,
+                channel_id,
+                cancel_token.clone(),
+                &state,
+            )
+            .await
+        } else {
+            mailbox_recovery_kickoff(
+                shared,
+                channel_id,
+                cancel_token.clone(),
+                kickoff_identity.request_owner,
+                kickoff_identity.user_message_id,
+            )
+            .await
+        };
 
         let resumed_same_episode = resume_installed
             && kickoff == crate::services::turn_orchestrator::RecoveryKickoffResult::AlreadyActiveSameEpisode;

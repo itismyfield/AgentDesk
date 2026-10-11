@@ -1,6 +1,6 @@
 use super::*;
 
-type StoredDeadLetter = (
+pub(super) type StoredDeadLetter = (
     String,
     String,
     Option<String>,
@@ -106,9 +106,7 @@ async fn production_sweep_too_old_drops_leave_no_outbox_notice_pg() {
             "too-old drops must enqueue no notice, including repeat and new batches"
         );
     }
-    let records: Vec<StoredDeadLetter> = sqlx::query_as(
-        "SELECT kind, channel_id, author_id, message_id, content, reason FROM relay_dead_letter ORDER BY id",
-    ).fetch_all(&pool).await.expect("load dead letters");
+    let records = stored_dead_letters(&pool).await;
     assert_eq!(
         records,
         [
@@ -144,4 +142,52 @@ async fn production_sweep_too_old_drops_leave_no_outbox_notice_pg() {
     assert!(!logs.contains("aggregate resend notice enqueued"), "{logs}");
     pool.close().await;
     pg_db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase1_exhausted_recovery_hold_ttl_boundary_busy_and_cancel_pg() {
+    super::frontier_sweep_tests::exhausted_recovery_tests::assert_hold_ttl_and_cancel_pg(false)
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_exhausted_recovery_hold_ttl_boundary_busy_and_cancel_pg() {
+    super::frontier_sweep_tests::exhausted_recovery_tests::assert_hold_ttl_and_cancel_pg(true)
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase1_exhausted_recovery_ttl_respects_sender_authorization_pg() {
+    super::frontier_sweep_tests::exhausted_recovery_tests::assert_exhausted_recovery_sender_authorization_pg(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_exhausted_recovery_ttl_respects_sender_authorization_pg() {
+    super::frontier_sweep_tests::exhausted_recovery_tests::assert_exhausted_recovery_sender_authorization_pg(true).await;
+}
+
+pub(super) async fn stored_dead_letters(pool: &sqlx::PgPool) -> Vec<StoredDeadLetter> {
+    sqlx::query_as(
+        "SELECT kind, channel_id, author_id, message_id, content, reason FROM relay_dead_letter ORDER BY id",
+    ).fetch_all(pool).await.expect("load dead letters")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase1_exhausted_recovery_unresolved_dispatch_is_preserved_at_ttl_pg() {
+    super::frontier_sweep_tests::exhausted_recovery_tests::assert_exhausted_recovery_unresolved_dispatch_ttl_pg(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase1_exhausted_recovery_expired_hold_does_not_authorize_fresh_dispatch_pg() {
+    super::frontier_sweep_tests::exhausted_recovery_tests::assert_exhausted_recovery_fresh_dispatch_ttl_pg(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_exhausted_recovery_unresolved_dispatch_is_preserved_at_ttl_pg() {
+    super::frontier_sweep_tests::exhausted_recovery_tests::assert_exhausted_recovery_unresolved_dispatch_ttl_pg(true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_exhausted_recovery_expired_hold_does_not_authorize_fresh_dispatch_pg() {
+    super::frontier_sweep_tests::exhausted_recovery_tests::assert_exhausted_recovery_fresh_dispatch_ttl_pg(true).await;
 }

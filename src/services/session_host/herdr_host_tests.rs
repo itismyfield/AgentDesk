@@ -1832,6 +1832,7 @@ fn herdr_items_have_no_production_caller() {
             "HostKindMarker",
             &[
                 MARKER,
+                CLAUDE_LAUNCH, // Guarded relaunch reads the marker only to keep a live session's evidence.
                 GUARD_ADAPTER,
                 CLEANUP_GATE,
                 RESOLVE,
@@ -1847,6 +1848,7 @@ fn herdr_items_have_no_production_caller() {
             "read_host_kind_marker",
             &[
                 MARKER,
+                CLAUDE_LAUNCH, // Guarded relaunch reads the marker only to keep a live session's evidence.
                 CLEANUP_GATE,
                 RESOLVE,
                 GUARD_ADAPTER,
