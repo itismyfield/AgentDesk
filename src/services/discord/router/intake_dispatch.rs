@@ -494,8 +494,7 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
     deps: &'a IntakeDeps<'b>,
     submission: IntakeSubmission,
     checkpoint: impl FnOnce() + Send + 'a,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), super::super::Error>> + Send + 'a>>
-{
+) -> BoxedIntake<'a> {
     Box::pin(async move {
         let admission = admit_text_intake(deps, &submission).await;
         if !matches!(admission, IntakeAdmission::ReplayDeferred(_)) {
@@ -572,15 +571,28 @@ pub(crate) async fn finish_admitted_local(
     }
     let preserve_on_cancel = submission.preserve_on_cancel;
     let queued_drain = matches!(submission.origin, IntakeOrigin::QueuedDrain);
-    message_handler::finish_admitted_local(
+    local_turn(deps, submission, preserve_on_cancel, queued_drain).await
+}
+
+type BoxedIntake<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), super::super::Error>> + Send + 'a>,
+>;
+
+/// Boxed inside a plain function so the turn's large future never sits in the intake frames above it.
+fn local_turn<'a, 'b: 'a>(
+    deps: &'a IntakeDeps<'b>,
+    submission: IntakeSubmission,
+    preserve_on_cancel: bool,
+    queued_drain: bool,
+) -> BoxedIntake<'a> {
+    Box::pin(message_handler::finish_admitted_local(
         deps,
         submission.request,
         preserve_on_cancel,
         queued_drain,
         submission.preloaded_uploads,
         submission.voice_announcement,
-    )
-    .await
+    ))
 }
 
 /// Boxed inside a plain function: a second inline enqueue future would grow the caller's stack frame.
