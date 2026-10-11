@@ -156,9 +156,22 @@ pub(in crate::services::discord) struct Reading {
     watch: Option<Arc<Mutex<Watch>>>,
     #[cfg(all(test, unix))]
     host_checked: bool,
+    /// The lifecycle ticket a strict read was observed under, or the one its adoption advanced to.
+    #[cfg(all(test, unix))]
+    ticket: Option<super::lifecycle::Ticket>,
 }
 
 impl Reading {
+    #[cfg(all(test, unix))]
+    pub(super) fn observed_under(&self) -> Option<&super::lifecycle::Ticket> {
+        self.ticket.as_ref()
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn rebind(&mut self, ticket: super::lifecycle::Ticket) {
+        self.ticket = Some(ticket);
+    }
+
     /// Supplies the receiver's binding identity; the bot id comes from its verified HTTP client.
     #[cfg(all(test, unix))]
     pub(super) fn identity(&self, bot_id: u64) -> Option<super::admission::Identity> {
@@ -256,6 +269,8 @@ impl Reading {
             watch: None,
             #[cfg(all(test, unix))]
             host_checked: false,
+            #[cfg(all(test, unix))]
+            ticket: None,
         }
     }
 
@@ -287,6 +302,8 @@ impl Reading {
             watch: Some(Arc::new(Mutex::new(watch))),
             #[cfg(all(test, unix))]
             host_checked: false,
+            #[cfg(all(test, unix))]
+            ticket: None,
         }
     }
 }
@@ -333,7 +350,8 @@ pub(super) async fn presence_reading_now(
     if ticket.channel() != channel.get() || ticket.incarnation().is_none() {
         return None;
     }
-    let reading = read_now(shared, provider, channel, true).await;
+    let mut reading = read_now(shared, provider, channel, true).await;
+    reading.ticket = Some(ticket.clone());
     ticket.with_current(|_| reading)
 }
 
@@ -356,6 +374,8 @@ async fn read_now(
             watch: None,
             #[cfg(all(test, unix))]
             host_checked,
+            #[cfg(all(test, unix))]
+            ticket: None,
         }
     };
     let shadow = match provider {
@@ -396,6 +416,8 @@ async fn read_now(
             watch: Some(watch),
             #[cfg(all(test, unix))]
             host_checked,
+            #[cfg(all(test, unix))]
+            ticket: None,
         },
         Err(_) => unstamped(observed(Activity::Unknown, "probe_failed")),
     }
