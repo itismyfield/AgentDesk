@@ -11,6 +11,11 @@ use super::{Attempt, Delivery, DraftState, Guard, Outcome, Report, Unconfirmed, 
 pub(super) fn run(attempt: &Attempt<'_>, draft: &[String]) -> Report {
     let mut last = None;
     let report = transact(attempt, draft, &mut last);
+    protect(attempt, &report, last.as_deref());
+    report
+}
+
+pub(super) fn protect(attempt: &Attempt<'_>, report: &Report, last: Option<&str>) {
     let guard = |state| super::super::composer_lock::guard_draft(attempt.request.session, state);
     match report.draft {
         DraftState::Unchanged => {}
@@ -18,10 +23,9 @@ pub(super) fn run(attempt: &Attempt<'_>, draft: &[String]) -> Report {
         DraftState::RestoredObserved => guard(DraftGuard::DraftRestored),
         DraftState::StashedVerified | DraftState::Unknown => {
             guard(DraftGuard::RecoveryRequired);
-            alert(attempt, &report, last.as_deref());
+            alert(attempt, report, last);
         }
     }
-    report
 }
 
 fn transact(attempt: &Attempt<'_>, draft: &[String], last: &mut Option<String>) -> Report {
@@ -66,7 +70,7 @@ fn await_stash(attempt: &Attempt<'_>, last: &mut Option<String>) -> Result<(), V
         if check > 0 {
             std::thread::sleep(attempt.timing.recheck_interval);
         }
-        if !attempt.unattended() {
+        if !attempt.generation_unchanged() {
             return Err(Veto::HumanAttached);
         }
         let Some(after) = attempt.pane.capture() else {

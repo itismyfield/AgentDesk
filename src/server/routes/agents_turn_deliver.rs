@@ -456,6 +456,164 @@ mod pg_tests {
         assert_eq!(channels.map(alerted), [false, false, false, true]);
     }
 
+    /// The HTTP entry carries the resolved channel into the same stash transaction as Discord.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_route_stashes_an_attached_persons_draft_only_on_the_allowlisted_channel_pg() {
+        use crate::services::discord::health::{InjectPane, queue_texts, register_inject_runtime};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let agents = [
+            ("stash-listed", 6_845_611_u64),
+            ("stash-outside", 6_845_612),
+        ];
+        for (agent, channel) in agents {
+            crate::db::agents::insert_agent_channels_for_tests(
+                &pool,
+                agent,
+                Some(&channel.to_string()),
+                None,
+            )
+            .await;
+        }
+        let registry = Arc::new(HealthRegistry::new());
+        let shared = register_inject_runtime(
+            &registry,
+            &agents.map(|(_, channel)| channel),
+            Some(pool.clone()),
+        )
+        .await;
+        let draft = "  사람 초안 첫 줄\n\n  둘째 줄 — 그대로 보존";
+        let mut listed = InjectPane::new(agents[0].1, "external");
+        let mut outside = InjectPane::new(agents[1].1, "external");
+        listed.stash(draft, true);
+        outside.stash(draft, false);
+        let app = router(Some(pool), Some(registry));
+        let input = json!({
+            "text": "status?", "author_discord_user_id": "200",
+            "source": "imessage", "origin_id": "attached-stash-http",
+        })
+        .to_string();
+        let (status, body) = deliver(&app, agents[0].0, &input).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["delivery"], "injected", "{body}");
+        assert!(body["turn_id"].is_null(), "{body}");
+        assert_eq!(listed.applied(), ["C-s", "paste", "Enter"]);
+        assert_eq!(listed.read("composer").as_deref(), Some(draft));
+        assert!(listed.read("stash").is_none());
+        assert_eq!(listed.read("attached").as_deref(), Some("4"));
+        let records = listed.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0], listed.read("buffer").unwrap());
+        assert!(
+            records[0].starts_with("[📱 imessage · 200 · "),
+            "{records:?}"
+        );
+        assert!(records[0].ends_with("\nstatus?"), "{records:?}");
+        assert!(!records[0].contains(draft));
+        assert!(queue_texts(&shared, agents[0].1).await.is_empty());
+
+        let (status, body) = deliver(&app, agents[1].0, &input).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["delivery"], "queued", "{body}");
+        assert_eq!(body["reason"], "handed_back", "{body}");
+        assert_eq!(body["inject_veto"], "human_attached", "{body}");
+        assert_eq!(queue_texts(&shared, agents[1].1).await, ["status?"]);
+        assert!(outside.applied().is_empty());
+        assert!(outside.records().is_empty());
+        assert_eq!(outside.read("composer").as_deref(), Some(draft));
+        assert!(outside.read("stash").is_none());
+    }
+
+    /// Same-generation human typing cannot turn a contaminated submit into confirmed delivery.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_route_reports_contaminated_submit_and_protects_a_mixed_direct_draft_pg() {
+        use crate::services::discord::health::{InjectPane, queue_texts, register_inject_runtime};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let agents = [
+            ("stash-contaminated", 6_845_651_u64),
+            ("direct-mixed", 6_845_652),
+        ];
+        for (agent, channel) in agents {
+            crate::db::agents::insert_agent_channels_for_tests(
+                &pool,
+                agent,
+                Some(&channel.to_string()),
+                None,
+            )
+            .await;
+        }
+        let registry = Arc::new(HealthRegistry::new());
+        let shared = register_inject_runtime(
+            &registry,
+            &agents.map(|(_, channel)| channel),
+            Some(pool.clone()),
+        )
+        .await;
+        let draft = "  첫째 줄 사람 초안\n\n  마지막 줄";
+        let mut contaminated = InjectPane::new(agents[0].1, "external");
+        contaminated.stash(draft, true);
+        // Own capture returns before a person types X and puts the caret back at its old location.
+        contaminated.set("human.3", "x=$(cat \"$d/cursor_x\"); y=$(cat \"$d/cursor_y\"); type_text X; echo \"$x\" > \"$d/cursor_x\"; echo \"$y\" > \"$d/cursor_y\"");
+        let mut direct = InjectPane::new(agents[1].1, "external");
+        direct.stash("", true);
+        direct.set("human.1", "type_text 'person typed '");
+        let app = router(Some(pool), Some(registry));
+        let input = json!({
+            "text": "status?", "author_discord_user_id": "200",
+            "source": "imessage", "origin_id": "contaminated-submit-http",
+        })
+        .to_string();
+        let (status, body) = deliver(&app, agents[0].0, &input).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["delivery"], "unconfirmed", "{body}");
+        assert_eq!(body["detail"], "contaminated_submit", "{body}");
+        assert_eq!(contaminated.applied(), ["C-s", "paste", "Enter"]);
+        assert_eq!(
+            contaminated.records(),
+            [format!("{}X", contaminated.read("buffer").unwrap())]
+        );
+        assert_eq!(contaminated.read("composer").as_deref(), Some(draft));
+        assert!(contaminated.read("stash").is_none());
+        assert_eq!(contaminated.read("attached").as_deref(), Some("4"));
+        assert_eq!(contaminated.read("last").as_deref(), Some("100"));
+        assert_eq!(contaminated.alarm_count("busy_inject_unconfirmed"), 1);
+        assert!(queue_texts(&shared, agents[0].1).await.is_empty());
+
+        let (status, body) = deliver(&app, agents[1].0, &input).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["delivery"], "unconfirmed", "{body}");
+        assert_eq!(direct.applied(), ["paste"]);
+        assert!(direct.records().is_empty());
+        assert!(
+            direct
+                .read("composer")
+                .unwrap()
+                .starts_with("person typed ")
+        );
+        assert_eq!(direct.alarm_count("busy_inject_draft_unrecovered"), 1);
+        assert!(queue_texts(&shared, agents[1].1).await.is_empty());
+        assert_eq!(
+            crate::services::claude_tui::composer_lock::composer_admission(
+                &direct.session(),
+                || None
+            ),
+            crate::services::claude_tui::composer_lock::ComposerAdmission::Held,
+        );
+        let applied = direct.applied();
+        let (status, body) = deliver(&app, agents[1].0, &input).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["delivery"], "queued", "{body}");
+        assert_eq!(body["inject_veto"], "draft", "{body}");
+        assert_eq!(direct.applied(), applied);
+        assert!(direct.records().is_empty());
+        assert_eq!(queue_texts(&shared, agents[1].1).await, ["status?"]);
+    }
+
     /// With the switch off the route answers as it did before injection existed: a start claims
     /// at once even past queued input, no success adds an injection field, and errors keep `detail`.
     #[cfg(unix)]
