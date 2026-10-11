@@ -824,6 +824,9 @@ src/
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
 │   │   │   └── too_old_drop_pg_tests.rs
+│   │   ├── codex_adoption_runtime/
+│   │   │   ├── boot.rs
+│   │   │   └── boot_tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
 │   │   │   │   ├── codex_verified_clear_tests.rs
@@ -1672,6 +1675,7 @@ src/
 │   │   │   ├── rehydration/
 │   │   │   │   ├── child_binding_tests.rs
 │   │   │   │   ├── codex_marker.rs
+│   │   │   │   ├── discovery_pass_tests.rs
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── relay_e2e/
 │   │   │   │   ├── cancel_backstop_e2e_tests/
@@ -1682,6 +1686,7 @@ src/
 │   │   │   │   ├── catch_up_pagination_e2e.rs
 │   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
+│   │   │   │   ├── herdr_terminate_e2e_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
@@ -1995,6 +2000,7 @@ src/
 │   │   ├── bot_role.rs
 │   │   ├── busy_followup_retry_store.rs
 │   │   ├── catch_up.rs
+│   │   ├── codex_adoption_runtime.rs
 │   │   ├── compact_turn_authority.rs
 │   │   ├── completion_footer_metadata.rs
 │   │   ├── delivery_lease_cell.rs
