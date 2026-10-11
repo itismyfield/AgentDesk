@@ -395,10 +395,11 @@ mod presence_admission {
         let Some(log) = logs.get(&path) else {
             return Ok(None);
         };
+        // A seq restored without its writer, or left after a poisoned one, proves no healthy log.
         let healthy = log
             .writer
             .as_ref()
-            .is_none_or(|writer| !writer.poisoned && !writer.tainted);
+            .is_some_and(|writer| !writer.poisoned && !writer.tainted);
         Ok((healthy && *log.notify.borrow() == expected).then(hand_off))
     }
 }

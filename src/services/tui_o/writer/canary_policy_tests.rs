@@ -188,7 +188,10 @@ async fn exercise_actor(alternate_owner: bool) {
         bindings.commit(event);
         harness.gate.acquired();
         let before = harness.channel().cursor(&source).unwrap().captured_through;
-        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Codex, bindings);
+        let turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook = super::host_start::CountedTurn(Arc::clone(&turns));
+        let writer = harness.writer().with_repost(Some(Box::new(hook)));
+        let (stop, task) = spawn_with(writer, ShadowProvider::Codex, bindings);
         for line in [
             output_line(
                 "event_msg",
@@ -218,6 +221,9 @@ async fn exercise_actor(alternate_owner: bool) {
             );
         }
         assert!(harness.alarms.taken().is_empty());
+        // A channel held from delivery never runs its re-post turn; a delivering one does.
+        let turned = turns.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(turned > 0, alternate_owner, "re-post turns: {turned}");
         halt(stop, task).await;
         assert_eq!(
             dedupe::binding_events::codex::read_ownership(&old_context).unwrap(),

@@ -69,12 +69,15 @@ pub(crate) struct Activation {
 pub(crate) struct Intent {
     pub(crate) key: Option<PieceKey>,
     pub(crate) payload_sha256: String,
+    /// The activation the original was sent under.
+    pub(crate) generation: u64,
 }
 
 /// The replayed sidecar.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Provenance {
-    activation: Option<Activation>,
+    /// Every activation by generation; a later one never takes an earlier one's originals.
+    activations: BTreeMap<u64, u64>,
     intents: BTreeMap<u64, Intent>,
     pending: BTreeSet<u64>,
     admitted: BTreeSet<u64>,
@@ -84,7 +87,19 @@ pub(crate) struct Provenance {
 impl Provenance {
     /// The latest activation; none means re-post never ran here.
     pub(crate) fn activation(&self) -> Option<Activation> {
-        self.activation
+        let (&generation, &frontier) = self.activations.last_key_value()?;
+        Some(Activation {
+            generation,
+            frontier,
+        })
+    }
+
+    /// Whether `serial` was prepared within the on interval of `generation`, the activation its
+    /// intent was written under: at or past that activation's frontier.
+    pub(crate) fn sent_while_on(&self, serial: u64, generation: u64) -> bool {
+        self.activations
+            .get(&generation)
+            .is_some_and(|&frontier| serial >= frontier)
     }
 
     pub(crate) fn intent(&self, serial: u64) -> Option<&Intent> {
@@ -110,22 +125,22 @@ impl Provenance {
                 generation,
                 frontier,
             } => {
-                self.activation = Some(Activation {
-                    generation,
-                    frontier,
-                })
+                // The first record of a generation stands, so a conflicting one never moves it.
+                self.activations.entry(generation).or_insert(frontier);
             }
             ProvenanceEntry::Intent {
                 serial,
                 unit_key,
                 piece_index,
                 payload_sha256,
+                generation,
                 ..
             } => {
                 let key = PieceKey::new(unit_key, piece_index);
                 let intent = Intent {
                     key,
                     payload_sha256,
+                    generation,
                 };
                 self.intents.insert(serial, intent);
             }
@@ -145,6 +160,11 @@ impl Provenance {
 pub(crate) struct ProvenanceLog {
     path: PathBuf,
     state: Provenance,
+    /// Set when an append failed part way: its bytes may sit at the tail, so nothing more is
+    /// written until a reopen cuts them.
+    poisoned: bool,
+    #[cfg(test)]
+    pub(crate) fail_after: Option<usize>,
 }
 
 impl ProvenanceLog {
@@ -162,6 +182,9 @@ impl ProvenanceLog {
         Ok(Self {
             path: path.to_owned(),
             state,
+            poisoned: false,
+            #[cfg(test)]
+            fail_after: None,
         })
     }
 
@@ -177,16 +200,34 @@ impl ProvenanceLog {
         };
         let mut bytes = serde_json::to_vec(&line).map_err(io::Error::other)?;
         bytes.push(b'\n');
-        let mut file = OpenOptions::new().append(true).open(&self.path)?;
-        file.write_all(&bytes)?;
-        file.sync_data()?;
+        if self.poisoned {
+            let detail = "an earlier append failed; reopen the sidecar first";
+            return Err(io::Error::other(detail));
+        }
+        let written = self.write(&bytes);
+        self.poisoned = written.is_err();
+        written?;
         self.state.apply(entry);
         Ok(())
     }
 
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let mut file = OpenOptions::new().append(true).open(&self.path)?;
+        #[cfg(test)]
+        if let Some(cut) = self.fail_after.take() {
+            file.write_all(&bytes[..cut.min(bytes.len())])?;
+            return Err(io::Error::other("injected write failure"));
+        }
+        file.write_all(bytes)?;
+        file.sync_data()
+    }
+
     /// Records an observed off-to-on switch; pieces prepared before `frontier` stay out.
     pub(crate) fn activate(&mut self, frontier: u64) -> io::Result<Activation> {
-        let generation = self.state.activation.map_or(1, |last| last.generation + 1);
+        let generation = self
+            .state
+            .activation()
+            .map_or(1, |last| last.generation + 1);
         self.append(ProvenanceEntry::Activated {
             generation,
             frontier,

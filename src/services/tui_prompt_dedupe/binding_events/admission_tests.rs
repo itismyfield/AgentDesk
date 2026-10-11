@@ -110,3 +110,32 @@ fn b2_first_poll_handoff_and_real_commit_share_the_log_mutex() {
     assert_eq!(admit_committed_seq(channel, 1, || 8).unwrap(), None);
     assert_eq!(admit_committed_seq(channel, 2, || 9).unwrap(), Some(9));
 }
+
+#[test]
+fn b2b1_seq_admission_refuses_a_cached_seq_without_a_healthy_writer() {
+    let root = tempfile::tempdir().unwrap();
+    let channel = 6_325_803;
+    let path = {
+        let _scope = BindingRoot::enter(root.path());
+        pending(channel, &root.path().join("a.jsonl"));
+        let path = log_path(channel).unwrap().unwrap();
+        assert_eq!(admit_committed_seq(channel, 1, || 1).unwrap(), Some(1));
+        // A poisoned writer is dropped and leaves its cached seq behind.
+        lock_logs().get_mut(&path).unwrap().writer = None;
+        assert_eq!(admit_committed_seq(channel, 1, || 2).unwrap(), None);
+        path
+    };
+    // A restored log reads its seq back, but no writer has loaded it yet.
+    let restored = tempfile::tempdir().unwrap();
+    let _scope = BindingRoot::enter(restored.path());
+    let copy = restored
+        .path()
+        .join(path.strip_prefix(root.path()).unwrap());
+    fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    fs::copy(&path, &copy).unwrap();
+    assert_eq!(*subscribe_binding_events(channel).unwrap().borrow(), 1);
+    assert_eq!(admit_committed_seq(channel, 1, || 3).unwrap(), None);
+    // A real commit loads a healthy writer; the seq it then holds admits.
+    pending(channel, &restored.path().join("b.jsonl"));
+    assert_eq!(admit_committed_seq(channel, 2, || 4).unwrap(), Some(4));
+}

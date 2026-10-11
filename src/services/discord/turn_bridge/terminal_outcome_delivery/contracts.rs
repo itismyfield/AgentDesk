@@ -266,6 +266,7 @@ impl TerminalOutcomeDeliveryOutput {
 pub(super) struct DeliveryEpilogueContext<'a> {
     pub(super) shared_owned: &'a Arc<SharedData>,
     pub(super) gateway: &'a Arc<dyn TurnGateway>,
+    pub(super) cancel_token: &'a Arc<crate::services::provider::CancelToken>,
     pub(super) provider: &'a ProviderKind,
     pub(super) channel_id: ChannelId,
     pub(super) user_msg_id: Option<MessageId>,

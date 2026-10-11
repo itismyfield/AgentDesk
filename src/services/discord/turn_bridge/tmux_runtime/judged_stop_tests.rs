@@ -842,3 +842,121 @@ fn a_stop_judged_before_its_herdr_turn_prepared_never_cancels_it() {
         HERDR_CANCEL_OVERRIDE.set(None);
     });
 }
+
+fn b2b1_watch(shared: &SharedData, channel: ChannelId, session: &str) {
+    shared.tmux_watchers.insert(
+        channel,
+        crate::services::discord::TmuxWatcherHandle {
+            tmux_session_name: session.into(),
+            output_path: format!("/tmp/{session}.jsonl"),
+            paused: Arc::new(false.into()),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(false.into()),
+            pause_epoch: Arc::new(0.into()),
+            turn_delivered: Arc::new(false.into()),
+            last_heartbeat_ts_ms: Arc::new(chrono::Utc::now().timestamp_millis().into()),
+        },
+    );
+}
+
+// Only a published cancel withdraws: a refused host or a turn replaced before the cancel keeps
+// the channel's approval.
+#[test]
+fn b2b1_a_user_stop_withdraws_only_when_its_cancel_is_published() {
+    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
+    let fx = Fixture::new();
+    run(async {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let probe = Probe::install(&shared);
+        fx.serve(Server::Live);
+        let provider = ProviderKind::Claude;
+        let refused = ChannelId::new(5_340_690_010);
+        let name = "AgentDesk-claude-b2b1-refused";
+        mark(name, Mark::Herdr);
+        start(&shared, refused, &Arc::new(CancelToken::new())).await;
+        inflight_row(&provider, refused, name, false);
+        let ticket = probe.arm(refused.get());
+        let stop = begin_user_stop(&shared, &provider, refused, true, "/stop").await;
+        assert!(matches!(stop, CommandStop::HostRefused));
+        assert!(Probe::current(&ticket), "a refused host keeps its approval");
+
+        let admitted = ChannelId::new(5_340_690_020);
+        let name = "AgentDesk-claude-b2b1-admitted";
+        mark(name, Mark::Absent);
+        start(&shared, admitted, &Arc::new(CancelToken::new())).await;
+        inflight_row(&provider, admitted, name, false);
+        let ticket = probe.arm(admitted.get());
+        let stop = begin_user_stop(&shared, &provider, admitted, true, "/stop").await;
+        assert!(matches!(stop, CommandStop::Stop(_)));
+        assert!(!Probe::current(&ticket), "the published cancel withdraws");
+
+        let replaced = ChannelId::new(5_340_690_030);
+        let name = "AgentDesk-claude-b2b1-replaced";
+        mark(name, Mark::Absent);
+        start(&shared, replaced, &bound_token(&provider, name)).await;
+        let judge = ChannelStop::judge(&shared, &provider, replaced, None, false);
+        let stop = judge.await.expect("a judged turn").expect("an active turn");
+        crate::services::discord::mailbox_finish_turn(&shared, &provider, replaced).await;
+        start(&shared, replaced, &bound_token(&provider, name)).await;
+        let ticket = probe.arm(replaced.get());
+        assert!(stop.cancel().await.token.is_none());
+        assert!(
+            Probe::current(&ticket),
+            "a cancel that missed its turn withdraws nothing"
+        );
+    });
+}
+
+// The common stop withdraws the live watcher's channel as it starts, never a successor at its
+// completion, and nothing for a name with no live watcher or a refused host.
+#[test]
+fn b2b1_the_common_stop_withdraws_its_live_session_channel_as_it_starts() {
+    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
+    use std::task::Poll;
+    let fx = Fixture::new();
+    run(async {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let probe = Probe::install(&shared);
+        fx.serve(Server::Live);
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(5_340_690_040);
+        let name = "AgentDesk-claude-b2b1-common";
+        mark(name, Mark::Absent);
+        b2b1_watch(&shared, channel, name);
+        let ticket = probe.arm(channel.get());
+        let token = bound_token(&provider, name);
+        let policy = TmuxCleanupPolicy::PreserveSession;
+        let mut stop = Box::pin(super::super::stop_active_turn(
+            &provider, &token, policy, "b2b1",
+        ));
+        let first = std::future::poll_fn(|cx| Poll::Ready(stop.as_mut().poll(cx))).await;
+        assert!(first.is_pending(), "the stop awaits its interrupt");
+        assert!(!Probe::current(&ticket), "withdrawn as the stop starts");
+        let successor = probe.arm(channel.get());
+        stop.await;
+        assert!(
+            Probe::current(&successor),
+            "its completion looks up no successor"
+        );
+
+        let restored = ChannelId::new(5_340_690_050);
+        let name = "AgentDesk-claude-b2b1-restored";
+        mark(name, Mark::Absent);
+        shared
+            .tmux_watchers
+            .restore_owner_channel_for_tmux_session(name, restored);
+        let refused = ChannelId::new(5_340_690_060);
+        let herdr = "AgentDesk-claude-b2b1-herdr";
+        mark(herdr, Mark::Herdr);
+        b2b1_watch(&shared, refused, herdr);
+        let tickets = [probe.arm(restored.get()), probe.arm(refused.get())];
+        for session in [name, herdr] {
+            let token = bound_token(&provider, session);
+            super::super::stop_active_turn(&provider, &token, policy, "b2b1").await;
+        }
+        assert!(
+            tickets.iter().all(Probe::current),
+            "no live watcher or a refused host"
+        );
+    });
+}
