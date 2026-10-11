@@ -705,6 +705,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/tmux_watcher/turn_stream_collector/observations.rs",
         "src/services/discord/inflight/o_seed_observation/terminal_barrier_test.rs",
         "src/services/discord/inflight/o_seed_observation/initial_parse_barrier_test.rs",
+        "src/services/discord/router/message_handler/provider_dispatch/producer_error_test_support.rs",
     }
 )
 

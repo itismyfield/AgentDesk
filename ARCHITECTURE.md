@@ -1403,6 +1403,8 @@ src/
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
+│   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   └── producer_error_test_support.rs
 │   │   │   │   ├── tui_followup/
 │   │   │   │   │   └── codex_observation.rs
 │   │   │   │   ├── attachments.rs
@@ -1920,6 +1922,7 @@ src/
 │   │   │   ├── context_window.rs
 │   │   │   ├── current_message_anchor.rs
 │   │   │   ├── early_tui_completion.rs
+│   │   │   ├── entry_abort_cold_error_tests.rs
 │   │   │   ├── entry_abort_mailbox_tests.rs
 │   │   │   ├── finalize_epilogue.rs
 │   │   │   ├── followup_requeue.rs
