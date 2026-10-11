@@ -41,7 +41,8 @@ import sys
 import tomllib
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from functools import cache
+from collections.abc import Callable
+from functools import cache, partial
 from pathlib import Path
 
 MOD_DECL = re.compile(
@@ -162,6 +163,33 @@ SOURCE_FLOOR_REL = Path("scripts/test_target_integrity_source_floors.txt")
 # The one run-time skip array whose generated values are read, not guessed.
 NON_PG_FILTER_REL = Path("scripts/ci/non-pg-test-filter.sh")
 NON_PG_SKIP_TOKEN = "${NON_PG_SKIP_ARGS[@]}"
+# The PG selection the same file derives from those pairs; restored, never guessed.
+PG_INCLUDE_TOKEN = "${PG_INCLUDE_ARGS[@]}"
+PG_INCLUDE_USE = re.compile(r"\$\{?PG_INCLUDE_ARGS\b")
+# The file's code after its generated region, blanks collapsed: the one derivation
+# whose PG_INCLUDE_ARGS value per PG_INCLUDE_SHARD is read without running Bash.
+PG_INCLUDE_DERIVATION = tuple("""\
+readonly -a NON_PG_SKIP_ARGS
+readonly -a NON_PG_FILTER_REPLAY
+readonly -a PG_INCLUDE_ARGS_SHARD_0
+readonly -a PG_INCLUDE_ARGS_SHARD_1
+PG_INCLUDE_ARGS=()
+for ((index = 1; index < ${#NON_PG_SKIP_ARGS[@]}; index += 2)); do
+PG_INCLUDE_ARGS+=("${NON_PG_SKIP_ARGS[$index]}")
+done
+unset index
+case "${PG_INCLUDE_SHARD-}" in
+"") ;;
+0) PG_INCLUDE_ARGS=("${PG_INCLUDE_ARGS_SHARD_0[@]}") ;;
+1) PG_INCLUDE_ARGS=("${PG_INCLUDE_ARGS_SHARD_1[@]}") ;;
+*)
+echo "PG_INCLUDE_SHARD must be 0 or 1, got: ${PG_INCLUDE_SHARD}" >&2
+return 1
+;;
+esac
+readonly -a PG_INCLUDE_ARGS""".splitlines())
+# A word ending one command and starting another; redirections such as `2>&1` are not.
+SHELL_CONTROL = re.compile(r"[;|]|&&|(?<![<>])&(?!>)")
 # Violation kind prefix for a generated array expanded without a proven source.
 KNOWN_ARRAY_KINDS = {"NON_PG_SKIP_ARGS": "non-pg", "PG_INCLUDE_ARGS": "pg-include"}
 LIB_INVENTORY_MANIFEST_HEADER = (
@@ -884,6 +912,9 @@ def _direct_cargo_test(words: list[str]) -> list[str] | None:
         while index < len(words) and SHELL_ASSIGNMENT.fullmatch(words[index]):
             index += 1
         if words[index:index + 2] == ["cargo", "test"]:
+            # A second command on the line would ride along as cargo argv, unjudged.
+            if any(SHELL_CONTROL.search(word) for word in words[index:]):
+                return None
             return words[index:]
         if index >= len(words):
             return None
@@ -1070,6 +1101,9 @@ class CommandSpec:
     # Of those expansions, the generated NON_PG_SKIP_ARGS array, or any other.
     non_pg_skip: bool = False
     opaque_skip: bool = False
+    # PG_INCLUDE_ARGS as one whole libtest word: restored per shard before judging,
+    # and a restored selection running nothing is the generated array's fault.
+    pg_include: bool = False
 
 
 def parse_command(words: list[str]) -> CommandSpec:
@@ -1088,7 +1122,7 @@ def parse_command(words: list[str]) -> CommandSpec:
     manifest_path = ""
     ignored_only = False
     target_inconclusive = False
-    unknown_skip = non_pg_skip = opaque_skip = False
+    unknown_skip = non_pg_skip = opaque_skip = pg_include = False
 
     def dynamic(token: str) -> bool:
         return bool(DYNAMIC_TOKEN.search(token))
@@ -1101,12 +1135,14 @@ def parse_command(words: list[str]) -> CommandSpec:
             skip_filters.append(value)
 
     def bare_word(token: str, libtest: bool = False) -> None:
-        nonlocal unknown_skip, non_pg_skip, opaque_skip
+        nonlocal unknown_skip, non_pg_skip, opaque_skip, pg_include
         # An expansion may word-split into --skip/--exact/--ignored at run time.
         if SHELL_EXPANSION.search(token):
             unknown_skip = True
             if libtest and token == NON_PG_SKIP_TOKEN:
                 non_pg_skip = True
+            elif libtest and token == PG_INCLUDE_TOKEN:
+                pg_include = True
             else:
                 opaque_skip = True
         if not token.startswith("-") and not dynamic(token):
@@ -1197,7 +1233,7 @@ def parse_command(words: list[str]) -> CommandSpec:
         targets_tuple, tuple(filters), tuple(skip_filters), exact, selection,
         bool(unjudged), target_inconclusive, classes_tuple,
         tuple(dict.fromkeys(packages)), unjudged, manifest_path, ignored_only,
-        unknown_skip, non_pg_skip, opaque_skip,
+        unknown_skip, non_pg_skip, opaque_skip, pg_include,
     )
 
 
@@ -1235,6 +1271,7 @@ class PackageTestIds:
         self._ids: dict[str, frozenset[str] | str] = {}
         self._non_pg: tuple[str, ...] | None = None
         self._non_pg_read = False
+        self._pg_include: dict[str, tuple[str, ...]] | str | None = None
 
     def manifest(self) -> dict:
         if self._manifest is None:
@@ -1292,6 +1329,41 @@ class PackageTestIds:
                             for value in values):
                 self._non_pg = values
         return self._non_pg
+
+    def pg_include_selections(self) -> dict[str, tuple[str, ...]] | str:
+        """PG_INCLUDE_ARGS for PG_INCLUDE_SHARD unset (""), 0 and 1, else why the
+        generated file does not prove them; only its canonical shape is read."""
+        if self._pg_include is None:
+            self._pg_include = self._read_pg_include()
+        return self._pg_include
+
+    def _read_pg_include(self) -> dict[str, tuple[str, ...]] | str:
+        skips = self.non_pg_skip_filters()
+        if skips is None:
+            return "its NON_PG_SKIP_ARGS pairs are unreadable"
+        contract = _membership()
+        try:
+            lines = (self.repo_root / NON_PG_FILTER_REL).read_text("utf-8").splitlines()
+            start = lines.index(contract.NON_PG_SELECTION_BEGIN)
+            stop = lines.index(contract.NON_PG_SELECTION_END, start)
+            region = lines[start:stop + 1]
+            replay_at = region.index("NON_PG_FILTER_REPLAY=(") + 1
+            replay = tuple(line.strip() for line in region[replay_at:region.index(")", replay_at)])
+            # The shards are PGM's own split of the pairs, so the region must render from them.
+            shards = contract.pg_include_shards(skips)
+            expected = contract.render_non_pg_selection(skips, replay)
+        except (OSError, UnicodeError, ValueError) as error:
+            return str(error) or type(error).__name__
+        code = [" ".join(line.split()) for line in lines[stop + 1:]
+                if line.strip() and not line.lstrip().startswith("#")]
+        size = len(PG_INCLUDE_DERIVATION)
+        # Only comments precede the region, so nothing can guard or skip the derivation.
+        if any(line.strip() and not line.lstrip().startswith("#") for line in lines[:start]) \
+                or lines.count(contract.NON_PG_SELECTION_BEGIN) != 1 or region != expected \
+                or tuple(code[:size]) != PG_INCLUDE_DERIVATION \
+                or any("PG_INCLUDE" in line for line in code[size:]):
+            return "it departs from the generated region or the PG_INCLUDE_ARGS derivation"
+        return {"": skips, "0": shards[0], "1": shards[1]}
 
     def target_flag(self, target: str, flag: str) -> bool:
         """A target's `test`/`bench`/`doctest` flag: manifest, else Cargo's default."""
@@ -1424,6 +1496,11 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
     # Restored skips drop the selected targets' own candidates too.
     rule = live_rule if live_rule is not None else spec
     final = _lib_selection(rule, frozenset(selected_ids))
+    if spec.pg_include and not final:
+        # The generated selection itself runs nothing: no allowlist or doctest excuses it.
+        return findings + [("pg-include-zero-match", (
+            f"restored PG_INCLUDE_ARGS selects 0 static test IDs in {selection_name} "
+            "after its positive and skip filters"))]
     swept_elsewhere = 0
     empty: list[tuple[str, str]] = []
     for filt in spec.filters:
@@ -1892,6 +1969,41 @@ def known_array_findings(shells: list[list[tuple[int, str]]], extracted: set[int
     return findings
 
 
+def pg_include_findings(words: list[str], spec: CommandSpec, shards: tuple[str, ...] | None,
+                        view: PackageTestIds,
+                        judge: Callable[[CommandSpec], list[tuple[str, str]]]) \
+        -> list[tuple[str, str]]:
+    """Judge a PG_INCLUDE_ARGS command once per PG_INCLUDE_SHARD value it may run
+    under (``shards``, None when unprovable), the array's words restored in place."""
+    if not spec.pg_include or sum(bool(PG_INCLUDE_USE.search(word)) for word in words) != 1:
+        return [("pg-include-usage-unresolved", (
+            f"only one whole \"{PG_INCLUDE_TOKEN}\" libtest word after `--` can be "
+            "restored, so the arguments this expansion passes are unknown"))]
+    selections = view.pg_include_selections()
+    if isinstance(selections, str):
+        return [("pg-include-unresolved", (
+            f"PG_INCLUDE_ARGS is a canonical known array, but {NON_PG_FILTER_REL} has "
+            f"no provable derived selection: {selections}"))]
+    if shards is None:
+        return [("pg-include-shard-unresolved", (
+            "this workflow names PG_INCLUDE_SHARD, so it cannot be proved unset, 0 or 1 "
+            "at the canonical source point"))]
+    at = words.index(PG_INCLUDE_TOKEN)
+    findings: list[tuple[str, str]] = []
+    for shard in shards:
+        args = selections[shard]
+        if parse_command(["cargo", "test", "--", *args]).filters:
+            # Reparsed, the restored words keep libtest's meaning and every other expansion.
+            found = judge(replace(parse_command([*words[:at], *args, *words[at + 1:]]),
+                                  pg_include=True))
+        else:
+            found = [("pg-include-empty", "PG_INCLUDE_ARGS contains no positive libtest "
+                      "filters; an empty expansion would widen this run")]
+        label = f"PG_INCLUDE_SHARD={shard}" if shard else "PG_INCLUDE_SHARD unset"
+        findings.extend((kind, f"{label}: {detail}") for kind, detail in found)
+    return findings
+
+
 def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str] | dict[str, int],
                     with_list_check: bool,
                     lib_test_ids: frozenset[str] | None = None,
@@ -1951,6 +2063,13 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str] 
             shells.get(source, []), extracted,
             "recipe line" if source == justfile else "run scalar")
         texts = {lineno: text.strip() for shell in shells.get(source, []) for lineno, text in shell}
+        if source == justfile:
+            # A recipe may inherit any shard, and sourcing fails on every other value.
+            shards: tuple[str, ...] | None = ("", "0", "1")
+        else:
+            # A workflow that never names the shard leaves it unset where a job sources the file.
+            named = "PG_INCLUDE_SHARD" in _membership()._strip_comments(source.read_text("utf-8"))
+            shards = None if named else ("",)
         violations.extend(Violation(rel, lineno, texts[lineno], kind, detail)
                           for lineno, found in sorted(known.items())
                           if lineno not in extracted for kind, detail in found)
@@ -1965,10 +2084,10 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str] 
             notes: list[str] = []
             if spec.skipped and (spec.filters or spec.skip_filters):
                 notes.append(f"unjudged: {spec.unjudged}")
-            findings = validate_command(
-                spec, inventories, repo_root, lib_test_ids,
-                view=view, notes=notes,
-            )
+            judge = partial(validate_command, inventories=inventories, repo_root=repo_root,
+                            lib_test_ids=lib_test_ids, view=view, notes=notes)
+            findings = pg_include_findings(words, spec, shards, view, judge) \
+                if any(PG_INCLUDE_USE.search(word) for word in words) else judge(spec)
             if diagnostics is not None:
                 diagnostics.extend(f"{rel}:{lineno}: {note} (command: {normalized})"
                                    for note in notes)

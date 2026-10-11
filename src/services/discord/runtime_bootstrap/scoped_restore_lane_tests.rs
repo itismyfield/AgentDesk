@@ -192,3 +192,39 @@ fn s3act_b2_scope_requires_local_identity_and_tracks_all_axes() {
     row.channel_id = "0".into();
     assert!(RestoreScope::new(&row, "claude", "mini").is_err());
 }
+
+#[tokio::test]
+async fn s3act_b3a1_retryable_failure_survives_witness_and_fresh_reentry() {
+    use crate::services::cluster::channel_home_port::RestoreFailure;
+    let lane = ScopedRestoreLane::new(5340424);
+    let home = super::scoped_inflight_restore_tests::home(5340424, HomeState::Worker);
+    let scope = RestoreScope::new(&home, "claude", "mini").unwrap();
+    lane.run(scope.clone(), 1, |_| async {
+        Err(RestoreFailure::retryable("row busy").into())
+    })
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(
+        lane.witness().status,
+        RestoreStatus::Blocked(RestoreFailure::Retryable("row busy".into()))
+    );
+    lane.run(scope, 2, |mut attempt| async move {
+        for stage in [
+            InstallStage::Queue,
+            InstallStage::Inflight,
+            InstallStage::Marker,
+            InstallStage::Placeholder,
+        ] {
+            attempt.acknowledge(stage)?;
+        }
+        attempt.observe(InflightObservation::Empty);
+        attempt.finish()?;
+        Ok(())
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(lane.witness().status, RestoreStatus::Restored);
+    assert_eq!(lane.witness().generation, 2);
+}

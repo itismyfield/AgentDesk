@@ -1,7 +1,7 @@
-//! `session_hosts`: the channels a Herdr endpoint runs. Read once at boot; an empty section
-//! leaves every channel on the host it had before.
+//! `session_hosts`: the channels a Herdr endpoint runs, and the Claude channels whose tmux
+//! sessions open at the guarded geometry. Read once at boot; an empty section changes nothing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -9,20 +9,24 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::Config;
-use crate::services::provider_hosting::RuntimeMode;
+use crate::services::provider_hosting::channel_effective_tui_request;
 
 const CHANNELS_KEY: &str = "session_hosts.herdr.channels";
+const CLAUDE_GUARD_KEY: &str = "session_hosts.claude_guard_channels";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionHostsConfig {
     #[serde(default, skip_serializing_if = "HerdrSection::is_empty")]
     pub herdr: HerdrSection,
+    /// Claude TUI channels whose new tmux sessions open at the fixed guarded geometry.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub claude_guard_channels: BTreeSet<u64>,
 }
 
 impl SessionHostsConfig {
     pub fn is_empty(&self) -> bool {
-        self.herdr.is_empty()
+        self.herdr.is_empty() && self.claude_guard_channels.is_empty()
     }
 }
 
@@ -95,6 +99,10 @@ impl BootSessionHosts {
     pub(crate) fn config(&self) -> &SessionHostsConfig {
         &self.config
     }
+
+    pub(crate) fn claude_guarded(&self, channel: u64) -> bool {
+        self.config.claude_guard_channels.contains(&channel)
+    }
 }
 
 /// Every endpoint complete with absolute paths, every channel a registered TUI on a known endpoint.
@@ -133,7 +141,7 @@ pub(crate) fn validate(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>
         let Some(endpoint) = herdr.endpoints.get(key) else {
             anyhow::bail!("{CHANNELS_KEY}: channel {channel} names unknown endpoint {key:?}");
         };
-        bound_as_tui(config, channel)?;
+        bound_as_tui(config, CHANNELS_KEY, channel, &["claude", "codex"])?;
         let endpoint = ChannelEndpoint {
             key: key.clone(),
             execution_node: endpoint.execution_node.trim().to_owned(),
@@ -146,11 +154,20 @@ pub(crate) fn validate(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>
             "{CHANNELS_KEY}: channel {channel} is listed twice"
         );
     }
+    // A guarded channel is a tmux Claude TUI; a Herdr channel never gets a tmux session.
+    for &channel in &config.session_hosts.claude_guard_channels {
+        ensure!(channel != 0, "{CLAUDE_GUARD_KEY}: 0 is not a channel id");
+        ensure!(
+            !channels.contains_key(&channel),
+            "{CLAUDE_GUARD_KEY}: channel {channel} runs on Herdr"
+        );
+        bound_as_tui(config, CLAUDE_GUARD_KEY, channel, &["claude"])?;
+    }
     Ok(channels)
 }
 
-/// The channel must be bound to an agent, and every binding of it must run as a Claude or Codex TUI.
-fn bound_as_tui(config: &Config, channel: u64) -> Result<()> {
+/// The channel must be bound to an agent, and every binding of it must run as a TUI of `providers`.
+fn bound_as_tui(config: &Config, key: &str, channel: u64, providers: &[&str]) -> Result<()> {
     let bindings = config.agents.iter().flat_map(|agent| agent.channels.iter());
     let mut found = false;
     for (provider_key, binding) in bindings {
@@ -162,27 +179,15 @@ fn bound_as_tui(config: &Config, channel: u64) -> Result<()> {
             .provider()
             .unwrap_or_else(|| provider_key.to_owned());
         let provider = provider.trim().to_ascii_lowercase();
-        let provider_config = config
-            .providers
-            .iter()
-            .find(|(key, _)| key.trim().eq_ignore_ascii_case(&provider))
-            .map(|(_, value)| value);
-        let runtime = binding
-            .runtime_mode_raw()
-            .or_else(|| provider_config.and_then(|config| config.runtime.clone()));
-        let tui = match runtime {
-            Some(raw) => RuntimeMode::parse(&raw) == Some(RuntimeMode::Tui),
-            None => binding
-                .tui_hosting()
-                .or_else(|| provider_config.and_then(|config| config.tui_hosting))
-                .unwrap_or_else(|| super::default_provider_tui_hosting(&provider)),
-        };
+        // The hosting resolver's own rule: a blank or unknown runtime falls back to tui_hosting.
+        let tui = channel_effective_tui_request(config, binding, &provider);
         ensure!(
-            matches!(provider.as_str(), "claude" | "codex") && tui,
-            "{CHANNELS_KEY}: channel {channel} is not a Claude or Codex TUI channel"
+            providers.contains(&provider.as_str()) && tui,
+            "{key}: channel {channel} is not a {} TUI channel",
+            providers.join(" or ")
         );
     }
-    ensure!(found, "{CHANNELS_KEY}: channel {channel} is not registered");
+    ensure!(found, "{key}: channel {channel} is not registered");
     Ok(())
 }
 
@@ -206,6 +211,11 @@ pub(crate) fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) ->
 
 pub(crate) fn herdr_endpoint(channel: u64) -> Option<ChannelEndpoint> {
     with_boot(|boot| boot.and_then(|boot| boot.herdr_endpoint(channel)).cloned())
+}
+
+/// Whether a Claude tmux launch for the channel opens at the guarded geometry; `None` never does.
+pub(crate) fn claude_guarded(channel: Option<u64>) -> bool {
+    channel.is_some_and(|channel| with_boot(|boot| boot.is_some_and(|b| b.claude_guarded(channel))))
 }
 
 /// Every Herdr-configured channel id as text, for SQL that must leave their rows alone.
@@ -235,6 +245,15 @@ pub(crate) fn force_for_test(
     local_node: Option<&str>,
     channels: &[(u64, &str)],
 ) -> ForcedSessionHosts {
+    force_with_claude_guard_for_test(local_node, channels, &[])
+}
+
+#[cfg(test)]
+pub(crate) fn force_with_claude_guard_for_test(
+    local_node: Option<&str>,
+    channels: &[(u64, &str)],
+    claude_guard: &[u64],
+) -> ForcedSessionHosts {
     let endpoint = |execution_node: &str| ChannelEndpoint {
         key: format!("{execution_node}-endpoint"),
         execution_node: execution_node.to_owned(),
@@ -246,7 +265,10 @@ pub(crate) fn force_for_test(
         .iter()
         .map(|(channel, node)| (*channel, endpoint(node)))
         .collect();
-    let mut config = SessionHostsConfig::default();
+    let mut config = SessionHostsConfig {
+        claude_guard_channels: claude_guard.iter().copied().collect(),
+        ..SessionHostsConfig::default()
+    };
     for (channel, endpoint) in &channels {
         let written = EndpointConfig {
             execution_node: endpoint.execution_node.clone(),

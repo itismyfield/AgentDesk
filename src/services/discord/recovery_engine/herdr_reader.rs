@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use sqlx::PgPool;
 use tokio::runtime::Handle;
 
+use super::super::codex_adoption_runtime::ObservationRuntimeId;
 use super::super::codex_adoption_runtime::boot::{DiscoveryPass, LiveSource};
 use super::host_reconcile::{
     HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading, HostReconcile,
@@ -104,8 +105,26 @@ impl Reconnect {
     }
 }
 
-/// Per sessions row: whether a Codex pass read it, the execution it read and its result.
-type Results = BTreeMap<i64, (bool, String, Reconnect)>;
+/// One sessions row: whether a Codex pass read it, the execution it read, its result and, for a
+/// bound source, the observation runtime whose pass saw it bound.
+#[derive(Clone)]
+struct RowResult {
+    read_by_codex: bool,
+    nonce: String,
+    reconnect: Reconnect,
+    bound_by: Option<ObservationRuntimeId>,
+}
+
+impl RowResult {
+    /// A bound result is `observer`'s evidence only when that same runtime saw it bound; a
+    /// flag-off or earlier runtime's stamp never counts.
+    fn bound_for(&self, observer: Option<ObservationRuntimeId>) -> bool {
+        self.reconnect == Reconnect::Published(true)
+            && observer.is_some_and(|current| self.bound_by == Some(current))
+    }
+}
+
+type Results = BTreeMap<i64, RowResult>;
 
 /// The latest pass: its result per sessions row with the execution it read, and the input holds
 /// it counted.
@@ -137,6 +156,8 @@ thread_local! {
     static RECONNECTS: std::cell::RefCell<Pass> = const { std::cell::RefCell::new(NO_PASS) };
     /// Passes on this thread that got past the endpoint switch.
     pub(crate) static PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Restart attaches this thread's passes ran.
+    pub(crate) static ATTACHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The in-process Herdr server, for tests that drive a pass through its callers.
@@ -160,6 +181,7 @@ fn codex_row(row: &HostedRecord) -> bool {
 pub(in crate::services::discord) fn reconnect_restarted_herdr_panes(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
+    observer: Option<ObservationRuntimeId>,
 ) -> DiscoveryPass {
     let codex = *provider == ProviderKind::Codex;
     if codex && !crate::services::turn_host::herdr_turn_switched_on_for(provider) {
@@ -194,7 +216,13 @@ pub(in crate::services::discord) fn reconnect_restarted_herdr_panes(
         let record = match &row.record {
             HostedRecord::Known(record) => record,
             _ => {
-                after.insert(row.session_id(), (codex, String::new(), Reconnect::Unknown));
+                let unknown = RowResult {
+                    read_by_codex: codex,
+                    nonce: String::new(),
+                    reconnect: Reconnect::Unknown,
+                    bound_by: None,
+                };
+                after.insert(row.session_id(), unknown);
                 let key = row.session_id().to_string();
                 sources.push(LiveSource {
                     key,
@@ -212,28 +240,35 @@ pub(in crate::services::discord) fn reconnect_restarted_herdr_panes(
         };
         let seen = before
             .get(&row.session_id())
-            .filter(|(_, seen, _)| *seen == nonce);
-        let result = match seen.map(|(_, _, result)| *result) {
-            Some(result) if result.settled() => result,
+            .filter(|seen| seen.nonce == nonce);
+        // A fresh bound result is stamped with this pass's runtime; a settled one keeps its stamp.
+        let fresh = |reconnect| RowResult {
+            read_by_codex: codex,
+            nonce: nonce.clone(),
+            reconnect,
+            bound_by: observer.filter(|_| reconnect == Reconnect::Published(true)),
+        };
+        let result = match seen {
+            Some(seen) if seen.reconnect.settled() => seen.clone(),
             // Only this pass's own refusal listed the pane; any other listing is this process's.
-            Some(result) if result != Reconnect::Pending => {
-                reconnect_unless_pending(&runtime, pool, record)
+            Some(seen) if seen.reconnect != Reconnect::Pending => {
+                fresh(reconnect_unless_pending(&runtime, pool, record))
             }
             // Listed by this process: no restart attach proves its source here.
             _ if herdr_execution_listed(&record.owner.logical_key) => {
                 sources.push(source(false));
                 continue;
             }
-            _ => reconnect_unless_pending(&runtime, pool, record),
+            _ => fresh(reconnect_unless_pending(&runtime, pool, record)),
         };
-        sources.push(source(result == Reconnect::Published(true)));
-        after.insert(row.session_id(), (codex, nonce, result));
+        sources.push(source(result.bound_for(observer)));
+        after.insert(row.session_id(), result);
     }
     with_pass(|pass| {
         // The other pass's rows keep their results; a row gone from the listing is dropped.
         let listed = |id: &i64| rows.iter().any(|row| row.session_id() == *id);
         pass.results
-            .retain(|id, (read_by_codex, ..)| *read_by_codex != codex && listed(id));
+            .retain(|id, result| result.read_by_codex != codex && listed(id));
         pass.results.extend(after);
     });
     Ok(sources)
@@ -248,6 +283,8 @@ fn reconnect_unless_pending(
     if record.state == HostedState::Pending {
         return Reconnect::Pending;
     }
+    #[cfg(test)]
+    ATTACHES.with(|attaches| attaches.set(attaches.get() + 1));
     Reconnect::of(&runtime.block_on(reconnect(pool, record)))
 }
 
@@ -302,7 +339,8 @@ pub(crate) fn local_reconnect_health() -> Option<(ReconnectCounts, HeldInputs)> 
 }
 
 pub(crate) fn reconnect_counts() -> ReconnectCounts {
-    let results: Vec<Reconnect> = with_pass(|pass| pass.results.values().map(|r| r.2).collect());
+    let results: Vec<Reconnect> =
+        with_pass(|pass| pass.results.values().map(|r| r.reconnect).collect());
     let mut counts = ReconnectCounts {
         channels: results.len(),
         ..ReconnectCounts::default()
