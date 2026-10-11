@@ -1,5 +1,5 @@
-//! Real intake arriving after a terminated execution's hold release waits through settlement.
-//! Routing stays `disabled` (one node owns the channel); the queued id and text witness intake.
+//! Real intake arriving after a terminated execution's hold release waits through settlement,
+//! then starts one Herdr launch. Routing stays `disabled`; the queued id and text witness intake.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,6 +20,8 @@ use crate::services::provider::ProviderKind;
 use crate::services::session_host::herdr_termination_rig as herdr;
 
 const ORIGINAL: &str = "input arriving inside the settlement window [5340-m2a]";
+/// The event backstop that takes over a listener's no-start waits 60s; the start follows it.
+const START_WAIT: Duration = Duration::from_secs(120);
 
 fn recent_message_id(low: u64) -> MessageId {
     const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
@@ -27,13 +29,13 @@ fn recent_message_id(low: u64) -> MessageId {
     MessageId::new((u64::try_from(recent_ms).unwrap() << 22) | low)
 }
 
-/// Listener ready first, then terminate, a real message inside the settlement window, and
-/// settlement while the listener meets the still-held transition; the start is not asserted.
+/// Listener ready first, terminate, a real message inside the settlement window, settlement
+/// against the held transition, then exactly one Herdr launch of that queued message.
 #[test]
-fn m2_1621_real_intake_waits_through_settlement_and_listener_hands_off_pg() {
+fn m2_1621_real_intake_through_termination_to_one_herdr_start_pg() {
     let path = concat!(
         module_path!(),
-        "::m2_1621_real_intake_waits_through_settlement_and_listener_hands_off_pg"
+        "::m2_1621_real_intake_through_termination_to_one_herdr_start_pg"
     );
     if !herdr::in_child(path, CHANNEL_ID) {
         return;
@@ -91,7 +93,14 @@ async fn scenario(rig: herdr::P11TerminationRig) {
     )
     .await
     .expect("a namespaced session key");
-    let _switches = rig.bind(&pool, &shared.token_hash, &session_key).await;
+    let _switches = rig
+        .bind(
+            &pool,
+            &shared.token_hash,
+            &session_key,
+            herdr::HostedState::Bound,
+        )
+        .await;
     let record = rig.record(&shared.token_hash, &session_key);
     let token_a = test_turn::start(&shared, channel, 51, "turn-a").await;
 
@@ -200,30 +209,216 @@ async fn scenario(rig: herdr::P11TerminationRig) {
     assert!(!token_a.cancelled.load(Ordering::Relaxed));
 
     assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+    // The queue consumer starts the queued message on Herdr: one launch, one typed command.
+    let started = wait_until(START_WAIT, || {
+        let writes = rig.writes();
+        Box::pin(async move {
+            writes
+                .iter()
+                .any(|(method, pane)| method == "pane.send_input" && pane == herdr::LAUNCHED_PANE)
+        })
+    })
+    .await;
+    assert!(
+        started,
+        "no Herdr start followed settlement: {:?}",
+        rig.writes()
+    );
+    // A late event or backstop pass starts nothing more.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let writes = rig.writes();
+    let count = |wanted: &str| writes.iter().filter(|(method, _)| method == wanted).count();
+    assert_eq!(count("workspace.create"), 1, "{writes:?}");
+    assert_eq!(count("pane.send_input"), 1, "{writes:?}");
+    assert_eq!(
+        writes.len(),
+        3,
+        "close, launch and its command only: {writes:?}"
+    );
+    // That launch is the queued message's turn: it answers that message and consumed it.
+    assert!(
+        harness
+            .messages()
+            .iter()
+            .any(|(reply_to, _)| *reply_to == Some(queued.get())),
+        "the started turn answers the queued message: {:?}",
+        harness.messages()
+    );
+    let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel).await;
+    assert!(
+        snapshot.intervention_queue.is_empty(),
+        "consumed from the queue"
+    );
+    assert!(
+        harness.durable_queue().is_empty(),
+        "consumed from the durable queue"
+    );
+    let row = herdr::row(&pool, &session_key).await;
+    assert!(
+        row.as_ref()
+            .is_some_and(|(_, nonce)| nonce != herdr::EXECUTION),
+        "the launch installed a new execution: {row:?}"
+    );
+    assert_eq!(
+        harness.provider_starts(),
+        0,
+        "no other driver took the turn"
+    );
     assert!(
         listener_first.load(Ordering::SeqCst),
         "the listener took QueueEligible and handed the no-start to the event backstop before \
          the transition was released"
     );
-    // Released, the message is neither lost nor consumed without a start.
-    let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel).await;
-    let waiting = snapshot
+    drop(harness);
+    pool.close().await;
+    database.drop().await;
+}
+
+/// A registered Herdr channel whose execution was retired, with no channel session or one
+/// without a name: its first catch-up input starts once on Herdr through the real kickoff.
+fn registered_retired_case(path: &str, nameless_session: bool) {
+    if !herdr::in_child(path, CHANNEL_ID) {
+        return;
+    }
+    let rig = herdr::P11TerminationRig::boot(CHANNEL_ID);
+    let install = rig.thread_installer();
+    install();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .on_thread_start(install)
+        .build()
+        .unwrap()
+        .block_on(registered_retired(rig, nameless_session));
+}
+
+#[test]
+fn m2q_registered_herdr_channel_without_session_starts_its_input_once_pg() {
+    registered_retired_case(
+        concat!(
+            module_path!(),
+            "::m2q_registered_herdr_channel_without_session_starts_its_input_once_pg"
+        ),
+        false,
+    );
+}
+
+#[test]
+fn m2q_registered_herdr_channel_without_channel_name_starts_its_input_once_pg() {
+    registered_retired_case(
+        concat!(
+            module_path!(),
+            "::m2q_registered_herdr_channel_without_channel_name_starts_its_input_once_pg"
+        ),
+        true,
+    );
+}
+
+async fn registered_retired(rig: herdr::P11TerminationRig, nameless_session: bool) {
+    use super::registered_bootstrap_e2e::{
+        FALLBACK, kick_off, recent_message_id, register_channel,
+    };
+    let mut database = None;
+    let harness = RelayE2eHarness::start_unbound_on(async {
+        let fixture = TestPostgresDb::create().await;
+        let pool = fixture.connect_and_migrate().await;
+        database = Some(fixture);
+        pool
+    })
+    .await;
+    let database = database.expect("an isolated PostgreSQL database");
+    let pool = harness.shared.pg_pool.clone().expect("PG-backed runtime");
+    let (shared, channel) = (harness.shared.clone(), harness.channel_id);
+    register_channel(&harness);
+    harness.answer_placeholders_immediately();
+    std::mem::forget(
+        crate::services::claude_tui::hook_server::publish_hook_endpoint(
+            "http://127.0.0.1:1".into(),
+        ),
+    );
+    let o_store = crate::services::herdr_launch::o_store_for_test;
+    let (store, era) = o_store(harness.root.path(), &[CHANNEL_ID]);
+    let mut seeded = store.open_channel(&era, CHANNEL_ID).unwrap().unwrap();
+    seeded.set_binding_checkpoint(3).unwrap();
+    let provider = ProviderKind::Claude;
+    let tmux = provider.build_tmux_session_name(FALLBACK);
+    let build = crate::services::discord::adk_session::build_namespaced_session_key;
+    let session_key = build(&shared.token_hash, &provider, &tmux);
+    let retired = herdr::HostedState::Retired;
+    let _switches = rig
+        .bind(&pool, &shared.token_hash, &session_key, retired)
+        .await;
+
+    let id = recent_message_id();
+    harness.seed_channel_history(&[(id, ORIGINAL, false)]);
+    harness.run_catch_up().await;
+    assert!(
+        shared.core.lock().await.sessions.is_empty(),
+        "no channel session"
+    );
+    if nameless_session {
+        let map = crate::services::discord::host_defer_gate::tests::map_channel;
+        map(&shared, channel, FALLBACK).await;
+        let mut core = shared.core.lock().await;
+        core.sessions.get_mut(&channel).unwrap().channel_name = None;
+    }
+    let queued: Vec<_> = harness
+        .mailbox()
+        .await
         .intervention_queue
         .iter()
-        .any(|item| item.message_id == queued && item.text == ORIGINAL);
-    let durable = harness
-        .durable_queue()
-        .iter()
-        .any(|item| item.message_id == queued && item.text == ORIGINAL);
-    let launches = rig
-        .writes()
-        .iter()
-        .filter(|(method, _)| method == "workspace.create")
-        .count();
+        .map(|i| i.message_id.get())
+        .collect();
+    assert_eq!(queued, vec![id], "catch-up queued the input");
     assert!(
-        (waiting && durable && launches == 0) || launches == 1,
-        "waiting={waiting} durable={durable} writes={:?}",
-        rig.writes()
+        kick_off(&harness).await,
+        "the retired row lets the kickoff start the input"
+    );
+
+    let started = wait_until(Duration::from_secs(60), || {
+        let writes = rig.writes();
+        Box::pin(async move {
+            writes
+                .iter()
+                .any(|(method, pane)| method == "pane.send_input" && pane == herdr::LAUNCHED_PANE)
+        })
+    })
+    .await;
+    assert!(started, "no Herdr start: {:?}", rig.writes());
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let writes = rig.writes();
+    let methods: Vec<&str> = writes.iter().map(|(method, _)| method.as_str()).collect();
+    assert_eq!(
+        methods,
+        ["workspace.create", "pane.send_input"],
+        "{writes:?}"
+    );
+    assert!(
+        harness
+            .messages()
+            .iter()
+            .any(|(reply_to, _)| *reply_to == Some(id)),
+        "the started turn answers the input: {:?}",
+        harness.messages()
+    );
+    assert!(
+        harness.mailbox().await.intervention_queue.is_empty(),
+        "consumed from the queue"
+    );
+    assert!(
+        harness.durable_queue().is_empty(),
+        "consumed from the durable queue"
+    );
+    let row = herdr::row(&pool, &session_key).await;
+    assert!(
+        row.as_ref()
+            .is_some_and(|(_, nonce)| nonce != herdr::EXECUTION),
+        "the launch installed a new execution: {row:?}"
+    );
+    assert_eq!(
+        harness.provider_starts(),
+        0,
+        "no other driver took the turn"
     );
     drop(harness);
     pool.close().await;

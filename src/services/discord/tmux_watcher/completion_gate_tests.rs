@@ -1764,9 +1764,16 @@ fn suppression_arms_are_wired_to_consumed_end_helper() {
         .0;
     assert!(arm.contains("suppressed_terminal_confirmed_end(current_offset, all_data)"));
     assert!(arm.contains("range: (data_start_offset, confirmed_end)"));
-    assert!(arm.contains(
-        "if first_observation_of_range {\n            journal_watcher::settle_without_transport("
-    ));
+    let normalized = arm
+        .lines()
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        normalized.contains(
+            "if first_observation_of_range {\njournal_watcher::settle_without_transport("
+        )
+    );
     assert!(!arm.contains("advance_watcher_confirmed_end("));
     assert_suppression_arm_uses_confirmed_end_helper(
         "src/services/discord/tmux.rs:silent_turn_suppressed_terminal_output",

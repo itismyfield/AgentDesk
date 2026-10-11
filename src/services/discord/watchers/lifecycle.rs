@@ -95,6 +95,16 @@ pub(in crate::services::discord) use self::claims::{
     thread_follow_up_parent_channel_id, thread_follow_up_parent_from_live,
 };
 
+#[cfg(test)]
+#[path = "lifecycle/o_only_install.rs"]
+mod o_only_install;
+#[cfg(test)]
+pub(in crate::services::discord) use o_only_install::tests::InstallFixture;
+#[cfg(test)]
+pub use o_only_install::{
+    OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
+};
+
 #[path = "lifecycle/restore.rs"]
 mod restore;
 pub(super) use self::restore::*;

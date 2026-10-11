@@ -916,7 +916,7 @@ async fn g1a_uncertain_persistence_dirty_race_retains_whole_sources_without_wal_
         .into_iter()
         .enumerate()
     {
-        let rig = Rig::new(6_325_950 + index as u64);
+        let rig = Rig::new(6_325_984 + index as u64);
         let mut driven = Driven::start(admitted(&rig, &[]).await, &screen).await;
         let cap = scan(&mut driven, 10).await;
         driven.supervisor.invalidate_order();
@@ -955,7 +955,7 @@ async fn g1a_uncertain_other_deferred_dirty_race_retains_only_prevalidated_retry
         .into_iter()
         .enumerate()
     {
-        let rig = Rig::new(6_325_952 + index as u64);
+        let rig = Rig::new(6_325_986 + index as u64);
         let screen = Arc::new(Screen::default());
         let mut supervisor = admitted(&rig, &[]).await;
         match reason {
@@ -1095,7 +1095,7 @@ async fn submit_external(driven: &mut Driven, source: Box<Source>) -> External {
 
 #[tokio::test]
 async fn submit_external_same_origin_keeps_first_body_and_seq() {
-    let rig = Rig::new(6_325_940);
+    let rig = Rig::new(6_325_980);
     let a = idle_transcript(&rig, "a", false);
     push(&rig, "n1", source(None, &a));
     let screen = Arc::new(Screen::default());
@@ -1139,7 +1139,7 @@ async fn submit_external_same_origin_keeps_first_body_and_seq() {
 
 #[tokio::test]
 async fn external_receipt_does_not_require_discord_scan() {
-    let rig = Rig::new(6_325_941);
+    let rig = Rig::new(6_325_981);
     let screen = Arc::new(Screen::default());
     let mut driven = Driven::start(admitted(&rig, &[]).await, &screen).await;
     // An unscanned Discord notice is pending and no fetch ticket exists.
@@ -1169,7 +1169,7 @@ async fn external_receipt_does_not_require_discord_scan() {
 
 #[tokio::test]
 async fn external_receipt_busy_waits_for_existing_actor_without_reactions() {
-    let rig = Rig::new(6_325_942);
+    let rig = Rig::new(6_325_982);
     let a = idle_transcript(&rig, "a", false);
     push(&rig, "n1", source(None, &a));
     let screen = Arc::new(Screen::default());
@@ -1203,7 +1203,7 @@ async fn external_receipt_busy_waits_for_existing_actor_without_reactions() {
 async fn hm1_normal_boot_has_no_external_receipts() {
     // Discord, voice and headless keys move in and hand back as before; none reads as external.
     let keys = [REAL, 9_000_000_000_000_000_002, 9_100_000_000_000_000_003];
-    let rig = Rig::new(6_325_943);
+    let rig = Rig::new(6_325_983);
     let mut supervisor = rig.supervisor(Request::Ledger, keys.to_vec());
     assert_eq!(supervisor.boot().await, Landing::Admitted);
     let rows = supervisor.slot().get().unwrap().rows().unwrap();

@@ -11,7 +11,7 @@ use crate::services::discord::host_defer_gate::tests::{Nameless, postgres};
 use crate::services::discord::turn_completion_events::TurnCompletionEvent;
 use crate::services::discord::{ProviderKind, inflight, kickoff_idle_queue_channel, router};
 
-const FALLBACK: &str = "p4c1f-registered";
+pub(super) const FALLBACK: &str = "p4c1f-registered";
 
 /// What the runtime finds for the registered name besides the queued input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,13 +24,13 @@ enum Trace {
     FailedRead,
 }
 
-fn recent_message_id() -> u64 {
+pub(super) fn recent_message_id() -> u64 {
     const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
     let discord_ms = chrono::Utc::now().timestamp_millis() - 30_000 - DISCORD_EPOCH_MS;
     (u64::try_from(discord_ms).expect("after Discord epoch") << 22) | 1
 }
 
-fn register_channel(harness: &RelayE2eHarness) {
+pub(super) fn register_channel(harness: &RelayE2eHarness) {
     let config = harness.root.path().join("config").join("agentdesk.yaml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     let workspace = harness.root.path().display();
@@ -146,7 +146,7 @@ async fn first_catch_up_input(trace: Trace) -> Run {
 }
 
 /// The production idle kickoff for the channel; whether it started a turn.
-async fn kick_off(harness: &RelayE2eHarness) -> bool {
+pub(super) async fn kick_off(harness: &RelayE2eHarness) -> bool {
     let deps = router::IntakeDeps {
         http: &harness.ctx.http,
         cache: Some(&harness.ctx.cache),

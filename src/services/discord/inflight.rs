@@ -16,7 +16,7 @@ pub(in crate::services::discord) use host_recovery_guard::keyed_tests::{
     seed_session_row, seed_session_row_hashed, seed_session_row_keyed,
 };
 pub(in crate::services::discord) use host_recovery_guard::{
-    KeyedTeardown, clear_channel_session, keyed_teardown, teardown_for_lookup,
+    KeyedTeardown, clear_channel_session, keyed_teardown, teardown_for_lookup, tmux_marker_is_known,
 };
 #[cfg(test)]
 mod invariant_test_capture;
@@ -403,6 +403,7 @@ fn bump_save_generation_for_write(path: &Path, state: &mut InflightTurnState) {
         .ok()
         .and_then(|content| serde_json::from_str::<InflightTurnState>(&content).ok());
     managed_submission::carry_forward(existing.as_ref(), state);
+    state.carry_before_start_receipt_from(existing.as_ref());
     let existing_generation = existing
         .map(|existing| existing.save_generation)
         .unwrap_or(0);
@@ -571,11 +572,15 @@ pub(super) fn load_inflight_state(
     provider: &ProviderKind,
     channel_id: u64,
 ) -> Option<InflightTurnState> {
+    #[cfg(test)]
+    o_seed_observation::writable_load(provider, channel_id);
     let root = inflight_runtime_root()?;
     let path = inflight_state_path(&root, provider, channel_id);
     let data = fs::read_to_string(&path).ok()?;
     let (state, backfilled) = parse_inflight_state_content_with_finalizer_backfill(&data).ok()?;
     if backfilled {
+        #[cfg(test)]
+        o_seed_observation::backfill_attempt(provider, channel_id);
         backfill_finalizer_turn_id_under_lock(&root, &path, provider).or(Some(state))
     } else {
         Some(state)
@@ -599,6 +604,8 @@ pub(in crate::services::discord) fn load_inflight_state_read_only_result(
     provider: &ProviderKind,
     channel_id: u64,
 ) -> Result<Option<InflightTurnState>, String> {
+    #[cfg(test)]
+    o_seed_observation::read_only_load(provider, channel_id);
     let root = inflight_runtime_root().ok_or("inflight root unavailable")?;
     let path = inflight_state_path(&root, provider, channel_id);
     match fs::read_to_string(path) {
@@ -609,6 +616,14 @@ pub(in crate::services::discord) fn load_inflight_state_read_only_result(
         Err(error) => Err(error.to_string()),
     }
 }
+
+#[cfg(test)]
+#[path = "inflight/o_seed_observation.rs"]
+pub(in crate::services::discord) mod o_seed_observation;
+
+#[cfg(test)]
+#[path = "inflight/o_seed_observation_tests.rs"]
+mod o_seed_observation_tests;
 
 pub(super) fn load_inflight_states(provider: &ProviderKind) -> Vec<InflightTurnState> {
     let Some(root) = inflight_runtime_root() else {

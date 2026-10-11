@@ -12,7 +12,12 @@ use crate::services::discord::session_relay_sink::journal::watcher as journal_wa
 
 #[path = "tmux_watcher/entry.rs"]
 mod entry;
+use self::entry::WatcherLegacyMode;
 pub(in crate::services::discord) use self::entry::tmux_output_watcher;
+
+#[path = "tmux_watcher/legacy_state.rs"]
+mod legacy_state;
+use self::legacy_state::*;
 
 #[path = "tmux_watcher/liveness.rs"]
 pub(in crate::services::discord) mod liveness;
@@ -231,6 +236,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             crate::services::provider::ProviderKind::Claude,
             String::new(),
         ));
+    let legacy_mode = initialize_watcher_mode(&watcher_provider, channel_id);
     let Some(mut cancellation_custody) = cancel_handoff::Custody::acquire(
         &shared,
         channel_id,
@@ -238,6 +244,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         &tmux_session_name,
         &output_path,
         &cancel,
+        legacy_mode,
     )
     .await
     else {
@@ -282,7 +289,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     let mut active_stream_inflight_reacquire_logged = false;
     let mut completion_footer_idle = WatcherCompletionFooterIdleState::default();
     let mut completion_footer_spin_idx: usize = 0;
-    let mut restored_turn = restored_turn;
+    let mut restored_turn =
+        mode_restored_turn(legacy_mode, restored_turn, &watcher_provider, channel_id);
     // #3107 codex re-review (P2#3, F3): the #3099 hourglass anchor
     // (`injected_prompt_message_id`) pinned by the restored turn, captured ONCE
     // up front before `restored_turn` is consumed by the streaming path's
@@ -300,7 +308,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         mut watcher_turn_nonce,
         mut last_relayed_offset,
         mut last_observed_generation_mtime_ns,
-    ) = entry::restore_delivery_position(&shared, channel_id, &tmux_session_name, &output_path);
+    ) = entry::restore_delivery_position(
+        &shared,
+        channel_id,
+        &tmux_session_name,
+        &output_path,
+        legacy_mode,
+    );
     let mut pending_terminal_rewind_seed: Option<RestoredWatcherTurn> = None;
     let mut terminal_rewind_attempt_key: Option<WatcherRewindAttemptKey> = None;
     let mut terminal_rewind_attempts: u8 = 0;
@@ -320,6 +334,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         watcher_thread_channel_id,
         watcher_instance_id,
         host: &host,
+        legacy_mode,
+        retired_binding: o_delegated_arm::pin_retired_binding(legacy_mode, &tmux_session_name),
     };
     let poll_controls = PollWatcherControls {
         cancel: &cancel,
@@ -468,34 +484,19 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &mut render_seed_state,
         )
         .await;
-        let checkpoint_row = crate::services::discord::inflight::load_inflight_state(
-            &watcher_provider,
-            channel_id.get(),
-        )
-        .filter(|row| {
-            turn_parse_state
-                .watcher_turn_identity
-                .as_ref()
-                .is_some_and(|identity| identity.matches_state(row))
-                && row.turn_nonce == watcher_turn_nonce
-        });
-        let checkpoint_turn = match &collection_outcome {
-            CollectOutcome::Fallthrough(turn) => Some(turn),
-            _ => None,
-        };
-        cancellation_custody.checkpoint(
+        let collected_turn_stream = match o_delegated_arm::dispatch_collected(
+            (&poll_context, &poll_controls),
             &turn_parse_state,
             &supervisor_relay_state,
-            source_authority,
-            checkpoint_turn,
-            checkpoint_row.as_ref(),
-        );
-        if cancel_handoff::cancel_yields_before_delivery(&cancel, checkpoint_turn) {
-            break 'watcher_loop;
-        }
-        let collected_turn_stream = match collection_outcome {
-            CollectOutcome::ContinueWatcherLoop => continue,
-            CollectOutcome::Fallthrough(collected) => collected,
+            &mut cancellation_custody,
+            (source_authority, epoch_snapshot, &watcher_turn_nonce),
+            collection_outcome,
+        )
+        .await
+        {
+            Ok(CollectOutcome::ContinueWatcherLoop) => continue,
+            Err(()) => break 'watcher_loop,
+            Ok(CollectOutcome::Fallthrough(collected)) => collected,
         };
         let CollectedTurnStream {
             turn_data_start_offset,
@@ -560,6 +561,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 cancel: &cancel,
                 turn_delivered: &turn_delivered,
                 watcher_instance_id,
+                legacy_mode,
             };
             let no_result_locals = NoResultExitLocals {
                 found_result,
@@ -732,6 +734,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 response_sent_offset: &mut response_sent_offset,
                 last_edit_text: &mut last_edit_text,
             };
+            #[cfg(test)]
+            crate::services::discord::inflight::o_seed_observation::record_event(
+                &watcher_provider,
+                channel_id.get(),
+                "terminal_preflight_entries",
+            );
             run_terminal_preflight_prepare(
                 &terminal_preflight_context,
                 terminal_preflight_locals,
@@ -2547,6 +2555,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         watcher_turn_identity,
         watcher_instance_id,
         host,
+        legacy_mode,
+        watcher_provider: watcher_provider.clone(),
     })
     .await;
 }
@@ -2554,3 +2564,5 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 #[cfg(test)]
 #[path = "tmux_watcher/tests.rs"]
 mod tests;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use self::tests::streaming_harness_tests::cancel_for_test;

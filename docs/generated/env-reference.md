@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 111
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 112
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -38,6 +38,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_QUALITY_ALERT_DRILL_BASE` | `src/services/agent_quality/regression_alerts.rs` | Resolve the drill-down base URL (env override or fallback const). |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_S3ACT_B1_MUTANT` | `src/services/discord/inflight/removal.rs` |  |
+| `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs`, `src/services/turn_orchestrator/installed_actor_handoff.rs` |  |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
 | `ADK_TEST_CODEX_PROMOTE_READY` | `src/services/discord/router/message_handler/tui_followup.rs` | ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests. |
 | `ADK_TEST_HOME_COMMAND_MUTANT` | `src/services/cluster/channel_home.rs` |  |

@@ -37,6 +37,7 @@ mod overflow;
 mod pending_queue_persistence;
 mod queue_cancellation;
 mod queue_enqueue;
+mod queued_head;
 mod recovery_kickoff;
 #[cfg(test)]
 mod recovery_kickoff_tests;
@@ -84,11 +85,12 @@ use pending_queue_persistence::channel_queue_files_present;
 #[cfg(test)]
 use pending_queue_persistence::load_channel_pending_queue;
 pub(crate) use pending_queue_persistence::save_channel_pending_dispatch_marker;
+#[cfg(test)]
+pub(crate) use pending_queue_persistence::save_channel_queue;
 pub(crate) use pending_queue_persistence::{
     PendingQueueItem, cleanup_stale_pending_queue_tmp_files_all_tokens,
     load_channel_pending_dispatch_marker, load_pending_dispatch_markers, load_pending_queues,
-    remove_channel_pending_queue_files_all_tokens, save_channel_queue,
-    warn_legacy_pending_queue_files,
+    remove_channel_pending_queue_files_all_tokens, warn_legacy_pending_queue_files,
 };
 #[cfg(test)]
 use pending_queue_persistence::{
@@ -106,9 +108,11 @@ use queue_cancellation::{
     cancel_soft_intervention_by_primary_message_id, dequeue_next_soft_intervention,
     has_soft_intervention,
 };
+use queue_enqueue::enqueue_behind;
 #[cfg(test)]
 pub(crate) use queue_enqueue::enqueue_intervention;
-use queue_enqueue::enqueue_with_settlement;
+#[cfg(test)]
+pub(crate) use queued_head::{QueueIdentity, QueuedHeadClaim};
 pub(crate) use recovery_kickoff::RecoveryKickoffResult;
 use recovery_kickoff::{kickoff_refusal, reset_activation_signals};
 pub(crate) use reply_results::{
@@ -1601,6 +1605,8 @@ struct ChannelMailboxState {
     turn_started_instant: Option<Instant>,
     /// Which persisted episode a recovery re-mint may still re-open.
     remint_fence: remint_fence::FenceCell,
+    /// The queue snapshot's head reservation and submitted sources; see `queued_head.rs`.
+    queued_head: queued_head::HeadLedger,
 }
 
 fn finalize_turn_state(
@@ -1986,8 +1992,9 @@ fn input_mailbox_step(
             let refused_released_episode = fence_episode
                 .is_some_and(|episode| fence.refuses(user_message_id, episode.as_deref()));
             let idle = state.cancel_token.is_none() && !refused_released_episode;
-            let yields =
-                idle && claim_yields(&mut state, turn_kind, user_message_id, admission_order);
+            let yields = idle
+                && (queued_head::blocks_claims(&mut state, channel_id, persistence.as_ref())
+                    || claim_yields(&mut state, turn_kind, user_message_id, admission_order));
             let mut queue_exit_events = Vec::new();
             let mut persistence_error = None;
             let can_start = idle && !yields;
@@ -2135,12 +2142,19 @@ fn input_mailbox_step(
                 });
                 return state;
             }
+            if queued_head::all_sources_submitted(&state, &intervention) {
+                let reason = EnqueueRefusalReason::AlreadyActiveTurn;
+                let _ = reply.send(EnqueueInterventionResult::refused(reason, Vec::new()));
+                return state;
+            }
             let previous_queue = state.intervention_queue.clone();
-            let mut enqueue_result = enqueue_with_settlement(
+            let reserved_front = queued_head::holds_front(&state);
+            let mut enqueue_result = enqueue_behind(
                 &mut state.intervention_queue,
                 intervention,
                 state.active_user_message_id,
                 Some((&persistence.provider, channel_id)),
+                reserved_front,
             );
             if enqueue_result.enqueued
                 && let Err(error) = persist_queue_or_restore(
@@ -2194,6 +2208,11 @@ fn input_mailbox_step(
             state.last_persistence = Some(persistence.clone());
             if injected_inputs::holds_order(&mut state) {
                 let _ = reply.send(injected_inputs::head_withheld(&state));
+                return state;
+            }
+            if let Some(withheld) = queued_head::withhold_take(&mut state, channel_id, &persistence)
+            {
+                let _ = reply.send(withheld);
                 return state;
             }
             let _ = clear_stale_pending_dispatch_reservation(&mut state, channel_id);
@@ -2601,7 +2620,8 @@ fn input_mailbox_step(
                 channel_id,
             );
             let previous_queue = state.intervention_queue.clone();
-            let drained = state.intervention_queue.drain(..).count();
+            let keep = queued_head::protected_len(&mut state, channel_id, &persistence);
+            let drained = state.intervention_queue.drain(keep..).count();
             let purge_persisted = persist_queue_or_restore(
                 &mut state,
                 channel_id,
@@ -2743,9 +2763,7 @@ fn input_mailbox_step(
         ChannelMailboxMsg::RestartDrain { persistence, reply } => {
             state.last_persistence = Some(persistence.clone());
             let persistence_error = absorb_disk_queue_error(&mut state, channel_id, &persistence)
-                .or_else(|| {
-                    persist_queue(channel_id, &state.intervention_queue, &persistence).err()
-                });
+                .or_else(|| persist_queue(&mut state, channel_id, &persistence).err());
             let _ = reply.send(RestartDrainResult {
                 queued_count: if persistence_error.is_some() {
                     0
