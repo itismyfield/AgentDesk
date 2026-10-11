@@ -18,11 +18,15 @@ use crate::services::turn_orchestrator::ClearChannelResult;
 
 impl CatchUpRetryState {
     pub(super) fn new(checkpoint: u64) -> Self {
+        Self::new_at(checkpoint, Instant::now())
+    }
+
+    pub(super) fn new_at(checkpoint: u64, armed_at: Instant) -> Self {
         Self {
             checkpoint,
             fetch_failures: 0,
             deferred_rearms: 0,
-            armed_at: Instant::now(),
+            armed_at,
         }
     }
 
