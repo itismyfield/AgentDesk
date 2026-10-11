@@ -708,7 +708,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
             live.load(Ordering::SeqCst)
                 && effective.as_ref().is_none_or(|enabled| enabled())
                 && stops.iter().all(|stop| !*stop.borrow())
-                && crate::services::tui_o::repost::runner::scope_allowed(channel)
+                && channel_home::registered_channel(channel).is_none()
+                && crate::services::cluster::home_availability::refusal(channel).is_none()
                 && source_delivery_allowed(channel, sources.iter().cloned())
         })
     }
