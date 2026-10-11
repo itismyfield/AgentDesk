@@ -72,6 +72,13 @@ pub(super) fn record_checkpoint(
     let watcher_provider = context.watcher_provider;
     let channel_id = context.channel_id;
     if let Some(turn) = checkpoint_turn {
+        if turn.startup_inflight_snapshot.is_some() {
+            crate::services::discord::inflight::o_seed_observation::record_event(
+                watcher_provider,
+                channel_id.get(),
+                "legacy_row_seed_adopted",
+            );
+        }
         crate::services::discord::inflight::o_seed_observation::record_parser_response(
             watcher_provider,
             channel_id.get(),
@@ -83,30 +90,4 @@ pub(super) fn record_checkpoint(
         channel_id.get(),
         "checkpoint",
     );
-}
-
-pub(super) fn rowless_exit(
-    context: &PollWatcherContext<'_>,
-    cancel: &Arc<std::sync::atomic::AtomicBool>,
-) -> bool {
-    let legacy_mode = context.legacy_mode;
-    let shared = context.shared;
-    let channel_id = context.channel_id;
-    let tmux_session_name = context.tmux_session_name;
-    let watcher_instance_id = context.watcher_instance_id;
-    // Rowless cancellation releases only its own registry slot; Legacy teardown reads rows.
-    if !legacy_mode.is_legacy() {
-        post_stream_exit::release_registry_slot_at_exit(
-            &shared.tmux_watchers,
-            channel_id,
-            tmux_session_name,
-            cancel,
-        );
-        tracing::info!(
-            instance = watcher_instance_id,
-            "tmux watcher stopped for #{tmux_session_name}"
-        );
-        return true;
-    }
-    false
 }

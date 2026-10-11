@@ -380,6 +380,42 @@ mod pg_tests {
         );
     }
 
+    /// A reply queued behind a TUI-direct turn is, as the live enqueue normalized it, a singleton the
+    /// queued-head claim reserves durably.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reply_queued_behind_a_busy_turn_is_a_claimable_singleton_pg() {
+        use crate::services::turn_orchestrator::{
+            ChannelMailboxRegistry, QueueIdentity, QueuePersistenceContext, QueuedHeadClaim,
+        };
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let cc = 6_813_001_u64;
+        let seed = crate::db::agents::insert_agent_channels_for_tests;
+        seed(&pool, "head-agent", Some(&cc.to_string()), None).await;
+        let registry = Arc::new(HealthRegistry::new());
+        register_bot_auth_for_tests(&registry, "claude", cc, Some(100), vec![200], false).await;
+        seed_external_turn_row_for_tests(&ProviderKind::Claude, cc);
+        let app = router(Some(pool), Some(registry));
+
+        let start = json!({"prompt": "status?"}).to_string();
+        let input = json!({"text": "status?", "author_discord_user_id": "200"}).to_string();
+        let (start_status, _) = post(&app, "/agents/head-agent/turn/start", &start).await;
+        let (_, delivered) = deliver(&app, "head-agent", &input).await;
+        assert_eq!(start_status, StatusCode::CONFLICT);
+        assert_eq!(delivered["delivery"], "queued", "{delivered}");
+
+        let channel = poise::serenity_prelude::ChannelId::new(cc);
+        let handle = ChannelMailboxRegistry::global_handle(channel).expect("intake mailbox");
+        let head = handle.snapshot().await.intervention_queue.remove(0);
+        let persistence =
+            QueuePersistenceContext::new(&ProviderKind::Claude, "test-token-hash", None);
+        let claim = handle
+            .claim_queued_head(QueueIdentity::of(&head), persistence)
+            .await;
+        assert!(matches!(claim, QueuedHeadClaim::Reserved(_)));
+    }
+
     /// The route reaches a scripted pane only when switched on; a pane veto hands the input back to
     /// the queue front and names itself.
     #[cfg(unix)]
