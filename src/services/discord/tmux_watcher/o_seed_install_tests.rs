@@ -5,6 +5,7 @@ use crate::services::discord::health::legacy_supervision::test_support::{
 };
 use crate::services::discord::health::legacy_supervision::{RetiredForTest, is_retired};
 use crate::services::discord::inflight::o_seed_observation::{Guard, Snapshot};
+use crate::services::discord::task_supervisor::n4d_spawn_observation::Scope;
 use crate::services::discord::task_supervisor::{spawn_observed_tmux_watcher, watcher_completion};
 use crate::services::discord::tmux::{InstallFixture, OOnlyInstallOutcome};
 use std::io::Write;
@@ -122,6 +123,10 @@ pub(super) fn assert_rowless(observed: &Guard) {
     assert!(key.event_count("outer_eof") > 0, "{key:?}");
     assert!(key.decoded_source_chunks > 0, "{key:?}");
     assert!(key.event_count("checkpoint") > 0, "{key:?}");
+    assert!(key.event_count("post_stream_exit") > 0, "{key:?}");
+    assert!(raw.event_count("post_stream_exit") > 0, "{raw:?}");
+    assert_eq!(key.event_count("legacy_row_seed_adopted"), 0, "{key:?}");
+    assert_eq!(raw.event_count("legacy_row_seed_adopted"), 0, "{raw:?}");
     assert_eq!(key.event_count("capsule_legacy_adopted"), 0, "{key:?}");
     assert!(!key.parser_responses.is_empty(), "{key:?}");
     assert!(
@@ -132,6 +137,21 @@ pub(super) fn assert_rowless(observed: &Guard) {
         "{key:?}"
     );
     eprintln!("N4D_NONTERMINAL_KEY={key:?}\nN4D_NONTERMINAL_RAW={raw:?}");
+}
+
+pub(super) async fn assert_joined(scope: &Scope, observed: &Guard, expected: usize) {
+    let joined = scope.join_all().await;
+    assert_eq!(scope.submissions(), expected, "raw submissions: {joined:?}");
+    assert_eq!(joined.len(), expected);
+    assert!(
+        joined
+            .iter()
+            .all(|(_, result)| *result == watcher_completion::Outcome::Returned)
+    );
+    let key = observed.snapshot();
+    let raw = observed.raw_process_snapshot();
+    assert!(key.event_count("post_stream_exit") >= expected, "{key:?}");
+    assert!(raw.event_count("post_stream_exit") >= expected, "{raw:?}");
 }
 
 pub(super) fn spawn_legacy(
@@ -217,6 +237,7 @@ async fn t6_a_installer_eof_then_nonterminal_decode_is_rowless_through_join() {
     let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
     let before = tree_fingerprint(&root);
     let observed = observe(&fixture);
+    let submitted = Scope::new(&fixture.shared);
     assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
     until(&observed, "actual initial EOF", |s| {
         s.event_count("outer_eof") > 0
@@ -229,6 +250,7 @@ async fn t6_a_installer_eof_then_nonterminal_decode_is_rowless_through_join() {
     })
     .await;
     fixture.cancel_and_join().await;
+    assert_joined(&submitted, &observed, 1).await;
     assert_rowless(&observed);
     assert!(
         observed
@@ -254,6 +276,10 @@ async fn t6_c_installer_reaches_expired_streaming_tick_without_legacy_row_effect
         &[
             ("AGENTDESK_STATUS_INTERVAL_SECS", "1"),
             ("AGENTDESK_SINGLE_MESSAGE_PANEL", "0"),
+            (
+                crate::services::tui_o::cutover::test_override::CHILD_ENV,
+                "1",
+            ),
         ],
     ) {
         return;
@@ -261,10 +287,9 @@ async fn t6_c_installer_reaches_expired_streaming_tick_without_legacy_row_effect
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let (mut fixture, discord) = fixture(632_511_003).await;
     fixture.registry.provider_entries_guard().await.clear();
-    Arc::get_mut(&mut fixture.shared)
-        .unwrap()
-        .ui
-        .status_panel_v2_enabled = true;
+    let ui = &mut Arc::get_mut(&mut fixture.shared).unwrap().ui;
+    ui.status_panel_v2_enabled = true;
+    ui.two_message_panel_enabled = true;
     fixture
         .registry
         .register("claude".into(), fixture.shared.clone())
@@ -278,12 +303,28 @@ async fn t6_c_installer_reaches_expired_streaming_tick_without_legacy_row_effect
     let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
     let before = tree_fingerprint(&root);
     let observed = observe(&fixture);
+    let submitted = Scope::new(&fixture.shared);
     assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    assert!(crate::services::tui_o::cutover::writer_enabled());
+    assert_eq!(
+        crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&fixture.session),
+        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
+    );
+    assert_eq!(
+        crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
+            fixture.channel.get(),
+            Some(&fixture.session)
+        ),
+        Ok(false),
+        "actual runtime-kind ownership permits Legacy before the RetiredO mode fence"
+    );
     until(&observed, "initial EOF before timed stream", |s| {
         s.event_count("outer_eof") > 0
     })
     .await;
-    let fresh = said("timed rowless response");
+    let body = "timed rowless response ".repeat(300);
+    assert!(body.len() > 2_000);
+    let fresh = said(&body);
     let appended_at = tokio::time::Instant::now();
     append(&fixture, fresh.as_bytes());
     until(&observed, "actual expired streaming interval", |s| {
@@ -292,16 +333,19 @@ async fn t6_c_installer_reaches_expired_streaming_tick_without_legacy_row_effect
     .await;
     assert!(appended_at.elapsed() >= Duration::from_secs(1));
     fixture.cancel_and_join().await;
+    assert_joined(&submitted, &observed, 1).await;
     assert_rowless(&observed);
     let snapshot = observed.snapshot();
     assert!(snapshot.event_count("inner_eof") > 0, "{snapshot:?}");
-    assert!(
-        snapshot
-            .parser_responses
-            .iter()
-            .any(|r| r == "timed rowless response")
-    );
+    assert!(snapshot.parser_responses.iter().any(|r| r == &body));
     assert_eq!(tree_fingerprint(&root), before);
+    let requests = discord.requests_for(fixture.channel.get());
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.starts_with("POST ") && !request.starts_with("PATCH ")),
+        "RetiredO cannot publish a Legacy streaming body: {requests:?}"
+    );
     eprintln!(
         "N4D_NONTERMINAL_HTTP={:?}",
         discord.requests_for(fixture.channel.get())
@@ -318,6 +362,7 @@ async fn t6_d_real_legacy_predecessor_capsule_is_retained_unadopted() {
     let old_row = seed(&fixture, 0);
     let restored = restored_watcher_turn_from_inflight(&old_row, &fixture.session, false).unwrap();
     let predecessor_observed = observe(&fixture);
+    let predecessor_submitted = Scope::new(&fixture.shared);
     let predecessor = spawn_legacy(&fixture, 0, Some(restored));
     until(&predecessor_observed, "Legacy predecessor EOF", |s| {
         s.event_count("outer_eof") > 0
@@ -330,6 +375,20 @@ async fn t6_d_real_legacy_predecessor_capsule_is_retained_unadopted() {
     })
     .await;
     cancel_join(&predecessor).await;
+    assert_joined(&predecessor_submitted, &predecessor_observed, 1).await;
+    assert!(
+        predecessor_observed
+            .snapshot()
+            .event_count("legacy_row_seed_adopted")
+            > 0
+    );
+    assert!(
+        predecessor_observed
+            .raw_process_snapshot()
+            .event_count("legacy_row_seed_adopted")
+            > 0
+    );
+    drop(predecessor_submitted);
     drop(predecessor_observed);
     let retained =
         cancel_handoff::capsule_observation::pending(&fixture.shared, fixture.channel).await;
@@ -360,6 +419,7 @@ async fn t6_d_real_legacy_predecessor_capsule_is_retained_unadopted() {
     let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
     let before = tree_fingerprint(&root);
     let observed = observe(&fixture);
+    let submitted = Scope::new(&fixture.shared);
     assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
     until(
         &observed,
@@ -374,6 +434,7 @@ async fn t6_d_real_legacy_predecessor_capsule_is_retained_unadopted() {
     })
     .await;
     fixture.cancel_and_join().await;
+    assert_joined(&submitted, &observed, 1).await;
     let remaining =
         cancel_handoff::capsule_observation::pending(&fixture.shared, fixture.channel).await;
     assert_eq!(
@@ -407,6 +468,7 @@ async fn t6_e_installed_successor_resumes_real_o_partial_utf8_capsule() {
     let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
     let before = tree_fingerprint(&root);
     let observed = observe(&fixture);
+    let submitted = Scope::new(&fixture.shared);
     assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
     until(&observed, "predecessor initial EOF", |s| {
         s.event_count("outer_eof") > 0
@@ -420,6 +482,7 @@ async fn t6_e_installed_successor_resumes_real_o_partial_utf8_capsule() {
     })
     .await;
     fixture.cancel_and_join().await;
+    assert_joined(&submitted, &observed, 1).await;
     let retained =
         cancel_handoff::capsule_observation::pending(&fixture.shared, fixture.channel).await;
     assert_eq!(retained.len(), 1, "{retained:?}");
@@ -455,6 +518,7 @@ async fn t6_e_installed_successor_resumes_real_o_partial_utf8_capsule() {
     })
     .await;
     fixture.cancel_and_join().await;
+    assert_joined(&submitted, &observed, 2).await;
     assert_rowless(&observed);
     let snapshot = observed.snapshot();
     assert_eq!(snapshot.event_count("capsule_o_adopted"), 1);
@@ -496,6 +560,7 @@ async fn legacy_control(channel: u64, n1_only: bool) {
     let before = tree_fingerprint(&root);
     let restored = restored_watcher_turn_from_inflight(&old_row, &fixture.session, false).unwrap();
     let observed = observe(&fixture);
+    let submitted = Scope::new(&fixture.shared);
     assert_eq!(
         fixture.install().await,
         OOnlyInstallOutcome::Deferred(
@@ -514,6 +579,7 @@ async fn legacy_control(channel: u64, n1_only: bool) {
     })
     .await;
     cancel_join(&handle).await;
+    assert_joined(&submitted, &observed, 1).await;
     let capsules =
         cancel_handoff::capsule_observation::pending(&fixture.shared, fixture.channel).await;
     let capsule = capsules
@@ -533,6 +599,8 @@ async fn legacy_control(channel: u64, n1_only: bool) {
     );
     let key = observed.snapshot();
     let raw = observed.raw_process_snapshot();
+    assert!(key.event_count("legacy_row_seed_adopted") > 0, "{key:?}");
+    assert!(raw.event_count("legacy_row_seed_adopted") > 0, "{raw:?}");
     assert!(
         key.watcher_initialization_observed && key.stream_decoder_initialization_observed,
         "{key:?}"
@@ -609,6 +677,7 @@ async fn native_legacy_control(channel: u64, n1_only: bool) {
     let before = tree_fingerprint(&root);
     let restored = restored_watcher_turn_from_inflight(&old_row, &fixture.session, false).unwrap();
     let observed = observe(&fixture);
+    let submitted = Scope::new(&fixture.shared);
     assert_eq!(
         fixture.install().await,
         OOnlyInstallOutcome::Deferred(
@@ -627,8 +696,11 @@ async fn native_legacy_control(channel: u64, n1_only: bool) {
     })
     .await;
     cancel_join(&handle).await;
+    assert_joined(&submitted, &observed, 1).await;
     let key = observed.snapshot();
     let raw = observed.raw_process_snapshot();
+    assert!(key.event_count("legacy_row_seed_adopted") > 0, "{key:?}");
+    assert!(raw.event_count("legacy_row_seed_adopted") > 0, "{raw:?}");
     assert!(
         key.parser_responses
             .iter()

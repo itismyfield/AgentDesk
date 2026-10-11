@@ -7,6 +7,9 @@ use std::sync::atomic::AtomicBool;
 use futures::FutureExt;
 
 use super::SharedData;
+#[cfg(test)]
+#[path = "task_supervisor/n4d_spawn_observation_tests.rs"]
+pub(in crate::services::discord) mod n4d_spawn_observation;
 pub(in crate::services::discord) mod watcher_completion;
 
 pub(in crate::services::discord) fn spawn_observed<F>(
@@ -40,8 +43,12 @@ pub(in crate::services::discord) fn spawn_observed_tmux_watcher<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    #[cfg(test)]
+    let observed = n4d_spawn_observation::submitted(&shared, &cancel);
+    #[cfg(test)]
+    let observed_task = observed.clone();
     let completion = watcher_completion::Registration::new(cancel.clone());
-    spawn_observed(task_name, async move {
+    let task = spawn_observed(task_name, async move {
         let cleanup_guard = TmuxWatcherTaskGuard {
             shared,
             tmux_session_name,
@@ -56,8 +63,13 @@ where
                 watcher_completion::Outcome::Panicked
             }
         };
+        #[cfg(test)]
+        n4d_spawn_observation::finished(&observed_task, result);
         completion.finish(result);
-    })
+    });
+    #[cfg(test)]
+    n4d_spawn_observation::attach(&observed, task.abort_handle());
+    task
 }
 
 struct TmuxWatcherTaskGuard {
