@@ -1485,3 +1485,6 @@ mod captured_terminal_admission;
 
 #[path = "runtime_stamp/herdr_terminal_admission.rs"]
 pub(in crate::services::discord) mod herdr_terminal_admission;
+
+#[path = "runtime_stamp/before_start_stop_admission.rs"]
+pub(in crate::services::discord::inflight) mod before_start_stop_admission;

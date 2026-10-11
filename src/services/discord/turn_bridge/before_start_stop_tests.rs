@@ -1,5 +1,6 @@
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
+use crate::services::discord;
 use crate::services::discord::inflight::RelayOwnerKind;
 use crate::services::provider::ProviderKind;
 use crate::services::provider::cancel_token_claude_interrupt::{
@@ -307,6 +308,11 @@ fn coldstop_closed_drops_callback_and_own_start_is_negative_evidence() {
     assert_eq!(seal_exit(&actor, false, false), ExitDecision::Hold);
 }
 
+/// A notice Discord showed by editing the turn's message.
+async fn shown() -> Result<ReplaceLongMessageOutcome, String> {
+    Ok(ReplaceLongMessageOutcome::EditedOriginal)
+}
+
 pub(in crate::services::discord::turn_bridge) struct NoLaunch;
 impl crate::services::claude::herdr_turn::HerdrTurnPorts for NoLaunch {
     fn launch_host(&self) -> Option<Arc<dyn crate::services::herdr_launch::HerdrLaunchHost>> {
@@ -436,15 +442,18 @@ pub(in crate::services::discord::turn_bridge) async fn actual_fresh_exit(
 async fn coldstop_proof_exact_actor_row_notice_and_accounting() {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for (provider, stop_before) in [
         (ProviderKind::Claude, false),
         (ProviderKind::Claude, true),
         (ProviderKind::Codex, false),
         (ProviderKind::Codex, true),
     ] {
-        let shared = discord::make_shared_data_for_tests_with_storage(None);
-        let mut shared = shared;
-        Arc::get_mut(&mut shared).unwrap().provider = provider.clone();
+        let mut shared = discord::make_shared_data_for_tests_with_storage(None);
+        let writable = Arc::get_mut(&mut shared).unwrap();
+        writable.provider = provider.clone();
+        // A nonzero generation, so a close keyed under any other generation is caught.
+        writable.restart.current_generation = 17;
         let (actor, owner) = prepared(provider.clone(), 907);
         let mut row = InflightTurnState::new(
             provider.clone(),
@@ -452,7 +461,7 @@ async fn coldstop_proof_exact_actor_row_notice_and_accounting() {
             None,
             1,
             901,
-            0,
+            9_070,
             "cold input".into(),
             None,
             Some(owner.logical_key.clone()),
@@ -480,14 +489,18 @@ async fn coldstop_proof_exact_actor_row_notice_and_accounting() {
             panic!("positive proof required");
         };
         let fin = TurnFinalizer::spawn();
-        let key = TurnKey::new(channel, row.user_msg_id, shared.restart.current_generation)
+        let key = TurnKey::new(channel, row.user_msg_id, 17)
             .with_episode_nonce(row.turn_nonce.as_deref());
-        fin.register_start(key, provider.clone(), RelayOwnerKind::None, &shared);
+        // A watcher-owned entry, so the generation-17 probe sees exactly this turn's entry.
+        fin.register_start(key, provider.clone(), RelayOwnerKind::Watcher, &shared);
+        assert!(fin.has_live_watcher_pending(channel, 17).await);
+        let anchor = MessageId::new(row.current_msg_id);
+        let submitted = test_hooks::submitted();
         let mut stale = proof.clone();
         stale.turn_nonce.push('x');
-        assert!(!consume(&shared, &fin, &actor, &row, &stale, async { Ok(()) }).await);
+        assert!(!consume(&shared, &fin, &actor, &row, (&stale, anchor), shown()).await);
         assert!(
-            !consume(&shared, &fin, &actor, &row, &proof, async {
+            !consume(&shared, &fin, &actor, &row, (&proof, anchor), async {
                 Err("notice failed".into())
             })
             .await
@@ -510,7 +523,7 @@ async fn coldstop_proof_exact_actor_row_notice_and_accounting() {
                 .lock()
                 .unwrap()
                 .submission = observation;
-            assert!(!consume(&shared, &fin, &actor, &row, &proof, async { Ok(()) }).await);
+            assert!(!consume(&shared, &fin, &actor, &row, (&proof, anchor), shown()).await);
             assert!(
                 shared
                     .mailbox_peek(channel)
@@ -530,7 +543,14 @@ async fn coldstop_proof_exact_actor_row_notice_and_accounting() {
             .lock()
             .unwrap()
             .submission = HerdrSubmission::Unsubmitted;
-        assert!(consume(&shared, &fin, &actor, &row, &proof, async { Ok(()) }).await);
+        assert_eq!(test_hooks::submitted(), submitted, "no refusal submits");
+        assert!(consume(&shared, &fin, &actor, &row, (&proof, anchor), shown()).await);
+        assert_eq!(
+            test_hooks::submitted(),
+            submitted + 1,
+            "one terminal submission"
+        );
+        assert!(!fin.has_live_watcher_pending(channel, 17).await);
         assert!(
             shared
                 .mailbox_peek(channel)
@@ -542,7 +562,12 @@ async fn coldstop_proof_exact_actor_row_notice_and_accounting() {
         );
         assert!(discord::inflight::load_inflight_state_read_only(&provider, 907).is_none());
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
-        assert!(!consume(&shared, &fin, &actor, &row, &proof, async { Ok(()) }).await);
+        assert!(!consume(&shared, &fin, &actor, &row, (&proof, anchor), shown()).await);
+        assert_eq!(
+            test_hooks::submitted(),
+            submitted + 1,
+            "a settled close never resubmits"
+        );
         let next = Arc::new(CancelToken::new());
         assert!(
             discord::mailbox_try_start_turn_kinded(
@@ -575,6 +600,7 @@ async fn coldstop_proof_exact_actor_row_notice_and_accounting() {
 async fn coldstop_policy_close_spares_successor_actor_and_row() {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for successor_actor in [true, false] {
         let provider = ProviderKind::Codex;
         let mut shared = discord::make_shared_data_for_tests_with_storage(None);
@@ -586,7 +612,7 @@ async fn coldstop_policy_close_spares_successor_actor_and_row() {
             None,
             1,
             911,
-            0,
+            9_080,
             "cold input".into(),
             None,
             Some(owner.logical_key.clone()),
@@ -639,9 +665,10 @@ async fn coldstop_policy_close_spares_successor_actor_and_row() {
         let noticed = std::sync::atomic::AtomicBool::new(false);
         let notice = async {
             noticed.store(true, Ordering::Release);
-            Ok(())
+            Ok(ReplaceLongMessageOutcome::EditedOriginal)
         };
-        assert!(!consume(&shared, &fin, &actor, &row, &proof, notice).await);
+        let anchor = MessageId::new(row.current_msg_id);
+        assert!(!consume(&shared, &fin, &actor, &row, (&proof, anchor), notice).await);
         // The successor's placeholder is never edited to the stopped notice.
         assert!(!noticed.load(Ordering::Acquire));
         let current = shared
@@ -656,6 +683,442 @@ async fn coldstop_policy_close_spares_successor_actor_and_row() {
         let kept = discord::inflight::load_inflight_state_read_only(&provider, 908)
             .expect("the row stays");
         assert_eq!(kept.turn_nonce, successor_row.turn_nonce);
+        assert!(
+            kept.herdr_before_start_stop.is_none(),
+            "no receipt lands on it"
+        );
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
+}
+
+/// One sealed policy close on a saved row, its mailbox actor and accounting, keyed at generation
+/// 17 under its own test root.
+struct Close {
+    _root: Option<(tempfile::TempDir, crate::config::test_env::TestEnvVarGuard)>,
+    _legacy: crate::services::tui_o::cutover::test_override::ChannelsGuard,
+    shared: Arc<SharedData>,
+    fin: Arc<TurnFinalizer>,
+    actor: Arc<CancelToken>,
+    row: InflightTurnState,
+    proof: BeforeStartProof,
+}
+
+impl Close {
+    async fn open(channel: u64, shape: impl FnOnce(&mut InflightTurnState)) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let env = crate::config::set_agentdesk_root_for_test(root.path());
+        let mut close = Self::open_in(17, channel, shape).await;
+        close._root = Some((root, env));
+        close
+    }
+
+    /// Opens under the runtime root the caller already set.
+    async fn open_in(
+        generation: u64,
+        channel: u64,
+        shape: impl FnOnce(&mut InflightTurnState),
+    ) -> Self {
+        let legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        let provider = ProviderKind::Claude;
+        let mut shared = discord::make_shared_data_for_tests_with_storage(None);
+        let writable = Arc::get_mut(&mut shared).unwrap();
+        writable.provider = provider.clone();
+        writable.restart.current_generation = generation;
+        let (actor, owner) = prepared(provider.clone(), channel);
+        let mut row = InflightTurnState::new(
+            provider.clone(),
+            channel,
+            None,
+            1,
+            channel + 1,
+            channel + 2,
+            "cold input".into(),
+            None,
+            Some(owner.logical_key.clone()),
+            None,
+            None,
+            0,
+        );
+        row.turn_nonce = actor.turn_nonce().map(str::to_owned);
+        shape(&mut row);
+        assert!(
+            discord::mailbox_try_start_turn_kinded(
+                &shared,
+                ChannelId::new(channel),
+                actor.clone(),
+                UserId::new(1),
+                MessageId::new(row.user_msg_id),
+                crate::services::turn_orchestrator::ActiveTurnKind::UserOrAgent
+            )
+            .await
+        );
+        discord::increment_global_active(&shared, "coldstop_test");
+        discord::inflight::save_inflight_state(&row).unwrap();
+        actual_fresh_exit(actor.clone(), owner, provider.clone(), true).await;
+        let ExitDecision::PolicyClose(proof) = seal_exit(&actor, false, false) else {
+            panic!("positive proof required");
+        };
+        let fin = TurnFinalizer::spawn();
+        let key = TurnKey::new(ChannelId::new(channel), row.user_msg_id, generation)
+            .with_episode_nonce(row.turn_nonce.as_deref());
+        fin.register_start(key, provider, RelayOwnerKind::None, &shared);
+        Self {
+            _root: None,
+            _legacy: legacy,
+            shared,
+            fin,
+            actor,
+            row,
+            proof,
+        }
+    }
+
+    fn anchor(&self) -> MessageId {
+        MessageId::new(self.row.current_msg_id)
+    }
+
+    async fn consume(
+        &self,
+        notice: impl std::future::Future<Output = Result<ReplaceLongMessageOutcome, String>>,
+    ) -> bool {
+        let close = (&self.proof, self.anchor());
+        consume(
+            &self.shared,
+            &self.fin,
+            &self.actor,
+            &self.row,
+            close,
+            notice,
+        )
+        .await
+    }
+
+    fn path(&self) -> std::path::PathBuf {
+        discord::inflight::inflight_state_path(
+            &discord::inflight::inflight_runtime_root().unwrap(),
+            &self.shared.provider,
+            self.row.channel_id,
+        )
+    }
+
+    fn bytes(&self) -> Option<Vec<u8>> {
+        std::fs::read(self.path()).ok()
+    }
+
+    fn durable(&self) -> Option<InflightTurnState> {
+        discord::inflight::load_inflight_state_read_only(&self.shared.provider, self.row.channel_id)
+    }
+
+    /// The turn is still held: its actor owns the slot and it is still counted active.
+    async fn held(&self) -> bool {
+        let slot = self
+            .shared
+            .mailbox_peek(ChannelId::new(self.row.channel_id));
+        let owner = slot.unwrap().snapshot().await.cancel_token;
+        owner.is_some_and(|owner| Arc::ptr_eq(&owner, &self.actor))
+            && self.shared.restart.global_active.load(Ordering::Relaxed) == 1
+    }
+
+    /// What the durable receipt says: `None` without one, else whether its notice is pending.
+    fn receipt_pending(&self) -> Option<bool> {
+        let receipt = self.durable()?.herdr_before_start_stop?;
+        assert!(receipt.supported());
+        Some(receipt.notice_pending())
+    }
+}
+
+/// A notice that records being polled and otherwise shows the notice.
+async fn recorded(
+    polled: &std::sync::atomic::AtomicBool,
+) -> Result<ReplaceLongMessageOutcome, String> {
+    polled.store(true, Ordering::Release);
+    Ok(ReplaceLongMessageOutcome::EditedOriginal)
+}
+
+/// A change applied to a row.
+type Shape = fn(&mut InflightTurnState);
+
+/// Nothing is shown or released before the receipt is durable: a failed receipt write keeps the
+/// turn held with its row as it was, and the notice later runs with the receipt on disk and no
+/// inflight lock held.
+#[tokio::test(flavor = "current_thread")]
+async fn coldstop_receipt_precedes_notice_and_release() {
+    for rename in [false, true] {
+        let armed = if rename { "rename" } else { "write" };
+        let close = Close::open(921, |_| {}).await;
+        let before = close.bytes();
+        let submitted = test_hooks::submitted();
+        let polled = std::sync::atomic::AtomicBool::new(false);
+        InflightTurnState::arm_before_start_receipt_fault(921, rename);
+        assert!(!close.consume(recorded(&polled)).await, "{armed:?}");
+        assert!(
+            InflightTurnState::before_start_receipt_faults_consumed(921),
+            "{armed:?} ran on the receipt write"
+        );
+        assert!(!polled.load(Ordering::Acquire), "{armed:?}: nothing shown");
+        assert!(close.held().await, "{armed:?}");
+        assert_eq!(close.bytes(), before, "{armed:?}");
+        assert_eq!(
+            test_hooks::submitted(),
+            submitted,
+            "{armed:?}: nothing submitted"
+        );
+        let path = close.path();
+        let durable = || close.durable().and_then(|row| row.herdr_before_start_stop);
+        let notice = async {
+            assert!(
+                durable().is_some_and(|receipt| receipt.notice_pending()),
+                "the receipt is durable before the notice"
+            );
+            assert!(
+                discord::inflight::try_lock_inflight_state_path(&path).is_ok(),
+                "no inflight lock spans the notice"
+            );
+            Ok(ReplaceLongMessageOutcome::EditedOriginal)
+        };
+        assert!(close.consume(notice).await, "{armed:?}");
+        assert_eq!(test_hooks::submitted(), submitted + 1, "{armed:?}");
+        assert!(close.durable().is_none());
+        assert_eq!(
+            close.shared.restart.global_active.load(Ordering::Relaxed),
+            0
+        );
+    }
+}
+
+/// Only a shown notice is acked; a failed or partial one keeps the receipt pending and the turn
+/// held, and a shown one is acked in the receipt before finalize runs.
+#[tokio::test(flavor = "current_thread")]
+async fn coldstop_notice_ack_only_after_delivery() {
+    let close = Close::open(922, |_| {}).await;
+    let submitted = test_hooks::submitted();
+    let partial = ReplaceLongMessageOutcome::PartialContinuationFailure {
+        sent_chunks: 1,
+        total_chunks: 2,
+        failed_chunk_index: 1,
+        sent_continuation_message_ids: Vec::new(),
+        cleanup_errors: Vec::new(),
+        error: "second chunk".into(),
+    };
+    for sent in [Err("send failed".to_string()), Ok(partial)] {
+        assert!(!close.consume(async { sent }).await);
+        assert_eq!(close.receipt_pending(), Some(true));
+        assert!(close.held().await);
+        assert_eq!(test_hooks::submitted(), submitted);
+    }
+    let finalized_on = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = finalized_on.clone();
+    test_hooks::observe(Some(Box::new(move |step, _| {
+        if step == "before_finalize" {
+            let durable =
+                discord::inflight::load_inflight_state_read_only(&ProviderKind::Claude, 922);
+            let receipt = durable.and_then(|row| row.herdr_before_start_stop).unwrap();
+            seen.borrow_mut()
+                .push(receipt.supported() && !receipt.notice_pending());
+        }
+    })));
+    let fallback = ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+        edit_error: "gone".into(),
+        replacement_anchor: None,
+    };
+    let settled = close.consume(async { Ok(fallback) }).await;
+    test_hooks::observe(None);
+    assert!(settled);
+    assert_eq!(*finalized_on.borrow(), [true], "acked before finalize");
+    assert_eq!(test_hooks::submitted(), submitted + 1);
+    assert!(close.durable().is_none());
+}
+
+/// A successor written between the seal and the receipt's lock gets no receipt and keeps its
+/// bytes, slot and accounting, whichever birth axis tells it apart.
+#[tokio::test(flavor = "current_thread")]
+async fn coldstop_receipt_admission_spares_successor_row() {
+    let successors: [(&str, Shape); 3] = [
+        ("nonce", |row| {
+            row.turn_nonce = Some("successor-nonce".into())
+        }),
+        ("start and generation", |row| {
+            row.started_at.push('9');
+            row.born_generation += 1;
+        }),
+        ("same message id", |row| {
+            row.turn_nonce = Some("successor-nonce".into());
+            row.started_at.push('9');
+        }),
+    ];
+    for (case, successor) in successors {
+        let close = Close::open(923, |_| {}).await;
+        let mut next = close.row.clone();
+        successor(&mut next);
+        let written = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let slot = written.clone();
+        test_hooks::observe(Some(Box::new(move |step, _| {
+            if step == "before_receipt" {
+                discord::inflight::save_inflight_state(&next).unwrap();
+                let path = discord::inflight::inflight_state_path(
+                    &discord::inflight::inflight_runtime_root().unwrap(),
+                    &ProviderKind::Claude,
+                    923,
+                );
+                *slot.borrow_mut() = std::fs::read(path).ok();
+            }
+        })));
+        let polled = std::sync::atomic::AtomicBool::new(false);
+        let settled = close.consume(recorded(&polled)).await;
+        test_hooks::observe(None);
+        assert!(!settled, "{case}");
+        assert!(!polled.load(Ordering::Acquire), "{case}: nothing shown");
+        assert_eq!(close.bytes(), *written.borrow(), "{case}: successor bytes");
+        assert!(close.held().await, "{case}");
+    }
+}
+
+/// The bridge shows the stop only where it owns the body: an O-owned destination or a message
+/// anchor that moved keeps the receipt pending, sends nothing and holds the turn.
+#[tokio::test(flavor = "current_thread")]
+async fn coldstop_bridge_shows_the_stop_only_on_its_own_body() {
+    let close = Close::open(924, |row| {
+        row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
+    })
+    .await;
+    let polled = std::sync::atomic::AtomicBool::new(false);
+    {
+        let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+            924,
+            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        )]);
+        assert!(!close.consume(recorded(&polled)).await);
+    }
+    assert!(!polled.load(Ordering::Acquire), "O owns the body");
+    assert_eq!(close.receipt_pending(), Some(true));
+    assert!(close.held().await);
+    let mut moved = close.durable().unwrap();
+    moved.current_msg_id += 1;
+    discord::inflight::save_inflight_state(&moved).unwrap();
+    assert!(!close.consume(recorded(&polled)).await);
+    assert!(!polled.load(Ordering::Acquire), "the anchor moved");
+    assert_eq!(close.receipt_pending(), Some(true));
+    assert!(close.held().await);
+}
+
+const CRASH_FILTER: &str = "coldstop_restart_finishes_a_close_that_crashed_midway";
+const CRASH_PHASE: &str = "ADK_COLDSTOP_B_PHASE";
+const CRASH_ROOT: &str = "ADK_COLDSTOP_B_ROOT";
+const CRASH_CHANNEL: u64 = 1_479_671_301_387_210_000;
+
+/// Runs this test as `phase` in a new process and returns the pid it printed beside `marker`.
+fn run_crash_phase(phase: &str, marker: &str, env: &[(&str, &std::ffi::OsStr)]) -> u32 {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args([CRASH_FILTER, "--test-threads=1", "--nocapture"]);
+    command.env(CRASH_PHASE, phase);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        output.status.success(),
+        "{phase}: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let line = stdout
+        .lines()
+        .find(|line| line.contains(marker))
+        .unwrap_or_else(|| panic!("{phase} printed no {marker}: {stdout}"));
+    let pid = line.split("pid=").nth(1).unwrap().trim().parse().unwrap();
+    assert_ne!(pid, std::process::id());
+    pid
+}
+
+/// A close that dies after its receipt, after its notice ack or just before finalize is finished
+/// by the next process's restart: the row goes and the stop is shown exactly once in total. The
+/// row carries no Herdr marker, so only the receipt brings restart to it.
+#[tokio::test(flavor = "current_thread")]
+async fn coldstop_restart_finishes_a_close_that_crashed_midway() {
+    if let Ok(phase) = std::env::var(CRASH_PHASE) {
+        return crash_phase(&phase).await;
+    }
+    for step in ["after_receipt", "after_notice_ack", "before_finalize"] {
+        let root = tempfile::tempdir().unwrap();
+        let close = [
+            (CRASH_ROOT, root.path().as_os_str()),
+            (test_hooks::STOP_AT, std::ffi::OsStr::new(step)),
+        ];
+        let restore = [(CRASH_ROOT, root.path().as_os_str())];
+        let closed = run_crash_phase("CLOSE", "COLDSTOP_B_STOP", &close);
+        let restored = run_crash_phase("RESTORE", "COLDSTOP_B_PHASE RESTORE", &restore);
+        assert_ne!(closed, restored);
+        let shown = std::fs::read_to_string(root.path().join("notices.log")).unwrap_or_default();
+        let expected = if step == "after_receipt" {
+            ["restart"]
+        } else {
+            ["bridge"]
+        };
+        assert_eq!(shown.lines().collect::<Vec<_>>(), expected, "{step}");
+    }
+}
+
+async fn crash_phase(phase: &str) {
+    let root = std::path::PathBuf::from(std::env::var_os(CRASH_ROOT).unwrap());
+    let log = root.join("notices.log");
+    let note = |by: &str| {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .unwrap();
+        writeln!(file, "{by}").unwrap();
+    };
+    let _env = crate::config::set_agentdesk_root_for_test(&root);
+    // Boot allocates the process generation that `SharedData` and every row carry.
+    let generation = crate::services::discord::runtime_store::allocate_process_generation();
+    if phase == "CLOSE" {
+        let close = Close::open_in(generation, CRASH_CHANNEL, |_| {}).await;
+        assert_eq!(
+            close.shared.restart.current_generation,
+            crate::services::discord::runtime_store::process_generation()
+        );
+        close
+            .consume(async {
+                note("bridge");
+                Ok(ReplaceLongMessageOutcome::EditedOriginal)
+            })
+            .await;
+        unreachable!("the step hook ends this process");
+    }
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    assert_eq!(
+        generation,
+        crate::services::discord::runtime_store::process_generation()
+    );
+    let mut shared = discord::make_shared_data_for_tests_with_storage(None);
+    let writable = Arc::get_mut(&mut shared).unwrap();
+    writable.provider = ProviderKind::Claude;
+    writable.restart.current_generation = generation;
+    let row =
+        discord::inflight::load_inflight_state_read_only(&ProviderKind::Claude, CRASH_CHANNEL)
+            .expect("the crashed close left its row");
+    let receipt = row.herdr_before_start_stop.expect("with its receipt");
+    assert!(receipt.supported() && receipt.admitted_generation() < generation);
+    let recorder =
+        crate::services::discord::recovery_engine::o_cut_recorder::start(CRASH_CHANNEL).await;
+    crate::services::discord::recovery_engine::restore_inflight_turns(
+        &recorder.http,
+        &shared,
+        &ProviderKind::Claude,
+    )
+    .await;
+    let route = format!("/channels/{CRASH_CHANNEL}/messages");
+    for call in recorder.calls() {
+        assert!(call.route.contains(&route), "{:?}", call.route);
+        assert_eq!(call.content.as_deref(), Some(ADMITTED_ABORT_NOTICE));
+        note("restart");
+    }
+    assert!(
+        discord::inflight::load_inflight_state_read_only(&ProviderKind::Claude, CRASH_CHANNEL)
+            .is_none(),
+        "restart finished the close"
+    );
+    println!("COLDSTOP_B_PHASE RESTORE pid={}", std::process::id());
 }
