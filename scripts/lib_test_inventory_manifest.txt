@@ -4368,6 +4368,7 @@ services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_te
 services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_tests::contended_uncaptured_codex_terminal_keeps_scheduler_timer_and_loopback_live
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::an_admitted_ack_outlives_a_stop_before_cleanup_pg
+services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::restart_preserves_execution_nonce_input_hold_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::a_herdr_claude_terminal_is_admitted_only_from_this_tokens_own_prompt
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::a_herdr_codex_terminal_is_admitted_only_from_this_tokens_own_turn
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::tests::a_herdr_range_holding_another_turns_head_or_tail_is_refused
@@ -9344,6 +9345,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_s
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::b2b1_only_an_escape_that_leaves_withdraws_the_herdr_turn_approval
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cold_stop_after_a_normal_exit_seal_sends_nothing
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cold_unsubmitted_stop_closes_only_after_a_no_attempt_exit
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cut::restart_real_cutpoints_reach_their_runtime_boundaries_pg
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_generation_only_stale_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_generation_only_stale_sends_no_escape

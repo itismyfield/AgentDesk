@@ -114,3 +114,35 @@ pane kill·close 는 P11 범위다.
   - holder 나 epoch 가 바뀐 뒤의 재시도 행은 `status` 에 `other_epoch` 로 보이고 claim 되지 않는다. 채널당 열린 route 가 1개뿐이라 그 채널의 다음 intake 도 막힌다.
   - 지금은 이 행을 현재 home 으로 다시 보내는 도구가 없다. force-fail 도 같은 epoch 로 다시 만든다. 현재 home 을 다시 읽는 재시도가 생기기 전에는 위임을 켜지 않는다.
   - drain 의 `blocker` 가 `open_intake` 에 오래 머물면 이 경우인지 `status` 로 확인한다.
+
+## 8. 중단 안내 중복(at-least-once)
+
+- 지금은 휴면이다. 생산 빌드의 Herdr 정산 스위치는 hard-false 라서 아래 경로는 실행되지 않는다. 활성화 뒤의 운영 기준이다.
+- 보장 범위:
+  - 중단 안내(`⏹ 중단됨`)는 이 순서로 처리한다: receipt 또는 admitted kind 를 row 에 durable 하게 쓴다 → 안내를 보낸다 → 보낸 결과를 같은 row 에 ACK 로 쓴다 → 그 row 만 정리한다.
+  - 원래 메시지 편집이 실패하면 새 메시지로 보낸다(`SentFallbackAfterEditFailure`). 이것도 실제로 보인 안내로 ACK 한다.
+  - 안내를 보낸 뒤 ACK 가 durable 해지기 전에 프로세스가 끝나면, 재시작이 Pending 을 보고 안내를 한 번 더 보낸다.
+    - 편집으로 보였던 안내는 같은 메시지를 다시 편집하므로 보이는 결과가 같다.
+    - fallback 으로 보였던 안내는 새 메시지가 하나 더 생길 수 있다.
+  - 안내가 정확히 한 번 보인다고 보장하지 않는다. 중복 안내는 terminal 이 두 번 처리됐다는 뜻이 아니다.
+- 진단: 같은 episode(채널·`turn_nonce`·generation·안내 메시지)로 다음을 대조한다.
+  - 로그 `herdr_turn_policy_close`: `channel_id`·`logical`·`turn_nonce`·`runtime_generation`·`settled`.
+  - 로그 `herdr_turn_held`: `hold_kind`·`hold_reason`·`settlement`.
+  - 재시작 로그 `recovery kept a before-start policy receipt` 와 `recovery kept an admitted Herdr terminal` 의 `why`.
+  - inflight row: receipt 의 notice 값(Pending·Delivered), `tui_terminal_kind`, `terminal_delivery_committed`.
+  - 실제 Discord 채널에 보인 안내 메시지 수.
+- 경보 기준(운영자 점검 기준이다. 자동 경보는 없다):
+  - 같은 episode 에서 fallback 안내가 반복된다.
+  - 재시작 뒤에도 receipt 가 Pending 으로 남는다.
+  - receipt 가 Delivered 인데 row 가 정리되지 않고 남는다.
+  - 이 빌드가 읽지 못하는 receipt 의 row 가 있다. 재시작은 그 row 를 그대로 둔다. 소비된 흔적이 보이면 조사한다.
+- 수동 대응:
+  1. 3절로 새 Herdr admission 을 막는다.
+  2. 해당 inflight row 파일과 receipt 를 그대로 복사해 둔다.
+  3. `agentdesk herdr status` 의 pane 상태와 그 채널의 mailbox(진행 턴·대기열)를 대조한다.
+  4. 처리는 운영자가 판단한다. 금지: row 삭제, kind 를 Completed 로 바꾸기, 안내 임의 재전송.
+- 롤백:
+  - 지금 생산 정산은 hard-false 다. 끌 것이 없다.
+  - 활성화 뒤 정산을 다시 끄면, 지금 코드는 receipt 나 admitted kind 가 있는 row 를 일반 복구 경로로 읽는다.
+    끄기 전에 그런 row 가 남아 있는지 확인하고, 남아 있으면 원본을 보존한 뒤 운영자가 처리한다.
+  - 꺼도 이런 row 를 일반 복구로 넘기지 않는 계약은 아직 없다. 활성화 전에 필요한 선행 작업이다.
