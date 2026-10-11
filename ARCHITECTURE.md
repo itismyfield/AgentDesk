@@ -1005,7 +1005,6 @@ src/
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── operator_disposition.rs
 │   │   │   │   └── reconcile_gate.rs
-│   │   │   ├── fixtures/
 │   │   │   ├── model/
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── serde_adapters.rs

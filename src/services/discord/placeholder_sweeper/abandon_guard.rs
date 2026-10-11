@@ -1151,6 +1151,7 @@ mod tests {
     }
     #[tokio::test(flavor = "current_thread")]
     async fn s3act_b3b_placeholder_stops_before_mailbox_finish_pg() {
+        #[cfg(unix)]
         crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE
             .set(false);
         use crate::services::discord::host_teardown_gate::test_support::{
