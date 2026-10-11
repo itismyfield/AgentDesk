@@ -154,7 +154,7 @@ fn a_p11_m2_last_pane_close_and_exact_retire() {
             .filter(|line| line.contains("event=\"workspace.close\""))
             .map(|line| field(line, "workspace_id"))
             .collect();
-        assert_eq!(closed, [target.workspace.clone()]);
+        assert_eq!(closed, std::slice::from_ref(&target.workspace));
         assert_eq!(s2.requests_since(s2_from), Vec::new());
         assert!(alive(&(s1.pid, s1.start.clone())) && alive(&(s2.pid, s2.start.clone())));
         s1.assert_offline();
