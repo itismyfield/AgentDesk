@@ -1083,7 +1083,14 @@ async fn each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_
                 force_fresh: false,
                 submission: None,
             };
-            let dispatched = execute(turn, sender);
+            let dispatched = execute(
+                turn,
+                crate::services::discord::router::intake_dispatch::replay_admission::dormant_start(
+                    "test",
+                )
+                .unwrap(),
+                sender,
+            );
             let clear = crate::services::discord::admin_host_guard::read_herdr_clear(
                 Some(pool),
                 &provider,

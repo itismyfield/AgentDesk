@@ -22,6 +22,7 @@ pub(crate) async fn receipt_disposition(
 }
 
 /// The `sources` that belong to no started request of `provider`, in input order.
+#[cfg(test)]
 pub(crate) async fn unblocked_sources(
     pool: &PgPool,
     provider: &str,
@@ -61,6 +62,17 @@ pub(crate) async fn blocked_receipt_for_sources(
 }
 
 /// Whether the dispatch's projected disposition forbids an automatic rerun.
+pub(crate) async fn dispatch_blocked(
+    pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT replay_dispatch_blocked($1)")
+        .bind(dispatch_id)
+        .fetch_one(pool)
+        .await
+}
+
+/// Whether the dispatch's projected disposition forbids an automatic rerun.
 pub(crate) async fn dispatch_blocked_on_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     dispatch_id: &str,
@@ -71,7 +83,6 @@ pub(crate) async fn dispatch_blocked_on_tx(
         .await
 }
 
-#[cfg(test)]
 pub(crate) mod receipt;
 #[cfg(test)]
 mod register_tests;

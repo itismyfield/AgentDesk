@@ -15,7 +15,6 @@ mod home_order_tests;
 mod notice;
 mod policy_channel;
 mod queued;
-#[cfg(test)]
 pub(crate) mod replay_admission;
 #[cfg(test)]
 mod replay_admission_tests;
@@ -94,6 +93,8 @@ pub(crate) enum IntakeAdmission {
     },
     SkippedDuplicate,
     ConsumedToHold,
+    /// The replay check could not decide; the input waits in durable custody instead of starting.
+    ReplayDeferred(replay_admission::ReplayDefer),
     DeferredOpenRoute {
         target_instance_id: String,
         prepared_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
@@ -109,30 +110,32 @@ pub(crate) async fn admit_text_intake(
 ) -> IntakeAdmission {
     let channel_id = submission.request.channel_id.get().to_string();
     if let Some(pool) = deps.shared.pg_pool.as_ref() {
-        let mut sources: Vec<String> = std::iter::once(submission.request.user_msg_id)
-            .chain(submission.request.source_message_ids.iter().copied())
-            .map(|id| id.get().to_string())
-            .collect();
-        sources.sort_unstable();
-        sources.dedup();
-        // Consume every absorbed source before routing or attachment effects; mixed items stay intact.
-        let detail = match crate::db::replay_disposition::unblocked_sources(
-            pool,
+        let request = &submission.request;
+        let input = replay_admission::discord_input(
             submission.provider.as_str(),
-            &channel_id,
-            &sources,
+            request.channel_id.get(),
+            request.user_msg_id.get(),
+            request.source_message_ids.iter().map(|id| id.get()),
+            &request.user_text,
+        );
+        let instance =
+            crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+        let ctx = replay_admission::ReplayAdmissionContext::production(
+            pool,
+            &instance,
+            replay_admission::incarnation(),
         )
-        .await
-        {
-            Ok(unblocked) if unblocked.len() == sources.len() => None,
-            Ok(unblocked) if unblocked.is_empty() => return IntakeAdmission::ConsumedToHold,
-            Ok(_) => Some("intake mixes held and new sources".to_string()),
-            Err(error) => Some(format!("replay hold lookup failed: {error}")),
-        };
-        if let Some(detail) = detail {
-            return IntakeAdmission::Blocked {
-                reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
-            };
+        .for_channel(&channel_id);
+        // Consume every absorbed source before routing or attachment effects; mixed items stay intact.
+        match replay_admission::preflight_source(&ctx, &input).await {
+            replay_admission::ReplayPreflight::LegacyUnprotected
+            | replay_admission::ReplayPreflight::Admit(_) => {}
+            replay_admission::ReplayPreflight::ConsumeProtected(_) => {
+                return IntakeAdmission::ConsumedToHold;
+            }
+            replay_admission::ReplayPreflight::Defer(defer) => {
+                return IntakeAdmission::ReplayDeferred(defer);
+            }
         }
     }
     // Before any routing or Postgres-less local fallback: an O channel runs only on its gateway.
@@ -453,6 +456,15 @@ pub(crate) async fn finish_text_intake_admission(
             submission.preloaded_uploads.extend(prepared_uploads);
             defer_live_submission(deps, submission).await;
         }
+        IntakeAdmission::ReplayDeferred(defer) => {
+            let channel_id = submission.request.channel_id.get();
+            if !defer_live_submission(deps, submission).await {
+                return Err(format!(
+                    "replay check deferred ({defer:?}); channel {channel_id} refused custody"
+                )
+                .into());
+            }
+        }
         IntakeAdmission::Blocked { ref reason }
             if submission.origin.should_notify_blocked(reason) =>
         {
@@ -502,9 +514,10 @@ pub(crate) async fn finish_admitted_local(
     .await
 }
 
-async fn defer_live_submission(deps: &IntakeDeps<'_>, submission: IntakeSubmission) {
+/// Queues a live input behind the slow backstop; true once the queue durably holds it.
+async fn defer_live_submission(deps: &IntakeDeps<'_>, submission: IntakeSubmission) -> bool {
     if matches!(submission.origin, IntakeOrigin::QueuedDrain) {
-        return;
+        return true;
     }
     let request = submission.request;
     let channel_id = request.channel_id;
@@ -519,7 +532,7 @@ async fn defer_live_submission(deps: &IntakeDeps<'_>, submission: IntakeSubmissi
         submission.preloaded_uploads,
         submission.voice_announcement,
     );
-    let _outcome = super::super::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
+    let outcome = super::super::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
         super::super::mailbox_enqueue_intervention(
             deps.shared,
             &submission.provider,
@@ -537,6 +550,14 @@ async fn defer_live_submission(deps: &IntakeDeps<'_>, submission: IntakeSubmissi
         "intake_open_route_deferred",
     )
     .await;
+    let duplicate = matches!(
+        outcome.refusal_reason,
+        Some(
+            crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued
+                | crate::services::turn_orchestrator::EnqueueRefusalReason::LastItemDedup
+        )
+    );
+    (outcome.enqueued || outcome.merged || duplicate) && outcome.persistence_error.is_none()
 }
 
 fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_msg_id: &str) {
@@ -550,6 +571,12 @@ fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_ms
             channel_id,
             user_msg_id,
             "[intake_dispatch] forwarded; local execution fenced"
+        ),
+        IntakeAdmission::ReplayDeferred(defer) => tracing::warn!(
+            ?defer,
+            channel_id,
+            user_msg_id,
+            "[intake_dispatch] replay check deferred; local execution fenced"
         ),
         IntakeAdmission::SkippedDuplicate | IntakeAdmission::ConsumedToHold => tracing::info!(
             channel_id,

@@ -14,6 +14,7 @@ mod host_refusal;
 pub(crate) mod inflight_create_log;
 mod placeholder_handoff;
 pub(super) mod race_loss;
+mod replay_start;
 mod runtime_transition;
 mod stale_dispatch_guard;
 mod voice_intake;
@@ -22,7 +23,7 @@ mod worker_entry;
 #[cfg(all(test, unix))]
 mod native_fresh_prompt_tests;
 
-pub(crate) use worker_entry::{IntakeRequest, execute_intake_turn_core};
+pub(crate) use worker_entry::{IntakeRequest, execute_intake_turn_core, start_exact_retry};
 
 mod context;
 pub(in crate::services::discord) use context::IntakeDeps;
@@ -544,7 +545,9 @@ async fn handle_text_message_admitted(
         session_was_cleared = Some(cleared);
     }
     let provider = settings_provider;
-    let dispatch_id_for_thread = super::super::super::adk_session::parse_dispatch_id(user_text);
+    let parsed_dispatch = super::super::super::adk_session::parse_dispatch_id(user_text);
+    let dispatch_id_for_thread =
+        dispatch_runtime::unheld_dispatch(shared, original_channel_id, parsed_dispatch).await;
     let dispatch_info_cached = if let Some(ref did) = dispatch_id_for_thread {
         super::super::lookup_dispatch_info(shared.api_port, did).await
     } else {
@@ -1881,12 +1884,13 @@ async fn handle_text_message_admitted(
     // In unified threads, user_text may contain a stale DISPATCH: prefix
     // from a previous dispatch in the same thread. DB lookup uses the
     // thread→card→dispatch link which is always current.
-    let dispatch_id = super::super::super::adk_session::lookup_pending_dispatch_for_thread(
+    let looked_up_dispatch = super::super::super::adk_session::lookup_pending_dispatch_for_thread(
         shared.api_port,
         channel_id.get(),
     )
     .await
     .or_else(|| super::super::super::adk_session::parse_dispatch_id(user_text));
+    let dispatch_id = dispatch_runtime::unheld_dispatch(shared, channel_id, looked_up_dispatch).await;
     post_adk_session_status_for_channel(
         shared,
         channel_id,
@@ -2313,6 +2317,26 @@ async fn handle_text_message_admitted(
     }
     inflight_state.session_key = adk_session_key.clone();
     inflight_state.dispatch_id = dispatch_id.clone();
+    let replay_request = replay_start::StartRequest {
+        provider: &provider,
+        channel_id,
+        agent_id: role_binding.as_ref().map(|binding| binding.role_id.as_str()),
+        reply_context: reply_context.as_deref(),
+        uploads: &pending_uploads,
+        session_key: adk_session_key.as_deref(),
+        prompt: &context_prompt,
+    };
+    let replay_start = match replay_start::admit(shared, replay_request, &mut inflight_state).await {
+        Ok((start, fresh)) => {
+            if fresh {
+                session_id = None;
+            }
+            start
+        }
+        Err(stop) => {
+            return replay_start::stop(shared, &provider, &inflight_state, &cancel_token, stop).await;
+        }
+    };
     let turn_host = crate::services::turn_host::for_turn(
         shared.pg_pool.as_ref(),
         &provider,
@@ -2492,6 +2516,7 @@ async fn handle_text_message_admitted(
                             force_fresh: force_fresh_provider_session,
                             submission: submission.as_ref(),
                         },
+                        replay_start,
                         tx.clone(),
                     )
                 }))

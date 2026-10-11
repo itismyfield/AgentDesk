@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::db::replay_disposition::write::{self, BeginFrom, CanonicalInput, EffectProjection};
-use crate::services::discord::replay_policy::RetryPermit;
 use crate::services::discord::replay_policy::live::{Activity, LiveAttempt, Seen, TerminalKind};
+use crate::services::discord::replay_policy::{ExactHandoff, ExactRetry};
 use crate::services::discord::turn_bridge::{
     BridgeCompletionSignal, TurnBridgeContext, spawn_turn_bridge,
 };
@@ -77,19 +77,15 @@ impl TurnGateway for EffectGateway {
     fn schedule_exact_retry_with_history<'a>(
         &'a self,
         _channel_id: ChannelId,
-        _user_message_id: MessageId,
-        _user_text: &'a str,
-        retry: RetryPermit,
-        completion_tx: tokio::sync::oneshot::Sender<()>,
-    ) -> GatewayFuture<'a, ()> {
-        let previous = retry.previous_nonce().to_string();
+        retry: ExactRetry,
+    ) -> GatewayFuture<'a, ExactHandoff> {
+        let previous = retry.permit.previous_nonce().to_string();
         self.0
             .exact
             .lock()
             .unwrap()
-            .push((retry.receipt_id(), previous));
-        let _ = completion_tx.send(());
-        Box::pin(async {})
+            .push((retry.permit.receipt_id(), previous));
+        Box::pin(async { ExactHandoff::Started })
     }
 
     fn dispatch_queued_turn<'a>(

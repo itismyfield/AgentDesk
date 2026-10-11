@@ -81,6 +81,62 @@ pub(crate) async fn execute_intake_turn_core(
     .await
 }
 
+/// How long an exact retry waits for the stale turn to release its channel before it gives up.
+const EXACT_RETRY_CLAIM_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Starts a protected request's exact retry on the intake start path once the stale turn released
+/// the channel. Only that start can take the permit; anything short of its begin leaves it held.
+pub(crate) async fn start_exact_retry(
+    http: &Arc<serenity::http::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    retry: crate::services::discord::replay_policy::ExactRetry,
+) -> crate::services::discord::replay_policy::ExactHandoff {
+    use crate::services::discord::replay_policy::{ExactHandoff, hand_over};
+    let deadline = tokio::time::Instant::now() + EXACT_RETRY_CLAIM_WAIT;
+    while crate::services::discord::mailbox_snapshot(shared, channel_id)
+        .await
+        .cancel_token
+        .is_some()
+    {
+        if tokio::time::Instant::now() >= deadline {
+            return ExactHandoff::Refused;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let request = IntakeRequest {
+        intake_outbox_id: None,
+        channel_id,
+        user_msg_id: retry.user_message_id,
+        source_message_ids: retry.sources,
+        busy_followup_retry_user_msg_id: retry.user_message_id,
+        request_owner: retry.request_owner,
+        request_owner_name: String::new(),
+        user_text: retry.text,
+        reply_to_user_message: true,
+        defer_watcher_resume: false,
+        wait_for_completion: false,
+        merge_consecutive: false,
+        reply_context: retry.reply_context,
+        has_reply_boundary: false,
+        dm_hint: None,
+        turn_kind: TurnKind::Foreground,
+        preserve_on_cancel: false,
+    };
+    let token = shared
+        .http
+        .cached_bot_token
+        .get()
+        .cloned()
+        .unwrap_or_default();
+    let start = execute_intake_turn_core(http, shared, &token, request, Vec::new());
+    let (result, handoff) = hand_over(retry.permit, start).await;
+    if let Err(error) = result {
+        tracing::warn!(channel_id = channel_id.get(), %error, "exact retry start failed");
+    }
+    handoff
+}
+
 #[cfg(all(test, unix))]
 mod input_effect_tests {
     use super::*;

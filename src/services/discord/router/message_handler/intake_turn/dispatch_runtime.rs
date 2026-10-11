@@ -45,13 +45,13 @@ pub(super) async fn prepare_post_redirect_dispatch_runtime(
             }
         }
     }
-    let active_dispatch_id_for_prompt =
-        crate::services::discord::adk_session::lookup_pending_dispatch_for_thread(
-            shared.api_port,
-            channel_id.get(),
-        )
-        .await
-        .or_else(|| dispatch_id_for_thread.cloned());
+    let looked_up = crate::services::discord::adk_session::lookup_pending_dispatch_for_thread(
+        shared.api_port,
+        channel_id.get(),
+    )
+    .await
+    .or_else(|| dispatch_id_for_thread.cloned());
+    let active_dispatch_id_for_prompt = unheld_dispatch(shared, channel_id, looked_up).await;
     let active_dispatch_info = match active_dispatch_id_for_prompt.as_deref() {
         Some(did) if dispatch_id_for_thread.map(String::as_str) == Some(did) => {
             dispatch_info_cached
@@ -71,4 +71,35 @@ pub(super) async fn prepare_post_redirect_dispatch_runtime(
         active_dispatch_info,
         active_dispatch_id_for_prompt,
     )
+}
+
+/// A held dispatch stays with its protected request, so a fresh input never inherits it. A dormant
+/// build reads nothing; a failed read keeps the dispatch as before.
+pub(super) async fn unheld_dispatch(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    dispatch_id: Option<String>,
+) -> Option<String> {
+    let admission = super::super::super::intake_dispatch::replay_admission::dormant_start;
+    let (Some(id), Some(pool)) = (dispatch_id.as_deref(), shared.pg_pool.as_ref()) else {
+        return dispatch_id;
+    };
+    if admission(&channel_id.get().to_string()).is_some() {
+        return dispatch_id;
+    }
+    match crate::db::replay_disposition::dispatch_blocked(pool, id).await {
+        Ok(false) => dispatch_id,
+        Ok(true) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                dispatch_id = id,
+                "held dispatch not inherited"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(dispatch_id = id, %error, "held dispatch lookup failed; kept");
+            dispatch_id
+        }
+    }
 }

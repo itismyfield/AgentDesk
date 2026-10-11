@@ -26,7 +26,7 @@ pub(super) use message_handler::{
     mailbox_try_start_turn_with_terminal_marker_cleanup, start_headless_turn,
     start_reserved_headless_turn, start_reserved_headless_turn_with_owner,
 };
-pub(crate) use message_handler::{IntakeRequest, execute_intake_turn_core};
+pub(crate) use message_handler::{IntakeRequest, execute_intake_turn_core, start_exact_retry};
 pub(in crate::services::discord) use queue_status_presentation::queue_status_card_enabled;
 #[cfg(test)]
 pub(super) use turn_start::claim_reserved_headless_turn;

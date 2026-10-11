@@ -4,7 +4,6 @@
 pub(crate) mod live;
 #[cfg(all(test, unix))]
 mod live_tests;
-#[cfg(test)]
 pub(crate) mod permit;
 #[cfg(test)]
 mod permit_tests;
@@ -88,6 +87,69 @@ impl RetryPermit {
     }
 }
 
+/// The original request an exact retry starts again, and the permit only its next start may take.
+#[derive(Debug)]
+pub(crate) struct ExactRetry {
+    pub(crate) user_message_id: poise::serenity_prelude::MessageId,
+    pub(crate) sources: Vec<poise::serenity_prelude::MessageId>,
+    pub(crate) request_owner: poise::serenity_prelude::UserId,
+    pub(crate) text: String,
+    pub(crate) reply_context: Option<String>,
+    pub(crate) permit: RetryPermit,
+}
+
+/// Whether the request's next start took the exact continuation and began its attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExactHandoff {
+    Started,
+    /// Nothing started; the receipt keeps blocking reruns.
+    Refused,
+}
+
+struct Handover {
+    permit: Option<RetryPermit>,
+    started: bool,
+}
+
+tokio::task_local! {
+    static CONTINUATION: std::cell::RefCell<Handover>;
+}
+
+/// Runs `start` with the continuation in reach of this task's next start only.
+pub(crate) async fn hand_over<F: std::future::Future>(
+    permit: RetryPermit,
+    start: F,
+) -> (F::Output, ExactHandoff) {
+    let handover = Handover {
+        permit: Some(permit),
+        started: false,
+    };
+    CONTINUATION
+        .scope(std::cell::RefCell::new(handover), async {
+            let output = start.await;
+            let started = CONTINUATION.with(|slot| slot.borrow().started);
+            let handoff = match started {
+                true => ExactHandoff::Started,
+                false => ExactHandoff::Refused,
+            };
+            (output, handoff)
+        })
+        .await
+}
+
+/// The continuation handed to this task's start, taken at most once.
+pub(crate) fn take_continuation() -> Option<RetryPermit> {
+    CONTINUATION
+        .try_with(|slot| slot.borrow_mut().permit.take())
+        .ok()
+        .flatten()
+}
+
+/// Records that the start which took the continuation committed its begin.
+pub(crate) fn continuation_started() {
+    let _ = CONTINUATION.try_with(|slot| slot.borrow_mut().started = true);
+}
+
 /// What a stale-resume branch may do with its turn.
 #[derive(Debug)]
 pub(in crate::services::discord) enum StaleResume {
@@ -102,10 +164,18 @@ pub(in crate::services::discord) enum StaleResume {
 /// How long a decision waits for the attempt's reader to finish before judging what it saw.
 const READER_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Channel and source messages whose protected request was held or handed to its exact
-/// continuation; the legacy history retry never reruns them in this process.
-static BARRED: std::sync::LazyLock<dashmap::DashSet<(u64, u64)>> =
-    std::sync::LazyLock::new(dashmap::DashSet::new);
+/// Per channel and source message, which of the legacy history retry and the protected decision
+/// claimed it first; the loser never reruns the request in this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryClaim {
+    /// Held or handed to its exact continuation.
+    Barred,
+    /// A legacy history retry committed to store its history and enqueue.
+    Legacy,
+}
+
+static RETRY_CLAIMS: std::sync::LazyLock<dashmap::DashMap<(u64, u64), RetryClaim>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
 
 /// Whether the turn carries a protected request; reads memory only, so a legacy turn does no IO.
 fn protected(token: &CancelToken, inflight: &InflightTurnState) -> bool {
@@ -121,16 +191,35 @@ fn ordinary_allowed(token: &CancelToken, inflight: &InflightTurnState) -> bool {
         || token.replay_attempt().and_then(|live| live.verdict()) == Some(Verdict::Ordinary)
 }
 
-fn bar_legacy_retry(inflight: &InflightTurnState) {
+/// Bars the legacy history retry; true when one already committed, so no exact retry may follow.
+fn bar_legacy_retry(inflight: &InflightTurnState) -> bool {
     let messages = std::iter::once(inflight.user_msg_id).chain(inflight.source_message_ids.clone());
-    for message in messages.filter(|&id| id != 0) {
-        BARRED.insert((inflight.channel_id, message));
-    }
+    let barred = messages
+        .filter(|&id| id != 0)
+        .map(|message| RETRY_CLAIMS.insert((inflight.channel_id, message), RetryClaim::Barred));
+    barred.fold(false, |raced, claim| {
+        raced | (claim == Some(RetryClaim::Legacy))
+    })
 }
 
 /// Whether the legacy history retry must refuse this request.
 pub(crate) fn legacy_retry_barred(channel_id: u64, message_id: u64) -> bool {
-    BARRED.contains(&(channel_id, message_id))
+    RETRY_CLAIMS
+        .get(&(channel_id, message_id))
+        .is_some_and(|claim| *claim == RetryClaim::Barred)
+}
+
+/// Claims the request for the legacy history retry right before its history write and enqueue;
+/// false when the protected decision barred it first.
+pub(crate) fn claim_legacy_retry(channel_id: u64, message_id: u64) -> bool {
+    use dashmap::mapref::entry::Entry;
+    match RETRY_CLAIMS.entry((channel_id, message_id)) {
+        Entry::Occupied(claim) if *claim.get() == RetryClaim::Barred => false,
+        entry => {
+            entry.insert(RetryClaim::Legacy);
+            true
+        }
+    }
 }
 
 /// Takes the token's live attempt for its one decision; a protected turn without one decides nothing.
@@ -157,13 +246,13 @@ pub(in crate::services::discord) async fn stale_resume(
     if ordinary_allowed(token, inflight) {
         return StaleResume::Legacy;
     }
-    bar_legacy_retry(inflight);
+    let legacy_raced = bar_legacy_retry(inflight);
     let Some((pool, live, attempt, observation)) = decide_live(pool, token).await else {
         return StaleResume::Hold;
     };
     let receipt = attempt.receipt_id();
     match decide_stale(pool, Some(attempt), &observation).await {
-        ReplayDecision::AllowStartupRetry(retry) => {
+        ReplayDecision::AllowStartupRetry(retry) if !legacy_raced => {
             live.settle(Verdict::Retried);
             StaleResume::Exact(retry)
         }

@@ -3,8 +3,21 @@
 use crate::db::replay_disposition::receipt::{self, Disposition, ReceiptSnapshot};
 pub(crate) use crate::db::replay_disposition::write::CanonicalInput;
 use crate::db::replay_disposition::write::{self, BeginFrom, EffectProjection, WriteError};
-use crate::services::discord::replay_policy::permit::{EffectTarget, RetryPermit, StartPermit};
+use crate::services::discord::replay_policy::live::LiveAttempt;
+use crate::services::discord::replay_policy::permit::{
+    EffectTarget, PermitRefusal, PreparedRetryStart, RetryPermit, StartPermit,
+};
+use crate::services::provider::CancelToken;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+
+/// This process's owner incarnation for the attempts it begins.
+static INCARNATION: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+
+pub(crate) fn incarnation() -> &'static str {
+    &INCARNATION
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProducerMode {
@@ -28,6 +41,150 @@ impl<'a> ReplayAdmissionContext<'a> {
             incarnation,
             producers: ProducerMode::Dormant,
         }
+    }
+
+    /// Producers turn on only where an activation supplier connected; none exists outside tests.
+    pub(crate) fn for_channel(mut self, channel: &str) -> Self {
+        self.producers = producers_for(channel);
+        self
+    }
+}
+
+fn producers_for(channel: &str) -> ProducerMode {
+    match activation_supplied(channel) {
+        true => ProducerMode::Active,
+        false => ProducerMode::Dormant,
+    }
+}
+
+/// No production activation supplier is connected, so no environment or config turns it on.
+#[cfg(not(test))]
+fn activation_supplied(_channel: &str) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn activation_supplied(channel: &str) -> bool {
+    test_activation::active(channel)
+}
+
+/// The start of a dormant build: the legacy path, with no receipt and no permit.
+pub(crate) fn dormant_start(channel: &str) -> Option<ReplayStart> {
+    (producers_for(channel) == ProducerMode::Dormant).then_some(ReplayStart(None))
+}
+
+/// Hash of the prompt a start actually submits.
+pub(crate) fn input_hash(prompt: &str) -> String {
+    hex::encode(Sha256::digest(prompt.as_bytes()))
+}
+
+/// The canonical identity of a Discord request: its first message keys it, every absorbed source
+/// stays with it, and a later re-entry keeps the same key.
+pub(crate) fn discord_input(
+    provider: &str,
+    channel: u64,
+    user_msg_id: u64,
+    sources: impl IntoIterator<Item = u64>,
+    original_text: &str,
+) -> CanonicalInput {
+    let mut sources: Vec<String> = std::iter::once(user_msg_id)
+        .chain(sources)
+        .map(|id| id.to_string())
+        .collect();
+    sources.sort_unstable();
+    sources.dedup();
+    CanonicalInput {
+        request_key: format!(
+            "discord:{}:{channel}:{user_msg_id}",
+            provider.to_lowercase()
+        ),
+        provider: provider.to_string(),
+        channel: channel.to_string(),
+        sources,
+        original_text: original_text.to_string(),
+        owner_id: String::new(),
+        agent_id: String::new(),
+        attachments: serde_json::json!([]),
+        reply_context: None,
+        provenance: "new_input",
+    }
+}
+
+/// The right to make a provider start's first input: a dormant build's legacy start, or one
+/// sealed permit. Only `dormant_start` and `admit_start` make one.
+#[derive(Debug)]
+pub(crate) struct ReplayStart(Option<StartPermit>);
+
+impl ReplayStart {
+    pub(crate) fn receipt_id(&self) -> Option<i64> {
+        self.0.as_ref().map(|permit| permit.attempt().receipt_id())
+    }
+
+    /// An exact retry's start: the approved local reset runs only now, after its begin committed.
+    pub(crate) fn exact_reset(self, reset: impl FnOnce()) -> Result<Self, Self> {
+        let Some(permit) = self.0 else {
+            return Err(self);
+        };
+        let prepared = match PreparedRetryStart::new((), permit) {
+            Ok(prepared) => prepared,
+            Err((_, permit)) => return Err(Self(Some(permit))),
+        };
+        Ok(prepared.launch(|_| reset(), |(), permit| Self(Some(permit))))
+    }
+
+    /// Spends the start right before the first input; a permit binds its attempt to the token so
+    /// the reader records it, and a mismatch refuses the start.
+    pub(crate) fn spend(
+        self,
+        target: &EffectTarget,
+        prompt: &str,
+        token: &CancelToken,
+    ) -> Result<(), PermitRefusal> {
+        let Some(permit) = self.0 else {
+            return Ok(());
+        };
+        let live =
+            |attempt| token.attach_replay_attempt(std::sync::Arc::new(LiveAttempt::new(attempt)));
+        match permit.consume(target, &input_hash(prompt), live)? {
+            true => Ok(()),
+            false => Err(PermitRefusal::Spent),
+        }
+    }
+}
+
+/// Why a start did not happen; the request keeps its custody either way.
+#[derive(Debug)]
+pub(crate) enum StartStop {
+    /// A held or finished request covers the input; nothing reruns it.
+    Consumed,
+    /// The start is undecided; the input waits in its existing custody.
+    Deferred(String),
+}
+
+/// The replay check of one provider start: a dormant build keeps the legacy start without IO; an
+/// active one begins the request, or its exact continuation, and seals the permit.
+pub(crate) async fn admit_start(
+    ctx: &ReplayAdmissionContext<'_>,
+    input: &CanonicalInput,
+    projection: PreparedEffectProjection,
+    continuation: Option<RetryPermit>,
+) -> Result<ReplayStart, StartStop> {
+    let candidate = match (preflight_source(ctx, input).await, continuation.as_ref()) {
+        (ReplayPreflight::Admit(candidate), None) => candidate,
+        (ReplayPreflight::ConsumeProtected(held), Some(retry)) => {
+            held.resume(retry).map_err(|_| StartStop::Consumed)?
+        }
+        (ReplayPreflight::ConsumeProtected(_), None) => return Err(StartStop::Consumed),
+        (other, _) => return Err(StartStop::Deferred(format!("{other:?}"))),
+    };
+    match prepare_effect_start(ctx, input, candidate, projection, continuation).await {
+        Ok(permit) => Ok(ReplayStart(Some(permit))),
+        Err(StartRefusal::Protected(receipt) | StartRefusal::AlreadyClassified(receipt)) => {
+            tracing::info!(receipt, "the request's receipt already started or finished");
+            Err(StartStop::Consumed)
+        }
+        Err(StartRefusal::Write(error)) => Err(StartStop::Deferred(error.to_string())),
+        Err(refusal) => Err(StartStop::Deferred(format!("{refusal:?}"))),
     }
 }
 
@@ -191,6 +348,11 @@ pub(crate) async fn prepare_effect_start(
                 _ => return Err(StartRefusal::Protected(receipt.id)),
             }
             let nonce = receipt.episode_nonce.as_deref().unwrap_or_default();
+            if let Some(session_key) = projection.session_key.as_deref() {
+                write::bind_session(ctx.pool, session_key, receipt.id, nonce)
+                    .await
+                    .map_err(StartRefusal::Write)?;
+            }
             let from = BeginFrom::Registered { nonce };
             write::begin(ctx.pool, receipt.id, from, &effect, ctx.incarnation).await
         }
@@ -212,4 +374,31 @@ pub(crate) async fn prepare_effect_start(
     }
     .map_err(StartRefusal::Write)?;
     StartPermit::seal(ack, &projection.target).map_err(|_| StartRefusal::PermitMismatch)
+}
+
+/// The activation supplier of tests: producers turn on only for the channels a guard names.
+#[cfg(test)]
+pub(crate) mod test_activation {
+    static ACTIVE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn active(channel: &str) -> bool {
+        ACTIVE
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|active| active == channel)
+    }
+
+    pub(crate) struct Activated(String);
+
+    pub(crate) fn activate(channel: u64) -> Activated {
+        ACTIVE.lock().unwrap().push(channel.to_string());
+        Activated(channel.to_string())
+    }
+
+    impl Drop for Activated {
+        fn drop(&mut self) {
+            ACTIVE.lock().unwrap().retain(|active| active != &self.0);
+        }
+    }
 }
