@@ -34,6 +34,9 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs",
+        "src/services/discord/runtime_bootstrap/scoped_inflight_restore_tests.rs",
+        "src/services/discord/runtime_bootstrap/scoped_restore_lane_tests.rs",
         "src/services/tui_o/writer/adoption_past_stall_tests.rs",
         "src/services/tui_o/writer/stall_handoff_tests.rs",
         "src/services/tui_o/writer/deferred_pg_tests.rs",
@@ -134,6 +137,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/input_facts/resume_tests.rs",
         "src/services/discord/turn_presence/activity_tests.rs",
         "src/services/discord/turn_presence/admission_tests.rs",
+        "src/services/discord/turn_presence/entrypoints_tests.rs",
         "src/services/discord/turn_presence/lifecycle_tests.rs",
         "src/services/tui_prompt_dedupe/binding_events/admission_tests.rs",
         "src/services/tui_o/writer/codex_adoption/judge_tests.rs",
@@ -336,6 +340,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/db/o_piece_ledger_tests.rs",
         "src/services/tui_o/repost/admission_tests.rs",
         "src/services/tui_o/repost/probe_tests.rs",
+        "src/services/tui_o/repost/runner_tests.rs",
         "src/services/discord/placeholder_controller/queued_card_gate/tests.rs",
         "src/services/discord/placeholder_live_events/probe_fixtures_tests.rs",
         "src/services/discord/placeholder_live_events/tests.rs",
@@ -563,11 +568,18 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/session_forwarding/home_stop_tests.rs",
         "src/server/routes/queue_api_home_stop_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs",
+        "src/services/discord/turn_bridge/before_start_stop_tests.rs",
         "src/services/discord/inflight/managed_submission_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_submission_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/cohort_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/completion_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/publication_tests.rs",
+        "src/services/discord/watchers/lifecycle/o_only_install_tests.rs",
+        "src/services/discord/inflight/o_seed_observation_tests.rs",
+        "src/services/discord/tmux_watcher/o_capsule_origin_tests.rs",
+        "src/services/discord/tmux_watcher/o_seed_install_tests.rs",
+        "src/services/discord/tmux_watcher/retired_host_tick_tests.rs",
+        "src/services/discord/tmux_watcher/retired_o_boundary_tests.rs",
         "src/cli/o_tests.rs",
     }
 )
@@ -580,7 +592,6 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/turn_bridge/replay_policy.rs",
         "src/services/discord/replay_policy/permit.rs",
         "src/services/discord/router/intake_dispatch/replay_admission.rs",
-        "src/services/discord/turn_bridge/before_start_stop.rs",
         "src/services/discord/input_runtime/activation.rs",
         "src/services/discord/input_runtime/activation/plan.rs",
         "src/services/discord/input_runtime/activation/scope.rs",
@@ -660,6 +671,9 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/runtime_bootstrap/boot_retirement/cohort.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/completion.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/publication.rs",
+        "src/services/discord/watchers/lifecycle/o_only_install.rs",
+        "src/services/discord/inflight/o_seed_observation.rs",
+        "src/services/discord/tmux_watcher/turn_stream_collector/observations.rs",
     }
 )
 

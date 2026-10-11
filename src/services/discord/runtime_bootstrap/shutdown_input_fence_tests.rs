@@ -381,3 +381,78 @@ async fn c2_sigterm_initial_and_final_snapshots_preserve_held_population_and_sav
             .any(|reason| reason.contains(&format!("channel={}", held.get())))
     );
 }
+
+/// The signal closes Presence before its first persistence wait, and nothing reopens it.
+#[cfg(unix)]
+#[tokio::test]
+async fn b2b1_sigterm_closes_presence_before_drain_and_marking() {
+    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        temp.path(),
+    );
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let probe = std::sync::Arc::new(Probe::install(&shared));
+    let channel = 6_325_608;
+    let ticket = probe.arm(channel);
+    shared
+        .restart
+        .shutdown_remaining
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (at_marking, probe_at_marking) = (seen.clone(), probe.clone());
+    let (send, receive) = tokio::sync::oneshot::channel();
+    SIGTERM_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(SigtermForTest {
+            signal: receive,
+            after_initial: Box::new(move || {
+                let open = probe_at_marking.open(channel);
+                *at_marking.lock().unwrap() = Some((Probe::current(&ticket), open));
+            }),
+            before_final: Box::new(|| {}),
+        })
+    });
+    let handler = run_bot_spawn_sigterm_handler(&shared, ProviderKind::Codex);
+    send.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), handler)
+        .await
+        .expect("handler completes")
+        .expect("handler join");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some((false, false)),
+        "closed before the drain and marking finished"
+    );
+    assert!(!probe.open(channel), "SIGTERM never reopens Presence");
+}
+
+/// Backend exit withdraws only approvals resting on its own Gateway witness.
+#[cfg(unix)]
+#[tokio::test]
+async fn b2b1_backend_exit_withdraws_only_its_gateway_approvals() {
+    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
+    let provider = ProviderKind::Unsupported("b2b1-backend-exit".into());
+    let gate = crate::services::tui_o::ownership::gate(provider.as_str());
+    gate.acquired();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let probe = Probe::install(&shared);
+    let own = probe.arm_gateway(6_325_611, gate.clone());
+    let other_gate = crate::services::tui_o::ownership::gate("b2b1-other-gateway");
+    let other = probe.arm_gateway(6_325_612, other_gate);
+    let home = probe.arm(6_325_613);
+    assert!(Probe::rests_on(&own, &gate));
+    let lease = tokio::spawn(std::future::pending::<()>());
+    let backend = tokio::spawn(async { Ok::<(), &str>(()) });
+    finish_gateway_backend(backend, &provider, None, Some(lease), None, async {}).await;
+    assert!(!Probe::current(&own));
+    assert!(
+        Probe::current(&other),
+        "another provider's gateway is not this witness"
+    );
+    assert!(
+        Probe::current(&home),
+        "an approval not resting on the gateway stays"
+    );
+}
