@@ -10,6 +10,7 @@ mod busy_followup_retry_store;
 pub(crate) mod herdr_terminate;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;
+mod codex_adoption_runtime;
 mod commands;
 mod compact_turn_authority;
 mod completion_footer_metadata;
@@ -140,6 +141,10 @@ mod terminal_coordinate;
 mod terminal_ui_obligation;
 #[cfg(unix)]
 mod tmux;
+#[cfg(all(test, unix))]
+pub use tmux::{
+    OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
+};
 #[cfg(all(test, unix))]
 pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
     requested_channel_id: ChannelId,

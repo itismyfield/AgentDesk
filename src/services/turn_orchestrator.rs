@@ -94,6 +94,10 @@ pub(crate) use pending_queue_persistence::{
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
 };
+#[cfg(test)]
+pub(crate) use pending_queue_persistence::{
+    load_channel_pending_dispatch_marker_checked, load_channel_pending_queue_checked,
+};
 use pending_queue_persistence::{log_queue_persistence_rollback, persist_queue};
 #[cfg(test)]
 use queue_cancellation::cancel_soft_intervention_by_message_id;
