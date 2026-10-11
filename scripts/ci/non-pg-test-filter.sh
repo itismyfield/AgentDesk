@@ -32,6 +32,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::o_channel_homes::tests
   --skip db::prompt_manifests::tests
   --skip db::relay_dead_letter::tests
+  --skip db::replay_disposition::register_tests
   --skip db::replay_disposition::tests
   --skip db::replay_disposition::write_tests
   --skip dispatch::dispatch_status::terminal_timestamp_tests
@@ -124,6 +125,9 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::relay_recovery::apply::host_deferred_tests
   --skip services::discord::relay_recovery::circuit_breaker::tests
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
+  --skip services::discord::replay_policy::live_tests
+  --skip services::discord::replay_policy::permit_tests
+  --skip services::discord::replay_policy::policy_tests
   --skip services::discord::router::intake_dispatch::home_order_tests
   --skip services::discord::router::intake_dispatch::replay_admission_tests
   --skip services::discord::router::intake_dispatch::tests
@@ -167,8 +171,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
   --skip services::discord::turn_bridge::intake_settlement::tests
   --skip services::discord::turn_bridge::recovery_text::tests
-  --skip services::discord::turn_bridge::replay_policy::permit_tests
-  --skip services::discord::turn_bridge::replay_policy::policy_tests
   --skip services::discord::turn_bridge::resume_pin_tests
   --skip services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
@@ -199,6 +201,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::tui_o::repost::o_piece_ledger_tests
   --skip services::tui_o::repost::runner_tests
   --skip services::tui_o::writer::tests::actor::host_start::deferred::pg
+  --skip services::tui_o::writer::tests::actor::repost_turn
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
@@ -379,6 +382,9 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::clear_persist_failure_tests::failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
+  services::discord::commands::control::home_fence::tests::b2b1_a_clear_whose_persist_fails_still_withdraws_and_keeps_its_session
+  services::discord::commands::control::home_fence::tests::b2b1_clear_and_reset_withdraw_only_once_admitted_and_restore_nothing
+  services::discord::commands::control::home_fence::tests::b2b1_queued_cancel_and_drain_reset_keep_the_active_turn_scope
   services::discord::commands::control::home_fence::tests::d2b_clear_and_reset_keep_admission_across_effect_await
   services::discord::commands::control::home_fence::tests::d2b_clear_reply_stays_counted_after_clear_body_finishes
   services::discord::commands::control::home_fence::tests::d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor
@@ -496,6 +502,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::relay_recovery::circuit_breaker::tests::stale_stage_cancel_failure_becomes_a_durable_cleanup_obligation
   services::discord::relay_recovery::circuit_breaker::tests::zero_originating_message_reserves_with_a_distinct_mailbox_anchor
   services::discord::relay_recovery::circuit_breaker::tests::zero_originating_message_still_rejects_episode_identity_mismatches
+  services::discord::replay_policy::permit_tests::effect_permits_cannot_be_cloned_or_serialised
   services::discord::restart_mode::protocol_v2::disposition::high_risk_recovery::every_disposition_owns_exact_original_bytes
   services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::absolute_and_relative_root_traversal_record_exact_pairs_and_identity
   services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::directory_mutation_records_sync_facts_and_owned_fds_outlive_parents
@@ -649,7 +656,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::intake_settlement::tests::terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags
   services::discord::turn_bridge::recovery_text::tests::direct_runtime_context_unavailable_matches_api_and_pg_errors
   services::discord::turn_bridge::recovery_text::tests::discord_recent_recovery_context_preserves_existing_format_and_limits
-  services::discord::turn_bridge::replay_policy::permit_tests::effect_permits_cannot_be_cloned_or_serialised
   services::discord::turn_bridge::resume_pin_tests::c1_actual_postlude_resume_pin_runtime_proof
   services::discord::turn_bridge::resume_pin_tests::c1_both_late_writers_consume_pin_without_registry_backfill
   services::discord::turn_bridge::resume_pin_tests::c1_cancelled_registered_pin_leaves_all_effects_untouched
@@ -769,6 +775,7 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::repost::admission_tests::a_torn_sidecar_tail_is_cut_and_any_other_damage_refuses_the_sidecar
   services::tui_o::repost::admission_tests::f3r_a_failed_append_refuses_more_until_a_reopen_cuts_its_bytes
   services::tui_o::repost::admission_tests::f3r_an_original_sent_while_on_stays_eligible_across_off_and_on
+  services::tui_o::repost::admission_tests::f6_a_conflicting_record_of_an_activation_never_moves_its_frontier
   services::tui_o::repost::admission_tests::only_an_uncertain_original_sent_while_on_is_eligible_and_the_rest_is_reported_once
   services::tui_o::repost::admission_tests::with_the_switch_off_no_admitter_exists_to_reach_postgres_or_the_sidecar
   services::tui_o::repost::runner_tests::f5_a_request_dropped_after_its_first_pending_is_gone_and_stays_counted
@@ -777,6 +784,8 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::repost::runner_tests::f5_default_off_tick_executes_zero_pg_statements
   services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
+  services::tui_o::writer::tests::actor::repost_turn::f6_a_live_reload_switches_the_next_turn_without_a_restart
+  services::tui_o::writer::tests::actor::repost_turn::f6_default_off_actor_turn_reads_nothing
   services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
   services::turn_host::tests::a_delegated_channel_runs_a_turn_only_where_its_home_is_held_with_intake_open
   services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
@@ -815,6 +824,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::o_channel_homes::tests
   db::prompt_manifests::tests
   db::relay_dead_letter::tests
+  db::replay_disposition::register_tests
   db::replay_disposition::tests
   db::replay_disposition::write_tests
   dispatch::dispatch_status::terminal_timestamp_tests
@@ -907,6 +917,9 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::relay_recovery::apply::host_deferred_tests
   services::discord::relay_recovery::circuit_breaker::tests
   services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
+  services::discord::replay_policy::live_tests
+  services::discord::replay_policy::permit_tests
+  services::discord::replay_policy::policy_tests
   services::discord::router::intake_dispatch::home_order_tests
   services::discord::router::intake_dispatch::replay_admission_tests
   services::discord::router::intake_dispatch::tests
@@ -950,8 +963,6 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::turn_bridge::headless_delivery::production_seam_tests
   services::discord::turn_bridge::intake_settlement::tests
   services::discord::turn_bridge::recovery_text::tests
-  services::discord::turn_bridge::replay_policy::permit_tests
-  services::discord::turn_bridge::replay_policy::policy_tests
   services::discord::turn_bridge::resume_pin_tests
   services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
@@ -982,6 +993,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::tui_o::repost::o_piece_ledger_tests
   services::tui_o::repost::runner_tests
   services::tui_o::writer::tests::actor::host_start::deferred::pg
+  services::tui_o::writer::tests::actor::repost_turn
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests
   voice::announce_meta::tests

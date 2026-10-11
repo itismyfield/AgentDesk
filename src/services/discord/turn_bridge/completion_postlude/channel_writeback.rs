@@ -17,7 +17,8 @@
 //!
 //! `run_completion_postlude` combines scheduled-snapshot isolation with a fresh
 //! `ChannelEpisodeScope` decision. A turn whose session key is isolated, whose
-//! mailbox is foreign, or whose ownership is unprovable must produce ZERO
+//! mailbox is foreign, whose ownership is unprovable, or whose protected request
+//! is held or unclassified by the replay policy must produce ZERO
 //! channel-scoped side-effects that a LATER LIVE TURN can observe. Every such
 //! effect is gated on the combined `channel_effects_suppressed` predicate:
 //!   1. sessions-map writeback — provider `session_id` + history into
@@ -64,6 +65,16 @@
 use super::super::super::DiscordSession;
 use super::super::memory_lifecycle::TurnEndMemoryPlan;
 use crate::ui::ai_screen::{HistoryItem, HistoryType};
+
+/// A held or unclassified protected request keeps its session and takes no ordinary outcome.
+pub(super) async fn replay_withheld(
+    shared: &super::super::super::SharedData,
+    token: &crate::services::provider::CancelToken,
+    inflight: &crate::services::discord::inflight::InflightTurnState,
+) -> bool {
+    let pool = shared.pg_pool.as_ref();
+    !crate::services::discord::replay_policy::ordinary_outcome(pool, token, inflight).await
+}
 
 /// Re-admission authorizes only the isolated attempt's own transcript;
 /// it grants no channel effects and the postlude also rejects cancelled turns.

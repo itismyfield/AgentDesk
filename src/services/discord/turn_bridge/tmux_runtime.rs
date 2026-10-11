@@ -599,6 +599,11 @@ async fn stop_active_turn_on(
     cleanup_policy: TmuxCleanupPolicy,
     reason: &str,
 ) -> StopOutcome {
+    // Withdrawn as the stop starts; its late completion never looks up a successor.
+    if let Some(name) = target.legacy_name() {
+        let withdraw = crate::services::discord::turn_presence::entrypoints::withdraw_session;
+        withdraw(name.as_str(), "turn_stop");
+    }
     let interrupt_outcome = interrupt_on(target, provider, token, reason).await;
     let cleanup = cancel_active_token_on(Some(target), token, cleanup_policy, reason);
     let outcome = &interrupt_outcome;
