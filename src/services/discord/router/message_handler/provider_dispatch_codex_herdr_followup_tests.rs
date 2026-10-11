@@ -49,7 +49,7 @@ fn reconnect(fx: &Fixture, provider: &ProviderKind) -> ReconnectCounts {
     let _registry = fx.rig.registry_on_this_thread();
     let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[]);
     fx.rig.show_panes(&[PANE]);
-    reconnect_restarted_herdr_panes(Some(&fx.pool), provider);
+    let _ = reconnect_restarted_herdr_panes(Some(&fx.pool), provider);
     reconnect_counts()
 }
 

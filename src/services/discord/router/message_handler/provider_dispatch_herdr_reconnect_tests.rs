@@ -22,6 +22,15 @@ fn launch(fx: &Fixture, launcher: &Arc<Launcher>) -> (String, Started) {
     (nonce, started.into_inner().unwrap().unwrap())
 }
 
+thread_local! {
+    /// Whether each row the latest pass read had its source bound, as adoption sees it.
+    static BOUND: std::cell::RefCell<Result<Vec<bool>, String>> = const { std::cell::RefCell::new(Ok(Vec::new())) };
+}
+
+fn bound() -> Result<Vec<bool>, String> {
+    BOUND.with_borrow(Clone::clone)
+}
+
 /// What a dcserver restart forgets, then its rehydrate pass on this node's endpoint.
 fn restart_and_reconnect(fx: &Fixture) -> ReconnectCounts {
     crate::services::tui_prompt_dedupe::reset_state_for_tests();
@@ -30,10 +39,16 @@ fn restart_and_reconnect(fx: &Fixture) -> ReconnectCounts {
     let _registry = fx.rig.registry_on_this_thread();
     let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[]);
     fx.rig.show_panes(&[PANE]);
-    reconnect_restarted_herdr_panes(
+    let pass = reconnect_restarted_herdr_panes(
         Some(&fx.pool),
         &crate::services::provider::ProviderKind::Claude,
     );
+    let channel = Some(CHANNEL);
+    BOUND.set(pass.map(|rows| {
+        rows.iter()
+            .map(|r| r.bound && r.channel == channel)
+            .collect()
+    }));
     reconnect_counts()
 }
 
@@ -69,6 +84,7 @@ fn t_r1_a_restart_reconnects_a_matched_bound_pane_and_its_next_turn_prompts_once
         ..ReconnectCounts::default()
     };
     assert_eq!(counts, reconnected);
+    assert_eq!(bound(), Ok(vec![true]), "the restored source is bound");
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
     assert_eq!(
@@ -101,6 +117,7 @@ fn t_r2_a_replaced_root_shell_reconnects_nothing_and_takes_no_input_pg() {
         ..ReconnectCounts::default()
     };
     assert_eq!(counts, withheld);
+    assert_eq!(bound(), Ok(vec![false]));
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
     assert_eq!(binding, None);
@@ -205,6 +222,12 @@ fn a_restart_after_a_pending_clear_prompts_the_cleared_session_once_pg() {
         ..ReconnectCounts::default()
     };
     assert_eq!(counts, admitted);
+    // Published for health, yet AwaitingClear restores no source: never adoption's bound source.
+    assert_eq!(
+        bound(),
+        Ok(vec![false]),
+        "herdr_awaiting_clear_is_not_bound_source_success"
+    );
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
     assert_eq!(binding, None, "no source is restored for a waiting clear");
@@ -315,6 +338,12 @@ fn a_restart_after_two_pending_clears_prompts_the_latest_cleared_session_once_pg
         ..ReconnectCounts::default()
     };
     assert_eq!(counts, admitted);
+    // Published for health, yet AwaitingClear restores no source: never adoption's bound source.
+    assert_eq!(
+        bound(),
+        Ok(vec![false]),
+        "herdr_awaiting_clear_is_not_bound_source_success"
+    );
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
     assert_eq!(binding, None, "no source is restored for a waiting clear");
