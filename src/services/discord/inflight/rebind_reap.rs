@@ -288,6 +288,9 @@ pub(super) fn reap_abandoned_rebind_origin_locked_in_root(
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return RebindReapOutcome::LockUnavailable;
     };
+    if super::receipt_protected_path(&path) && !super::receipt_mutant("rebind-none") {
+        return RebindReapOutcome::Skipped;
+    }
     let Some(locked) = read_inflight_state_content(&path) else {
         return RebindReapOutcome::Missing;
     };
@@ -353,6 +356,9 @@ pub(super) fn reap_dead_watcher_rebind_origin_locked_in_root(
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return RebindReapOutcome::LockUnavailable;
     };
+    if super::receipt_protected_path(&path) && !super::receipt_mutant("rebind-watcher") {
+        return RebindReapOutcome::Skipped;
+    }
     let Some(locked) = read_inflight_state_content(&path) else {
         return RebindReapOutcome::Missing;
     };

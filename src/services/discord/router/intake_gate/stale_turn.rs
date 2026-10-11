@@ -196,6 +196,14 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
     _parent_channel_id: serenity::ChannelId,
     thread_id: serenity::ChannelId,
 ) {
+    if crate::services::discord::inflight::delete_inflight_state_file_checked(
+        provider,
+        thread_id.get(),
+    ) == crate::services::discord::inflight::InflightDeleteOutcome::ProtectedReceipt
+        && !crate::services::discord::inflight::receipt_mutant("stale-a")
+    {
+        return;
+    }
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] 🔓 THREAD-GUARD: stale inflight detected for thread {}, cleaning up and proceeding",
@@ -210,7 +218,6 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
         provider,
         thread_parent_kickoffs,
     );
-    crate::services::discord::inflight::delete_inflight_state_file(provider, thread_id.get());
     let cleared = mailbox_clear_channel(shared, provider, thread_id).await;
     crate::services::discord::stall_recovery::finalize_orphaned_clear(
         shared,
@@ -272,7 +279,14 @@ async fn release_queue_blocked_stale_active_turn(
         crate::services::discord::turn_finalizer::cleanup::snapshot_role_override(
             shared, channel_id,
         );
-    crate::services::discord::inflight::delete_inflight_state_file(provider, channel_id.get());
+    if crate::services::discord::inflight::delete_inflight_state_file_checked(
+        provider,
+        channel_id.get(),
+    ) == crate::services::discord::inflight::InflightDeleteOutcome::ProtectedReceipt
+        && !crate::services::discord::inflight::receipt_mutant("stale-b")
+    {
+        return false;
+    }
     let finish = mailbox_finish_turn(shared, provider, channel_id).await;
     // #2044 F7: `finalize_orphaned_clear` owns both `cancelled.store(true)`
     // and the saturating `global_active` decrement — do not duplicate them here.
