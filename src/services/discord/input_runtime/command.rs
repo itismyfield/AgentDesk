@@ -118,9 +118,17 @@ async fn pending_within(
             obligation.armed = false;
             Ok(pending)
         }
-        // An answered refusal is the order's verdict on these sources, not a lost notice.
-        Ok(Ok(Err(_))) => {
+        // The namespace refusal is the order's verdict on these sources, not a lost notice.
+        Ok(Ok(Err(Failure::StalePermit))) => {
             obligation.armed = false;
+            Err(Deferred::Order)
+        }
+        // Any other refusal (exhaustion) took nothing, so the catch-up obligation stays armed.
+        Ok(Ok(Err(_))) => {
+            #[cfg(test)]
+            if super::mutant("disarm_pending_guard_on_generation_failure") {
+                obligation.armed = false;
+            }
             Err(Deferred::Order)
         }
         _ => Err(Deferred::SupervisorLost),
@@ -306,3 +314,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "g1b_command_tests.rs"]
+mod g1b_tests;

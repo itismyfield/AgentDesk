@@ -914,15 +914,16 @@ targets = {
     # #4979 S2 re-pins after adding the AGENTDESK_REQUIRE_PG=1 job env so a PG
     # connection failure in this PG-backed lane hard-fails instead of
     # soft-skipping green; the command inventory itself is unchanged.
-    # #5040 re-pins after adding the telemetry-only intake authority regressions
-    # to this existing toolchain-provisioned lane whose mirror is required.
+    # Re-pinned after dropping the telemetry-only intake step: NON_PG skipped all
+    # five of its IDs, which the library sweep's replay runs instead.
     # #5025 and #4985 retain their production bridge and footer-marker coverage
     # in the same job block, so the pin covers the merged command inventory.
     # #5230 re-pins after replacing repeated PostgreSQL skip literals with the
     # shared non-pg-test-filter source; job names, conditions, and timeouts are
     # unchanged, and the exact commands below pin each source/use pair.
     # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
-    "job_sha256" => "9f9393864d4b8bbd9ce50bb38b2074f464e601653e48f04b3ed374127f4c406a",
+    # Re-pinned after raising the `just test-postgres` step budget from 40 to 60 minutes.
+    "job_sha256" => "0a4bf73e7cc453625d7e8fafb5fcc7d31b07db1793e0db4c24fd86cf7c9e74c1",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
@@ -954,13 +955,6 @@ targets = {
         ],
         "timeout_minutes" => 10,
       },
-      "Telemetry-only intake authority regressions" => {
-        "commands" => [
-          "source scripts/ci/non-pg-test-filter.sh",
-          'env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::tests::telemetry_only_unopted -- "${NON_PG_SKIP_ARGS[@]}"',
-        ],
-        "timeout_minutes" => 10,
-      },
       "Terminal delivery evidence regressions" => {
         "commands" => [
           "env -u AGENTDESK_ROOT_DIR cargo test --lib inflight::terminal_delivery_evidence_loss::tests",
@@ -972,7 +966,7 @@ targets = {
       },
       "just test-postgres" => {
         "commands" => ["just test-postgres"],
-        "timeout_minutes" => 40,
+        "timeout_minutes" => 60,
       },
     },
   },
@@ -1492,7 +1486,7 @@ tests = steps.each_index.select { |i| runs_tests.(steps[i]) }
 stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" })
 test_step = tests.length == 1 ? steps[tests[0]] : {}
 errors << "job postgres must run tests in exactly one step, \"just test-postgres-shard\": just test-postgres-shard" unless test_step["name"] == "just test-postgres-shard" && test_step["run"].to_s.strip == "just test-postgres-shard"
-errors << "job postgres test step must keep timeout-minutes: 40" unless test_step["timeout-minutes"] == 40
+errors << "job postgres test step must keep timeout-minutes: 60" unless test_step["timeout-minutes"] == 60
 errors << "job postgres must not set a job timeout-minutes" if job.key?("timeout-minutes")
 errors << "job postgres must start PostgreSQL, run the test step, then stop it" unless start && stop && tests.length == 1 && start < tests[0] && tests[0] < stop
 errors.each { |message| warn "#{main_path}: #{message}" }

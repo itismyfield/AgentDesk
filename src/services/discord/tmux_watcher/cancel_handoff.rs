@@ -433,6 +433,61 @@ impl Custody {
         });
     }
 
+    pub(super) fn checkpoint_collection(
+        &mut self,
+        context: &PollWatcherContext<'_>,
+        parser: &TurnParseState<'_>,
+        relay: &SupervisorRelayState<'_>,
+        authority: WatcherSourceAuthority,
+        nonce: &Option<String>,
+        outcome: &CollectOutcome,
+    ) {
+        let row = checkpoint_row(context, parser, nonce);
+        let turn = match outcome {
+            CollectOutcome::Fallthrough(turn) => Some(turn),
+            _ => None,
+        };
+        #[cfg(test)]
+        record_checkpoint(context, turn);
+        self.checkpoint(parser, relay, authority, turn, row.as_ref());
+    }
+
+    // Only this completed prefix settles; the successor still owns every tail byte.
+    pub(super) fn settle_retired_prefix(
+        &mut self,
+        authority: WatcherSourceAuthority,
+        range: (u64, u64),
+    ) -> bool {
+        let Some(pending) = self.checkpoint.as_mut() else {
+            return false;
+        };
+        if pending.legacy_mode.is_legacy()
+            || pending.authority != authority
+            || pending.identity.is_some()
+            || pending.nonce.is_some()
+            || pending.restored.is_some()
+            || pending.rewind.is_some()
+            || pending.rewind_key.is_some()
+            || pending.rewind_attempts != 0
+            || pending.buffer_start != range.1
+            || !pending.turn.as_ref().is_some_and(|turn| {
+                turn.found_result
+                    && turn.turn_data_start_offset == range.0
+                    && turn.startup_inflight_snapshot.is_none()
+                    && turn.completion_actor.is_none()
+                    && turn.turn_identity_for_panel.is_none()
+                    && turn.restored_response_seed.is_empty()
+            })
+        {
+            return false;
+        }
+        pending.turn = None;
+        if pending.buffer.is_empty() && !pending.utf8.has_pending() {
+            self.checkpoint = None;
+        }
+        true
+    }
+
     pub(super) fn settled(&mut self) {
         self.checkpoint = None;
         *self
@@ -504,12 +559,12 @@ pub(super) fn cancel_yields_before_delivery(
 }
 
 #[cfg(test)]
-pub(super) mod capsule_observation {
+pub(in crate::services::discord) mod capsule_observation {
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
-    pub(in crate::services::discord::tmux::tmux_watcher) struct Summary {
-        pub origin: WatcherLegacyMode,
+    pub(in crate::services::discord) struct Summary {
+        pub(in crate::services::discord::tmux::tmux_watcher) origin: WatcherLegacyMode,
         pub body: String,
         pub buffer: String,
         pub offset: u64,
@@ -520,7 +575,7 @@ pub(super) mod capsule_observation {
         pub has_startup_snapshot: bool,
         pub startup_snapshot: Option<serde_json::Value>,
         pub restored_response_seed: String,
-        pub authority: WatcherSourceAuthority,
+        pub(in crate::services::discord::tmux::tmux_watcher) authority: WatcherSourceAuthority,
         pub opened_source: crate::services::cluster::stream_relay::SourceFileIdentity,
         pub cancel_address: usize,
         pub has_restored_seed: bool,
@@ -530,7 +585,24 @@ pub(super) mod capsule_observation {
         pub utf8_state: String,
     }
 
-    pub(in crate::services::discord::tmux::tmux_watcher) async fn pending(
+    impl Summary {
+        pub(in crate::services::discord) fn origin_is_retired(&self) -> bool {
+            !self.origin.is_legacy()
+        }
+    }
+
+    pub(in crate::services::discord) fn recorded_original(
+        shared: &SharedData,
+        channel: ChannelId,
+    ) -> Option<serde_json::Value> {
+        let store = shared.tmux_relay_coord(channel).cancel_handoffs.clone();
+        let recorded = store.recorded.lock().unwrap_or_else(|e| e.into_inner());
+        recorded
+            .as_ref()
+            .map(|episode| serde_json::to_value(&episode.original).unwrap())
+    }
+
+    pub(in crate::services::discord) async fn pending(
         shared: &SharedData,
         channel: ChannelId,
     ) -> Vec<Summary> {

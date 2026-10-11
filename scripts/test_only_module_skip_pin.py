@@ -109,6 +109,13 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/input_runtime/fence_tests.rs",
         "src/services/discord/input_runtime/effects_tests.rs",
         "src/services/discord/input_runtime/ordering_tests.rs",
+        "src/services/discord/input_runtime/fence/g1b_modes_tests.rs",
+        "src/services/discord/input_runtime/g1b_command_tests.rs",
+        "src/services/discord/input_runtime/g1b_ordering_tests.rs",
+        "src/services/discord/input_runtime/supervisor/g1b_entry_tests.rs",
+        "src/services/tui_input/g1b_receipt_identity_tests.rs",
+        "src/services/tui_input/g1b_rows_tests.rs",
+        "src/services/tui_input/g1b_transition_tests.rs",
         "src/services/discord/input_runtime/receipt_tests.rs",
         "src/services/discord/input_runtime/supervisor_tests.rs",
         "src/services/discord/input_runtime/mapping_guard_tests.rs",
@@ -591,6 +598,15 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/retired_host_tick_tests.rs",
         "src/services/discord/tmux_watcher/retired_o_boundary_tests.rs",
         "src/cli/o_tests.rs",
+        "src/services/discord/catch_up/phase2_age_tests.rs",
+        "src/services/discord/session_relay_sink/o_retired_terminal_e2e_tests.rs",
+        "src/services/discord/task_supervisor/n4d_spawn_observation_tests.rs",
+        "src/services/discord/tmux_watcher/inherited_fixture_tests.rs",
+        "src/services/discord/tmux_watcher/streaming_status_tick/retired_transport_tests.rs",
+        "src/services/discord/session_relay_sink/o_retired_terminal_race_tests.rs",
+        "src/services/discord/session_relay_sink/o_retired_terminal_legacy_fixture_tests.rs",
+        "src/services/discord/session_relay_sink/o_retired_terminal_source_tests.rs",
+        "src/server/routes/agents_turn_deliver/pg_tests.rs",
     }
 )
 
@@ -681,6 +697,8 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/watchers/lifecycle/o_only_install.rs",
         "src/services/discord/inflight/o_seed_observation.rs",
         "src/services/discord/tmux_watcher/turn_stream_collector/observations.rs",
+        "src/services/discord/inflight/o_seed_observation/terminal_barrier_test.rs",
+        "src/services/discord/inflight/o_seed_observation/initial_parse_barrier_test.rs",
     }
 )
 

@@ -537,7 +537,10 @@ fn run(
         nonce,
         text: &input.text,
     };
-    let inject = || busy_inject::inject(pane, &request, &busy_inject::TIMING);
+    let inject = || {
+        busy_inject::inject_report(pane, &request, Some(input.channel), &busy_inject::TIMING)
+            .outcome
+    };
     // A panic may come after the paste, so it is reported like any later failure.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));
     let alert = |detail| unconfirmed(input, session, turn_id.clone(), detail);
@@ -731,6 +734,8 @@ fn unconfirmed_name(detail: Unconfirmed) -> &'static str {
         Unconfirmed::CaptureFailed => "capture_failed",
         Unconfirmed::ModalAfterPaste => "modal_after_paste",
         Unconfirmed::DraftNotOwned => "draft_not_owned",
+        Unconfirmed::ContaminatedSubmit => "contaminated_submit",
+        Unconfirmed::CursorChangedBeforeEnter => "cursor_changed_before_enter",
         Unconfirmed::EnterFailed => "enter_failed",
         Unconfirmed::NotObserved => "not_observed",
     }

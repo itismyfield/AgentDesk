@@ -335,6 +335,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         watcher_instance_id,
         host: &host,
         legacy_mode,
+        retired_binding: o_delegated_arm::pin_retired_binding(legacy_mode, &tmux_session_name),
     };
     let poll_controls = PollWatcherControls {
         cancel: &cancel,
@@ -483,26 +484,19 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &mut render_seed_state,
         )
         .await;
-        let checkpoint_row = checkpoint_row(&poll_context, &turn_parse_state, &watcher_turn_nonce);
-        let checkpoint_turn = match &collection_outcome {
-            CollectOutcome::Fallthrough(turn) => Some(turn),
-            _ => None,
-        };
-        #[cfg(test)]
-        record_checkpoint(&poll_context, checkpoint_turn);
-        cancellation_custody.checkpoint(
+        let collected_turn_stream = match o_delegated_arm::dispatch_collected(
+            (&poll_context, &poll_controls),
             &turn_parse_state,
             &supervisor_relay_state,
-            source_authority,
-            checkpoint_turn,
-            checkpoint_row.as_ref(),
-        );
-        if cancel_handoff::cancel_yields_before_delivery(&cancel, checkpoint_turn) {
-            break 'watcher_loop;
-        }
-        let collected_turn_stream = match collection_outcome {
-            CollectOutcome::ContinueWatcherLoop => continue,
-            CollectOutcome::Fallthrough(collected) => collected,
+            &mut cancellation_custody,
+            (source_authority, epoch_snapshot, &watcher_turn_nonce),
+            collection_outcome,
+        )
+        .await
+        {
+            Ok(CollectOutcome::ContinueWatcherLoop) => continue,
+            Err(()) => break 'watcher_loop,
+            Ok(CollectOutcome::Fallthrough(collected)) => collected,
         };
         let CollectedTurnStream {
             turn_data_start_offset,
@@ -740,6 +734,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 response_sent_offset: &mut response_sent_offset,
                 last_edit_text: &mut last_edit_text,
             };
+            #[cfg(test)]
+            crate::services::discord::inflight::o_seed_observation::record_event(
+                &watcher_provider,
+                channel_id.get(),
+                "terminal_preflight_entries",
+            );
             run_terminal_preflight_prepare(
                 &terminal_preflight_context,
                 terminal_preflight_locals,
@@ -2546,9 +2546,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
     // Publish custody before the old task's independently fenced registry cleanup.
     drop(cancellation_custody);
-    if rowless_exit(&poll_context, &cancel) {
-        return;
-    }
     // #4229 S5: post-stream-exit finalize tail moved verbatim to tmux_watcher/post_stream_exit.rs.
     run_post_stream_exit(PostStreamExitContext {
         channel_id,
@@ -2558,6 +2555,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         watcher_turn_identity,
         watcher_instance_id,
         host,
+        legacy_mode,
+        watcher_provider: watcher_provider.clone(),
     })
     .await;
 }

@@ -1,7 +1,70 @@
 import tempfile
 import unittest
+import re
 from pathlib import Path
 from scripts import check_legacy_supervision_census as guard
+
+
+class N4DInstallerDormancyTests(unittest.TestCase):
+    INSTALLER = 'src/services/discord/watchers/lifecycle/o_only_install.rs'
+    SYMBOL = re.compile(r'\b(?:install_retired_o_watcher|claim_retired_o_watcher_for_host|o_only_install|OOnlyInstall(?:Request|Outcome|Reason))\b')
+
+    def errors(self, raw, code, name):
+        errors = [f'{name}: production installer symbol {m.group()}' for m in self.SYMBOL.finditer(code)]
+        lines = code.splitlines()
+        for match in re.finditer(r'\binclude\s*!\s*\([^;]*?\)|#\[[^\]]*\]', raw, re.S):
+            if 'o_only_install' not in match.group():
+                continue
+            line = raw[:match.start()].count('\n')
+            column = match.start() - raw.rfind('\n', 0, match.start()) - 1
+            active = lines[line][column:] if line < len(lines) else ''
+            if active.startswith('#[') or re.match(r'include\s*!', active):
+                errors.append(f'{name}: production installer reinclude')
+        return errors
+
+    def inspect(self, source):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'source.rs'
+            path.write_text(source)
+            return self.errors(source, guard.classifier._production_text(path), 'source.rs')
+
+    def test_actual_installer_has_its_own_dormant_production_census(self):
+        root = Path.cwd()
+        files, skips = guard.classifier._scan_inputs(root, guard.classifier.PINNED_TEST_ONLY_MODULE_FILES)
+        self.assertIn(root / self.INSTALLER, skips, 'installer must remain resolver-test-only')
+        errors = []
+        for path in files:
+            if path not in skips:
+                errors.extend(self.errors(path.read_text(), guard.classifier._production_text(path), path.relative_to(root)))
+        self.assertEqual(errors, [], '\n'.join(errors))
+
+    def test_installer_direct_call_function_value_alias_and_reexport_fail(self):
+        for source in (
+            'fn startup() { install_retired_o_watcher(request); }',
+            'fn startup() { let f = install_retired_o_watcher; }',
+            'use crate::services::discord::install_retired_o_watcher as hidden;',
+            'pub use hidden::OOnlyInstallRequest as Request;',
+            'fn startup() { claim_retired_o_watcher_for_host(args); }',
+        ):
+            with self.subTest(source=source):
+                self.assertTrue(self.inspect(source))
+
+    def test_installer_cfg_removal_and_reinclude_fail_without_hiding_linux(self):
+        for item in (
+            '#[path = "watchers/lifecycle/o_only_install.rs"] mod hidden;',
+            'include!("watchers/lifecycle/o_only_install.rs");',
+            'pub use hidden::install_retired_o_watcher;',
+        ):
+            with self.subTest(item=item):
+                self.assertEqual(self.inspect('#[cfg(test)]\n' + item), [])
+                self.assertTrue(self.inspect(item), 'removing the test-only gate must fail')
+                self.assertTrue(self.inspect('#[cfg(any(test, target_os = "linux"))]\n' + item))
+
+    def test_installer_prose_and_test_only_items_are_not_production_callers(self):
+        source = ('// install_retired_o_watcher\n'
+                  'fn prose() { let a = r#"include!(\"o_only_install.rs\");"#; }\n'
+                  '#[cfg(test)] fn fixture() { install_retired_o_watcher(request); }')
+        self.assertEqual(self.inspect(source), [])
 
 
 class DormantCensusTests(unittest.TestCase):
