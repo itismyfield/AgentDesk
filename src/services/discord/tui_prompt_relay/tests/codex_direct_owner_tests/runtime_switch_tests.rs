@@ -221,9 +221,8 @@ fn scenario(replaced: bool) -> (Output, Output) {
         .block_on(run(root.path(), replaced))
 }
 
-// After runtime B replaces A, both of B's tails (the claimed row's repair tail and the loop's
-// own tail) deliver to channels only B routes, A's answer already in flight is sent once to A,
-// and B's output and cursors equal those of B running alone.
+// After B replaces A, both B tails deliver to channels only B routes, A's in-flight answer goes
+// once to A, and B's output and cursors equal those of B alone.
 #[test]
 fn a_replaced_runtime_relays_through_its_own_routing_and_output() {
     let _env_lock = crate::config::shared_test_env_lock()
@@ -241,9 +240,8 @@ fn a_replaced_runtime_relays_through_its_own_routing_and_output() {
     );
 }
 
-// The relay's recovery call cannot post for a Codex TUI row yet: Codex has structured turn state,
-// so the pane-ready fallback that recovery requires is never offered. A recovery-only stale
-// runtime therefore changes no output today; once this opens, recovery needs its own B-only case.
+// Recovery cannot post for a Codex TUI row yet (no pane-ready fallback), so a stale runtime there
+// changes no output; once this opens, recovery needs its own B-only case.
 #[test]
 fn codex_tui_recovery_has_no_pane_ready_fallback_yet() {
     use crate::services::agent_protocol::RuntimeHandoffKind;
