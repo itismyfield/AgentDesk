@@ -422,7 +422,7 @@ fn channel_runtime_mode_explicit(channel: &crate::config::AgentChannel) -> Optio
 /// `tui_hosting`. Keeping this predicate aligned with the resolver
 /// prevents "hook published but no channel routes through TUI" drift
 /// (Phase 0 counter-review round 2 MAJOR).
-fn channel_effective_tui_request(
+pub(crate) fn channel_effective_tui_request(
     config: &Config,
     channel: &crate::config::AgentChannel,
     provider_id: &str,

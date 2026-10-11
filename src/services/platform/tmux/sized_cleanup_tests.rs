@@ -57,7 +57,8 @@ fn sized_cleanup_removes_only_the_created_identity() {
     let (_, ids) = identity.split_once(' ').unwrap();
     let session = ids.split(' ').next().unwrap();
 
-    let other_server = remove_created_session(name, &format!("1 {ids}"));
+    let (cleanup, other_server) = remove_created_session(name, &format!("1 {ids}"));
+    assert_eq!(cleanup, SizedCleanup::Unconfirmed, "{other_server}");
     assert!(
         other_server.starts_with("cleanup unconfirmed"),
         "{other_server}"
@@ -66,11 +67,13 @@ fn sized_cleanup_removes_only_the_created_identity() {
         has_session(name),
         "another server's identity must not be killed"
     );
-    let unknown = remove_created_session(name, "");
+    let (cleanup, unknown) = remove_created_session(name, "");
+    assert_eq!(cleanup, SizedCleanup::Unconfirmed);
     assert!(unknown.contains("identity of"), "{unknown}");
     assert!(has_session(name));
 
     let removed = remove_created_session(name, &identity);
-    assert_eq!(removed, format!("created session {session} removed"));
+    let expected = format!("created session {session} removed");
+    assert_eq!(removed, (SizedCleanup::Removed, expected));
     assert!(!has_session(name));
 }

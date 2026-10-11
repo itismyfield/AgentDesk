@@ -37,6 +37,7 @@ pub(super) fn prepare_and_create_claude_tui_session(
     )?;
     let owner_path = tmux_owner_path(tmux_session_name);
     let mut prepared_session_files = None;
+    let mut sized_cleanup = None;
     let launch_result = (|| -> Result<(_, PreparedIncarnation), String> {
         let prepared = PreparedIncarnation::prepare(
             "claude",
@@ -85,7 +86,11 @@ pub(super) fn prepare_and_create_claude_tui_session(
                 &command,
                 cols,
                 rows,
-            )?
+            )
+            .map_err(|failure| {
+                sized_cleanup = Some(failure.cleanup);
+                failure.message
+            })?
         } else {
             crate::services::platform::tmux::create_session(
                 tmux_session_name,
@@ -98,10 +103,22 @@ pub(super) fn prepare_and_create_claude_tui_session(
     let (tmux_result, incarnation) = match launch_result {
         Ok(result) => result,
         Err(error) => {
+            use crate::services::platform::tmux::SizedCleanup;
+            // A guarded session that may still run keeps every piece of its ownership evidence.
+            if sized_cleanup == Some(SizedCleanup::Unconfirmed) {
+                return Err(error);
+            }
             if let Some(files) = prepared_session_files.as_ref() {
                 files.cleanup_best_effort();
             }
             let _ = std::fs::remove_file(&owner_path);
+            // A guarded session confirmed gone leaves no kind or host marker behind either.
+            if sized_cleanup == Some(SizedCleanup::Removed) {
+                use crate::services::tmux_common::{self as tc, host_marker};
+                let kind = tc::session_temp_path(tmux_session_name, tc::TMUX_RUNTIME_KIND_TEMP_EXT);
+                let _ = std::fs::remove_file(kind);
+                host_marker::remove_tmux_host_marker(tmux_session_name);
+            }
             return Err(error);
         }
     };

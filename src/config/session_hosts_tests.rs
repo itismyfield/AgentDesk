@@ -165,3 +165,38 @@ fn claude_guard_channels_default_empty_round_trip_unchanged_and_only_claude_tui(
         "a guard list edit needs a restart"
     );
 }
+
+// The guard list reads a channel's TUI hosting as the hosting resolver does: a blank provider
+// runtime falls back to tui_hosting, while an explicit non-TUI runtime still refuses boot.
+#[test]
+fn claude_guard_channel_runtime_follows_the_hosting_resolver_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    let load = |provider: &str| {
+        let path = root.path().join("agentdesk.yaml");
+        let data_dir = serde_json::to_string(&root.path().join("data")).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "server: {{}}\ndata:\n  dir: {data_dir}\nproviders:\n  claude: {provider}\n\
+                 agents:\n  - id: fallback-fixture\n    name: Fallback fixture\n    channels:\n      claude: {{id: '45'}}\n\
+                 session_hosts: {{claude_guard_channels: [45]}}\n"
+            ),
+        )
+        .unwrap();
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        load_from_path(&path)
+    };
+    for (provider, accepted) in [
+        ("{runtime: '', tui_hosting: true}", true),
+        ("{runtime: tui}", true),
+        ("{runtime: '', tui_hosting: false}", false),
+        ("{runtime: pipe, tui_hosting: true}", false),
+        ("{runtime: claude-e, tui_hosting: true}", false),
+    ] {
+        assert_eq!(
+            load(provider).is_ok(),
+            accepted,
+            "providers.claude: {provider}"
+        );
+    }
+}

@@ -9,7 +9,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::Config;
-use crate::services::provider_hosting::RuntimeMode;
+use crate::services::provider_hosting::channel_effective_tui_request;
 
 const CHANNELS_KEY: &str = "session_hosts.herdr.channels";
 const CLAUDE_GUARD_KEY: &str = "session_hosts.claude_guard_channels";
@@ -179,21 +179,8 @@ fn bound_as_tui(config: &Config, key: &str, channel: u64, providers: &[&str]) ->
             .provider()
             .unwrap_or_else(|| provider_key.to_owned());
         let provider = provider.trim().to_ascii_lowercase();
-        let provider_config = config
-            .providers
-            .iter()
-            .find(|(key, _)| key.trim().eq_ignore_ascii_case(&provider))
-            .map(|(_, value)| value);
-        let runtime = binding
-            .runtime_mode_raw()
-            .or_else(|| provider_config.and_then(|config| config.runtime.clone()));
-        let tui = match runtime {
-            Some(raw) => RuntimeMode::parse(&raw) == Some(RuntimeMode::Tui),
-            None => binding
-                .tui_hosting()
-                .or_else(|| provider_config.and_then(|config| config.tui_hosting))
-                .unwrap_or_else(|| super::default_provider_tui_hosting(&provider)),
-        };
+        // The hosting resolver's own rule: a blank or unknown runtime falls back to tui_hosting.
+        let tui = channel_effective_tui_request(config, binding, &provider);
         ensure!(
             providers.contains(&provider.as_str()) && tui,
             "{key}: channel {channel} is not a {} TUI channel",

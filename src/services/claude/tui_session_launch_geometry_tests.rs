@@ -245,6 +245,8 @@ fn guarded_launch_failure_after_create_leaves_nothing_and_the_next_launch_succee
     let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let lab = Lab::new();
     let _hosts = crate::config::session_hosts::force_with_claude_guard_for_test(None, &[], &[TEST]);
+    // Leftovers of both fault kinds are reported together, so each kind's result is visible.
+    let mut leftovers = Vec::new();
     for (verb, bystander) in [("resize-window", false), ("display-message", true)] {
         let name = format!("AgentDesk-cga-fail-{verb}");
         let other = "AgentDesk-cga-bystander";
@@ -276,15 +278,66 @@ fn guarded_launch_failure_after_create_leaves_nothing_and_the_next_launch_succee
             tc::tmux_owner_path(&name),
             tc::session_temp_path(&name, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT),
             tc::session_dead_marker_path(&name),
+            tc::session_temp_path(&name, tc::TMUX_RUNTIME_KIND_TEMP_EXT),
+            tc::session_temp_path(&name, "host_kind"),
         ] {
-            assert!(
-                !std::path::Path::new(&leftover).exists(),
-                "{verb}: {leftover}"
-            );
+            if std::path::Path::new(&leftover).exists() {
+                leftovers.push(format!("{verb}: {leftover}"));
+            }
         }
 
         std::fs::remove_file(&fault).unwrap();
         lab.take_calls();
+        lab.launch(&name, Some(TEST))
+            .expect("the next launch succeeds");
+        assert_eq!(lab.geometry(&name), HELD);
+    }
+    assert!(leftovers.is_empty(), "{leftovers:#?}");
+}
+
+// When removal of the created session cannot be confirmed, the launch still fails but keeps
+// every piece of ownership evidence: the session may run (failed kill) or be gone (failed probe).
+#[test]
+fn guarded_launch_with_unconfirmed_cleanup_fails_and_keeps_the_ownership_evidence() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let lab = Lab::new();
+    let _hosts = crate::config::session_hosts::force_with_claude_guard_for_test(None, &[], &[TEST]);
+    let keeper = "AgentDesk-cga-keeper";
+    assert!(
+        lab.real(&["new-session", "-d", "-s", keeper, "sleep 600"])
+            .status
+            .success()
+    );
+    for (cleanup_fault, survives) in [("if-shell", true), ("has-session", false)] {
+        let name = format!("AgentDesk-cga-unconfirmed-{cleanup_fault}");
+        let faults = ["display-message", cleanup_fault]
+            .map(|verb| lab.root.path().join(format!("fail-{verb}")));
+        for fault in &faults {
+            std::fs::write(fault, "").unwrap();
+        }
+        let error = lab.launch(&name, Some(TEST)).unwrap_err();
+        assert!(
+            error.contains("cleanup unconfirmed"),
+            "{cleanup_fault}: {error}"
+        );
+        assert_eq!(lab.alive(&name), survives, "{cleanup_fault}: {error}");
+        for evidence in [
+            tc::tmux_owner_path(&name),
+            tc::session_temp_path(&name, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT),
+            tc::session_temp_path(&name, tc::TMUX_RUNTIME_KIND_TEMP_EXT),
+            tc::session_temp_path(&name, "host_kind"),
+        ] {
+            assert!(
+                std::path::Path::new(&evidence).exists(),
+                "{cleanup_fault}: {evidence} must be kept"
+            );
+        }
+
+        for fault in &faults {
+            std::fs::remove_file(fault).unwrap();
+        }
+        lab.real(&["kill-session", "-t", &format!("={name}")]);
         lab.launch(&name, Some(TEST))
             .expect("the next launch succeeds");
         assert_eq!(lab.geometry(&name), HELD);
