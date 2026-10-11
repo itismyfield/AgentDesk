@@ -326,9 +326,8 @@ async fn restore_cuts(root: &Path, pool: &sqlx::PgPool) {
     drop(guards);
 }
 
-/// Each named cut reaches its own runtime boundary in its own process: the intent before any input,
-/// the Escape's Sent and Indeterminate returns, and each admitted kind's durable write. A fresh
-/// process then keeps the unadmitted turns held and settles the admitted ones from their kind.
+/// Intent, Sent, Indeterminate and each admitted kind's durable write are reached in their own
+/// processes; a fresh process keeps the unadmitted turns held and settles the admitted ones.
 #[tokio::test(flavor = "current_thread")]
 async fn restart_real_cutpoints_reach_their_runtime_boundaries_pg() {
     let Ok(phase) = std::env::var(PHASE) else {
