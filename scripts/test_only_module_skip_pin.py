@@ -176,6 +176,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/turn_host_tests.rs",
         "src/config/session_hosts_tests.rs",
         "src/services/claude/host_gate_tests.rs",
+        "src/services/claude/tui_session_launch_geometry_tests.rs",
+        "src/services/platform/tmux/sized_cleanup_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs",
         "src/services/session_host/herdr_socket_rig_tests.rs",
         "src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs",
