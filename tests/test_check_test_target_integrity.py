@@ -1341,6 +1341,7 @@ class KnownArrayProvenance(unittest.TestCase):
     def test_a_run_scalar_must_source_before_the_array_it_expands(self) -> None:
         source, non_pg, pg = self.SOURCE, self.NON_PG, self.PG
         unsourced = [("ci-fixture.yml", "non-pg-source-unproven")]
+        pg_unsourced = [("ci-fixture.yml", "pg-include-source-unproven")]
         redefined = [("ci-fixture.yml", "known-array-redefined")]
         for steps, kinds in (
                 (((source, non_pg),), []),
@@ -1364,6 +1365,17 @@ class KnownArrayProvenance(unittest.TestCase):
                 ((("(", source, ")", non_pg),), unsourced),
                 ((("echo \\", source, non_pg),), unsourced),
                 ((("echo \\\\", source, non_pg),), []),
+                # Code left open by `&&`, `||` or a pipe, or an open backtick, owns the source.
+                ((("false &&", source, pg),), pg_unsourced),
+                ((("true ||", "", source, pg),), pg_unsourced),
+                ((("echo |", source, non_pg),), unsourced),
+                ((("echo `", source, "`", pg),), pg_unsourced),
+                ((("true && echo ok", "echo `date`", source, pg),), []),
+                # Quoted or escaped, `;`, `|` and `&&` are argument text, not a second command.
+                (((source, f"{non_pg} --logfile 'ci;pg.log'"),), []),
+                (((source, f"{non_pg} --logfile ci\\;pg.log"),), []),
+                (((f'{source} && cargo test --lib -- --logfile "a|b&&c" "${{PG_INCLUDE_ARGS[@]}}"',),),
+                 []),
                 ((('source "$FILTER"', non_pg),), unsourced),
                 (((f"{source} && {non_pg}",),), []),
                 ((f"'{source} && {non_pg}'",), []),
@@ -1399,6 +1411,7 @@ class KnownArrayProvenance(unittest.TestCase):
                 justfile)], [["cargo", "test", "--lib"]])
         for just_lines, kinds in (
                 ((f"{source} && {pg}", f"{source} && {GOOD_COMMAND}"), []),
+                ((f"{source} && {pg} --logfile 'ci;pg.log'",), []),
                 # Every recipe line is its own shell.
                 ((source, pg), [("justfile", "pg-include-source-unproven")]),
                 ((f"source scripts/other.sh && {pg}",),
@@ -1416,6 +1429,7 @@ class KnownArrayProvenance(unittest.TestCase):
                       (source, f"{non_pg} && cargo test --lib does_not_exist -- "
                                '"${NON_PG_SKIP_ARGS[@]}"'),
                       (source, f"{non_pg} | tee test.log"),
+                      (source, f"{non_pg} --logfile ci\\\\; echo done"),
                       (source, f"time {non_pg}"),
                       (source, f"bash -c '{non_pg}'"),
                       (source, "cargo test --lib high_risk_recovery \\",
@@ -1569,6 +1583,23 @@ class ParserContract(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(len(integrity.extract_justfile_commands(justfile)), 1)
+
+    def test_a_cargo_test_joined_to_another_command_is_unparsed(self) -> None:
+        # A direct cargo test refused for a control operator fails, array or not;
+        # other words, quoted text and redirections join nothing.
+        unparsed = ["cargo-command-unparsed"]
+        for command, kinds in (
+                (f"{GOOD_COMMAND} && cargo test --lib does_not_exist", unparsed),
+                (f"{GOOD_COMMAND}; echo done", unparsed),
+                (f"MODE=ci {GOOD_COMMAND} | tee test.log", unparsed),
+                (f"echo {GOOD_COMMAND} && true", []),
+                (f"time {GOOD_COMMAND} && true", []),
+                (f"{GOOD_COMMAND} --logfile 'ci;pg.log' 2>&1", [])):
+            with self.subTest(command=command):
+                self.assertEqual([v.kind for v in run_fixture(command)], kinds)
+        just_text = f"fixture:\n    {GOOD_COMMAND} && cargo test --lib does_not_exist\n"
+        self.assertEqual([(v.workflow, v.kind) for v in run_fixture(
+            GOOD_COMMAND, just_text=just_text)], [("justfile", "cargo-command-unparsed")])
 
     def test_recognized_unsupported_env_string_split_is_inconclusive(self) -> None:
         diagnostics: list[str] = []
