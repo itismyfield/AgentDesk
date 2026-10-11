@@ -207,9 +207,8 @@ async fn http(addr: SocketAddr, headers: &[(&str, &str)]) -> (u16, Value) {
     (status, serde_json::from_str(reply).unwrap_or(Value::Null))
 }
 
-// With a token configured only the operator Bearer reaches the switch: a loopback browser
-// Referer is admitted by the middleware as `Loopback` and refused by the route. Without one,
-// a loopback peer does; a route outside the middleware admits nobody.
+// With a token only the operator Bearer reaches the switch (a loopback Referer is refused);
+// without one a loopback peer does, and a route outside the auth middleware admits nobody.
 #[test]
 fn act_route_token_mode_requires_server_admin() {
     if !in_child(concat!(

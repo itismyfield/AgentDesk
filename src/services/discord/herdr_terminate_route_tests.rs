@@ -1,7 +1,5 @@
-//! The operator route through the API router against the fake Herdr rig and a throwaway PG:
-//! its replies, its refusals' zero effect, the fence after a panic, and one result log per run.
-//! The helpers also serve the route's own tests; anything that changes the live config runs
-//! alone in a child process.
+//! The operator route through the API router on the fake Herdr rig and a throwaway PG, and the
+//! helpers the route's own tests share; a test changing the live config runs in a child process.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;

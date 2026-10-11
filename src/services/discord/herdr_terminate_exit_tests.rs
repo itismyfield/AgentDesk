@@ -1,6 +1,5 @@
-//! A process that ends right after its close, the way the SIGTERM handler's `exit(0)` ends it:
-//! the row keeps its nonce and its input hold, and a restarted process sharing the database and
-//! runtime root retires it on a rerun without a second close.
+//! A process ending right after its close, as the SIGTERM handler's `exit(0)` does, keeps the
+//! row's nonce and hold; a restarted process on the same database and root retires it on a rerun.
 
 use std::io::Write;
 use std::time::Duration;

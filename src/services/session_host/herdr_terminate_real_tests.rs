@@ -1,7 +1,5 @@
-//! The operator terminate path, from `agentdesk herdr terminate` through the API router, against
-//! real Herdr 0.9.3 servers run from a scratch root: a last pane's close retires exactly its
-//! execution, and a worktree group's confirmation answer stops the run with nothing escalated.
-//! `scripts/test_p11_m2_activation.py` runs each test and judges the lines it prints.
+//! `agentdesk herdr terminate` against real Herdr 0.9.3 servers from a scratch copy, run and
+//! judged by `scripts/test_p11_m2_activation.py` from the lines each test prints.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -417,9 +415,8 @@ struct Seen {
     outcome: String,
 }
 
-/// The registered endpoint's own socket transport, keeping which server took each call: a
-/// write's connection is checked against `expected` before its first byte, so a sent write was
-/// answered by that server.
+/// The registered endpoint's socket transport, keeping the server of each call; a write is sent
+/// only on a connection to `expected`, so a sent write was answered by that server.
 struct Witnessing {
     inner: HerdrSocketTransport,
     seen: Arc<Mutex<Vec<Seen>>>,

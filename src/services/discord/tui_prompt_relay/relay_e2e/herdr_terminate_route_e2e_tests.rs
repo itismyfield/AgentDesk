@@ -1,6 +1,5 @@
-//! The operator route's request dropped while its close is in flight: the detached run still
-//! retires, releases the hold and settles the captured turn, and the message queued meanwhile
-//! starts once on Herdr.
+//! A terminate request dropped while its close is in flight: the detached run still retires and
+//! settles the captured turn, and the message queued meanwhile starts once on Herdr.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
