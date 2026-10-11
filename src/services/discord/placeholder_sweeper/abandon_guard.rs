@@ -383,6 +383,14 @@ async fn finalize_abandoned_mailbox_admitted(
     sweep_started_before: std::time::Instant,
     evidence: AbandonedCleanupEvidence,
 ) -> AbandonedTmuxCleanupOutcome {
+    if super::super::inflight::before_start_receipt_present(provider, state.channel_id)
+        && !super::super::inflight::receipt_mutant("placeholder")
+    {
+        return AbandonedTmuxCleanupOutcome {
+            decision: AbandonedTmuxCleanupDecision::PreserveRetry,
+            state_delete_authorized: false,
+        };
+    }
     let owner_decision = if evidence.terminal_delivered() {
         AbandonedTmuxCleanupDecision::PreserveRetry
     } else {
@@ -1140,5 +1148,61 @@ mod tests {
     async fn blocking_probe_join_failure_preserves_retry() {
         let decision = run_blocking_cleanup_probe(|| panic!("synthetic probe panic")).await;
         assert_eq!(decision, AbandonedTmuxCleanupDecision::PreserveRetry);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn s3act_b3b_placeholder_stops_before_mailbox_finish_pg() {
+        #[cfg(unix)]
+        crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE
+            .set(false);
+        use crate::services::discord::host_teardown_gate::test_support::{
+            busy_turn, shared_on, turn_kept,
+        };
+        use std::sync::atomic::Ordering;
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let shared = shared_on(&pool).await;
+        let provider = ProviderKind::Claude;
+        for protected in [true, false] {
+            let channel =
+                serenity::ChannelId::new(1_479_671_301_387_270_000 + u64::from(protected));
+            let name = provider.build_tmux_session_name("b3b2-placeholder");
+            let token = busy_turn(&shared, channel, &name).await;
+            shared.restart.global_active.store(1, Ordering::Relaxed);
+            let path = crate::services::discord::inflight::inflight_state_path(
+                &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
+                &provider,
+                channel.get(),
+            );
+            let mut raw: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            raw["turn_nonce"] = serde_json::to_value(token.turn_nonce()).unwrap();
+            if protected {
+                raw["herdr_before_start_stop"] = serde_json::Value::Null;
+            }
+            let before = serde_json::to_vec_pretty(&raw).unwrap();
+            std::fs::write(&path, &before).unwrap();
+            let state = serde_json::from_value(raw).unwrap();
+            let mut rx = subscribe_turn_completion_events(shared.as_ref());
+            let result = super::finalize_abandoned_mailbox(
+                &shared,
+                &provider,
+                &state,
+                std::time::Instant::now(),
+                AbandonedCleanupEvidence::TerminalDelivered,
+            )
+            .await;
+            assert_eq!(result.state_delete_authorized, !protected);
+            if protected {
+                assert!(turn_kept(&shared, channel, &token).await);
+                assert_eq!(std::fs::read(path).unwrap(), before);
+                assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+                assert!(rx.try_recv().is_err());
+            } else {
+                assert!(!turn_kept(&shared, channel, &token).await);
+                assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+            }
+        }
+        pool.close().await;
     }
 }

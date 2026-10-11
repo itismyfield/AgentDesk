@@ -12,60 +12,76 @@ const DELIVERED: &str = "delivered";
 const ADMIT_CALLER: &str = "inflight::before_start_stop_admission::admit";
 const ACK_CALLER: &str = "inflight::before_start_stop_admission::ack";
 
-/// Missing fields read as unknown values, so a malformed receipt never fails the whole row.
+/// Raw receipt values survive unsupported fields, types and present-null unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub(in crate::services::discord) struct BeforeStartReceipt {
-    protocol: u32,
-    kind: String,
-    turn_nonce: String,
-    /// The process generation that admitted the close; restart takes only a prior one.
-    admitted_generation: u64,
-    basis: String,
-    notice: String,
+#[serde(transparent)]
+pub(in crate::services::discord) struct BeforeStartReceipt(serde_json::Value);
+
+pub(in crate::services::discord) fn deserialize_receipt<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<BeforeStartReceipt>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    #[cfg(test)]
+    let mut value = value;
+    #[cfg(test)]
+    {
+        let mutant = super::super::super::super::receipt_mutant;
+        if mutant("raw-type") && !value.is_object() {
+            return Err(serde::de::Error::custom("object required"));
+        }
+        if mutant("raw-null") && value.is_null() {
+            return Ok(None);
+        }
+        if mutant("raw-shape") {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("future");
+            }
+        }
+    }
+    Ok(Some(BeforeStartReceipt(value)))
 }
 
 impl BeforeStartReceipt {
-    /// Every field is one this binary reads; generation and row checks are the caller's.
     pub(in crate::services::discord) fn supported(&self) -> bool {
-        self.protocol == PROTOCOL
-            && self.kind == KIND
-            && matches!(self.basis.as_str(), "no_attempt" | "untouched")
-            && matches!(self.notice.as_str(), PENDING | DELIVERED)
-            && !self.turn_nonce.is_empty()
+        (super::super::super::super::receipt_mutant("unknown-field")
+            || self.0.as_object().is_some_and(|object| object.len() == 6))
+            && self.0["protocol"].as_u64() == Some(u64::from(PROTOCOL))
+            && self.0["kind"].as_str() == Some(KIND)
+            && matches!(self.0["basis"].as_str(), Some("no_attempt" | "untouched"))
+            && matches!(self.0["notice"].as_str(), Some(PENDING | DELIVERED))
+            && self.0["admitted_generation"].as_u64().is_some()
+            && !self.turn_nonce().is_empty()
     }
-
-    #[cfg(unix)]
     pub(in crate::services::discord) fn turn_nonce(&self) -> &str {
-        &self.turn_nonce
+        self.0["turn_nonce"].as_str().unwrap_or("")
     }
-
-    #[cfg(unix)]
     pub(in crate::services::discord) fn admitted_generation(&self) -> u64 {
-        self.admitted_generation
+        self.0["admitted_generation"].as_u64().unwrap_or(0)
     }
-
     #[cfg(unix)]
     pub(in crate::services::discord) fn notice_pending(&self) -> bool {
-        self.supported() && self.notice == PENDING
+        self.supported() && self.0["notice"].as_str() == Some(PENDING)
     }
-
-    /// The same admission, whatever its notice says.
     fn same_admission(&self, other: &Self) -> bool {
-        self.protocol == other.protocol
-            && self.kind == other.kind
-            && self.turn_nonce == other.turn_nonce
-            && self.admitted_generation == other.admitted_generation
-            && self.basis == other.basis
+        [
+            "protocol",
+            "kind",
+            "turn_nonce",
+            "admitted_generation",
+            "basis",
+        ]
+        .iter()
+        .all(|key| self.0[*key] == other.0[*key])
     }
+}
 
-    /// Unknown values rank above every known one so no write lowers them.
-    fn rank(&self) -> u8 {
-        match (self.supported(), self.notice.as_str()) {
-            (true, PENDING) => 1,
-            (true, DELIVERED) => 2,
-            _ => u8::MAX,
-        }
+thread_local! {
+    static RECEIPT_WRITE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+struct ReceiptWrite(Option<&'static str>);
+impl Drop for ReceiptWrite {
+    fn drop(&mut self) {
+        RECEIPT_WRITE.set(self.0);
     }
 }
 
@@ -106,6 +122,7 @@ fn commit(
 ) -> Option<InflightTurnState> {
     #[cfg(all(test, unix))]
     fault::check(guard.state(), caller).ok()?;
+    let _permission = ReceiptWrite(RECEIPT_WRITE.replace(Some(caller)));
     match guard.persist_verified_under_guard(updated, caller) {
         GuardedSaveOutcome::Saved
             if guard.state().herdr_before_start_stop == updated.herdr_before_start_stop =>
@@ -117,27 +134,77 @@ fn commit(
 }
 
 impl InflightTurnState {
-    /// Every row write keeps the durable receipt of the same birth episode: a stale snapshot can
-    /// neither drop nor lower it, and only its own acknowledgement raises it.
+    pub(in crate::services::discord::inflight) fn before_start_policy_receipt_clearable(
+        &self,
+        fresh: &InflightTurnState,
+        generation: u64,
+    ) -> bool {
+        self.herdr_before_start_stop
+            .as_ref()
+            .is_some_and(|receipt| {
+                receipt.supported()
+                    && receipt.0["notice"].as_str() == Some(DELIVERED)
+                    && receipt.admitted_generation() == generation
+                    && generation != 0
+                    && fresh.herdr_before_start_stop.as_ref() == Some(receipt)
+                    && fresh.turn_nonce.as_deref() == Some(receipt.turn_nonce())
+                    && fresh.restart_mode.is_none()
+                    && !fresh.rebind_origin
+                    && fresh.tui_terminal_kind.is_none()
+                    && !fresh.terminal_delivery_committed
+                    && fresh.save_generation == self.save_generation
+                    && InflightEpisodePin::from_state(self).matches_state(fresh)
+            })
+    }
+
+    /// General writers carry only the same durable episode's exact receipt.
     pub(in crate::services::discord::inflight) fn carry_before_start_receipt_from(
         &mut self,
         existing: Option<&InflightTurnState>,
-    ) {
-        let Some(durable) = existing
-            .filter(|existing| {
-                InflightEpisodePin::from_state(existing)
+    ) -> Result<(), String> {
+        if super::super::super::super::receipt_mutant("absent-blocks")
+            && self.herdr_before_start_stop.is_none()
+        {
+            return Err("receipt required".into());
+        }
+        let durable = existing.and_then(|row| row.herdr_before_start_stop.as_ref());
+        if durable.is_some()
+            && existing.is_some_and(|row| {
+                !InflightEpisodePin::from_state(row)
                     .is_same_episode_as(&InflightEpisodePin::from_state(self))
             })
-            .and_then(|existing| existing.herdr_before_start_stop.as_ref())
-        else {
-            return;
-        };
-        self.herdr_before_start_stop = match self.herdr_before_start_stop.take() {
-            Some(next) if next.same_admission(durable) && next.rank() > durable.rank() => {
-                Some(next)
+        {
+            return Err("policy receipt belongs to another episode".into());
+        }
+        let permission = RECEIPT_WRITE.get();
+        let outgoing = self.herdr_before_start_stop.as_ref();
+        if permission == Some(ADMIT_CALLER)
+            && durable.is_none()
+            && outgoing.is_some_and(|receipt| receipt.supported())
+        {
+            return Ok(());
+        }
+        if permission == Some(ACK_CALLER)
+            && durable.zip(outgoing).is_some_and(|(old, new)| {
+                old.supported()
+                    && new.supported()
+                    && old.same_admission(new)
+                    && new.0["notice"].as_str() == Some(DELIVERED)
+            })
+        {
+            return Ok(());
+        }
+        if durable.is_none() && outgoing.is_some() {
+            if super::super::super::super::receipt_mutant("mint") {
+                return Ok(());
             }
-            _ => Some(durable.clone()),
-        };
+            return Err("policy receipt requires admission authority".into());
+        }
+        if super::super::super::super::receipt_mutant("raise") {
+            return Ok(());
+        }
+        self.herdr_before_start_stop = durable.cloned();
+        Ok(())
     }
 
     /// Admits a `pending` receipt on the locked fresh row of this birth episode and returns that
@@ -148,26 +215,20 @@ impl InflightTurnState {
         basis: CloseBasis,
         generation: u64,
     ) -> Option<InflightTurnState> {
-        let receipt = BeforeStartReceipt {
-            protocol: PROTOCOL,
-            kind: KIND.into(),
-            turn_nonce: nonce.into(),
-            admitted_generation: generation,
-            basis: match basis {
-                CloseBasis::NoAttempt => "no_attempt",
-                CloseBasis::Untouched => "untouched",
-            }
-            .into(),
-            notice: PENDING.into(),
-        };
+        let receipt = BeforeStartReceipt(serde_json::json!({
+            "protocol": PROTOCOL, "kind": KIND, "turn_nonce": nonce,
+            "admitted_generation": generation,
+            "basis": match basis { CloseBasis::NoAttempt => "no_attempt", CloseBasis::Untouched => "untouched" },
+            "notice": PENDING,
+        }));
         let row = self.clone();
         off_scheduler(move || row.admit_locked(receipt)).await
     }
 
     fn admit_locked(&self, receipt: BeforeStartReceipt) -> Option<InflightTurnState> {
         if !crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
-            || receipt.admitted_generation == 0
-            || receipt.turn_nonce.is_empty()
+            || receipt.admitted_generation() == 0
+            || receipt.turn_nonce().is_empty()
         {
             return None;
         }
@@ -181,7 +242,7 @@ impl InflightTurnState {
             )
             .ok()?;
         let fresh = guard.state();
-        if fresh.turn_nonce.as_deref() != Some(receipt.turn_nonce.as_str())
+        if fresh.turn_nonce.as_deref() != Some(receipt.turn_nonce())
             || !InflightTurnIdentity::from_state(self).matches_state(fresh)
             || fresh.effective_finalizer_turn_id() != self.effective_finalizer_turn_id()
             || fresh.rebind_origin
@@ -231,17 +292,17 @@ impl InflightTurnState {
             .herdr_before_start_stop
             .as_ref()
             .filter(|durable| durable.supported() && durable.same_admission(expected))?;
-        if fresh.turn_nonce.as_deref() != Some(durable.turn_nonce.as_str())
+        if fresh.turn_nonce.as_deref() != Some(durable.turn_nonce())
             || fresh.tui_terminal_kind.is_some()
             || fresh.terminal_delivery_committed
         {
             return None;
         }
-        if durable.notice == DELIVERED {
+        if durable.0["notice"].as_str() == Some(DELIVERED) {
             return Some(fresh.clone());
         }
         let mut updated = fresh.clone();
-        updated.herdr_before_start_stop.as_mut()?.notice = DELIVERED.into();
+        updated.herdr_before_start_stop.as_mut()?.0["notice"] = DELIVERED.into();
         commit(&mut guard, &updated, ACK_CALLER)
     }
 
@@ -257,11 +318,11 @@ impl InflightTurnState {
             return false;
         };
         receipt.supported()
-            && receipt.notice == DELIVERED
+            && receipt.0["notice"].as_str() == Some(DELIVERED)
             && fresh.herdr_before_start_stop.as_ref() == Some(receipt)
-            && fresh.turn_nonce.as_deref() == Some(receipt.turn_nonce.as_str())
-            && receipt.admitted_generation != 0
-            && receipt.admitted_generation < current_generation
+            && fresh.turn_nonce.as_deref() == Some(receipt.turn_nonce())
+            && receipt.admitted_generation() != 0
+            && receipt.admitted_generation() < current_generation
             && !crate::services::discord::inflight::row_is_current_generation(
                 fresh,
                 current_generation,

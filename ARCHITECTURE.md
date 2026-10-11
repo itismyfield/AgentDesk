@@ -826,6 +826,7 @@ src/
 │   │   │   ├── frontier_sweep_tests.rs
 │   │   │   ├── handled_command.rs
 │   │   │   ├── handled_command_tests.rs
+│   │   │   ├── held_range.rs
 │   │   │   ├── injected_catch_up_tests.rs
 │   │   │   ├── merged_alias_tests.rs
 │   │   │   ├── phase2.rs
@@ -1021,7 +1022,8 @@ src/
 │   │   │   │   ├── boot_reaper.rs
 │   │   │   │   ├── custody_notice.rs
 │   │   │   │   ├── custody_notice_tests.rs
-│   │   │   │   └── input_fence_reaper_tests.rs
+│   │   │   │   ├── input_fence_reaper_tests.rs
+│   │   │   │   └── scoped_restore.rs
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── runtime_stamp/
@@ -1068,6 +1070,7 @@ src/
 │   │   │   ├── orphan_relay_reclaim.rs
 │   │   │   ├── ownership_ops.rs
 │   │   │   ├── rebind_reap.rs
+│   │   │   ├── receipt_boundary_tests.rs
 │   │   │   ├── removal.rs
 │   │   │   ├── replay_projection_tests.rs
 │   │   │   ├── restart_mark.rs
@@ -2757,6 +2760,7 @@ src/
 │   │   ├── input_fence_tests.rs
 │   │   ├── input_handback.rs
 │   │   ├── input_handback_tests.rs
+│   │   ├── installed_actor_handoff.rs
 │   │   ├── intervention.rs
 │   │   ├── lease_release.rs
 │   │   ├── mailbox_observation.rs

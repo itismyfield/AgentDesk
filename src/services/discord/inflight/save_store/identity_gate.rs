@@ -558,7 +558,9 @@ fn bind_recovery_anchor_if_matches_snapshot(
     on_disk.current_msg_len = anchor_text_len;
     on_disk.ensure_finalizer_turn_id();
     on_disk.updated_at = now_string();
-    bump_save_generation_for_write(&path, &mut on_disk);
+    if bump_save_generation_for_write(&path, &mut on_disk).is_err() {
+        return GuardedSaveOutcome::AuthorityPinned;
+    }
     let Ok(json) = serde_json::to_string_pretty(&on_disk) else {
         return GuardedSaveOutcome::IoError;
     };
@@ -949,7 +951,8 @@ pub(in crate::services::discord::inflight) fn lock_and_save_existing_inflight_re
         "src/services/discord/inflight.rs:save_existing_inflight_rebind_adoption_if_matches_identity_in_root",
     );
     updated.updated_at = now_string();
-    bump_save_generation_for_write(&path, &mut updated);
+    bump_save_generation_for_write(&path, &mut updated)
+        .map_err(|_| GuardedSaveOutcome::AuthorityPinned)?;
     let Ok(json) = serde_json::to_string_pretty(&updated) else {
         return Err(GuardedSaveOutcome::IoError);
     };
