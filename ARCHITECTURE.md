@@ -78,6 +78,7 @@ src/
 │   ├── monitoring.rs
 │   ├── o.rs
 │   ├── o_shadow.rs
+│   ├── o_tests.rs
 │   ├── query.rs
 │   ├── restart_terminal_proof.rs
 │   ├── run.rs

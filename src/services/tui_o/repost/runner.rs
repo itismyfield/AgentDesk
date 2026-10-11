@@ -1,5 +1,5 @@
-//! The re-post turn: off, nothing past the switch runs. On, a tick advances the probes of admitted
-//! pieces, and a slot is granted only on fresh absence evidence or a current approval.
+//! The re-post turn. Off, nothing past the switch runs: no PostgreSQL, probe or sidecar step.
+//! On, a tick advances admitted probes and a turn grants a slot only on fresh absence or approval.
 
 use std::collections::BTreeMap;
 use std::future::Future;
