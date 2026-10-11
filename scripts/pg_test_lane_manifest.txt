@@ -181,6 +181,8 @@ src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host.rs
 src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs
+src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs
+src/services/discord/runtime_bootstrap/scoped_inflight_restore_tests.rs
 src/services/discord/session_idle_cleanup_tests.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
@@ -196,6 +198,7 @@ src/services/discord/tui_prompt_relay/rehydration.rs
 src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs
+src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs
 src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs
@@ -452,6 +455,8 @@ services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests
 services::discord::runtime_bootstrap::o_writer_host::fence_tests
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests
+services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests
 services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
@@ -470,6 +475,7 @@ services::discord::tui_prompt_relay::rehydration::tests::host_defer
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
@@ -1514,6 +1520,15 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
+services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_invalidation_preserves_replay_and_foreign_rows_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_admitted_kinds_resume_only_after_installation_and_output_admission_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_fresh_receipt_precedes_admitted_settlement_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_install_defers_active_source_queue_feedback_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_install_is_effect_free_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_old_generation_cannot_install_a_mailbox_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_resume_rechecks_home_epoch_and_input_fence_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_retained_terminal_keeps_reason_and_obligation_pg
+services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_unverified_receipts_block_without_durable_error_holds_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::exact_owned_row_with_null_cwd_is_channel_scoped_empty_path
@@ -1619,6 +1634,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_threa
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_arrival_of_an_injected_message_never_runs_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_takes_a_message_whose_parent_owner_died_pg
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cancelled_anchor_recovery_keeps_a_person_draft_and_q_until_lift_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_real_intake_waits_through_settlement_and_listener_hands_off_pg
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e::reconcile_stale_turn_held_release_arms_backstop_and_runs_preserved_q_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg
@@ -1691,7 +1707,8 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_roll
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_cold_start_accepts_intent_without_marker_then_sends_once
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base
-services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cold_unsubmitted_stop_keeps_the_bridge_hold_without_a_terminal
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cold_stop_after_a_normal_exit_seal_sends_nothing
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cold_unsubmitted_stop_closes_only_after_a_no_attempt_exit
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_generation_only_stale_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_generation_only_stale_sends_no_escape

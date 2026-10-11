@@ -10,6 +10,7 @@ mod busy_followup_retry_store;
 pub(crate) mod herdr_terminate;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;
+mod codex_adoption_runtime;
 mod commands;
 mod compact_turn_authority;
 mod completion_footer_metadata;
