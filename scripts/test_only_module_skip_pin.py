@@ -438,6 +438,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests.rs",
+        "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/runtime_switch_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/loss_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/native_turn_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/fenced_admission_tests.rs",
