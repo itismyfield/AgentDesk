@@ -12,7 +12,7 @@ static NEXT_HANDBACK: AtomicU64 = AtomicU64::new(1);
 static BARRIERS: Mutex<BTreeMap<(String, u64), HandbackEntry>> = Mutex::new(BTreeMap::new());
 
 /// Exhaustion refuses for good and is never the namespace verdict, so a producer stays armed.
-pub(crate) const EXHAUSTED: Failure = Failure::Busy;
+pub(crate) const EXHAUSTED: Failure = Failure::GenerationExhausted;
 
 /// MAX is the exhausted sentinel, so no generation ever issues it as current.
 fn next_generation(value: u64) -> Option<u64> {
@@ -427,6 +427,26 @@ pub(crate) fn order_barrier(provider: &ProviderKind, channel: u64) -> bool {
         })
 }
 
+/// Runs a Gate protection change under the handback serializer, so it lands only between callbacks.
+pub(in crate::services::discord::input_runtime) fn serialized<T>(change: impl FnOnce() -> T) -> T {
+    let _entries = match BARRIERS.try_lock() {
+        Ok(entries) => entries,
+        Err(_) => {
+            #[cfg(test)]
+            CONTENDED.with(|hook| hook.borrow_mut().take().map(|hook| hook()));
+            BARRIERS.lock().unwrap_or_else(|e| e.into_inner())
+        }
+    };
+    change()
+}
+
+// Fires on the waiting thread once a serialized change finds a callback holding the lock.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// The same lock covers protection release and installation, so ingress never sees a gap. Every
 /// refusal precedes the release, and a reinstall must inherit a fully settled entry of the same
 /// Gate and producer handle, so neither pending sources nor a live overflow path is dropped.
@@ -435,10 +455,14 @@ pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
     snapshot: &PendingSource,
 ) -> Result<(), Failure> {
     let (provider, channel) = (closing.provider().clone(), closing.channel());
-    if snapshot.overflow.provider != provider
+    let foreign = snapshot.overflow.provider != provider
         || snapshot.overflow.channel != channel
-        || !discord_sources(&snapshot.sources)
-    {
+        || !discord_sources(&snapshot.sources);
+    #[cfg(test)]
+    let late = mutant("release_before_snapshot_namespace_check");
+    #[cfg(not(test))]
+    let late = false;
+    if foreign && !late {
         return Err(Failure::StalePermit);
     }
     let mut entries = BARRIERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -472,7 +496,10 @@ pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
             next_generation(value)
         })
         .map_err(|_| EXHAUSTED)?;
-    let release = closing.release_for_handback()?;
+    let release = closing.release_protection_after_handback()?;
+    if foreign && late {
+        return Err(Failure::StalePermit);
+    }
     let mut order = AdmissionOrder::new(provider, channel, release.epoch(), 0);
     order.pending.extend(&snapshot.sources);
     order.stamp.dirty = snapshot.dirty_generation;

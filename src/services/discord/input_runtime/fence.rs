@@ -27,6 +27,8 @@ pub(crate) enum Failure {
     StalePermit,
     Busy,
     ActorUnreachable,
+    /// A generation that cannot advance; the refusal is permanent, never a retryable Busy.
+    GenerationExhausted,
 }
 struct State {
     mode: Mode,
@@ -53,6 +55,21 @@ pub(crate) fn population_root() -> Option<PathBuf> {
 }
 
 // Another provider's protection still covers the channel, so a foreign writer never reads None.
+// MAX is the exhausted sentinel, so an epoch that cannot advance refuses the transition for good.
+fn next_epoch(epoch: u64) -> Result<u64, Failure> {
+    #[cfg(test)]
+    {
+        use super::supervisor::mutant;
+        if mutant("reuse_gate_generation") {
+            return Ok(epoch.wrapping_add(1));
+        }
+        if mutant("max_generation_remains_valid") {
+            return epoch.checked_add(1).ok_or(Failure::GenerationExhausted);
+        }
+    }
+    (epoch.checked_add(1).filter(|next| *next != u64::MAX)).ok_or(Failure::GenerationExhausted)
+}
+
 pub(crate) fn lookup(provider: &ProviderKind, channel: u64) -> Option<Arc<Gate>> {
     find(|gate| gate.channel == channel && &gate.provider == provider)
         .or_else(|| channel_gate(channel))
@@ -173,12 +190,21 @@ impl Gate {
             slot = &entry.next;
         }
     }
+    /// Shares the handback serializer (BARRIERS before Gate.state), so a restore lands only
+    /// between handback callbacks and never inside one.
     pub(crate) fn restore_protection(&self) -> Result<(), Failure> {
+        #[cfg(test)]
+        if super::supervisor::mutant("drop_restore_serialization") {
+            return self.restore_now();
+        }
+        super::supervisor::ordering::serialized(|| self.restore_now())
+    }
+    fn restore_now(&self) -> Result<(), Failure> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.effects != 0 || self.protected.load(std::sync::atomic::Ordering::Acquire) {
             return Err(Failure::Busy);
         }
-        state.epoch += 1;
+        state.epoch = next_epoch(state.epoch)?;
         state.mode = Mode::LegacyOpen;
         *self.health.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.protected
@@ -282,8 +308,11 @@ impl Closing {
     pub(crate) fn provider(&self) -> &ProviderKind {
         &self.gate.provider
     }
-    // This port is for the supervisor after durable handback, not cancellation cleanup.
-    pub(crate) fn release_protection_after_handback(&self) -> Result<(), Failure> {
+    // Only the handback installer releases, after durable handback; the proof carries the epoch
+    // this transition produced rather than one guessed from the Closing.
+    pub(in crate::services::discord::input_runtime) fn release_protection_after_handback(
+        &self,
+    ) -> Result<modes::ReleaseProof, Failure> {
         let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.effects != 0
             || state.epoch != self.epoch.load(std::sync::atomic::Ordering::Acquire)
@@ -291,12 +320,16 @@ impl Closing {
         {
             return Err(Failure::Busy);
         }
-        state.epoch += 1;
+        let epoch = next_epoch(state.epoch)?;
+        state.epoch = epoch;
         state.mode = Mode::LegacyOpen;
         self.gate
             .protected
             .store(false, std::sync::atomic::Ordering::Release);
-        Ok(())
+        Ok(modes::ReleaseProof {
+            gate: self.gate.clone(),
+            epoch,
+        })
     }
     pub(crate) fn freeze(
         &self,
@@ -312,8 +345,9 @@ impl Closing {
         {
             return Err(Failure::Busy);
         }
+        let epoch = next_epoch(state.epoch)?;
         state.mode = Mode::Frozen;
-        state.epoch += 1;
+        state.epoch = epoch;
         self.epoch
             .store(state.epoch, std::sync::atomic::Ordering::Release);
         Ok(())

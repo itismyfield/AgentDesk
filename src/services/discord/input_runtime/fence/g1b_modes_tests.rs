@@ -175,3 +175,125 @@ fn g1b_settled_reinstall_requires_same_overflow() {
     overflow.mark_dirty();
     assert!(order_barrier(&CLAUDE, channel));
 }
+
+#[test]
+fn g1b_restore_serializes_with_durable_callback() {
+    use crate::services::discord::input_runtime::supervisor::ordering::CONTENDED;
+    use std::sync::mpsc;
+    let channel = 6_326_162;
+    let gate = Gate::protect(CLAUDE, channel).unwrap();
+    let _health = test_health::Clear::new(&gate);
+    handback(&gate)
+        .release_after_handback_with_pending(&producer(channel, &[]).pending_snapshot())
+        .unwrap();
+    let cap = scan(channel, vec![11], 11);
+    let (events, observed) = mpsc::channel();
+    let mut restorer = None;
+    let executed = ordering::handback_commit_from_scan(cap, &[11], || {
+        // The restore starts while the callback runs; it may only wait, never land, until it ends.
+        let (restoring, events) = (gate.clone(), events.clone());
+        restorer = Some(std::thread::spawn(move || {
+            let waiting = events.clone();
+            CONTENDED.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    waiting.send("restore waits").unwrap();
+                }))
+            });
+            let restored = restoring.restore_protection();
+            events.send("restore landed").unwrap();
+            restored
+        }));
+        assert_eq!(observed.recv().unwrap(), "restore waits");
+        assert!(
+            !protected(&gate).2,
+            "the release still stands inside the callback"
+        );
+        Ok("durable")
+    })
+    .unwrap();
+    assert_eq!(
+        (executed.outcome, executed.settlement),
+        (Ok("durable"), Ok(()))
+    );
+    assert_eq!(restorer.unwrap().join().unwrap(), Ok(()));
+    assert_eq!(observed.recv().unwrap(), "restore landed");
+    assert!(protected(&gate).2);
+    assert!(ordering::handback_fetch_ticket(&CLAUDE, channel).is_err());
+}
+
+#[test]
+fn g1b_generation_exhaustion_matrix_gate() {
+    // A release one step below the limit issues MAX-1, and the restore after it is refused.
+    let channel = 6_326_163;
+    let gate = Gate::protect(CLAUDE, channel).unwrap();
+    let _health = test_health::Clear::new(&gate);
+    gate.state.lock().unwrap().epoch = u64::MAX - 2;
+    let snapshot = producer(channel, &[]).pending_snapshot();
+    handback(&gate)
+        .release_after_handback_with_pending(&snapshot)
+        .unwrap();
+    assert_eq!(protected(&gate), (Mode::LegacyOpen, u64::MAX - 1, false));
+    for _ in 0..2 {
+        assert_eq!(gate.restore_protection(), Err(Failure::GenerationExhausted));
+        assert_eq!(protected(&gate), (Mode::LegacyOpen, u64::MAX - 1, false));
+    }
+    // A release at the limit is refused before protection, mode or the entry move.
+    let channel = 6_326_164;
+    let gate = Gate::protect(CLAUDE, channel).unwrap();
+    let _health = test_health::Clear::new(&gate);
+    gate.state.lock().unwrap().epoch = u64::MAX - 1;
+    let closing = handback(&gate);
+    let snapshot = producer(channel, &[]).pending_snapshot();
+    for _ in 0..2 {
+        assert_eq!(
+            closing.release_after_handback_with_pending(&snapshot),
+            Err(Failure::GenerationExhausted)
+        );
+        assert_eq!(protected(&gate), (Mode::Handback, u64::MAX - 1, true));
+        assert!(!order_barrier(&CLAUDE, channel), "no entry was installed");
+    }
+}
+
+#[test]
+fn g1b_generation_exhaustion_matrix_gate_freeze() {
+    struct Env(Option<std::ffi::OsString>);
+    impl Drop for Env {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.0 {
+                    Some(old) => std::env::set_var("AGENTDESK_ROOT_DIR", old),
+                    None => std::env::remove_var("AGENTDESK_ROOT_DIR"),
+                }
+            }
+        }
+    }
+    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/i01-tmp");
+    std::fs::create_dir_all(&parent).unwrap();
+    let root = tempfile::tempdir_in(parent).unwrap();
+    let _env = Env(std::env::var_os("AGENTDESK_ROOT_DIR"));
+    unsafe {
+        std::env::set_var("AGENTDESK_ROOT_DIR", root.path());
+    }
+    let channel = 6_326_165;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let gate = Gate::protect(CLAUDE, channel).unwrap();
+            let _health = test_health::Clear::new(&gate);
+            gate.state.lock().unwrap().epoch = u64::MAX - 1;
+            let closing = Arc::new(gate.close().unwrap());
+            let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+                &CLAUDE, "session", None,
+            );
+            let frozen = shared
+                .freeze_legacy_queue(closing.clone(), persistence)
+                .await;
+            assert_eq!(frozen.err(), Some(Failure::GenerationExhausted));
+            assert_eq!(protected(&gate), (Mode::Closing, u64::MAX - 1, true));
+            assert_eq!(closing.begin_handback(), Err(Failure::Mode(Mode::Closing)));
+        });
+}

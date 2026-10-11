@@ -33,7 +33,7 @@ fn identity(key: u64, sources: &[u64]) -> ReceiptIdentity {
     ReceiptIdentity::new(key, sources.to_vec(), 7, 8, CHANNEL).unwrap()
 }
 
-fn input(key: u64, sources: &[u64]) -> Value {
+pub(in crate::services::tui_input) fn input(key: u64, sources: &[u64]) -> Value {
     json!({"text":format!("input {key}"),"receipt_identity":identity(key, sources)})
 }
 
@@ -69,7 +69,7 @@ fn record(seq: u64, entry: &Entry) -> Record {
     }
 }
 
-fn tracked(ledger: &mut Ledger, key: u64) {
+pub(in crate::services::tui_input) fn tracked(ledger: &mut Ledger, key: u64) {
     let source = SourceId {
         session_id: "session".into(),
         path: "/nonexistent/session.jsonl".into(),
@@ -123,7 +123,7 @@ impl Retire for Facts {
 }
 
 // Two checkpoints past the horizon collect a settled row's attempt detail.
-fn collect(ledger: &mut Ledger) {
+pub(in crate::services::tui_input) fn collect(ledger: &mut Ledger) {
     let now = 1_000 * DAY_MS;
     ledger.checkpoint_rows_with(&Facts(now)).unwrap();
     let later = Facts(now + TOMBSTONE_HORIZON_MS);

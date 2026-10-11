@@ -22,8 +22,8 @@ pub(crate) fn settle_order_barrier(cap: ValidatedOrderCapability) -> Result<bool
 
 /// The Gate a handback release opened and the epoch that release produced; only a Closing makes one.
 pub(crate) struct ReleaseProof {
-    gate: Arc<Gate>,
-    epoch: u64,
+    pub(super) gate: Arc<Gate>,
+    pub(super) epoch: u64,
 }
 
 impl ReleaseProof {
@@ -100,24 +100,6 @@ impl Closing {
         snapshot: &ordering::PendingSource,
     ) -> Result<(), Failure> {
         ordering::install_handback_snapshot(self, snapshot)
-    }
-
-    /// Releases and reads back the state that release produced under the Gate lock, so the proof
-    /// names the actual transition and never a guessed epoch.
-    pub(in crate::services::discord::input_runtime) fn release_for_handback(
-        &self,
-    ) -> Result<ReleaseProof, Failure> {
-        let epoch =
-            (self.epoch.load(Ordering::Acquire).checked_add(1)).ok_or(ordering::EXHAUSTED)?;
-        self.release_protection_after_handback()?;
-        let proof = ReleaseProof {
-            gate: self.gate.clone(),
-            epoch,
-        };
-        match proof.current() {
-            true => Ok(proof),
-            false => Err(Failure::StalePermit),
-        }
     }
 
     // No permit can exist past the freeze, so these moves keep the epoch unchanged.

@@ -4557,7 +4557,10 @@ services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_before_fi
 services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_during_poll_holds_effect_until_worker_cleanup
 services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_pending_returns_pool_thread_and_cleans_on_worker
 services::discord::input_runtime::fence::effect::tests::c1b_same_identity_stale_epoch_is_not_replaced_by_root_admission
+services::discord::input_runtime::fence::modes::g1b_tests::g1b_generation_exhaustion_matrix_gate
+services::discord::input_runtime::fence::modes::g1b_tests::g1b_generation_exhaustion_matrix_gate_freeze
 services::discord::input_runtime::fence::modes::g1b_tests::g1b_restore_invalidates_every_handback_port
+services::discord::input_runtime::fence::modes::g1b_tests::g1b_restore_serializes_with_durable_callback
 services::discord::input_runtime::fence::modes::g1b_tests::g1b_settled_reinstall_requires_same_overflow
 services::discord::input_runtime::fence::modes::g1b_tests::g1b_unsettled_reinstall_refused_before_release
 services::discord::input_runtime::fence::modes::tests::e1_abort_returns_only_a_history_free_close_and_hold_refuses_both_owners
@@ -4693,6 +4696,7 @@ services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry:
 services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::g1a_uncertain_persistence_dirty_race_retains_whole_sources_without_wal_append
 services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::g1b::g1b_merge_retry_primary_first
 services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::g1b::g1b_merge_retry_primary_nonfirst
+services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::g1b::g1b_snapshot_conflict_holds_aliases_and_actor
 services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::hm1_normal_boot_has_no_external_receipts
 services::discord::input_runtime::supervisor::tests::drive_entry::receipt_entry::submit_external_same_origin_keeps_first_body_and_seq
 services::discord::input_runtime::supervisor::tests::drive_entry::run_cancellation_holds_gate_even_when_supervisor_remains
@@ -11427,6 +11431,8 @@ services::tui_input::transition_fixture_tests::bounded_retry_resumes_transient_f
 services::tui_input::transition_fixture_tests::deletion_boundaries_restart_keep_one_owner_and_order
 services::tui_input::transition_fixture_tests::e1_probe_reports_history_without_creating_a_ledger
 services::tui_input::transition_fixture_tests::e1_unbound_handback_holds_and_names_every_unbound_key
+services::tui_input::transition_fixture_tests::g1b::g1b_move_preflights_all_candidates_before_effects
+services::tui_input::transition_fixture_tests::g1b::g1b_tracked_handback_after_real_gc_never_reactivates_through_move
 services::tui_input::transition_fixture_tests::handback_holds_an_attempted_row_even_on_an_empty_composer
 services::tui_input::transition_fixture_tests::handback_rejection_preserves_order_and_enqueue_crash_is_idempotent
 services::tui_input::transition_fixture_tests::host_error_on_a_usable_handle_still_reopens_before_the_next_step

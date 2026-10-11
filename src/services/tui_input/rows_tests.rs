@@ -1439,4 +1439,4 @@ mod tracked {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[path = "g1b_rows_tests.rs"]
-mod g1b;
+pub(super) mod g1b;
