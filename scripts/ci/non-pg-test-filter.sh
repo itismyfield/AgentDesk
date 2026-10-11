@@ -114,6 +114,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::inflight::rebind_reap::tests
   --skip services::discord::inflight::removal::custody_notice_tests
   --skip services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
+  --skip services::discord::input_runtime::supervisor::runtime::ports::tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
   --skip services::discord::placeholder_sweeper::retirement_tests
   --skip services::discord::recovery_engine::host_reconcile::tests
@@ -451,6 +452,10 @@ NON_PG_FILTER_REPLAY=(
   services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
   services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
   services::discord::input_runtime::clear::tests::postgres_outage_holds_without_reset_or_cut_and_reports_it
+  services::discord::input_runtime::supervisor::runtime::ports::tests::b_adopt_requires_all_provider_mapping_views_ports
+  services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_freeze_failure_preserves_legacy_and_closing
+  services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_reject_unresolved_resources_without_effects
+  services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_sources_are_read_only_and_unreadable_is_not_empty
   services::discord::placeholder_sweeper::abandon_guard::tests::blocking_probe_join_failure_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_live_process_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_missing_or_legacy_identity_preserves_retry
@@ -907,6 +912,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::inflight::rebind_reap::tests
   services::discord::inflight::removal::custody_notice_tests
   services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
+  services::discord::input_runtime::supervisor::runtime::ports::tests
   services::discord::placeholder_sweeper::abandon_guard::tests
   services::discord::placeholder_sweeper::retirement_tests
   services::discord::recovery_engine::host_reconcile::tests
