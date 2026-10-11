@@ -650,6 +650,7 @@ mod cancel_queue_preserve_pg_tests {
             "purge-queued",
             "rollback",
             "stat",
+            "corrupt",
         ]
         .into_iter()
         .enumerate()
@@ -658,11 +659,15 @@ mod cancel_queue_preserve_pg_tests {
             let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
             let db = TestPostgresDb::create().await;
             let pool = db.connect_and_migrate().await;
-            let channel = ChannelId::new(6038750 + i as u64);
+            // 6038760.. belongs to turn_cancel_queue_guard's table, so the added row sits apart.
+            let channel = ChannelId::new(match row {
+                "corrupt" => 6_813_750,
+                _ => 6038750 + i as u64,
+            });
             seed_cancel_target(&pool, channel.get()).await;
             // A forced cancel through the runtime is kept unless its host guard can read the
             // sessions table, so the forced rows' runtime runs on the test pool.
-            let shared = if row == "purge-empty" || row == "rollback" {
+            let shared = if matches!(row, "purge-empty" | "rollback" | "corrupt") {
                 crate::services::discord::host_teardown_gate::test_support::shared_on(&pool).await
             } else {
                 make_shared_data_for_tests()
@@ -707,21 +712,48 @@ mod cancel_queue_preserve_pg_tests {
                 std::fs::create_dir_all(&parent).unwrap();
                 std::fs::write(parent.join(token), b"not a directory").unwrap();
             }
-            if row == "rollback" {
-                std::fs::create_dir_all(parent.join(format!("{}.json", channel.get()))).unwrap();
+            if row == "rollback" || row == "corrupt" {
                 crate::services::queue::set_pre_purge_hook_for_test(
                     channel,
                     vec![queued_user_message(42)],
                     "tokB",
                 );
             }
+            // A directory where the purge's own snapshot lives is unreadable, so S2a refuses it.
+            let unreadable = parent.join(format!("{}.json", channel.get()));
+            if row == "corrupt" {
+                std::fs::create_dir_all(&unreadable).unwrap();
+            }
             let app = if row == "purge-queued" {
                 test_router(pool.clone())
             } else {
                 registered_app(&pool, &shared).await
             };
-            let force = row.starts_with("purge") || row == "rollback";
+            let force = row.starts_with("purge") || row == "rollback" || row == "corrupt";
+            let fault_armed = std::rc::Rc::new(std::cell::Cell::new(false));
+            if row == "rollback" {
+                // The hook's restore save samples source clocks after its own fault check, so the
+                // fault armed there fails only the purge's later save, past its checked preflight.
+                let armed = fault_armed.clone();
+                Intervention::source_clock_sample_hook_for_tests(move || {
+                    crate::services::turn_orchestrator::test_support::fail_queue_saves(channel, 1);
+                    armed.set(true);
+                });
+            }
             let (status, body) = post_cancel(&app, channel.get(), force).await;
+            if row == "rollback" {
+                assert!(
+                    fault_armed.get(),
+                    "the hook's restore save must arm the fault"
+                );
+                assert_eq!(
+                    crate::services::turn_orchestrator::test_support::queue_save_faults(
+                        channel, true
+                    ),
+                    0,
+                    "the purge's save must consume the armed fault"
+                );
+            }
             mailboxes.remove_fixture_for_test(channel);
             if row == "drop" || row.starts_with("hydrate") {
                 // Mailbox reply loss is unknown, not an observed idle turn.
@@ -777,7 +809,7 @@ mod cancel_queue_preserve_pg_tests {
                     } else {
                         assert_explicit_null(&body, "queue_purged");
                     }
-                    if row == "purge-empty" || row == "dead" {
+                    if row == "purge-empty" || row == "dead" || row == "corrupt" {
                         assert_explicit_null(&body, "queued_remaining");
                     } else {
                         assert_eq!(
@@ -785,6 +817,20 @@ mod cancel_queue_preserve_pg_tests {
                             "{row}: depth must be 1, never inferred 0: {body}"
                         );
                     }
+                }
+                if row == "corrupt" {
+                    // A refused purge keeps the directory, the restored file and the queue.
+                    assert!(unreadable.is_dir(), "{row}");
+                    let ids = |queue: Vec<Intervention>| {
+                        queue.iter().map(|x| x.message_id.get()).collect::<Vec<_>>()
+                    };
+                    let disk = load_channel_pending_queue_for_tests(&provider, "tokB", channel).0;
+                    assert_eq!(ids(disk), [42], "{row}");
+                    assert_eq!(
+                        ids(handle.snapshot().await.intervention_queue),
+                        [42],
+                        "{row}"
+                    );
                 }
             }
             pool.close().await;
