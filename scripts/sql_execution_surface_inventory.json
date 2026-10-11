@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "7b510d5f73f57b14ce2171324e772bf03561f42b",
+  "measured_at_sha": "d7c53eb97837fbd597675ed95680be4d2133578b",
   "records": [
     {
       "root": "migrations/postgres",
@@ -31942,6 +31942,24 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:8137ee71edb2bf0bb55ad8bb27dbe4082a3681bc9a19766402cb473953afe6f4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tmux_watcher/inherited_fixture_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:86c0608e8b36180b4a49f74d803718a7018bbb72ce799798472f235032608fd4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tmux_watcher/inherited_fixture_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9d8ee29016d3c73bf9cf56d33dc4f136f720cdd79323aacc5fe65bc0286159ee"
     },
     {
       "root": "src",
