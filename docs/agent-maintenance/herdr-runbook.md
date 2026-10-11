@@ -122,8 +122,8 @@ pane kill·close 는 P11 범위다.
   - 중단 안내(`⏹ 중단됨`)는 이 순서로 처리한다: receipt 또는 admitted kind 를 row 에 durable 하게 쓴다 → 안내를 보낸다 → 보낸 결과를 같은 row 에 ACK 로 쓴다 → 그 row 만 정리한다.
   - 원래 메시지 편집이 실패하면 새 메시지로 보낸다(`SentFallbackAfterEditFailure`). 이것도 실제로 보인 안내로 ACK 한다.
   - 안내를 보낸 뒤 ACK 가 durable 해지기 전에 프로세스가 끝나면, 재시작이 Pending 을 보고 안내를 한 번 더 보낸다.
-    - 편집으로 보였던 안내는 같은 메시지를 다시 편집하므로 보이는 결과가 같다.
-    - fallback 으로 보였던 안내는 새 메시지가 하나 더 생길 수 있다.
+    - 재시도도 먼저 원래 메시지를 편집한다. 재시도 편집도 성공하면 같은 메시지가 갱신된다.
+    - 재시도 편집이 실패하고 fallback POST 가 성공하면 안내가 하나 더 생길 수 있다. 처음 안내가 편집으로 보였어도 마찬가지다.
   - 안내가 정확히 한 번 보인다고 보장하지 않는다. 중복 안내는 terminal 이 두 번 처리됐다는 뜻이 아니다.
 - 진단: 같은 episode(채널·`turn_nonce`·generation·안내 메시지)로 다음을 대조한다.
   - 로그 `herdr_turn_policy_close`: `channel_id`·`logical`·`turn_nonce`·`runtime_generation`·`settled`.
