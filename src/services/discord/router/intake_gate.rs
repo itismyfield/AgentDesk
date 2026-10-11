@@ -1613,12 +1613,20 @@ pub(in crate::services::discord) async fn handle_event(
 
             // Checkpoint: message about to be processed as a turn
             // (#2044 F12 — monotonic).
-            super::super::advance_last_message_checkpoint(
-                &data.shared,
-                &data.provider,
-                channel_id,
-                new_message.id,
-            );
+            let checkpoint = || {
+                super::super::advance_last_message_checkpoint(
+                    &data.shared,
+                    &data.provider,
+                    channel_id,
+                    new_message.id,
+                );
+            };
+            // A replay-deferred direct dispatch checkpoints only once its custody is settled.
+            let settle_checkpoint = attachment_local_permit.is_none()
+                && super::checkpoint_waits_for_admission(channel_id);
+            if !settle_checkpoint {
+                checkpoint();
+            }
 
             // #796: classify the originating sender so the race handler in
             // `handle_text_message` knows whether it's safe to delete the
@@ -1694,6 +1702,8 @@ pub(in crate::services::discord) async fn handle_event(
             };
             if let Some(permit) = attachment_local_permit {
                 super::finish_admitted_text_intake(&deps, permit, submission).await?;
+            } else if settle_checkpoint {
+                super::dispatch_live_text_intake(&deps, submission, checkpoint).await?;
             } else {
                 super::dispatch_text_intake(&deps, submission).await?;
             }

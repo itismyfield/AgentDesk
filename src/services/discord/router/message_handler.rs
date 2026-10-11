@@ -261,7 +261,7 @@ pub(in crate::services::discord) use self::headless_turn::{
     start_voice_headless_turn,
 };
 pub(in crate::services::discord) use self::intake_turn::IntakeDeps;
-pub(crate) use self::intake_turn::{IntakeRequest, execute_intake_turn_core};
+pub(crate) use self::intake_turn::{IntakeRequest, execute_intake_turn_core, start_exact_retry};
 // #4270 — pre-teardown hosted-TUI readiness probe + live-dispatch defer for the
 // queued-turn promote entrypoints (idle kickoff in discord/mod.rs, live
 // dispatch in gateway.rs).
