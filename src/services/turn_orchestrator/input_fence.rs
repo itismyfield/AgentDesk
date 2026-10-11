@@ -241,7 +241,11 @@ pub(super) fn refuse(state: &ChannelMailboxState, msg: ChannelMailboxMsg, failur
         }
         #[cfg(test)]
         M::InstalledActorHandoff(request) => {
-            request.refuse(crate::services::cluster::channel_home_port::RestoreFailure::Rejected(format!("input fence: {failure:?}")));
+            request.refuse(
+                crate::services::cluster::channel_home_port::RestoreFailure::Rejected(format!(
+                    "input fence: {failure:?}"
+                )),
+            );
         }
         M::RecoveryKickoff { reply, .. } => {
             let _ = reply.send(match failure {

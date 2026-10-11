@@ -442,7 +442,14 @@ fn s3act_b3a1_scoped_probe_excludes_stale_planned_restart() {
     fs::write(generation, "7").unwrap();
     let before = fingerprint(&path);
     let probe = inflight::load_inflight_probe_scoped(&ProviderKind::Claude, state.channel_id);
-    assert!(probe.states.is_empty(), "stale planned restart must not be retained as an active candidate");
+    assert!(
+        probe.states.is_empty(),
+        "stale planned restart must not be retained as an active candidate"
+    );
     assert!(!probe.complete);
-    assert_eq!(fingerprint(&path), before, "classification adds no retirement rights");
+    assert_eq!(
+        fingerprint(&path),
+        before,
+        "classification adds no retirement rights"
+    );
 }
