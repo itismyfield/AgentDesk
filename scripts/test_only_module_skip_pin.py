@@ -588,6 +588,13 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/retired_host_tick_tests.rs",
         "src/services/discord/tmux_watcher/retired_o_boundary_tests.rs",
         "src/cli/o_tests.rs",
+        "src/services/discord/session_relay_sink/o_retired_terminal_e2e_tests.rs",
+        "src/services/discord/task_supervisor/n4d_spawn_observation_tests.rs",
+        "src/services/discord/tmux_watcher/inherited_fixture_tests.rs",
+        "src/services/discord/tmux_watcher/streaming_status_tick/retired_transport_tests.rs",
+        "src/services/discord/session_relay_sink/o_retired_terminal_race_tests.rs",
+        "src/services/discord/session_relay_sink/o_retired_terminal_legacy_fixture_tests.rs",
+        "src/services/discord/session_relay_sink/o_retired_terminal_source_tests.rs",
     }
 )
 
@@ -678,6 +685,8 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/watchers/lifecycle/o_only_install.rs",
         "src/services/discord/inflight/o_seed_observation.rs",
         "src/services/discord/tmux_watcher/turn_stream_collector/observations.rs",
+        "src/services/discord/inflight/o_seed_observation/terminal_barrier_test.rs",
+        "src/services/discord/inflight/o_seed_observation/initial_parse_barrier_test.rs",
     }
 )
 

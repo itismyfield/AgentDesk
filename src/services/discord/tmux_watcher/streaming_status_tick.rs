@@ -701,11 +701,12 @@ pub(super) async fn update_streaming_status_tick(
 
         // Withhold Legacy body writes for O ownership or unresolved selected identities. Only a
         // write that shows unsent assistant text claims the channel, as it is sent.
-        if crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
-            channel_id.get(),
-            Some(&tmux_session_name),
-        )
-        .unwrap_or(true)
+        if !ctx.legacy_mode.is_legacy()
+            || crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
+                channel_id.get(),
+                Some(&tmux_session_name),
+            )
+            .unwrap_or(true)
         {
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::Fallthrough;
