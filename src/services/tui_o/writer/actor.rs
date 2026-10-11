@@ -279,8 +279,8 @@ where
         actor.observe_waiting(false);
         actor.deliver_owed().await;
         // Re-post runs in this same turn and only once nothing is owed, so it never sends beside
-        // a piece of this channel.
-        if actor.owed.is_empty() && actor.delivery_allowed() {
+        // a piece of this channel. It holds no exact permit, so a verified channel never runs it.
+        if actor.verified.is_none() && actor.owed.is_empty() && actor.delivery_allowed() {
             actor.writer.repost_turn().await;
         }
         actor.collect_settled();

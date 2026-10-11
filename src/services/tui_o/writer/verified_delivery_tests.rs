@@ -521,3 +521,51 @@ async fn gc_keeps_owed_and_associated_sources_and_nothing_while_a_unit_is_unseal
     stop.send(true).unwrap();
     task.await.unwrap();
 }
+
+/// Counts the actor's re-post turns; a fresh original may always go.
+struct CountTurns(Arc<std::sync::atomic::AtomicUsize>);
+
+impl<W> crate::services::tui_o::repost::runner::RepostHook<W> for CountTurns {
+    fn turn<'a>(
+        &'a mut self,
+        _: &'a mut W,
+    ) -> crate::services::tui_o::repost::runner::Turned<'a, ()> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {})
+    }
+
+    fn original(
+        &mut self,
+        _: u64,
+        _: crate::services::tui_o::store::ledger::PieceRecord,
+    ) -> crate::services::tui_o::repost::runner::Turned<
+        '_,
+        crate::services::tui_o::repost::admission::OriginalGate,
+    > {
+        Box::pin(async { crate::services::tui_o::repost::admission::OriginalGate::Send })
+    }
+}
+
+/// Re-post holds no exact permit, so a verified channel's actor never runs its turn; the same
+/// actor runs it once the readiness gate is off.
+#[tokio::test(start_paused = true)]
+async fn a_verified_channel_never_runs_the_permitless_repost_turn() {
+    for (channel, ready) in [(584_619, true), (584_620, false)] {
+        let _gate = Gate::open(channel, ready);
+        let (_runtime, store, a) = switched_on(channel);
+        let (writer, _) = owed_writer(opened(&store));
+        let turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let writer = writer.with_repost(Some(Box::new(CountTurns(Arc::clone(&turns)))));
+        let bindings = Bindings::on(channel);
+        bindings.bind(None, &a, BindingCause::Startup);
+        let (stop, stopped) = watch::channel(false);
+        let resumed = watch::channel(false).0;
+        let codex = ShadowProvider::Codex;
+        let task = tokio::spawn(run_channel(writer, codex, bindings, stopped, resumed));
+        tokio::time::sleep(POLL_INTERVAL * 3).await;
+        stop.send(true).unwrap();
+        task.await.unwrap();
+        let ran = turns.load(Ordering::SeqCst);
+        assert_eq!(ran == 0, ready, "ready {ready}: {ran} re-post turns");
+    }
+}

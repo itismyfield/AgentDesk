@@ -26,8 +26,8 @@ use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::cutover;
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
 use crate::services::tui_o::shadow::ShadowProvider;
-use crate::services::tui_o::store::ledger::Unsent;
 use crate::services::tui_o::store::ChannelStore;
+use crate::services::tui_o::store::ledger::Unsent;
 
 mod recover;
 use recover::{Recovered, recover};
