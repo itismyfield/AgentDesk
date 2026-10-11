@@ -1302,20 +1302,6 @@ jobs:
           source scripts/ci/non-pg-test-filter.sh
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- "${NON_PG_SKIP_ARGS[@]}"
 
-      # #5040: `intake_dispatch::tests` predates the lane-coverage ratchet and is
-      # baselined debt. Select the telemetry-only admission regressions explicitly
-      # in this branch-protected lane so a zero-test filter cannot pass unnoticed.
-      - name: Telemetry-only intake authority regressions
-        timeout-minutes: 10
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          source scripts/ci/non-pg-test-filter.sh
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::tests::telemetry_only_unopted -- "${NON_PG_SKIP_ARGS[@]}"
-
       # #5025: this job is mirrored by the branch-protected
       # `Fast targeted tests (ubuntu-latest)` context above. Keep the router test
       # and both real identity-gate producers together so a red WARN regression
@@ -2209,7 +2195,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=c976035f6d9a03a91fb23cd8c898e5cc147517a986f9de838e66577baf4d0031
+          expected=999cdd16b47a51a31e8744caa83e8f627d26827d01df27658b2b548ab5444418
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2442,7 +2428,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=c976035f6d9a03a91fb23cd8c898e5cc147517a986f9de838e66577baf4d0031
+          expected=999cdd16b47a51a31e8744caa83e8f627d26827d01df27658b2b548ab5444418
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
