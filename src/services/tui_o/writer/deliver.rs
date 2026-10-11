@@ -622,11 +622,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWriter<P, L, A> {
     type Lease = L::Held;
 
-    fn settle_open(&mut self) -> impl Future<Output = bool> + Send {
-        async move {
-            ChannelWriter::settle_open(self).await.is_ok()
-                && self.store.ledger().unresolved().is_none()
-        }
+    async fn settle_open(&mut self) -> bool {
+        ChannelWriter::settle_open(self).await.is_ok() && self.store.ledger().unresolved().is_none()
     }
 
     /// Stop (a violation stops too), delegation, home availability and the switch. The actor runs
