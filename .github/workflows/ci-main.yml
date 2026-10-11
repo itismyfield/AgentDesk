@@ -250,8 +250,9 @@ jobs:
           resource_sample > "$RUNNER_TEMP/pg-resource-samples.log" 2>&1 &
 
       - name: just test-postgres-shard
-        # Same budget as ci-pr.yml; main hit 30 min at 25–27 min typical runtime.
-        timeout-minutes: 40
+        # Same budget as ci-pr.yml; shard 1 runs the rest of the PG selection and
+        # reached 39–41 min on 2026-10-11, so 40 min cut healthy runs.
+        timeout-minutes: 60
         run: just test-postgres-shard
         env:
           # #4245: see Full tests lane — keep test debuginfo off so the build

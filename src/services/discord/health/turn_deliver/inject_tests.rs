@@ -27,7 +27,7 @@ const BUSY_TURN: &str = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"con
     {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n";
 
 /// Scripted `tmux` of `size` (80,24) pasting only at `live`: folded, or flat with `draw`/`draw.rows`;
-/// Enter queues the header as Claude does mid-turn. `gate`/`hold` park keys/capture until `go`.
+/// Enter records the complete submitted buffer. `gate`/`hold` park keys/capture until `go`.
 const FAKE_TMUX: &str = r##"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
@@ -60,7 +60,7 @@ if-shell)
       cat "$d/draw"; printf '\342\235\257\302\240%s\n' "$(head -n 1 "$d/buffer")"
       if [ -f "$d/draw.rows" ]; then cat "$d/draw.rows"; else awk 'NR > 1 { print ($0 == "" ? "" : "  " $0) }' "$d/buffer"; fi
       cat "$d/draw.tail"; } > "$d/cap.pasted" ;;
-  send-keys*) printf '{"type":"queue-operation","operation":"enqueue","content":"%s\\nstatus?","sessionId":"6245","timestamp":"2026-10-06T00:00:00.000Z"}\n' "$(head -n 1 "$d/buffer")" >> "$d/transcript.jsonl" ;;
+  send-keys*) python3 -c 'import json,sys; print(json.dumps({"type":"queue-operation","operation":"enqueue","content":open(sys.argv[1]).read(),"sessionId":"6245","timestamp":"2026-10-06T00:00:00.000Z"}))' "$d/buffer" >> "$d/transcript.jsonl" ;;
   esac ;;
 esac
 exit 0
@@ -71,6 +71,7 @@ exit 0
 pub(crate) struct InjectPane {
     dir: tempfile::TempDir,
     channel: u64,
+    stash_allowlist: Option<crate::services::claude_tui::busy_inject::StashChannelGuard>,
 }
 
 impl InjectPane {
@@ -80,6 +81,7 @@ impl InjectPane {
         let pane = Self {
             dir: tempfile::tempdir_in(root).unwrap(),
             channel,
+            stash_allowlist: None,
         };
         pane.set("transcript.jsonl", BUSY_TURN);
         pane.set("attach", "0");
@@ -124,6 +126,70 @@ impl InjectPane {
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding);
         test_hook::set(channel, InjectMode::parse(Some(mode)), program);
         pane
+    }
+
+    /// Uses the shared stash simulator with four attached clients and an exact multiline draft.
+    pub(crate) fn stash(&mut self, draft: &str, allowlisted: bool) {
+        use crate::services::claude_tui::busy_inject::{FAKE_STASH_TUI, StashChannelGuard};
+        self.stash_allowlist = allowlisted.then(|| StashChannelGuard::new(self.channel));
+        let script = FAKE_STASH_TUI
+            .replace("@D@", &self.dir.path().display().to_string())
+            .replace("@T@", &self.path("transcript.jsonl").display().to_string());
+        self.set("tmux", &script);
+        for (name, value) in [
+            ("attached", "4".to_string()),
+            ("last", "100".to_string()),
+            ("width", "60".to_string()),
+            ("height", "50".to_string()),
+            ("cursor_x", "3".to_string()),
+            ("cursor_y", "20".to_string()),
+            ("head", format!("⏺ Working on it.\n\n{SPINNER}\n")),
+            ("border", format!("{BORDER}\n")),
+            ("prompt", "❯\u{00a0}".to_string()),
+            ("footer", format!("{FOOTER}\n")),
+            ("stashrow", format!("{:>58}\n", "› stashed")),
+            ("placeholder", "Try \"edit <filepath> to...\"".to_string()),
+            ("composer", draft.to_string()),
+        ] {
+            self.set(name, &value);
+        }
+        assert_eq!(self.read("attached").as_deref(), Some("4"));
+        let pane = crate::services::claude_tui::busy_inject::Pane::with_program(
+            &self.session(),
+            self.path("tmux"),
+        );
+        assert_eq!(pane.state().unwrap().generation.attached, 4);
+    }
+
+    pub(crate) fn read(&self, name: &str) -> Option<String> {
+        fs::read_to_string(self.path(name)).ok()
+    }
+
+    pub(crate) fn applied(&self) -> Vec<String> {
+        self.lines("applied")
+    }
+
+    pub(crate) fn alarm_count(&self, event_type: &str) -> usize {
+        let session = self.session();
+        crate::services::observability::events::recent(usize::MAX)
+            .into_iter()
+            .filter(|event| event.event_type == event_type)
+            .filter(|event| {
+                event.channel_id == Some(self.channel)
+                    || event.payload["tmux_session"].as_str() == Some(session.as_str())
+            })
+            .count()
+    }
+
+    pub(crate) fn records(&self) -> Vec<String> {
+        self.lines("transcript.jsonl")
+            .into_iter()
+            .skip(2)
+            .map(|line| {
+                let record: serde_json::Value = serde_json::from_str(&line).unwrap();
+                record["content"].as_str().unwrap().to_string()
+            })
+            .collect()
     }
 
     /// The tmux name the channel name `inject-<channel>` resolves to.
@@ -194,14 +260,12 @@ impl InjectPane {
         self.lines("keys").into_iter().map(first_word).collect()
     }
 
-    /// Whether the transcript recorded the header the pasted buffer carried.
+    /// Whether a decoded submission contains exactly the complete pasted buffer.
     pub(crate) fn transcript_recorded_the_paste(&self) -> bool {
-        let header = self.lines("buffer").into_iter().next().unwrap_or_default();
-        !header.is_empty()
-            && self
-                .lines("transcript.jsonl")
-                .iter()
-                .any(|line| line.contains(&header))
+        let Some(buffer) = self.read("buffer").filter(|text| !text.is_empty()) else {
+            return false;
+        };
+        self.records().iter().any(|record| record == &buffer)
     }
 }
 
@@ -337,6 +401,156 @@ fn queued(message: u64) -> Intervention {
         pending_uploads: Vec::new(),
         voice_announcement: None,
     }
+}
+
+/// Both source variants enter one stash effect; a Discord message retains its replay protection.
+#[tokio::test(flavor = "current_thread")]
+async fn discord_origin_uses_the_attached_stash_transaction_once_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let ch = 6_845_621;
+    let registry = HealthRegistry::new();
+    let shared = register_inject_runtime(&registry, &[ch], Some(pool)).await;
+    let mut pane = InjectPane::new(ch, "external");
+    let draft = "Discord와 아이메시지가 공유하는 사람 초안\n다음 줄";
+    pane.stash(draft, true);
+    let message = MessageId::new(ch + 100);
+    let provider = ProviderKind::Claude;
+    let claim_source = crate::services::discord::inject_disposition::claim_source;
+    let guard = claim_source(&provider, message, std::time::Instant::now()).unwrap();
+    let request = HumanInputRequest {
+        channel_id: ChannelId::new(ch),
+        provider: provider.clone(),
+        text: "discord status?".into(),
+        author_id: 200,
+        source: "discord".into(),
+        metadata: None,
+        channel_name_hint: None,
+    };
+    let mut entry = queued(message.get());
+    entry.author_id = UserId::new(200);
+    entry.text = request.text.clone();
+    let origin = inject::Origin::Discord {
+        message,
+        handback: Box::new((entry, format!("discord:{ch}:{message}"))),
+        guard,
+    };
+    let result = inject::attempt(&shared, &request, origin).await;
+    assert_eq!(result, inject::InjectAttempt::Injected { turn_id: None });
+    assert_eq!(pane.applied(), ["C-s", "paste", "Enter"]);
+    assert_eq!(pane.read("composer").as_deref(), Some(draft));
+    assert!(pane.read("stash").is_none());
+    let records = pane.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0], pane.read("buffer").unwrap());
+    assert!(
+        records[0].starts_with("[📱 discord · 200 · "),
+        "{records:?}"
+    );
+    assert!(records[0].ends_with("\ndiscord status?"), "{records:?}");
+    assert!(queue_texts(&shared, ch).await.is_empty());
+    assert!(claim_source(&provider, message, std::time::Instant::now()).is_none());
+    assert_eq!(pane.records(), records);
+}
+
+/// Stable attached clients permit stash; a changed attachment generation still vetoes the key.
+#[tokio::test(flavor = "current_thread")]
+async fn deliver_stash_stops_on_generation_change_or_mixed_human_text_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let channels = [6_845_631, 6_845_632];
+    let registry = HealthRegistry::new();
+    let shared = register_inject_runtime(&registry, &channels, Some(pool)).await;
+    let draft = "사람 초안\n보존 대상";
+    let mut changed = InjectPane::new(channels[0], "external");
+    changed.stash(draft, true);
+    // The capture already returned; a client changes before the guarded C-s reaches tmux.
+    changed.set("human.1", "attach 101; echo 4 > \"$d/attached\"");
+    assert_eq!(
+        deliver(&registry, channels[0]).await,
+        "queued handed_back veto=human_attached"
+    );
+    assert!(changed.applied().is_empty());
+    assert!(changed.records().is_empty());
+    assert_eq!(changed.read("composer").as_deref(), Some(draft));
+    assert!(changed.read("stash").is_none());
+    assert_eq!(queue_texts(&shared, channels[0]).await, ["status?"]);
+
+    let mut mixed = InjectPane::new(channels[1], "external");
+    mixed.stash(draft, true);
+    // A person types after the empty/stashed capture and before paste. Never submit mixed bytes.
+    mixed.set("human.2", "type_text 'person typed '");
+    let result = deliver(&registry, channels[1]).await;
+    assert!(result.contains("Unconfirmed"), "{result}");
+    assert!(result.contains("draft_not_owned"), "{result}");
+    assert_eq!(mixed.applied(), ["C-s", "paste"]);
+    assert!(mixed.records().is_empty());
+    assert_eq!(mixed.read("stash").as_deref(), Some(draft));
+    assert!(mixed.read("composer").unwrap().starts_with("person typed "));
+    assert!(queue_texts(&shared, channels[1]).await.is_empty());
+    assert_eq!(
+        crate::services::claude_tui::composer_lock::composer_admission(&mixed.session(), || None),
+        crate::services::claude_tui::composer_lock::ComposerAdmission::Held,
+    );
+}
+
+/// Nonce presence alone must not confirm an Enter whose actual composer gained human bytes.
+#[tokio::test(flavor = "current_thread")]
+async fn shared_deliver_rejects_contaminated_submit_and_holds_mixed_direct_draft_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let channels = [6_845_641, 6_845_642];
+    let registry = HealthRegistry::new();
+    let shared = register_inject_runtime(&registry, &channels, Some(pool)).await;
+    let draft = "  사람 초안\n\n  정확히 보존";
+    let mut contaminated = InjectPane::new(channels[0], "external");
+    contaminated.stash(draft, true);
+    // A person types after own capture, then moves the caret back to the same coordinates.
+    contaminated.set("human.3", "x=$(cat \"$d/cursor_x\"); y=$(cat \"$d/cursor_y\"); type_text X; echo \"$x\" > \"$d/cursor_x\"; echo \"$y\" > \"$d/cursor_y\"");
+    let result = deliver(&registry, channels[0]).await;
+    assert!(result.contains("Unconfirmed"), "{result}");
+    assert!(result.contains("contaminated_submit"), "{result}");
+    assert_eq!(contaminated.applied(), ["C-s", "paste", "Enter"]);
+    let submitted = contaminated.records();
+    assert_eq!(
+        submitted,
+        [format!("{}X", contaminated.read("buffer").unwrap())]
+    );
+    assert_eq!(contaminated.read("composer").as_deref(), Some(draft));
+    assert!(contaminated.read("stash").is_none());
+    assert_eq!(contaminated.alarm_count("busy_inject_unconfirmed"), 1);
+    assert!(queue_texts(&shared, channels[0]).await.is_empty());
+
+    let mut direct = InjectPane::new(channels[1], "external");
+    direct.stash("", true);
+    direct.set("human.1", "type_text 'person typed '");
+    let result = deliver(&registry, channels[1]).await;
+    assert!(result.contains("Unconfirmed"), "{result}");
+    assert_eq!(direct.applied(), ["paste"]);
+    assert!(direct.records().is_empty());
+    assert!(
+        direct
+            .read("composer")
+            .unwrap()
+            .starts_with("person typed ")
+    );
+    assert!(queue_texts(&shared, channels[1]).await.is_empty());
+    assert_eq!(direct.alarm_count("busy_inject_draft_unrecovered"), 1);
+    assert_eq!(
+        crate::services::claude_tui::composer_lock::composer_admission(&direct.session(), || None),
+        crate::services::claude_tui::composer_lock::ComposerAdmission::Held,
+    );
+    let applied = direct.applied();
+    assert_eq!(
+        deliver(&registry, channels[1]).await,
+        "queued handed_back veto=draft"
+    );
+    assert_eq!(direct.applied(), applied);
+    assert!(direct.records().is_empty());
+    assert_eq!(queue_texts(&shared, channels[1]).await, ["status?"]);
 }
 
 #[test]

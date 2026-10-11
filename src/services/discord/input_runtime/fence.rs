@@ -27,11 +27,15 @@ pub(crate) enum Failure {
     StalePermit,
     Busy,
     ActorUnreachable,
+    /// A generation that cannot advance; the refusal is permanent, never a retryable Busy.
+    GenerationExhausted,
 }
 struct State {
     mode: Mode,
     epoch: u64,
     effects: usize,
+    // Set once an epoch could not advance; such a Gate never issues new authority again.
+    exhausted: bool,
 }
 pub(crate) struct Gate {
     channel: u64,
@@ -53,6 +57,33 @@ pub(crate) fn population_root() -> Option<PathBuf> {
 }
 
 // Another provider's protection still covers the channel, so a foreign writer never reads None.
+// MAX is the exhausted sentinel; the first epoch that cannot advance latches the Gate for good.
+fn next_epoch(state: &mut State) -> Result<u64, Failure> {
+    let epoch = state.epoch;
+    #[cfg(test)]
+    {
+        use super::supervisor::mutant;
+        if mutant("reuse_gate_generation") {
+            return Ok(epoch.wrapping_add(1));
+        }
+        if mutant("max_generation_remains_valid") {
+            return epoch.checked_add(1).ok_or(Failure::GenerationExhausted);
+        }
+    }
+    let next = epoch.checked_add(1).filter(|next| *next != u64::MAX);
+    match next.filter(|_| !state.exhausted) {
+        Some(next) => Ok(next),
+        None => {
+            #[cfg(test)]
+            let latch = !super::supervisor::mutant("drop_gate_exhaustion_latch");
+            #[cfg(not(test))]
+            let latch = true;
+            state.exhausted |= latch;
+            Err(Failure::GenerationExhausted)
+        }
+    }
+}
+
 pub(crate) fn lookup(provider: &ProviderKind, channel: u64) -> Option<Arc<Gate>> {
     find(|gate| gate.channel == channel && &gate.provider == provider)
         .or_else(|| channel_gate(channel))
@@ -151,6 +182,7 @@ impl Gate {
                             mode: Mode::LegacyOpen,
                             epoch: 1,
                             effects: 0,
+                            exhausted: false,
                         }),
                         drained: Notify::new(),
                         protected: std::sync::atomic::AtomicBool::new(true),
@@ -173,12 +205,21 @@ impl Gate {
             slot = &entry.next;
         }
     }
+    /// Shares the handback serializer (BARRIERS before Gate.state), so a restore lands only
+    /// between handback callbacks and never inside one.
     pub(crate) fn restore_protection(&self) -> Result<(), Failure> {
+        #[cfg(test)]
+        if super::supervisor::mutant("drop_restore_serialization") {
+            return self.restore_now();
+        }
+        super::supervisor::ordering::serialized(|| self.restore_now())
+    }
+    fn restore_now(&self) -> Result<(), Failure> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.effects != 0 || self.protected.load(std::sync::atomic::Ordering::Acquire) {
             return Err(Failure::Busy);
         }
-        state.epoch += 1;
+        state.epoch = next_epoch(&mut state)?;
         state.mode = Mode::LegacyOpen;
         *self.health.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.protected
@@ -196,6 +237,9 @@ impl Gate {
         if !self.protected.load(std::sync::atomic::Ordering::Acquire) {
             return Err(Failure::StalePermit);
         }
+        if state.exhausted {
+            return Err(Failure::GenerationExhausted);
+        }
         if state.mode != Mode::LegacyOpen {
             return Err(Failure::Mode(state.mode));
         }
@@ -209,6 +253,9 @@ impl Gate {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if !self.protected.load(std::sync::atomic::Ordering::Acquire) {
             return Err(Failure::StalePermit);
+        }
+        if state.exhausted {
+            return Err(Failure::GenerationExhausted);
         }
         if state.mode != Mode::LegacyOpen {
             return Err(Failure::Mode(state.mode));
@@ -282,8 +329,9 @@ impl Closing {
     pub(crate) fn provider(&self) -> &ProviderKind {
         &self.gate.provider
     }
-    // This port is for the supervisor after durable handback, not cancellation cleanup.
-    pub(crate) fn release_protection_after_handback(&self) -> Result<(), Failure> {
+    // Private to fence: only modes hands it to the handback installer; the proof carries the
+    // epoch this transition produced rather than one guessed from the Closing.
+    fn release_protection_after_handback(&self) -> Result<modes::ReleaseProof, Failure> {
         let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.effects != 0
             || state.epoch != self.epoch.load(std::sync::atomic::Ordering::Acquire)
@@ -291,12 +339,16 @@ impl Closing {
         {
             return Err(Failure::Busy);
         }
-        state.epoch += 1;
+        let epoch = next_epoch(&mut state)?;
+        state.epoch = epoch;
         state.mode = Mode::LegacyOpen;
         self.gate
             .protected
             .store(false, std::sync::atomic::Ordering::Release);
-        Ok(())
+        Ok(modes::ReleaseProof {
+            gate: self.gate.clone(),
+            epoch,
+        })
     }
     pub(crate) fn freeze(
         &self,
@@ -312,11 +364,22 @@ impl Closing {
         {
             return Err(Failure::Busy);
         }
+        let epoch = next_epoch(&mut state)?;
         state.mode = Mode::Frozen;
-        state.epoch += 1;
+        state.epoch = epoch;
         self.epoch
             .store(state.epoch, std::sync::atomic::Ordering::Release);
         Ok(())
+    }
+    /// Refuses a freeze whose epoch cannot advance before the queue freeze persists anything;
+    /// `freeze` still makes the final check. A refusal latches the Gate exhausted.
+    pub(crate) fn check_freeze(&self) -> Result<(), Failure> {
+        #[cfg(test)]
+        if super::supervisor::mutant("drop_freeze_epoch_precheck") {
+            return Ok(());
+        }
+        let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        next_epoch(&mut state).map(drop)
     }
     pub(crate) fn frozen_population(&self, root: &Path) -> Result<ClosedPopulationGuard, Failure> {
         if self.gate.mode() != Mode::Frozen {
@@ -338,6 +401,7 @@ impl Closing {
                     mode: Mode::Frozen,
                     epoch: 1,
                     effects: 0,
+                    exhausted: false,
                 }),
                 drained: Notify::new(),
                 protected: std::sync::atomic::AtomicBool::new(true),

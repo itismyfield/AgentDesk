@@ -1,10 +1,11 @@
 //! Supervisor-only mode moves after a Legacy close; an effect admitted before the close keeps its
 //! epoch, so a held or aborted transition never strands that effect's cleanup.
-use super::{Closing, Failure, Mode};
+use super::{Closing, Failure, Gate, Mode};
 use crate::services::discord::input_runtime::supervisor::ordering::{
     self, ValidatedOrderCapability,
 };
 use crate::services::provider::ProviderKind;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -17,6 +18,30 @@ pub(crate) fn order_barrier(provider: &ProviderKind, channel: u64) -> bool {
 /// Only the completed current sweep of this handback may reopen direct Legacy ingress.
 pub(crate) fn settle_order_barrier(cap: ValidatedOrderCapability) -> Result<bool, Failure> {
     ordering::settle_handback(cap)
+}
+
+/// The Gate a handback release opened and the epoch that release produced; only a Closing makes one.
+pub(crate) struct ReleaseProof {
+    pub(super) gate: Arc<Gate>,
+    pub(super) epoch: u64,
+}
+
+impl ReleaseProof {
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The release still stands: no restore or later close has moved this Gate since.
+    pub(crate) fn current(&self) -> bool {
+        let state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.epoch == self.epoch
+            && state.mode == Mode::LegacyOpen
+            && !self.gate.protected.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn names(&self, closing: &Closing) -> bool {
+        Arc::ptr_eq(&self.gate, &closing.gate)
+    }
 }
 
 impl Closing {
@@ -55,6 +80,9 @@ impl Closing {
     /// Returns a channel the ledger never owned to Legacy; earlier permits stay valid.
     pub(crate) fn abort_close(&self, ledger_history: bool) -> Result<(), Failure> {
         let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.exhausted {
+            return Err(Failure::GenerationExhausted);
+        }
         if ledger_history
             || !self.gate.protected.load(Ordering::Acquire)
             || state.epoch != self.epoch.load(Ordering::Acquire)
@@ -68,38 +96,15 @@ impl Closing {
         Ok(())
     }
 
-    /// Releases protection after a complete handback while keeping the catch-up order barrier.
-    pub(crate) fn release_after_handback(
-        &self,
-        pending_snapshot: &[u64],
-        dirty_gen: u64,
-    ) -> Result<(), Failure> {
-        ordering::install_handback(
-            self.provider().clone(),
-            self.channel(),
-            pending_snapshot,
-            dirty_gen,
-            || {
-                self.release_protection_after_handback()?;
-                Ok(self.epoch.load(Ordering::Acquire) + 1)
-            },
-        )
-    }
-
-    /// Carries the live producer's overflow handle through the protection-release boundary.
+    /// Releases protection after a complete handback while keeping the catch-up order barrier; the
+    /// live producer's overflow handle and pending sources cross the boundary whole.
     pub(crate) fn release_after_handback_with_pending(
         &self,
         snapshot: &ordering::PendingSource,
     ) -> Result<(), Failure> {
-        ordering::install_handback_snapshot(
-            self.provider().clone(),
-            self.channel(),
-            snapshot,
-            || {
-                self.release_protection_after_handback()?;
-                Ok(self.epoch.load(Ordering::Acquire) + 1)
-            },
-        )
+        ordering::install_handback_snapshot(self, snapshot, || {
+            self.release_protection_after_handback()
+        })
     }
 
     // No permit can exist past the freeze, so these moves keep the epoch unchanged.
@@ -130,3 +135,7 @@ impl Closing {
 #[cfg(test)]
 #[path = "modes_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "g1b_modes_tests.rs"]
+mod g1b_tests;
