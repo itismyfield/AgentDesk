@@ -775,6 +775,10 @@ async fn herdr_cold_case(
     (signal, holds, row.is_some(), active)
 }
 
+#[cfg(unix)]
+#[path = "entry_abort_cold_error_tests.rs"]
+mod cold_error;
+
 /// A Herdr Codex turn from the real rollout reader through admission, the bridge and the finalizer.
 #[cfg(unix)]
 mod herdr_settlement {

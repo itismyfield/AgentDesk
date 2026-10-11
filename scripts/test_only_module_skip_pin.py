@@ -588,6 +588,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/session_forwarding/home_stop_tests.rs",
         "src/server/routes/queue_api_home_stop_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_cut_tests.rs",
+        "src/services/discord/turn_bridge/entry_abort_cold_error_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs",
         "src/services/discord/turn_bridge/before_start_stop_tests.rs",
         "src/services/discord/inflight/managed_submission_tests.rs",

@@ -8770,6 +8770,9 @@ services::discord::turn_bridge::before_start_stop::tests::coldstop_restart_finis
 services::discord::turn_bridge::before_start_stop::tests::coldstop_typed_untouched_not_indeterminate_and_late_exit_is_sealed
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::a_pending_or_failing_refusal_notice_never_holds_the_unwind
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::c1_actual_spawn_bridge_retains_effect_until_future_disposal
+services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::cold_error::cold_error_does_not_clear_successor
+services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::cold_error::cold_error_without_proof_remains_held
+services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::cold_error::cold_launch_error_reaches_bridge_policy_close_both_providers
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::headless_entry_abort_releases_mailbox_without_touching_durable_owner
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::herdr_cold_stop_settles_only_with_a_before_start_proof
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::herdr_settlement::a_herdr_turn_settles_on_its_own_admitted_terminal_after_a_stop
