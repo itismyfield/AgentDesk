@@ -329,6 +329,33 @@ fn the_tui_send_endpoint_keeps_off_a_pane_in_recovery() {
     assert_eq!(tui.drafts(), (String::new(), None));
 }
 
+#[test]
+fn uncertain_attached_direct_input_holds_every_later_automatic_writer() {
+    let tui = Tui::new("");
+    tui.put("attached", "4");
+    tui.person_after_capture(1, "type_text 'person typed '");
+    assert_eq!(
+        tui.run(),
+        report(
+            Outcome::Unconfirmed(Unconfirmed::DraftNotOwned),
+            DraftState::Unknown
+        )
+    );
+    assert_eq!(tui.applied(), ["paste"]);
+    assert_eq!(tui.alerts().len(), 1);
+    tui.put("head", IDLE_HEAD);
+    let (ended, calls) = warm_follow_up(&tui, &tui.capture());
+    assert_requeued(&ended, &calls);
+    assert_eq!(relay(&tui, "next input", false).0, StatusCode::CONFLICT);
+    assert_eq!(
+        with_composer_cleanup_lock(&tui.session(), || panic!("held direct input cleaned")),
+        None::<()>
+    );
+    assert_eq!(tui.applied(), ["paste"]);
+    assert!(tui.records().is_empty());
+    assert_eq!(tui.drafts(), (format!("person typed {}", framed()), None));
+}
+
 /// A new message sent to an idle pane whose composer holds a person's draft no path has seen yet,
 /// or that cannot be read, sends nothing; an empty composer takes it once.
 #[test]
@@ -473,4 +500,36 @@ fn only_an_allowlisted_channel_takes_the_stash_path() {
         (listed.as_slice(), stash_channels(None)),
         (&[e2e, other][..], vec![])
     );
+}
+
+#[test]
+fn configured_stash_channels_are_scoped_and_use_the_resolved_input_channel() {
+    let (channel, other) = (18_003_000_001, 18_003_000_002);
+    let first = StashChannelGuard::new(channel);
+    let second = StashChannelGuard::new(other);
+    assert!(configured_channels().contains(&channel));
+    assert!(configured_channels().contains(&other));
+    drop(second);
+    assert!(configured_channels().contains(&channel));
+    assert!(!configured_channels().contains(&other));
+
+    let tui = Tui::new("human draft A");
+    tui.put("attached", "4");
+    let rejected = report(Outcome::NotSent(Veto::HumanAttached), DraftState::Unchanged);
+    assert_eq!(run_on(&tui, Some(other), None), rejected);
+    assert_eq!(run_on(&tui, None, None), rejected);
+    assert!(tui.applied().is_empty());
+    assert_eq!(
+        run_on(&tui, Some(channel), None),
+        report(Outcome::Injected, DraftState::RestoredObserved)
+    );
+    assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
+    assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
+
+    drop(first);
+    assert!(!configured_channels().contains(&channel));
+    let fresh = Tui::new("human draft A");
+    fresh.put("attached", "4");
+    assert_eq!(run_on(&fresh, Some(channel), None), rejected);
+    assert!(fresh.applied().is_empty());
 }

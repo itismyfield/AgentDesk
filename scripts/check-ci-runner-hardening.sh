@@ -922,7 +922,8 @@ targets = {
     # shared non-pg-test-filter source; job names, conditions, and timeouts are
     # unchanged, and the exact commands below pin each source/use pair.
     # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
-    "job_sha256" => "cb9918f50817c9ee32358c7670b6766398ca2df3a47912a251a23d5994f0d037",
+    # Re-pinned after raising the `just test-postgres` step budget from 40 to 60 minutes.
+    "job_sha256" => "0a4bf73e7cc453625d7e8fafb5fcc7d31b07db1793e0db4c24fd86cf7c9e74c1",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
@@ -965,7 +966,7 @@ targets = {
       },
       "just test-postgres" => {
         "commands" => ["just test-postgres"],
-        "timeout_minutes" => 40,
+        "timeout_minutes" => 60,
       },
     },
   },
@@ -1485,7 +1486,7 @@ tests = steps.each_index.select { |i| runs_tests.(steps[i]) }
 stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" })
 test_step = tests.length == 1 ? steps[tests[0]] : {}
 errors << "job postgres must run tests in exactly one step, \"just test-postgres-shard\": just test-postgres-shard" unless test_step["name"] == "just test-postgres-shard" && test_step["run"].to_s.strip == "just test-postgres-shard"
-errors << "job postgres test step must keep timeout-minutes: 40" unless test_step["timeout-minutes"] == 40
+errors << "job postgres test step must keep timeout-minutes: 60" unless test_step["timeout-minutes"] == 60
 errors << "job postgres must not set a job timeout-minutes" if job.key?("timeout-minutes")
 errors << "job postgres must start PostgreSQL, run the test step, then stop it" unless start && stop && tests.length == 1 && start < tests[0] && tests[0] < stop
 errors.each { |message| warn "#{main_path}: #{message}" }
