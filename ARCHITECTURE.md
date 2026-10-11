@@ -1015,6 +1015,8 @@ src/
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── runtime_stamp/
+│   │   │   │   │   │   ├── before_start_stop_admission.rs
+│   │   │   │   │   │   ├── before_start_stop_admission_tests.rs
 │   │   │   │   │   │   ├── captured_terminal_admission.rs
 │   │   │   │   │   │   ├── claude_terminal_tests.rs
 │   │   │   │   │   │   ├── herdr_terminal_admission.rs
@@ -1266,6 +1268,8 @@ src/
 │   │   │   ├── crash_resume_guard.rs
 │   │   │   ├── herdr_admitted_restart.rs
 │   │   │   ├── herdr_admitted_restart_tests.rs
+│   │   │   ├── herdr_before_start_restart.rs
+│   │   │   ├── herdr_before_start_restart_tests.rs
 │   │   │   ├── herdr_reader.rs
 │   │   │   ├── herdr_reader_tests.rs
 │   │   │   ├── host_reconcile.rs

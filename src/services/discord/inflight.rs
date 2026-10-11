@@ -403,6 +403,7 @@ fn bump_save_generation_for_write(path: &Path, state: &mut InflightTurnState) {
         .ok()
         .and_then(|content| serde_json::from_str::<InflightTurnState>(&content).ok());
     managed_submission::carry_forward(existing.as_ref(), state);
+    state.carry_before_start_receipt_from(existing.as_ref());
     let existing_generation = existing
         .map(|existing| existing.save_generation)
         .unwrap_or(0);
