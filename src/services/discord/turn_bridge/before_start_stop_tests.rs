@@ -838,9 +838,8 @@ async fn recorded(
 /// A change applied to a row.
 type Shape = fn(&mut InflightTurnState);
 
-/// Nothing is shown or released before the receipt is durable: a failed receipt write keeps the
-/// turn held with its row as it was, and the notice later runs with the receipt on disk and no
-/// inflight lock held.
+/// Nothing is shown or released before the receipt is durable: a failed write keeps the turn held
+/// and its row as it was; the notice runs with the receipt on disk and no inflight lock held.
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_receipt_precedes_notice_and_release() {
     for rename in [false, true] {
@@ -1030,9 +1029,8 @@ fn run_crash_phase(phase: &str, marker: &str, env: &[(&str, &std::ffi::OsStr)]) 
     pid
 }
 
-/// A close that dies after its receipt, after its notice ack or just before finalize is finished
-/// by the next process's restart: the row goes and the stop is shown exactly once in total. The
-/// row carries no Herdr marker, so only the receipt brings restart to it.
+/// A close dying after its receipt, notice ack or just before finalize is finished by the next
+/// restart, led by the receipt alone (no Herdr marker): the row goes, the stop shows once in total.
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_restart_finishes_a_close_that_crashed_midway() {
     if let Ok(phase) = std::env::var(CRASH_PHASE) {

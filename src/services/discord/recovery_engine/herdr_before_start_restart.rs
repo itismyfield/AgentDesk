@@ -1,6 +1,5 @@
-//! Restart settles a prior process's before-start policy receipt: one stop notice on the turn's
-//! own message, its ack in the receipt, then a clear of exactly that row. A receipt it cannot read
-//! or that does not name its row keeps the row, away from every other recovery path.
+//! Restart settles a prior process's before-start receipt: one stop notice on the turn's message,
+//! ack, then clear of that row. An unreadable or foreign receipt keeps the row off other recovery.
 
 use super::herdr_admitted_restart::ADMITTED_ABORT_NOTICE;
 use super::*;

@@ -1,6 +1,5 @@
-//! The durable receipt of a Herdr stop that closed a turn before its input started, and its three
-//! lock-held transitions: admit (`pending`), acknowledge the shown notice (`delivered`), and the
-//! restart clear check. A value this binary does not know is kept verbatim and never read as known.
+//! Durable receipt of a Herdr stop that closed a turn before its input started, with its lock-held
+//! admit (`pending`), notice ack (`delivered`) and restart clear check. Unknowns stay verbatim.
 
 use super::*;
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;

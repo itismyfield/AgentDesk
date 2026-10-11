@@ -180,9 +180,8 @@ const HELD: [(&str, Edit); 10] = [
     }),
 ];
 
-/// Only a readable receipt of a prior process's close that names its row is settled; any other
-/// receipt is held, and a row without one, or with settlement off, keeps the existing path. The
-/// Herdr marker is not required.
+/// Only a readable prior-close receipt naming its row settles, marker or not; other receipts are
+/// held, and a row without one, or with settlement off, keeps the existing path.
 #[test]
 fn decode_takes_only_a_prior_readable_receipt_that_names_its_row() {
     let fixture = Fixture::new("decode", false);
@@ -239,9 +238,8 @@ async fn a_prior_receipt_shows_one_stop_then_clears_its_row() {
     assert!(discord.calls().is_empty(), "{:?}", discord.calls());
 }
 
-/// The restart scan leaves every held receipt row byte-for-byte and makes no Discord call for
-/// it, with or without the Herdr marker: neither the existing recovery path (which at least looks
-/// the channel up) nor, beside a native kind, the admitted-kind path runs.
+/// Restart keeps each held receipt row byte-for-byte with no Discord call, marker or not: neither
+/// the existing path (it looks the channel up) nor, by a native kind, the admitted path runs.
 #[tokio::test(flavor = "current_thread")]
 async fn the_restart_scan_keeps_every_held_receipt_silent_and_untouched() {
     for marked in [false, true] {
