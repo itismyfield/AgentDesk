@@ -32,6 +32,29 @@ BAD_COMMAND = "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads
 GOOD_COMMAND = "cargo test --lib high_risk_recovery:: -- --test-threads=1"
 # The generated arrays are proven only after this source in the command's own shell.
 SOURCED = f"source {integrity.NON_PG_FILTER_REL} && "
+# Generated skip values whose PG selection reaches the fixture lib: unsharded and
+# shard 1 through the module, shard 0 through `pg_` alone.
+PG_SKIPS = ("_pg", "pg_", "postgres", "server::multinode_regression")
+PG_CASE = "server::multinode_regression::tests::pg_nested_case"
+
+
+def write_generated_filter(root: Path, skips: tuple[str, ...] = PG_SKIPS,
+                           edit=lambda text: text, pg_case: str | None = PG_CASE) -> None:
+    """The checked-in filter with its generated region rendered for ``skips`` (so the
+    real PG derivation follows it), changed by ``edit``; ``pg_case`` joins the lib."""
+    contract = integrity._membership()
+    lines = (REPO_ROOT / integrity.NON_PG_FILTER_REL).read_text("utf-8").splitlines()
+    begin = lines.index(contract.NON_PG_SELECTION_BEGIN)
+    end = lines.index(contract.NON_PG_SELECTION_END)
+    text = "\n".join([*lines[:begin], *contract.render_non_pg_selection(skips, ()),
+                      *lines[end + 1:]]) + "\n"
+    path = root / integrity.NON_PG_FILTER_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(edit(text), encoding="utf-8")
+    manifest = root / integrity.LIB_INVENTORY_MANIFEST_REL
+    ids = integrity.load_lib_inventory_manifest(manifest)
+    manifest.write_text(integrity.render_lib_inventory_manifest(
+        ids | {pg_case} if pg_case else ids), encoding="utf-8")
 
 
 def build_fixture_repo(root: Path, command: str, *,
@@ -1305,9 +1328,7 @@ class KnownArrayProvenance(unittest.TestCase):
             root = Path(tmp)
             workflow = build_fixture_repo(root, GOOD_COMMAND, just_text="fixture:\n" + "".join(
                 f"    {line}\n" for line in just_lines))
-            (root / "scripts/ci").mkdir(parents=True)
-            (root / integrity.NON_PG_FILTER_REL).write_text(
-                "NON_PG_SKIP_ARGS=(\n  --skip _pg\n  --skip postgres\n)\n", encoding="utf-8")
+            write_generated_filter(root)
             workflow.write_text("jobs:\n  lane:\n    steps:\n" + "".join(
                 f"      - run: {step}\n" if isinstance(step, str) else
                 "      - run: |\n" + "".join(f"          {line}\n" for line in step)
@@ -1398,6 +1419,85 @@ class KnownArrayProvenance(unittest.TestCase):
                       (source, 'run_lane "${PG_INCLUDE_ARGS[@]}"')):
             with self.subTest(lines=lines):
                 self.assertEqual(self.kinds((lines,)), unparsed)
+
+
+class PgIncludeRestoration(unittest.TestCase):
+    """PG_INCLUDE_ARGS is judged as the selection the generated file derives for every
+    shard its command may run under, never as an opaque expansion."""
+
+    PG = 'cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --test-threads=1'
+
+    def kinds(self, run: str = PG, recipe: str | None = PG, *, env: str = "",
+              allowlist: str = "", **generated) -> list[tuple[str, str]]:
+        """(file, kind) for one sourced run block and one sourced recipe line."""
+        source = f"source {integrity.NON_PG_FILTER_REL}"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = build_fixture_repo(root, GOOD_COMMAND, just_text=(
+                f"fixture:\n    {source} && {recipe or GOOD_COMMAND}\n"))
+            write_generated_filter(root, **generated)
+            workflow.write_text(f"jobs:\n  lane:\n{env}    steps:\n      - run: |\n"
+                                f"          {source}\n          {run}\n", encoding="utf-8")
+            allow = root / "allowlist.txt"
+            allow.write_text(allowlist, encoding="utf-8")
+            return [(Path(v.workflow).name, v.kind) for v in integrity.check_workflows(
+                root, [workflow], integrity.load_allowlist(allow), False)]
+
+    def test_each_shard_a_command_may_run_under_is_judged(self) -> None:
+        pg, run_only = self.PG, {"recipe": None}
+        workflow, recipe = "ci-fixture.yml", "justfile"
+        missing = ("_pg", "pg_", "postgres", "no_such_module")
+        zero = [(workflow, "pg-include-zero-match")] + [(recipe, "pg-include-zero-match")] * 3
+        normalized = pg.replace('"', "")
+        for name, kwargs, kinds in (
+                ("every shard selects", {}, []),
+                # A workflow sources with the shard unset; a recipe may inherit 0 or 1.
+                ("shard 0 selects nothing", {"pg_case": None},
+                 [(recipe, "pg-include-zero-match")]),
+                ("shard 1 has no positive filter", {"skips": ("pg_", "postgres")},
+                 [(recipe, "pg-include-empty")]),
+                ("nothing selected", {"skips": missing, "pg_case": None}, zero),
+                ("allowlisted", {"skips": missing, "pg_case": None,
+                                 "allowlist": f"# reason: platform-gated\n{normalized}\n"}, zero),
+                # Restoring the array keeps every other run-time uncertainty.
+                ("other expansion", {"run": f"{pg} $EXTRA", **run_only},
+                 [(workflow, "unproven-union")] * 2),
+                ("ignored", {"run": f"{pg} --ignored", **run_only},
+                 [(workflow, "unproven-union")] * 2),
+                ("shard named", {"env": "    env:\n      PG_INCLUDE_SHARD: 2\n", **run_only},
+                 [(workflow, "pg-include-shard-unresolved")]),
+                ("shard in a comment", {"env": "    # PG_INCLUDE_SHARD: 2\n", **run_only}, []),
+                *((f"usage {index}", {"run": run, **run_only},
+                   [(workflow, "pg-include-usage-unresolved")]) for index, run in enumerate((
+                    'cargo test --lib "${PG_INCLUDE_ARGS[@]}"',
+                    'cargo test --lib -- --skip "${PG_INCLUDE_ARGS[@]}"',
+                    'cargo test --lib -- "${PG_INCLUDE_ARGS[*]}"',
+                    f'{pg} "${{PG_INCLUDE_ARGS[@]}}"')))):
+            with self.subTest(name):
+                self.assertEqual(self.kinds(**kwargs), kinds)
+
+    def test_only_the_generated_derivation_is_restored(self) -> None:
+        unresolved = [("ci-fixture.yml", "pg-include-unresolved")]
+        for old, new in (
+                ("", ""),
+                ("index = 1;", "index = 0;"),
+                ("index += 2", "index += 1"),
+                ("  PG_INCLUDE_ARGS+=(", "  PG_EXTRA_ARGS+=("),
+                ('0) PG_INCLUDE_ARGS=("${PG_INCLUDE_ARGS_SHARD_0[@]}")',
+                 '0) PG_INCLUDE_ARGS=("${PG_INCLUDE_ARGS_SHARD_1[@]}")'),
+                ("    return 1\n", "    :\n"),
+                ("\nreadonly -a PG_INCLUDE_ARGS\n", "\n"),
+                ("\nrun_non_pg_filter_replay() {", "\nPG_INCLUDE_ARGS_SHARD_0+=(extra)\n"
+                 "run_non_pg_filter_replay() {"),
+                ("  --skip pg_\n  --skip postgres\n)\n# END", ")\n# END"),
+                ("PG_INCLUDE_ARGS_SHARD_0=(\n  pg_\n", "PG_INCLUDE_ARGS_SHARD_0=(\n  $EXTRA\n"),
+                ("# BEGIN generated", "return 0\n# BEGIN generated"),
+                ("  --skip server::multinode_regression\n)", "  --skip server::multinode_regression\n")):
+            def edit(text: str, old: str = old, new: str = new) -> str:
+                self.assertEqual(text.count(old), 1 if old else len(text) + 1)
+                return text.replace(old, new) if old else text
+            with self.subTest(old=old, new=new):
+                self.assertEqual(self.kinds(recipe=None, edit=edit), unresolved if old else [])
 
 
 class ParserContract(unittest.TestCase):
