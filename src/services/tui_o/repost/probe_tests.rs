@@ -907,7 +907,7 @@ fn opens_a_group(path: &str, line: &str) -> bool {
     opens && !line.contains('}')
 }
 
-/// The dormant runner and dispatch: they read the probe, and nothing operational reads them.
+/// The runner and dispatch: they read the probe, and only the writer seam reads them.
 const CONSUMERS: [&str; 2] = [
     "src/services/tui_o/repost/runner.rs",
     "src/services/tui_o/repost/dispatch.rs",
@@ -933,14 +933,78 @@ fn names_the_runner(path: &str, line: &str) -> bool {
     })
 }
 
-/// Whether a consumer line reaches `io` other than through its probe, or re-exports anything.
+/// Whether a consumer line reaches `io` other than through its probe, re-exports anything, or
+/// names the writer's own Discord port, which a re-post never sends through.
 fn consumer_escapes(path: &str, line: &str) -> bool {
-    let words = line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'));
-    let beside = words
-        .into_iter()
+    let words: Vec<&str> = line
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
+        .collect();
+    let beside = (words.iter())
         .any(|word| word.starts_with("super::io") && !word.starts_with("super::io::probe::"));
     let reexport = line.trim().starts_with("pub") && line.contains(" use ");
-    beside || reexport || (names_the_probe(path, line) && line.contains("repost::io"))
+    let port = (words.iter()).any(|word| {
+        word.split("::")
+            .any(|name| ["DiscordPort", "GatewayPort"].contains(&name))
+    });
+    beside || reexport || port || (names_the_probe(path, line) && line.contains("repost::io"))
+}
+
+/// The writer seam: the only production lines outside the re-post tree that may name it.
+const WIRING: [(&str, &str); 8] = [
+    (
+        "src/services/discord/outbound/o_writer_io.rs",
+        "use crate::services::tui_o::repost::io::{RepostHttp, Unsupported};",
+    ),
+    (
+        "src/services/discord/runtime_bootstrap/o_writer_host.rs",
+        "use crate::services::tui_o::repost::{",
+    ),
+    (
+        "src/services/discord/runtime_bootstrap/o_writer_host.rs",
+        "config::RepostSwitch, io::probe::evidence::RunScope, runner,",
+    ),
+    (
+        "src/services/tui_o/writer/deliver.rs",
+        "use crate::services::tui_o::repost::dispatch::{DispatchPermit, RepostWriter};",
+    ),
+    (
+        "src/services/tui_o/writer/deliver.rs",
+        "use crate::services::tui_o::repost::runner::{RepostHook, TurnWriter};",
+    ),
+    (
+        "src/services/tui_o/writer/deliver.rs",
+        "impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWriter<P, L, A> {",
+    ),
+    (
+        "src/services/tui_o/writer/deliver.rs",
+        "fn prepare(&mut self, epoch: u64, permit: &DispatchPermit) -> Result<(), String> {",
+    ),
+    (
+        "src/services/tui_o/writer/host.rs",
+        "dyn crate::services::tui_o::repost::runner::RepostHook<",
+    ),
+];
+
+/// `text` as logical lines with their first line numbers: a line that starts with `::`, or
+/// follows one that ends with it, continues the path before it.
+fn logical_lines(text: &str) -> Vec<(usize, String)> {
+    let mut lines: Vec<(usize, String)> = Vec::new();
+    for (number, raw) in text.lines().enumerate() {
+        let continues = raw.trim_start().starts_with("::")
+            || lines
+                .last()
+                .is_some_and(|(_, last)| last.trim_end().ends_with("::"));
+        match lines.last_mut() {
+            Some((_, last)) if continues => last.push_str(raw.trim()),
+            _ => lines.push((number, raw.to_owned())),
+        }
+    }
+    lines
+}
+
+/// The code of `raw` before any line comment.
+fn code(raw: &str) -> &str {
+    raw.split("//").next().unwrap_or_default().trim_end()
 }
 
 /// Public functions of the probe files as they stand; a new one, or any re-export, needs review.
@@ -1007,14 +1071,14 @@ fn probe_edges(root: &std::path::Path) -> Vec<String> {
             let mut in_group = false;
             // `#[cfg(test)] mod … {` until its closing brace at the same indent.
             let (mut cfg_test, mut test_mod_end) = (false, None::<String>);
-            for (number, raw) in text.lines().enumerate() {
-                let line = &tight_paths(raw);
-                if test_mod_end.as_deref() == Some(raw.trim_end()) {
+            for (number, raw) in logical_lines(&text) {
+                let line = &tight_paths(&raw);
+                if test_mod_end.as_deref() == Some(code(&raw)) {
                     test_mod_end = None;
                 } else if cfg_test && test_mod_end.is_none() && raw.trim_start().starts_with("mod ")
                 {
                     let indent = &raw[..raw.len() - raw.trim_start().len()];
-                    test_mod_end = raw.trim_end().ends_with('{').then(|| format!("{indent}}}"));
+                    test_mod_end = code(&raw).ends_with('{').then(|| format!("{indent}}}"));
                 }
                 cfg_test =
                     raw.trim() == "#[cfg(test)]" || (cfg_test && raw.trim().starts_with("#["));
@@ -1024,23 +1088,25 @@ fn probe_edges(root: &std::path::Path) -> Vec<String> {
                 } else if !in_group {
                     in_group = opens_a_group(&relative, line);
                 }
-                let allowed = relative == ADAPTER
-                    && (ADAPTER_LINES.contains(&line.trim()) || line.trim() == ADAPTER_PATH);
-                let edge = if definition {
-                    widens_the_probe(line)
-                } else if CONSUMERS.contains(&relative.as_str()) {
-                    consumer_escapes(&relative, line)
-                } else {
-                    let named =
-                        names_the_probe(&relative, line) || names_the_runner(&relative, line);
-                    // A macro could assemble any path; beside the re-post module it is an edge.
-                    let macro_beside = line.contains("macro_rules!") && text.contains("repost");
-                    // Only an in-file test module may glob its parent inside the re-post tree.
-                    let parent_glob = relative.contains("tui_o/repost/")
-                        && line.contains("super::*")
-                        && test_mod_end.is_none();
-                    (named || member || macro_beside || parent_glob) && !allowed
-                };
+                let allowed = (relative == ADAPTER
+                    && (ADAPTER_LINES.contains(&line.trim()) || line.trim() == ADAPTER_PATH))
+                    || WIRING.contains(&(relative.as_str(), line.trim()));
+                // Only an in-file test module may glob its parent inside the re-post tree.
+                let parent_glob = relative.contains("tui_o/repost/")
+                    && line.contains("super::*")
+                    && test_mod_end.is_none();
+                let edge = parent_glob
+                    || if definition {
+                        widens_the_probe(line)
+                    } else if CONSUMERS.contains(&relative.as_str()) {
+                        consumer_escapes(&relative, line)
+                    } else {
+                        let named =
+                            names_the_probe(&relative, line) || names_the_runner(&relative, line);
+                        // A macro could assemble any path; beside the re-post module it is an edge.
+                        let macro_beside = line.contains("macro_rules!") && text.contains("repost");
+                        (named || member || macro_beside) && !allowed
+                    };
                 if edge {
                     found.push(format!("{relative}:{}", number + 1));
                 }
@@ -1098,7 +1164,7 @@ async fn f4_has_no_operational_probe_edges_and_preserves_legacy_confirmation() {
     assert_eq!(
         probe_edges(root),
         Vec::<String>::new(),
-        "no production caller yet"
+        "only the writer seam reaches re-post"
     );
 
     let gateway = GatewayPort::new(Arc::new(serenity::Http::new("test-token")), BOT);
@@ -1686,6 +1752,35 @@ fn f3r_the_dormancy_scan_reads_spaced_paths_and_parent_globs_outside_tests() {
             "src/services/tui_o/repost/b.rs:7",
             "src/services/tui_o/writer/a.rs:1",
             "src/services/tui_o/writer/a.rs:2",
+        ]
+    );
+}
+
+#[test]
+fn f6_the_dormancy_scan_reads_parent_globs_everywhere_commented_ends_and_split_paths() {
+    let write = |root: &std::path::Path, relative: &str, text: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let tree = tempfile::tempdir().unwrap();
+    let root = tree.path();
+    write(root, CONSUMERS[0], "use super::*;\n");
+    write(root, PROBE_FILES[0], "use super::*;\n");
+    let commented = "#[cfg(test)]\nmod tests {\n    use super::*;\n} // mod tests\nuse super::*;\n";
+    write(root, "src/services/tui_o/repost/a.rs", commented);
+    let split = "use crate::services::tui_o::repost\n    ::runner::Runner;\nfn go() {\n    crate::services::tui_o::repost::\n        dispatch::start();\n}\n";
+    write(root, "src/services/tui_o/writer/b.rs", split);
+    write(root, CONSUMERS[1], "fn go(port: &dyn DiscordPort) {}\n");
+    assert_eq!(
+        probe_edges(root),
+        [
+            "src/services/tui_o/repost/a.rs:5",
+            "src/services/tui_o/repost/dispatch.rs:1",
+            "src/services/tui_o/repost/probe.rs:1",
+            "src/services/tui_o/repost/runner.rs:1",
+            "src/services/tui_o/writer/b.rs:1",
+            "src/services/tui_o/writer/b.rs:4",
         ]
     );
 }
