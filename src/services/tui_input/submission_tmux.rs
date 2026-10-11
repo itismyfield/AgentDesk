@@ -112,6 +112,10 @@ impl InputTransport for SubmissionTmux {
         self.capture_raw(session, scroll_back)
     }
 
+    fn capture_draft(&mut self, session: &str) -> Option<String> {
+        self.capture_raw(session, -80)
+    }
+
     fn pane_alive(&mut self, session: &str) -> bool {
         let target = format!("={session}:");
         self.run(&["display-message", "-p", "-t", &target, "#{pane_dead}"])

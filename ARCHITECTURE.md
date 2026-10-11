@@ -2488,6 +2488,10 @@ src/
 │   │   └── tests_pg.rs
 │   ├── tui_input/
 │   │   ├── actor/
+│   │   │   ├── gate/
+│   │   │   │   ├── claude_guarded/
+│   │   │   │   │   └── acceptance_tests.rs
+│   │   │   │   └── claude_guarded.rs
 │   │   │   ├── pane/
 │   │   │   │   ├── ownership.rs
 │   │   │   │   └── ownership_tests.rs

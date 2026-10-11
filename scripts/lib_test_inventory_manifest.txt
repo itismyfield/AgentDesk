@@ -11426,6 +11426,14 @@ services::tui_input::actor::capability::tests::capability_no_mid_incarnation_upg
 services::tui_input::actor::capability::tests::capability_profile_matches_measured_rows_boundaries
 services::tui_input::actor::capability::tests::capability_source_identity_drift_permanently_disables
 services::tui_input::actor::capability::tests::capability_stale_snapshot_nonce_drift_permanently_disables
+services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_exact_reader_rejects_modal_scrollback_and_missing_capture
+services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_folded_requires_exact_empty_exclusive_and_single_same_frame_paste
+services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_guarded_plan_replans_utf16_fold_only_and_preserves_frame_bytes
+services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_lf2_lf3_and_lf_in_utf16_budget
+services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_off_keeps_legacy_own_draft_consumers_and_plans_byte_identical
+services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_real_tmux_plan_transport_and_capture_draft_without_spy
+services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_utf16_800_801_includes_emoji_and_hangul
+services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_whitespace_is_exact_and_unknown_wraps_hold
 services::tui_input::actor::pane::ownership_tests::an_offer_for_another_provider_cannot_spawn_paste_or_enter
 services::tui_input::actor::pane::ownership_tests::ownership_changes_after_paste_preserve_draft_and_veto_enter
 services::tui_input::actor::pane::ownership_tests::ownership_changes_between_offer_and_paste_prevent_actual_spawn
