@@ -1218,6 +1218,9 @@ pub(super) mod exhausted_recovery_tests {
         blocked_fetch: Option<(usize, Arc<tokio::sync::Notify>)>,
         resumable_fetch: Option<(usize, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
         utility_ids: Option<(UtilityBotUserIdResolution, UtilityBotUserIdResolution)>,
+        first_binding_unknown: std::sync::atomic::AtomicBool,
+        fail_after_cursor: Option<u64>,
+        failed_fetches: Mutex<Vec<CatchUpFetchRequest>>,
         dlq_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     }
 
@@ -1231,6 +1234,9 @@ pub(super) mod exhausted_recovery_tests {
                 blocked_fetch: None,
                 resumable_fetch: None,
                 utility_ids: None,
+                first_binding_unknown: std::sync::atomic::AtomicBool::new(false),
+                fail_after_cursor: None,
+                failed_fetches: Mutex::new(Vec::new()),
                 dlq_tasks: Mutex::new(Vec::new()),
             }
         }
@@ -1265,6 +1271,12 @@ pub(super) mod exhausted_recovery_tests {
             &self,
             channel_id: ChannelId,
         ) -> RuntimeChannelBindingStatus {
+            if self
+                .first_binding_unknown
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return RuntimeChannelBindingStatus::Unknown;
+            }
             self.strict
                 .resolve_runtime_channel_binding_status(channel_id)
                 .await
@@ -1286,6 +1298,13 @@ pub(super) mod exhausted_recovery_tests {
             channel_id: ChannelId,
             request: CatchUpFetchRequest,
         ) -> Result<Vec<serenity::Message>, String> {
+            if self
+                .fail_after_cursor
+                .is_some_and(|cursor| request.cursor == Some(CatchUpFetchCursor::After(cursor)))
+            {
+                self.failed_fetches.lock().unwrap().push(request);
+                return Err("temporary held-gap fetch failure".to_owned());
+            }
             if let Some((call, entered)) = &self.blocked_fetch
                 && self.strict.fetch_log().len() == *call
             {
@@ -1558,6 +1577,9 @@ pub(super) mod exhausted_recovery_tests {
             .expect("the actual exhausted path emits its WARN");
         assert!(exhausted.contains("repair the cause"), "{exhausted}");
         assert!(exhausted.contains("next periodic sweep"), "{exhausted}");
+        assert!(exhausted.contains("in-process"), "{exhausted}");
+        assert!(exhausted.contains("restart"), "{exhausted}");
+        assert!(exhausted.contains("TooOld DLQ"), "{exhausted}");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2217,5 +2239,453 @@ pub(super) mod exhausted_recovery_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn phase2_exhausted_recovery_adopts_busy_drain_retry_before_age_and_budget() {
         assert_drained_retry_handoff(true).await;
+    }
+
+    // A reply after B hides B from phase 2's unanswered slice, while phase 1 still owes B.
+    async fn assert_phase2_successor_cannot_release_unsettled_hold(active_successor: bool) {
+        let fx = Fixture::new().await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_290 + u64::from(active_successor));
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        let (r, successor_id) = (clock.message_id(3, 20), clock.message_id(4, 10));
+        fx.seed_checkpoint(channel_id, a);
+        if active_successor {
+            let token = Arc::new(crate::services::provider::CancelToken::new());
+            assert!(
+                discord::mailbox_try_start_turn(
+                    &fx.shared,
+                    channel_id,
+                    token,
+                    serenity::UserId::new(HUMAN_ID),
+                    successor_id,
+                )
+                .await
+            );
+        }
+        let successor = if active_successor {
+            human(channel_id, successor_id)
+        } else {
+            foreign_bot(channel_id, successor_id)
+        };
+        let queue_file = discord::runtime_store::discord_pending_queue_root()
+            .expect("queue root")
+            .join(fx.provider.as_str())
+            .join(&fx.shared.token_hash)
+            .join(format!("{}.json", channel_id.get()));
+        std::fs::create_dir_all(&queue_file).expect("directory blocks durable enqueue");
+        let build = || {
+            RecordingApi::new(StrictApi::new(&fx.shared).with_history(
+                channel_id,
+                vec![
+                    human(channel_id, b),
+                    own_reply(channel_id, r),
+                    successor.clone(),
+                ],
+            ))
+        };
+        let mut origin = None;
+        for attempt in 1..=9 {
+            if attempt > 1 {
+                clock.advance(60);
+            }
+            let scan = build();
+            periodic_sweep(&scan, &fx.shared, &fx.provider, &clock).await;
+            assert_phase1_read(&scan.strict, after(a), &[b, r, successor_id]);
+            let fetches = scan.strict.fetch_log();
+            assert_eq!(fetches.len(), 2, "the same sweep actually runs both phases");
+            assert_eq!(
+                fetches[1],
+                (
+                    channel_id,
+                    CatchUpFetchRequest::new(20),
+                    vec![successor_id.get(), r.get(), b.get()]
+                )
+            );
+            assert_eq!(*scan.outcomes.lock().unwrap(), [(b.get(), false, true)]);
+            assert!(scan.dead_letters.lock().unwrap().is_empty());
+            assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+            let snapshot = discord::mailbox_snapshot(&fx.shared, channel_id).await;
+            assert!(snapshot.intervention_queue.is_empty());
+            assert_eq!(
+                snapshot.active_user_message_id,
+                active_successor.then_some(successor_id)
+            );
+            let state = fx
+                .pending(channel_id)
+                .expect("B's retry survives its sweep");
+            assert_eq!(state.deferred_rearms, attempt);
+            assert_eq!(state.checkpoint, a.get());
+            assert_eq!(state.armed_at, *origin.get_or_insert(state.armed_at));
+        }
+        assert_hold_excluded(&fx, channel_id);
+        clock.advance(60);
+        std::fs::remove_dir(&queue_file).expect("repair the actual durable enqueue path");
+        let repaired = build();
+        periodic_sweep(&repaired, &fx.shared, &fx.provider, &clock).await;
+        assert_phase1_read(&repaired.strict, after(a), &[b, r, successor_id]);
+        assert_eq!(
+            repaired.accepted(b),
+            1,
+            "B is recovered after repair within 24h"
+        );
+        assert_eq!(*repaired.outcomes.lock().unwrap(), [(b.get(), true, false)]);
+        assert!(repaired.dead_letters.lock().unwrap().is_empty());
+        assert!(fx.pending(channel_id).is_none());
+        let (memory, disk) = fx.surfaces(channel_id);
+        assert_eq!(memory, disk);
+        assert!(memory.is_some_and(|checkpoint| checkpoint >= b.get()));
+        let stored = || {
+            load_channel_pending_queue_checked(&fx.provider, &fx.shared.token_hash, channel_id)
+                .expect("read the actual durable recovered queue")
+                .0
+        };
+        assert_eq!(sources(&stored()), [b]);
+        clock.advance(60);
+        let again = build();
+        periodic_sweep(&again, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(again.accepted(b), 0);
+        assert!(again.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(sources(&stored()), [b]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rv_phase2_unblocked_pass_releases_hold_kept_by_phase1() {
+        assert_phase2_successor_cannot_release_unsettled_hold(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_recovery_active_turn_after_later_reply_does_not_release_b_hold() {
+        assert_phase2_successor_cannot_release_unsettled_hold(true).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_recovery_empty_phase1_releases_after_phase2_durable_acceptance() {
+        let fx = Fixture::new().await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_292);
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        let path = exhaust_actual_failures(&fx, &clock, channel_id, a, &[b], false).await;
+        std::fs::remove_dir(path).expect("repair the actual durable enqueue path");
+        clock.advance(60);
+        let build = || {
+            RecordingApi::new(
+                StrictApi::new(&fx.shared)
+                    .with_history(channel_id, vec![own_reply(channel_id, a)])
+                    .arriving_at(1, human(channel_id, b)),
+            )
+        };
+        let repaired = build();
+        periodic_sweep(&repaired, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(
+            repaired.strict.fetch_log(),
+            [
+                (channel_id, after(a), vec![]),
+                (
+                    channel_id,
+                    CatchUpFetchRequest::new(20),
+                    vec![b.get(), a.get()]
+                ),
+            ]
+        );
+        assert_eq!(*repaired.outcomes.lock().unwrap(), [(b.get(), true, false)]);
+        assert_eq!(repaired.accepted(b), 1);
+        assert!(repaired.dead_letters.lock().unwrap().is_empty());
+        assert!(
+            fx.pending(channel_id).is_none(),
+            "phase 2 earns release with B's durable frontier"
+        );
+        assert_eq!(fx.surfaces(channel_id), (Some(b.get()), Some(b.get())));
+        let stored = || {
+            load_channel_pending_queue_checked(&fx.provider, &fx.shared.token_hash, channel_id)
+                .expect("read phase 2's durable B")
+                .0
+        };
+        assert_eq!(sources(&stored()), [b]);
+        clock.advance(60);
+        let again = build();
+        periodic_sweep(&again, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(again.accepted(b), 0);
+        assert!(again.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(sources(&stored()), [b]);
+    }
+    // A partial phase-2 frontier keeps C's original hold while B is already durable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_recovery_empty_phase1_phase2_partial_progress_keeps_c_origin() {
+        let fx = Fixture::new().await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_293);
+        let (a, b, c) = (
+            clock.message_id(1, 600),
+            clock.message_id(2, 30),
+            clock.message_id(3, 20),
+        );
+        let path = exhaust_actual_failures(&fx, &clock, channel_id, a, &[b, c], false).await;
+        let original = fx
+            .pending(channel_id)
+            .expect("nine actual failures retain the original hold");
+        std::fs::remove_dir(path).expect("repair the actual durable enqueue path");
+        clock.advance(60);
+        let partial = RecordingApi::new(
+            StrictApi::new(&fx.shared)
+                .with_history(channel_id, vec![own_reply(channel_id, a)])
+                .arriving_at(1, human(channel_id, b))
+                .arriving_at(1, human(channel_id, c))
+                .with_hooks(c, &[Hook::Defer]),
+        );
+        periodic_sweep(&partial, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(
+            partial.strict.fetch_log(),
+            [
+                (channel_id, after(a), vec![]),
+                (
+                    channel_id,
+                    CatchUpFetchRequest::new(20),
+                    vec![c.get(), b.get(), a.get()]
+                ),
+            ]
+        );
+        assert_eq!(
+            *partial.outcomes.lock().unwrap(),
+            [(b.get(), true, false), (c.get(), false, false)]
+        );
+        assert_eq!(partial.accepted(b), 1);
+        assert_eq!(partial.accepted(c), 0);
+        assert!(partial.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(fx.surfaces(channel_id), (Some(b.get()), Some(b.get())));
+        assert_eq!(
+            fx.pending(channel_id),
+            Some(CatchUpRetryState {
+                checkpoint: b.get(),
+                ..original
+            }),
+            "C inherits the original arm and exhausted budgets after B's durable progress"
+        );
+        assert_hold_excluded(&fx, channel_id);
+        let stored = || {
+            load_channel_pending_queue_checked(&fx.provider, &fx.shared.token_hash, channel_id)
+                .expect("read B and C from the actual durable queue")
+                .0
+        };
+        assert_eq!(sources(&stored()), [b]);
+        clock.advance(60);
+        let build = || {
+            RecordingApi::new(StrictApi::new(&fx.shared).with_history(
+                channel_id,
+                vec![
+                    own_reply(channel_id, a),
+                    human(channel_id, b),
+                    human(channel_id, c),
+                ],
+            ))
+        };
+        let recovered = build();
+        periodic_sweep(&recovered, &fx.shared, &fx.provider, &clock).await;
+        assert_phase1_read(&recovered.strict, after(b), &[c]);
+        assert_eq!(
+            *recovered.outcomes.lock().unwrap(),
+            [(c.get(), true, false)]
+        );
+        assert_eq!(recovered.accepted(c), 1);
+        assert_eq!(recovered.accepted(b), 0);
+        assert!(recovered.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(fx.surfaces(channel_id), (Some(c.get()), Some(c.get())));
+        assert!(fx.pending(channel_id).is_none());
+        assert_eq!(sources(&stored()), [b, c]);
+        clock.advance(60);
+        let again = build();
+        periodic_sweep(&again, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(again.accepted(b), 0);
+        assert_eq!(again.accepted(c), 0);
+        assert!(again.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(sources(&stored()), [b, c]);
+    }
+
+    // A failed held-gap read cannot let a later recent page prove progress over B.
+    async fn assert_failed_phase1_keeps_hold_without_phase2(binding_unknown: bool) {
+        let fx = Fixture::new().await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_294 + u64::from(binding_unknown));
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        let path = exhaust_actual_failures(&fx, &clock, channel_id, a, &[b], false).await;
+        let hold = fx
+            .pending(channel_id)
+            .expect("nine actual failures retain B");
+        assert_eq!(hold.deferred_rearms, 9);
+        assert_eq!(hold.checkpoint, a.get());
+        assert!(
+            clock.sample().1.duration_since(hold.armed_at) >= Duration::from_secs(480),
+            "the failure sequence crosses eight real periodic intervals"
+        );
+        std::fs::remove_dir(path).expect("C could now be accepted durably if phase 2 ran");
+        clock.advance(60);
+        let (reply, c) = (clock.message_id(3, 20), clock.message_id(4, 10));
+        assert!(a < b && b < reply && reply < c);
+        let mut scan = RecordingApi::new(StrictApi::new(&fx.shared).with_history(
+            channel_id,
+            vec![
+                human(channel_id, b),
+                own_reply(channel_id, reply),
+                human(channel_id, c),
+            ],
+        ));
+        if binding_unknown {
+            scan.first_binding_unknown
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            scan.fail_after_cursor = Some(a.get());
+        }
+        periodic_sweep(&scan, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(
+            *scan.failed_fetches.lock().unwrap(),
+            if binding_unknown {
+                vec![]
+            } else {
+                vec![after(a)]
+            },
+            "the fetch-error case actually attempts the held cursor"
+        );
+        assert!(
+            scan.strict.fetch_log().is_empty(),
+            "phase 2 performs zero actual recent fetches after the held gap was unread"
+        );
+        assert!(scan.outcomes.lock().unwrap().is_empty());
+        assert_eq!(scan.accepted(c), 0);
+        assert!(scan.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(
+            fx.pending(channel_id),
+            Some(hold),
+            "hold origin and budgets remain exact"
+        );
+        assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+        assert!(
+            discord::mailbox_snapshot(&fx.shared, channel_id)
+                .await
+                .intervention_queue
+                .is_empty()
+        );
+        assert_hold_excluded(&fx, channel_id);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_recovery_failed_phase1_fetch_preserves_unread_hold_gap() {
+        assert_failed_phase1_keeps_hold_without_phase2(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_recovery_unknown_phase1_binding_preserves_unread_hold_gap() {
+        assert_failed_phase1_keeps_hold_without_phase2(true).await;
+    }
+    // A full terminal-only After page cannot discharge a hold before the later B is read.
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_recovery_full_held_after_page_reads_through_its_upper_snapshot() {
+        let fx = Fixture::new().await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_296);
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        let (r, f) = (clock.message_id(3, 20), clock.message_id(4, 10));
+        let noise: Vec<_> = (0_u64..50)
+            .map(|index| clock.message_id(100 + index, 590 - i64::try_from(index).unwrap()))
+            .collect();
+        let d = *noise.last().unwrap();
+        assert!(a < noise[0] && d < b && b < r && r < f);
+        let path = exhaust_actual_failures(&fx, &clock, channel_id, a, &[b], true).await;
+        let original = fx
+            .pending(channel_id)
+            .expect("nine failures retain B's original hold");
+        clock.advance(60);
+        let mut history: Vec<_> = noise.iter().map(|id| own_reply(channel_id, *id)).collect();
+        history.extend([
+            human(channel_id, b),
+            own_reply(channel_id, r),
+            foreign_bot(channel_id, f),
+        ]);
+        let build = || {
+            RecordingApi::new(StrictApi::new(&fx.shared).with_history(channel_id, history.clone()))
+        };
+        let mut unread = build();
+        unread.fail_after_cursor = Some(d.get());
+        periodic_sweep(&unread, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(*unread.failed_fetches.lock().unwrap(), [after(d)]);
+        assert_eq!(
+            unread.strict.fetch_log(),
+            [
+                (
+                    channel_id,
+                    after(a),
+                    noise.iter().rev().map(|id| id.get()).collect()
+                ),
+                (channel_id, CatchUpFetchRequest::new(1), vec![f.get()]),
+            ]
+        );
+        assert!(unread.outcomes.lock().unwrap().is_empty());
+        assert!(unread.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(fx.pending(channel_id), Some(original));
+        assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+        clock.advance(60);
+        let blocked = build();
+        periodic_sweep(&blocked, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(
+            *blocked.outcomes.lock().unwrap(),
+            [(b.get(), false, true)],
+            "the held-range continuation actually reads and fails B's durable enqueue"
+        );
+        let first_page: Vec<_> = noise.iter().rev().map(|id| id.get()).collect();
+        let recent: Vec<_> = [f.get(), r.get(), b.get()]
+            .into_iter()
+            .chain(noise.iter().rev().map(|id| id.get()))
+            .take(20)
+            .collect();
+        assert_eq!(
+            blocked.strict.fetch_log(),
+            [
+                (channel_id, after(a), first_page),
+                (channel_id, CatchUpFetchRequest::new(1), vec![f.get()]),
+                (channel_id, after(d), vec![f.get(), r.get(), b.get()]),
+                (channel_id, CatchUpFetchRequest::new(20), recent),
+            ]
+        );
+        assert!(blocked.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(fx.surfaces(channel_id), (Some(d.get()), Some(d.get())));
+        assert_eq!(
+            fx.pending(channel_id),
+            Some(CatchUpRetryState {
+                checkpoint: d.get(),
+                ..original
+            }),
+            "terminal noise moves the cursor without releasing B or renewing its arm"
+        );
+        assert_hold_excluded(&fx, channel_id);
+        assert!(
+            discord::mailbox_snapshot(&fx.shared, channel_id)
+                .await
+                .intervention_queue
+                .is_empty()
+        );
+        std::fs::remove_dir(path).expect("repair B's actual durable enqueue path");
+        clock.advance(60);
+        let repaired = build();
+        periodic_sweep(&repaired, &fx.shared, &fx.provider, &clock).await;
+        assert_phase1_read(&repaired.strict, after(d), &[b, r, f]);
+        assert_eq!(
+            repaired.strict.fetch_log()[0],
+            (channel_id, after(d), vec![f.get(), r.get(), b.get()])
+        );
+        assert_eq!(*repaired.outcomes.lock().unwrap(), [(b.get(), true, false)]);
+        assert_eq!(repaired.accepted(b), 1);
+        assert!(repaired.dead_letters.lock().unwrap().is_empty());
+        assert!(fx.pending(channel_id).is_none());
+        assert_eq!(fx.surfaces(channel_id), (Some(f.get()), Some(f.get())));
+        let stored = || {
+            load_channel_pending_queue_checked(&fx.provider, &fx.shared.token_hash, channel_id)
+                .expect("read B from the actual durable queue")
+                .0
+        };
+        assert_eq!(sources(&stored()), [b]);
+        clock.advance(60);
+        let again = build();
+        periodic_sweep(&again, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(again.accepted(b), 0);
+        assert!(again.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(sources(&stored()), [b]);
     }
 }

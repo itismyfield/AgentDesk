@@ -11,6 +11,7 @@ use super::super::{
     mailbox_clear_channel,
 };
 use super::clock::CatchUpClock;
+use super::settled_frontier::RetainedBarrier;
 use super::{
     CATCH_UP_RETRY_DEFERRED_REARM_LIMIT, CATCH_UP_RETRY_FETCH_FAILURE_LIMIT, CatchUpRetryState,
 };
@@ -63,13 +64,16 @@ pub(super) fn consume_catch_up_retry_state_for_scan(
     let mut retry_state = reserved
         .map(|state| merge_catch_up_retry_state(retry_checkpoints.get(&channel_id).copied(), state))
         .or_else(|| retry_checkpoints.get(&channel_id).copied());
-    if let Some(hold) = shared
+    if let Some(mut hold) = shared
         .catch_up_retry_pending
-        .get(&channel_id)
-        .map(|entry| *entry)
+        .get_mut(&channel_id)
         .filter(|state| state.is_exhausted_hold())
     {
-        return CatchUpRetryScanDecision::Proceed(Some(hold));
+        if let Some(reserved) = reserved {
+            hold.checkpoint = hold.checkpoint.min(reserved.checkpoint);
+            hold.armed_at = hold.armed_at.min(reserved.armed_at);
+        }
+        return CatchUpRetryScanDecision::Proceed(Some(*hold));
     }
     if !pending_retry_channels.contains(&channel_id) {
         return CatchUpRetryScanDecision::Proceed(retry_state);
@@ -140,7 +144,8 @@ pub(super) fn rearm_catch_up_retry_after_defer(
             tracing::warn!(
                 "  [{ts}] ⚠ catch-up: channel {} deferred {} time(s); giving up after {} re-arm(s) at checkpoint {}; \
              repair the cause; the next periodic sweep automatically recovers this backlog \
-             within 24h of its original arm",
+             within 24h of its original arm (in-process only); a restart before repair \
+             loses the hold and follows the existing TooOld DLQ path",
                 channel_id,
                 attempted_rearms,
                 CATCH_UP_RETRY_DEFERRED_REARM_LIMIT,
@@ -387,8 +392,8 @@ pub(super) fn finish_hold_scan(
     shared: &SharedData,
     channel_id: ChannelId,
     prior: Option<CatchUpRetryState>,
-    checkpoint: Option<u64>,
-    blocked: bool,
+    durable: Option<u64>,
+    remaining: Option<RetainedBarrier>,
 ) {
     if let Some(prior) = prior.filter(|state| state.is_exhausted_hold()) {
         shared
@@ -397,10 +402,13 @@ pub(super) fn finish_hold_scan(
                 if entry.armed_at != prior.armed_at || entry.deferred_rearms != HOLD_IDLE {
                     return false;
                 }
-                if let Some(checkpoint) = checkpoint {
-                    entry.checkpoint = entry.checkpoint.max(checkpoint);
+                // Partial progress transfers the same origin to the remaining frontier.
+                if remaining.is_some()
+                    && let Some(durable) = durable
+                {
+                    entry.checkpoint = entry.checkpoint.max(durable);
                 }
-                !blocked
+                durable.is_some_and(|settled| settled > entry.checkpoint)
             });
     }
 }
