@@ -19,7 +19,9 @@ use crate::services::tui_o::repost::io::probe::evidence::{EvidenceScope, RunScop
 use crate::services::tui_o::repost::io::probe::matcher::ObservedMessage;
 use crate::services::tui_o::repost::io::probe::tests::absent_evidence;
 use crate::services::tui_o::repost::o_piece_attempts::{AttemptResult, attempts};
-use crate::services::tui_o::repost::o_piece_delivery::load;
+use crate::services::tui_o::repost::o_piece_delivery::{
+    Receipt, ReceiptMethod, ReceiptOutcome, load, record_receipt,
+};
 use crate::services::tui_o::repost::provenance::ProvenanceLog;
 use crate::services::tui_o::repost::runner::{
     ChannelTurn, DispatchIntent, RepostHook, Runner, TurnWriter, Turned,
@@ -279,14 +281,17 @@ async fn results(pool: &PgPool, key: &PieceKey) -> Vec<Option<AttemptResult>> {
     spent.into_iter().map(|attempt| attempt.result).collect()
 }
 
-async fn receipts(pool: &PgPool, key: &PieceKey) -> i64 {
-    let sql = "SELECT COUNT(*) FROM o_piece_receipts WHERE native_key = $1";
-    let native = &key.unit().native_key;
-    sqlx::query_scalar(sql)
-        .bind(native)
-        .fetch_one(pool)
-        .await
-        .unwrap()
+/// Whether message `id` already is `key`'s receipt, read back by recording it once more.
+async fn is_receipt(pool: &PgPool, key: &PieceKey, id: u64) -> bool {
+    let receipt = Receipt {
+        key: key.clone(),
+        message_id: id,
+        author_id: BOT,
+        slot: None,
+        method: ReceiptMethod::PostResponse,
+    };
+    let outcome = record_receipt(pool, &receipt).await.unwrap();
+    outcome == ReceiptOutcome::Known
 }
 
 async fn grant(runner: &mut Runner, writer: &mut Writer, pool: &PgPool, key: &PieceKey) -> bool {
@@ -367,11 +372,12 @@ async fn f6_general_auto_and_resume_never_overlap_posts_pg() {
     let (_, latest) = ledger.latest_piece(auto.unit(), 0).unwrap();
     let history = harness.port.history.lock().unwrap().clone();
     let reposted = history.iter().find(|seen| seen.content == "auto piece");
-    let posted = Some(PieceOutcome::Posted(reposted.unwrap().id));
+    let reposted = reposted.unwrap().id;
+    let posted = Some(PieceOutcome::Posted(reposted));
     assert_eq!((latest.epoch, &latest.outcome), (epoch, &posted));
     let created = [Some(AttemptResult::Uncertain), Some(AttemptResult::Created)];
     assert_eq!(results(&pool, &auto).await, created);
-    assert_eq!(receipts(&pool, &auto).await, 1);
+    assert!(is_receipt(&pool, &auto, reposted).await);
     assert_eq!(results(&pool, &excluded).await.len(), 1);
     pool.close().await;
     db.drop().await;
