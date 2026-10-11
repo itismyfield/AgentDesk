@@ -17,6 +17,7 @@ use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey};
 use crate::services::tui_o::store::rotation::Boundary;
 use crate::services::tui_o::store::spool::source_key;
+use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission;
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const WAIT_LIMIT: Duration = Duration::from_secs(300);
@@ -162,6 +163,8 @@ struct Actor<P, L, A, B> {
     writer: ChannelWriter<P, L, A>,
     deriver: UnitDeriver,
     owed: VecDeque<Derived>,
+    /// Set only where verified owed delivery is ready; every piece then needs its exact permit.
+    verified: Option<super::owed::OwedLog>,
     sources: Sources<B>,
     bindings: Arc<B>,
     /// The binding log's latest seq, watched once the channel first publishes what it owes.
@@ -241,10 +244,13 @@ where
     let deriver = UnitDeriver::new(writer.channel(), provider);
     let sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings));
     let owed = VecDeque::new();
+    let ready = admission::owed_delivery_ready(writer.channel());
+    let verified = ready.then(|| super::owed::OwedLog::new(writer.channel(), provider));
     let mut actor = Actor {
         writer,
         deriver,
         owed,
+        verified,
         sources,
         bindings,
         notice: None,
@@ -256,9 +262,13 @@ where
     };
     let mut sources_resumed = false;
     while !actor.writer.is_stopped() && !*stop.borrow() {
-        if !sources_resumed && actor.delivery_allowed() {
-            let (writer, deriver, owed) = (&mut actor.writer, &mut actor.deriver, &mut actor.owed);
-            if let Err(alarm) = actor.sources.resume(writer, deriver, owed) {
+        if !sources_resumed && actor.sources_allowed() {
+            let (writer, deriver) = (&mut actor.writer, &mut actor.deriver);
+            let restored = match &mut actor.verified {
+                Some(log) => actor.sources.resume(writer, deriver, log),
+                None => actor.sources.resume(writer, deriver, &mut actor.owed),
+            };
+            if let Err(alarm) = restored {
                 actor.writer.stop(alarm);
             }
             sources_resumed = true;
@@ -270,8 +280,8 @@ where
         actor.observe_waiting(false);
         actor.deliver_owed().await;
         // Re-post runs in this same turn and only once nothing is owed, so it never sends beside
-        // a piece of this channel.
-        if actor.owed.is_empty() && actor.delivery_allowed() {
+        // a piece of this channel. It holds no exact permit, so a verified channel never runs it.
+        if actor.verified.is_none() && actor.owed.is_empty() && actor.delivery_allowed() {
             actor.writer.repost_turn().await;
         }
         actor.collect_settled();
@@ -446,7 +456,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         self.writer.delivery_allowed(!self.owed.is_empty())
     }
 
+    /// Verified sources are restored apart from delivery permission, which each piece proves.
+    fn sources_allowed(&mut self) -> bool {
+        self.verified.is_some() || self.delivery_allowed()
+    }
+
     async fn deliver_owed(&mut self) {
+        if let Some(log) = &mut self.verified {
+            // Legacy retries in `owed` have no provenance, so they stay Unknown here.
+            return super::owed::deliver_owed(&mut self.writer, log).await;
+        }
         while !self.owed.is_empty() {
             if !self.delivery_allowed() {
                 return;
@@ -458,7 +477,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 Step::Done => {
                     self.owed.pop_front();
                 }
-                Step::LeaseBusy | Step::NoGateway | Step::Stopped => return,
+                Step::LeaseBusy | Step::NoGateway | Step::Stopped | Step::Withheld => return,
             }
         }
     }
@@ -474,7 +493,14 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         {
             return;
         }
-        for (source, keep) in self.sources.collectable() {
+        let protected = self.verified.as_ref().map(super::owed::protected);
+        let collectable = self.sources.collectable().into_iter();
+        let mut collectable = collectable.filter(|(source, _)| {
+            !protected
+                .as_ref()
+                .is_some_and(|keys| keys.contains(&source_key(source)))
+        });
+        for (source, keep) in collectable.by_ref() {
             if !crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
                 self.writer.channel(),
                 &source,
@@ -541,12 +567,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     /// Applies new binds first, so a bound source is read in the same poll as its predecessor.
     fn read_sources(&mut self) {
-        if self.writer.is_stopped() || !self.delivery_allowed() {
+        if self.writer.is_stopped() || !self.sources_allowed() {
             return;
         }
-        let (writer, deriver, owed) = (&mut self.writer, &mut self.deriver, &mut self.owed);
+        let (writer, deriver) = (&mut self.writer, &mut self.deriver);
         let read = (self.sources.follow(writer))
-            .and_then(|()| self.sources.capture(writer, deriver, owed))
+            .and_then(|()| match &mut self.verified {
+                Some(log) => self.sources.capture(writer, deriver, log),
+                None => self.sources.capture(writer, deriver, &mut self.owed),
+            })
             .and_then(|()| self.sources.tend(writer));
         if let Err(alarm) = read {
             self.writer.stop(alarm);
@@ -588,6 +617,7 @@ mod test_support {
             writer,
             deriver: UnitDeriver::new(channel, provider),
             owed: VecDeque::new(),
+            verified: None,
             sources: Sources::new(channel, provider, Arc::clone(&bindings)),
             bindings,
             notice: None,

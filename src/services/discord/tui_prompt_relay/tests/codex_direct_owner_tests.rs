@@ -825,3 +825,6 @@ async fn codex_direct_answer_scenario(root: &Path) {
 
 /// Codex direct input whose claim lands after the idle loop's cursor moved on.
 mod boundary_tests;
+
+/// A Codex runtime replaced in process: the relay follows the new runtime's routing.
+mod runtime_switch_tests;
