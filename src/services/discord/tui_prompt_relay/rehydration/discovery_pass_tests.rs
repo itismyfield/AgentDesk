@@ -16,8 +16,8 @@ use std::time::Duration;
 
 const A: &str = "AgentDesk-codex-u32a1-a";
 const B: &str = "AgentDesk-codex-u32a1-b";
-const CA: u64 = 6_325_201;
-const CB: u64 = 6_325_202;
+const CA: u64 = 7_632_520_201;
+const CB: u64 = 7_632_520_202;
 
 fn fixture(test: impl FnOnce(&Path, &Arc<SharedData>)) {
     let temp = tempfile::tempdir().unwrap();

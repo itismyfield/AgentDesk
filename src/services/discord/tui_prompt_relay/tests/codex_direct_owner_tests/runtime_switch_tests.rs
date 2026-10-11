@@ -2,9 +2,9 @@
 //! runtime's routing to channels only it owns, and an answer already being relayed is sent once.
 use super::*;
 
-const A_PARKED: (u64, &str) = (6_325_301, "AgentDesk-codex-6325-a-parked");
-const B_HOOK: (u64, &str) = (6_325_401, "AgentDesk-codex-6325-b-hook");
-const B_ROLLOUT: (u64, &str) = (6_325_402, "AgentDesk-codex-6325-b-rollout");
+const A_PARKED: (u64, &str) = (7_632_520_301, "AgentDesk-codex-6325-a-parked");
+const B_HOOK: (u64, &str) = (7_632_520_401, "AgentDesk-codex-6325-b-hook");
+const B_ROLLOUT: (u64, &str) = (7_632_520_402, "AgentDesk-codex-6325-b-rollout");
 
 /// What one B channel received: each accepted request as `(method, path, content)`, and where
 /// its binding cursor ended.
@@ -32,6 +32,12 @@ fn channel(
     frames: &Arc<AtomicUsize>,
     relays: &mut Vec<crate::services::cluster::stream_relay::StreamRelayHandle>,
 ) -> CodexChannel {
+    // Input-fence gates outlive their tests and gate a channel for every provider.
+    let gate = crate::services::discord::input_runtime::fence::channel_gate(id);
+    assert!(
+        gate.is_none(),
+        "channel {id} is shared with an input-fence test"
+    );
     let codex = CodexChannel::new(shared, root, id, tmux);
     let relay = crate::services::cluster::stream_relay::spawn_stream_relay(
         crate::services::cluster::session_matcher::MatchedChannel {
@@ -163,7 +169,7 @@ async fn run(root: &Path, replaced: bool) -> (Output, Output) {
         *super::super::super::codex_idle_rollout::CAPTURE_PAUSE
             .lock()
             .unwrap() = Some((parked.channel.get(), entered.clone(), resume.clone()));
-        hook_first(&shared_a, parked, 6_325_301_001).await;
+        hook_first(&shared_a, parked, 7_632_520_301_001).await;
         tokio::time::timeout(Duration::from_secs(15), entered.notified())
             .await
             .expect("A's tail reaches bridge capture");
@@ -176,18 +182,26 @@ async fn run(root: &Path, replaced: bool) -> (Output, Output) {
         resume.notify_one();
         delivered(&requests, parked).await;
     }
-    hook_first(&shared_b, &b_hook, 6_325_401_001).await;
+    hook_first(&shared_b, &b_hook, 7_632_520_401_001).await;
     delivered(&requests, &b_hook).await;
-    rollout_first(&shared_b, &b_rollout, 6_325_402_001).await;
+    rollout_first(&shared_b, &b_rollout, 7_632_520_402_001).await;
     delivered(&requests, &b_rollout).await;
 
-    // Several polls past every delivery: nothing is sent twice.
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    if let Some(parked) = &parked {
-        delivered_once(&requests, parked, 6_325_301_001);
+    // Two more polls of each session past every delivery: nothing is sent twice.
+    for codex in [&b_hook, &b_rollout] {
+        let visits = poll_notes(&codex.tmux, PollNote::Visit);
+        let polled = || poll_notes(&codex.tmux, PollNote::Visit) >= visits + 2;
+        assert!(
+            wait_for(Duration::from_secs(10), polled).await,
+            "polls stopped on {}",
+            codex.tmux
+        );
     }
-    delivered_once(&requests, &b_hook, 6_325_401_001);
-    delivered_once(&requests, &b_rollout, 6_325_402_001);
+    if let Some(parked) = &parked {
+        delivered_once(&requests, parked, 7_632_520_301_001);
+    }
+    delivered_once(&requests, &b_hook, 7_632_520_401_001);
+    delivered_once(&requests, &b_rollout, 7_632_520_402_001);
     assert_eq!(
         frames.load(Ordering::SeqCst),
         0,
