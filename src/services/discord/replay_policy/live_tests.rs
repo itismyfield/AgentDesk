@@ -251,7 +251,6 @@ async fn direct_adapter_without_a_live_attempt_is_unchanged_pg() {
 // arriving between that check and the wait wakes it at once.
 #[tokio::test(flavor = "current_thread")]
 async fn decision_wakes_on_a_fact_recorded_after_its_check_pg() {
-    let host = crate::config::pin_runtime_host_for_test();
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate_with_max_connections(4).await;
     let live = LiveAttempt::new(start(&pool, "barrier").await);
