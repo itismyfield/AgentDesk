@@ -106,15 +106,35 @@ const CASES: &[Case] = &[
     },
 ];
 
-/// Runs the real direct adapter against a fake CLI per case; returns the messages it sent.
-fn run_adapter(
-    host: &crate::config::PinnedRuntimeHost,
-    tokens: &[Arc<CancelToken>],
-) -> Vec<Vec<String>> {
-    use std::os::unix::fs::PermissionsExt;
-    let cli = host.root.path().join("claude");
+/// An isolated runtime whose Claude CLI is a fake script; the root guard holds the env lock and
+/// drops last, after the other variables are restored.
+struct FakeHost {
+    cli: std::path::PathBuf,
+    _vars: [crate::config::TestEnvVarGuard; 2],
+    _root: crate::config::TestEnvVarGuard,
+    dir: tempfile::TempDir,
+}
+
+fn fake_host() -> FakeHost {
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::config::set_agentdesk_root_for_test(dir.path());
     let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
-    let _cli_env = set("AGENTDESK_CLAUDE_PATH", &cli);
+    let cli = dir.path().join("claude");
+    FakeHost {
+        _vars: [
+            set("CLAUDE_CONFIG_DIR", dir.path()),
+            set("AGENTDESK_CLAUDE_PATH", &cli),
+        ],
+        _root: root,
+        cli,
+        dir,
+    }
+}
+
+/// Runs the real direct adapter against a fake CLI per case; returns the messages it sent.
+fn run_adapter(host: &FakeHost, tokens: &[Arc<CancelToken>]) -> Vec<Vec<String>> {
+    use std::os::unix::fs::PermissionsExt;
+    let cli = &host.cli;
     let mut sent = Vec::new();
     for (case, token) in CASES.iter().zip(tokens) {
         let quoted: Vec<String> = case.stdout.iter().map(|line| format!("'{line}'")).collect();
@@ -133,7 +153,7 @@ fn run_adapter(
         let (tx, rx) = std::sync::mpsc::channel();
         // A dropped receiver makes every send fail.
         let rx = (!case.receiver_dropped).then_some(rx);
-        let workdir = host.root.path().display().to_string();
+        let workdir = host.dir.path().display().to_string();
         let _ = crate::services::claude::execute_command_streaming(
             "prompt",
             None,
@@ -180,7 +200,7 @@ async fn live_attempts(pool: &PgPool, prefix: &str) -> Vec<(Arc<LiveAttempt>, Ar
 // classifies, a later Error does not, and only a quiet complete run is no-effect.
 #[tokio::test(flavor = "current_thread")]
 async fn direct_adapter_completes_the_observation_past_its_done_pg() {
-    let host = crate::config::pin_runtime_host_for_test();
+    let host = fake_host();
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate_with_max_connections(4).await;
     let attempts = live_attempts(&pool, "raw").await;
@@ -225,7 +245,7 @@ async fn direct_adapter_completes_the_observation_past_its_done_pg() {
 // and nothing attaches an attempt for it.
 #[tokio::test(flavor = "current_thread")]
 async fn direct_adapter_without_a_live_attempt_is_unchanged_pg() {
-    let host = crate::config::pin_runtime_host_for_test();
+    let host = fake_host();
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate_with_max_connections(4).await;
     let attempts = live_attempts(&pool, "dormant").await;
