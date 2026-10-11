@@ -233,6 +233,69 @@ pub(super) fn load_queued_placeholders(
     load_entries(store_root(), provider, token_hash)
 }
 
+#[cfg(test)]
+pub(super) fn load_channel_queued_placeholders_checked(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel: ChannelId,
+) -> Result<HashMap<(ChannelId, MessageId), MessageId>, String> {
+    if crate::services::discord::inflight::scoped_restore_mutant("post-filter") {
+        return Ok(load_queued_placeholders(provider, token_hash)
+            .into_iter()
+            .filter(|((id, _), _)| *id == channel)
+            .collect());
+    }
+    if fence::lookup(provider, channel.get()).is_some() {
+        return Err("input-protected placeholder restore".into());
+    }
+    let path =
+        channel_file_path(provider, token_hash, channel).ok_or("placeholder root unavailable")?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let entries: Vec<QueuedPlaceholderEntry> =
+        serde_json::from_str(&content).map_err(|error| error.to_string())?;
+    let mut loaded = HashMap::new();
+    for entry in entries {
+        if entry.user_message_id == 0 || entry.placeholder_message_id == 0 {
+            return Err("zero placeholder identity".into());
+        }
+        let key = (channel, MessageId::new(entry.user_message_id));
+        let card = MessageId::new(entry.placeholder_message_id);
+        if loaded
+            .insert(key, card)
+            .is_some_and(|previous| previous != card)
+        {
+            return Err("conflicting persisted placeholder owner".into());
+        }
+    }
+    Ok(loaded)
+}
+
+#[cfg(test)]
+pub(super) fn persist_channel_from_map_checked(
+    map: &dashmap::DashMap<(ChannelId, MessageId), MessageId>,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel: ChannelId,
+) -> Result<(), String> {
+    let result = fence::write(provider, channel.get(), || {
+        if fence::lookup(provider, channel.get()).is_some() {
+            return Err("input-protected placeholder restore".into());
+        }
+        save_entries_checked(
+            channel_file_path(provider, token_hash, channel),
+            &snapshot_map(map, channel),
+        )
+    });
+    if crate::services::discord::inflight::scoped_restore_mutant("persist-error-complete") {
+        return Ok(());
+    }
+    result
+}
+
 pub(super) fn load_queue_exit_placeholder_clears(
     provider: &ProviderKind,
     token_hash: &str,
