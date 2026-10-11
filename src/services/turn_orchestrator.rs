@@ -1234,6 +1234,8 @@ impl ChannelMailboxRegistry {
 
 // Once `CloseIfIdle` sets `state.closed`, the exhaustive `registry_purge::gate_closed_arm` passes
 // reads and refuses every other arm; CommitCapturedReadyDelivery refuses closed actors in its own arm.
+pub(crate) mod installed_actor_handoff;
+
 enum ChannelMailboxMsg {
     FreezeInput {
         closing: Arc<crate::services::discord::input_runtime::fence::Closing>,
@@ -1341,6 +1343,8 @@ enum ChannelMailboxMsg {
         user_message_id: Option<MessageId>,
         reply: oneshot::Sender<RecoveryKickoffResult>,
     },
+    #[cfg(test)]
+    InstalledActorHandoff(installed_actor_handoff::Request),
     ClearRecoveryMarker {
         reply: closed_verdict::VerdictReply<()>,
     },
@@ -2094,6 +2098,10 @@ fn input_mailbox_step(
             state.turn_started_at = Some(Utc::now());
             state.turn_started_instant = Some(recovery_started_at);
             let _ = reply.send(RecoveryKickoffResult::Activated);
+        }
+        #[cfg(test)]
+        ChannelMailboxMsg::InstalledActorHandoff(request) => {
+            installed_actor_handoff::step(&mut state, channel_id, own_recovery_done, request);
         }
         ChannelMailboxMsg::ClearRecoveryMarker { reply } => {
             state.recovery_started_at = None;

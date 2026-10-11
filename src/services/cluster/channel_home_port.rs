@@ -107,8 +107,51 @@ impl DrainPort for ChannelHomePort {
 #[path = "channel_home_port_tests.rs"]
 mod tests;
 
+/// Recovery errors preserve whether a fresh attempt can resolve the failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RestoreFailure {
+    Retryable(String),
+    Rejected(String),
+}
+impl RestoreFailure {
+    pub(crate) fn retryable(reason: impl ToString) -> Self {
+        #[cfg(test)]
+        if std::env::var("ADK_S3ACT_B3A1_MUTANT").ok().as_deref() == Some("retryable") {
+            return Self::Rejected(reason.to_string());
+        }
+        Self::Retryable(reason.to_string())
+    }
+}
+impl std::fmt::Display for RestoreFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Retryable(reason) => write!(f, "retryable: {reason}"),
+            Self::Rejected(reason) => f.write_str(reason),
+        }
+    }
+}
+impl From<String> for RestoreFailure {
+    fn from(reason: String) -> Self {
+        match reason.strip_prefix("retryable: ") {
+            Some(reason) => Self::retryable(reason),
+            None => Self::Rejected(reason),
+        }
+    }
+}
+impl From<&str> for RestoreFailure {
+    fn from(reason: &str) -> Self {
+        reason.to_string().into()
+    }
+}
+impl From<RestoreFailure> for String {
+    fn from(reason: RestoreFailure) -> Self {
+        reason.to_string()
+    }
+}
+
 #[cfg(all(test, unix))]
 pub(crate) mod scoped_restore {
+    use super::RestoreFailure;
     use crate::db::o_channel_homes::{ChannelHome, HomeState};
     use crate::services::agent_protocol::NativeTerminalKind;
     use std::sync::{
@@ -176,7 +219,7 @@ pub(crate) mod scoped_restore {
         Pending,
         Restoring,
         Restored,
-        Blocked(String),
+        Blocked(RestoreFailure),
     }
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(crate) enum InflightObservation {

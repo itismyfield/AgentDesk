@@ -4,7 +4,9 @@ use super::*;
 use std::collections::HashMap;
 use std::path::Path;
 
+use super::store;
 use super::store::InflightStateFileLock;
+use crate::services::cluster::channel_home_port::RestoreFailure;
 
 fn channel_id_from_path(path: &Path) -> u64 {
     path.file_stem()
@@ -636,7 +638,10 @@ fn classify_inflight_row_for_restore(
             }
             (state, backfill) = (locked, false);
         }
-        if retain_for_restore || stale_removal_reason_for_path(path, &state, generation).is_none() {
+        let retain = retain_for_restore && state.restart_mode.is_none();
+        #[cfg(test)]
+        let retain = retain || (retain_for_restore && scoped_restore_mutant("stale-planned"));
+        if retain || stale_removal_reason_for_path(path, &state, generation).is_none() {
             return Ok(RowVerdict::Keep(state, backfill));
         }
         let (locked, lock) = relock(path, &content)?;
@@ -646,7 +651,10 @@ fn classify_inflight_row_for_restore(
         }
         Ok(
             match stale_removal_reason_for_path(path, &locked, generation) {
-                Some(_) if loader_gate_refuses_with_allocation(&locked, allocation) => {
+                Some(_)
+                    if !retain_for_restore
+                        && loader_gate_refuses_with_allocation(&locked, allocation) =>
+                {
                     RowVerdict::KeepGateRefused(locked, lock)
                 }
                 Some(reason) => RowVerdict::HideStale(reason, state, locked, lock),
@@ -660,6 +668,8 @@ fn classify_inflight_row_for_restore(
 pub(in crate::services::discord) struct InflightProbeLoad {
     pub(in crate::services::discord) states: Vec<InflightTurnState>,
     pub(in crate::services::discord) complete: bool,
+    #[cfg(test)]
+    pub(in crate::services::discord) failure: Option<RestoreFailure>,
 }
 
 #[cfg(test)]
@@ -676,6 +686,7 @@ pub(in crate::services::discord) fn load_inflight_probe_scoped(
         return InflightProbeLoad {
             states: Vec::new(),
             complete: false,
+            failure: Some(RestoreFailure::retryable("restore root/scope unavailable")),
         };
     };
     if channel == 0
@@ -684,6 +695,9 @@ pub(in crate::services::discord) fn load_inflight_probe_scoped(
         return InflightProbeLoad {
             states: Vec::new(),
             complete: false,
+            failure: Some(RestoreFailure::Rejected(
+                "restore scope/input unavailable".into(),
+            )),
         };
     }
     let mut loaded = if scoped_restore_mutant("scope") {
@@ -697,85 +711,9 @@ pub(in crate::services::discord) fn load_inflight_probe_scoped(
     loaded
 }
 
+mod scoped_restore;
 #[cfg(test)]
-pub(in crate::services::discord) async fn invalidate_stale_generation_scoped(
-    pool: Option<&sqlx::PgPool>,
-    provider: &ProviderKind,
-    generation: u64,
-    expected: &InflightTurnState,
-) -> Result<bool, String> {
-    let protected = |row: &InflightTurnState| {
-        row.restart_mode.is_some()
-            || row.rebind_origin
-            || (!scoped_restore_mutant("replay-front")
-                && (row.replay_rerun_blocked() || row.replay_receipt_id.is_some()))
-    };
-    if protected(expected)
-        || expected
-            .restart_generation
-            .is_none_or(|old| old == generation)
-    {
-        return Ok(false);
-    }
-    let channel = expected.channel_id;
-    let input_held =
-        || crate::services::discord::input_runtime::fence::lookup(provider, channel).is_some();
-    if channel == 0 || input_held() || expected.provider_kind().as_ref() != Some(provider) {
-        return Err("generation restore scope/input mismatch".into());
-    }
-    let root = inflight_runtime_root().ok_or("inflight root unavailable")?;
-    let path = inflight_state_path(&root, provider, channel);
-    let _guard = try_lock_inflight_state_path(&path)?;
-    let bytes = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    let fresh = parse_inflight_state_content(&bytes).map_err(|error| error.to_string())?;
-    if !scoped_restore_mutant("snapshot")
-        && serde_json::to_value(&fresh).map_err(|error| error.to_string())?
-            != serde_json::to_value(expected).map_err(|error| error.to_string())?
-    {
-        return Err("generation restore snapshot changed".into());
-    }
-    if protected(&fresh) {
-        return Ok(false);
-    }
-    let pool = pool.ok_or("generation replay receipt unavailable")?;
-    let sources: Vec<String> = fresh
-        .source_message_ids
-        .iter()
-        .chain([&fresh.user_msg_id])
-        .filter(|&&id| id != 0)
-        .map(u64::to_string)
-        .collect();
-    // Canonical source holds without a local projection also fence this cleanup.
-    if crate::db::replay_disposition::blocked_receipt_for_sources(
-        pool,
-        provider.as_str(),
-        &channel.to_string(),
-        &sources,
-    )
-    .await
-    .map_err(|error| error.to_string())?
-    .is_some()
-        && !scoped_restore_mutant("canonical-replay")
-    {
-        return Ok(false);
-    }
-    crate::services::discord::input_runtime::fence::write(provider, channel, || {
-        if input_held() {
-            return Err("input-protected generation restore".into());
-        }
-        log_inflight_remove(
-            provider,
-            channel,
-            fresh.user_msg_id,
-            "invalidate_stale_generation_scoped",
-            &path,
-        );
-        fs::remove_file(&path).map_err(|error| error.to_string())?;
-        crate::services::discord::runtime_store::fsync_parent_dir(&path)
-            .map_err(|error| error.to_string())
-    })?;
-    Ok(true)
-}
+pub(in crate::services::discord) use scoped_restore::invalidate_stale_generation_scoped;
 
 pub(super) fn load_inflight_states_from_root(
     root: &Path,
@@ -823,40 +761,7 @@ fn load_inflight_states_for_probe_from_root_excluding(
     load_inflight_probe_with_scope(root, provider, exclude_channel, None)
 }
 
-fn backfill_scoped_restore(
-    root: &Path,
-    path: &Path,
-    provider: &ProviderKind,
-) -> Option<InflightTurnState> {
-    let _guard = try_lock_inflight_state_path(path).ok()?;
-    let bytes = fs::read_to_string(path).ok()?;
-    let (state, needs_backfill) =
-        parse_inflight_state_content_with_finalizer_backfill(&bytes).ok()?;
-    if state.provider_kind().as_ref() != Some(provider)
-        || state.channel_id != channel_id_from_path(path)
-        || state.runtime_kind_unknown_on_disk
-        || state.version > inflight_state_version()
-    {
-        return None;
-    }
-    if needs_backfill {
-        let outcome = super::store::persist_under_lock_with_snapshot(
-            root,
-            path,
-            &state,
-            "scoped_restore_backfill",
-        );
-        #[cfg(test)]
-        if scoped_restore_mutant("backfill-ack") && outcome.is_err() {
-            return Some(state);
-        }
-        let saved = outcome.ok()??;
-        crate::services::discord::runtime_store::fsync_parent_dir(path).ok()?;
-        Some(saved)
-    } else {
-        Some(state)
-    }
-}
+use scoped_restore::backfill_scoped_restore;
 
 fn load_inflight_probe_with_scope(
     root: &Path,
@@ -871,11 +776,16 @@ fn load_inflight_probe_with_scope(
             return InflightProbeLoad {
                 states: Vec::new(),
                 complete: error.kind() == std::io::ErrorKind::NotFound,
+                #[cfg(test)]
+                failure: (error.kind() != std::io::ErrorKind::NotFound)
+                    .then(|| RestoreFailure::retryable(error)),
             };
         }
     };
     let mut states = Vec::new();
     let mut complete = true;
+    #[cfg(test)]
+    let mut failure = None;
     let mut tmux_owners: HashMap<String, u64> = HashMap::new();
     let allocation = crate::services::discord::runtime_store::process_generation_binding();
     for entry in entries {
@@ -911,14 +821,24 @@ fn load_inflight_probe_with_scope(
                 let backfilled = if scope.is_some() {
                     backfill_scoped_restore(root, &path, provider)
                 } else {
-                    backfill_finalizer_turn_id_under_lock(root, &path, provider)
+                    backfill_finalizer_turn_id_under_lock(root, &path, provider).ok_or_else(|| {
+                        RestoreFailure::Rejected("legacy backfill incomplete".into())
+                    })
                 };
-                complete &= backfilled.is_some();
+                complete &= backfilled.is_ok();
+                #[cfg(test)]
+                if scope.is_some() {
+                    failure = backfilled.as_ref().err().cloned();
+                }
                 backfilled.unwrap_or(state)
             }
             RowVerdict::Keep(state, false) | RowVerdict::KeepGateRefused(state, _) => state,
             RowVerdict::Skip(incomplete) => {
                 complete &= !incomplete;
+                #[cfg(test)]
+                if incomplete && scope.is_some() {
+                    failure = Some(RestoreFailure::retryable("scoped row read/lock incomplete"));
+                }
                 continue;
             }
             RowVerdict::HideStale(..)
@@ -957,7 +877,12 @@ fn load_inflight_probe_with_scope(
         }
         states.push(state);
     }
-    InflightProbeLoad { states, complete }
+    InflightProbeLoad {
+        states,
+        complete,
+        #[cfg(test)]
+        failure,
+    }
 }
 
 mod boot_custody;
@@ -1281,23 +1206,57 @@ mod loader_gate_observation_tests {
             .split_once("\nmod loader_gate_observation_tests")
             .unwrap()
             .0;
-        let scoped_invalidation = owned
-            .split_once("async fn invalidate_stale_generation_scoped(")
-            .unwrap()
-            .1
-            .split_once("pub(super) fn load_inflight_states_from_root(")
-            .unwrap()
-            .0;
-        let scoped_backfill = owned
-            .split_once("fn backfill_scoped_restore(")
-            .unwrap()
-            .1
-            .split_once("fn load_inflight_probe_with_scope(")
-            .unwrap()
-            .0;
-        let owned = owned
-            .replace(scoped_invalidation, "")
-            .replace(scoped_backfill, "");
+        let scoped = include_str!("removal/scoped_restore.rs");
+        // Exclude only the two named items; extra items before the next item or EOF are refused.
+        let item = |text: &str, name: &str, sentinel: &str| {
+            assert_eq!(text.matches(name).count(), 1, "unique item {name}");
+            let name_at = text.find(name).expect(name);
+            let start = text[..name_at].rfind('\n').map_or(0, |index| index + 1);
+            let end = name_at + text[name_at..].find("\n}").expect("item closing brace") + 2;
+            let next = if sentinel.is_empty() {
+                text.len()
+            } else {
+                end + text[end..].find(sentinel).expect(sentinel)
+            };
+            assert!(
+                text[end..next].trim().is_empty(),
+                "extra item after {name}"
+            );
+            start..end
+        };
+        let ranges = [
+            item(
+                scoped,
+                "async fn invalidate_stale_generation_scoped(",
+                "pub(super) fn backfill_scoped_restore(",
+            ),
+            item(
+                scoped,
+                "fn backfill_scoped_restore(",
+                "",
+            ),
+        ];
+        assert!(ranges[0].end < ranges[1].start);
+        let scoped_reads = format!(
+            "{}{}{}",
+            &scoped[..ranges[0].start],
+            &scoped[ranges[0].end..ranges[1].start],
+            &scoped[ranges[1].end..]
+        );
+        for (connection, sentinel) in [
+            (
+                "use scoped_restore::invalidate_stale_generation_scoped;",
+                "pub(super) fn load_inflight_states_from_root(",
+            ),
+            (
+                "use scoped_restore::backfill_scoped_restore;",
+                "fn load_inflight_probe_with_scope(",
+            ),
+        ] {
+            let end = owned.find(connection).expect(connection) + connection.len();
+            let next = end + owned[end..].find(sentinel).expect(sentinel);
+            assert!(owned[end..next].trim().is_empty(), "extra item after {connection}");
+        }
         let reads = owned.split_once("fn classify_inflight_row(").unwrap().1;
         let reads = reads.split_once("\nmod boot_reaper;").unwrap().0;
         let effects = [
@@ -1313,6 +1272,7 @@ mod loader_gate_observation_tests {
         ];
         for effect in effects.iter().chain(&events) {
             assert!(!reads.contains(effect), "{effect}");
+            assert!(!scoped_reads.contains(effect), "scoped {effect}");
         }
         assert_eq!(
             reads

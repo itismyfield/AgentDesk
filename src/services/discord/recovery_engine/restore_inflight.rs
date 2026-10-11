@@ -2166,14 +2166,18 @@ async fn restore_inflight_states(
             restore_recovered_session_worktree(session, &state);
         }
 
-        let kickoff = mailbox_recovery_kickoff(
-            shared,
-            channel_id,
-            cancel_token.clone(),
-            kickoff_identity.request_owner,
-            kickoff_identity.user_message_id,
-        )
-        .await;
+        let kickoff = if resume_installed {
+            scoped_restore::checked_kickoff(shared, provider, channel_id, cancel_token.clone(), &state).await
+        } else {
+            mailbox_recovery_kickoff(
+                shared,
+                channel_id,
+                cancel_token.clone(),
+                kickoff_identity.request_owner,
+                kickoff_identity.user_message_id,
+            )
+            .await
+        };
 
         let resumed_same_episode = resume_installed
             && kickoff == crate::services::turn_orchestrator::RecoveryKickoffResult::AlreadyActiveSameEpisode;

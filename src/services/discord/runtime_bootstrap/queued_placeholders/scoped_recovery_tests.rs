@@ -429,3 +429,20 @@ async fn s3act_b1_scoped_invalidation_preserves_replay_and_foreign_rows_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[test]
+fn s3act_b3a1_scoped_probe_excludes_stale_planned_restart() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let mut state = row(5340405);
+    state.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
+    state.restart_generation = Some(1);
+    let path = write_row(&state);
+    let generation = runtime_store::generation_path().unwrap();
+    fs::create_dir_all(generation.parent().unwrap()).unwrap();
+    fs::write(generation, "7").unwrap();
+    let before = fingerprint(&path);
+    let probe = inflight::load_inflight_probe_scoped(&ProviderKind::Claude, state.channel_id);
+    assert!(probe.states.is_empty(), "stale planned restart must not be retained as an active candidate");
+    assert!(!probe.complete);
+    assert_eq!(fingerprint(&path), before, "classification adds no retirement rights");
+}
