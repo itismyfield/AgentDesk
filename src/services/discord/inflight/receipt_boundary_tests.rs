@@ -356,7 +356,7 @@ async fn s3act_b3b_generic_inflight_regression_off_pg() {
     assert_eq!(
         outputs,
         serde_json::from_str::<serde_json::Value>(include_str!(
-            "fixtures/receipt_free_writer_baseline.json"
+            "../../../../tests/fixtures/discord_inflight/receipt_free_writer_baseline.json"
         ))
         .unwrap(),
         "receipt-free golden from pre-fix execution"
@@ -769,7 +769,7 @@ async fn s3act_b3b_receipt_free_reaper_results_and_logs_pg() {
     assert_eq!(
         outputs,
         serde_json::from_str::<serde_json::Value>(include_str!(
-            "fixtures/receipt_free_reaper_baseline.json"
+            "../../../../tests/fixtures/discord_inflight/receipt_free_reaper_baseline.json"
         ))
         .unwrap()
     );
