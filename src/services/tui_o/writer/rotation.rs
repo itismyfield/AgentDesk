@@ -10,6 +10,7 @@ use tokio::time::Instant;
 
 use super::binding::{BindingCause, BindingEvent, BindingEvents, BindingRecord, BindingTarget};
 use super::deliver::ChannelWriter;
+use super::past_bind;
 use super::pieces::{Derived, UnitDeriver};
 use super::renumbered::{self, Logged, Names, Reopen, reopen};
 use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm};
@@ -20,7 +21,7 @@ use crate::services::tui_o::shadow::{
     CaptureBatch, CaptureOutcome, CaptureSource, CapturedRecord, MAX_READ_BYTES, ShadowProvider,
     SourceId, UnitKind,
 };
-use crate::services::tui_o::store::{ChannelStore, StoreError};
+use crate::services::tui_o::store::StoreError;
 use crate::services::tui_o::store::rotation::{Boundary, Rotation, SourceLink, Successor};
 use crate::services::tui_o::store::spool::{SpoolFrame, source_key};
 
@@ -601,17 +602,10 @@ impl<B: BindingEvents> Sources<B> {
             let store = writer.store();
             let parent =
                 parent_hint.filter(|parent| **parent != new && store.cursor(parent).is_some());
-            let boundary = match (cause, parent) {
-                // An adoption left this past source unpinned, so its records are old: hold them.
-                _ if self.bound_before(store, event.seq, &new) => Boundary::Pending {
-                    candidates: vec![0],
-                },
-                (BindingCause::Startup | BindingCause::Clear, _) => Boundary::Owed { from: 0 },
-                (BindingCause::Unknown, _) | (_, None) => Boundary::Pending {
-                    candidates: vec![0],
-                },
-                _ => Boundary::Undecided,
-            };
+            let log = self.bindings.binding_events_since(self.channel, 0);
+            let attached = |source: &SourceId| store.cursor(source).is_some();
+            let unread = past_bind::unread_before(log, event.seq, &new, attached);
+            let boundary = past_bind::first_boundary(cause, parent.is_some(), unread);
             if matches!(boundary, Boundary::Pending { .. }) {
                 let source = new.clone();
                 writer.alarm(WriterAlarm::BoundaryPending { source });
@@ -667,25 +661,6 @@ impl<B: BindingEvents> Sources<B> {
             Some(cursor) if cursor.retired => self.unretire(writer, &new),
             Some(_) => Ok(()),
         }
-    }
-
-    /// Whether the log bound `source`'s session and path before `seq` under a name with no cursor,
-    /// or its path and inode under an empty session on either side, whatever device number a
-    /// remount gave it then; an unreadable log counts as bound.
-    fn bound_before(&self, store: &ChannelStore, seq: u64, source: &SourceId) -> bool {
-        let Ok(events) = self.bindings.binding_events_since(self.channel, 0) else {
-            return true;
-        };
-        let earlier = events.iter().filter(|event| event.seq < seq);
-        let mut unread = earlier
-            .filter_map(bound_source)
-            .filter(|b| store.cursor(b).is_none());
-        unread.any(|bound| {
-            let unnamed = bound.session_id.is_empty() || source.session_id.is_empty();
-            let session =
-                bound.session_id == source.session_id || (unnamed && bound.ino == source.ino);
-            session && bound.path == source.path
-        })
     }
 
     fn unretire<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
