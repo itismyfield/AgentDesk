@@ -2491,9 +2491,10 @@ src/
 │   │   │   ├── tap.rs
 │   │   │   └── unit_plan.rs
 │   │   ├── store/
-│   │   │   ├── rotation/
-│   │   │   │   ├── provenance.rs
-│   │   │   │   └── provenance_tests.rs
+│   │   │   ├── codex_provenance/
+│   │   │   │   └── mutation.rs
+│   │   │   ├── codex_provenance.rs
+│   │   │   ├── codex_provenance_tests.rs
 │   │   │   ├── durable.rs
 │   │   │   ├── ledger.rs
 │   │   │   ├── ledger_lock_tests.rs
@@ -2520,6 +2521,7 @@ src/
 │   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── rotation/
+│   │   │   │   ├── owe.rs
 │   │   │   │   └── provenance.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
@@ -2555,6 +2557,8 @@ src/
 │   │   │   ├── operator_resume_delivery_tests.rs
 │   │   │   ├── operator_resume_source_tests.rs
 │   │   │   ├── operator_resume_tests.rs
+│   │   │   ├── owed.rs
+│   │   │   ├── owed_tests.rs
 │   │   │   ├── pieces.rs
 │   │   │   ├── reclaim_tests.rs
 │   │   │   ├── recovery_tests.rs
