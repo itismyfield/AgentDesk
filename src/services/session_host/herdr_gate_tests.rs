@@ -1900,6 +1900,7 @@ pub(crate) mod p11 {
     pub(crate) const NODE: &str = "mac-mini";
     pub(crate) const EXECUTION: &str = NONCE;
     pub(crate) const LAUNCHED_PANE: &str = LAUNCHED;
+    pub(crate) use crate::db::dispatched_sessions::hosted_execution::HostedState;
 
     /// Re-runs test `path` in a child owning its boot section, O writer list and Herdr
     /// provenance (config written before it started); returns whether this is that child.
@@ -2007,20 +2008,21 @@ pub(crate) mod p11 {
             }
         }
 
-        /// Execution `EXECUTION` Bound on the server's pane under `session_key`, provider alive
-        /// and hold taken, with the live terminate and Herdr turn switches on.
+        /// Execution `EXECUTION` in `state` on the server's pane under `session_key`, provider
+        /// alive and, unless retired, its hold taken; the live terminate and turn switches on.
         pub(crate) async fn bind(
             &self,
             pool: &sqlx::PgPool,
             token_hash: &str,
             session_key: &str,
+            state: HostedState,
         ) -> LiveSwitches {
             let logical = session_key.rsplit_once(':').unwrap().1;
             let marker = crate::services::tmux_common::session_temp_path(logical, "host_kind");
             std::fs::write(marker, "herdr").unwrap();
             self.os
                 .swap(Arc::new(FakeOs::launched(env_naming(&context(NONCE)))));
-            let mut record = stored(&self.server, HostedState::Bound);
+            let mut record = stored(&self.server, state);
             record.owner.discord_token_hash = token_hash.into();
             record.owner.channel_id = self.channel.to_string();
             record.owner.logical_key = logical.into();
@@ -2030,7 +2032,9 @@ pub(crate) mod p11 {
                 .bind(session_key).bind(token_hash).bind(self.channel.to_string())
                 .bind(serde_json::to_value(&record).unwrap())
                 .execute(pool).await.unwrap();
-            crate::services::claude::herdr_turn::hold(NONCE).unwrap();
+            if state != HostedState::Retired {
+                crate::services::claude::herdr_turn::hold(NONCE).unwrap();
+            }
             let switches = LiveSwitches(LiveTerminateSwitch::new());
             let mut config = switches.0.0.clone();
             config.runtime.herdr_terminate_enabled = Some(true);
