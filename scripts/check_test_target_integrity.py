@@ -95,6 +95,8 @@ SHELL_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 # A shell or just expansion whose value is unknown statically.
 DYNAMIC_TOKEN = re.compile(
     r"\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)|\{\{[^{}]*\}\}")
+# Shell or just syntax that may rewrite or word-split a libtest argument.
+SHELL_EXPANSION = re.compile(r"[$`{*?\[]")
 NICE_LEGACY_ADJUSTMENT = re.compile(r"^-[+-]?\d+$")
 LIST_SUMMARY = re.compile(r"(\d+) tests?, \d+ benchmarks")
 JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):(?:\s*#.*)?$")
@@ -1033,6 +1035,8 @@ class CommandSpec:
     manifest_path: str = ""
     # libtest `--ignored`: only #[ignore] tests among the selection run.
     ignored_only: bool = False
+    # A run-time expansion may add a --skip (or --exact/--ignored) unseen here.
+    unknown_skip: bool = False
 
 
 def parse_command(words: list[str]) -> CommandSpec:
@@ -1051,9 +1055,24 @@ def parse_command(words: list[str]) -> CommandSpec:
     manifest_path = ""
     ignored_only = False
     target_inconclusive = False
+    unknown_skip = False
 
     def dynamic(token: str) -> bool:
         return bool(DYNAMIC_TOKEN.search(token))
+
+    def skip_value(value: str) -> None:
+        nonlocal unknown_skip
+        if SHELL_EXPANSION.search(value):
+            unknown_skip = True
+        else:
+            skip_filters.append(value)
+
+    def bare_word(token: str) -> None:
+        nonlocal unknown_skip
+        # An expansion may word-split into --skip/--exact/--ignored at run time.
+        unknown_skip = unknown_skip or bool(SHELL_EXPANSION.search(token))
+        if not token.startswith("-") and not dynamic(token):
+            filters.append(token)
 
     def consume_filter_option(tokens: list[str], position: int) -> int | None:
         nonlocal exact
@@ -1061,13 +1080,10 @@ def parse_command(words: list[str]) -> CommandSpec:
         if token == "--exact":
             exact = True
         elif token == "--skip" and position + 1 < len(tokens):
-            if not dynamic(tokens[position + 1]):
-                skip_filters.append(tokens[position + 1])
+            skip_value(tokens[position + 1])
             return position + 1
         elif token.startswith("--skip="):
-            value = token.partition("=")[2]
-            if not dynamic(value):
-                skip_filters.append(value)
+            skip_value(token.partition("=")[2])
         else:
             return None
         return position
@@ -1104,8 +1120,8 @@ def parse_command(words: list[str]) -> CommandSpec:
             unjudged = unjudged or f"{token}: {UNJUDGED_OPTIONS[token]}"
         elif (consumed := consume_filter_option(before, index)) is not None:
             index = consumed
-        elif not token.startswith("-") and not dynamic(token):
-            filters.append(token)
+        else:
+            bare_word(token)
         index += 1
     index = 0
     while index < len(after):
@@ -1117,8 +1133,8 @@ def parse_command(words: list[str]) -> CommandSpec:
             index += 1
         elif token == "--ignored":
             ignored_only = True
-        elif not token.startswith("-") and not dynamic(token):
-            filters.append(token)
+        else:
+            bare_word(token)
         index += 1
 
     targets_tuple = tuple(dict.fromkeys(targets))
@@ -1140,6 +1156,7 @@ def parse_command(words: list[str]) -> CommandSpec:
         targets_tuple, tuple(filters), tuple(skip_filters), exact, selection,
         bool(unjudged), target_inconclusive, classes_tuple,
         tuple(dict.fromkeys(packages)), unjudged, manifest_path, ignored_only,
+        unknown_skip,
     )
 
 
@@ -1341,9 +1358,10 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                 ids, filt, spec.exact)
             if hits:
                 matched.append(f"{target} ({len(hits)} test ID(s))")
-            # Only a test that survives the same --skip rule proves a sweep.
-            live = live or bool(_lib_selection(
-                replace(spec, filters=(filt,)), hits))
+            # Only a test that survives the same --skip rule proves a sweep;
+            # under --ignored no static ID is known to be #[ignore].
+            live = live or (not spec.ignored_only and bool(_lib_selection(
+                replace(spec, filters=(filt,)), hits)))
         elsewhere = "; ".join(
             ([f"module `{lead}` declared in {', '.join(declared)}"]
              if declared else [])
@@ -1363,10 +1381,18 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                 empty.append(("zero-match", (
                     f"module-path filter `{filt}` matches 0 test IDs in "
                     f"{selection_name}")))
-        elif final:
+        elif final and not (spec.unknown_skip or spec.ignored_only):
             continue  # libtest ORs the filters; the union already selects tests
         elif elsewhere and not sweep:
             findings.append(mismatch)
+        elif final:
+            # The union rests on candidates a run-time restriction may drop.
+            restriction = ("a dynamic --skip or libtest argument"
+                           if spec.unknown_skip else "--ignored")
+            findings.append(("unproven-union", (
+                f"filter `{filt}` matches 0 tests in {selection_name}; only "
+                f"the other filters' {len(final)} candidate test ID(s) keep "
+                f"the run non-empty, and {restriction} may remove them all")))
         elif live:
             # A name sweep across a target class: an empty side is visible,
             # not fatal, while a typo matching nothing anywhere still fails.
