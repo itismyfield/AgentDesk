@@ -5,9 +5,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
+use super::queued_head::{SnapshotMeta, parse_snapshot};
 use super::{
-    Intervention, InterventionMode, QueuePersistenceContext, SourceMessageQueuedGeneration,
-    SourceMessageTextSegment,
+    ChannelMailboxState, Intervention, InterventionMode, QueuePersistenceContext,
+    SourceMessageQueuedGeneration, SourceMessageTextSegment,
 };
 use crate::services::provider::ProviderKind;
 
@@ -18,7 +19,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// Serializable form of a queued intervention for disk persistence.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PendingQueueItem {
     pub(crate) author_id: u64,
     #[serde(default)]
@@ -98,7 +99,7 @@ fn pending_queue_root() -> Option<PathBuf> {
     crate::services::discord::runtime_store::discord_pending_queue_root()
 }
 
-fn pending_queue_file_path(
+pub(super) fn pending_queue_file_path(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: ChannelId,
@@ -359,7 +360,7 @@ fn created_at_instant_from_wall_time_ms(
     }
 }
 
-fn pending_queue_item_from_intervention(
+pub(super) fn pending_queue_item_from_intervention(
     intervention: &Intervention,
     channel_id: ChannelId,
     dispatch_role_override: Option<u64>,
@@ -424,6 +425,7 @@ fn pending_queue_item_from_intervention(
 
 /// Write-through: save a single channel's queue to disk.
 /// If the queue is empty the file is removed.
+#[cfg(test)]
 pub(crate) fn save_channel_queue(
     provider: &ProviderKind,
     token_hash: &str,
@@ -437,16 +439,19 @@ pub(crate) fn save_channel_queue(
             token_hash,
             channel_id,
             queue,
+            None,
             dispatch_role_override,
         )
     })
 }
 
+/// A set `meta` writes the V1 object, which an empty queue does not remove.
 fn save_channel_queue_locked(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: ChannelId,
     queue: &[Intervention],
+    meta: Option<&SnapshotMeta>,
     dispatch_role_override: Option<u64>,
 ) -> Result<(), String> {
     let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) else {
@@ -464,7 +469,7 @@ fn save_channel_queue_locked(
             path.display()
         ));
     }
-    if queue.is_empty() {
+    if queue.is_empty() && meta.is_none() {
         return match fs::remove_file(&path) {
             Ok(())
                 if crate::services::discord::input_runtime::fence::lookup(
@@ -510,7 +515,7 @@ fn save_channel_queue_locked(
             )
         })
         .collect();
-    let json = serde_json::to_string_pretty(&items)
+    let json = super::queued_head::snapshot_json(items, meta)
         .map_err(|error| format!("serialize pending queue {}: {error}", path.display()))?;
     let context =
         crate::services::discord::runtime_store::AtomicWriteContext::new("discord_pending_queue")
@@ -520,18 +525,22 @@ fn save_channel_queue_locked(
     crate::services::discord::runtime_store::critical_atomic_write(&path, &json, context)
 }
 
+/// The actor's only queue write: its snapshot, once `prepare_write` accepts it.
 pub(super) fn persist_queue(
+    state: &mut ChannelMailboxState,
     channel_id: ChannelId,
-    queue: &[Intervention],
     persistence: &QueuePersistenceContext,
 ) -> Result<(), String> {
-    save_channel_queue(
-        &persistence.provider,
-        &persistence.token_hash,
-        channel_id,
-        queue,
+    super::queued_head::prepare_write(state, channel_id, persistence)?;
+    let (provider, token_hash) = (&persistence.provider, &persistence.token_hash);
+    let meta = Some(&state.queued_head.meta).filter(|meta| meta.is_set());
+    let (queue, role) = (
+        &state.intervention_queue,
         persistence.dispatch_role_override,
-    )
+    );
+    crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
+        save_channel_queue_locked(provider, token_hash, channel_id, queue, meta, role)
+    })
 }
 
 pub(super) fn log_queue_persistence_rollback(
@@ -666,7 +675,7 @@ pub(crate) fn remove_channel_pending_queue_files_all_tokens(
     let mut removed = 0;
     for entry in entries.flatten() {
         let token_dir = entry.path();
-        if !token_dir.is_dir() {
+        if !token_dir.is_dir() || super::queued_head::purge_keeps(&token_dir.join(&filenames[0])) {
             continue;
         }
         for filename in &filenames {
@@ -870,7 +879,7 @@ pub(crate) fn load_pending_queues(
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(items) = serde_json::from_str::<Vec<PendingQueueItem>>(&content) else {
+        let Ok((items, _)) = parse_snapshot(&content) else {
             continue;
         };
         if let Some(override_id) = items.iter().find_map(|item| item.override_channel_id) {
@@ -945,7 +954,7 @@ pub(crate) fn load_channel_pending_queue_checked(
             ));
         }
     };
-    let items = serde_json::from_str::<Vec<PendingQueueItem>>(&content)
+    let (items, _) = parse_snapshot(&content)
         .map_err(|error| format!("parse pending queue file {}: {error}", path.display()))?;
     let restored_override = items
         .iter()

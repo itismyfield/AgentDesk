@@ -6,7 +6,7 @@ use poise::serenity_prelude::{ChannelId, MessageId};
 use super::{
     ChannelMailboxState, ClearChannelResult, QueueExitEvent, QueueExitKind,
     QueuePersistenceContext, clear_pending_user_dispatch,
-    delete_pending_dispatch_marker_with_persistence, persist_queue_or_restore,
+    delete_pending_dispatch_marker_with_persistence, persist_queue_or_restore, queued_head,
     release_active_turn_anchor,
 };
 
@@ -20,9 +20,11 @@ pub(super) fn clear_channel_state(
         state.active_user_message_id.into_iter().collect();
     let removed_token = release_active_turn_anchor(state, channel_id, Some(&persistence.provider));
     let previous_queue = state.intervention_queue.clone();
+    // A reserved queued head is not cleared: it may already be in the pane.
+    let keep = queued_head::protected_len(state, channel_id, &persistence);
     let queue_exit_events: Vec<QueueExitEvent> = state
         .intervention_queue
-        .drain(..)
+        .drain(keep..)
         .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Superseded))
         .collect();
     if let Err(error) =
