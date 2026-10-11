@@ -1063,11 +1063,31 @@ class TestIdOracleContract(unittest.TestCase):
                  ["unproven-union"]),
                 # A single filter never leans on another filter's candidates.
                 ("cargo test --lib recovery_case -- ${NON_PG_SKIP_ARGS[@]}", []),
+                # A sweep's evidence must survive the array, and this fixture
+                # has no filter file to read it from.
                 ("cargo test --bins high_risk_recovery -- ${NON_PG_SKIP_ARGS[@]}",
-                 [])):
+                 ["zero-match"])):
             with self.subTest(command=command):
                 self.assertEqual(self.kinds(command, integration_test=True,
                                             bin_test=True), kinds)
+
+    def test_a_full_union_still_needs_a_statically_known_skip(self) -> None:
+        # Every filter matching statically proves nothing once a skip whose
+        # value is unknown may drop all of their candidates at run time.
+        both = "cargo test --lib recovery_case -- nested_case"
+        for command, kinds in (
+                (both, []),
+                (f"{both} --skip other_case", []),
+                (f"{both} --skip case", ["zero-match"]),
+                (f"{both} --skip $SKIP", ["unproven-union"]),
+                (f"{both} --skip {{{{SKIP}}}}", ["unproven-union"]),
+                (f"{both} --skip `skips`", ["unproven-union"]),
+                (f"{both} ${{NON_PG_SKIP_ARGS[@]}}", ["unproven-union"]),
+                ("cargo test --lib recovery_case -- missing_case --skip $SKIP",
+                 ["unproven-union"]),
+                ("cargo test --lib recovery_case -- --skip $SKIP", [])):
+            with self.subTest(command=command):
+                self.assertEqual(self.kinds(command), kinds)
 
     def test_a_provable_empty_selection_is_judged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1112,6 +1132,49 @@ class TestIdOracleContract(unittest.TestCase):
                     ("cargo test --bins high_risk_recovery -- --include-ignored", [])):
                 with self.subTest(command=command):
                     self.assertEqual(self.judge(root, command), kinds)
+
+    def test_sweep_evidence_must_survive_the_run_time_skips(self) -> None:
+        # Another target's test proves a sweep only if it survives the run's
+        # skips: an opaque expansion may drop it; the generated array is read.
+        sweep = "cargo test --bins high_risk_recovery --"
+        array = "${NON_PG_SKIP_ARGS[@]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_fixture_repo(root, GOOD_COMMAND)
+            filter_file = root / "scripts/ci/non-pg-test-filter.sh"
+            for body, command, kinds in (
+                    (None, f"{sweep} --skip other_case", []),
+                    (None, f"{sweep} --skip $SKIP", ["empty-target"]),
+                    (None, f"{sweep} --skip=${{SKIP}}", ["empty-target"]),
+                    (None, f"{sweep} --skip {{{{SKIP}}}}", ["empty-target"]),
+                    (None, f"{sweep} --skip $(skips)", ["empty-target"]),
+                    (None, f"{sweep} $EXTRA", ["empty-target"]),
+                    # Without the checked-in filter the array is unknown.
+                    (None, f"{sweep} {array}", ["empty-target"]),
+                    ("  --skip _pg\n  --skip postgres\n", f"{sweep} {array}", []),
+                    ("  --skip _pg\n  --skip postgres\n", f"{sweep} {array} $EXTRA",
+                     ["empty-target"]),
+                    # Only libtest reads the array's --skip pairs.
+                    ("  --skip _pg\n  --skip postgres\n",
+                     f"cargo test --bins high_risk_recovery {array}", ["empty-target"]),
+                    ("  --skip _pg\n  --skip high_risk_recovery\n", f"{sweep} {array}",
+                     ["empty-target"]),
+                    ("  --skip _pg\n  --exact\n", f"{sweep} {array}", ["empty-target"]),
+                    ("  --skip _pg\n  --skip $EXTRA\n", f"{sweep} {array}",
+                     ["empty-target"]),
+                    ("  --skip _pg\n)\nNON_PG_SKIP_ARGS+=(\n  --skip high_risk\n",
+                     f"{sweep} {array}", ["empty-target"])):
+                if body is not None:
+                    filter_file.parent.mkdir(parents=True, exist_ok=True)
+                    filter_file.write_text(f"NON_PG_SKIP_ARGS=(\n{body})\n",
+                                           encoding="utf-8")
+                with self.subTest(body=body, command=command):
+                    self.assertEqual(self.judge(root, command), kinds)
+
+    def test_checked_in_non_pg_filter_is_readable(self) -> None:
+        skips = integrity.PackageTestIds(REPO_ROOT).non_pg_skip_filters()
+        self.assertIsNotNone(skips)
+        self.assertIn("_pg", skips)
 
     def test_default_selection_follows_cargo_test_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
