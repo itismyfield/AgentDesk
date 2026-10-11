@@ -65,7 +65,18 @@ pub trait HostIo: Send + Sync + 'static {
     fn relaying(&self, channel: u64) -> bool;
     /// Called once a first activation committed the channel, before it is ready for intake.
     fn adopted(&self, _channel: u64, _provider: ShadowProvider) {}
+    /// The channel's re-post turn for one actor start; none leaves the writer as it was.
+    fn repost(&self, _channel: u64, _port: &Arc<Self::Port>) -> Option<RepostTurn<Self>> {
+        None
+    }
 }
+
+/// A host's re-post turn for one channel writer.
+pub(crate) type RepostTurn<I> = Box<
+    dyn crate::services::tui_o::repost::runner::RepostHook<
+            ChannelWriter<<I as HostIo>::Port, <I as HostIo>::Lease, <I as HostIo>::Alarms>,
+        >,
+>;
 
 /// The facts and queued Legacy bodies read while intake writes are fenced.
 pub struct FencedFacts {
@@ -762,7 +773,10 @@ impl<I: HostIo> Hosted<'_, I> {
     async fn run(&self, store: ChannelStore, attempt: u32) -> Option<StopCause> {
         let (channel, gate) = (self.channel, self.gate);
         let (port, lease) = (Arc::clone(&self.port), self.io.lease());
-        let writer = ChannelWriter::new(store, Arc::clone(gate), port, lease, self.alarms.clone());
+        // Built for each start, so a restarted actor reopens the sidecar and keeps no stale probe.
+        let repost = self.io.repost(channel, &port);
+        let writer = ChannelWriter::new(store, Arc::clone(gate), port, lease, self.alarms.clone())
+            .with_repost(repost);
         let (stop_tx, stop) = watch::channel(false);
         let (resumed_tx, resumed) = watch::channel(false);
         // Each start publishes its own count; the ended actor's closed one reads as `None`.

@@ -587,6 +587,8 @@ async fn herdr_cold_stop_settles_only_with_a_before_start_proof() {
     use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    // The bridge owns these bodies; the policy close shows its stop only there.
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     for (index, cold) in [
         Cold::FailedThenStop,
         Cold::StopThenClosed,
@@ -599,8 +601,23 @@ async fn herdr_cold_stop_settles_only_with_a_before_start_proof() {
     .into_iter()
     .enumerate()
     {
+        let steps = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = steps.clone();
+        let receipt = move |step: &'static str, row: &InflightTurnState| {
+            let durable =
+                discord::inflight::load_inflight_state(&ProviderKind::Codex, row.channel_id);
+            let pending = durable
+                .and_then(|row| row.herdr_before_start_stop)
+                .map(|r| r.notice_pending());
+            seen.borrow_mut().push((step, pending));
+        };
+        crate::services::discord::turn_bridge::before_start_stop::test_hooks::observe(Some(
+            Box::new(receipt),
+        ));
         let (signal, holds, row, active) =
             herdr_cold_case(5_340_331_000 + index as u64, cold).await;
+        crate::services::discord::turn_bridge::before_start_stop::test_hooks::observe(None);
+        let steps = steps.take();
         if cold == Cold::StopAfterSeal {
             // A sealed Normal exit is not reopened by the late stop: the ordinary error finalize
             // frees the slot and accounting (its row follows the ordinary error disposition).
@@ -609,6 +626,18 @@ async fn herdr_cold_stop_settles_only_with_a_before_start_proof() {
             continue;
         }
         let proof = matches!(cold, Cold::FailedThenStop | Cold::StopThenClosed);
+        // The actual exit writes the receipt, acks the shown stop in it, then finalize clears it.
+        let through_receipt = [
+            ("before_receipt", None),
+            ("after_receipt", Some(true)),
+            ("after_notice_ack", Some(false)),
+            ("before_finalize", Some(false)),
+        ];
+        assert_eq!(
+            steps,
+            if proof { &through_receipt[..] } else { &[] },
+            "{cold:?}"
+        );
         assert_eq!(signal, BridgeCompletionSignal::Unresolved, "{cold:?}");
         assert_eq!(
             (holds, row, active),
@@ -633,7 +662,10 @@ async fn herdr_cold_case(
     use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
     use std::sync::atomic::Ordering;
     let mut shared = discord::make_shared_data_for_tests();
-    Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Codex;
+    let writable = Arc::get_mut(&mut shared).unwrap();
+    writable.provider = ProviderKind::Codex;
+    // A booted process generation: the policy receipt records it.
+    writable.restart.current_generation = 17;
     let channel = ChannelId::new(channel_id);
     let cancel = Arc::new(CancelToken::new());
     let owner = HostedOwner {
@@ -698,6 +730,8 @@ async fn herdr_cold_case(
     let mut bridge = seed_context("", row);
     bridge.provider = ProviderKind::Codex;
     bridge.user_msg_id = Some(message);
+    // The bridge's placeholder is the row's message, as intake hands it over.
+    bridge.current_msg_id = Some(MessageId::new(18));
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
     bridge.completion_tx = Some(completion_tx);
     let (tx, rx) = mpsc::channel();
