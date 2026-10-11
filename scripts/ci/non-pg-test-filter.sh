@@ -52,6 +52,7 @@ NON_PG_SKIP_ARGS=(
   --skip server::routes::dispatched_sessions::tests
   --skip server::routes::escalation::manual_decision_gate_tests
   --skip server::routes::health_api::host_guard_tests
+  --skip server::routes::herdr_legacy_tests
   --skip server::routes::memory_api::request_body_tests
   --skip server::routes::message_outbox::tests
   --skip server::routes::pipeline::stage_save_tests
@@ -165,6 +166,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
@@ -844,6 +846,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   server::routes::dispatched_sessions::tests
   server::routes::escalation::manual_decision_gate_tests
   server::routes::health_api::host_guard_tests
+  server::routes::herdr_legacy_tests
   server::routes::memory_api::request_body_tests
   server::routes::message_outbox::tests
   server::routes::pipeline::stage_save_tests
@@ -957,6 +960,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
   services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
+  services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
   services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e

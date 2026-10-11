@@ -66,6 +66,7 @@ src/server/routes/dispatched_sessions_tests.rs
 src/server/routes/dispatches/crud.rs
 src/server/routes/escalation.rs
 src/server/routes/health_api/host_guard_tests.rs
+src/server/routes/herdr_legacy_tests.rs
 src/server/routes/memory_api.rs
 src/server/routes/message_outbox.rs
 src/server/routes/pipeline_stage_save_tests.rs
@@ -204,6 +205,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs
+src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs
 src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs
@@ -338,6 +340,7 @@ server::routes::dispatched_sessions::tests
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests
 server::routes::escalation::manual_decision_gate_tests
 server::routes::health_api::host_guard_tests
+server::routes::herdr_legacy_tests
 server::routes::memory_api::request_body_tests
 server::routes::message_outbox::tests
 server::routes::pipeline::stage_save_tests
@@ -485,6 +488,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
@@ -560,6 +564,7 @@ cli::herdr::tests::a_lone_recorded_root_shell_retires_its_execution_pg
 cli::herdr::tests::a_retire_whose_cas_fails_keeps_the_hold_pg
 cli::herdr::tests::an_execution_without_launch_evidence_keeps_its_row_while_its_pane_may_run_pg
 cli::herdr::tests::an_execution_without_launch_evidence_retires_once_a_snapshot_lacks_its_pane_pg
+cli::herdr::tests::m2t_u9_manual_retire_inside_the_terminate_cas_window_pg
 cli::herdr::tests::status_shows_rows_panes_and_holds_without_paths_pg
 cli::herdr::tests::t_r3_retire_needs_a_read_that_shows_the_execution_ended_pg
 db::auto_queue::entries::dispatch_failure::tests::concurrent_failure_has_one_cas_winner_pg
@@ -1026,6 +1031,7 @@ server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dis
 server::routes::escalation::manual_decision_gate_tests::emit_escalation_pg_rejects_superseded_manual_decision_cards_without_discord_send
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_defers_before_the_tmux_probe_unless_the_row_is_legacy_pg
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_names_and_records_an_unmeasured_tail_pg
+server::routes::herdr_legacy_tests::m2t_t8_legacy_delete_and_force_routes_preserve_host_guards_pg
 server::routes::memory_api::request_body_tests::local_memory_api_uses_migrated_table
 server::routes::memory_api::request_body_tests::local_memory_migration_preserves_preexisting_route_table_rows
 server::routes::memory_api::request_body_tests::memory_recall_forget_handlers_use_local_when_memento_runtime_unavailable
@@ -1661,6 +1667,9 @@ services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cancelled_a
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_real_intake_through_termination_to_one_herdr_start_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_channel_name_starts_its_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_session_starts_its_input_once_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6_sealed_tail_delivered_once_after_termination_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6b_successor_launch_preserves_a_tail_and_cursor_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7_unsealed_survives_termination_and_rotation_stall_pg
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e::reconcile_stale_turn_held_release_arms_backstop_and_runs_preserved_q_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg

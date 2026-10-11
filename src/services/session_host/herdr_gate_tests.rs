@@ -1301,6 +1301,7 @@ mod service {
     pub(super) struct ScriptedOs {
         inner: Mutex<Arc<dyn ProcessOs>>,
         exists: Result<bool, RestoreUnverified>,
+        on_exists: Mutex<Option<CloseHook>>,
     }
 
     impl ScriptedOs {
@@ -1311,10 +1312,15 @@ mod service {
             Arc::new(Self {
                 inner: Mutex::new(inner),
                 exists,
+                on_exists: Mutex::new(None),
             })
         }
         pub(super) fn swap(&self, inner: Arc<dyn ProcessOs>) {
             *self.inner.lock().unwrap() = inner;
+        }
+        /// Runs once, inside the next read of whether the recorded provider still exists.
+        pub(super) fn on_exists(&self, hook: CloseHook) {
+            *self.on_exists.lock().unwrap() = Some(hook);
         }
         fn os(&self) -> Arc<dyn ProcessOs> {
             self.inner.lock().unwrap().clone()
@@ -1323,6 +1329,9 @@ mod service {
 
     impl ProcessOs for ScriptedOs {
         fn exists(&self, _: u32) -> Result<bool, RestoreUnverified> {
+            if let Some(hook) = self.on_exists.lock().unwrap().take() {
+                hook();
+            }
             self.exists
         }
         fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified> {
@@ -1889,6 +1898,64 @@ fn m2_turn_changed_before_close_has_zero_effect_pg() {
     });
 }
 
+// A run that stops after its close and before the retire CAS, as a dying process would, leaves
+// the row Bound over a gone pane with the hold, turn and closing fence; a rerun in this process
+// retires without a second close. A real restart also drops the mailbox turn and the fence.
+#[test]
+fn m2t_u8_stop_between_close_and_cas_then_rerun_pg() {
+    if run_terminate_child("m2t_u8_stop_between_close_and_cas_then_rerun_pg") {
+        return;
+    }
+    use service::test_turn;
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, false, true);
+    let os = ScriptedOs::new(launched_os(&rig), Ok(false));
+    block_on(async {
+        let service = Service::start(&rig, pane.clone(), os, NONCE).await;
+        let channel = serenity::model::id::ChannelId::new(1);
+        let token = test_turn::start(&service.shared, channel, 51, "turn-a").await;
+        let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel::<()>();
+        pane.on_close(Box::new(move || {
+            let _ = stopped_tx.send(());
+        }));
+        // The stop fires inside the close call, so the run is dropped before it sees the reply.
+        let first = tokio::select! {
+            biased;
+            _ = stopped_rx => None,
+            result = service.terminate(NONCE) => Some(result),
+        };
+        assert_eq!(first, None, "the run stopped after its close");
+        assert_eq!(closes(&rig).len(), 1);
+        assert_eq!(service.row().await, ("bound".into(), NONCE.into()));
+        assert!(held(NONCE), "no CAS ran, so the hold stays");
+        let active = test_turn::active(&service.shared, channel).await;
+        assert!(active.is_some_and(|active| Arc::ptr_eq(&active, &token)));
+        let mut record = stored(&rig.server, HostedState::Bound);
+        record.owner.discord_token_hash = service.shared.token_hash.clone();
+        let target = herdr_registry::registry().target(&record).unwrap();
+        let pinned = target.pin(Mutation::Input);
+        target.discard_pin();
+        assert!(
+            pinned.is_err(),
+            "the closed execution refuses input: {pinned:?}"
+        );
+
+        let rerun = service.terminate(NONCE).await;
+        assert_eq!(rerun, TerminationResult::Retired);
+        assert_eq!(closes(&rig).len(), 1, "an ended pane is never closed again");
+        assert_eq!(service.row().await.0, "retired");
+        assert!(!held(NONCE));
+        assert!(test_turn::active(&service.shared, channel).await.is_none());
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(
+            service.shared.restart.global_active.load(Ordering::Relaxed),
+            0
+        );
+        service.finish().await;
+    });
+}
+
 /// The fake Herdr server and scripted OS wired into a caller's runtime, pool and root; every
 /// runtime thread reads the boot registry, whose launch host dials the same server.
 pub(crate) mod p11 {
@@ -2053,6 +2120,25 @@ pub(crate) mod p11 {
             record
         }
 
+        /// Every write the server received, as `(method, params)`, in order.
+        pub(crate) fn writes_with_params(&self) -> Vec<(String, Value)> {
+            let method = |m: &Value| m["method"].as_str().unwrap_or("").to_owned();
+            let writes = self.server.mutations().into_iter();
+            writes.map(|m| (method(&m), m["params"].clone())).collect()
+        }
+
+        /// Holds the next provider-existence read, which only the service's end check makes
+        /// after its close: `arrived` fires there and the read waits until `release` is sent.
+        pub(crate) fn pause_end_check(&self) -> EndCheckPause {
+            let (arrived_tx, arrived) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            self.os.on_exists(Box::new(move || {
+                let _ = arrived_tx.send(());
+                let _ = wait.recv_timeout(Duration::from_secs(60));
+            }));
+            EndCheckPause { arrived, release }
+        }
+
         /// Every write the server received, as `(method, pane_id)`, in order.
         pub(crate) fn writes(&self) -> Vec<(String, String)> {
             self.server
@@ -2069,6 +2155,12 @@ pub(crate) mod p11 {
 
     /// Restores the live config the child started with.
     pub(crate) struct LiveSwitches(LiveTerminateSwitch);
+
+    /// A held end check: the service waits between its close and its retire CAS.
+    pub(crate) struct EndCheckPause {
+        pub(crate) arrived: tokio::sync::oneshot::Receiver<()>,
+        pub(crate) release: std::sync::mpsc::Sender<()>,
+    }
 
     /// Whether the execution's input hold is still taken.
     pub(crate) fn held() -> bool {

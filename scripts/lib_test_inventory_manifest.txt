@@ -153,6 +153,7 @@ cli::herdr::tests::a_lone_recorded_root_shell_retires_its_execution_pg
 cli::herdr::tests::a_retire_whose_cas_fails_keeps_the_hold_pg
 cli::herdr::tests::an_execution_without_launch_evidence_keeps_its_row_while_its_pane_may_run_pg
 cli::herdr::tests::an_execution_without_launch_evidence_retires_once_a_snapshot_lacks_its_pane_pg
+cli::herdr::tests::m2t_u9_manual_retire_inside_the_terminate_cas_window_pg
 cli::herdr::tests::status_shows_rows_panes_and_holds_without_paths_pg
 cli::herdr::tests::t_r3_retire_needs_a_read_that_shows_the_execution_ended_pg
 cli::init::launchd_plist_tests::clamp_launchd_nofile_soft_limit_never_exceeds_host_hard_limit
@@ -1282,6 +1283,7 @@ server::routes::health_api::tests::supported_provider_ids_contain_no_colon
 server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_nothing_for_a_measured_backlog
 server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_nothing_when_readiness_also_refuses
 server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_only_when_no_unrelayed_answer_refuses
+server::routes::herdr_legacy_tests::m2t_t8_legacy_delete_and_force_routes_preserve_host_guards_pg
 server::routes::kakao_calendar::tests::calendar_mutations_require_stable_nonempty_bounded_keys
 server::routes::kakao_calendar::tests::calendar_requires_real_bearer_not_claimed_identity_or_local_origin
 server::routes::kanban::update_card_validation_tests::update_card_validation_accepts_valid_metadata_json_object
@@ -8305,6 +8307,9 @@ services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::he
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_real_intake_through_termination_to_one_herdr_start_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_channel_name_starts_its_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_session_starts_its_input_once_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6_sealed_tail_delivered_once_after_termination_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6b_successor_launch_preserves_a_tail_and_cursor_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7_unsealed_survives_termination_and_rotation_stall_pg
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_claude_idle_binding_does_not_resume_its_synthetic_row
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_direct_prompt_posts_only_its_notice
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance
@@ -11022,6 +11027,7 @@ services::session_host::herdr_gate::tests::m1_unreadable_process_never_means_abs
 services::session_host::herdr_gate::tests::m2_already_finalized_with_active_a_is_indeterminate_pg
 services::session_host::herdr_gate::tests::m2_settlement_mailbox_unreadable_is_indeterminate_pg
 services::session_host::herdr_gate::tests::m2_turn_changed_before_close_has_zero_effect_pg
+services::session_host::herdr_gate::tests::m2t_u8_stop_between_close_and_cas_then_rerun_pg
 services::session_host::herdr_gate::tests::only_a_registered_local_endpoint_makes_a_herdr_target
 services::session_host::herdr_gate::tests::stopped_admission_refuses_input_but_lets_a_cancel_key_through
 services::session_host::herdr_gate::tests::the_boot_registry_holds_only_this_nodes_endpoints

@@ -196,10 +196,10 @@ async fn scenario(rig: herdr::P11TerminationRig) {
         "the original text and its source identity wait in the queue"
     );
     assert!(pin.is_err(), "the execution fence refuses input: {pin:?}");
-    let writes = rig.writes();
-    assert!(
-        matches!(writes.as_slice(), [(method, pane)] if method.ends_with(".close") && pane == "w1-1"),
-        "nothing but the close reached Herdr before settlement: {writes:?}"
+    assert_eq!(
+        rig.writes(),
+        [("pane.close".to_string(), "w1-1".to_string())],
+        "nothing but the close reached Herdr before settlement"
     );
     assert_eq!(harness.provider_starts(), 0);
     assert!(
@@ -259,6 +259,7 @@ async fn scenario(rig: herdr::P11TerminationRig) {
             .is_some_and(|(_, nonce)| nonce != herdr::EXECUTION),
         "the launch installed a new execution: {row:?}"
     );
+    assert_launch_typed_its_script(&rig, &record.owner.logical_key);
     assert_eq!(
         harness.provider_starts(),
         0,
@@ -272,6 +273,31 @@ async fn scenario(rig: herdr::P11TerminationRig) {
     drop(harness);
     pool.close().await;
     database.drop().await;
+}
+
+/// The launch's one input typed, with Enter, the launch script prepared for session `tmux`.
+fn assert_launch_typed_its_script(rig: &herdr::P11TerminationRig, tmux: &str) {
+    let writes = rig.writes_with_params();
+    let typed: Vec<_> = writes
+        .iter()
+        .filter(|(method, params)| {
+            method == "pane.send_input" && params["pane_id"] == herdr::LAUNCHED_PANE
+        })
+        .map(|(_, params)| params)
+        .collect();
+    let [params] = typed.as_slice() else {
+        panic!("one launch input: {writes:?}");
+    };
+    assert_eq!(params["keys"], serde_json::json!(["enter"]), "{params}");
+    let ext = crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT;
+    let script = crate::services::tmux_common::session_temp_path(tmux, ext);
+    let typed = format!("bash {}", crate::services::process::shell_escape(&script));
+    assert_eq!(params["text"], typed.as_str(), "{params}");
+    let body = std::fs::read_to_string(&script).unwrap_or_default();
+    assert!(
+        body.contains("\nexec "),
+        "the script launches the provider: {body}"
+    );
 }
 
 /// A registered Herdr channel whose execution was retired, with no channel session or one
