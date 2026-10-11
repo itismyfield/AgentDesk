@@ -140,6 +140,8 @@ class RequiredPrParityTests(unittest.TestCase):
         self.assertIn("justfile:3", missing[0])
         self.assertIn("gamma::local", missing[0])
         self.assertIn("OK: required_pr_coverage", output)
+        repo.pr["targeted"].append("cargo test --lib ''")
+        self.assertEqual(len(findings(repo.check()[1], "pr-parity-missing")), 1)
 
     def test_explicit_required_pr_filter_restores_parity(self) -> None:
         repo = Repo()
@@ -241,12 +243,15 @@ class RequiredPrParityTests(unittest.TestCase):
         self.assertIn("gamma::local", invalid[0])
         self.assertIn("  + gamma (e.g. gamma::local)", output)
 
-    def test_dynamic_required_pr_selection_is_unresolved(self) -> None:
-        repo = Repo()
-        repo.pr["targeted"].append('cargo test --lib "$FILTER"')
-        result, output = repo.check()
-        self.assertEqual(result, 1)
-        self.assertEqual(len(findings(output, "source-command-unresolved")), 1, output)
+    def test_unreadable_required_pr_commands_are_unresolved(self) -> None:
+        for command in ('cargo test --lib "$FILTER"', "just test-non-pg || true"):
+            with self.subTest(command=command):
+                repo = Repo()
+                repo.pr["targeted"].append(command)
+                result, output = repo.check()
+                self.assertEqual(result, 1)
+                unresolved = findings(output, "source-command-unresolved")
+                self.assertEqual(len(unresolved), 1, output)
 
     def test_malformed_or_unsorted_exceptions_are_invalid(self) -> None:
         repo = Repo()

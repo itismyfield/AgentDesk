@@ -142,7 +142,9 @@ def _source(cti, coverage, expansions, origin, owner, location, words):
     else:
         target = "lib" if "--lib" in cargo_args else "default"
     filters = tuple(lane.positives) if lane is not None else tuple(spec.filters)
-    selection = "sweep" if lane is not None and not lane.positives else "named"
+    # An empty positive matches every id, so it selects like the unfiltered sweep.
+    broad = lane is not None and (not lane.positives or "" in lane.positives)
+    selection = "sweep" if broad else "named"
     return LaneSource(origin, owner, location, target, filters, lane, selection), None
 
 
@@ -284,12 +286,12 @@ def _job_sources(cti, coverage, expansions, recipes, rel, lines, commands, origi
             )
             if lane is not None:
                 source = LaneSource(origin, job, location, "lib", lane.positives, lane, "replay")
-        elif words[:1] == ["just"] and len(words) > 1:
+        elif words[:1] == ["just"] and len(words) == 2:
             sources.extend(
                 replace(recipe_source, origin=origin, owner=job)
                 for recipe_source in recipes.get(words[1], ())
             )
-        elif "cargo test" in snippet:
+        elif "cargo test" in snippet or words[:1] == ["just"]:
             finding = _unreadable(location, snippet.strip())
         sources.extend([source] if source else [])
         if finding and origin == "pr-required":
