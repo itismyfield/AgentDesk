@@ -775,7 +775,6 @@ impl CancelToken {
     }
 
     /// Binds the attempt whose start permit this turn's executor spent; at most once per token.
-    #[cfg(test)]
     pub(crate) fn attach_replay_attempt(
         &self,
         live: std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>,

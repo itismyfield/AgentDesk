@@ -10,9 +10,12 @@ mod thread_binding;
 mod turn_start;
 
 pub(crate) use authorization::TurnKind;
+#[cfg(test)]
+pub(in crate::services::discord) use intake_dispatch::replay_admission::test_activation as replay_test_activation;
 pub(crate) use intake_dispatch::{
     IntakeOrigin, IntakeSubmission, LocalAdmissionPermit, QueuedAdmissionDisposition,
-    admit_queued_intake, admit_text_intake, dispatch_skill_intake, dispatch_text_intake,
+    admit_queued_intake, admit_text_intake, checkpoint_waits_for_admission,
+    dispatch_live_text_intake, dispatch_skill_intake, dispatch_text_intake,
     finish_admitted_queued_intake, finish_admitted_text_intake, finish_text_intake_admission,
     prepare_admitted_live_attachments, resolve_attachment_admission,
 };
@@ -26,7 +29,7 @@ pub(super) use message_handler::{
     mailbox_try_start_turn_with_terminal_marker_cleanup, start_headless_turn,
     start_reserved_headless_turn, start_reserved_headless_turn_with_owner,
 };
-pub(crate) use message_handler::{IntakeRequest, execute_intake_turn_core};
+pub(crate) use message_handler::{IntakeRequest, execute_intake_turn_core, start_exact_retry};
 pub(in crate::services::discord) use queue_status_presentation::queue_status_card_enabled;
 #[cfg(test)]
 pub(super) use turn_start::claim_reserved_headless_turn;

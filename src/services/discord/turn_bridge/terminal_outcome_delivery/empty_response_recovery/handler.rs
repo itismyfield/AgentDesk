@@ -251,6 +251,10 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                     )
                 })
                 .unwrap_or(false);
+            #[cfg(test)]
+            if let Some(path) = inflight_state.output_path.as_deref() {
+                output_growth::grow(path);
+            }
             if stale_resume_in_output {
                 resume_failure_detected = true;
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -527,6 +531,27 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
             spoken_delivery_response,
             resume_retry_queued,
         }
+    }
+}
+
+/// Lets a test append to the output file between the two stale-session scans, as a source
+/// still being written does.
+#[cfg(test)]
+pub(in crate::services::discord::turn_bridge) mod output_growth {
+    static PENDING: std::sync::LazyLock<dashmap::DashMap<String, String>> =
+        std::sync::LazyLock::new(dashmap::DashMap::new);
+
+    pub(in crate::services::discord::turn_bridge) fn after_first_scan(path: &str, line: &str) {
+        PENDING.insert(path.to_string(), line.to_string());
+    }
+
+    pub(super) fn grow(path: &str) {
+        use std::io::Write as _;
+        let Some((_, line)) = PENDING.remove(path) else {
+            return;
+        };
+        let mut file = std::fs::OpenOptions::new().append(true).open(path);
+        writeln!(file.as_mut().unwrap(), "{line}").unwrap();
     }
 }
 

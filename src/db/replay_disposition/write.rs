@@ -1,11 +1,9 @@
 //! Replay receipt transitions; every acknowledgement is returned only after its commit succeeded.
 
-#[cfg(test)]
 mod start;
-#[cfg(test)]
 pub(crate) use start::{
-    BeginAck, BeginFrom, CanonicalInput, EffectProjection, begin, ensure_same_request,
-    register_or_reuse,
+    BeginAck, BeginFrom, CanonicalInput, EffectProjection, begin, bind_session,
+    ensure_same_request, register_or_reuse,
 };
 
 use crate::services::discord::replay_policy::live::{NoEffectEvidence, TerminalEvidence};
@@ -23,7 +21,6 @@ pub(crate) enum WriteError {
     /// Commit was sent but not acknowledged; the change may be durable.
     AckUnknown(sqlx::Error),
     /// The receipt stored under this request key names a different request.
-    #[cfg(test)]
     IdentityConflict(i64),
 }
 
@@ -34,7 +31,6 @@ impl std::fmt::Display for WriteError {
             Self::Fenced(message) => write!(f, "replay fence refused: {message}"),
             Self::Storage(error) => write!(f, "write failed before commit: {error}"),
             Self::AckUnknown(error) => write!(f, "commit not acknowledged: {error}"),
-            #[cfg(test)]
             Self::IdentityConflict(id) => write!(f, "receipt {id} names a different request"),
         }
     }
@@ -53,7 +49,6 @@ pub(crate) struct ExactAttempt {
     receipt_id: i64,
     nonce: String,
     incarnation: String,
-    #[cfg(test)]
     retry_of: Option<String>,
 }
 
@@ -66,7 +61,6 @@ impl ExactAttempt {
         &self.nonce
     }
 
-    #[cfg(test)]
     pub(crate) fn retry_of(&self) -> Option<&str> {
         self.retry_of.as_deref()
     }
