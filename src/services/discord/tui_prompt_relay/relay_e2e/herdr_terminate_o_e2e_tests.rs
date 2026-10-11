@@ -872,3 +872,7 @@ async fn unsealed(rig: herdr::P11TerminationRig) {
     let _ = task.await;
     run.finish().await;
 }
+
+// X1 runs this writer harness against real Herdr servers; ignored outside its runner.
+#[path = "herdr_terminate_o_real_tests.rs"]
+mod real;

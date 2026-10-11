@@ -12,7 +12,7 @@ use clap::Parser;
 use serde_json::{Value, json};
 
 use super::{HerdrArgs, HerdrCommand, run};
-use crate::cli::client::{LocalPostError, post_json_local_at, post_local};
+use crate::cli::client::{LOCAL_POST_READ, LocalPostError, post_json_local_at, post_local};
 use crate::config::TestEnvVarGuard;
 use crate::config::test_env_lock::acquire_shared_test_env_lock;
 
@@ -311,8 +311,10 @@ fn act_cli_terminate_never_follows_redirect() {
 }
 
 // A server that stops answering ends the wait with an error, and the request is never resent.
+// The CLI waits that long for the answer, measured here with a short wait on the same path.
 #[test]
 fn act_cli_terminate_stalled_server_times_out_once() {
+    assert_eq!(LOCAL_POST_READ, Duration::from_secs(120));
     let stalled = Mock::start(Reply::Stall);
     let _env = env(None, None);
     let (done, waited) = std::sync::mpsc::channel();

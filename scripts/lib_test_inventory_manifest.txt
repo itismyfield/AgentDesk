@@ -4003,6 +4003,7 @@ services::discord::health::watcher_respawn::tests::unwatched_candidates_exclude_
 services::discord::health::watcher_respawn::tests::unwatched_candidates_include_a_mailbox_channel_whose_watcher_was_cancelled
 services::discord::health::watcher_respawn::tests::watcher_absence_feeds_the_retry_queue_for_the_whole_5h_gap
 services::discord::herdr_terminate::exit_tests::act_terminate_process_exit_after_close_recovers_pg
+services::discord::herdr_terminate::route_tests::act_route_endpoint_lost_after_close_is_indeterminate_pg
 services::discord::herdr_terminate::route_tests::act_route_foreign_runtime_refused_pg
 services::discord::herdr_terminate::route_tests::act_route_logs_result_once_pg
 services::discord::herdr_terminate::route_tests::act_route_panic_reopens_the_fence_only_before_the_close_pg
@@ -8350,6 +8351,7 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registe
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6_sealed_tail_delivered_once_after_termination_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6b_successor_launch_preserves_a_tail_and_cursor_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7_unsealed_survives_termination_and_rotation_stall_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real::a_p11_m2_last_pane_close_and_exact_retire
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e::act_route_disconnect_after_close_still_settles_pg
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_claude_idle_binding_does_not_resume_its_synthetic_row
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_direct_prompt_posts_only_its_notice
@@ -11101,7 +11103,6 @@ services::session_host::herdr_host::tests::session_target_guard_stays_behind_the
 services::session_host::herdr_host::tests::typed_session_probe_entries_have_no_production_caller
 services::session_host::herdr_host::windows_tests::an_unconfigured_herdr_host_refuses_every_operation
 services::session_host::herdr_terminate_real_tests::a_p11_m2_confirmation_required_has_no_escalation
-services::session_host::herdr_terminate_real_tests::a_p11_m2_last_pane_close_and_exact_retire
 services::session_host::legacy_collapse::tests::blank_name_collapses_like_the_platform_probes
 services::session_host::legacy_collapse::tests::herdr_ref_is_never_collapsed_into_a_tmux_probe
 services::session_host::legacy_collapse::tests::liveness_collapse_treats_probe_error_as_not_dead

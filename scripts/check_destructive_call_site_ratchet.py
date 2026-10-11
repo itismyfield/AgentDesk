@@ -209,11 +209,11 @@ HOST_TERMINATE_OWNER = "src/services/termination_audit/host_terminate.rs"
 # any additional spelling still exceeds a measured per-file ceiling.
 HOST_TERMINATE_DECLARED_SITES = {
     "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs": 1,
+    "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs": 1,
     "src/services/session_host/herdr/model.rs": 2,
     "src/services/session_host/herdr_gate.rs": 3,
     "src/services/session_host/herdr_gate_tests.rs": 5,
     "src/services/session_host/herdr_host_tests.rs": 5,
-    "src/services/session_host/herdr_terminate_real_tests.rs": 1,
 }
 HOST_TERMINATE_LITERAL_PATTERN = re.compile(
     r"(?i)\bpane\s*\.\s*close\b|\bserver\s*\.\s*stop\b"

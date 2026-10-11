@@ -433,6 +433,33 @@ fn act_route_view_vanishes_after_target_is_refused_pg() {
     });
 }
 
+// The endpoint vanishing once the close was sent is a 500, never a refusal that reads as an
+// untouched pane; the row and hold stay for a rerun and no second close is sent.
+#[test]
+fn act_route_endpoint_lost_after_close_is_indeterminate_pg() {
+    let Some((rig, runtime)) = rig_child("act_route_endpoint_lost_after_close_is_indeterminate_pg")
+    else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::bind(&rig, None).await;
+        probe_after_close(Box::new(|| {
+            Box::pin(async { herdr::clear_endpoints_here() })
+        }));
+        let (status, reply) = node.terminate(herdr::EXECUTION).await;
+        assert_eq!(
+            (status, &reply["result"]),
+            (StatusCode::INTERNAL_SERVER_ERROR, &json!("indeterminate"))
+        );
+        assert_eq!(reply["detail"], "no local endpoint after the close");
+        assert_eq!(closes(&rig), 1);
+        assert_eq!(node.row().await, node.bound());
+        assert!(herdr::held());
+        node.finish().await;
+    });
+}
+
 // A panic before the close could have been sent reopens the fence; one after the close keeps
 // the execution closed. Both are a logged 500, and the row and hold stay for a rerun.
 #[test]

@@ -5,13 +5,16 @@ Each test runs alone (`--ignored --exact`) with a scratch copy of the server bin
 under the scratch directory and a pid ledger. Both must pass on one clean head:
 
   W1  the test really ran: `running 1 test` and its own line, not `ignored`
-  W2  `test result: ok. 1 passed; 0 failed; 0 ignored`
+  W2  `test result: ok. 1 passed; 0 failed; 0 ignored`, and cargo exited 0 within its time
   W3  its one write went to a process other than the test, whose binary is the scratch copy with
       the pinned hash; that process is the server the test started on that socket (pid and
       start), and that server's own log took the request id once as a pane close (N-2)
-  W4  one terminate result log naming the bound execution, with the expected result, and the
-      server's panes before and after as the result says
-  W5  the head is the same and clean before and after both runs
+  W4  one terminate result log naming the bound execution, with the expected result; one
+      snapshot per server and phase, the target's after one exactly its before one less the
+      target pane for X1 and unchanged for X2, every other server unchanged; one effect line;
+      for X1 one O line: the sealed tail unread at the termination, the service writing none
+      of O's state, then posted and recorded once with no repost after a restart
+  W5  each run starts and ends on the PR head with no change, untracked files included
 
 The run also requires each server offline (no curl under it, its update check unable to spawn
 curl), every ledger pid of the run gone afterwards, and the production sockets unchanged.
@@ -31,17 +34,28 @@ import sys
 from pathlib import Path
 
 PINNED_SHA256 = "5173a3e0ae42d5d1ab7ebfa5d5e6329f7c3d23f8e1a3677c7ce3231da2884157"
-MODULE = "services::session_host::herdr_terminate_real_tests"
 TESTS = {
-    "x1": ("a_p11_m2_last_pane_close_and_exact_retire", "retired", "ok"),
+    "x1": (
+        "services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real",
+        "a_p11_m2_last_pane_close_and_exact_retire",
+        "retired",
+        "ok",
+    ),
     "x2": (
+        "services::session_host::herdr_terminate_real_tests",
         "a_p11_m2_confirmation_required_has_no_escalation",
         "confirmation_required",
         "error:confirmation_required",
     ),
 }
 EFFECT = {"x1": "row=retired hold=released turn=settled", "x2": "row=bound hold=kept turn=active"}
-WIDER_CLOSES = ("workspace.close", "tab.close", "server.stop")
+O_EVIDENCE = {
+    "x1": "tail=unread service_o_writes=0 service_posts=0 tail_posts=1 tail_ledger_posted=1 "
+          "restart_reposts=0 halts=0",
+}
+WIDER_CLOSES = ("workspace.close", "tab.close", "group.close", "worktree_group.close",
+                "server.stop")
+RUN_TIMEOUT = 1800
 
 
 def fields(line: str) -> dict[str, str]:
@@ -76,19 +90,23 @@ def log_requests(log: str) -> list[tuple[str, str]]:
     return found
 
 
-def judge(name: str, output: str, *, bin_path: str, read_log) -> list[str]:
-    """Why one test's run is not a PASS; empty when it is."""
-    test, result, write_outcome = TESTS[name]
+def judge(name: str, output: str, *, bin_path: str, read_log, returncode: int | None) -> list[str]:
+    """Why one test's run is not a PASS; empty when it is. `returncode` is None on a timeout."""
+    module, test, result, write_outcome = TESTS[name]
     failures = []
     # W1, W2
     if "running 1 test" not in output.splitlines():
         failures.append("W1: no `running 1 test`")
     # With --nocapture the test's own lines come between its name and `ok`.
-    started = re.search(rf"^test {re.escape(MODULE)}::{test} \.\.\. (.*)$", output, re.M)
+    started = re.search(rf"^test {re.escape(module)}::{test} \.\.\. (.*)$", output, re.M)
     if not started or started.group(1).strip() == "ignored":
         failures.append(f"W1: `{test}` did not run")
     if not re.search(r"^test result: ok\. 1 passed; 0 failed; 0 ignored;", output, re.M):
         failures.append("W2: not exactly one passed test")
+    if returncode is None:
+        failures.append(f"W2: the run did not end within {RUN_TIMEOUT}s")
+    elif returncode != 0:
+        failures.append(f"W2: cargo test exited {returncode}")
     # W3
     tests = lines_of(output, "X_TEST")
     test_pid = tests[0].get("pid") if tests else None
@@ -132,12 +150,20 @@ def judge(name: str, output: str, *, bin_path: str, read_log) -> list[str]:
         ):
             failures.append("W4: the result log names another execution")
     failures += snapshots(name, output, execution)
-    if not any(line.get("name") == name and " ".join(
-        f"{k}={line[k]}" for k in ("row", "hold", "turn") if k in line
-    ) == EFFECT[name] for line in lines_of(output, "X_EFFECT")):
-        failures.append(f"W4: no effect line `{EFFECT[name]}`")
+    failures += exactly_one(name, output, "X_EFFECT", EFFECT[name])
+    if name in O_EVIDENCE:
+        failures += exactly_one(name, output, "X_O", O_EVIDENCE[name])
     failures += isolation(output)
     return failures
+
+
+def exactly_one(name: str, output: str, tag: str, expected: str) -> list[str]:
+    """The run's one `tag` line, which reads `expected` after its name."""
+    found = [line for line in lines_of(output, tag) if line.get("name") == name]
+    if len(found) != 1:
+        return [f"W4: {len(found)} {tag} lines, expected 1"]
+    text = " ".join(f"{key}={value}" for key, value in found[0].items() if key != "name")
+    return [] if text == expected else [f"W4: {tag} `{text}`, expected `{expected}`"]
 
 
 def correlate(write: dict, servers: list[dict], read_log) -> list[str]:
@@ -169,24 +195,31 @@ def correlate(write: dict, servers: list[dict], read_log) -> list[str]:
 
 
 def snapshots(name: str, output: str, execution: dict) -> list[str]:
-    server = execution.get("server")
-    phases = {
-        line.get("phase"): json.loads(line.get("panes", "null"))
-        for line in lines_of(output, "X_SNAPSHOT")
-        if line.get("server") == server
-    }
-    before, after = phases.get("before"), phases.get("after")
-    if before is None or after is None:
-        return ["W4: no before/after snapshot of the target server"]
-    pane = execution.get("pane")
-    ids = lambda panes: [entry.get("pane_id") for entry in panes]
-    if pane not in ids(before):
-        return ["W4: the target pane is not in the before snapshot"]
-    if name == "x1" and (pane in ids(after) or len(after) != len(before) - 1):
-        return ["W4: the after snapshot is not the before one less the target"]
-    if name == "x2" and after != before:
-        return ["W4: the after snapshot differs from the before one"]
-    return []
+    """One before and one after snapshot per started server; only X1's target pane went."""
+    taken: dict[tuple[str, str], list] = {}
+    for line in lines_of(output, "X_SNAPSHOT"):
+        taken.setdefault((line.get("server", ""), line.get("phase", "")), []).append(
+            json.loads(line.get("panes", "null")))
+    failures = []
+    for server in [line.get("name", "") for line in lines_of(output, "X_SERVER")]:
+        phases = {phase: taken.get((server, phase), []) for phase in ("before", "after")}
+        if any(len(found) != 1 for found in phases.values()):
+            failures.append(f"W4: {server} has {len(phases['before'])} before and "
+                            f"{len(phases['after'])} after snapshots, expected 1 each")
+            continue
+        before, after = phases["before"][0], phases["after"][0]
+        expected = before
+        if server == execution.get("server"):
+            pane = execution.get("pane")
+            if pane not in [entry.get("pane_id") for entry in before]:
+                failures.append("W4: the target pane is not in the before snapshot")
+                continue
+            if name == "x1":
+                expected = [entry for entry in before if entry.get("pane_id") != pane]
+        if after != expected:
+            failures.append(f"W4: {server}'s after snapshot is not its before one"
+                            + (" less the target" if expected != before else ""))
+    return failures
 
 
 def isolation(output: str) -> list[str]:
@@ -205,18 +238,23 @@ def isolation(output: str) -> list[str]:
     return failures
 
 
-def judge_all(verdicts: dict[str, list[str]], heads: dict[str, tuple[str, bool]],
-              pr_head: str) -> list[str]:
-    """W5 and the pair: both gates ran with no failure, each on the clean PR head."""
+def judge_all(verdicts: dict[str, list[str]],
+              heads: dict[str, list[tuple[str, bool]]], pr_head: str) -> list[str]:
+    """W5 and the pair: both gates ran with no failure, each starting and ending on the clean
+    PR head."""
     failures = []
     for name in TESTS:
         if name not in verdicts:
             failures.append(f"{name}: not run")
             continue
         failures += [f"{name}: {why}" for why in verdicts[name]]
-        head, clean = heads.get(name, ("", False))
-        if (head, clean) != (pr_head, True):
-            failures.append(f"{name}: W5: ran on {head} clean={clean}, not the PR head {pr_head}")
+        states = heads.get(name, [])
+        if len(states) != 2:
+            failures.append(f"{name}: W5: the head was not read before and after the run")
+        for when, (head, clean) in zip(("before", "after"), states):
+            if (head, clean) != (pr_head, True):
+                failures.append(f"{name}: W5: {when} the run on {head} clean={clean}, "
+                                f"not the PR head {pr_head}")
     return failures
 
 
@@ -231,7 +269,7 @@ def git(worktree: Path, *args: str) -> str:
 
 
 def head_state(worktree: Path) -> tuple[str, bool]:
-    clean = git(worktree, "status", "--porcelain", "--untracked-files=no") == ""
+    clean = git(worktree, "status", "--porcelain", "--untracked-files=all") == ""
     return git(worktree, "rev-parse", "HEAD"), clean
 
 
@@ -311,18 +349,22 @@ def main() -> int:
     verdicts, heads = {}, {}
     pr_head = args.pr_head or head
     for name in args.only or sorted(TESTS):
-        heads[name] = head_state(args.worktree)
-        test = TESTS[name][0]
-        command = ["cargo", "test", "--lib", f"{MODULE}::{test}", "--", "--ignored", "--exact",
+        heads[name] = [head_state(args.worktree)]
+        module, test = TESTS[name][:2]
+        command = ["cargo", "test", "--lib", f"{module}::{test}", "--", "--ignored", "--exact",
                    "--nocapture", "--test-threads=1"]
         try:
             run = subprocess.run(command, cwd=args.worktree, env=env, capture_output=True,
-                                 text=True, timeout=1800)
-            output = run.stdout + run.stderr
+                                 text=True, timeout=RUN_TIMEOUT)
+            output, returncode = run.stdout + run.stderr, run.returncode
         except subprocess.TimeoutExpired as expired:
-            output = f"{expired.stdout or ''}{expired.stderr or ''}\nTIMEOUT"
+            stdout, stderr = expired.stdout or b"", expired.stderr or b""
+            output = (stdout if isinstance(stdout, str) else stdout.decode(errors="replace")) + (
+                stderr if isinstance(stderr, str) else stderr.decode(errors="replace"))
+            output, returncode = output + "\nTIMEOUT", None
+        heads[name].append(head_state(args.worktree))
         (out / f"{name}.log").write_text(output)
-        verdicts[name] = judge(name, output, bin_path=str(binary),
+        verdicts[name] = judge(name, output, bin_path=str(binary), returncode=returncode,
                                read_log=lambda path: Path(path).read_text() if path else "")
         say(f"{name.upper()} {'PASS' if not verdicts[name] else 'FAIL'} head={head} "
             f"log={out / (name + '.log')} " + "; ".join(verdicts[name]))

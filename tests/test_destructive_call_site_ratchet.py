@@ -100,11 +100,11 @@ class SourceContractTests(unittest.TestCase):
 class RatchetDiscriminationTests(unittest.TestCase):
     DECLARED_CLOSE_SITES = {
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs": 1,
+        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs": 1,
         "src/services/session_host/herdr/model.rs": 2,
         "src/services/session_host/herdr_gate.rs": 3,
         "src/services/session_host/herdr_gate_tests.rs": 5,
         "src/services/session_host/herdr_host_tests.rs": 5,
-        "src/services/session_host/herdr_terminate_real_tests.rs": 1,
     }
 
     def test_declared_close_sites_pass_without_baseline_growth(self) -> None:

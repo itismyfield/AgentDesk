@@ -3205,6 +3205,30 @@ fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String>
             "src/services/discord/turn_finalizer/cleanup.rs",
         ],
     ));
+    // Each link of the chain is still made, exactly once: a lost call fails as an extra one does.
+    let files = scan_files(sources, &mut Vec::new());
+    let required: [(&str, &str); 4] = [
+        ("terminate_registered_herdr", TERMINATE_ROUTE),
+        ("terminate_explicit_herdr", TERMINATE_SERVICE),
+        ("host_terminated", TERMINATE_SERVICE),
+        ("post_json_local_at", HERDR_CLI),
+    ];
+    for (needle, owner) in required {
+        let uses = item_uses_by_file(&files, needle, &bindings(&files, needle));
+        let used = uses.get(owner).map_or(0, |(used, _)| *used);
+        if used != 1 {
+            violations.push(format!("{owner}: {needle} used x{used}, not exactly once"));
+        }
+    }
+    let built = regex::Regex::new(r"\bTerminalEvent\s*::\s*HostTerminated\b").unwrap();
+    let built = files
+        .get(TERMINATE_SERVICE)
+        .map_or(0, |file| built.find_iter(&file.code).count());
+    if built != 1 {
+        violations.push(format!(
+            "{TERMINATE_SERVICE}: HostTerminated built x{built}, not exactly once"
+        ));
+    }
     violations
 }
 

@@ -75,7 +75,7 @@ pub(crate) enum LocalPostError {
 }
 
 /// How long the CLI waits for the server's answer once the request is sent.
-const LOCAL_POST_READ: std::time::Duration = std::time::Duration::from_secs(120);
+pub(crate) const LOCAL_POST_READ: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// One POST to `base` + `path`, only when that URL is loopback: no redirect, no proxy, bounded
 /// waits. A 4xx/5xx JSON body comes back with its status so the caller can show it.

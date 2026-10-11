@@ -133,9 +133,10 @@ async fn capture_turn(
     }))
 }
 async fn read_end(target: HerdrTarget, record: HostedExecution) -> Result<(), TerminationResult> {
-    let view = herdr_endpoints()
-        .view(&record)
-        .ok_or_else(|| TerminationResult::Refused("no local endpoint".into()))?;
+    // The close may have been applied, so a lost endpoint leaves the outcome open.
+    let view = herdr_endpoints().view(&record).ok_or_else(|| {
+        TerminationResult::Indeterminate("no local endpoint after the close".into())
+    })?;
     tokio::task::spawn_blocking(move || {
         let pane = view.read_execution();
         if !crate::cli::herdr::confirmed_ended(&record, &pane) {

@@ -93,9 +93,9 @@ Herdr 로 띄운 Claude 채널(P9 대상: adk-dash-cc)의 운영 절차다. 5a�
   - 서버는 loopback peer 이고 `Origin` 헤더가 없는 요청만 받는다.
   - `server.auth_token` 이 있으면(모드 T) 그 Bearer 가 필요하다. 없으면(모드 N) loopback 이면 된다. reverse proxy 뒤에서는 peer 가 loopback 으로 보이므로 모드 T 가 필수다.
 - 결과(`result`)와 종료 코드. exit 0 은 `retired`(200) 하나뿐이다.
-  - 409: `disabled`, `refused`(row·nonce·소유가 다르거나 이미 Retired), `gate_refused`, `not_sent`, `confirmation_required`. close 가 적용되지 않았고 row·hold·턴은 그대로다.
+  - 409: `disabled`, `refused`(row·nonce·소유·endpoint 가 다르거나 이미 Retired), `gate_refused`, `not_sent`, `confirmation_required`. 모두 close 를 보내기 전이나 Herdr 가 거절한 경우라 pane 은 그대로이고 row·hold·턴도 그대로다.
   - 409 `provider_survived_close`: pane 은 닫혔는데 기록된 provider 가 살아 있다. row 는 바꾸지 않았다.
-  - 500 `indeterminate`: close 뒤의 결과를 확정하지 못했다.
+  - 500 `indeterminate`: close 뒤의 결과를 확정하지 못했다. pane 은 닫혔을 수 있다. close 뒤 endpoint 설정이 사라진 경우도 여기이며, 그때 row·hold 는 그대로라 endpoint 를 되돌린 뒤 같은 key·nonce 로 다시 실행한다.
   - 서버는 실행마다 결과 로그 한 줄(target `agentdesk::herdr_terminate`, session_key·nonce·사유·결과)을 남긴다. CLI 연결이 끊겨도 서버 쪽 실행은 끝까지 가므로 이 로그로 결과를 확인한다.
 - `confirmation_required`: worktree group 부모 workspace 의 마지막 pane 이다. 서비스는 확인을 주지 않고 workspace·group close 로 넓히지 않는다. herdr 에서 사람이 정리한 뒤 5절 retire 를 쓴다.
 - 같은 채널에 `herdr retire` 를 동시에 실행하지 않는다.

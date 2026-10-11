@@ -1,5 +1,6 @@
 //! `agentdesk herdr terminate` against real Herdr 0.9.3 servers from a scratch copy, run and
-//! judged by `scripts/test_p11_m2_activation.py` from the lines each test prints.
+//! judged by `scripts/test_p11_m2_activation.py` from the lines each test prints. X1 runs beside
+//! O's writer harness on this file's servers, CLI and API.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -39,17 +40,17 @@ const NODE: &str = "mac-mini";
 const SESSION: &str = "adk";
 const REASON: &str = "operator test";
 /// Requests the API router took on the terminate route.
-static ROUTE_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static ROUTE_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 
 /// The scratch copy of the server binary, the run's root and the pid ledger, from the runner.
-struct Scratch {
+pub(crate) struct Scratch {
     bin: PathBuf,
     root: PathBuf,
     ledger: PathBuf,
 }
 
 impl Scratch {
-    fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         let var = |key: &str| {
             PathBuf::from(std::env::var_os(key).unwrap_or_else(|| panic!("{key} is not set")))
         };
@@ -75,18 +76,18 @@ fn start_of(pid: u32) -> Option<String> {
 
 /// One server run from its own directory, with every process it hosts for this test recorded
 /// in the ledger. Dropping it stops that server by its pid and waits for those processes.
-struct Real {
-    name: String,
+pub(crate) struct Real {
+    pub(crate) name: String,
     dir: PathBuf,
     ledger: PathBuf,
     child: Option<Child>,
-    pid: u32,
-    start: String,
-    recorded: Vec<(u32, String)>,
+    pub(crate) pid: u32,
+    pub(crate) start: String,
+    pub(crate) recorded: Vec<(u32, String)>,
 }
 
 impl Real {
-    fn start(scratch: &Scratch, name: &str) -> Self {
+    pub(crate) fn start(scratch: &Scratch, name: &str) -> Self {
         let dir = scratch.root.join(name);
         let _ = std::fs::remove_dir_all(&dir);
         for sub in [
@@ -199,11 +200,11 @@ impl Real {
         self.recorded.push((pid, start));
     }
 
-    fn socket(&self) -> PathBuf {
+    pub(crate) fn socket(&self) -> PathBuf {
         self.dir.join("run/h.sock")
     }
 
-    fn work(&self, name: &str) -> PathBuf {
+    pub(crate) fn work(&self, name: &str) -> PathBuf {
         let path = self.dir.join("work").join(name);
         std::fs::create_dir_all(&path).unwrap();
         path
@@ -213,11 +214,11 @@ impl Real {
         self.dir.join("home/xdg/herdr/herdr-server.log")
     }
 
-    fn log(&self) -> String {
+    pub(crate) fn log(&self) -> String {
         std::fs::read_to_string(self.log_path()).unwrap_or_default()
     }
 
-    fn endpoint(&self) -> HerdrEndpoint {
+    pub(crate) fn endpoint(&self) -> HerdrEndpoint {
         HerdrEndpoint::new(NODE, &self.name, &self.socket(), SESSION)
             .unwrap()
             .with_herdr_home(&self.dir.join("home"))
@@ -246,13 +247,13 @@ impl Real {
         serde_json::from_str(&line).unwrap_or_else(|_| panic!("{method}: {line}"))
     }
 
-    fn snapshot(&self) -> Value {
+    pub(crate) fn snapshot(&self) -> Value {
         let reply = self.rpc("x12-snapshot", "session.snapshot", json!({}));
         reply["result"]["snapshot"].clone()
     }
 
     /// Each pane with its workspace, terminal, root shell and foreground processes.
-    fn panes(&self) -> Vec<Value> {
+    pub(crate) fn panes(&self) -> Vec<Value> {
         let snapshot = self.snapshot();
         let mut panes: Vec<Value> = snapshot["panes"]
             .as_array()
@@ -316,7 +317,7 @@ impl Real {
     }
 
     /// The log's API requests after `offset`, as `(request_id, line)`.
-    fn requests_since(&self, offset: usize) -> Vec<(String, String)> {
+    pub(crate) fn requests_since(&self, offset: usize) -> Vec<(String, String)> {
         self.log()[offset..]
             .lines()
             .filter(|line| line.contains("event=\"api.request.start\""))
@@ -325,7 +326,7 @@ impl Real {
     }
 
     /// Asserts nothing reached the network and prints how the update checks ended.
-    fn assert_offline(&self) {
+    pub(crate) fn assert_offline(&self) {
         let curl = self.curl_children();
         let log = self.log();
         let failed = log.lines().any(|line| {
@@ -397,7 +398,7 @@ fn ps(args: &[&str]) -> String {
 }
 
 /// `name="value"` or `name=value` of one log line.
-fn field(line: &str, name: &str) -> String {
+pub(crate) fn field(line: &str, name: &str) -> String {
     let Some((_, rest)) = line.split_once(&format!(" {name}=")) else {
         return String::new();
     };
@@ -408,7 +409,7 @@ fn field(line: &str, name: &str) -> String {
 }
 
 /// One call the registered transport made, and the server that answered it.
-struct Seen {
+pub(crate) struct Seen {
     id: String,
     method: String,
     witness: Result<ServerWitness, String>,
@@ -417,14 +418,14 @@ struct Seen {
 
 /// The registered endpoint's socket transport, keeping the server of each call; a write is sent
 /// only on a connection to `expected`, so a sent write was answered by that server.
-struct Witnessing {
+pub(crate) struct Witnessing {
     inner: HerdrSocketTransport,
     seen: Arc<Mutex<Vec<Seen>>>,
-    writes: Arc<Mutex<Vec<Seen>>>,
+    pub(crate) writes: Arc<Mutex<Vec<Seen>>>,
 }
 
 impl Witnessing {
-    fn new(endpoint: &HerdrEndpoint) -> Self {
+    pub(crate) fn new(endpoint: &HerdrEndpoint) -> Self {
         Self {
             inner: HerdrSocketTransport::new(
                 endpoint,
@@ -525,7 +526,13 @@ fn print_writes(transport: &Witnessing) -> Vec<(String, String, ServerWitness)> 
 
 /// This node's boot section with `real` as its one endpoint, the registry over the witnessing
 /// transport on every runtime thread, and the terminate switch on.
-fn boot(real: &Real, channel: u64, transport: Arc<Witnessing>) -> tokio::runtime::Runtime {
+/// `on_thread` runs on every runtime thread after the registry and launch overrides.
+pub(crate) fn boot(
+    real: &Real,
+    channel: u64,
+    transport: Arc<Witnessing>,
+    on_thread: impl Fn() + Send + Sync + 'static,
+) -> tokio::runtime::Runtime {
     let config: crate::config::Config = serde_json::from_value(json!({
         "server": {},
         "cluster": {"instance_id": NODE},
@@ -557,6 +564,7 @@ fn boot(real: &Real, channel: u64, transport: Arc<Witnessing>) -> tokio::runtime
         std::mem::forget(crate::services::herdr_launch::force_writer_accepts(Some(
             true,
         )));
+        on_thread();
     };
     install();
     tokio::runtime::Builder::new_current_thread()
@@ -568,16 +576,16 @@ fn boot(real: &Real, channel: u64, transport: Arc<Witnessing>) -> tokio::runtime
 
 /// A launched, bound execution of `logical` on `real`: the real launch path creates its pane and
 /// types the provider fixture, whose exec-time environment names the execution's own context.
-struct Execution {
-    key: String,
-    nonce: String,
-    pane: String,
-    workspace: String,
-    shell: (u32, String),
-    provider: (u32, String),
+pub(crate) struct Execution {
+    pub(crate) key: String,
+    pub(crate) nonce: String,
+    pub(crate) pane: String,
+    pub(crate) workspace: String,
+    pub(crate) shell: (u32, String),
+    pub(crate) provider: (u32, String),
 }
 
-async fn launch(
+pub(crate) async fn launch(
     real: &mut Real,
     pool: &PgPool,
     token_hash: &str,
@@ -685,7 +693,7 @@ async fn launch(
     }
 }
 
-async fn stored(pool: &PgPool, key: &str) -> HostedExecution {
+pub(crate) async fn stored(pool: &PgPool, key: &str) -> HostedExecution {
     match load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await {
         HostedLookup::Found(row) => match row.record {
             HostedRecord::Known(record) => record,
@@ -697,7 +705,7 @@ async fn stored(pool: &PgPool, key: &str) -> HostedExecution {
 
 /// A pane on `real` running `/bin/sleep`, created as the launch host creates one; its shell and
 /// sleep are recorded.
-fn control(real: &mut Real, label: &str) -> String {
+pub(crate) fn control(real: &mut Real, label: &str) -> String {
     let host =
         super::SocketHerdrLaunchHost::new(vec![real.endpoint()], HerdrSocketConfig::default());
     let witness = host
@@ -720,11 +728,11 @@ fn control(real: &mut Real, label: &str) -> String {
     pane_id
 }
 
-fn alive(process: &(u32, String)) -> bool {
+pub(crate) fn alive(process: &(u32, String)) -> bool {
     start_of(process.0).as_ref() == Some(&process.1)
 }
 
-fn print_panes(real: &Real, phase: &str, panes: &[Value]) {
+pub(crate) fn print_panes(real: &Real, phase: &str, panes: &[Value]) {
     println!(
         "X_SNAPSHOT server={} phase={phase} panes={}",
         real.name,
@@ -740,7 +748,11 @@ struct Cli {
 
 /// `agentdesk herdr terminate` run on a blocking thread of this process against `api`, the only
 /// difference from the CLI binary being that process boundary.
-async fn cli_terminate(api: std::net::SocketAddr, key: &str, nonce: &str) -> Result<(), String> {
+pub(crate) async fn cli_terminate(
+    api: std::net::SocketAddr,
+    key: &str,
+    nonce: &str,
+) -> Result<(), String> {
     let config = tempfile::tempdir().unwrap();
     let path = config.path().join("agentdesk.yaml");
     std::fs::write(&path, "server:\n  port: 1\n").unwrap();
@@ -776,7 +788,7 @@ async fn cli_terminate(api: std::net::SocketAddr, key: &str, nonce: &str) -> Res
 }
 
 /// The API router with its auth middleware under `/api` on a loopback listener.
-async fn serve_api(
+pub(crate) async fn serve_api(
     registry: Arc<crate::services::discord::health::HealthRegistry>,
     pool: PgPool,
 ) -> std::net::SocketAddr {
@@ -810,7 +822,7 @@ async fn serve_api(
 }
 
 /// The one write a run sent, which must be its close on `real`'s own process.
-fn the_close(real: &Real, transport: &Witnessing) -> String {
+pub(crate) fn the_close(real: &Real, transport: &Witnessing) -> String {
     let writes = print_writes(transport);
     let [(id, method, witness)] = writes.as_slice() else {
         panic!("one write: {writes:?}");
@@ -829,7 +841,7 @@ fn the_close(real: &Real, transport: &Witnessing) -> String {
     id.clone()
 }
 
-fn print_results(
+pub(crate) fn print_results(
     records: Vec<std::collections::BTreeMap<String, String>>,
     key: &str,
     nonce: &str,
@@ -845,125 +857,6 @@ fn print_results(
         );
     }
     results_of(records, key, nonce)
-}
-
-#[test]
-#[ignore = "needs ADK_TEST_HERDR_BIN, ADK_TEST_HERDR_ROOT, ADK_TEST_HERDR_PIDS: scripts/test_p11_m2_activation.py"]
-fn a_p11_m2_last_pane_close_and_exact_retire() {
-    const CHANNEL: u64 = 5_340_231;
-    let scratch = Scratch::from_env();
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    println!("X_TEST name=x1 pid={}", std::process::id());
-    let mut s1 = Real::start(&scratch, "x1-s1");
-    let mut s2 = Real::start(&scratch, "x1-s2");
-    let transport = Arc::new(Witnessing::new(&s1.endpoint()));
-    let runtime = boot(&s1, CHANNEL, transport.clone());
-    runtime.block_on(async {
-        let (results, _logs) = capture();
-        let db = TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
-        let (shared, registry) =
-            crate::services::discord::host_teardown_gate::test_support::runtime(&pool).await;
-        let channel = poise::serenity_prelude::ChannelId::new(CHANNEL);
-        let cwd = s1.work("a");
-        let logical = "AgentDesk-claude-x1";
-        let target = launch(&mut s1, &pool, &shared.token_hash, CHANNEL, logical, cwd).await;
-        let keep = control(&mut s1, "x1-keep");
-        let other = control(&mut s2, "x1-other");
-        crate::services::claude::herdr_turn::hold(&target.nonce).unwrap();
-        let token = test_turn::start(&shared, channel, 51, "turn-x1").await;
-        let (s1_before, s2_before) = (s1.panes(), s2.panes());
-        print_panes(&s1, "before", &s1_before);
-        print_panes(&s2, "before", &s2_before);
-        let (s1_from, s2_from) = (s1.log().len(), s2.log().len());
-        let hosted: Vec<(u32, String)> = s1.recorded.iter().chain(&s2.recorded).cloned().collect();
-        transport.writes.lock().unwrap().clear();
-
-        let api = serve_api(registry, pool.clone()).await;
-        assert_eq!(cli_terminate(api, &target.key, &target.nonce).await, Ok(()));
-        let close = the_close(&s1, &transport);
-        assert_eq!(
-            ROUTE_REQUESTS.load(Ordering::SeqCst),
-            1,
-            "one request, no retry"
-        );
-        let results = print_results(results.take(), &target.key, &target.nonce);
-        assert_eq!(results, ["retired"]);
-
-        // Only the target's pane and workspace are gone, with its shell and provider.
-        let (s1_after, s2_after) = (s1.panes(), s2.panes());
-        print_panes(&s1, "after", &s1_after);
-        print_panes(&s2, "after", &s2_after);
-        let kept: Vec<Value> = s1_before
-            .iter()
-            .filter(|pane| pane["pane_id"] != target.pane.as_str())
-            .cloned()
-            .collect();
-        assert_eq!(s1_after, kept, "only {} left {}", target.pane, s1.name);
-        assert!(s1_after.iter().any(|pane| pane["pane_id"] == keep.as_str()));
-        assert!(
-            s1.snapshot()["workspaces"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|workspace| workspace["workspace_id"] != target.workspace.as_str()),
-            "the last pane took its workspace"
-        );
-        assert_eq!(s2_after, s2_before, "{} unchanged", s2.name);
-        assert!(
-            s2_after
-                .iter()
-                .any(|pane| pane["pane_id"] == other.as_str())
-        );
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while (alive(&target.provider) || alive(&target.shell)) && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        assert!(!alive(&target.provider), "the recorded provider is gone");
-        assert!(!alive(&target.shell));
-        for process in &hosted {
-            if *process != target.provider && *process != target.shell {
-                assert!(alive(process), "{process:?} untouched");
-            }
-        }
-
-        // One request reached S1, the close; S2 took none. Both servers still run offline.
-        let requests = s1.requests_since(s1_from);
-        assert_eq!(requests.len(), 1, "{requests:?}");
-        assert_eq!(requests[0].0, close);
-        let completed = s1.log()[s1_from..].lines().any(|line| {
-            line.contains("event=\"api.request.complete\"")
-                && field(line, "request_id") == close
-                && field(line, "outcome") == "ok"
-        });
-        assert!(completed, "the close completed ok");
-        let closed: Vec<String> = s1.log()[s1_from..]
-            .lines()
-            .filter(|line| line.contains("event=\"workspace.close\""))
-            .map(|line| field(line, "workspace_id"))
-            .collect();
-        assert_eq!(closed, [target.workspace.clone()]);
-        assert_eq!(s2.requests_since(s2_from), Vec::new());
-        assert!(alive(&(s1.pid, s1.start.clone())) && alive(&(s2.pid, s2.start.clone())));
-        s1.assert_offline();
-        s2.assert_offline();
-
-        // The row retired exactly this nonce, the hold is gone and the captured turn settled.
-        let record = stored(&pool, &target.key).await;
-        assert_eq!(
-            (record.state, record.execution_nonce.as_str()),
-            (HostedState::Retired, target.nonce.as_str())
-        );
-        let holds = crate::services::claude::herdr_turn::input_holds().unwrap();
-        assert!(holds.iter().all(|(nonce, _)| *nonce != target.nonce));
-        let active = test_turn::active(&shared, channel).await;
-        assert!(active.is_none_or(|now| !Arc::ptr_eq(&now, &token)));
-        assert!(!token.cancelled.load(Ordering::Relaxed));
-        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
-        println!("X_EFFECT name=x1 row=retired hold=released turn=settled");
-        pool.close().await;
-        db.drop().await;
-    });
 }
 
 #[test]
@@ -1001,7 +894,7 @@ fn a_p11_m2_confirmation_required_has_no_escalation() {
         "x2 fixture",
     ]);
     let transport = Arc::new(Witnessing::new(&s2.endpoint()));
-    let runtime = boot(&s2, CHANNEL, transport.clone());
+    let runtime = boot(&s2, CHANNEL, transport.clone(), || {});
     runtime.block_on(async {
         let (results, _logs) = capture();
         let db = TestPostgresDb::create().await;
