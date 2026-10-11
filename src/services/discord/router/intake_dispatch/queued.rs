@@ -110,7 +110,9 @@ pub(crate) async fn admit_queued_intake(
             .await;
             return QueuedAdmissionDisposition::RejectedNonPortableAttachment;
         }
-        IntakeAdmission::DeferredOpenRoute { .. } | IntakeAdmission::Blocked { .. } => {
+        IntakeAdmission::DeferredOpenRoute { .. }
+        | IntakeAdmission::ReplayDeferred(_)
+        | IntakeAdmission::Blocked { .. } => {
             let Some(dispatch_lease) = dispatch_lease else {
                 tracing::error!(
                     provider = submission.provider.as_str(),

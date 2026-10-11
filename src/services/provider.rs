@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 pub(crate) mod cancel_token_claude_interrupt;
 pub(crate) mod cancel_token_cleanup;
+mod cancel_token_codex_owed;
 mod cancel_watchdog;
 pub(crate) mod channel_rules;
 pub(crate) mod herdr_before_start;
@@ -726,6 +727,8 @@ pub struct CancelToken {
     /// Independent destructive claims prevent a PID-only cleanup from suppressing tmux cleanup.
     pub(crate) pid_kill_claim: AtomicU8,
     pub(crate) name_kill_claim: AtomicU8,
+    /// The exact Codex episode record owed delivery checks; unset on every current path.
+    codex_owed: std::sync::OnceLock<std::sync::Arc<cancel_token_codex_owed::Record>>,
 }
 
 impl CancelToken {
@@ -761,6 +764,7 @@ impl CancelToken {
             restart_mode: AtomicU8::new(0),
             pid_kill_claim: AtomicU8::new(0),
             name_kill_claim: AtomicU8::new(0),
+            codex_owed: std::sync::OnceLock::new(),
         }
     }
 
@@ -775,7 +779,6 @@ impl CancelToken {
     }
 
     /// Binds the attempt whose start permit this turn's executor spent; at most once per token.
-    #[cfg(test)]
     pub(crate) fn attach_replay_attempt(
         &self,
         live: std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>,
@@ -940,6 +943,7 @@ impl CancelToken {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         self.set_cancel_source_locked(source);
+        let _record = self.codex_owed_publication();
         self.cancelled.store(true, Ordering::Release);
     }
 
@@ -949,6 +953,7 @@ impl CancelToken {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         self.set_cancel_source_if_absent_locked(source);
+        let _record = self.codex_owed_publication();
         self.cancelled.store(true, Ordering::Release);
     }
 

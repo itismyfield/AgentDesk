@@ -1,6 +1,10 @@
 //! Persisted turn and queue recovery shared by Gateway and REST worker runtimes.
 use super::*;
 
+#[cfg(test)]
+#[path = "queued_recovery_s2a_tests.rs"]
+mod s2a_tests;
+
 pub(super) async fn restore_worker_queues(shared: &Arc<SharedData>, provider: &ProviderKind) {
     let Some(http) = shared.serenity_http_or_token_fallback() else {
         tracing::error!(
@@ -341,7 +345,7 @@ impl ScopedRestoreLane {
             if let Err(reason) = &result {
                 let mut witness = lane.witness.lock().unwrap();
                 if witness.generation == generation && witness.status != RestoreStatus::Restored {
-                    witness.status = RestoreStatus::Blocked(reason.clone());
+                    witness.status = RestoreStatus::Blocked(reason.clone().into());
                 }
             }
             result

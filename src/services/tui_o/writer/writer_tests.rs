@@ -158,6 +158,8 @@ struct FakeLease {
     busy: AtomicBool,
     released: Arc<AtomicUsize>,
     on_acquire: Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// Channels whose writer the host reported stopped for good.
+    unavailable: Mutex<Vec<u64>>,
 }
 
 struct Held(Arc<AtomicUsize>);
@@ -176,6 +178,10 @@ impl DeliveryLease for Arc<FakeLease> {
             hook();
         }
         (!self.busy.load(Ordering::SeqCst)).then(|| Held(Arc::clone(&self.released)))
+    }
+
+    fn writer_unavailable(&self, channel: u64) {
+        self.unavailable.lock().unwrap().push(channel);
     }
 }
 

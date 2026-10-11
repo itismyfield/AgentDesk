@@ -15,7 +15,6 @@ mod home_order_tests;
 mod notice;
 mod policy_channel;
 mod queued;
-#[cfg(test)]
 pub(crate) mod replay_admission;
 #[cfg(test)]
 mod replay_admission_tests;
@@ -94,6 +93,8 @@ pub(crate) enum IntakeAdmission {
     },
     SkippedDuplicate,
     ConsumedToHold,
+    /// The replay check could not decide; the input waits in durable custody instead of starting.
+    ReplayDeferred(replay_admission::ReplayDefer),
     DeferredOpenRoute {
         target_instance_id: String,
         prepared_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
@@ -103,36 +104,80 @@ pub(crate) enum IntakeAdmission {
     },
 }
 
+/// Without an activation supplier the replay check keeps the legacy hold lookup and its outcomes.
+fn replay_starts_dormant(channel_id: &str) -> bool {
+    replay_admission::dormant_start(channel_id).is_some()
+}
+
+/// The legacy hold lookup: a lookup failure or a mixed input blocks instead of waiting in custody.
+async fn dormant_hold_admission(
+    pool: &sqlx::PgPool,
+    submission: &IntakeSubmission,
+    channel_id: &str,
+) -> Option<IntakeAdmission> {
+    let mut sources: Vec<String> = std::iter::once(submission.request.user_msg_id)
+        .chain(submission.request.source_message_ids.iter().copied())
+        .map(|id| id.get().to_string())
+        .collect();
+    sources.sort_unstable();
+    sources.dedup();
+    // Consume every absorbed source before routing or attachment effects; mixed items stay intact.
+    let detail = match crate::db::replay_disposition::unblocked_sources(
+        pool,
+        submission.provider.as_str(),
+        channel_id,
+        &sources,
+    )
+    .await
+    {
+        Ok(unblocked) if unblocked.len() == sources.len() => None,
+        Ok(unblocked) if unblocked.is_empty() => return Some(IntakeAdmission::ConsumedToHold),
+        Ok(_) => Some("intake mixes held and new sources".to_string()),
+        Err(error) => Some(format!("replay hold lookup failed: {error}")),
+    };
+    detail.map(|detail| IntakeAdmission::Blocked {
+        reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
+    })
+}
+
 pub(crate) async fn admit_text_intake(
     deps: &IntakeDeps<'_>,
     submission: &IntakeSubmission,
 ) -> IntakeAdmission {
     let channel_id = submission.request.channel_id.get().to_string();
-    if let Some(pool) = deps.shared.pg_pool.as_ref() {
-        let mut sources: Vec<String> = std::iter::once(submission.request.user_msg_id)
-            .chain(submission.request.source_message_ids.iter().copied())
-            .map(|id| id.get().to_string())
-            .collect();
-        sources.sort_unstable();
-        sources.dedup();
-        // Consume every absorbed source before routing or attachment effects; mixed items stay intact.
-        let detail = match crate::db::replay_disposition::unblocked_sources(
-            pool,
+    if let Some(pool) = deps.shared.pg_pool.as_ref()
+        && replay_starts_dormant(&channel_id)
+    {
+        if let Some(admission) = dormant_hold_admission(pool, submission, &channel_id).await {
+            return admission;
+        }
+    } else if let Some(pool) = deps.shared.pg_pool.as_ref() {
+        let request = &submission.request;
+        let input = replay_admission::discord_input(
             submission.provider.as_str(),
-            &channel_id,
-            &sources,
+            request.channel_id.get(),
+            request.user_msg_id.get(),
+            request.source_message_ids.iter().map(|id| id.get()),
+            &request.user_text,
+        );
+        let instance =
+            crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+        let ctx = replay_admission::ReplayAdmissionContext::production(
+            pool,
+            &instance,
+            replay_admission::incarnation(),
         )
-        .await
-        {
-            Ok(unblocked) if unblocked.len() == sources.len() => None,
-            Ok(unblocked) if unblocked.is_empty() => return IntakeAdmission::ConsumedToHold,
-            Ok(_) => Some("intake mixes held and new sources".to_string()),
-            Err(error) => Some(format!("replay hold lookup failed: {error}")),
-        };
-        if let Some(detail) = detail {
-            return IntakeAdmission::Blocked {
-                reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
-            };
+        .for_channel(&channel_id);
+        // Consume every absorbed source before routing or attachment effects; mixed items stay intact.
+        match replay_admission::preflight_source(&ctx, &input).await {
+            replay_admission::ReplayPreflight::LegacyUnprotected
+            | replay_admission::ReplayPreflight::Admit(_) => {}
+            replay_admission::ReplayPreflight::ConsumeProtected(_) => {
+                return IntakeAdmission::ConsumedToHold;
+            }
+            replay_admission::ReplayPreflight::Defer(defer) => {
+                return IntakeAdmission::ReplayDeferred(defer);
+            }
         }
     }
     // Before any routing or Postgres-less local fallback: an O channel runs only on its gateway.
@@ -438,6 +483,30 @@ pub(crate) async fn dispatch_text_intake(
     finish_text_intake_admission(deps, admission, submission).await
 }
 
+/// Only active replay starts defer a live input, so only they hold its checkpoint until custody.
+pub(crate) fn checkpoint_waits_for_admission(channel_id: serenity::ChannelId) -> bool {
+    !replay_starts_dormant(&channel_id.get().to_string())
+}
+
+/// Advances the checkpoint before any effect, except that a replay-deferred input advances it
+/// only once the queue holds it. Boxed so the caller's frame stays the size of a plain dispatch.
+pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
+    deps: &'a IntakeDeps<'b>,
+    submission: IntakeSubmission,
+    checkpoint: impl FnOnce() + Send + 'a,
+) -> BoxedIntake<'a> {
+    Box::pin(async move {
+        let admission = admit_text_intake(deps, &submission).await;
+        if !matches!(admission, IntakeAdmission::ReplayDeferred(_)) {
+            checkpoint();
+            return finish_text_intake_admission(deps, admission, submission).await;
+        }
+        finish_text_intake_admission(deps, admission, submission).await?;
+        checkpoint();
+        Ok(())
+    })
+}
+
 pub(crate) async fn finish_text_intake_admission(
     deps: &IntakeDeps<'_>,
     admission: IntakeAdmission,
@@ -451,7 +520,18 @@ pub(crate) async fn finish_text_intake_admission(
             prepared_uploads, ..
         } => {
             submission.preloaded_uploads.extend(prepared_uploads);
-            defer_live_submission(deps, submission).await;
+            defer_live_submission(deps, submission, false).await;
+        }
+        IntakeAdmission::ReplayDeferred(defer) => {
+            let channel_id = submission.request.channel_id.get();
+            // Unprepared Discord attachments cannot ride the queue item; refuse rather than keep text only.
+            let unprepared = !submission.attachments.is_empty();
+            if unprepared || !defer_with_all_sources(deps, submission).await {
+                return Err(format!(
+                    "replay check deferred ({defer:?}); channel {channel_id} refused custody"
+                )
+                .into());
+            }
         }
         IntakeAdmission::Blocked { ref reason }
             if submission.origin.should_notify_blocked(reason) =>
@@ -491,24 +571,51 @@ pub(crate) async fn finish_admitted_local(
     }
     let preserve_on_cancel = submission.preserve_on_cancel;
     let queued_drain = matches!(submission.origin, IntakeOrigin::QueuedDrain);
-    message_handler::finish_admitted_local(
+    local_turn(deps, submission, preserve_on_cancel, queued_drain).await
+}
+
+type BoxedIntake<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), super::super::Error>> + Send + 'a>,
+>;
+
+/// Boxed inside a plain function so the turn's large future never sits in the intake frames above it.
+fn local_turn<'a, 'b: 'a>(
+    deps: &'a IntakeDeps<'b>,
+    submission: IntakeSubmission,
+    preserve_on_cancel: bool,
+    queued_drain: bool,
+) -> BoxedIntake<'a> {
+    Box::pin(message_handler::finish_admitted_local(
         deps,
         submission.request,
         preserve_on_cancel,
         queued_drain,
         submission.preloaded_uploads,
         submission.voice_announcement,
-    )
-    .await
+    ))
 }
 
-async fn defer_live_submission(deps: &IntakeDeps<'_>, submission: IntakeSubmission) {
+/// Boxed inside a plain function: a second inline enqueue future would grow the caller's stack frame.
+fn defer_with_all_sources<'a, 'b: 'a>(
+    deps: &'a IntakeDeps<'b>,
+    submission: IntakeSubmission,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+    Box::pin(defer_live_submission(deps, submission, true))
+}
+
+/// Queues a live input behind the slow backstop, with every absorbed source when asked; true once
+/// the queue durably holds it.
+async fn defer_live_submission(
+    deps: &IntakeDeps<'_>,
+    submission: IntakeSubmission,
+    all_sources: bool,
+) -> bool {
     if matches!(submission.origin, IntakeOrigin::QueuedDrain) {
-        return;
+        return true;
     }
     let request = submission.request;
     let channel_id = request.channel_id;
-    let intervention = super::response_format::build_race_requeued_intervention(
+    let mut intervention = super::response_format::build_race_requeued_intervention(
         request.request_owner,
         request.user_msg_id,
         &request.user_text,
@@ -519,7 +626,23 @@ async fn defer_live_submission(deps: &IntakeDeps<'_>, submission: IntakeSubmissi
         submission.preloaded_uploads,
         submission.voice_announcement,
     );
-    let _outcome = super::super::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
+    let absorbed = request.source_message_ids.iter().copied();
+    for source in absorbed.filter(|&source| all_sources && source != request.user_msg_id) {
+        let generation = intervention.queued_generation;
+        let queued = match submission.preserve_on_cancel {
+            true => {
+                crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
+                    source, generation,
+                )
+            }
+            false => crate::services::turn_orchestrator::SourceMessageQueuedGeneration::new(
+                source, generation,
+            ),
+        };
+        intervention.source_message_ids.push(source);
+        intervention.source_message_queued_generations.push(queued);
+    }
+    let outcome = super::super::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
         super::super::mailbox_enqueue_intervention(
             deps.shared,
             &submission.provider,
@@ -537,6 +660,14 @@ async fn defer_live_submission(deps: &IntakeDeps<'_>, submission: IntakeSubmissi
         "intake_open_route_deferred",
     )
     .await;
+    let duplicate = matches!(
+        outcome.refusal_reason,
+        Some(
+            crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued
+                | crate::services::turn_orchestrator::EnqueueRefusalReason::LastItemDedup
+        )
+    );
+    (outcome.enqueued || outcome.merged || duplicate) && outcome.persistence_error.is_none()
 }
 
 fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_msg_id: &str) {
@@ -550,6 +681,12 @@ fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_ms
             channel_id,
             user_msg_id,
             "[intake_dispatch] forwarded; local execution fenced"
+        ),
+        IntakeAdmission::ReplayDeferred(defer) => tracing::warn!(
+            ?defer,
+            channel_id,
+            user_msg_id,
+            "[intake_dispatch] replay check deferred; local execution fenced"
         ),
         IntakeAdmission::SkippedDuplicate | IntakeAdmission::ConsumedToHold => tracing::info!(
             channel_id,

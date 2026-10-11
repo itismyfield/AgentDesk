@@ -167,6 +167,27 @@ async fn insert_registered(
     Ok(())
 }
 
+/// Binds the session to a registered receipt's nonce before its begin, so an exact retry can move
+/// it later; `Ok(false)` when no session row carries the key.
+pub(crate) async fn bind_session(
+    pool: &PgPool,
+    session_key: &str,
+    receipt_id: i64,
+    nonce: &str,
+) -> Result<bool, WriteError> {
+    let bound = sqlx::query(
+        "UPDATE sessions SET current_replay_receipt_id = $2, replay_episode_nonce = $3
+          WHERE session_key = $1",
+    )
+    .bind(session_key)
+    .bind(receipt_id)
+    .bind(nonce)
+    .execute(pool)
+    .await
+    .map_err(refused)?;
+    Ok(bound.rows_affected() == 1)
+}
+
 /// Which attempt a begin starts: the registered nonce, or the next nonce after a no-effect one.
 pub(crate) enum BeginFrom<'a> {
     Registered {
