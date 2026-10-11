@@ -591,6 +591,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/repost/runner_activation_tests.rs",
         "src/services/tui_o/repost/runtime_host_activation_tests.rs",
         "src/services/tui_o/repost/writer_activation_tests.rs",
+        "src/services/discord/catch_up/phase2_age_tests.rs",
         "src/services/discord/session_relay_sink/o_retired_terminal_e2e_tests.rs",
         "src/services/discord/task_supervisor/n4d_spawn_observation_tests.rs",
         "src/services/discord/tmux_watcher/inherited_fixture_tests.rs",
