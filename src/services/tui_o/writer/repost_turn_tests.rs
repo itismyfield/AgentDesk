@@ -306,7 +306,6 @@ async fn grant(runner: &mut Runner, writer: &mut Writer, pool: &PgPool, key: &Pi
 async fn f6_general_auto_and_resume_never_overlap_posts_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let auto = admitted(&pool, "f6-auto", "auto piece").await;
     let excluded = admitted(&pool, "f6-excluded", "excluded piece").await;
     let (harness, path, _) = switched_over(b"");
     let epoch = harness.gate.acquired();
@@ -347,6 +346,9 @@ async fn f6_general_auto_and_resume_never_overlap_posts_pg() {
     *harness.port.on_post.lock().unwrap() = Some(Box::new(on_post));
     let hook = turn(&harness, pool.clone(), switch(true), &io);
     let (stop, task) = spawn(harness.writer().with_repost(Some(Box::new(hook))));
+    // Admitted later, so the excluded piece's evidence comes first, alone.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let auto = admitted(&pool, "f6-auto", "auto piece").await;
     // Two probe passes, 10 s and then 20 s apart, come before any re-post.
     let waiting = tokio::time::timeout(Duration::from_secs(60), io.waiting.notified());
     waiting.await.expect("the re-post leaves");
