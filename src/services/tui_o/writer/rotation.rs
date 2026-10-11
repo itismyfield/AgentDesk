@@ -2,7 +2,10 @@
 //! read until it provably stops; a resumed or forked source skips what its parent already holds.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, mpsc},
+    time::{Duration, SystemTime},
+};
 
 use chrono::{TimeDelta, Utc};
 use tokio::sync::watch;
@@ -13,17 +16,19 @@ use super::deliver::ChannelWriter;
 use super::past_bind;
 use super::pieces::{Derived, UnitDeriver};
 use super::renumbered::{self, Logged, Names, Reopen, reopen};
-use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm};
+use super::{AlarmSink, DeliveryLease, DiscordPort, ReaderConfig, WriterAlarm};
 use crate::services::claude_tui::hook_server::HookEventKind;
-use crate::services::tui_o::shadow::capture::SourceCapture;
+use crate::services::tui_o::shadow::SourceAnomalyKind;
+use crate::services::tui_o::shadow::capture::{Fingerprint, SourceCapture};
 use crate::services::tui_o::shadow::identity::{RecordFact, classify};
 use crate::services::tui_o::shadow::{
     CaptureBatch, CaptureOutcome, CaptureSource, CapturedRecord, MAX_READ_BYTES, ShadowProvider,
     SourceId, UnitKind,
 };
 use crate::services::tui_o::store::StoreError;
+use crate::services::tui_o::store::cleanup_witness::{CleanupWitness, WITNESS_REFRESH};
 use crate::services::tui_o::store::rotation::{Boundary, Rotation, SourceLink, Successor};
-use crate::services::tui_o::store::spool::{SpoolFrame, source_key};
+use crate::services::tui_o::store::spool::{Cursor, SpoolFrame, source_key};
 
 /// A proven old source whose length holds this long after its successor's first record is retired.
 pub const RETIRE_QUIET: Duration = Duration::from_secs(10);
@@ -32,6 +37,8 @@ pub const OLD_GROWTH_ALARM: Duration = Duration::from_secs(600);
 /// A retired source is watched this long; growth un-retires it.
 pub const RETIRED_WATCH: Duration = Duration::from_secs(24 * 60 * 60);
 pub const MAX_READERS: usize = 3;
+const DORMANT_QUIET: Duration = Duration::from_secs(30);
+const DORMANT_POLL: Duration = Duration::from_secs(60);
 /// A parent consumed past this is not scanned, so a fork of it waits for the operator.
 pub const LINEAGE_SCAN_CAP_BYTES: u64 = 256 << 20;
 const PENDING_BIND_ALARM_SECS: i64 = 60;
@@ -40,6 +47,8 @@ const PENDING_BIND_ALARM_SECS: i64 = 60;
 mod fork_lineage;
 #[cfg(test)]
 pub(crate) mod provenance;
+#[path = "rotation/readers.rs"]
+mod readers;
 use fork_lineage::{Class, Lineage, RowIds};
 
 /// How a record names a native key: as the unit itself or as an announcement of it.
@@ -64,6 +73,19 @@ struct Reader {
     watch_until: Option<Instant>,
     /// The old source's length at its rotation; its successor waits until it is read and spooled.
     drain_to: Option<u64>,
+    dormant: Option<Instant>,
+    idle: Option<(Fingerprint, Instant)>,
+    observation: Option<CleanupWitness>,
+    persisted_at: Option<SystemTime>,
+}
+
+struct Validation {
+    cursor: Cursor,
+    fingerprint: Fingerprint,
+    observed_at: SystemTime,
+    result: mpsc::Receiver<std::io::Result<Fingerprint>>,
+    #[cfg(test)]
+    ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Reader {
@@ -78,6 +100,10 @@ impl Reader {
             growth_alarmed: false,
             watch_until: None,
             drain_to: None,
+            dormant: None,
+            idle: None,
+            observation: None,
+            persisted_at: None,
         }
     }
 
@@ -114,6 +140,13 @@ pub struct Sources<B> {
     /// Hop seq and pane of successor records written without them, as the binding log names them.
     legacy_hops: HashMap<String, (u64, String)>,
     names: Names,
+    reader_config: Option<ReaderConfig>,
+    last_wall: Option<SystemTime>,
+    validation: Option<Validation>,
+    #[cfg(test)]
+    jobs_started: usize,
+    #[cfg(test)]
+    hold_validation: bool,
 }
 
 fn halted(context: &'static str) -> impl Fn(StoreError) -> WriterAlarm {
@@ -264,86 +297,21 @@ impl<B: BindingEvents> Sources<B> {
             log_alarmed: false,
             legacy_hops: HashMap::new(),
             names: Names::new(provider),
+            reader_config: None,
+            last_wall: None,
+            validation: None,
+            #[cfg(test)]
+            jobs_started: 0,
+            #[cfg(test)]
+            hold_validation: false,
         }
     }
 
-    /// Applies operator-resolved boundaries, re-derives every retained spool with predecessors
-    /// first, then reopens each source at its cursor.
-    pub fn resume<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
-        &mut self,
-        writer: &mut ChannelWriter<P, L, A>,
-        deriver: &mut UnitDeriver,
-        owed: &mut VecDeque<Derived>,
-    ) -> Result<(), WriterAlarm> {
-        let resolved = writer.store().apply_resolved_boundaries();
-        resolved.map_err(halted("resolved boundary"))?;
-        renumbered::unique(writer.store().cursors()).map_err(halt)?;
-        self.rotation = writer.store().rotation().map_err(halted("rotation"))?;
-        let checkpoint = writer.store().binding_checkpoint();
-        self.checkpoint = checkpoint.map_err(halted("binding checkpoint"))?;
-        if let Some(logged) = self.read_log(writer, 0)? {
-            let checkpoint = self.names.start(writer.store(), &logged, self.checkpoint)?;
-            if let Some(checkpoint) = checkpoint {
-                self.restore_hops(writer, &logged.1, checkpoint)?;
-            }
-        }
-        let mut cursors: Vec<_> = writer.store().cursors().cloned().collect();
-        cursors.sort_by_key(|cursor| {
-            let seq = self.rotation.link(&cursor.source).map_or(0, |l| l.seq);
-            (predecessors(&self.rotation, &cursor.source), seq)
-        });
-        let now = Instant::now();
-        let consumed: HashMap<String, u64> = (cursors.iter())
-            .map(|cursor| (source_key(&cursor.source), cursor.captured_through))
-            .collect();
-        for cursor in cursors {
-            let (key, mut captured_any) = (source_key(&cursor.source), false);
-            self.sync_parent(&key, |parent| consumed.get(&source_key(parent)).copied());
-            if let Some(SourceLink {
-                boundary: Boundary::Pending { .. },
-                ..
-            }) = self.rotation.link(&cursor.source)
-            {
-                let source = cursor.source.clone();
-                self.raised.push(WriterAlarm::BoundaryPending { source });
-            }
-            let replay = writer.store().for_each_frame(&cursor.source, |frame| {
-                if let SpoolFrame::Record(record) = frame {
-                    captured_any = true;
-                    self.owe(deriver, owed, &key, &record);
-                }
-            });
-            replay.map_err(halted("spool replay"))?;
-            let capture = match reopen(&cursor) {
-                Ok(capture) => Some(capture),
-                Err(Reopen::Unread(_)) if cursor.retired => None,
-                Err(failed) => return Err(failed.halt()),
-            };
-            let mut reader = Reader::new(cursor.source.clone(), capture);
-            reader.captured_any = captured_any
-                || !writer
-                    .store()
-                    .ledger()
-                    .gc_segments(&cursor.source)
-                    .is_empty();
-            reader.rotated_at = self.rotation.successors.contains_key(&key).then_some(now);
-            reader.watch_until = cursor.retired.then_some(now + RETIRED_WATCH);
-            reader.drain_to = match self.rotation.successors.get(&key) {
-                // A record written before the rotation length was kept holds to the length now.
-                Some(next) if next.seq.is_none() => reader.backlog_end(),
-                Some(next) => next.drain_to.filter(|end| cursor.captured_through < *end),
-                None => None,
-            };
-            // A retired reader is never captured again, so its prefix-only end is judged here.
-            let ended = (reader.capture.as_ref())
-                .is_none_or(|capture| capture.file_len().ok() == Some(cursor.captured_through));
-            if reader.watch_until.is_some() && ended {
-                self.pend_at_end(&key, cursor.captured_through);
-            }
-            self.readers.push(reader);
-        }
-        self.restore_legacy_hops(writer);
-        self.flush(writer)
+    /// Selects the cleanup engine explicitly; existing actor callers keep the legacy path.
+    #[must_use]
+    pub fn with_readers(mut self, config: ReaderConfig) -> Self {
+        self.reader_config = Some(config);
+        self
     }
 
     fn restore_hops<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
@@ -546,6 +514,7 @@ impl<B: BindingEvents> Sources<B> {
             return Ok(());
         };
         let mut proved = false;
+        let mut wake = Vec::new();
         for (key, next) in &mut self.rotation.successors {
             let made = match (next.seq, next.tmux_session.as_deref()) {
                 (Some(seq), Some(tmux)) => Some((seq, tmux)),
@@ -558,11 +527,24 @@ impl<B: BindingEvents> Sources<B> {
             if next.proof.is_none() && ours && left {
                 next.proof = Some(event.seq);
                 proved = true;
+                if self.reader_config.is_some() {
+                    wake.push(key.clone());
+                }
             }
         }
         if proved {
             let written = writer.store().write_rotation(&self.rotation);
             written.map_err(halted("rotation"))?;
+            for key in wake {
+                if let Some(index) = self
+                    .readers
+                    .iter()
+                    .position(|r| source_key(&r.source) == key)
+                {
+                    self.readers[index].quiet = None;
+                    self.wake(writer, index)?;
+                }
+            }
         }
         Ok(())
     }
@@ -596,6 +578,17 @@ impl<B: BindingEvents> Sources<B> {
         let parent_hint = parent_hint.map(&mut stored).transpose()?;
         let new = stored(&new)?;
         let (old, parent_hint) = (old.as_ref(), parent_hint.as_ref());
+        if self.reader_config.is_some() {
+            for source in old.into_iter().chain([&new]) {
+                if let Some(index) = self
+                    .readers
+                    .iter()
+                    .position(|r| r.source == *source && r.dormant.is_some())
+                {
+                    self.wake(writer, index)?;
+                }
+            }
+        }
         let key = source_key(&new);
         let cursor = writer.store().cursor(&new).cloned();
         if cursor.is_none() && !self.rotation.links.contains_key(&key) {
@@ -712,13 +705,23 @@ impl<B: BindingEvents> Sources<B> {
         owed: &mut VecDeque<Derived>,
         index: usize,
     ) -> Result<(), WriterAlarm> {
+        if self.reader_config.is_some() && self.readers[index].watch_until.is_none() {
+            let reader = &self.readers[index];
+            if reader.capture.is_none() && (reader.drain_to.is_some() || reader.pending.is_some()) {
+                return Err(halt(
+                    "reader without an FD still holds a capture obligation",
+                ));
+            }
+        }
         let reader = &mut self.readers[index];
         let Some(capture) = reader
             .capture
             .as_mut()
             .filter(|_| reader.watch_until.is_none())
         else {
-            reader.drain_to = None;
+            if self.reader_config.is_none() {
+                reader.drain_to = None;
+            }
             return Ok(());
         };
         let retried = reader.pending.is_some();
@@ -728,12 +731,16 @@ impl<B: BindingEvents> Sources<B> {
                 CaptureOutcome::Batch(batch) => batch,
                 CaptureOutcome::Anomaly(anomaly) => {
                     let (kind, detail) = (anomaly.kind, anomaly.detail);
+                    if self.reader_config.is_some() && kind == SourceAnomalyKind::Missing {
+                        return self.cleanup_missing(writer, index, SystemTime::now());
+                    }
                     return Err(halt(format!("source {kind:?}: {detail}")));
                 }
             },
         };
         let read_through = capture.read_through();
         let at_end = capture.file_len().ok() == Some(capture.captured_through());
+        let first_capture = !reader.captured_any && !batch.records.is_empty();
         match writer.store().append_spool(&batch, &capture.prefix_hash()) {
             Ok(()) => reader.captured_any |= !batch.records.is_empty(),
             Err(StoreError::SpoolFull) => {
@@ -747,6 +754,18 @@ impl<B: BindingEvents> Sources<B> {
         }
         if !reader.drain_to.is_some_and(|end| read_through < end) {
             reader.drain_to = None;
+        }
+        if first_capture && self.reader_config.is_some() {
+            for old in &mut self.readers {
+                if self
+                    .rotation
+                    .successors
+                    .get(&source_key(&old.source))
+                    .is_some_and(|next| next.source == batch.source)
+                {
+                    old.quiet = None;
+                }
+            }
         }
         let key = source_key(&batch.source);
         let store = writer.store();
@@ -767,7 +786,7 @@ impl<B: BindingEvents> Sources<B> {
         let source = &self.readers[index].source;
         self.readers.iter().any(|reader| {
             reader.drain_to.is_some()
-                && reader.reading()
+                && (reader.reading() || self.reader_config.is_some())
                 && (self.rotation.successors.get(&source_key(&reader.source)))
                     .is_some_and(|next| next.source == *source)
         })
@@ -916,73 +935,6 @@ impl<B: BindingEvents> Sources<B> {
         Ok(())
     }
 
-    /// Retires quiet drained old sources whose hop is proven, alarms on growth and reader count, and
-    /// watches retired ones.
-    pub fn tend<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
-        &mut self,
-        writer: &mut ChannelWriter<P, L, A>,
-    ) -> Result<(), WriterAlarm> {
-        let now = Instant::now();
-        let captured = self.readers.iter().filter(|r| r.captured_any);
-        let captured: HashSet<String> = captured.map(|r| source_key(&r.source)).collect();
-        let mut grew_back = Vec::new();
-        for reader in &mut self.readers {
-            let Some(capture) = reader.capture.as_ref() else {
-                continue;
-            };
-            let Ok(len) = capture.file_len() else {
-                continue;
-            };
-            let through = capture.captured_through();
-            if let Some(until) = reader.watch_until {
-                if len > through {
-                    grew_back.push(reader.source.clone());
-                } else if now >= until {
-                    reader.capture = None;
-                }
-                continue;
-            }
-            let successor = self.rotation.successors.get(&source_key(&reader.source));
-            let Some(successor) = successor else {
-                continue;
-            };
-            let successor_captured = captured.contains(&source_key(&successor.source));
-            // Only a provider record shows the old source stopped; a drained quiet one stays read.
-            let proven = successor.proof.is_some();
-            let drained = through == len && reader.pending.is_none();
-            let grew = reader.quiet.is_some_and(|(held, _)| held != len);
-            let late = reader
-                .rotated_at
-                .is_some_and(|at| now - at > OLD_GROWTH_ALARM);
-            if grew && late && !reader.growth_alarmed {
-                reader.growth_alarmed = true;
-                let source = reader.source.clone();
-                writer.alarm(WriterAlarm::SourceStillGrowing { source });
-            }
-            let since = match reader.quiet {
-                Some((held, since)) if held == len && successor_captured => since,
-                _ => now,
-            };
-            reader.quiet = Some((len, since));
-            if proven && successor_captured && drained && now - since >= RETIRE_QUIET {
-                let retired = writer.store().set_retired(&reader.source, true);
-                retired.map_err(halted("retire"))?;
-                (reader.watch_until, reader.quiet) = (Some(now + RETIRED_WATCH), None);
-            }
-        }
-        for source in grew_back {
-            self.unretire(writer, &source)?;
-            writer.alarm(WriterAlarm::RetiredSourceGrew { source });
-        }
-        let count = self.readers.iter().filter(|r| r.reading()).count();
-        if count > MAX_READERS && !self.readers_alarmed {
-            writer.alarm(WriterAlarm::TooManyReaders { count });
-        }
-        self.readers_alarmed = count > MAX_READERS;
-        writer.reconcile_reader_count(count);
-        Ok(())
-    }
-
     /// Sources whose segments may be collected, with how many to keep; undecided and pending
     /// boundaries keep their spool.
     pub fn collectable(&self) -> Vec<(SourceId, usize)> {
@@ -1006,5 +958,69 @@ pub(crate) mod probe {
     ) -> Option<Option<Instant>> {
         let reader = sources.readers.iter().find(|r| r.source == *source);
         reader.map(|r| r.rotated_at)
+    }
+    pub(crate) fn reading<B>(sources: &Sources<B>, source: &SourceId) -> bool {
+        sources
+            .readers
+            .iter()
+            .any(|r| r.source == *source && r.reading())
+    }
+
+    pub(crate) fn keep_barrier<B>(sources: &mut Sources<B>, source: &SourceId, end: u64) {
+        let reader = sources
+            .readers
+            .iter_mut()
+            .find(|r| r.source == *source)
+            .unwrap();
+        reader.capture = None;
+        reader.drain_to = Some(end);
+    }
+
+    pub(crate) fn quiet<B>(sources: &mut Sources<B>, source: &SourceId) -> bool {
+        sources
+            .readers
+            .iter()
+            .find(|r| r.source == *source)
+            .unwrap()
+            .quiet
+            .is_some()
+    }
+    pub(crate) fn validating<B>(sources: &Sources<B>) -> bool {
+        sources.validation.is_some()
+    }
+    pub(crate) fn jobs_started<B>(sources: &Sources<B>) -> usize {
+        sources.jobs_started
+    }
+    pub(crate) fn hold_validation<B>(sources: &mut Sources<B>, hold: bool) {
+        sources.hold_validation = hold;
+    }
+    pub(crate) fn ready<B>(sources: &Sources<B>) -> bool {
+        sources
+            .validation
+            .as_ref()
+            .is_some_and(|v| v.ready.load(std::sync::atomic::Ordering::Acquire))
+    }
+    pub(crate) fn apply_validation<
+        B: super::BindingEvents,
+        P: super::DiscordPort,
+        L: super::DeliveryLease,
+        A: super::AlarmSink,
+    >(
+        sources: &mut Sources<B>,
+        writer: &mut super::ChannelWriter<P, L, A>,
+        now: std::time::SystemTime,
+    ) -> Result<Option<usize>, super::WriterAlarm> {
+        sources.validation_result(writer, now)
+    }
+    pub(crate) fn observed_at<B>(
+        sources: &Sources<B>,
+        source: &SourceId,
+    ) -> Option<std::time::SystemTime> {
+        sources
+            .readers
+            .iter()
+            .find(|r| r.source == *source)
+            .and_then(|r| r.observation.as_ref())
+            .map(|w| w.observed_at)
     }
 }

@@ -2538,6 +2538,7 @@ src/
 │   │   │   ├── rotation/
 │   │   │   │   ├── provenance.rs
 │   │   │   │   └── provenance_tests.rs
+│   │   │   ├── cleanup_witness.rs
 │   │   │   ├── durable.rs
 │   │   │   ├── ledger.rs
 │   │   │   ├── ledger_lock_tests.rs
@@ -2564,7 +2565,8 @@ src/
 │   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── rotation/
-│   │   │   │   └── provenance.rs
+│   │   │   │   ├── provenance.rs
+│   │   │   │   └── readers.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs

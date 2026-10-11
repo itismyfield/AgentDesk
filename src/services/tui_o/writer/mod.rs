@@ -31,6 +31,12 @@ pub struct WriterConfig {
     pub enabled: bool,
 }
 
+/// Reader policy selected explicitly by an engine caller; the default keeps FDs open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReaderConfig {
+    pub dormant: bool,
+}
+
 /// A message as Discord returned it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeenMessage {
@@ -151,6 +157,12 @@ pub enum WriterAlarm {
     /// A retired source grew; it is read again.
     RetiredSourceGrew {
         source: SourceId,
+    },
+    CleanupRetired {
+        source: SourceId,
+        offset: u64,
+        modified: std::time::SystemTime,
+        age: std::time::Duration,
     },
     /// The full spool refuses an old source's tail, its successor waits behind that tail, and an
     /// announced unit keeps GC off; nothing can move, so the channel stops for an operator.
