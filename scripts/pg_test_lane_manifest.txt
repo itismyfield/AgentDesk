@@ -135,6 +135,7 @@ src/services/discord/health/recovery/live_agent_recovery.rs
 src/services/discord/health/recovery/stall_alert.rs
 src/services/discord/health/turn_deliver/inject_codex_tests.rs
 src/services/discord/health/turn_deliver/inject_tests.rs
+src/services/discord/health/watcher_respawn/o_only_retry_tests.rs
 src/services/discord/herdr_terminate.rs
 src/services/discord/host_defer_gate_tests.rs
 src/services/discord/host_key_derivation_tests.rs
@@ -228,6 +229,7 @@ src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs
 src/services/discord/turn_bridge/voice_completion_tests.rs
 src/services/discord/turn_teardown_clearance_tests.rs
 src/services/discord/watchers/dispatched_origin_ghost_tests.rs
+src/services/discord/watchers/lifecycle/n4d2_restore_tests.rs
 src/services/discord/watchers/lifecycle/restore.rs
 src/services/discord/watchers/lifecycle/restore_tests.rs
 src/services/dispatches/discord_delivery/guard.rs
@@ -413,6 +415,7 @@ services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::health::turn_deliver::inject_codex_tests
 services::discord::health::turn_deliver::inject_tests
+services::discord::health::watcher_respawn::o_only_retry::tests
 services::discord::herdr_terminate::tests
 services::discord::host_defer_gate::tests
 services::discord::host_key_derivation::tests
@@ -478,6 +481,7 @@ services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_h
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests::inherited_fixture_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests
+services::discord::tmux::watcher_lifecycle::o_only_restore::tests
 services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
 services::discord::tmux_reaper::host_guard_tests
@@ -1360,6 +1364,7 @@ services::discord::health::turn_deliver::inject_tests::an_injection_without_a_di
 services::discord::health::turn_deliver::inject_tests::input_left_on_disk_for_an_unloaded_mailbox_stays_ahead_of_a_deliver_pg
 services::discord::health::turn_deliver::inject_tests::input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg
 services::discord::health::turn_deliver::inject_tests::input_queued_reserved_or_claimed_before_a_deliver_stays_ahead_of_it_pg
+services::discord::health::watcher_respawn::o_only_retry::tests::n4d2_public_retry_pg_unknown_host_uses_actual_installer_and_watcher
 services::discord::herdr_terminate::tests::m1_retire_cas_failure_preserves_successor_pg
 services::discord::host_defer_gate::tests::the_promote_gate_holds_only_what_the_host_guard_keeps_pg
 services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_under_another_name_pg
@@ -1618,6 +1623,7 @@ services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispa
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::live_turn_without_dispatch_keeps_its_inflight_row
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::real_dispatched_origin_ghost_is_consumed_after_the_probe
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::release_that_takes_no_session_row_reports_no_consumed_ghost
+services::discord::tmux::watcher_lifecycle::o_only_restore::tests::n4d2_restore_orphan_preserves_retired_target_and_kills_legacy_pg
 services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests::c2b_startup_cleanup_leaves_a_protected_channel_alone_pg
 services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests::startup_cleanup_runs_only_after_the_host_guard_admits_the_stored_rows_pg
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::dispatched_origin_ghost_marker_is_consumed_only_for_matching_turn

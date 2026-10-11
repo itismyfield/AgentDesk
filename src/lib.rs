@@ -290,3 +290,9 @@ pub mod home_runtime {
 pub mod delegation_availability {
     pub use crate::services::cluster::home_availability::{Availability, Unavailable, state};
 }
+
+/// Prepared watcher restore API; runtime boot integration remains dormant.
+#[cfg(unix)]
+pub mod watcher_restore {
+    pub use crate::services::discord::{RetiredOWatcherRestore, restore_retired_o_watchers};
+}

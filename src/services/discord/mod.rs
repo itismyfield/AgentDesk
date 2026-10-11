@@ -145,6 +145,8 @@ mod tmux;
 pub use tmux::{
     OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
 };
+#[cfg(unix)]
+pub use tmux::{RetiredOWatcherRestore, restore_retired_o_watchers};
 #[cfg(all(test, unix))]
 pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
     requested_channel_id: ChannelId,
