@@ -38313,6 +38313,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:5360c8ffe89c62db7dad3644d2a92be6d80277707b4ac06c9e93fd3fda52903c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_host/herdr_gate_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:71d2560dfdd13db40c4b683994e7ead366dd841ff733e6ee01fbfa75fcae9884"
     },
     {

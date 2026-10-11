@@ -630,6 +630,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/catch_up_pagination_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/consumed_command_guard_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/discord_mock.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/mod.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/queue_recovery_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs",
