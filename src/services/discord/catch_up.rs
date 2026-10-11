@@ -233,7 +233,9 @@ fn rearm_catch_up_retry_after_defer(
     let attempted_rearms = base.deferred_rearms.saturating_add(1);
     let Some(next_retry_state) = base.after_deferred_rearm(retry_after) else {
         tracing::warn!(
-            "  [{ts}] ⚠ catch-up: channel {} deferred {} time(s); giving up after {} re-arm(s) at checkpoint {}",
+            "  [{ts}] ⚠ catch-up: channel {} deferred {} time(s); giving up after {} re-arm(s) at checkpoint {}; \
+             repair the enqueue/persistence failure, then rerun a full catch-up sweep \
+             (periodic scan or restart; normal message age limits still apply)",
             channel_id,
             attempted_rearms,
             CATCH_UP_RETRY_DEFERRED_REARM_LIMIT,
@@ -591,6 +593,15 @@ pub(in crate::services::discord) async fn catch_up_missed_messages(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
+    let api = SerenityCatchUpDiscordApi { http };
+    catch_up_missed_messages_with_api(&api, shared, provider).await;
+}
+
+async fn catch_up_missed_messages_with_api<A: CatchUpDiscordApi + ?Sized>(
+    api: &A,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+) {
     let pending_retry_channels = collect_catch_up_retry_pending_channels(shared);
     let pending_count = pending_retry_channels.len();
     if pending_count > 0 {
@@ -599,9 +610,8 @@ pub(in crate::services::discord) async fn catch_up_missed_messages(
             "  [{ts}] 🔁 catch-up: sweep observed {pending_count} pending retry checkpoint(s)"
         );
     }
-    let api = SerenityCatchUpDiscordApi { http };
     run_catch_up_sweep(
-        CatchUpDeps::new(&api, shared, provider)
+        CatchUpDeps::new(api, shared, provider)
             .with_pending_retry_channels(&pending_retry_channels),
     )
     .await;

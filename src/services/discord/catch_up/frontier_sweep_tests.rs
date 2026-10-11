@@ -1172,3 +1172,6 @@ mod merged_alias_tests;
 
 #[path = "phase2_age_tests.rs"]
 mod phase2_age_tests;
+
+#[path = "exhausted_recovery_tests.rs"]
+mod exhausted_recovery_tests;
