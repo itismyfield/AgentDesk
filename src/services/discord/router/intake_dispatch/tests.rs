@@ -971,6 +971,7 @@ async fn dispatched_open_route_never_uses_stale_local_recovery_pg() {
         channel_id: &channel,
         policy_channel_id: &channel,
         user_msg_id: "4350452",
+        replay_source_message_ids: None,
         request_owner_id: &request_owner_id,
         request_owner_name: Some(&submission.request.request_owner_name),
         user_text: &submission.request.user_text,
