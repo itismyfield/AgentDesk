@@ -1,3 +1,4 @@
+use super::super::has_session;
 use super::*;
 use crate::config::TestEnvVarGuard as Guard;
 use std::os::unix::fs::PermissionsExt;
