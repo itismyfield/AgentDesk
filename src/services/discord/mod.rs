@@ -1037,6 +1037,9 @@ pub(crate) struct SharedData {
     /// count for the next in-process pass, independent of live message
     /// checkpoints that may advance while the queued backlog drains.
     pub(super) catch_up_retry_pending: dashmap::DashMap<ChannelId, CatchUpRetryState>,
+    /// Serializes sweeps and retains retries handed to a busy channel.
+    pub(super) catch_up_scan_in_progress:
+        dashmap::DashMap<ChannelId, (bool, Option<CatchUpRetryState>)>,
     /// Per-channel turn start time — used for metrics duration calculation.
     pub(super) turn_start_times: dashmap::DashMap<ChannelId, std::time::Instant>,
     /// Per-channel known speakers collected lazily from incoming messages.
@@ -1359,6 +1362,7 @@ fn make_shared_data_for_tests_with_storage_and_intake_capabilities(
         },
         last_message_ids: dashmap::DashMap::new(),
         catch_up_retry_pending: dashmap::DashMap::new(),
+        catch_up_scan_in_progress: dashmap::DashMap::new(),
         turn_start_times: dashmap::DashMap::new(),
         channel_rosters: dashmap::DashMap::new(),
         http: RuntimeHttpCache {
