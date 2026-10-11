@@ -1174,8 +1174,8 @@ class TestIdOracleContract(unittest.TestCase):
                     self.assertEqual(self.judge(root, command), kinds)
 
     def test_a_restored_skip_also_empties_the_selected_target(self) -> None:
-        # The generated array also skips the selected target's own candidates,
-        # so a single filter it wipes out runs 0 tests; opaque stays unjudged.
+        # The generated array also skips the selected target's own candidates, so a
+        # single filter it wipes out runs 0 tests; opaque, option values too, stays unjudged.
         array = "${NON_PG_SKIP_ARGS[@]}"
         single = f"cargo test --lib high_risk_recovery -- {array}"
         with tempfile.TemporaryDirectory() as tmp:
@@ -1189,7 +1189,9 @@ class TestIdOracleContract(unittest.TestCase):
                      f"-- {array}", ["zero-match"]),
                     ("postgres", single, []),
                     ("high_risk_recovery", f"cargo test --lib case -- {array}", []),
-                    ("high_risk_recovery", f"{single} $EXTRA", [])):
+                    ("high_risk_recovery", f"{single} $EXTRA", []),
+                    ("high_risk_recovery", f"{single} --test-threads $EXTRA", []),
+                    ("high_risk_recovery", f"{single} --test-threads 1", ["zero-match"])):
                 filter_file.write_text(
                     f"NON_PG_SKIP_ARGS=(\n  --skip _pg\n  --skip {skip}\n)\n",
                     encoding="utf-8")
