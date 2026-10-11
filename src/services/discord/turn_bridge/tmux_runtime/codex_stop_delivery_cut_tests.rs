@@ -397,7 +397,6 @@ async fn restart_real_cutpoints_reach_their_runtime_boundaries_pg() {
     let root = PathBuf::from(std::env::var_os("ADK_CUT_ROOT").unwrap());
     let _root = crate::config::set_agentdesk_root_for_test(&root);
     let _log = TestBindingRoot::enter(Some(&root));
-    let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let url = std::env::var("ADK_CUT_DB").unwrap();
     let pool = crate::db::postgres::connect_test_pool_with_max_connections(&url, "cut", 4);
     let pool = pool.await.unwrap();
