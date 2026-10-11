@@ -766,6 +766,12 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
     user_text: &str,
 ) {
     let ts = chrono::Local::now().format("%H:%M:%S");
+    // A protected request reruns only through its exact continuation, never this history retry.
+    let barred = crate::services::discord::replay_policy::legacy_retry_barred;
+    if barred(channel_id.get(), user_message_id.get()) {
+        tracing::warn!("  [{ts}] ⏭ auto-retry: protected request held for channel {channel_id}");
+        return;
+    }
 
     // Dedup guard: prevent turn_bridge + watcher from both firing
     // auto-retry for the same channel simultaneously.

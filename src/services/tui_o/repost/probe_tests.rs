@@ -83,7 +83,7 @@ pub(crate) fn run(name: &str) -> RunScope {
     }
 }
 
-fn scope(slots: &[u8]) -> EvidenceScope {
+pub(crate) fn scope(slots: &[u8]) -> EvidenceScope {
     let settled: Vec<_> = slots
         .iter()
         .map(|slot| (*slot, Some(AttemptResult::Uncertain)))
@@ -144,11 +144,11 @@ impl Fake {
         }
     }
 
-    fn add(&self, message: ObservedMessage) {
+    pub(crate) fn add(&self, message: ObservedMessage) {
         self.channel.lock().unwrap().insert(message.id, message);
     }
 
-    fn reads(&self) -> usize {
+    pub(crate) fn reads(&self) -> usize {
         self.reads.load(Ordering::SeqCst)
     }
 }
@@ -827,6 +827,7 @@ const PROBE_FILES: [&str; 3] = [
     "src/services/tui_o/repost/matcher.rs",
 ];
 const ADAPTER: &str = "src/services/discord/outbound/o_writer_repost_io.rs";
+const ADAPTER_PATH: &str = "#[path = \"../../tui_o/repost/probe.rs\"]";
 /// The adapter may only declare the probe and implement its reads.
 const ADAPTER_LINES: [&str; 4] = [
     "use probe::ProbeRead;",
@@ -847,11 +848,136 @@ fn names_the_probe(path: &str, line: &str) -> bool {
         "repost::io",
         "io::probe",
     ];
-    let words = line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'));
+    let words: Vec<&str> = line
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
+        .collect();
+    let in_repost = path.contains("tui_o/repost/");
+    // A grouped import of the re-post module or its siblings: a dormant member in it, or not on
+    // one line.
+    let grouped = line.contains("repost::{") || (in_repost && line.contains("super::{"));
+    let group_names_io = grouped && (!line.contains('}') || names_a_member(line));
     entries.iter().any(|entry| line.contains(entry))
-        || words.clone().any(|word| word.starts_with("probe::"))
-        || (path.contains("tui_o/repost/")
-            && words.into_iter().any(|word| word.starts_with("super::io")))
+        || words.iter().any(|word| word.starts_with("probe::"))
+        || (in_repost && words.iter().any(|word| word.starts_with("super::io")))
+        || group_names_io
+        || line.contains("repost as ")
+        || escapes_by_path(path, line)
+        || (path == ADAPTER && line.contains("probe"))
+}
+
+/// `line` with the blanks around each `::` removed, so a spaced path reads as written tight.
+fn tight_paths(line: &str) -> String {
+    let parts: Vec<&str> = line.split("::").collect();
+    let last = parts.len() - 1;
+    let tight = parts.iter().enumerate().map(|(index, part)| {
+        let part = if index > 0 { part.trim_start() } else { part };
+        if index < last { part.trim_end() } else { part }
+    });
+    tight.collect::<Vec<_>>().join("::")
+}
+
+/// Imports a line scan cannot follow: a glob of the re-post module, `self` paths inside it, and a
+/// path split before its group. Reported, never skipped.
+fn escapes_by_path(path: &str, line: &str) -> bool {
+    let in_repost = path.contains("tui_o/repost/");
+    // `super::*` is judged in `probe_edges`: only an in-file test module may glob its parent.
+    let glob = line.contains("repost::*");
+    let words = line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'));
+    let selfish = in_repost
+        && (line.contains("self::{")
+            || line.contains("self::*")
+            || words.into_iter().any(|word| {
+                ["self::runner", "self::dispatch", "self::io"]
+                    .iter()
+                    .any(|module| word.starts_with(module))
+            }));
+    glob || selfish || line.trim_end().ends_with("repost::")
+}
+
+/// Whether a line names a dormant re-post module as a bare word, as a group member does.
+fn names_a_member(line: &str) -> bool {
+    line.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|word| ["io", "probe", "runner", "dispatch", "self"].contains(&word))
+}
+
+/// Whether `line` opens a grouped import of the re-post module that it does not also close.
+fn opens_a_group(path: &str, line: &str) -> bool {
+    let in_repost = path.contains("tui_o/repost/");
+    let opens = line.contains("repost::{") || (in_repost && line.contains("super::{"));
+    opens && !line.contains('}')
+}
+
+/// The dormant runner and dispatch: they read the probe, and nothing operational reads them.
+const CONSUMERS: [&str; 2] = [
+    "src/services/tui_o/repost/runner.rs",
+    "src/services/tui_o/repost/dispatch.rs",
+];
+
+/// Whether a line names the runner or its dispatch.
+fn names_the_runner(path: &str, line: &str) -> bool {
+    let names = [
+        "DispatchIntent",
+        "try_next_dispatch",
+        "RepostWriter",
+        "DispatchPermit",
+    ];
+    let words = line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'));
+    words.into_iter().any(|word| {
+        let segments: Vec<&str> = word.split("::").collect();
+        let module = segments.windows(2).any(|pair| {
+            let parent =
+                pair[0] == "repost" || (pair[0] == "super" && path.contains("tui_o/repost/"));
+            parent && ["runner", "dispatch"].contains(&pair[1])
+        });
+        module || segments.iter().any(|segment| names.contains(segment))
+    })
+}
+
+/// Whether a consumer line reaches `io` other than through its probe, or re-exports anything.
+fn consumer_escapes(path: &str, line: &str) -> bool {
+    let words = line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'));
+    let beside = words
+        .into_iter()
+        .any(|word| word.starts_with("super::io") && !word.starts_with("super::io::probe::"));
+    let reexport = line.trim().starts_with("pub") && line.contains(" use ");
+    beside || reexport || (names_the_probe(path, line) && line.contains("repost::io"))
+}
+
+/// Public functions of the probe files as they stand; a new one, or any re-export, needs review.
+const PROBE_API: [&str; 19] = [
+    "covered",
+    "new",
+    "attribution",
+    "advance",
+    "of",
+    "additional_sent",
+    "verify",
+    "message_id",
+    "upper",
+    "started_at",
+    "completed_at",
+    "proof",
+    "from_passes",
+    "scope",
+    "passes",
+    "validate_current",
+    "is_clear",
+    "distinct_ids",
+    "match_observations",
+];
+
+/// Whether a probe-file line adds public reach: a re-export, or a public fn not in `PROBE_API`.
+fn widens_the_probe(line: &str) -> bool {
+    let line = line.trim();
+    if !line.starts_with("pub") {
+        return false;
+    }
+    let mut words = line.split(|c: char| !(c.is_alphanumeric() || c == '_'));
+    if line.contains(" use ") {
+        return true;
+    }
+    let named = words.by_ref().skip_while(|word| *word != "fn").nth(1);
+    named.is_some_and(|name| !PROBE_API.contains(&name))
 }
 
 /// `path:line` of every production line under `root/src` that names the probe outside what is
@@ -872,16 +998,50 @@ fn probe_edges(root: &std::path::Path) -> Vec<String> {
                 .to_string_lossy()
                 .replace('\\', "/");
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if !name.ends_with(".rs")
-                || name.ends_with("_tests.rs")
-                || PROBE_FILES.contains(&relative.as_str())
-            {
+            if !name.ends_with(".rs") || name.ends_with("_tests.rs") {
                 continue;
             }
+            let definition = PROBE_FILES.contains(&relative.as_str());
             let text = std::fs::read_to_string(&path).unwrap();
-            for (number, line) in text.lines().enumerate() {
-                let allowed = relative == ADAPTER && ADAPTER_LINES.contains(&line.trim());
-                if names_the_probe(&relative, line) && !allowed {
+            // Inside a multi-line re-post import group, every member line is read as part of it.
+            let mut in_group = false;
+            // `#[cfg(test)] mod … {` until its closing brace at the same indent.
+            let (mut cfg_test, mut test_mod_end) = (false, None::<String>);
+            for (number, raw) in text.lines().enumerate() {
+                let line = &tight_paths(raw);
+                if test_mod_end.as_deref() == Some(raw.trim_end()) {
+                    test_mod_end = None;
+                } else if cfg_test && test_mod_end.is_none() && raw.trim_start().starts_with("mod ")
+                {
+                    let indent = &raw[..raw.len() - raw.trim_start().len()];
+                    test_mod_end = raw.trim_end().ends_with('{').then(|| format!("{indent}}}"));
+                }
+                cfg_test =
+                    raw.trim() == "#[cfg(test)]" || (cfg_test && raw.trim().starts_with("#["));
+                let member = in_group && names_a_member(line);
+                if in_group && line.contains('}') {
+                    in_group = false;
+                } else if !in_group {
+                    in_group = opens_a_group(&relative, line);
+                }
+                let allowed = relative == ADAPTER
+                    && (ADAPTER_LINES.contains(&line.trim()) || line.trim() == ADAPTER_PATH);
+                let edge = if definition {
+                    widens_the_probe(line)
+                } else if CONSUMERS.contains(&relative.as_str()) {
+                    consumer_escapes(&relative, line)
+                } else {
+                    let named =
+                        names_the_probe(&relative, line) || names_the_runner(&relative, line);
+                    // A macro could assemble any path; beside the re-post module it is an edge.
+                    let macro_beside = line.contains("macro_rules!") && text.contains("repost");
+                    // Only an in-file test module may glob its parent inside the re-post tree.
+                    let parent_glob = relative.contains("tui_o/repost/")
+                        && line.contains("super::*")
+                        && test_mod_end.is_none();
+                    (named || member || macro_beside || parent_glob) && !allowed
+                };
+                if edge {
                     found.push(format!("{relative}:{}", number + 1));
                 }
             }
@@ -1297,4 +1457,235 @@ async fn f4r2_an_older_or_unreadable_identifier_is_never_absence() {
         ..old_marked
     };
     assert!(attribute(&known(), &readable_other).is_clear());
+}
+
+#[tokio::test(start_paused = true)]
+async fn f4r3_a_note_whose_marker_was_cut_off_is_never_absence() {
+    let footer = repost_footer(&key("f4"));
+    let marker_cut = footer[..footer.find(" o:").unwrap() + 2].to_owned();
+    let note_cut: String = footer.chars().take(3).collect();
+    for cut in [marker_cut, note_cut] {
+        let damaged = ObservedMessage {
+            rich_embeds: 1,
+            footers: vec![cut.clone()],
+            ..message(450, BOT, "변형된 본문")
+        };
+        let reader = Fake::with([message(900, BOT, "earlier"), damaged]);
+        let mut session = ProbeSession::new(scope(&[0, 1]), vec![900], Instant::now());
+        for progress in drive(&mut session, &reader, &known(), 4).await {
+            assert!(
+                matches!(progress, Progress::Incomplete(_)),
+                "{cut}: {progress:?}"
+            );
+        }
+    }
+    // A footer of the bot's own that is no re-post note proves nothing either way.
+    let card = ObservedMessage {
+        rich_embeds: 1,
+        footers: vec!["상태 카드".into()],
+        ..message(450, BOT, "변형된 본문")
+    };
+    let mut into = Attribution::default();
+    match_observations(&scope(&[0, 1]), &known(), [&card], &mut into);
+    assert!(into.is_clear());
+}
+
+#[test]
+fn f4r3_the_dormancy_scan_reads_aliases_groups_and_new_probe_api() {
+    let write = |root: &std::path::Path, relative: &str, text: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let tree = tempfile::tempdir().unwrap();
+    let root = tree.path();
+    let probe = "pub(crate) fn new() {}\npub(crate) async fn start_reader() {}\npub(crate) use self::matcher as m;\n";
+    write(root, PROBE_FILES[0], probe);
+    write(
+        root,
+        ADAPTER,
+        "pub(crate) mod probe;\npub(crate) use self::probe as engine;\n",
+    );
+    let grouped = "use crate::services::tui_o::repost::{io as rp};\nfn go() { rp::engine::start_reader(); }\n";
+    write(root, "src/services/tui_o/writer/host.rs", grouped);
+    let split = "use crate::services::tui_o::repost::{\n    config,\n};\nuse crate::services::tui_o::repost as r;\n";
+    write(root, "src/services/tui_o/writer/actor.rs", split);
+    assert_eq!(
+        probe_edges(root),
+        [
+            "src/services/discord/outbound/o_writer_repost_io.rs:2",
+            "src/services/tui_o/repost/probe.rs:2",
+            "src/services/tui_o/repost/probe.rs:3",
+            "src/services/tui_o/writer/actor.rs:1",
+            "src/services/tui_o/writer/actor.rs:4",
+            "src/services/tui_o/writer/host.rs:1",
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn f4r3_a_nonce_once_read_stays_without_any_other_evidence() {
+    let nonce = RepostIds::for_piece(&marker(&key("f4")))
+        .unwrap()
+        .nonce()
+        .to_owned();
+    let with_nonce = ObservedMessage {
+        nonce: Some(nonce),
+        ..message(450, BOT, "Discord가 바꾼 본문")
+    };
+    let reader = Fake::with([message(900, BOT, "earlier"), with_nonce]);
+    let mut session = ProbeSession::new(scope(&[0]), vec![900], Instant::now());
+    drive(&mut session, &reader, &known(), 1).await;
+    reader.add(message(450, BOT, "Discord가 바꾼 본문"));
+    assert_eq!(
+        drive(&mut session, &reader, &known(), 1).await,
+        [Progress::Present]
+    );
+    let found = &session.attribution().found[&450];
+    assert_eq!(found.receipt.method, ReceiptMethod::Nonce);
+}
+
+#[tokio::test(start_paused = true)]
+async fn f4r3_a_payload_once_matched_stays_without_any_other_evidence() {
+    let reader = Fake::with([message(900, BOT, "earlier"), message(450, BOT, PAYLOAD)]);
+    let mut session = ProbeSession::new(scope(&[0, 1]), vec![900], Instant::now());
+    drive(&mut session, &reader, &known(), 1).await;
+    // Later the content reads changed and a sent embed shows: a damaged copy, not a stranger.
+    reader.add(ObservedMessage {
+        rich_embeds: 1,
+        ..message(450, BOT, "변형된 본문")
+    });
+    assert_eq!(
+        drive(&mut session, &reader, &known(), 1).await,
+        [Progress::Present]
+    );
+    let seen = session.attribution();
+    assert!(seen.found.is_empty());
+    assert_eq!(seen.damaged.iter().copied().collect::<Vec<_>>(), [450]);
+}
+
+#[test]
+fn f5_has_no_operational_edges() {
+    let write = |root: &std::path::Path, relative: &str, text: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let tree = tempfile::tempdir().unwrap();
+    let root = tree.path();
+    let reads =
+        "use super::dispatch::RepostWriter;\nuse super::io::probe::ProbeRead;\nfn tick() {}\n";
+    write(root, CONSUMERS[0], reads);
+    write(
+        root,
+        "src/services/tui_o/repost/mod.rs",
+        "pub(crate) mod runner;\n",
+    );
+    assert_eq!(probe_edges(root), Vec::<String>::new());
+
+    let escapes = "use super::io;\npub(crate) use super::dispatch::start;\n";
+    write(root, CONSUMERS[1], escapes);
+    let caller =
+        "use crate::services::tui_o::repost::runner::Runner;\nfn go(w: &dyn RepostWriter) {}\n";
+    write(root, "src/services/tui_o/writer/host.rs", caller);
+    assert_eq!(
+        probe_edges(root),
+        [
+            "src/services/tui_o/repost/dispatch.rs:1",
+            "src/services/tui_o/repost/dispatch.rs:2",
+            "src/services/tui_o/writer/host.rs:1",
+            "src/services/tui_o/writer/host.rs:2",
+        ]
+    );
+}
+
+#[test]
+fn f5r4_the_dormancy_scan_reads_every_member_of_a_grouped_alias() {
+    let write = |root: &std::path::Path, relative: &str, text: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let tree = tempfile::tempdir().unwrap();
+    let root = tree.path();
+    let split = "use crate::services::tui_o::repost::{\n    config,\n    runner as rr,\n    dispatch as dd,\n};\nfn go() { rr::tick(); }\n";
+    write(root, "src/services/tui_o/writer/host.rs", split);
+    let sibling =
+        "use super::{\n    runner as rr, dispatch as dd,\n};\nuse super::{config, runner as r2};\n";
+    write(root, "src/services/tui_o/repost/host.rs", sibling);
+    let nested = "use crate::services::tui_o::{\n    repost::{runner as rr, dispatch as dd},\n};\n";
+    write(root, "src/services/tui_o/writer/actor.rs", nested);
+    assert_eq!(
+        probe_edges(root),
+        [
+            "src/services/tui_o/repost/host.rs:1",
+            "src/services/tui_o/repost/host.rs:2",
+            "src/services/tui_o/repost/host.rs:4",
+            "src/services/tui_o/writer/actor.rs:2",
+            "src/services/tui_o/writer/host.rs:1",
+            "src/services/tui_o/writer/host.rs:3",
+            "src/services/tui_o/writer/host.rs:4",
+        ]
+    );
+}
+
+#[test]
+fn f6_the_dormancy_scan_fails_closed_on_globs_self_paths_and_macros() {
+    let write = |root: &std::path::Path, relative: &str, text: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let tree = tempfile::tempdir().unwrap();
+    let root = tree.path();
+    let glob = "use crate::services::tui_o::repost::*;\nfn go() { Runner::new(); }\n";
+    write(root, "src/services/tui_o/writer/a.rs", glob);
+    let reexport = "pub use crate::services::tui_o::repost::*;\n";
+    write(root, "src/services/tui_o/writer/b.rs", reexport);
+    let own = "use self::{runner as rr};\nfn go() { self::dispatch::start(); }\n";
+    write(root, "src/services/tui_o/repost/c.rs", own);
+    let aliased =
+        "use crate::services::tui_o::repost::{self as rp};\nfn go() { rp::runner::x(); }\n";
+    write(root, "src/services/tui_o/writer/d.rs", aliased);
+    let made = "macro_rules! reach {\n    ($m:ident) => { crate::services::tui_o::repost::$m::go() };\n}\n";
+    write(root, "src/services/tui_o/writer/e.rs", made);
+    let split = "use crate::services::tui_o::repost::\n    {runner as rr};\n";
+    write(root, "src/services/tui_o/writer/f.rs", split);
+    assert_eq!(
+        probe_edges(root),
+        [
+            "src/services/tui_o/repost/c.rs:1",
+            "src/services/tui_o/repost/c.rs:2",
+            "src/services/tui_o/writer/a.rs:1",
+            "src/services/tui_o/writer/b.rs:1",
+            "src/services/tui_o/writer/d.rs:1",
+            "src/services/tui_o/writer/e.rs:1",
+            "src/services/tui_o/writer/f.rs:1",
+        ]
+    );
+}
+
+#[test]
+fn f3r_the_dormancy_scan_reads_spaced_paths_and_parent_globs_outside_tests() {
+    let write = |root: &std::path::Path, relative: &str, text: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let tree = tempfile::tempdir().unwrap();
+    let root = tree.path();
+    let spaced = "use crate::services::tui_o::repost :: runner::Runner;\nuse crate::services::tui_o::repost :: {dispatch as dd};\n";
+    write(root, "src/services/tui_o/writer/a.rs", spaced);
+    let globbed =
+        "use super::*;\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n}\nuse super::*;\n";
+    write(root, "src/services/tui_o/repost/b.rs", globbed);
+    assert_eq!(
+        probe_edges(root),
+        [
+            "src/services/tui_o/repost/b.rs:1",
+            "src/services/tui_o/repost/b.rs:7",
+            "src/services/tui_o/writer/a.rs:1",
+            "src/services/tui_o/writer/a.rs:2",
+        ]
+    );
 }
