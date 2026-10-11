@@ -819,7 +819,6 @@ src/
 │   │   │   ├── consumed_commands_tests.rs
 │   │   │   ├── deps.rs
 │   │   │   ├── duplicate_race_tests.rs
-│   │   │   ├── exhausted_recovery_tests.rs
 │   │   │   ├── frontier_evidence.rs
 │   │   │   ├── frontier_sweep_tests.rs
 │   │   │   ├── handled_command.rs

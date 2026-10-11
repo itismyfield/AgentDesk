@@ -228,6 +228,10 @@ impl Phase2Frontier {
         safe_durable_candidate(self.max_recovered, self.barrier())
     }
 
+    pub(super) fn can_durably_settle(&self, message_id: u64) -> bool {
+        safe_durable_candidate(Some(message_id), self.barrier()).is_some()
+    }
+
     /// An id this scan left open is reread by the end-of-sweep retry arm.
     pub(super) fn retain_into(
         &self,
