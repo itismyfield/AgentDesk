@@ -1450,9 +1450,13 @@ _CLOSERS = frozenset({"fi", "esac", "done", "}"})
 
 def _at_top_level(shell: str, offset: int) -> bool:
     """Whether the word at ``offset`` runs as the shell's own command, not quoted, heredoc
-    data or inside a compound, function or subshell: a fail-closed keyword count."""
+    data, a continued line or inside a compound, function or subshell: a fail-closed count."""
     syntax = _QUOTED.sub(lambda span: re.sub(r"[^\n]", " ", span.group()), shell)
-    if syntax[offset:offset + 1].isspace() or re.search(r"(?<!<)<<(?!<)", syntax[:offset]):
+    newline = shell.rfind("\n", 0, offset)
+    # An odd run of backslashes ending the previous line makes this word an argument there.
+    continued = newline > 0 and (newline - len(shell[:newline].rstrip("\\"))) % 2
+    if continued or syntax[offset:offset + 1].isspace() \
+            or re.search(r"(?<!<)<<(?!<)", syntax[:offset]):
         return False
     depth = 0
     for line in syntax[:offset].split("\n"):

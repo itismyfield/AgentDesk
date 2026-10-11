@@ -1362,6 +1362,8 @@ class KnownArrayProvenance(unittest.TestCase):
                 ((("cat <<'EOF'", source, "EOF", non_pg),), unsourced),
                 ((('echo "', source, '"', non_pg),), unsourced),
                 ((("(", source, ")", non_pg),), unsourced),
+                ((("echo \\", source, non_pg),), unsourced),
+                ((("echo \\\\", source, non_pg),), []),
                 ((('source "$FILTER"', non_pg),), unsourced),
                 (((f"{source} && {non_pg}",),), []),
                 ((f"'{source} && {non_pg}'",), []),
