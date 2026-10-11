@@ -473,6 +473,7 @@ jobs:
               - 'src/services/tui_o/exact_pg_tests.rs'
               - 'src/services/tui_o/exact_submission.rs'
               - 'src/services/tui_o/repost/admission_tests.rs'
+              - 'src/services/tui_o/repost/backlog_tests.rs'
               - 'src/services/tui_o/repost/runner_activation_tests.rs'
               - 'src/services/tui_o/repost/runner_tests.rs'
               - 'src/services/tui_o/repost/runtime_host_activation_tests.rs'
@@ -484,6 +485,10 @@ jobs:
               - 'src/voice/announce_meta.rs'
               - 'src/voice/turn_link.rs'
               # END generated pg_db source paths
+              # Re-post production changes must run the shared-budget tests too.
+              - 'src/services/tui_o/repost/**'
+              - 'src/services/tui_o/writer/**'
+              - 'src/services/discord/outbound/o_writer*.rs'
               - '.github/workflows/**'
               - 'justfile'
               - 'Cargo.toml'

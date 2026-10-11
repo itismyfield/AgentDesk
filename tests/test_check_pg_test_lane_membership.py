@@ -2143,6 +2143,30 @@ class PgDbCiWiring(unittest.TestCase):
             rc = membership.check_pg_db_generated_block(self.PR_WORKFLOW, manifest)
         self.assertEqual(rc, 0)
 
+    def test_repost_production_only_changes_select_the_required_pg_job(self) -> None:
+        patterns = membership.parse_pg_db_patterns(self.PR_WORKFLOW)
+        files = (
+            "src/services/tui_o/repost/provenance.rs",
+            "src/services/tui_o/repost/admission.rs",
+            "src/services/tui_o/repost/runner.rs",
+            "src/services/tui_o/repost/config.rs",
+            "src/services/tui_o/repost/projection.rs",
+            "src/services/tui_o/writer/deliver.rs",
+            "src/services/tui_o/writer/actor.rs",
+            "src/services/tui_o/writer/host.rs",
+            "src/services/discord/outbound/o_writer_repost_io.rs",
+            "src/services/discord/outbound/o_writer_discord_port.rs",
+            "src/services/discord/runtime_bootstrap/o_writer_host.rs",
+        )
+        for path in files:
+            with self.subTest(path=path):
+                self.assertTrue(membership.path_selected(path, patterns), path)
+        job = self.workflow["jobs"]["test_fast"]
+        self.assertIn("needs.changes.outputs.pg_db", job["if"])
+        self.assertEqual(str(job["env"]["AGENTDESK_REQUIRE_PG"]), "1")
+        self.assertTrue(any("just test-postgres" in step.get("run", "")
+                            for step in job["steps"]))
+
     PG_TITLE = '"PostgreSQL test-lane membership gate'
 
     def run_pg_gate_section(self, py_rc: int = 0, git_rc: int = 0) -> tuple[int, list[str]]:

@@ -249,6 +249,15 @@ the original piece once, then the output that followed. Run these on the O home,
   script refuses a source or a rollback target that does not record `o_ledger_operator_resume` as
   `true`. Fix forward instead, and never delete approval lines from the ledger to get past it.
 
+An enabled re-post turn reports retained uncertain backlog with
+`[tui_o] re-post backlog retained`: `channel`, `count`, and `pieces` contain the serial, unit key,
+piece index and reason, without the payload. The sidecar marks each serial before the log is
+emitted; repeated turns, sidecar reopening and later activations do not repeat that report.
+These pieces do not enter the shared re-post budget and are not automatically re-posted.
+`[tui_o] re-post backlog report failed` blocks that re-post turn until the sidecar can be reopened
+and the report recorded. A missing log line is not proof of an empty backlog: a serial may already
+be marked reported, or the reporting step may have failed.
+
 ## 8. Roll back after re-post activation
 
 An older binary that cannot read the `not_sent` ledger tag stops the channel writer with ledger
