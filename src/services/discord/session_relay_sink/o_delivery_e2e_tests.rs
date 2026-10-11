@@ -12,6 +12,9 @@ mod writer;
 #[path = "o_adoption_e2e_tests.rs"]
 mod adoption;
 
+#[path = "o_retired_terminal_e2e_tests.rs"]
+mod retired_terminal;
+
 const BODY: &str = "동일한 응답 본문 — delivered by O";
 const CHILD: &str = "ADK_O_DELIVERY_E2E_CHILD";
 

@@ -19,6 +19,8 @@ pub(super) struct PostStreamExitContext {
         Option<crate::services::discord::inflight::InflightTurnIdentity>,
     pub(super) watcher_instance_id: u64,
     pub(super) host: Arc<HostSnapshot>,
+    pub(super) watcher_provider: ProviderKind,
+    pub(super) legacy_mode: WatcherLegacyMode,
 }
 
 pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
@@ -30,7 +32,16 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         watcher_turn_identity,
         watcher_instance_id,
         host,
+        watcher_provider,
+        legacy_mode,
     } = ctx;
+
+    #[cfg(test)]
+    crate::services::discord::inflight::o_seed_observation::record_event(
+        &watcher_provider,
+        channel_id.get(),
+        "post_stream_exit",
+    );
 
     // Cleanup: release this watcher's registry slot.
     // #243: When a watcher is cancelled (replaced by a new watcher or shutdown),
@@ -41,6 +52,15 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         &tmux_session_name,
         &cancel,
     );
+
+    if !legacy_mode.is_legacy() {
+        tracing::info!(
+            provider = watcher_provider.as_str(),
+            instance = watcher_instance_id,
+            "tmux watcher stopped for #{tmux_session_name}"
+        );
+        return;
+    }
 
     let api_port = shared.api_port;
     let provider = shared.settings.read().await.provider.clone();
