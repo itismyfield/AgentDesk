@@ -2544,8 +2544,11 @@ src/
 │   │   │   ├── probe_tests.rs
 │   │   │   ├── provenance.rs
 │   │   │   ├── runner.rs
+│   │   │   ├── runner_activation_tests.rs
 │   │   │   ├── runner_tests.rs
-│   │   │   └── send.rs
+│   │   │   ├── runtime_host_activation_tests.rs
+│   │   │   ├── send.rs
+│   │   │   └── writer_activation_tests.rs
 │   │   ├── shadow/
 │   │   │   ├── binding_reader.rs
 │   │   │   ├── capture.rs

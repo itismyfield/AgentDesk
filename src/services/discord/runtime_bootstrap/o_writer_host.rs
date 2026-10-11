@@ -501,6 +501,10 @@ mod fence_tests {
 }
 
 #[cfg(test)]
+#[path = "../../tui_o/repost/runtime_host_activation_tests.rs"]
+mod activation_tests;
+
+#[cfg(test)]
 mod repost_tests {
     use super::*;
 

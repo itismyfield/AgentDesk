@@ -2,9 +2,10 @@
 //! the dispatch that starts its request under the gate and then owns the request's timeout.
 
 use std::future::{Future, poll_fn};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::Poll;
+use std::task::{Context, Poll};
 
 use sqlx::PgPool;
 use tokio::task::JoinHandle;
@@ -33,6 +34,10 @@ pub(crate) trait RepostWriter {
     fn gate(&self) -> Arc<OwnershipGate>;
     /// Whether switch, holder and run still let a request leave; read without the gate lock.
     fn live(&self) -> Arc<dyn Fn() -> bool + Send + Sync>;
+    /// The shared POST count belongs to the request, including its retry waits and timeout.
+    fn start_request(&self) -> Box<dyn Send> {
+        Box::new(())
+    }
     /// Appends this send's ordinary Prepared at `epoch`. Runs under the gate lock: no await.
     fn prepare(&mut self, epoch: u64, permit: &DispatchPermit) -> Result<(), String>;
     /// Records how a prepared send ended; `Unsent` withdraws the Prepared.
@@ -114,6 +119,20 @@ enum Run {
     Running(JoinHandle<WireOutcome>, DispatchCounts),
 }
 
+/// Field order drops the request before its shared count, including on timeout or cancellation.
+struct CountedRequest<F> {
+    request: Pin<Box<F>>,
+    _running: Box<dyn Send>,
+}
+
+impl<F: Future> Future for CountedRequest<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.request.as_mut().poll(cx)
+    }
+}
+
 /// A started dispatch. Dropping it stops only the wait: the task still ends the request.
 pub(crate) struct Started {
     grant: SlotGrant,
@@ -158,7 +177,8 @@ pub(crate) async fn start<W: RepostWriter>(
         *observed.borrow() == owned && writer_live() && Instant::now() < deadline
     });
     let (request, counts) = hand_over(transport, &envelope, live);
-    let mut request = Box::pin(request);
+    let mut handed = Some(request);
+    let mut request = None;
     let still_live = writer.live();
     let first = poll_fn(|cx| {
         Poll::Ready(gate.admit(|epoch| {
@@ -167,7 +187,15 @@ pub(crate) async fn start<W: RepostWriter>(
             }
             writer.prepare(epoch, &permit)?;
             admitted.store(epoch, Ordering::SeqCst);
-            Ok(request.as_mut().poll(cx))
+            let running = writer.start_request();
+            let handed = handed.take().expect("one request under the gate");
+            let mut owned = Box::pin(CountedRequest {
+                request: Box::pin(handed),
+                _running: running,
+            });
+            let first = owned.as_mut().poll(cx);
+            request = Some(owned);
+            Ok(first)
         }))
     })
     .await;
@@ -176,6 +204,7 @@ pub(crate) async fn start<W: RepostWriter>(
         Some(Err(reason)) => Run::Done(DispatchEnd::Withdrawn(reason)),
         Some(Ok(Poll::Ready(outcome))) => Run::Done(DispatchEnd::Sent(counts.report(outcome))),
         Some(Ok(Poll::Pending)) => {
+            let request = request.expect("the first poll created the request");
             let task = tokio::spawn(async move {
                 let ended = tokio::time::timeout(POST_TIMEOUT, request).await;
                 // The request is dropped, so aborted, before the lease goes.

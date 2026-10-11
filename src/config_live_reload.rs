@@ -573,16 +573,39 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
 }
 
 #[cfg(test)]
+pub(crate) struct TestLiveGuard {
+    previous: Config,
+    _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+}
+
+#[cfg(test)]
+impl Drop for TestLiveGuard {
+    fn drop(&mut self) {
+        install(self.previous.clone());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_live_guard(
+    lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+) -> TestLiveGuard {
+    let previous = current()
+        .map(|config| (*config).clone())
+        .unwrap_or_default();
+    TestLiveGuard {
+        previous,
+        _lock: lock,
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     /// Serializes tests that mutate/read the process-global [`LIVE`] snapshot so
     /// they do not race each other under the parallel test runner.
-    fn global_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn global_test_guard() -> TestLiveGuard {
+        test_live_guard(crate::config::test_env_lock::acquire_shared_test_env_lock())
     }
 
     fn write(path: &Path, body: &str) {
@@ -695,6 +718,87 @@ mod tests {
     }
 
     #[test]
+    fn f6_rejected_live_reload_retains_effective_switch() {
+        use crate::services::tui_o::repost::config::{RepostSwitch, SnapshotSource};
+
+        let _guard = global_test_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.yaml");
+        install(Config::default());
+        let mut switch = RepostSwitch::new(None, subscribe());
+        write(
+            &path,
+            "server:\n  port: 8791\ntui_o:\n  repost:\n    enabled: true\n",
+        );
+        assert!(matches!(
+            reload_from_path(&path),
+            ReloadOutcome::Applied { .. }
+        ));
+        let on = switch.current();
+        assert!(on.enabled);
+        assert_eq!(on.source, SnapshotSource::Live);
+
+        write(
+            &path,
+            "server:\n  port: 8791\ntui_o:\n  repost:\n    enabeld: true\n",
+        );
+        assert!(matches!(
+            reload_from_path(&path),
+            ReloadOutcome::Rejected { .. }
+        ));
+        assert_eq!(
+            switch.current(),
+            on,
+            "a rejected candidate must not publish defaults"
+        );
+        assert!(current().unwrap().tui_o.as_ref().unwrap().repost.enabled);
+
+        write(
+            &path,
+            "server:\n  port: 8791\ntui_o:\n  repost:\n    enabled: false\n",
+        );
+        assert!(matches!(
+            reload_from_path(&path),
+            ReloadOutcome::Applied { .. }
+        ));
+        let off = switch.current();
+        assert!(!off.enabled);
+        assert_eq!(off.generation, on.generation + 1);
+        assert_eq!(off.source, SnapshotSource::Live);
+    }
+
+    #[test]
+    fn d4act_predeploy_effective_off_checks_boot_and_validated_live_values() {
+        use crate::services::tui_o::repost::config::{RepostSwitch, SnapshotSource};
+
+        let _guard = global_test_guard();
+        assert!(!crate::services::tui_o::repost::config::RepostConfig::default().enabled);
+        let mut on = Config::default();
+        on.tui_o = Some(crate::services::tui_o::shadow::tap::TuiOConfig {
+            repost: crate::services::tui_o::repost::config::RepostConfig { enabled: true },
+            ..crate::services::tui_o::shadow::tap::TuiOConfig::default()
+        });
+        let mut boot = RepostSwitch::new(on.tui_o.as_ref(), tokio::sync::watch::channel(None).1);
+        let boot_value = boot.current();
+        assert!(
+            boot_value.enabled,
+            "default-off alone is not an effective-off deployment check"
+        );
+        assert_eq!(boot_value.source, SnapshotSource::Boot);
+
+        install(on.clone());
+        let mut live = RepostSwitch::new(None, subscribe());
+        assert!(
+            live.current().enabled,
+            "validated live on defeats an off boot default"
+        );
+        install(Config::default());
+        let mut overrides_boot = RepostSwitch::new(on.tui_o.as_ref(), subscribe());
+        assert!(!overrides_boot.current().enabled);
+        assert_eq!(overrides_boot.current().source, SnapshotSource::Live);
+    }
+
+    #[test]
     fn load_graceful_uses_live_snapshot_when_file_is_invalid() {
         let _guard = global_test_guard();
         let dir = tempfile::tempdir().unwrap();
@@ -704,7 +808,10 @@ mod tests {
         crate::config::save_to_path(&path, &config).unwrap();
         install(crate::config::load_from_path(&path).unwrap());
 
-        let _config_path = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
+        let _config_path = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CONFIG",
+            &path,
+        );
         write(&path, "server:\n  port: : invalid yaml\n");
 
         let loaded = crate::config::load_graceful();
