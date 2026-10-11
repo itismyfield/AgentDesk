@@ -471,7 +471,7 @@ fn restore_cancel_clear_and_purge_keep_a_reserved_head() {
 }
 
 /// Without a live actor, force purge removes only namespaces whose file holds no head or
-/// submitted source and reads cleanly.
+/// submitted source and parses cleanly.
 #[test]
 fn an_actorless_force_purge_keeps_held_or_unreadable_snapshots() {
     let _root = root();
@@ -494,6 +494,7 @@ fn an_actorless_force_purge_keeps_held_or_unreadable_snapshots() {
             ("terminal", terminal.as_str()),
             ("legacy", "[]"),
             ("torn", r#"{"version":1,"items":["#),
+            ("broken", "[{"),
         ] {
             std::fs::create_dir_all(file(token).parent().unwrap()).unwrap();
             std::fs::write(file(token), body).unwrap();
@@ -507,6 +508,36 @@ fn an_actorless_force_purge_keeps_held_or_unreadable_snapshots() {
         assert_eq!(purged.map(|counts| counts.disk_files_removed), Some(1));
         let kept = ["unknown", "terminal", "legacy", "torn"].map(|token| file(token).exists());
         assert_eq!(kept, [true, true, false, true]);
+        assert_eq!(std::fs::read(file("broken")).unwrap(), b"[{");
+    });
+}
+
+/// A legacy queue file that does not parse is never read as empty: the enqueue fails and the
+/// file keeps its bytes, whether the actor meets it at start or after it was adopted.
+#[test]
+fn a_corrupt_legacy_queue_refuses_input_and_keeps_its_bytes() {
+    let _root = root();
+    block_on(async {
+        let channel = ChannelId::new(6_813_172);
+        let path = queue_path(channel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[{").unwrap();
+        let restart = ChannelMailboxRegistry::default();
+        let refused = restart
+            .handle(channel)
+            .enqueue(human(81, 7, "b"), ctx())
+            .await;
+        assert!(!refused.enqueued && refused.persistence_error.is_some());
+        assert_eq!(std::fs::read(&path).unwrap(), b"[{");
+
+        std::fs::remove_file(&path).unwrap();
+        let live = ChannelMailboxRegistry::default();
+        let handle = live.handle(channel);
+        assert!(handle.enqueue(human(82, 7, "a"), ctx()).await.enqueued);
+        std::fs::write(&path, "[{").unwrap();
+        let refused = handle.enqueue(human(83, 8, "c"), ctx()).await;
+        assert!(!refused.enqueued && refused.persistence_error.is_some());
+        assert_eq!(std::fs::read(&path).unwrap(), b"[{");
     });
 }
 

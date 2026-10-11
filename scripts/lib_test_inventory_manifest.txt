@@ -12608,6 +12608,7 @@ services::turn_orchestrator::purge_queue_tests::purge_queue_is_idempotent_on_emp
 services::turn_orchestrator::queue_cancellation::tests::explicit_queue_cancel_matches_only_primary_message_id
 services::turn_orchestrator::queue_cancellation::tests::matching_dequeue_preserves_blocked_head_and_fifo_of_remaining_items
 services::turn_orchestrator::queued_head::tests::a_claim_and_a_dispatch_never_both_own_the_queue_front
+services::turn_orchestrator::queued_head::tests::a_corrupt_legacy_queue_refuses_input_and_keeps_its_bytes
 services::turn_orchestrator::queued_head::tests::a_not_sent_head_keeps_its_place_and_payload
 services::turn_orchestrator::queued_head::tests::a_possibly_sent_head_found_by_a_restart_is_unknown_and_never_resubmitted
 services::turn_orchestrator::queued_head::tests::a_reserved_head_found_by_a_restart_is_released_unsent

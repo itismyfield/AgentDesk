@@ -125,23 +125,20 @@ pub(super) fn parse_snapshot(
 }
 
 /// The head and submitted sources a queue file holds; `None` for a missing file or a legacy
-/// array, an error for a file that cannot be read or an object this reader does not know.
+/// array, an error for a file that cannot be read or parsed, legacy or not.
 fn read_snapshot_meta(path: &Path) -> Result<Option<SnapshotMeta>, String> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("read {}: {error}", path.display())),
     };
-    if !content.trim_start().starts_with('{') {
-        return Ok(None);
-    }
     let (_, meta) =
         parse_snapshot(&content).map_err(|e| format!("parse {}: {e}", path.display()))?;
     Ok(meta.filter(SnapshotMeta::is_set))
 }
 
 /// Whether an actorless force purge must keep this namespace's files: its queue file holds a head
-/// or submitted sources, or cannot be read.
+/// or submitted sources, or cannot be read or parsed.
 pub(super) fn purge_keeps(queue_file: &Path) -> bool {
     let reason = match read_snapshot_meta(queue_file) {
         Ok(None) => return false,

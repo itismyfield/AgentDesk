@@ -7,8 +7,8 @@ use serenity::{ChannelId, MessageId};
 
 use super::active_source_dedup::strip_source_message_id_from_intervention;
 use super::pending_queue_persistence::{
-    load_channel_pending_dispatch_marker, load_channel_pending_queue,
-    load_channel_pending_queue_checked, remove_channel_pending_dispatch_marker,
+    load_channel_pending_dispatch_marker, load_channel_pending_queue_checked,
+    remove_channel_pending_dispatch_marker,
 };
 use super::{
     ChannelMailboxState, DispatchLease, HydratePendingQueueResult, Intervention, InterventionMode,
@@ -408,15 +408,19 @@ pub(super) fn hydrate_pending_queue_from_disk_if_present(
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
 ) -> HydratePendingQueueResult {
-    if let Err(error) = super::queued_head::adopt(state, channel_id, persistence) {
-        return HydratePendingQueueResult {
-            queue_len_after: state.intervention_queue.len(),
-            persistence_error: Some(error),
-            ..Default::default()
-        };
-    }
-    let (disk_items, mut restored_override) =
-        load_channel_pending_queue(&persistence.provider, &persistence.token_hash, channel_id);
+    let (provider, token_hash) = (&persistence.provider, &persistence.token_hash);
+    let loaded = super::queued_head::adopt(state, channel_id, persistence)
+        .and_then(|()| load_channel_pending_queue_checked(provider, token_hash, channel_id));
+    let (disk_items, mut restored_override) = match loaded {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            return HydratePendingQueueResult {
+                queue_len_after: state.intervention_queue.len(),
+                persistence_error: Some(error),
+                ..Default::default()
+            };
+        }
+    };
 
     let mut effective_persistence = persistence.clone();
     if effective_persistence.dispatch_role_override.is_none() {
