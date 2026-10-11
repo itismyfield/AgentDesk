@@ -3,6 +3,10 @@
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 
+/// Columns and rows of a guarded Claude session: a full composer stays inside the captured screen.
+#[cfg(unix)]
+const CLAUDE_GUARDED_SIZE: (u16, u16) = (160, 40);
+
 /// Prepare durable launch evidence before creating the hosted tmux session.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
@@ -23,6 +27,8 @@ pub(super) fn prepare_and_create_claude_tui_session(
     if herdr_configured_for_tui_launch(channel_id) {
         return Err(HERDR_NOT_ADMITTED.to_string());
     }
+    // Only boot-allowlisted channels open at the guarded geometry; every other launch is unchanged.
+    let guarded = crate::config::session_hosts::claude_guarded(channel_id);
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     write_tmux_owner_marker(tmux_session_name)?;
     crate::services::tmux_common::write_tmux_runtime_kind_marker(
@@ -67,14 +73,26 @@ pub(super) fn prepare_and_create_claude_tui_session(
         );
         std::fs::write(&launch_script_path, script)
             .map_err(|error| format!("update Claude TUI launch script: {error}"))?;
-        let result = crate::services::platform::tmux::create_session(
-            tmux_session_name,
-            Some(working_dir),
-            &format!(
-                "bash {}",
-                shell_escape(&launch_script_path.display().to_string())
-            ),
-        )?;
+        let command = format!(
+            "bash {}",
+            shell_escape(&launch_script_path.display().to_string())
+        );
+        let result = if guarded {
+            let (cols, rows) = CLAUDE_GUARDED_SIZE;
+            crate::services::platform::tmux::create_session_sized(
+                tmux_session_name,
+                Some(working_dir),
+                &command,
+                cols,
+                rows,
+            )?
+        } else {
+            crate::services::platform::tmux::create_session(
+                tmux_session_name,
+                Some(working_dir),
+                &command,
+            )?
+        };
         Ok((result, prepared))
     })();
     let (tmux_result, incarnation) = match launch_result {
@@ -556,3 +574,7 @@ mod herdr_env_tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "tui_session_launch_geometry_tests.rs"]
+mod guarded_geometry_tests;

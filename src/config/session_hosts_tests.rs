@@ -101,3 +101,67 @@ fn session_hosts_boot_loader_takes_tui_channels_on_complete_endpoints_and_refuse
         "a session_hosts edit needs a restart"
     );
 }
+
+// The Claude guard list is empty by default, writes nothing back, takes only tmux Claude TUI
+// channels, and an edit is restart-required like the rest of the section.
+#[test]
+fn claude_guard_channels_default_empty_round_trip_unchanged_and_only_claude_tui() {
+    let root = tempfile::tempdir().unwrap();
+    let empty = load(root.path(), "").unwrap();
+    assert!(empty.session_hosts.claude_guard_channels.is_empty());
+    let boot = BootSessionHosts::from_config(&empty).unwrap();
+    assert!(!boot.claude_guarded(41));
+
+    // An existing section without the key serializes back to exactly what it read.
+    let socket = serde_json::to_string(&root.path().join("herdr.sock")).unwrap();
+    let home = serde_json::to_string(&root.path().join("herdr")).unwrap();
+    let mini = format!("{{mini: {}}}", endpoint("mac-mini", &socket, &home));
+    let herdr_only = herdr(&mini, "{'42': mini}");
+    let config = load(root.path(), &herdr_only).unwrap();
+    let read: serde_yaml::Value = serde_yaml::from_str(&herdr_only).unwrap();
+    let written = serde_yaml::to_value(&config.session_hosts).unwrap();
+    assert_eq!(Some(&written), read.get("session_hosts"));
+    let full = serde_yaml::to_string(&config).unwrap();
+    assert!(!full.contains("claude_guard_channels"), "{full}");
+
+    let guarded = load(root.path(), "session_hosts: {claude_guard_channels: [41]}").unwrap();
+    let boot = BootSessionHosts::from_config(&guarded).unwrap();
+    assert!(boot.claude_guarded(41) && !boot.claude_guarded(42));
+    let written = serde_yaml::to_value(&guarded.session_hosts).unwrap();
+    let expected: serde_yaml::Value =
+        serde_yaml::from_str("{claude_guard_channels: [41]}").unwrap();
+    assert_eq!(written, expected);
+
+    let overlap = format!(
+        "session_hosts: {{herdr: {{endpoints: {mini}, channels: {{'41': mini}}}}, claude_guard_channels: [41]}}"
+    );
+    for (case, section) in [
+        (
+            "channel 0",
+            "session_hosts: {claude_guard_channels: [0]}".to_string(),
+        ),
+        (
+            "unregistered",
+            "session_hosts: {claude_guard_channels: [99]}".into(),
+        ),
+        (
+            "codex",
+            "session_hosts: {claude_guard_channels: [42]}".into(),
+        ),
+        (
+            "non-TUI",
+            "session_hosts: {claude_guard_channels: [43]}".into(),
+        ),
+        ("herdr channel", overlap),
+    ] {
+        assert!(
+            load(root.path(), &section).is_err(),
+            "{case} must refuse boot"
+        );
+    }
+    assert!(
+        crate::config_live_reload::restart_required_changes(&empty, &guarded)
+            .contains(&"session_hosts"),
+        "a guard list edit needs a restart"
+    );
+}
