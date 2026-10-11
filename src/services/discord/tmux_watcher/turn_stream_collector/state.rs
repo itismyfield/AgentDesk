@@ -28,6 +28,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct TurnStreamCollectorC
     pub(in crate::services::discord::tmux::tmux_watcher) restored_injected_prompt_message_id:
         Option<u64>,
     pub(in crate::services::discord::tmux::tmux_watcher) host: Arc<HostSnapshot>,
+    pub(in crate::services::discord::tmux::tmux_watcher) legacy_mode: WatcherLegacyMode,
 }
 
 pub(in crate::services::discord::tmux::tmux_watcher) struct TurnStreamCollectorIo {
@@ -133,6 +134,13 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct CollectedTurnStream 
         Option<InflightTurnState>,
     pub(in crate::services::discord::tmux::tmux_watcher) completion_actor:
         Option<std::sync::Weak<crate::services::provider::CancelToken>>,
+    // #3805 P2 (PR-C): this turn's status-panel generation epoch, SEEDED from
+    // the on-disk row so a restart re-hydrating an existing panel carries the
+    // SAME epoch it was created with (a stale-epoch completion is thus never
+    // falsely skipped). The two-message create bumps it (opens the epoch on a
+    // fresh bind); the completion guard proves it against the on-disk epoch.
+    // Inert on the default-OFF path (stays 0) and while no mid-turn re-anchor
+    // exists yet (PR-D) — this turn's epoch always equals the on-disk epoch.
     pub(in crate::services::discord::tmux::tmux_watcher) this_turn_status_panel_generation: u64,
     pub(in crate::services::discord::tmux::tmux_watcher) turn_is_external_input_for_session: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) turn_identity_for_panel:
@@ -203,6 +211,7 @@ impl TurnStreamCollectorContext {
             turn_result_relayed,
             restored_injected_prompt_message_id,
             host: context.host.clone(),
+            legacy_mode: context.legacy_mode,
         }
     }
 }

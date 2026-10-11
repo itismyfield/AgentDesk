@@ -36,6 +36,17 @@ pub(in crate::services::discord::tmux::tmux_watcher) fn forwarded_chunk<'a>(
     }
 }
 
+// #3041 P1-3 (Part a, B1): DEFERRED forward of the outer-read chunk. We now
+// know — from `initial_outcome.found_result` — whether THIS chunk is the
+// RESULT-bearing (terminal) one. If so, forward it as a TERMINAL frame
+// carrying the commit fence (`terminal_event_consumed_offset(..)` + the
+// pinned turn identity loaded at turn start), so the SAME frame that
+// triggers the sink's terminal delivery carries the consumed_end + identity
+// (FIFO single-task: a separate later frame would arrive after the sink
+// already dispatched). Non-terminal chunks forward exactly as before (no
+// fence, no streaming-latency change beyond the synchronous parse reorder).
+// The ACK target is captured from THIS forward, so the watcher's wait now
+// correlates to the terminal frame's sequence (more precise).
 /// Forward `chunk` for the turn `turn_identity` pins, as a TERMINAL frame when
 /// `terminal` names a commit fence and as a plain streaming frame otherwise.
 pub(in crate::services::discord::tmux::tmux_watcher) fn forward_turn_chunk_to_supervisor_relay(
