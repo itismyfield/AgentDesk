@@ -168,6 +168,13 @@ impl Phase2Frontier {
         live.map(|checkpoint| clamp_retry_cursor(checkpoint, self.barrier()))
     }
 
+    pub(super) fn seal(&mut self, message_id: u64) {
+        self.first_open = Some(
+            self.first_open
+                .map_or(message_id, |open| open.min(message_id)),
+        );
+    }
+
     pub(super) fn recovered(&mut self, message_id: u64) {
         self.max_recovered = advance_phase2_checkpoint(self.max_recovered, message_id);
     }
@@ -210,8 +217,7 @@ impl Phase2Frontier {
                 checkpoint
             }
             FrontierEvidence::Open => {
-                let open = self.first_open.map_or(message_id, |o| o.min(message_id));
-                self.first_open = Some(open);
+                self.seal(message_id);
                 checkpoint
             }
         }
@@ -226,6 +232,10 @@ impl Phase2Frontier {
 
     pub(super) fn durable(&self) -> Option<u64> {
         safe_durable_candidate(self.max_recovered, self.barrier())
+    }
+
+    pub(super) fn can_durably_settle(&self, message_id: u64) -> bool {
+        safe_durable_candidate(Some(message_id), self.barrier()).is_some()
     }
 
     /// An id this scan left open is reread by the end-of-sweep retry arm.
