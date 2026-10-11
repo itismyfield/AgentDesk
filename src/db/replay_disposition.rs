@@ -22,7 +22,6 @@ pub(crate) async fn receipt_disposition(
 }
 
 /// The `sources` that belong to no started request of `provider`, in input order.
-#[cfg(test)]
 pub(crate) async fn unblocked_sources(
     pool: &PgPool,
     provider: &str,

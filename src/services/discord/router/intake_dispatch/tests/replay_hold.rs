@@ -91,10 +91,15 @@ async fn replay_live_absorbed_sources_cannot_forward_and_keep_original_pg() {
             .await
             .expect("held live admission is consumed without provider execution");
 
-        // A mixed input is undecided: it waits whole in the queue instead of being refused.
         let mut mixed = submission_for_admission(channel, source_b + 1);
         mixed.request.source_message_ids =
             vec![MessageId::new(source_a), mixed.request.user_msg_id];
+        assert!(matches!(
+            super::super::admit_text_intake(&deps, &mixed).await,
+            IntakeAdmission::Blocked { .. }
+        ));
+        // With replay starts active a mixed input is undecided: it waits whole in the queue.
+        let _active = super::super::replay_admission::test_activation::activate(channel.get());
         let admission = super::super::admit_text_intake(&deps, &mixed).await;
         assert!(matches!(admission, IntakeAdmission::ReplayDeferred(_)));
         super::super::finish_text_intake_admission(&deps, admission, mixed)

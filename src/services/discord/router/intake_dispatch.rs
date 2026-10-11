@@ -104,12 +104,54 @@ pub(crate) enum IntakeAdmission {
     },
 }
 
+/// Without an activation supplier the replay check keeps the legacy hold lookup and its outcomes.
+fn replay_starts_dormant(channel_id: &str) -> bool {
+    replay_admission::dormant_start(channel_id).is_some()
+}
+
+/// The legacy hold lookup: a lookup failure or a mixed input blocks instead of waiting in custody.
+async fn dormant_hold_admission(
+    pool: &sqlx::PgPool,
+    submission: &IntakeSubmission,
+    channel_id: &str,
+) -> Option<IntakeAdmission> {
+    let mut sources: Vec<String> = std::iter::once(submission.request.user_msg_id)
+        .chain(submission.request.source_message_ids.iter().copied())
+        .map(|id| id.get().to_string())
+        .collect();
+    sources.sort_unstable();
+    sources.dedup();
+    // Consume every absorbed source before routing or attachment effects; mixed items stay intact.
+    let detail = match crate::db::replay_disposition::unblocked_sources(
+        pool,
+        submission.provider.as_str(),
+        channel_id,
+        &sources,
+    )
+    .await
+    {
+        Ok(unblocked) if unblocked.len() == sources.len() => None,
+        Ok(unblocked) if unblocked.is_empty() => return Some(IntakeAdmission::ConsumedToHold),
+        Ok(_) => Some("intake mixes held and new sources".to_string()),
+        Err(error) => Some(format!("replay hold lookup failed: {error}")),
+    };
+    detail.map(|detail| IntakeAdmission::Blocked {
+        reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
+    })
+}
+
 pub(crate) async fn admit_text_intake(
     deps: &IntakeDeps<'_>,
     submission: &IntakeSubmission,
 ) -> IntakeAdmission {
     let channel_id = submission.request.channel_id.get().to_string();
-    if let Some(pool) = deps.shared.pg_pool.as_ref() {
+    if let Some(pool) = deps.shared.pg_pool.as_ref()
+        && replay_starts_dormant(&channel_id)
+    {
+        if let Some(admission) = dormant_hold_admission(pool, submission, &channel_id).await {
+            return admission;
+        }
+    } else if let Some(pool) = deps.shared.pg_pool.as_ref() {
         let request = &submission.request;
         let input = replay_admission::discord_input(
             submission.provider.as_str(),
@@ -441,6 +483,31 @@ pub(crate) async fn dispatch_text_intake(
     finish_text_intake_admission(deps, admission, submission).await
 }
 
+/// Only active replay starts defer a live input, so only they hold its checkpoint until custody.
+pub(crate) fn checkpoint_waits_for_admission(channel_id: serenity::ChannelId) -> bool {
+    !replay_starts_dormant(&channel_id.get().to_string())
+}
+
+/// Advances the checkpoint before any effect, except that a replay-deferred input advances it
+/// only once the queue holds it. Boxed so the caller's frame stays the size of a plain dispatch.
+pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
+    deps: &'a IntakeDeps<'b>,
+    submission: IntakeSubmission,
+    checkpoint: impl FnOnce() + Send + 'a,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), super::super::Error>> + Send + 'a>>
+{
+    Box::pin(async move {
+        let admission = admit_text_intake(deps, &submission).await;
+        if !matches!(admission, IntakeAdmission::ReplayDeferred(_)) {
+            checkpoint();
+            return finish_text_intake_admission(deps, admission, submission).await;
+        }
+        finish_text_intake_admission(deps, admission, submission).await?;
+        checkpoint();
+        Ok(())
+    })
+}
+
 pub(crate) async fn finish_text_intake_admission(
     deps: &IntakeDeps<'_>,
     admission: IntakeAdmission,
@@ -458,7 +525,9 @@ pub(crate) async fn finish_text_intake_admission(
         }
         IntakeAdmission::ReplayDeferred(defer) => {
             let channel_id = submission.request.channel_id.get();
-            if !defer_with_all_sources(deps, submission).await {
+            // Unprepared Discord attachments cannot ride the queue item; refuse rather than keep text only.
+            let unprepared = !submission.attachments.is_empty();
+            if unprepared || !defer_with_all_sources(deps, submission).await {
                 return Err(format!(
                     "replay check deferred ({defer:?}); channel {channel_id} refused custody"
                 )
