@@ -1544,7 +1544,10 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                             unknown_skip=False)
     # Restored skips drop the selected targets' own candidates too.
     rule = live_rule if live_rule is not None else spec
-    final = _lib_selection(rule, frozenset(selected_ids))
+    # --ignored proves no candidate runs, yet the restored skips still drop known ones.
+    candidate_rule = replace(rule, skip_filters=spec.skip_filters + restored) \
+        if spec.ignored_only and spec.non_pg_skip else rule
+    final = _lib_selection(candidate_rule, frozenset(selected_ids))
     if spec.pg_include and not _lib_selection(replace(rule, filters=spec.pg_filters),
                                               frozenset(selected_ids)):
         # The generated selection itself runs nothing, whatever other filters add:
@@ -1622,6 +1625,13 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
             f"filters {names} match {len(final)} candidate test ID(s) in "
             f"{selection_name}, and a dynamic --skip or libtest argument may "
             "remove them all")))
+    if spec.ignored_only and spec.non_pg_skip and not final:
+        # No known candidate is left for --ignored: no allowlist or doctest excuses it.
+        findings.append(("non-pg-ignored-zero-match", (
+            "--ignored with restored NON_PG_SKIP_ARGS leaves 0 known candidate test IDs in "
+            f"{selection_name} (before generated skips: "
+            f"{len(_lib_selection(rule, frozenset(selected_ids)))}); ignored execution "
+            "remains unproven")))
     if not findings and not empty and not final \
             and not (spec.filters and swept_elsewhere == len(spec.filters)):
         empty.append(("zero-match" if selected_ids else "empty-target", (

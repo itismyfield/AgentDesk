@@ -1023,14 +1023,15 @@ class TestIdOracleContract(unittest.TestCase):
                 ["target-mismatch"])
 
     def judge(self, root: Path, command: str,
-              diagnostics: list[str] | None = None) -> list[str]:
+              diagnostics: list[str] | None = None,
+              allowlist: frozenset[str] = frozenset()) -> list[str]:
         # Like CI, the run scalar sources the generated filter before its command.
         workflow = root / ".github/workflows/ci-fixture.yml"
         workflow.write_text("jobs:\n  lane:\n    steps:\n      - run: |\n"
                             f"          source {integrity.NON_PG_FILTER_REL}\n"
                             f"          {command}\n", encoding="utf-8")
         return [v.kind for v in integrity.check_workflows(
-            root, [workflow], set(), False, diagnostics=diagnostics)
+            root, [workflow], set(allowlist), False, diagnostics=diagnostics)
             if v.workflow.endswith("ci-fixture.yml")]
 
     def test_class_flags_follow_cargo_target_flags(self) -> None:
@@ -1256,6 +1257,41 @@ class TestIdOracleContract(unittest.TestCase):
                 with self.subTest(skip=skip, command=command):
                     self.assertEqual(self.judge(root, command), kinds)
 
+    def test_restored_skips_still_bound_an_ignored_run(self) -> None:
+        # --ignored proves no candidate runs, yet the restored skips still drop known
+        # ones; none left is its own failure that no allowlist or doctest excuses.
+        array = "${NON_PG_SKIP_ARGS[@]}"
+        single = f"cargo test --lib high_risk_recovery -- {array} --ignored"
+        both = f"cargo test --lib recovery_case -- nested_case {array} --ignored"
+        zero, union = ["non-pg-ignored-zero-match"], ["unproven-union"]
+        literal = "NON_PG_SKIP_ARGS=(\n  --skip _pg\n  --skip {}\n)\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_fixture_repo(root, GOOD_COMMAND)
+            filter_file = root / "scripts/ci/non-pg-test-filter.sh"
+            filter_file.parent.mkdir(parents=True)
+            for skip, command, kinds in (
+                    ("high_risk_recovery", single, zero),
+                    ("postgres", single, []),
+                    ("_case", both, zero),
+                    ("recovery_case", both, union),
+                    ("postgres", both, union),
+                    ("high_risk_recovery", f"{single} $EXTRA", zero),
+                    ("recovery_case", f"{both} $EXTRA", union),
+                    ("high_risk_recovery", f"cargo test high_risk_recovery -- {array} --ignored",
+                     zero),
+                    ("x\n)\nNON_PG_SKIP_ARGS+=(\n  --skip y", single, ["non-pg-skip-unresolved"])):
+                filter_file.write_text(literal.format(skip), encoding="utf-8")
+                with self.subTest(skip=skip, command=command):
+                    self.assertEqual(self.judge(root, command), kinds)
+            filter_file.write_text(literal.format("high_risk_recovery"), encoding="utf-8")
+            self.assertEqual(self.judge(root, single, allowlist=frozenset({single})), zero)
+            filter_file.write_text(literal.format("postgres"), encoding="utf-8")
+            diagnostics: list[str] = []
+            self.assertEqual(self.judge(root, single, diagnostics), [])
+            self.assertIn("unjudged: --ignored keeps only #[ignore] tests among 1 candidate",
+                          " ".join(diagnostics))
+
     def test_an_unreadable_generated_array_fails_closed(self) -> None:
         # The array is known to carry skips, so a shape the reader cannot
         # restore fails; other opaque expansions keep their verdicts.
@@ -1381,6 +1417,8 @@ class KnownArrayProvenance(unittest.TestCase):
                 ((f"'{source} && {non_pg}'",), []),
                 (((f"{source} && echo ok", non_pg),), unsourced),
                 (((source, "NON_PG_SKIP_ARGS=(--skip high_risk_recovery)", non_pg),), redefined),
+                (((f"{non_pg} --ignored",),), unsourced),
+                (((source, "unset NON_PG_SKIP_ARGS", f"{non_pg} --ignored"),), redefined),
                 (((source, "PG_INCLUDE_ARGS+=(extra_case)", pg),), redefined),
                 (((source, "unset PG_INCLUDE_ARGS", pg),), redefined),
                 (((source, "NON_PG_SKIP_ARGS[0]=--exact", non_pg),), redefined),
@@ -1488,6 +1526,10 @@ class PgIncludeRestoration(unittest.TestCase):
                  [(workflow, "unproven-union")] * 2),
                 ("ignored", {"run": f"{pg} --ignored", **run_only},
                  [(workflow, "unproven-union")] * 2),
+                # Every PG match carries a NON_PG skip value, so the restored skips leave none.
+                ("ignored beside the NON_PG skips",
+                 {"run": f'{pg} "${{NON_PG_SKIP_ARGS[@]}}" --ignored', **run_only},
+                 [(workflow, "non-pg-ignored-zero-match")]),
                 ("shard named", {"env": "    env:\n      PG_INCLUDE_SHARD: 2\n", **run_only},
                  [(workflow, "pg-include-shard-unresolved")]),
                 ("shard in a comment", {"env": "    # PG_INCLUDE_SHARD: 2\n", **run_only}, []),
