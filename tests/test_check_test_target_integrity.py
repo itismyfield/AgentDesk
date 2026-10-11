@@ -1477,6 +1477,12 @@ class PgIncludeRestoration(unittest.TestCase):
                 ("nothing selected", {"skips": missing, "pg_case": None}, zero),
                 ("allowlisted", {"skips": missing, "pg_case": None,
                                  "allowlist": f"# reason: platform-gated\n{normalized}\n"}, zero),
+                # Another filter's tests cannot stand in for the generated selection's own.
+                ("other filter beside nothing", {"run": f"{pg} high_risk_recovery",
+                                                 "recipe": f"{pg} high_risk_recovery",
+                                                 "skips": missing, "pg_case": None}, zero),
+                ("other filter beside every shard", {"run": f"{pg} high_risk_recovery",
+                                                     "recipe": f"{pg} high_risk_recovery"}, []),
                 # Restoring the array keeps every other run-time uncertainty.
                 ("other expansion", {"run": f"{pg} $EXTRA", **run_only},
                  [(workflow, "unproven-union")] * 2),

@@ -1151,6 +1151,8 @@ class CommandSpec:
     # PG_INCLUDE_ARGS as one whole libtest word: restored per shard before judging,
     # and a restored selection running nothing is the generated array's fault.
     pg_include: bool = False
+    # Restored, the array's own positive filters: their selection alone must run tests.
+    pg_filters: tuple[str, ...] = ()
 
 
 def parse_command(words: list[str]) -> CommandSpec:
@@ -1543,11 +1545,13 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
     # Restored skips drop the selected targets' own candidates too.
     rule = live_rule if live_rule is not None else spec
     final = _lib_selection(rule, frozenset(selected_ids))
-    if spec.pg_include and not final:
-        # The generated selection itself runs nothing: no allowlist or doctest excuses it.
+    if spec.pg_include and not _lib_selection(replace(rule, filters=spec.pg_filters),
+                                              frozenset(selected_ids)):
+        # The generated selection itself runs nothing, whatever other filters add:
+        # no allowlist or doctest excuses it.
         return findings + [("pg-include-zero-match", (
-            f"restored PG_INCLUDE_ARGS selects 0 static test IDs in {selection_name} "
-            "after its positive and skip filters"))]
+            f"restored PG_INCLUDE_ARGS's own positive filters select 0 static test IDs "
+            f"in {selection_name} after the run's skip filters"))]
     swept_elsewhere = 0
     empty: list[tuple[str, str]] = []
     for filt in spec.filters:
@@ -2039,10 +2043,11 @@ def pg_include_findings(words: list[str], spec: CommandSpec, shards: tuple[str, 
     findings: list[tuple[str, str]] = []
     for shard in shards:
         args = selections[shard]
-        if parse_command(["cargo", "test", "--", *args]).filters:
+        own = parse_command(["cargo", "test", "--", *args]).filters
+        if own:
             # Reparsed, the restored words keep libtest's meaning and every other expansion.
             found = judge(replace(parse_command([*words[:at], *args, *words[at + 1:]]),
-                                  pg_include=True))
+                                  pg_include=True, pg_filters=own))
         else:
             found = [("pg-include-empty", "PG_INCLUDE_ARGS contains no positive libtest "
                       "filters; an empty expansion would widen this run")]
