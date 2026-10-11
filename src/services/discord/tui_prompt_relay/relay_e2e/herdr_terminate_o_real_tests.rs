@@ -101,6 +101,8 @@ fn a_p11_m2_last_pane_close_and_exact_retire() {
         // The service wrote none of O's store, cursor, ledger or sources, and posted nothing.
         let o_untouched = o_state(events.path()) == o_before && cursor_of(&a_source) == cursor;
         let service_posts = o.posts().len().saturating_sub(1);
+        assert!(o_untouched, "the service wrote none of O's state");
+        assert_eq!(service_posts, 0, "the service posted nothing of its own");
 
         // Only the target's pane and workspace are gone, with its shell and provider.
         let (s1_after, s2_after) = (s1.panes(), s2.panes());
@@ -198,8 +200,6 @@ fn a_p11_m2_last_pane_close_and_exact_retire() {
             count(&posts, TAIL),
             halts.len()
         );
-        assert!(o_untouched, "the service wrote none of O's state");
-        assert_eq!(service_posts, 0, "the service posted nothing of its own");
         assert!(delivered, "{posts:?} {halts:?}");
         assert_eq!(posts, [ANSWER, TAIL], "{halts:?}");
         assert_eq!(ledger, 1, "the tail is delivered once");
