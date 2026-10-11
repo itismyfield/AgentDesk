@@ -2,6 +2,8 @@
 //! exact attempt once, classify it as ordinary, or hold it.
 
 pub(crate) mod live;
+#[cfg(all(test, unix))]
+mod live_tests;
 #[cfg(test)]
 pub(crate) mod permit;
 #[cfg(test)]

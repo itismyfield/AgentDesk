@@ -1,15 +1,17 @@
 //! What one live attempt was seen to do, and the evidence a complete observation can give.
 
 use crate::db::replay_disposition::write::ExactAttempt;
+use crate::services::agent_protocol::StreamMessage;
 use std::sync::Mutex;
 
 /// Activity after start that makes an automatic rerun unsafe.
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Activity {
     Output,
     Tool,
     Unclassified,
+    /// Recorded by the TUI injection path, which is not connected yet.
+    #[cfg(test)]
     InjectedInput,
 }
 
@@ -17,7 +19,6 @@ pub(crate) enum Activity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TerminalKind {
     Done,
-    #[cfg(test)]
     Error,
 }
 
@@ -30,30 +31,35 @@ pub(crate) enum Seen {
         waited: bool,
     },
     StderrDrained,
-    /// A malformed record, read or send error, dropped receiver or stderr error.
+    /// A malformed record, read or send error, dropped receiver, stderr error or cancellation.
     Broken,
-    // Only the provider reader records activity and terminals; it is not connected yet.
-    #[cfg(test)]
     Activity(Activity),
-    #[cfg(test)]
     Terminal(TerminalKind),
 }
 
 impl Seen {
     fn terminal(&self) -> Option<TerminalKind> {
-        #[cfg(test)]
-        if let Self::Terminal(kind) = self {
-            return Some(*kind);
+        match self {
+            Self::Terminal(kind) => Some(*kind),
+            _ => None,
         }
-        None
     }
 
     fn activity(&self) -> bool {
-        #[cfg(test)]
-        if let Self::Activity(_) = self {
-            return true;
-        }
-        false
+        matches!(self, Self::Activity(_))
+    }
+
+    /// What one parsed stdout record shows; only the `result` record is the provider's terminal.
+    fn of_record(record_type: &str, message: Option<&StreamMessage>) -> Option<Self> {
+        use StreamMessage as M;
+        Some(match message {
+            Some(M::Done { .. }) if record_type == "result" => Self::Terminal(TerminalKind::Done),
+            Some(M::Error { .. }) if record_type == "result" => Self::Terminal(TerminalKind::Error),
+            Some(M::Text { .. } | M::Thinking { .. }) => Self::Activity(Activity::Output),
+            Some(M::ToolUse { .. } | M::ToolResult { .. }) => Self::Activity(Activity::Tool),
+            Some(M::TaskNotification { .. }) | None => Self::Activity(Activity::Unclassified),
+            Some(_) => return None,
+        })
     }
 }
 
@@ -75,7 +81,6 @@ impl RawObservation {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn record(&mut self, seen: Seen) {
         self.seen.push(seen);
     }
@@ -194,6 +199,9 @@ pub(crate) struct LiveAttempt {
     verdict: Mutex<Option<Verdict>>,
     /// The bridge saw a stale resume; only the stale-resume decision may judge this attempt.
     stale: std::sync::atomic::AtomicBool,
+    /// Facts a test records between a decision's state check and its wait.
+    #[cfg(test)]
+    pub(crate) after_check: Mutex<Vec<Seen>>,
 }
 
 impl LiveAttempt {
@@ -205,10 +213,10 @@ impl LiveAttempt {
             recorded: tokio::sync::Notify::new(),
             verdict: Mutex::new(None),
             stale: std::sync::atomic::AtomicBool::new(false),
+            after_check: Mutex::new(Vec::new()),
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn record(&self, seen: Seen) {
         lock(&self.observation).record(seen);
         self.recorded.notify_waiters();
@@ -221,8 +229,15 @@ impl LiveAttempt {
     ) -> Option<(ExactAttempt, RawObservation)> {
         let deadline = tokio::time::Instant::now() + wait;
         loop {
+            // Registered before the state check, so a fact recorded after the check still wakes it.
             let recorded = self.recorded.notified();
+            tokio::pin!(recorded);
+            recorded.as_mut().enable();
             let finished = lock(&self.observation).finished();
+            #[cfg(test)]
+            for seen in std::mem::take(&mut *lock(&self.after_check)) {
+                self.record(seen);
+            }
             if finished || tokio::time::timeout_at(deadline, recorded).await.is_err() {
                 break;
             }
@@ -245,6 +260,46 @@ impl LiveAttempt {
 
     pub(crate) fn stale(&self) -> bool {
         self.stale.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// The direct adapter's tap on its reader. It records nothing unless the token carries a live
+/// attempt, which only a protected start attaches.
+pub(crate) struct RawTap(Option<std::sync::Arc<LiveAttempt>>);
+
+impl RawTap {
+    pub(crate) fn for_token(token: Option<&crate::services::provider::CancelToken>) -> Self {
+        Self(token.and_then(|token| token.replay_attempt()).cloned())
+    }
+
+    pub(crate) fn active(&self) -> bool {
+        self.0.is_some()
+    }
+
+    pub(crate) fn see(&self, seen: Seen) {
+        if let Some(live) = &self.0 {
+            live.record(seen);
+        }
+    }
+
+    pub(crate) fn record_line(&self, record_type: &str, message: Option<&StreamMessage>) {
+        if let Some(seen) = Seen::of_record(record_type, message) {
+            self.see(seen);
+        }
+    }
+
+    /// Reads stderr to its end; a read error yields the same empty text and breaks the record.
+    pub(crate) fn read_stderr(&self, stderr: Option<std::process::ChildStderr>) -> String {
+        match stderr.map(std::io::read_to_string) {
+            Some(Ok(text)) => {
+                self.see(Seen::StderrDrained);
+                text
+            }
+            _ => {
+                self.see(Seen::Broken);
+                String::new()
+            }
+        }
     }
 }
 
