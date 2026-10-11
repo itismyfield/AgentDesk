@@ -1085,12 +1085,14 @@ src/
 │   │   │   │   ├── scope_tests.rs
 │   │   │   │   └── selection_tests.rs
 │   │   │   ├── fence/
+│   │   │   │   ├── g1b_modes_tests.rs
 │   │   │   │   ├── modes.rs
 │   │   │   │   └── modes_tests.rs
 │   │   │   ├── supervisor/
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_entry_tests.rs
 │   │   │   │   ├── drive_tests.rs
+│   │   │   │   ├── g1b_entry_tests.rs
 │   │   │   │   ├── receipt_entry_tests.rs
 │   │   │   │   └── reserve.rs
 │   │   │   ├── activation.rs
@@ -1106,6 +1108,8 @@ src/
 │   │   │   ├── external_tests.rs
 │   │   │   ├── fence.rs
 │   │   │   ├── fence_tests.rs
+│   │   │   ├── g1b_command_tests.rs
+│   │   │   ├── g1b_ordering_tests.rs
 │   │   │   ├── mapping.rs
 │   │   │   ├── mapping_guard_tests.rs
 │   │   │   ├── mod.rs
@@ -1395,6 +1399,8 @@ src/
 │   │   │   │   │   ├── native_fresh_prompt_tests.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
+│   │   │   │   │   ├── replay_start.rs
+│   │   │   │   │   ├── replay_start_tests.rs
 │   │   │   │   │   ├── runtime_transition.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── voice_intake.rs
@@ -1738,6 +1744,7 @@ src/
 │   │   │   │   ├── queue_recovery_e2e.rs
 │   │   │   │   ├── reconcile_stale_turn_e2e_tests.rs
 │   │   │   │   ├── registered_bootstrap_e2e.rs
+│   │   │   │   ├── replay_defer_intake_e2e_tests.rs
 │   │   │   │   ├── stale_resume_retry_e2e.rs
 │   │   │   │   ├── stop_command_catch_up_e2e.rs
 │   │   │   │   └── thread_guard_host_e2e.rs
@@ -2496,6 +2503,9 @@ src/
 │   │   ├── bounded_tmux_tests.rs
 │   │   ├── durability_tests.rs
 │   │   ├── durable.rs
+│   │   ├── g1b_receipt_identity_tests.rs
+│   │   ├── g1b_rows_tests.rs
+│   │   ├── g1b_transition_tests.rs
 │   │   ├── handover.rs
 │   │   ├── input_key.rs
 │   │   ├── input_key_tests.rs

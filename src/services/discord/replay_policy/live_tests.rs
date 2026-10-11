@@ -52,6 +52,8 @@ struct Case {
     stderr: &'static str,
     exit: i32,
     receiver_dropped: bool,
+    /// A background child keeps the inherited stderr open past the CLI's exit.
+    stderr_held: bool,
 }
 
 const CASES: &[Case] = &[
@@ -61,6 +63,7 @@ const CASES: &[Case] = &[
         stderr: "note",
         exit: 0,
         receiver_dropped: false,
+        stderr_held: false,
     },
     Case {
         name: "error-after-done",
@@ -68,6 +71,7 @@ const CASES: &[Case] = &[
         stderr: "",
         exit: 1,
         receiver_dropped: false,
+        stderr_held: false,
     },
     Case {
         name: "quiet-failure",
@@ -75,6 +79,7 @@ const CASES: &[Case] = &[
         stderr: "No conversation found with session ID: sid",
         exit: 1,
         receiver_dropped: false,
+        stderr_held: false,
     },
     Case {
         name: "tool",
@@ -82,6 +87,7 @@ const CASES: &[Case] = &[
         stderr: "",
         exit: 0,
         receiver_dropped: false,
+        stderr_held: false,
     },
     Case {
         name: "unclassified",
@@ -89,6 +95,7 @@ const CASES: &[Case] = &[
         stderr: "",
         exit: 1,
         receiver_dropped: false,
+        stderr_held: false,
     },
     Case {
         name: "malformed",
@@ -96,6 +103,7 @@ const CASES: &[Case] = &[
         stderr: "",
         exit: 1,
         receiver_dropped: false,
+        stderr_held: false,
     },
     Case {
         name: "receiver-dropped",
@@ -103,6 +111,31 @@ const CASES: &[Case] = &[
         stderr: "",
         exit: 0,
         receiver_dropped: true,
+        stderr_held: false,
+    },
+    Case {
+        name: "quiet-done-dropped",
+        stdout: &[],
+        stderr: "",
+        exit: 0,
+        receiver_dropped: true,
+        stderr_held: false,
+    },
+    Case {
+        name: "quiet-error-dropped",
+        stdout: &[],
+        stderr: "boom",
+        exit: 1,
+        receiver_dropped: true,
+        stderr_held: false,
+    },
+    Case {
+        name: "stderr-held",
+        stdout: &[INIT, TEXT, DONE],
+        stderr: "",
+        exit: 0,
+        receiver_dropped: false,
+        stderr_held: true,
     },
 ];
 
@@ -139,7 +172,12 @@ fn run_adapter(host: &FakeHost, tokens: &[Arc<CancelToken>]) -> Vec<Vec<String>>
     for (case, token) in CASES.iter().zip(tokens) {
         let quoted: Vec<String> = case.stdout.iter().map(|line| format!("'{line}'")).collect();
         let script = format!(
-            "#!/bin/sh\ncat >/dev/null\n{}\nprintf '%s' '{}' >&2\nexit {}\n",
+            "#!/bin/sh\ncat >/dev/null\n{}{}\nprintf '%s' '{}' >&2\nexit {}\n",
+            if case.stderr_held {
+                "sleep 20 >/dev/null &\n"
+            } else {
+                ""
+            },
             if quoted.is_empty() {
                 String::new()
             } else {
@@ -235,6 +273,9 @@ async fn direct_adapter_completes_the_observation_past_its_done_pg() {
             ("unclassified", None, false),
             ("malformed", None, false),
             ("receiver-dropped", None, false),
+            ("quiet-done-dropped", None, false),
+            ("quiet-error-dropped", None, false),
+            ("stderr-held", None, false),
         ]
     );
     pool.close().await;

@@ -58,17 +58,29 @@ impl ReceiptIdentity {
         if mutant("drop_identity") {
             return None;
         }
-        if let Some(saved) = input.get("receipt_identity") {
-            let identity: Self = serde_json::from_value(saved.clone()).ok()?;
-            return Self::new(
-                key,
-                identity.source_ids,
-                identity.author_id,
-                identity.original_channel_id,
-                identity.execution_channel_id,
-            )
-            .ok();
+        if let Some(saved) = explicit(input) {
+            let identity = serde_json::from_value::<Self>(saved.clone())
+                .ok()
+                .and_then(|saved| {
+                    Self::new(
+                        key,
+                        saved.source_ids,
+                        saved.author_id,
+                        saved.original_channel_id,
+                        saved.execution_channel_id,
+                    )
+                    .ok()
+                });
+            #[cfg(test)]
+            if identity.is_none() && mutant("malformed_explicit_legacy_fallback") {
+                return Self::from_legacy(key, input);
+            }
+            return identity;
         }
+        Self::from_legacy(key, input)
+    }
+
+    fn from_legacy(key: u64, input: &Value) -> Option<Self> {
         let input = input.get("legacy_input").unwrap_or(input);
         let channel = input.get("channel_id")?.as_u64()?;
         Self::new(
@@ -83,6 +95,14 @@ impl ReceiptIdentity {
                 .map_or(Some(channel), Value::as_u64)?,
         )
         .ok()
+    }
+
+    /// The same provenance and source set, whatever order a stored copy lists its sources in.
+    pub(super) fn same(&self, other: &Self) -> bool {
+        let sorted = |ids: &[u64]| ids.iter().copied().collect::<BTreeSet<_>>();
+        self.same_provenance(other)
+            && self.source_ids.len() == other.source_ids.len()
+            && sorted(&self.source_ids) == sorted(&other.source_ids)
     }
 
     fn same_provenance(&self, other: &Self) -> bool {
@@ -101,11 +121,28 @@ pub enum Responsibility {
     Conflict,
 }
 
+/// The top-level explicit identity wins over a nested one; a present but malformed one never
+/// falls back, so Legacy fields are read only when neither is present.
+fn explicit(input: &Value) -> Option<&Value> {
+    let nested = || input.get("legacy_input")?.get("receipt_identity");
+    #[cfg(test)]
+    if mutant("drop_nested_explicit_identity") {
+        return input.get("receipt_identity");
+    }
+    input.get("receipt_identity").or_else(nested)
+}
+
 fn source_coverage(key: u64, input: &Value) -> Option<Vec<u64>> {
-    let input = input.get("legacy_input").unwrap_or(input);
-    let values = match input.get("receipt_identity") {
+    let explicit = explicit(input);
+    #[cfg(test)]
+    let explicit = match mutant("coverage_ignores_top_explicit_priority") {
+        true => (input.get("legacy_input").unwrap_or(input)).get("receipt_identity"),
+        false => explicit,
+    };
+    let values = match explicit {
         Some(identity) => identity.get("source_ids")?.as_array()?,
         None => {
+            let input = input.get("legacy_input").unwrap_or(input);
             if input.get("message_id")?.as_u64()? != key {
                 return None;
             }
@@ -447,3 +484,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "g1b_receipt_identity_tests.rs"]
+mod g1b_tests;
