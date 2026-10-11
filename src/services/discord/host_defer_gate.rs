@@ -10,7 +10,7 @@ use super::host_key_derivation::{
 };
 use super::inflight::{KeyedTeardown, keyed_teardown, teardown_for_lookup};
 use crate::db::dispatched_sessions::hosted_execution::{
-    HostedLookup, HostedLookupKey, load_hosted_execution_pg,
+    HostedLookup, HostedLookupKey, HostedRecord, HostedState, load_hosted_execution_pg,
 };
 use crate::services::provider::ProviderKind;
 
@@ -34,6 +34,25 @@ pub(super) async fn channel_session_deferred(
     kept(
         shared, lookup, provider, channel_id, None, tmux_name, CALLER,
     )
+}
+
+/// A Herdr-configured channel whose one row holds a retired execution: nothing runs there to
+/// guard, and its next turn launches on Herdr, never on tmux. Any other answer is `false`.
+pub(super) async fn configured_herdr_retired(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_name: &str,
+) -> bool {
+    if crate::config::session_hosts::herdr_endpoint(channel_id).is_none() {
+        return false;
+    }
+    let hashes = [shared.token_hash.clone()];
+    let lookup = identity_lookup(shared, &hashes, None, provider, channel_id, tmux_name).await;
+    let HostedLookup::Found(found) = lookup else {
+        return false;
+    };
+    matches!(found.record, HostedRecord::Known(record) if record.state == HostedState::Retired)
 }
 
 /// [`channel_session_deferred`] for a provider-wide pass, which one runtime runs for

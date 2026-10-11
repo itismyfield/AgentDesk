@@ -313,6 +313,40 @@ pub(in crate::services::discord) fn clear_admitted_restart_terminal(
     .0
 }
 
+impl InflightTurnState {
+    /// Clears the row of a restart-settled policy receipt only while the locked fresh row is still
+    /// this snapshot's delivered receipt row of a prior generation.
+    #[cfg(unix)]
+    pub(in crate::services::discord) fn clear_before_start_receipt(
+        &self,
+        current_generation: u64,
+    ) -> GuardedClearOutcome {
+        let (Some(root), Some(provider)) = (inflight_runtime_root(), self.provider_kind()) else {
+            return GuardedClearOutcome::Missing;
+        };
+        let path = inflight_state_path(&root, &provider, self.channel_id);
+        let Ok(_lock) = lock_inflight_state_path(&path) else {
+            return GuardedClearOutcome::IoError;
+        };
+        let Some(fresh) = fs::read_to_string(&path)
+            .ok()
+            .and_then(|data| serde_json::from_str::<InflightTurnState>(&data).ok())
+        else {
+            return GuardedClearOutcome::Missing;
+        };
+        if !self.before_start_receipt_clearable(&fresh, current_generation) {
+            return GuardedClearOutcome::UserMsgMismatch;
+        }
+        let expected = InflightTurnIdentity::from_state(self);
+        let outcome = guarded_identity_clear_outcome(&fresh, &expected, self.turn_nonce.as_deref());
+        if outcome != GuardedClearOutcome::Cleared {
+            return outcome;
+        }
+        let reason = "clear_before_start_receipt";
+        remove_identity_matched_state(&path, &provider, self.channel_id, &expected, fresh, reason).0
+    }
+}
+
 fn clear_rebind_origin_inflight_state_if_matches_identity_impl_in_root(
     root: &std::path::Path,
     provider: &ProviderKind,
