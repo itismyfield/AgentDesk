@@ -137,6 +137,7 @@ async fn suppressed_poll_keeps_shared_delivery_frontier() {
                     watcher_thread_channel_id: None,
                     watcher_instance_id: 5755,
                     host: &Arc::new(HostSnapshot::new(WatchHost::Legacy)),
+                    legacy_mode: WatcherLegacyMode::Legacy,
                 },
                 &PollWatcherControls {
                     cancel: &Arc::new(AtomicBool::new(false)),
@@ -338,6 +339,7 @@ async fn poll_resume_branch_scopes_the_delivery_marker_to_the_current_turn_5943(
                     watcher_thread_channel_id: None,
                     watcher_instance_id: 5943,
                     host: &Arc::new(HostSnapshot::new(WatchHost::Legacy)),
+                    legacy_mode: WatcherLegacyMode::Legacy,
                 },
                 &PollWatcherControls {
                     cancel: &Arc::new(AtomicBool::new(false)),

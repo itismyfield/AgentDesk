@@ -3860,7 +3860,8 @@ fn dc1_actual_scanner_contract() {
 }
 
 type Dc1Snapshot = std::collections::BTreeMap<String, (u64, u8)>;
-static DC1_TICKS: std::sync::OnceLock<Mutex<Vec<Dc1Snapshot>>> = std::sync::OnceLock::new();
+pub(super) static DC1_TICKS: std::sync::OnceLock<Mutex<Vec<Dc1Snapshot>>> =
+    std::sync::OnceLock::new();
 #[derive(Clone, Copy)]
 enum Dc1OpenAction {
     Replace,
@@ -3916,7 +3917,7 @@ pub(super) fn dc1_observe_tick(
     }
 }
 
-async fn dc1_tick() -> Dc1Snapshot {
+pub(super) async fn dc1_tick() -> Dc1Snapshot {
     let ticks = DC1_TICKS.get().unwrap();
     let before = ticks.lock().unwrap().len();
     tokio::time::advance(Duration::from_millis(500)).await;
