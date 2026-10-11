@@ -29,7 +29,7 @@ enum Hook {
     /// the undelivered `AbsorbAndEnd`.
     PurgeAbsorbAndEnd(MessageId),
     AbsorbAndDeliverEpisode(MessageId),
-    /// #6051: the id's own turn is claimed between the scan snapshot and the enqueue.
+    /// The id's own turn is claimed between the scan snapshot and the enqueue.
     StartTurn,
 }
 

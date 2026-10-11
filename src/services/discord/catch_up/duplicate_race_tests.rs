@@ -1,10 +1,5 @@
-//! #6051 — the phase-2 duplicate commit arm: a refusal raced in after the scan
-//! snapshot. Only `AlreadyActiveTurn` names a turn that took the id, so only it
-//! advances; `SourceIdAlreadyQueued` holds the retry at the checkpoint. The
-//! membership path (id already in the snapshot) is covered by
-//! `queue_membership_alone_does_not_advance_the_phase2_checkpoint`,
-//! `an_active_turn_still_advances_the_phase2_checkpoint` and
-//! `phase2_queued_membership_then_accepted_x_does_not_leap_m`.
+//! Phase-2 duplicate commits raced in after the scan snapshot; the snapshot
+//! membership path is covered in `classification_order_tests` and `absorbed_active_tests`.
 
 use super::absorbed_active_tests::phase2_only;
 use super::*;
@@ -82,9 +77,8 @@ async fn t14_phase2_queued_race_refusal_keeps_the_retry_at_b() {
     assert_eq!(retry.checkpoint, b.get(), "retry must stay at B (M = {m})");
 }
 
-/// T15: the same race, but M's own turn is claimed first, so the real refusal
-/// is `AlreadyActiveTurn` and the retry moves to M. Guards against treating
-/// every duplicate commit as non-advancing.
+/// T15: M's own turn is claimed first, so the real `AlreadyActiveTurn` moves the
+/// retry to M; not every duplicate commit holds the checkpoint.
 #[tokio::test(flavor = "current_thread")]
 async fn t15_phase2_active_turn_race_refusal_advances_the_retry_to_m() {
     let fx = Fixture::new().await;
