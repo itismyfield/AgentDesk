@@ -91,7 +91,7 @@ struct TestIo {
 }
 
 /// A re-post hook that only counts its turns; every original still goes.
-struct CountedTurn(Arc<AtomicUsize>);
+pub(super) struct CountedTurn(pub(super) Arc<AtomicUsize>);
 
 impl<W> RepostHook<W> for CountedTurn {
     fn turn<'a>(&'a mut self, _: &'a mut W) -> Turned<'a, ()> {
