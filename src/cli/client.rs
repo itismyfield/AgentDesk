@@ -5,7 +5,10 @@ use serde_json::Value;
 
 mod transport;
 pub(crate) use transport::get_json_at;
+pub(crate) use transport::post_json_local_at;
 use transport::request_json;
+#[cfg(test)]
+pub(crate) use transport::{LocalPostError, post_local};
 mod runtime_config;
 pub(crate) use runtime_config::payload as runtime_config_payload;
 

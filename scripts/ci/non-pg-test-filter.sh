@@ -103,6 +103,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
   --skip services::discord::health::turn_deliver::inject_codex_tests
   --skip services::discord::health::turn_deliver::inject_tests
+  --skip services::discord::herdr_terminate::exit_tests
+  --skip services::discord::herdr_terminate::route_tests
   --skip services::discord::herdr_terminate::tests
   --skip services::discord::host_defer_gate::tests
   --skip services::discord::host_key_derivation::tests
@@ -165,6 +167,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
@@ -192,6 +195,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::session_forwarding::home_stop::tests
   --skip services::session_forwarding::tests
   --skip services::session_host::herdr_clear_adapter::tests
+  --skip services::session_host::herdr_terminate_real_tests
   --skip services::session_host::session_record::tests
   --skip services::session_resume::tests
   --skip services::settings::tests
@@ -221,6 +225,7 @@ NON_PG_FILTER_REPLAY=(
   cli::dcserver_pg_bootstrap::tests::schema_ahead_needs_every_unknown_version_past_the_latest
   cli::dcserver_pg_bootstrap::tests::slow_startup_timeout_exhausts_retries_and_reports_the_exit_line
   cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
+  cli::herdr::terminate_tests::act_cli_terminate_never_opens_postgres
   db::auto_queue::entries::tests::pinned_dispatch_identity_is_declared_before_the_stale_retry_loop
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::explicit_phase_gate_verdict_key_blocks_inference
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::non_string_explicit_verdict_preserves_checks_inference
@@ -896,6 +901,8 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::health::recovery::stall_watchdog_auto_heal_tests
   services::discord::health::turn_deliver::inject_codex_tests
   services::discord::health::turn_deliver::inject_tests
+  services::discord::herdr_terminate::exit_tests
+  services::discord::herdr_terminate::route_tests
   services::discord::herdr_terminate::tests
   services::discord::host_defer_gate::tests
   services::discord::host_key_derivation::tests
@@ -958,6 +965,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
   services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
+  services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e
   services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
@@ -985,6 +993,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::session_forwarding::home_stop::tests
   services::session_forwarding::tests
   services::session_host::herdr_clear_adapter::tests
+  services::session_host::herdr_terminate_real_tests
   services::session_host::session_record::tests
   services::session_resume::tests
   services::settings::tests

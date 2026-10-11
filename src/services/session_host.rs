@@ -23,6 +23,9 @@ mod herdr_host;
 mod herdr_registry;
 #[cfg(test)]
 pub(crate) mod herdr_socket_rig_tests;
+// The operator terminate path against real Herdr servers its runner starts; ignored otherwise.
+#[cfg(test)]
+mod herdr_terminate_real_tests;
 pub(crate) mod legacy_collapse;
 mod model;
 mod process_host;

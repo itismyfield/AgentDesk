@@ -136,6 +136,8 @@ src/services/discord/health/recovery/stall_alert.rs
 src/services/discord/health/turn_deliver/inject_codex_tests.rs
 src/services/discord/health/turn_deliver/inject_tests.rs
 src/services/discord/herdr_terminate.rs
+src/services/discord/herdr_terminate_exit_tests.rs
+src/services/discord/herdr_terminate_route_tests.rs
 src/services/discord/host_defer_gate_tests.rs
 src/services/discord/host_key_derivation_tests.rs
 src/services/discord/idle_recap_interaction.rs
@@ -205,6 +207,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs
+src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs
 src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs
@@ -253,6 +256,7 @@ src/services/scheduled_messages/postgres_tests.rs
 src/services/session_forwarding.rs
 src/services/session_forwarding/home_stop_tests.rs
 src/services/session_host/herdr_clear_adapter_tests.rs
+src/services/session_host/herdr_terminate_real_tests.rs
 src/services/session_host/session_record.rs
 src/services/session_resume.rs
 src/services/settings.rs
@@ -413,6 +417,8 @@ services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::health::turn_deliver::inject_codex_tests
 services::discord::health::turn_deliver::inject_tests
+services::discord::herdr_terminate::exit_tests
+services::discord::herdr_terminate::route_tests
 services::discord::herdr_terminate::tests
 services::discord::host_defer_gate::tests
 services::discord::host_key_derivation::tests
@@ -487,6 +493,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
@@ -535,6 +542,7 @@ services::scheduled_messages::postgres_tests
 services::session_forwarding::home_stop::tests
 services::session_forwarding::tests
 services::session_host::herdr_clear_adapter::tests
+services::session_host::herdr_terminate_real_tests
 services::session_host::session_record::tests
 services::session_resume::tests
 services::settings::tests
@@ -1360,6 +1368,14 @@ services::discord::health::turn_deliver::inject_tests::an_injection_without_a_di
 services::discord::health::turn_deliver::inject_tests::input_left_on_disk_for_an_unloaded_mailbox_stays_ahead_of_a_deliver_pg
 services::discord::health::turn_deliver::inject_tests::input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg
 services::discord::health::turn_deliver::inject_tests::input_queued_reserved_or_claimed_before_a_deliver_stays_ahead_of_it_pg
+services::discord::herdr_terminate::exit_tests::act_terminate_process_exit_after_close_recovers_pg
+services::discord::herdr_terminate::route_tests::act_route_foreign_runtime_refused_pg
+services::discord::herdr_terminate::route_tests::act_route_logs_result_once_pg
+services::discord::herdr_terminate::route_tests::act_route_panic_reopens_the_fence_only_before_the_close_pg
+services::discord::herdr_terminate::route_tests::act_route_retired_is_the_only_success_pg
+services::discord::herdr_terminate::route_tests::act_route_stale_cas_is_indeterminate_pg
+services::discord::herdr_terminate::route_tests::act_route_view_vanishes_after_target_is_refused_pg
+services::discord::herdr_terminate::route_tests::act_route_wrong_nonce_zero_effect_pg
 services::discord::herdr_terminate::tests::m1_retire_cas_failure_preserves_successor_pg
 services::discord::host_defer_gate::tests::the_promote_gate_holds_only_what_the_host_guard_keeps_pg
 services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_row_under_another_name_pg
@@ -1666,6 +1682,7 @@ services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cancelled_a
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_real_intake_through_termination_to_one_herdr_start_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_channel_name_starts_its_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_session_starts_its_input_once_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e::act_route_disconnect_after_close_still_settles_pg
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e::reconcile_stale_turn_held_release_arms_backstop_and_runs_preserved_q_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg
@@ -1916,6 +1933,8 @@ services::session_host::herdr_clear_adapter::tests::an_input_hold_refuses_the_cl
 services::session_host::herdr_clear_adapter::tests::an_unclear_clear_line_holds_without_a_second_and_its_late_pending_settles_pg
 services::session_host::herdr_clear_adapter::tests::an_unsettled_or_unread_rotation_refuses_the_clear_pg
 services::session_host::herdr_clear_adapter::tests::every_failed_check_refuses_before_any_change_pg
+services::session_host::herdr_terminate_real_tests::a_p11_m2_confirmation_required_has_no_escalation
+services::session_host::herdr_terminate_real_tests::a_p11_m2_last_pane_close_and_exact_retire
 services::session_host::session_record::tests::only_a_found_null_record_admits_the_legacy_clear_pg
 services::session_resume::tests::production_resume_lock_blocks_effective_intake_snapshot_until_rebind_finishes
 services::session_resume::tests::resume_production_path_clears_stale_binding_and_rebinds_runtime

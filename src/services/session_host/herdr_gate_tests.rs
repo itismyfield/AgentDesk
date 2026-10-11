@@ -2102,4 +2102,166 @@ pub(crate) mod p11 {
         target.discard_pin();
         pinned
     }
+
+    /// The server's reply to the next write, withheld until `release` is sent or dropped;
+    /// `reached` fires once that write is at the server. Reads pass straight through.
+    pub(crate) struct WriteHold {
+        pub(crate) reached: tokio::sync::oneshot::Receiver<()>,
+        pub(crate) release: std::sync::mpsc::Sender<()>,
+        stop: Arc<AtomicBool>,
+        /// The server's own socket, moved aside while the relay owns its path.
+        real: PathBuf,
+        path: PathBuf,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for WriteHold {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            // A reply still held is let go, so the relay thread can end.
+            drop(std::mem::replace(
+                &mut self.release,
+                std::sync::mpsc::channel().0,
+            ));
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+            let _ = std::fs::rename(&self.real, &self.path);
+        }
+    }
+
+    type Held = Option<(
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>;
+
+    /// Carries one connection's request to `real` and its reply back, holding a write's reply;
+    /// with `hide`, snapshots list no pane.
+    fn relay(client: UnixStream, real: &std::path::Path, held: &mut Held, hide: bool) {
+        let _ = client.set_nonblocking(false);
+        let _ = client.set_read_timeout(Some(Duration::from_secs(3)));
+        let mut request = String::new();
+        let _ = BufReader::new(&client).read_line(&mut request);
+        let Ok(mut server) = UnixStream::connect(real) else {
+            return;
+        };
+        let _ = server.write_all(request.as_bytes());
+        let mut reply = String::new();
+        let _ = BufReader::new(&server).read_line(&mut reply);
+        if let Ok(mut parsed) = serde_json::from_str::<Value>(&reply)
+            && hide
+            && parsed["result"]["type"] == "session_snapshot"
+        {
+            parsed["result"]["snapshot"]["panes"] = json!([]);
+            reply = format!("{parsed}\n");
+        }
+        // A witness-only dial carries no request; only a named write is held.
+        let write = serde_json::from_str::<Value>(&request).is_ok_and(|request| {
+            request["method"].as_str().is_some_and(|method| {
+                !matches!(method, "ping" | "session.snapshot" | "pane.process_info")
+            })
+        });
+        if write && let Some((reached, release)) = held.take() {
+            let _ = reached.send(());
+            let _ = release.recv_timeout(Duration::from_secs(60));
+        }
+        let mut client = client;
+        let _ = client.write_all(reply.as_bytes());
+        let _ = client.shutdown(Shutdown::Write);
+    }
+
+    impl P11TerminationRig {
+        /// Puts a relay at the server's path that holds the next write's reply.
+        pub(crate) fn hold_next_write(&self) -> WriteHold {
+            self.relay(true, false)
+        }
+
+        /// Puts a relay at the server's path under which every pane is gone.
+        pub(crate) fn hide_panes(&self) -> WriteHold {
+            self.relay(false, true)
+        }
+
+        fn relay(&self, hold: bool, hide: bool) -> WriteHold {
+            let real = self.server.path.with_extension("held");
+            std::fs::rename(&self.server.path, &real).unwrap();
+            let listener = UnixListener::bind(&self.server.path).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let (reached_tx, reached) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let stop = Arc::new(AtomicBool::new(false));
+            let (stopped, target) = (stop.clone(), real.clone());
+            let thread = thread::spawn(move || {
+                let mut held: Held = hold.then_some((reached_tx, wait));
+                while !stopped.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((client, _)) => relay(client, &target, &mut held, hide),
+                        Err(_) => thread::sleep(Duration::from_millis(2)),
+                    }
+                }
+            });
+            WriteHold {
+                reached,
+                release,
+                stop,
+                real,
+                path: self.server.path.clone(),
+                thread: Some(thread),
+            }
+        }
+
+        /// While `required`, a close is answered as Herdr 0.9.3 answers a worktree-group
+        /// parent's last pane, and the pane stays.
+        pub(crate) fn require_confirmation(&self, required: bool) {
+            let reply = json!({"error": {
+                "code": "confirmation_required",
+                "message": "closing this pane would close a worktree group"
+            }});
+            *self.server.close_reply.lock().unwrap() = required.then_some(reply);
+            self.server
+                .vanish_on_close
+                .store(!required, Ordering::SeqCst);
+        }
+    }
+
+    /// The child `in_child` would start for test `path`, its Herdr config written under `home`,
+    /// for a caller that judges the child's exit itself.
+    pub(crate) fn child_command(
+        path: &str,
+        channel: u64,
+        home: &std::path::Path,
+    ) -> std::process::Command {
+        let name = path.split_once("::").unwrap().1;
+        let config = home.join("config.toml");
+        std::fs::write(&config, CANONICAL_CONFIG).unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(3_600);
+        let file = std::fs::File::options().write(true).open(&config).unwrap();
+        file.set_modified(old).unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(TERMINATE_TEST_CHILD, name)
+            .env("HERDR_CONFIG_PATH", &config)
+            .env("XDG_CONFIG_HOME", home.join("xdg"))
+            .env_remove(crate::services::herdr_admission::ADMISSION_ENV)
+            .env(
+                crate::services::tui_o::cutover::test_override::CHILD_ENV,
+                "1",
+            )
+            .env(
+                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+                format!("[[{channel},\"claude_tui\"]]"),
+            );
+        command
+    }
+
+    /// Whether this process is a terminate test's child.
+    pub(crate) fn is_child() -> bool {
+        std::env::var_os(TERMINATE_TEST_CHILD).is_some()
+    }
+
+    /// This thread sees no Herdr endpoint until its installer runs again.
+    pub(crate) fn clear_endpoints_here() {
+        let none = BootSessionHosts::from_config(&crate::config::Config::default()).unwrap();
+        std::mem::forget(herdr_registry::force_for_test(HerdrRegistry::build(&none)));
+    }
 }
