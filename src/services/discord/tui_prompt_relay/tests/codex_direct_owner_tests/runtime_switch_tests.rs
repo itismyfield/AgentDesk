@@ -240,3 +240,25 @@ fn a_replaced_runtime_relays_through_its_own_routing_and_output() {
         "B's output and cursors are those of B alone"
     );
 }
+
+// The relay's recovery call cannot post for a Codex TUI row yet: Codex has structured turn state,
+// so the pane-ready fallback that recovery requires is never offered. A recovery-only stale
+// runtime therefore changes no output today; once this opens, recovery needs its own B-only case.
+#[test]
+fn codex_tui_recovery_has_no_pane_ready_fallback_yet() {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    assert!(
+        !crate::services::tui_turn_state::pane_ready_fallback_allowed(
+            &ProviderKind::Codex,
+            Some(RuntimeHandoffKind::CodexTui),
+        )
+    );
+    assert!(
+        crate::services::provider::fallback_capture_ready_for_input(
+            "› ready",
+            &ProviderKind::Codex,
+            Some(RuntimeHandoffKind::CodexTui),
+        )
+        .is_none()
+    );
+}
