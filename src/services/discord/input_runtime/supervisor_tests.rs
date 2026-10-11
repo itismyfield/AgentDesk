@@ -50,11 +50,33 @@ fn seqs(events: &[BindingEvent]) -> Vec<u64> {
 // Work a fake clear worker runs right after its reset.
 type Then = Option<Box<dyn FnOnce() + Send>>;
 
+// The one Claude runtime handed over to the probe; tests write its real writer map.
+struct Runtime {
+    shared: Arc<crate::services::discord::SharedData>,
+    probe: mapping::Probe,
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let probe = mapping::Probe::default();
+        assert!(probe.adopt(&[ProviderKind::Claude], vec![shared.clone()]));
+        Self { shared, probe }
+    }
+}
+
+// The fake event name, how many of them to let pass first, and the parent → thread edge.
+type Inject = (&'static str, usize, (u64, u64));
+
 // Everything the fakes observed, shared across the supervisor, its workers and the test.
 #[derive(Default)]
 struct World {
-    parents: dashmap::DashMap<ChannelId, ChannelId>,
+    runtime: Runtime,
     mapping_unavailable: AtomicBool,
+    mapping_pending: AtomicBool,
+    // An edge written into the real map at the nth matching fake event, after its own effect.
+    inject: Mutex<Option<Inject>>,
+    effects: Mutex<Vec<&'static str>>,
     mapping_checks: AtomicUsize,
     freeze_failed: AtomicBool,
     log: Mutex<Vec<&'static str>>,
@@ -72,11 +94,39 @@ struct World {
 }
 
 impl World {
+    fn parents(&self) -> &dashmap::DashMap<ChannelId, ChannelId> {
+        &self.runtime.shared.dispatch.thread_parents
+    }
     fn log(&self) -> Vec<&'static str> {
         self.log.lock().unwrap().clone()
     }
     fn note(&self, entry: &'static str) {
         self.log.lock().unwrap().push(entry);
+        self.fire(entry);
+    }
+    fn fire(&self, entry: &'static str) {
+        self.effects.lock().unwrap().push(entry);
+        let mut inject = self.inject.lock().unwrap();
+        let Some((at, nth, (parent, thread))) = *inject else {
+            return;
+        };
+        if at != entry {
+            return;
+        }
+        if nth > 0 {
+            *inject = Some((at, nth - 1, (parent, thread)));
+            return;
+        }
+        *inject = None;
+        (self.parents()).insert(ChannelId::new(parent), ChannelId::new(thread));
+    }
+    fn effects(&self, entry: &str) -> usize {
+        self.effects
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| **e == entry)
+            .count()
     }
     fn gaps(&self) -> Vec<u64> {
         let clears = self.clears.lock().unwrap();
@@ -217,6 +267,7 @@ struct MoveFake {
 
 impl Host for MoveFake {
     fn collect(&mut self, _: &Ledger) -> io::Result<Vec<Input>> {
+        self.world.fire("collect");
         Ok((self.inputs.iter())
             .map(|&key| Input {
                 key,
@@ -227,6 +278,7 @@ impl Host for MoveFake {
             .collect())
     }
     fn evidence(&mut self, _: &Input) -> io::Result<MoveEvidence> {
+        self.world.fire("evidence");
         Ok(MoveEvidence {
             user_record: false,
             turn_open: false,
@@ -239,12 +291,14 @@ impl Host for MoveFake {
         Ok(())
     }
     fn start_actor(&mut self) -> io::Result<()> {
+        self.world.fire("actor");
         Ok(())
     }
     fn reconcile(&mut self, _: u64, _: &Row) -> io::Result<(bool, Composer)> {
         Ok((false, Composer::Empty))
     }
     fn enqueue(&mut self, key: u64, _: &Row) -> io::Result<EnqueueOutcome> {
+        self.world.fire("enqueue");
         self.world.enqueued.lock().unwrap().push(key);
         Ok(EnqueueOutcome::Persisted)
     }
@@ -265,13 +319,17 @@ struct Fake {
 impl Ports for Fake {
     type Clear = ClearFake;
     type Move = MoveFake;
-    fn mapping(&self, channel: u64) -> mapping::Check {
+    fn mapping(&self) -> mapping::Probe {
         self.world.mapping_checks.fetch_add(1, Ordering::SeqCst);
+        let probe = mapping::Probe::default();
         if self.world.mapping_unavailable.load(Ordering::SeqCst) {
-            mapping::Check::Unavailable
-        } else {
-            mapping::inspect(&self.world.parents, channel)
+            // Handed over without the Codex runtime it was told to expect.
+            let only = vec![self.world.runtime.shared.clone()];
+            assert!(probe.adopt(&[ProviderKind::Claude, ProviderKind::Codex], only));
+        } else if !self.world.mapping_pending.load(Ordering::SeqCst) {
+            return self.world.runtime.probe.clone();
         }
+        probe
     }
     fn freeze(&mut self, closing: Arc<Closing>) -> Step<'_, Result<(), Failure>> {
         self.world.note("freeze");
@@ -498,6 +556,19 @@ impl Rig {
         inputs: Vec<u64>,
         refusal: Option<&'static str>,
     ) -> Supervisor<Fake> {
+        let reserved =
+            (self.registry).reserve_for_test(&ProviderKind::Claude, self.channel, &self.root);
+        self.adopt(reserved.unwrap(), request, inputs, refusal)
+            .unwrap()
+    }
+    // Supervisor::start over a given reservation, with this rig's config and fakes.
+    fn adopt(
+        &self,
+        reserved: Reserved,
+        request: Request,
+        inputs: Vec<u64>,
+        refusal: Option<&'static str>,
+    ) -> Result<Supervisor<Fake>, Refused> {
         let config = Config {
             provider: ProviderKind::Claude,
             channel: self.channel,
@@ -513,7 +584,7 @@ impl Rig {
             inputs,
             mailbox: ChannelMailboxRegistry::default(),
         };
-        Supervisor::start(self.registry, config, ports).unwrap()
+        Supervisor::start(reserved, config, ports)
     }
     fn health(&self) -> Vec<String> {
         super::super::reasons_with(self.registry)
@@ -1004,6 +1075,9 @@ mod drive_entry;
 
 #[path = "mapping_guard_tests.rs"]
 mod mapping_guard;
+
+#[path = "reserve_tests.rs"]
+mod reserve;
 
 #[test]
 fn registered_holds_join_fence_health_and_leave_on_release() {

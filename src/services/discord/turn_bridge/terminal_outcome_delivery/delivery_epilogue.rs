@@ -53,9 +53,13 @@ pub(super) async fn handle_delivery_epilogue(
     let terminal_delivery_committed = ctx.terminal_delivery_committed;
     let terminal_body_visible = ctx.terminal_body_visible;
     let preserve_inflight_for_cleanup_retry = ctx.preserve_inflight_for_cleanup_retry;
+    // A protected request settles its dispatch only after an ordinary classification.
+    let pool = shared_owned.pg_pool.as_ref();
+    let replay = crate::services::discord::replay_policy::ordinary_outcome;
+    let ordinary = replay(pool, ctx.cancel_token, state.inflight_state).await;
     let should_complete_work_dispatch_after_delivery =
-        ctx.should_complete_work_dispatch_after_delivery;
-    let should_fail_dispatch_after_delivery = ctx.should_fail_dispatch_after_delivery;
+        ctx.should_complete_work_dispatch_after_delivery && ordinary;
+    let should_fail_dispatch_after_delivery = ctx.should_fail_dispatch_after_delivery && ordinary;
     let bridge_relay_delegated_to_watcher = ctx.bridge_relay_delegated_to_watcher;
     let watcher_delivery_pin = ctx.watcher_delivery_pin;
     let can_deliver_directly = gateway.can_deliver_directly();

@@ -23,27 +23,18 @@ pub(in crate::services::discord::turn_bridge) fn held_before_submit(
 
 /// A Herdr turn whose input may have been submitted, or that took a user stop, ends only on its
 /// provider's admitted terminal; EOF, a dead pane or a disconnect leave the turn, row and slot held.
-pub(in crate::services::discord::turn_bridge) fn herdr_stop_unconfirmed(
+/// The one exception is a sealed before-start proof, which the bridge settles as a policy close.
+pub(in crate::services::discord::turn_bridge) fn herdr_exit_decision(
     token: &crate::services::provider::CancelToken,
     cancelled: bool,
     terminal_admitted: bool,
-) -> bool {
-    use crate::services::provider::cancel_token_claude_interrupt::{
-        HerdrSubmission, herdr_stop_settlement_available,
-    };
-    let held = herdr_stop_settlement_available()
-        && !cancelled
-        && !terminal_admitted
-        && token.herdr_interrupt_state().is_some_and(|intent| {
-            let submission = intent
-                .submission
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .submission;
-            intent.user_stop.load(std::sync::atomic::Ordering::Acquire)
-                || submission != HerdrSubmission::Unsubmitted
-        });
-    if held && let Some(state) = token.herdr_interrupt_state() {
+) -> crate::services::provider::herdr_before_start::ExitDecision {
+    use crate::services::provider::herdr_before_start::{ExitDecision, seal_exit};
+    let decision = seal_exit(token, cancelled, terminal_admitted);
+    if decision != ExitDecision::Normal
+        && let Some(state) = token.herdr_interrupt_state()
+    {
+        let policy_close = matches!(decision, ExitDecision::PolicyClose(_));
         tracing::info!(
             event = "herdr_turn_held",
             provider = state.owner.provider,
@@ -52,13 +43,21 @@ pub(in crate::services::discord::turn_bridge) fn herdr_stop_unconfirmed(
             turn_nonce = token.turn_nonce(),
             runtime_generation = token.claude_interrupt_generation(),
             hold_kind = "provider_terminal",
-            hold_reason = "provider_terminal_unconfirmed",
-            settlement = "host_owned",
+            hold_reason = if policy_close {
+                "before_start_policy_close"
+            } else {
+                "provider_terminal_unconfirmed"
+            },
+            settlement = if policy_close {
+                "policy_close"
+            } else {
+                "host_owned"
+            },
             terminal_confirmed = false,
             "Herdr turn remains held"
         );
     }
-    held
+    decision
 }
 
 pub(super) fn stream_loop_should_continue(

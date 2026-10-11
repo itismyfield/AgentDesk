@@ -1,5 +1,14 @@
 use super::*;
 
+pub(in crate::services::discord::tmux::tmux_watcher) const SPINNER: &[&str] =
+    &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord::tmux::tmux_watcher) enum StreamingStatusTickOutcome {
+    ContinueStreamingLoop,
+    Fallthrough,
+}
+
 pub(in crate::services::discord::tmux::tmux_watcher) fn watcher_should_suppress_streaming_after_bridge_delivery(
     bridge_delivered_turn: bool,
     has_assistant_response: bool,
@@ -24,6 +33,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct StreamingStatusTickC
     pub(in crate::services::discord::tmux::tmux_watcher) output_path: &'a String,
     pub(in crate::services::discord::tmux::tmux_watcher) turn_delivered: &'a Arc<AtomicBool>,
     pub(in crate::services::discord::tmux::tmux_watcher) host: &'a HostSnapshot,
+    pub(in crate::services::discord::tmux::tmux_watcher) legacy_mode: WatcherLegacyMode,
 }
 
 pub(in crate::services::discord::tmux::tmux_watcher) struct StreamingStatusTickTurn<'a> {
