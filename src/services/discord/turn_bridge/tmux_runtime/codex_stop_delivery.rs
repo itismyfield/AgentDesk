@@ -859,7 +859,3 @@ fn deliver(
     };
     attempt().unwrap_or_else(HerdrDelivery::NotSent)
 }
-
-#[cfg(all(test, unix))]
-#[path = "../before_start_stop.rs"]
-mod before_start_stop;

@@ -69,12 +69,21 @@ pub(crate) fn classify(
         return Candidate::Backlog(BacklogReason::NotRepostable);
     };
     let activated = provenance.activation();
-    if activated.is_none_or(|activation| serial < activation.frontier) {
+    let Some(activated) = activated else {
+        return Candidate::Backlog(BacklogReason::BeforeActivation);
+    };
+    let Some(intent) = provenance.intent(serial) else {
+        let before = serial < activated.frontier;
+        return Candidate::Backlog(if before {
+            BacklogReason::BeforeActivation
+        } else {
+            BacklogReason::NoIntent
+        });
+    };
+    // Judged by the activation it was sent under, so a later off-to-on never drops it.
+    if !provenance.sent_while_on(serial, intent.generation) {
         return Candidate::Backlog(BacklogReason::BeforeActivation);
     }
-    let Some(intent) = provenance.intent(serial) else {
-        return Candidate::Backlog(BacklogReason::NoIntent);
-    };
     if intent.key.as_ref() != Some(&key) || intent.payload_sha256 != payload_sha256(&record.payload)
     {
         return Candidate::Backlog(BacklogReason::IntentMismatch);

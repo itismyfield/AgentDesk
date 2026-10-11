@@ -824,6 +824,9 @@ src/
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
 │   │   │   └── too_old_drop_pg_tests.rs
+│   │   ├── codex_adoption_runtime/
+│   │   │   ├── boot.rs
+│   │   │   └── boot_tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
 │   │   │   │   ├── codex_verified_clear_tests.rs
@@ -1251,7 +1254,8 @@ src/
 │   │   │   │   ├── output_paths.rs
 │   │   │   │   ├── ready_without_output_tests.rs
 │   │   │   │   ├── replay_hold.rs
-│   │   │   │   └── replay_hold_tests.rs
+│   │   │   │   ├── replay_hold_tests.rs
+│   │   │   │   └── scoped_restore.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
@@ -1422,6 +1426,7 @@ src/
 │   │   │   ├── intake_delivery_sweep/
 │   │   │   │   └── tests.rs
 │   │   │   ├── queued_placeholders/
+│   │   │   │   ├── scoped_recovery_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── relay_dlq_redelivery/
 │   │   │   │   └── tests.rs
@@ -1452,6 +1457,8 @@ src/
 │   │   │   ├── recovery_flush.rs
 │   │   │   ├── relay_dlq_redelivery.rs
 │   │   │   ├── restored_state.rs
+│   │   │   ├── scoped_inflight_restore_tests.rs
+│   │   │   ├── scoped_restore_lane_tests.rs
 │   │   │   ├── session_gc.rs
 │   │   │   ├── shared_data.rs
 │   │   │   ├── shutdown.rs
@@ -1670,6 +1677,7 @@ src/
 │   │   │   ├── rehydration/
 │   │   │   │   ├── child_binding_tests.rs
 │   │   │   │   ├── codex_marker.rs
+│   │   │   │   ├── discovery_pass_tests.rs
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── relay_e2e/
 │   │   │   │   ├── cancel_backstop_e2e_tests/
@@ -1680,6 +1688,7 @@ src/
 │   │   │   │   ├── catch_up_pagination_e2e.rs
 │   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
+│   │   │   │   ├── herdr_terminate_e2e_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
@@ -1848,6 +1857,7 @@ src/
 │   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs
 │   │   │   ├── before_start_stop.rs
+│   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
 │   │   │   ├── bridge_entry_persist.rs
@@ -1993,6 +2003,7 @@ src/
 │   │   ├── bot_role.rs
 │   │   ├── busy_followup_retry_store.rs
 │   │   ├── catch_up.rs
+│   │   ├── codex_adoption_runtime.rs
 │   │   ├── compact_turn_authority.rs
 │   │   ├── completion_footer_metadata.rs
 │   │   ├── delivery_lease_cell.rs
@@ -2471,6 +2482,7 @@ src/
 │   │   │   ├── admission.rs
 │   │   │   ├── admission_tests.rs
 │   │   │   ├── config.rs
+│   │   │   ├── dispatch.rs
 │   │   │   ├── evidence.rs
 │   │   │   ├── identity.rs
 │   │   │   ├── matcher.rs
@@ -2478,6 +2490,8 @@ src/
 │   │   │   ├── probe.rs
 │   │   │   ├── probe_tests.rs
 │   │   │   ├── provenance.rs
+│   │   │   ├── runner.rs
+│   │   │   ├── runner_tests.rs
 │   │   │   └── send.rs
 │   │   ├── shadow/
 │   │   │   ├── binding_reader.rs
