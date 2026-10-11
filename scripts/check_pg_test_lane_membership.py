@@ -1440,6 +1440,35 @@ _ARRAY_READ = re.compile(
     rf"\$\{{[!#]?(?:{'|'.join(KNOWN_ARRAYS)})\b[^}}\n]*\}}|{_ARRAY_USE.pattern}"
 )
 _ARRAY_NAME = re.compile(rf"\b({'|'.join(KNOWN_ARRAYS)})\b")
+# Quoted spans (an unterminated one runs to the end) and escapes hold no shell syntax.
+_QUOTED = re.compile(r"'[^']*(?:'|\Z)|\"(?:\\.|[^\"\\])*(?:\"|\Z)|\\.", re.S)
+_SHELL_WORD = re.compile(r"[;&|()]+|[^\s;&|()]+")
+# Words opening a compound command, group or loop; a closer counts only in command position.
+_OPENERS = frozenset({"if", "case", "for", "select", "while", "until", "{"})
+_CLOSERS = frozenset({"fi", "esac", "done", "}"})
+
+
+def _at_top_level(shell: str, offset: int) -> bool:
+    """Whether the word at ``offset`` runs as the shell's own command, not quoted, heredoc
+    data or inside a compound, function or subshell: a fail-closed keyword count."""
+    syntax = _QUOTED.sub(lambda span: re.sub(r"[^\n]", " ", span.group()), shell)
+    if syntax[offset:offset + 1].isspace() or re.search(r"(?<!<)<<(?!<)", syntax[:offset]):
+        return False
+    depth = 0
+    for line in syntax[:offset].split("\n"):
+        words = _SHELL_WORD.findall(line)
+        for index, word in enumerate(words):
+            if word in _OPENERS:
+                depth += 1
+            elif word in _CLOSERS and (index == 0 or words[index - 1][-1] in ";&|("):
+                depth -= 1
+        # An open `(`/`$(` nests; only a line led by `)` closes one, unlike a case pattern.
+        opened = line.count("(") - line.count(")")
+        if opened > 0 or line.lstrip().startswith(")"):
+            depth += opened
+        if depth < 0:
+            return False
+    return depth == 0
 
 
 def known_array_use(line: str) -> tuple[int, tuple[str, ...]] | None:
@@ -1462,7 +1491,7 @@ def known_array_source_problem(shell: str) -> tuple[str, int] | None:
                 default=0)
     covering = [
         source for source in _CANONICAL_SOURCE.finditer(shell)
-        if len(source.group(1)) == outer
+        if len(source.group(1)) == outer and _at_top_level(shell, source.end(1))
         and (not source.group().endswith("&&") or not _CHAIN_BREAK.search(shell, source.end()))
     ]
     if not covering:

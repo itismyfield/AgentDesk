@@ -1335,10 +1335,13 @@ class KnownArrayProvenance(unittest.TestCase):
                 (((f"{source} || true", non_pg),), unsourced),
                 (((f"[ -n \"$CI\" ] && {source}", non_pg),), unsourced),
                 ((("if [ -n \"$CI\" ]; then", f"  {source}", "fi", non_pg),), unsourced),
+                # Unindented, a source in a branch, an uncalled function or heredoc data never runs.
+                ((("if false; then", source, "fi", non_pg),), unsourced),
+                ((("setup() {", source, "}", non_pg),), unsourced),
+                ((("cat <<'EOF'", source, "EOF", non_pg),), unsourced),
                 ((('source "$FILTER"', non_pg),), unsourced),
                 (((f"{source} && {non_pg}",),), []),
                 ((f"'{source} && {non_pg}'",), []),
-                (((f"{source} && cargo test --lib case || {non_pg}",),), unsourced),
                 (((f"{source} && echo ok", non_pg),), unsourced),
                 (((source, "NON_PG_SKIP_ARGS=(--skip high_risk_recovery)", non_pg),), redefined),
                 (((source, "PG_INCLUDE_ARGS+=(extra_case)", pg),), redefined),
@@ -1350,6 +1353,8 @@ class KnownArrayProvenance(unittest.TestCase):
                 (((f"{source}  # canonical arrays", "# NON_PG_SKIP_ARGS=(--exact)", non_pg),), []),
                 ((("NON_PG_SKIP_ARGS=(--skip high_risk_recovery)", source, non_pg),), []),
                 ((("if true; then", "  echo nested", "fi", source, non_pg),), []),
+                ((('case "$CI" in', "  true) echo ci ;;", "esac", "note() { echo note; }",
+                   source, non_pg),), []),
                 # Other expansions keep their own verdicts without any source.
                 ((("cargo test --lib high_risk_recovery -- $OTHER_ARGS",),), [])):
             with self.subTest(steps=steps):
@@ -1380,6 +1385,12 @@ class KnownArrayProvenance(unittest.TestCase):
         source, non_pg = self.SOURCE, self.NON_PG
         unparsed = [("ci-fixture.yml", "known-array-command-unparsed")]
         for lines in ((f"{source}; {non_pg}",),
+                      # A second command on the cargo line is never judged as its argv.
+                      (f"{source} && cargo test --lib case || {non_pg}",),
+                      (f"{source} && {non_pg} && {non_pg}",),
+                      (source, f"{non_pg} && cargo test --lib does_not_exist -- "
+                               '"${NON_PG_SKIP_ARGS[@]}"'),
+                      (source, f"{non_pg} | tee test.log"),
                       (source, f"time {non_pg}"),
                       (source, f"bash -c '{non_pg}'"),
                       (source, "cargo test --lib high_risk_recovery \\",

@@ -162,6 +162,8 @@ SOURCE_FLOOR_REL = Path("scripts/test_target_integrity_source_floors.txt")
 # The one run-time skip array whose generated values are read, not guessed.
 NON_PG_FILTER_REL = Path("scripts/ci/non-pg-test-filter.sh")
 NON_PG_SKIP_TOKEN = "${NON_PG_SKIP_ARGS[@]}"
+# A word ending one command and starting another; redirections such as `2>&1` are not.
+SHELL_CONTROL = re.compile(r"[;|]|&&|(?<![<>])&(?!>)")
 # Violation kind prefix for a generated array expanded without a proven source.
 KNOWN_ARRAY_KINDS = {"NON_PG_SKIP_ARGS": "non-pg", "PG_INCLUDE_ARGS": "pg-include"}
 LIB_INVENTORY_MANIFEST_HEADER = (
@@ -884,6 +886,9 @@ def _direct_cargo_test(words: list[str]) -> list[str] | None:
         while index < len(words) and SHELL_ASSIGNMENT.fullmatch(words[index]):
             index += 1
         if words[index:index + 2] == ["cargo", "test"]:
+            # A second command on the line would ride along as cargo argv, unjudged.
+            if any(SHELL_CONTROL.search(word) for word in words[index:]):
+                return None
             return words[index:]
         if index >= len(words):
             return None
