@@ -1072,14 +1072,15 @@ class TestIdOracleContract(unittest.TestCase):
                                             bin_test=True), kinds)
 
     def test_a_full_union_still_needs_a_statically_known_skip(self) -> None:
-        # Every filter matching statically proves nothing once a skip whose
-        # value is unknown may drop all of their candidates at run time.
+        # Every filter matching statically proves nothing once an unknown skip,
+        # even one split out of a libtest option value, may drop them all.
         both = "cargo test --lib recovery_case -- nested_case"
         for command, kinds in (
                 (both, []),
                 (f"{both} --skip other_case", []),
                 (f"{both} --skip case", ["zero-match"]),
                 (f"{both} --skip $SKIP", ["unproven-union"]),
+                (f"{both} --test-threads $EXTRA", ["unproven-union"]),
                 (f"{both} --skip {{{{SKIP}}}}", ["unproven-union"]),
                 (f"{both} --skip `skips`", ["unproven-union"]),
                 (f"{both} ${{NON_PG_SKIP_ARGS[@]}}", ["non-pg-skip-unresolved"]),
@@ -1196,10 +1197,14 @@ class TestIdOracleContract(unittest.TestCase):
                     self.assertEqual(self.judge(root, command), kinds)
 
     def test_a_restored_array_is_a_known_skip_for_a_union(self) -> None:
-        # Once read, the array no longer leaves a union unproven; another
-        # opaque expansion still does, and wiping every candidate still fails.
+        # A read array no longer leaves a union unproven; another opaque word,
+        # a dynamic option value or --ignored still does, and a wipe still fails.
         array = "${NON_PG_SKIP_ARGS[@]}"
         both = "cargo test --lib recovery_case -- nested_case"
+        dynamic_values = ("--test-threads $EXTRA", "--format ${FMT}",
+                          "--color $(color)", "--logfile $LOGFILE",
+                          "--logfile run-*.log", "-Z $FLAGS",
+                          "--test-threads=$EXTRA")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             build_fixture_repo(root, GOOD_COMMAND, integration_test=True)
@@ -1210,6 +1215,11 @@ class TestIdOracleContract(unittest.TestCase):
                     ("postgres", f"cargo test --lib recovery_case -- "
                      f"integration_only_case {array}", []),
                     ("postgres", f"{both} {array} $EXTRA", ["unproven-union"]),
+                    *(("postgres", f"{both} {array} {value}", ["unproven-union"])
+                      for value in dynamic_values),
+                    ("postgres", f"{both} {array} --test-threads 1", []),
+                    ("postgres", f"{both} {array} --test-threads=1", []),
+                    ("postgres", f"{both} {array} --ignored", ["unproven-union"]),
                     ("_case", f"{both} {array}", ["zero-match"])):
                 filter_file.write_text(
                     f"NON_PG_SKIP_ARGS=(\n  --skip _pg\n  --skip {skip}\n)\n",

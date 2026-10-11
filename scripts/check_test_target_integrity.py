@@ -1142,6 +1142,9 @@ def parse_command(words: list[str]) -> CommandSpec:
             index = consumed
         elif token in LIBTEST_VALUE_OPTIONS:
             index += 1
+            # An expanded value may word-split into extra --skip/filter words.
+            if index < len(after) and SHELL_EXPANSION.search(after[index]):
+                unknown_skip = opaque_skip = True
         elif token == "--ignored":
             ignored_only = True
         else:
