@@ -813,6 +813,7 @@ fn the_restart_pass_leaves_an_execution_this_process_launched_pg() {
             let _ = reconnect_restarted_herdr_panes(
                 Some(&pool),
                 &crate::services::provider::ProviderKind::Claude,
+                None,
             );
             reconnect_counts()
         })
