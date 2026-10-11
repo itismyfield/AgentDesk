@@ -30,6 +30,8 @@ _spec.loader.exec_module(integrity)
 
 BAD_COMMAND = "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
 GOOD_COMMAND = "cargo test --lib high_risk_recovery:: -- --test-threads=1"
+# The generated arrays are proven only after this source in the command's own shell.
+SOURCED = f"source {integrity.NON_PG_FILTER_REL} && "
 
 
 def build_fixture_repo(root: Path, command: str, *,
@@ -999,9 +1001,11 @@ class TestIdOracleContract(unittest.TestCase):
 
     def judge(self, root: Path, command: str,
               diagnostics: list[str] | None = None) -> list[str]:
+        # Like CI, the run scalar sources the generated filter before its command.
         workflow = root / ".github/workflows/ci-fixture.yml"
-        workflow.write_text(f'jobs:\n  lane:\n    steps:\n      - run: "{command}"\n',
-                            encoding="utf-8")
+        workflow.write_text("jobs:\n  lane:\n    steps:\n      - run: |\n"
+                            f"          source {integrity.NON_PG_FILTER_REL}\n"
+                            f"          {command}\n", encoding="utf-8")
         return [v.kind for v in integrity.check_workflows(
             root, [workflow], set(), False, diagnostics=diagnostics)
             if v.workflow.endswith("ci-fixture.yml")]
@@ -1062,10 +1066,10 @@ class TestIdOracleContract(unittest.TestCase):
                  ["unproven-union"]),
                 # This fixture has no filter file, so the generated array
                 # cannot be read and fails closed whatever the selection.
-                (f"{union} ${{NON_PG_SKIP_ARGS[@]}}", ["non-pg-skip-unresolved"]),
-                ("cargo test --lib recovery_case -- ${NON_PG_SKIP_ARGS[@]}",
+                (f"{SOURCED}{union} ${{NON_PG_SKIP_ARGS[@]}}", ["non-pg-skip-unresolved"]),
+                (SOURCED + "cargo test --lib recovery_case -- ${NON_PG_SKIP_ARGS[@]}",
                  ["non-pg-skip-unresolved"]),
-                ("cargo test --bins high_risk_recovery -- ${NON_PG_SKIP_ARGS[@]}",
+                (SOURCED + "cargo test --bins high_risk_recovery -- ${NON_PG_SKIP_ARGS[@]}",
                  ["non-pg-skip-unresolved"])):
             with self.subTest(command=command):
                 self.assertEqual(self.kinds(command, integration_test=True,
@@ -1083,7 +1087,7 @@ class TestIdOracleContract(unittest.TestCase):
                 (f"{both} --test-threads $EXTRA", ["unproven-union"]),
                 (f"{both} --skip {{{{SKIP}}}}", ["unproven-union"]),
                 (f"{both} --skip `skips`", ["unproven-union"]),
-                (f"{both} ${{NON_PG_SKIP_ARGS[@]}}", ["non-pg-skip-unresolved"]),
+                (f"{SOURCED}{both} ${{NON_PG_SKIP_ARGS[@]}}", ["non-pg-skip-unresolved"]),
                 ("cargo test --lib recovery_case -- missing_case --skip $SKIP",
                  ["unproven-union"]),
                 ("cargo test --lib recovery_case -- --skip $SKIP", [])):
@@ -1284,6 +1288,105 @@ class TestIdOracleContract(unittest.TestCase):
                 self.assertIn("unjudged", " ".join(diagnostics))
         self.assertIs(integrity.parse_command("cargo test --bin $B x::".split()).selection,
                       integrity.TargetSelection.UNJUDGED)
+
+
+class KnownArrayProvenance(unittest.TestCase):
+    """A generated array is the canonical one only when the command's own shell
+    sourced the filter first and nothing rebound the array before the command."""
+
+    SOURCE = f"source {integrity.NON_PG_FILTER_REL}"
+    NON_PG = 'cargo test --lib high_risk_recovery -- "${NON_PG_SKIP_ARGS[@]}"'
+    PG = 'cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --test-threads=1'
+
+    def check(self, steps, just_lines=(GOOD_COMMAND,)) -> list:
+        """Violations for one job (a tuple step is a `run: |` block, a str one
+        line) and one justfile recipe, with a readable generated filter."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = build_fixture_repo(root, GOOD_COMMAND, just_text="fixture:\n" + "".join(
+                f"    {line}\n" for line in just_lines))
+            (root / "scripts/ci").mkdir(parents=True)
+            (root / integrity.NON_PG_FILTER_REL).write_text(
+                "NON_PG_SKIP_ARGS=(\n  --skip _pg\n  --skip postgres\n)\n", encoding="utf-8")
+            workflow.write_text("jobs:\n  lane:\n    steps:\n" + "".join(
+                f"      - run: {step}\n" if isinstance(step, str) else
+                "      - run: |\n" + "".join(f"          {line}\n" for line in step)
+                for step in steps), encoding="utf-8")
+            return integrity.check_workflows(root, [workflow], set(), False)
+
+    def kinds(self, steps, just_lines=(GOOD_COMMAND,)) -> list[tuple[str, str]]:
+        return [(Path(v.workflow).name, v.kind) for v in self.check(steps, just_lines)]
+
+    def test_a_run_scalar_must_source_before_the_array_it_expands(self) -> None:
+        source, non_pg, pg = self.SOURCE, self.NON_PG, self.PG
+        unsourced = [("ci-fixture.yml", "non-pg-source-unproven")]
+        redefined = [("ci-fixture.yml", "known-array-redefined")]
+        for steps, kinds in (
+                (((source, non_pg),), []),
+                (((source, pg),), []),
+                (((non_pg,),), unsourced),
+                (((pg,),), [("ci-fixture.yml", "pg-include-source-unproven")]),
+                # Each run scalar is its own shell, so an earlier step proves nothing.
+                (((source,), (non_pg,)), unsourced),
+                ((source, (non_pg,)), unsourced),
+                # Only a whole command that cannot fail open counts as the source.
+                (((f"# {source}", non_pg),), unsourced),
+                (((f'echo "{source}"', non_pg),), unsourced),
+                (((f"{source} || true", non_pg),), unsourced),
+                (((f"[ -n \"$CI\" ] && {source}", non_pg),), unsourced),
+                ((("if [ -n \"$CI\" ]; then", f"  {source}", "fi", non_pg),), unsourced),
+                ((('source "$FILTER"', non_pg),), unsourced),
+                (((f"{source} && {non_pg}",),), []),
+                ((f"'{source} && {non_pg}'",), []),
+                (((f"{source} && cargo test --lib case || {non_pg}",),), unsourced),
+                (((f"{source} && echo ok", non_pg),), unsourced),
+                (((source, "NON_PG_SKIP_ARGS=(--skip high_risk_recovery)", non_pg),), redefined),
+                (((source, "PG_INCLUDE_ARGS+=(extra_case)", pg),), redefined),
+                (((source, "unset PG_INCLUDE_ARGS", pg),), redefined),
+                (((source, "NON_PG_SKIP_ARGS[0]=--exact", non_pg),), redefined),
+                (((source, 'read -ra NON_PG_SKIP_ARGS <<< "--exact"', non_pg),), redefined),
+                # A read or a comment is no rebinding, and the source overwrites an earlier value.
+                (((source, 'echo "${#NON_PG_SKIP_ARGS[@]}"', non_pg),), []),
+                (((f"{source}  # canonical arrays", "# NON_PG_SKIP_ARGS=(--exact)", non_pg),), []),
+                ((("NON_PG_SKIP_ARGS=(--skip high_risk_recovery)", source, non_pg),), []),
+                ((("if true; then", "  echo nested", "fi", source, non_pg),), []),
+                # Other expansions keep their own verdicts without any source.
+                ((("cargo test --lib high_risk_recovery -- $OTHER_ARGS",),), [])):
+            with self.subTest(steps=steps):
+                self.assertEqual(self.kinds(steps), kinds)
+
+    def test_messages_name_the_command_and_the_rebinding_line(self) -> None:
+        violations = self.check(((self.SOURCE, "unset NON_PG_SKIP_ARGS", self.NON_PG),))
+        self.assertEqual([(v.line, v.kind) for v in violations], [(7, "known-array-redefined")])
+        self.assertIn("NON_PG_SKIP_ARGS was assigned at line 6", violations[0].detail)
+
+    def test_a_recipe_line_sources_in_its_own_and_chain(self) -> None:
+        source, pg = self.SOURCE, self.PG
+        with tempfile.TemporaryDirectory() as tmp:
+            justfile = Path(tmp) / "justfile"
+            justfile.write_text(f"fixture:\n    {source} && {pg}\n", encoding="utf-8")
+            self.assertEqual([words[:3] for _, words, _ in integrity.extract_justfile_commands(
+                justfile)], [["cargo", "test", "--lib"]])
+        for just_lines, kinds in (
+                ((f"{source} && {pg}", f"{source} && {GOOD_COMMAND}"), []),
+                # Every recipe line is its own shell.
+                ((source, pg), [("justfile", "pg-include-source-unproven")]),
+                ((f"source scripts/other.sh && {pg}",),
+                 [("justfile", "known-array-command-unparsed")])):
+            with self.subTest(just_lines=just_lines):
+                self.assertEqual(self.kinds(((GOOD_COMMAND,),), just_lines), kinds)
+
+    def test_an_array_outside_any_extracted_command_is_unparsed(self) -> None:
+        source, non_pg = self.SOURCE, self.NON_PG
+        unparsed = [("ci-fixture.yml", "known-array-command-unparsed")]
+        for lines in ((f"{source}; {non_pg}",),
+                      (source, f"time {non_pg}"),
+                      (source, f"bash -c '{non_pg}'"),
+                      (source, "cargo test --lib high_risk_recovery \\",
+                       '  -- "${NON_PG_SKIP_ARGS[@]}"'),
+                      (source, 'run_lane "${PG_INCLUDE_ARGS[@]}"')):
+            with self.subTest(lines=lines):
+                self.assertEqual(self.kinds((lines,)), unparsed)
 
 
 class ParserContract(unittest.TestCase):

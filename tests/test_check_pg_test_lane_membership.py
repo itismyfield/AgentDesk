@@ -287,6 +287,27 @@ class NonPgFilterContract(unittest.TestCase):
             any("redefines canonical NON_PG_SKIP_ARGS" in error for error in errors)
         )
 
+    def test_a_use_needs_a_source_that_cannot_fail_open_and_no_rebinding(self) -> None:
+        path = self.root / ".github/workflows/ci-nightly.yml"
+        original = path.read_text("utf-8")
+        source = "          source scripts/ci/non-pg-test-filter.sh\n"
+        use = "          cargo test --all-targets -- \"${PG_INCLUDE_ARGS[@]}\"\n"
+        for old, new, expected in (
+                (source + use, source.rstrip() + " || true\n" + use, "used without sourcing"),
+                (source + use, "          echo \"" + source.strip() + "\"\n" + use,
+                 "used without sourcing"),
+                (source + use, "          if [ -n \"$CI\" ]; then\n  " + source + "          fi\n"
+                 + use, "used without sourcing"),
+                (use, "          unset PG_INCLUDE_ARGS\n" + use,
+                 "PG_INCLUDE_ARGS is reassigned after sourcing")):
+            with self.subTest(new=new):
+                self.assertEqual(original.count(old), 1)
+                path.write_text(original.replace(old, new), "utf-8")
+                errors = membership.non_pg_filter_contract_errors(self.root, self.jobs())
+                self.assertTrue(any(
+                    "ci-nightly.yml:postgres_full" in error and expected in error
+                    for error in errors), errors)
+
     def test_replay_id_must_exist_in_libtest_inventory(self) -> None:
         path = self.root / membership.NON_PG_FILTER_REL
         first = membership.load_non_pg_filter_replay(self.root)[0]
