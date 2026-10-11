@@ -1946,7 +1946,7 @@ mod after_string_brace {
         )
         verifier_line = (
             'AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure.sh '
-            'lib-inventory -- "$PYTHON" scripts/ci-timeout.py 900 '
+            'lib-inventory -- "$PYTHON" scripts/ci-timeout.py 1800 '
             '"$PYTHON" scripts/check_test_target_integrity.py '
             '--verify-lib-inventory'
         )
