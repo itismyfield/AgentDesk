@@ -145,6 +145,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::runtime_bootstrap::gateway_handback_integration_tests
   --skip services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+  --skip services::discord::runtime_bootstrap::o_writer_host::activation_tests
   --skip services::discord::runtime_bootstrap::o_writer_host::fence_tests
   --skip services::discord::runtime_bootstrap::orphan_recovery::fence_tests
   --skip services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
@@ -199,6 +200,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::tui_o::exact_submission::tests
   --skip services::tui_o::repost::admission_tests
   --skip services::tui_o::repost::o_piece_ledger_tests
+  --skip services::tui_o::repost::runner::activation_tests
   --skip services::tui_o::repost::runner_tests
   --skip services::tui_o::writer::tests::actor::host_start::deferred::pg
   --skip services::tui_o::writer::tests::actor::repost_turn
@@ -773,6 +775,7 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::exact_pg::tests::exact_snapshot_sibling_construction_is_compile_rejected
   services::tui_o::exact_submission::tests::exact_submission_none_preserves_result_without_runtime
   services::tui_o::repost::admission_tests::a_torn_sidecar_tail_is_cut_and_any_other_damage_refuses_the_sidecar
+  services::tui_o::repost::admission_tests::d4act_not_sent_replays_as_settled_without_reclassifying_legacy_records
   services::tui_o::repost::admission_tests::f3r_a_failed_append_refuses_more_until_a_reopen_cuts_its_bytes
   services::tui_o::repost::admission_tests::f3r_an_original_sent_while_on_stays_eligible_across_off_and_on
   services::tui_o::repost::admission_tests::f6_a_conflicting_record_of_an_activation_never_moves_its_frontier
@@ -937,6 +940,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::runtime_bootstrap::gateway_handback_integration_tests
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+  services::discord::runtime_bootstrap::o_writer_host::activation_tests
   services::discord::runtime_bootstrap::o_writer_host::fence_tests
   services::discord::runtime_bootstrap::orphan_recovery::fence_tests
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
@@ -991,6 +995,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::tui_o::exact_submission::tests
   services::tui_o::repost::admission_tests
   services::tui_o::repost::o_piece_ledger_tests
+  services::tui_o::repost::runner::activation_tests
   services::tui_o::repost::runner_tests
   services::tui_o::writer::tests::actor::host_start::deferred::pg
   services::tui_o::writer::tests::actor::repost_turn

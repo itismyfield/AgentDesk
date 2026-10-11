@@ -83,6 +83,19 @@ struct Io {
     /// Notified once a request waits, after its 429 or while held.
     waiting: Arc<Notify>,
     release: Arc<Notify>,
+    outcome: Mutex<Option<WireOutcome>>,
+    drop_count: Mutex<Option<Arc<AtomicUsize>>>,
+    dropped_count: Arc<Mutex<Vec<usize>>>,
+}
+
+struct ObserveRequestDrop(Option<Arc<AtomicUsize>>, Arc<Mutex<Vec<usize>>>);
+
+impl Drop for ObserveRequestDrop {
+    fn drop(&mut self) {
+        if let Some(count) = &self.0 {
+            self.1.lock().unwrap().push(count.load(Ordering::SeqCst));
+        }
+    }
 }
 
 impl Io {
@@ -162,13 +175,23 @@ impl BoundedTransport for Io {
         let throttle = self.throttle_first.load(Ordering::SeqCst);
         let hold = self.hold.load(Ordering::SeqCst);
         let port = self.port.clone();
+        let outcome = self.outcome.lock().unwrap().clone();
+        let drop_count = self.drop_count.lock().unwrap().clone();
+        let dropped_count = Arc::clone(&self.dropped_count);
         async move {
+            let _drop = ObserveRequestDrop(drop_count, dropped_count);
+            if let Some(outcome @ WireOutcome::Unsent(_)) = outcome.clone() {
+                return outcome;
+            }
             let leave = || guard.begin().map(|()| wire.fetch_add(1, Ordering::SeqCst));
             if let Err(reason) = leave() {
                 return WireOutcome::Unsent(reason);
             }
             if throttle {
                 guard.throttled();
+                if outcome == Some(WireOutcome::Throttled) {
+                    return WireOutcome::Throttled;
+                }
                 waiting.notify_one();
                 release.notified().await;
                 if let Err(reason) = leave() {
@@ -181,6 +204,9 @@ impl BoundedTransport for Io {
                 release.notified().await;
             }
             active.fetch_sub(1, Ordering::SeqCst);
+            if let Some(outcome) = outcome {
+                return outcome;
+            }
             // Discord ids grow, so the re-post lands after everything the channel already holds.
             let id = port.map_or(9_000, |port| port.say(BOT, &content).id);
             WireOutcome::Created(CreatedMessage {
@@ -630,3 +656,6 @@ async fn f6_a_live_reload_switches_the_next_turn_without_a_restart() {
     assert_eq!(writer.guard(), Err("re-post is off".to_owned()));
     assert_eq!(io.wire(), 0);
 }
+
+#[path = "../repost/writer_activation_tests.rs"]
+mod activation;

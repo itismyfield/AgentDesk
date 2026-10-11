@@ -776,7 +776,8 @@ impl<I: HostIo> Hosted<'_, I> {
         // Built for each start, so a restarted actor reopens the sidecar and keeps no stale probe.
         let repost = self.io.repost(channel, &port);
         let writer = ChannelWriter::new(store, Arc::clone(gate), port, lease, self.alarms.clone())
-            .with_repost(repost);
+            .with_repost(repost)
+            .with_repost_stop(self.stopping.clone());
         let (stop_tx, stop) = watch::channel(false);
         let (resumed_tx, resumed) = watch::channel(false);
         // Each start publishes its own count; the ended actor's closed one reads as `None`.

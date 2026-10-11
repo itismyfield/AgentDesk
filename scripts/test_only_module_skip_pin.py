@@ -583,6 +583,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/retired_host_tick_tests.rs",
         "src/services/discord/tmux_watcher/retired_o_boundary_tests.rs",
         "src/cli/o_tests.rs",
+        "src/services/tui_o/repost/runner_activation_tests.rs",
+        "src/services/tui_o/repost/runtime_host_activation_tests.rs",
+        "src/services/tui_o/repost/writer_activation_tests.rs",
     }
 )
 
