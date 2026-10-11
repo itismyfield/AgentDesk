@@ -216,6 +216,7 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
         DeliveryEpilogueContext {
             shared_owned: &shared,
             gateway: &gateway,
+            cancel_token: &Arc::new(crate::services::provider::CancelToken::new()),
             provider: &provider,
             channel_id,
             user_msg_id: None,

@@ -52,8 +52,9 @@ pub(super) async fn handle_recovery_retry(
     let mut new_raw_provider_session_id = state.new_raw_provider_session_id.take();
     let mut inflight_state = &mut *state.inflight_state;
 
-    match message {
-        RecoveryRetryMessage::SessionDiedDuringRecovery => {
+    // A recovery sentinel is never no-effect evidence: a protected request is held, not rerun.
+    let RecoveryRetryMessage::SessionDiedDuringRecovery = message;
+    if !crate::services::discord::replay_policy::hold_recovery(shared_owned.pg_pool.as_ref(), &cancel_token, inflight_state).await {
     // Recovery auto-retry: session died during restart recovery
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
@@ -92,7 +93,6 @@ pub(super) async fn handle_recovery_retry(
                 .await;
         }
         full_response = String::new();
-        }
     }
 
     *state.full_response = full_response;

@@ -411,3 +411,82 @@ async fn exact_retry_reenters_only_through_its_own_continuation_pg() {
     pool.close().await;
     fixture.drop().await;
 }
+
+// The exact retry re-checks the stored request before its begin: a different request under the
+// same key is refused with nothing written and the stale session untouched.
+#[tokio::test(flavor = "current_thread")]
+async fn exact_retry_refuses_a_different_request_before_begin_pg() {
+    let (fixture, pool) = setup().await;
+    let ctx = active(&pool);
+    let input = request("identity", &["i1"]);
+    let candidate = admitted(preflight_source(&ctx, &input).await);
+    let permit = prepare_effect_start(&ctx, &input, candidate, projection(None), None);
+    let attempt = permit
+        .await
+        .unwrap()
+        .consume(&projection(None).target, "prepared-input", |attempt| {
+            attempt
+        })
+        .unwrap();
+    let (id, previous) = (attempt.receipt_id(), attempt.nonce().to_string());
+    sqlx::query(
+        "INSERT INTO sessions (session_key, channel_id, provider, status, current_replay_receipt_id,
+                               replay_episode_nonce, claude_session_id)
+         VALUES ('identity-session', 'chan', 'claude', 'turn_active', $1, $2, 'stale-resume')",
+    )
+    .bind(id)
+    .bind(&previous)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut observation = RawObservation::for_attempt(&attempt);
+    for item in [
+        Seen::StdoutEof,
+        Seen::Exited { waited: true },
+        Seen::StderrDrained,
+    ] {
+        observation.record(item);
+    }
+    let ReplayDecision::AllowStartupRetry(retry) =
+        decide_stale(&pool, Some(attempt), &observation).await
+    else {
+        panic!("no-effect attempt allows one retry");
+    };
+    let ReplayPreflight::ConsumeProtected(set) = preflight_source(&ctx, &input).await else {
+        panic!("the retried request is protected");
+    };
+    let candidate = set.resume(&retry).expect("own continuation resumes");
+    let mut other = request("identity", &["i1"]);
+    other.attachments = serde_json::json!([]);
+    let session = Some("identity-session");
+    let outcome = prepare_effect_start(&ctx, &other, candidate, projection(session), Some(retry));
+    assert!(
+        matches!(
+            outcome.await,
+            Err(StartRefusal::Write(WriteError::IdentityConflict(conflict))) if conflict == id
+        ),
+        "a different request never begins the exact retry"
+    );
+    let stored: (String, String, Option<String>) = sqlx::query_as(
+        "SELECT replay_disposition, replay_episode_nonce, replay_retry_of_nonce
+           FROM intake_outbox WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored,
+        ("startup_failed_no_effect".into(), previous.clone(), None)
+    );
+    let session: (Option<String>, String) = sqlx::query_as(
+        "SELECT claude_session_id, replay_episode_nonce FROM sessions
+          WHERE session_key = 'identity-session'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(session, (Some("stale-resume".into()), previous));
+    pool.close().await;
+    fixture.drop().await;
+}

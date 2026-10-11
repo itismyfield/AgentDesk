@@ -25,6 +25,7 @@ use crate::services::claude_tui::hosting::{
     ClaudeTuiWarmFollowupOutcome, FollowupHost, emit_claude_tui_zero_harvest,
     try_claude_tui_warm_followup,
 };
+use crate::services::discord::replay_policy::live::{RawTap, Seen};
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
@@ -1026,6 +1027,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
     let mut stdout_error: Option<(String, String)> = None; // (message, raw_line)
     let mut line_count = 0;
     let mut stream_state = StreamLineState::new();
+    // Raw facts of a protected attempt, recorded before any parsing decision.
+    let tap = RawTap::for_token(cancel_token.as_deref());
 
     debug_log("Entering lines loop - will block until first line arrives...");
     for line in reader.lines() {
@@ -1033,6 +1036,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
         if cancel_requested(cancel_token.as_deref()) {
             debug_log("Cancel detected — killing child process tree");
             kill_child_tree(&mut child);
+            tap.see(Seen::Broken);
             log_producer_exit(
                 "cancel_during_read",
                 last_session_id.as_deref(),
@@ -1055,6 +1059,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
             }
             Err(e) => {
                 debug_log(&format!("ERROR: Failed to read line: {}", e));
+                tap.see(Seen::Broken);
                 let send_ok = sender
                     .send(StreamMessage::Error {
                         message: format!("Failed to read output: {}", e),
@@ -1118,6 +1123,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         },
                     )
                 {
+                    tap.see(Seen::Broken);
                     break;
                 }
             }
@@ -1193,11 +1199,14 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
             observe_stream_context(&json, &mut stream_state);
             if !emit_status_events_from_stream_json(&json, &sender) {
+                tap.see(Seen::Broken);
                 break;
             }
 
             debug_log("  Calling parse_stream_message...");
-            if let Some(msg) = parse_stream_message_with_state(&json, &stream_state) {
+            let parsed = parse_stream_message_with_state(&json, &stream_state);
+            tap.record_line(msg_type, parsed.as_ref());
+            if let Some(msg) = parsed {
                 debug_log(&format!(
                     "  Parsed message variant: {:?}",
                     std::mem::discriminant(&msg)
@@ -1315,6 +1324,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 let send_result = sender.send(msg);
                 if send_result.is_err() {
                     debug_log("  ERROR: Channel send failed (receiver dropped)");
+                    tap.see(Seen::Broken);
                     break;
                 }
                 debug_log("  Message sent to channel successfully");
@@ -1327,8 +1337,10 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         "  >>> Extra ToolUse from same assistant message: {:?}",
                         std::mem::discriminant(&extra)
                     ));
+                    tap.record_line(msg_type, Some(&extra));
                     if sender.send(extra).is_err() {
                         debug_log("  ERROR: Channel send failed on extra ToolUse");
+                        tap.see(Seen::Broken);
                         break;
                     }
                 }
@@ -1341,8 +1353,10 @@ IMPORTANT: Format your responses using Markdown for better readability:
         } else {
             let invalid_preview: String = line.chars().take(200).collect();
             debug_log(&format!("  NOT valid JSON: {}", invalid_preview));
+            tap.see(Seen::Broken);
         }
     }
+    tap.see(Seen::StdoutEof);
 
     debug_log("--- Exited lines loop ---");
     debug_log(&format!("Total lines read: {}", line_count));
@@ -1353,6 +1367,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
     if cancel_requested(cancel_token.as_deref()) {
         debug_log("Cancel detected after loop — killing child process tree");
         kill_child_tree(&mut child);
+        tap.see(Seen::Broken);
         log_producer_exit(
             "cancel_after_loop",
             last_session_id.as_deref(),
@@ -1367,8 +1382,12 @@ IMPORTANT: Format your responses using Markdown for better readability:
     debug_log("Waiting for child process to finish (child.wait())...");
     let wait_start = std::time::Instant::now();
     let status = match child.wait() {
-        Ok(status) => status,
+        Ok(status) => {
+            tap.see(Seen::Exited { waited: true });
+            status
+        }
         Err(e) => {
+            tap.see(Seen::Exited { waited: false });
             debug_log(&format!(
                 "ERROR: Process wait failed after {:?}: {}",
                 wait_start.elapsed(),
@@ -1396,11 +1415,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     // Handle stdout error or non-zero exit code
     if stdout_error.is_some() || !status.success() {
-        let stderr_msg = child
-            .stderr
-            .take()
-            .and_then(|s| std::io::read_to_string(s).ok())
-            .unwrap_or_default();
+        let stderr_msg = tap.read_stderr(child.stderr.take());
 
         let (message, stdout_raw) = if let Some((msg, raw)) = stdout_error {
             (msg, raw)
@@ -1446,6 +1461,11 @@ IMPORTANT: Format your responses using Markdown for better readability:
             }),
         );
         return Ok(());
+    }
+
+    // A protected attempt's observation completes only once stderr is drained after its Done.
+    if tap.active() {
+        tap.read_stderr(child.stderr.take());
     }
 
     // If we didn't get a proper Done message, send one now

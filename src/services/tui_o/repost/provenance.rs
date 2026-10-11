@@ -125,7 +125,8 @@ impl Provenance {
                 generation,
                 frontier,
             } => {
-                self.activations.insert(generation, frontier);
+                // The first record of a generation stands, so a conflicting one never moves it.
+                self.activations.entry(generation).or_insert(frontier);
             }
             ProvenanceEntry::Intent {
                 serial,

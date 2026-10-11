@@ -13,6 +13,8 @@ use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wir
 use crate::services::discord::inflight::seed_session_row;
 use crate::services::provider::CancelToken;
 
+mod replay_turn_tests;
+
 /// Counts retry-with-history scheduling and records the placeholder edits and replacements.
 struct RetryCounter(Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>);
 

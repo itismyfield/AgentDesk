@@ -137,3 +137,72 @@ async fn stale_attempt_retries_only_on_committed_no_effect_evidence_pg() {
     pool.close().await;
     fixture.drop().await;
 }
+
+async fn fail_commit_of(pool: &PgPool, disposition: &str) {
+    sqlx::raw_sql(&format!(
+        "CREATE OR REPLACE FUNCTION lose_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'commit acknowledgement lost'; END $$;
+         CREATE CONSTRAINT TRIGGER lose_{disposition} AFTER UPDATE ON intake_outbox
+             DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+             WHEN (NEW.replay_disposition = '{disposition}')
+             EXECUTE FUNCTION lose_commit();"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+// A stale decision whose classification misses its attempt, loses its commit or cannot store
+// its hold reports an unpersisted hold and never a retry permit.
+#[tokio::test(flavor = "current_thread")]
+async fn stale_decision_failures_hold_without_a_permit_pg() {
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate_with_max_connections(4).await;
+
+    let elsewhere = start(&pool, "held-elsewhere").await;
+    let id = elsewhere.receipt_id();
+    let preserved = serde_json::json!({ "hold": "elsewhere" });
+    write::withhold(&pool, &elsewhere, "held elsewhere", &preserved)
+        .await
+        .unwrap();
+    let quiet = observed(&elsewhere, &[], true);
+    let decision = decide_stale(&pool, Some(elsewhere), &quiet).await;
+    assert!(
+        matches!(
+            decision,
+            ReplayDecision::WithholdReplay { persisted: false }
+        ),
+        "CAS miss: {decision:?}"
+    );
+    assert_eq!(stored(&pool, id).await.1.as_deref(), Some("held elsewhere"));
+
+    fail_commit_of(&pool, "startup_failed_no_effect").await;
+    let lost = start(&pool, "lost-no-effect").await;
+    let id = lost.receipt_id();
+    let quiet = observed(&lost, &[], true);
+    let decision = decide_stale(&pool, Some(lost), &quiet).await;
+    assert!(
+        matches!(
+            decision,
+            ReplayDecision::WithholdReplay { persisted: false }
+        ),
+        "lost no-effect commit: {decision:?}"
+    );
+    assert_eq!(stored(&pool, id).await.0, "started_unclassified");
+
+    fail_commit_of(&pool, "withheld").await;
+    let active = start(&pool, "lost-hold").await;
+    let id = active.receipt_id();
+    let busy = observed(&active, &[Seen::Activity(Activity::Tool)], true);
+    let decision = decide_stale(&pool, Some(active), &busy).await;
+    assert!(
+        matches!(
+            decision,
+            ReplayDecision::WithholdReplay { persisted: false }
+        ),
+        "lost hold commit: {decision:?}"
+    );
+    assert_eq!(stored(&pool, id).await.0, "started_unclassified");
+    pool.close().await;
+    fixture.drop().await;
+}
