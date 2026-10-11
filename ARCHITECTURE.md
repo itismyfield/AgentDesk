@@ -1007,6 +1007,9 @@ src/
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── serde_adapters.rs
 │   │   │   │   └── turn_kinds.rs
+│   │   │   ├── o_seed_observation/
+│   │   │   │   ├── initial_parse_barrier_test.rs
+│   │   │   │   └── terminal_barrier_test.rs
 │   │   │   ├── rebind_reap/
 │   │   │   │   └── tests.rs
 │   │   │   ├── removal/
@@ -1506,6 +1509,10 @@ src/
 │   │   │   ├── journal.rs
 │   │   │   ├── o_adoption_e2e_tests.rs
 │   │   │   ├── o_delivery_e2e_tests.rs
+│   │   │   ├── o_retired_terminal_e2e_tests.rs
+│   │   │   ├── o_retired_terminal_legacy_fixture_tests.rs
+│   │   │   ├── o_retired_terminal_race_tests.rs
+│   │   │   ├── o_retired_terminal_source_tests.rs
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
 │   │   │   ├── short_controller.rs
@@ -1544,6 +1551,7 @@ src/
 │   │   │   ├── terminal_identity.rs
 │   │   │   └── tests.rs
 │   │   ├── task_supervisor/
+│   │   │   ├── n4d_spawn_observation_tests.rs
 │   │   │   ├── watcher_completion.rs
 │   │   │   └── watcher_completion_tests.rs
 │   │   ├── terminal_delivery_custody/
@@ -1590,6 +1598,7 @@ src/
 │   │   │   │   ├── existing_panel_update.rs
 │   │   │   │   ├── legacy_state.rs
 │   │   │   │   ├── native_collector_tests.rs
+│   │   │   │   ├── retired_transport_tests.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── supervisor_relay/
 │   │   │   │   └── supervisor_frame_source.rs
@@ -1614,6 +1623,7 @@ src/
 │   │   │   ├── entry.rs
 │   │   │   ├── herdr_entry_host_tests.rs
 │   │   │   ├── host_gate.rs
+│   │   │   ├── inherited_fixture_tests.rs
 │   │   │   ├── jsonl_rotation.rs
 │   │   │   ├── judged_stop_harness_tests.rs
 │   │   │   ├── legacy_state.rs

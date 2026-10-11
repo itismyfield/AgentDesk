@@ -1171,6 +1171,29 @@ class TestIdOracleContract(unittest.TestCase):
                 with self.subTest(body=body, command=command):
                     self.assertEqual(self.judge(root, command), kinds)
 
+    def test_a_restored_skip_also_empties_the_selected_target(self) -> None:
+        # The generated array also skips the selected target's own candidates,
+        # so a single filter it wipes out runs 0 tests; opaque stays unjudged.
+        array = "${NON_PG_SKIP_ARGS[@]}"
+        single = f"cargo test --lib high_risk_recovery -- {array}"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_fixture_repo(root, GOOD_COMMAND)
+            filter_file = root / "scripts/ci/non-pg-test-filter.sh"
+            filter_file.parent.mkdir(parents=True)
+            for skip, command, kinds in (
+                    ("high_risk_recovery", single, ["zero-match"]),
+                    ("high_risk_recovery", f"cargo test --lib high_risk_recovery:: "
+                     f"-- {array}", ["zero-match"]),
+                    ("postgres", single, []),
+                    ("high_risk_recovery", f"cargo test --lib case -- {array}", []),
+                    ("high_risk_recovery", f"{single} $EXTRA", [])):
+                filter_file.write_text(
+                    f"NON_PG_SKIP_ARGS=(\n  --skip _pg\n  --skip {skip}\n)\n",
+                    encoding="utf-8")
+                with self.subTest(skip=skip, command=command):
+                    self.assertEqual(self.judge(root, command), kinds)
+
     def test_checked_in_non_pg_filter_is_readable(self) -> None:
         skips = integrity.PackageTestIds(REPO_ROOT).non_pg_skip_filters()
         self.assertIsNotNone(skips)
@@ -1946,7 +1969,7 @@ mod after_string_brace {
         )
         verifier_line = (
             'AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure.sh '
-            'lib-inventory -- "$PYTHON" scripts/ci-timeout.py 900 '
+            'lib-inventory -- "$PYTHON" scripts/ci-timeout.py 1800 '
             '"$PYTHON" scripts/check_test_target_integrity.py '
             '--verify-lib-inventory'
         )

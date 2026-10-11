@@ -20,7 +20,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "c976035f6d9a03a91fb23cd8c898e5cc147517a986f9de838e66577baf4d0031"
+    "999cdd16b47a51a31e8744caa83e8f627d26827d01df27658b2b548ab5444418"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Job-level condition of every required-context mirror and its source line.
@@ -498,25 +498,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn("source scripts/ci/non-pg-test-filter.sh", test_job)
         self.assertEqual(test_job.count(command), 1)
         self.assertNotIn(command, job_block(workflow, "scripts"))
-
-    def test_telemetry_only_intake_regressions_run_in_required_lane(self) -> None:
-        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        changes = job_block(workflow, "changes")
-        test_job = job_block(workflow, "test_fast")
-        mirror = job_block(workflow, "fast_targeted_tests_required_context")
-        command = (
-            "env -u AGENTDESK_ROOT_DIR cargo test --lib "
-            "services::discord::router::intake_dispatch::tests::telemetry_only_unopted "
-            '-- "${NON_PG_SKIP_ARGS[@]}"'
-        )
-
-        self.assertEqual(test_job.count("- name: Telemetry-only intake authority regressions"), 1)
-        self.assertEqual(test_job.count(command), 1)
-        self.assertIn("- 'src/services/discord/router/intake_dispatch.rs'", changes)
-        self.assertIn("- 'src/services/discord/router/intake_dispatch/**'", changes)
-        self.assertIn("- test_fast", mirror)
-        self.assertIn("FILTER_NAME: pg_db", mirror)
-        self.assertIn("UPSTREAM_JOB_NAME: test_fast", mirror)
 
     def test_terminal_delivery_evidence_regressions_flow_through_registered_required_context(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

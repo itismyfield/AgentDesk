@@ -1373,7 +1373,6 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
         if isinstance(ids, str):
             return findings + [("inventory-error", ids)]
         selected_ids.update(ids)
-    final = _lib_selection(spec, frozenset(selected_ids))
     selection_name = "/".join(judged) or "no target"
     sweep = spec.selection is not TargetSelection.EXPLICIT
     # The skip rule a sweep's evidence must survive; an opaque expansion or
@@ -1386,6 +1385,9 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
         restored = view.non_pg_skip_filters()
         live_rule = None if restored is None else replace(
             spec, skip_filters=spec.skip_filters + restored)
+    # Restored skips drop the selected targets' own candidates too.
+    final = _lib_selection(live_rule if live_rule is not None else spec,
+                           frozenset(selected_ids))
     swept_elsewhere = 0
     empty: list[tuple[str, str]] = []
     for filt in spec.filters:

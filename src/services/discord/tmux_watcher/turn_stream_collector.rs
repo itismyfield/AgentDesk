@@ -3,6 +3,8 @@ use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
 use crate::services::cluster::stream_relay::RelayProducer;
 use crate::services::discord::InflightTurnState;
+#[cfg(test)]
+use crate::services::discord::inflight::o_seed_observation::initial_parse_checkpoint;
 use crate::services::discord::task_notification_delivery::merge_context;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -104,6 +106,7 @@ async fn collect_turn_stream_body(
     );
     let initial_source_authority =
         authority_for_decoded_text(source_authority, decoded_data.mixed_read_provenance);
+    let mut clean_decoded_provenance = !decoded_data.mixed_read_provenance;
     if initial_buffer_was_empty {
         all_data_start_offset = decoded_data.start_offset.unwrap_or(data_start_offset);
     }
@@ -452,7 +455,13 @@ async fn collect_turn_stream_body(
         stale_resume_detected |= turn.stale_resume_detected;
         assistant_text_seen |= turn.assistant_text_seen;
         fresh_assistant_text_seen |= turn.fresh_assistant_text_seen;
-        task_notification_context = turn.task_notification_context.clone();
+        task_notification_context = if ctx.legacy_mode.is_legacy() {
+            turn.task_notification_context.clone()
+        } else if let Some(fresh) = task_notification_context.take() {
+            merge_context(turn.task_notification_context.clone(), fresh)
+        } else {
+            turn.task_notification_context.clone()
+        };
         auto_compaction_lifecycle_attempted = turn.auto_compaction_lifecycle_attempted;
         monitor_auto_turn_preamble_injected = turn.monitor_auto_turn_preamble_injected;
     }
@@ -460,14 +469,7 @@ async fn collect_turn_stream_body(
         task_notification_kind = merge_task_notification_kind(task_notification_kind, kind);
     }
     if initial_outcome.auto_compacted && !auto_compaction_lifecycle_attempted {
-        auto_compaction_lifecycle_attempted = emit_context_compacted_lifecycle_from_watcher(
-            &shared,
-            channel_id,
-            &watcher_provider,
-            state.last_model.as_deref(),
-            stream_line_state_token_usage(&state),
-        )
-        .await;
+        auto_compaction_lifecycle_attempted = entry::emit_compaction(ctx, &state).await;
     }
     let post_terminal_success_continuation_flush = should_flush_post_terminal_success_continuation(
         turn_result_relayed,
@@ -569,6 +571,8 @@ async fn collect_turn_stream_body(
         let mut streaming_suppressed_by_missing_inflight = false;
         let mut fresh_ready_for_input_idle = false;
 
+        #[cfg(test)]
+        initial_parse_checkpoint(&watcher_provider, channel_id.get()).await;
         while !found_result {
             // Loop can wait minutes for a long tool/test; keep the registry heartbeat
             // fresh so the sweeper does not cancel relay on a healthy streaming watcher.
@@ -631,6 +635,7 @@ async fn collect_turn_stream_body(
                     );
                     let authority =
                         authority_for_decoded_text(authority, decoded_chunk.mixed_read_provenance);
+                    clean_decoded_provenance &= !decoded_chunk.mixed_read_provenance;
                     // Defer forwarding until parsing attaches the terminal fence.
                     let chunk_buffer_was_empty = all_data.is_empty();
                     if chunk_buffer_was_empty {
@@ -792,14 +797,7 @@ async fn collect_turn_stream_body(
                     }
                     if outcome.auto_compacted && !auto_compaction_lifecycle_attempted {
                         auto_compaction_lifecycle_attempted =
-                            emit_context_compacted_lifecycle_from_watcher(
-                                &shared,
-                                channel_id,
-                                &watcher_provider,
-                                state.last_model.as_deref(),
-                                stream_line_state_token_usage(&state),
-                            )
-                            .await;
+                            entry::emit_compaction(ctx, &state).await;
                     }
                 }
                 Ok(Ok(Ok((_, off, _)))) => {
@@ -1073,7 +1071,11 @@ async fn collect_turn_stream_body(
 
     commit_collect_state!();
     let source_authority = WatcherSourceAuthority {
-        source_stamp: None,
+        source_stamp: if ctx.legacy_mode.is_legacy() || !clean_decoded_provenance {
+            None
+        } else {
+            source_authority.source_stamp
+        },
         ..source_authority
     };
     return CollectOutcome::Fallthrough(CollectedTurnStream {

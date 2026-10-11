@@ -14,6 +14,9 @@ use tracing_subscriber::fmt::MakeWriter;
 #[path = "native_collector_tests.rs"]
 mod native_collector_tests;
 
+#[path = "retired_transport_tests.rs"]
+mod retired_transport_tests;
+
 const WARN_EVENT: &str = "watcher_stream_progress_terminal_rejected";
 const PANEL_CHILD_ENV: &str = "AGENTDESK_5191_PANEL_FIXTURE_CHILD";
 const COMMITTED_BODY: &str = "완료된 응답 A";

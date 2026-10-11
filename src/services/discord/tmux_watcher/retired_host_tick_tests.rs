@@ -4,6 +4,9 @@ use crate::services::discord::inflight::o_seed_observation::Guard;
 use crate::services::tmux_common::{session_temp_path, write_tmux_runtime_kind_marker};
 use crate::services::tui_prompt_dedupe::{TuiRuntimeBinding, register_tmux_runtime_binding};
 
+#[path = "inherited_fixture_tests.rs"]
+mod inherited_fixture_tests;
+
 fn fixture_pane(state: &str) {
     let root = crate::config::runtime_root().unwrap();
     std::fs::write(root.join("pane.next"), format!("{state}\n")).unwrap();
@@ -135,10 +138,11 @@ fn hosted_record(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t6_f_installer_pg_locator_changes_before_and_after_actual_host_await_keep_both_eofs() {
-    use super::o_seed_install_tests::{assert_rowless, observe, seed, until};
+    use super::o_seed_install_tests::{assert_joined, assert_rowless, observe, seed, until};
     use crate::services::discord::health::legacy_supervision::{
         RetiredForTest, test_support::tree_fingerprint,
     };
+    use crate::services::discord::task_supervisor::n4d_spawn_observation::Scope;
     use crate::services::discord::tmux::{OOnlyInstallOutcome, watch_host_of};
     let test =
         "t6_f_installer_pg_locator_changes_before_and_after_actual_host_await_keep_both_eofs";
@@ -173,6 +177,7 @@ async fn t6_f_installer_pg_locator_changes_before_and_after_actual_host_await_ke
         let row_root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
         let fingerprint = tree_fingerprint(&row_root);
         let observed = observe(&fixture);
+        let submitted = Scope::new(&fixture.shared);
         assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
         until(
             &observed,
@@ -225,6 +230,7 @@ async fn t6_f_installer_pg_locator_changes_before_and_after_actual_host_await_ke
         }
         require_kept_outer_and_inner(&fixture, &observed).await;
         fixture.cancel_and_join().await;
+        assert_joined(&submitted, &observed, 1).await;
         assert_rowless(&observed);
         assert_eq!(tree_fingerprint(&row_root), fingerprint, "{change}");
         eprintln!(
@@ -239,10 +245,13 @@ async fn t6_f_installer_pg_locator_changes_before_and_after_actual_host_await_ke
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t6_f_installer_keeps_changed_herdr_unknown_runtime_and_missing_marker_through_both_eofs() {
-    use super::o_seed_install_tests::{assert_rowless, fixture, observe, seed, until};
+    use super::o_seed_install_tests::{
+        assert_joined, assert_rowless, fixture, observe, seed, until,
+    };
     use crate::services::discord::health::legacy_supervision::{
         RetiredForTest, test_support::tree_fingerprint,
     };
+    use crate::services::discord::task_supervisor::n4d_spawn_observation::Scope;
     use crate::services::discord::tmux::{OOnlyInstallOutcome, watch_host_of};
     let test =
         "t6_f_installer_keeps_changed_herdr_unknown_runtime_and_missing_marker_through_both_eofs";
@@ -266,6 +275,7 @@ async fn t6_f_installer_keeps_changed_herdr_unknown_runtime_and_missing_marker_t
         let row_root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
         let fingerprint = tree_fingerprint(&row_root);
         let observed = observe(&fixture);
+        let submitted = Scope::new(&fixture.shared);
         assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
         until(
             &observed,
@@ -343,6 +353,7 @@ async fn t6_f_installer_keeps_changed_herdr_unknown_runtime_and_missing_marker_t
         }
         require_kept_outer_and_inner(&fixture, &observed).await;
         fixture.cancel_and_join().await;
+        assert_joined(&submitted, &observed, 1).await;
         assert_rowless(&observed);
         assert_eq!(tree_fingerprint(&row_root), fingerprint, "{change}");
         eprintln!(
