@@ -481,6 +481,7 @@ if [[ -z "${TEST_LANE_BASELINE_REF:-}" ]]; then
 fi
 "$PYTHON" scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_test_lane_coverage
+"$PYTHON" -m unittest tests.test_test_lane_source_parity
 fi
 
 if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
