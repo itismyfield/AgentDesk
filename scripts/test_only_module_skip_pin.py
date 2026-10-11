@@ -590,6 +590,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/cli/o_tests.rs",
         "src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs",
+        "src/services/discord/catch_up/phase2_age_tests.rs",
         "src/services/discord/session_relay_sink/o_retired_terminal_e2e_tests.rs",
         "src/services/discord/task_supervisor/n4d_spawn_observation_tests.rs",
         "src/services/discord/tmux_watcher/inherited_fixture_tests.rs",
