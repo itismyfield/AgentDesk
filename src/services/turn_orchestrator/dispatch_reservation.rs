@@ -361,11 +361,9 @@ pub(super) fn absorb_disk_queue(
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
 ) -> HydratePendingQueueResult {
-    let loaded = load_channel_pending_queue_checked(
-        &persistence.provider,
-        &persistence.token_hash,
-        channel_id,
-    );
+    let (provider, token_hash) = (&persistence.provider, &persistence.token_hash);
+    let loaded = super::queued_head::adopt(state, channel_id, persistence)
+        .and_then(|()| load_channel_pending_queue_checked(provider, token_hash, channel_id));
     let (items, over) = match loaded {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -410,6 +408,13 @@ pub(super) fn hydrate_pending_queue_from_disk_if_present(
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
 ) -> HydratePendingQueueResult {
+    if let Err(error) = super::queued_head::adopt(state, channel_id, persistence) {
+        return HydratePendingQueueResult {
+            queue_len_after: state.intervention_queue.len(),
+            persistence_error: Some(error),
+            ..Default::default()
+        };
+    }
     let (disk_items, mut restored_override) =
         load_channel_pending_queue(&persistence.provider, &persistence.token_hash, channel_id);
 

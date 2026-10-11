@@ -2678,6 +2678,8 @@ src/
 │   │   ├── pending_queue_persistence.rs
 │   │   ├── queue_cancellation.rs
 │   │   ├── queue_enqueue.rs
+│   │   ├── queued_head.rs
+│   │   ├── queued_head_tests.rs
 │   │   ├── recovery_kickoff.rs
 │   │   ├── recovery_kickoff_tests.rs
 │   │   ├── registry_purge.rs
