@@ -188,6 +188,13 @@ async fn persist_cut(cut: &str, n: u64, root: &Path, pool: &sqlx::PgPool) -> ! {
     seen["user_stop"] = state.user_stop.load(Ordering::Acquire).into();
     seen["turn_start"] = state.turn_start.get().is_some().into();
     seen["reached"] = serde_json::json!(*REACHED.lock().unwrap());
+    // The transcript then ends in a result no terminal admitted; restart must never show it.
+    let result = serde_json::json!({"type": "result", "subtype": "success", "result": TRANSCRIPT});
+    let mut source = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&case.path)
+        .unwrap();
+    std::io::Write::write_all(&mut source, format!("{result}\n").as_bytes()).unwrap();
     let before = std::fs::read(row_path(&case)).unwrap();
     std::fs::write(root.join(format!("{cut}.before")), before).unwrap();
     let source = std::fs::read(&case.path).unwrap();
