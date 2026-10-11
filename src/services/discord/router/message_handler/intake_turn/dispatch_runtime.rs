@@ -87,7 +87,7 @@ pub(super) async fn unheld_dispatch(
     if admission(&channel_id.get().to_string()).is_some() {
         return dispatch_id;
     }
-    match crate::db::replay_disposition::dispatch_blocked(pool, id).await {
+    match Box::pin(crate::db::replay_disposition::dispatch_blocked(pool, id)).await {
         Ok(false) => dispatch_id,
         Ok(true) => {
             tracing::warn!(

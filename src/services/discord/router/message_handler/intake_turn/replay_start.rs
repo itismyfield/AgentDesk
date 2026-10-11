@@ -19,9 +19,32 @@ pub(super) struct StartRequest<'a> {
     pub(super) prompt: &'a str,
 }
 
+/// Runs `admit`, settling a refused start with `stop`; boxed inside this plain function so the
+/// check's store futures never sit in the intake turn's poll frame.
+pub(super) fn check<'a>(
+    shared: &'a Arc<SharedData>,
+    request: StartRequest<'a>,
+    inflight: &'a mut InflightTurnState,
+    cancel_token: &'a Arc<CancelToken>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<(ReplayStart, bool), Result<(), Error>>>
+            + Send
+            + 'a,
+    >,
+> {
+    Box::pin(async move {
+        let provider = request.provider;
+        match admit(shared, request, inflight).await {
+            Ok(started) => Ok(started),
+            Err(refused) => Err(stop(shared, provider, inflight, cancel_token, refused).await),
+        }
+    })
+}
+
 /// A dormant build keeps the legacy start without IO; an active one begins the request or its exact
 /// continuation once no other turn owns the channel. `true` means the stale resume was dropped.
-pub(super) async fn admit(
+async fn admit(
     shared: &Arc<SharedData>,
     request: StartRequest<'_>,
     inflight: &mut InflightTurnState,
@@ -102,7 +125,7 @@ pub(super) async fn admit(
 
 /// Settles a start that did not happen: a consumed request releases its claim, a deferred one
 /// goes back to the front of its queue; `Err` when that custody was refused.
-pub(super) async fn stop(
+async fn stop(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     inflight: &InflightTurnState,

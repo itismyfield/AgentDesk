@@ -2328,16 +2328,15 @@ async fn handle_text_message_admitted(
         session_key: adk_session_key.as_deref(),
         prompt: &context_prompt,
     };
-    let replay_start = match replay_start::admit(shared, replay_request, &mut inflight_state).await {
+    let checked = replay_start::check(shared, replay_request, &mut inflight_state, &cancel_token);
+    let replay_start = match checked.await {
         Ok((start, fresh)) => {
             if fresh {
                 session_id = None;
             }
             start
         }
-        Err(stop) => {
-            return replay_start::stop(shared, &provider, &inflight_state, &cancel_token, stop).await;
-        }
+        Err(stopped) => return stopped,
     };
     let turn_host = crate::services::turn_host::for_turn(
         shared.pg_pool.as_ref(),
