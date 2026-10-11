@@ -415,3 +415,85 @@ async fn bridge_background_tool_child_closes_by_its_launching_tool_use_id_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+// A terminal left in custody because a successor took the anchor settles its dispatch on
+// publish only when ordinary: a held protected request keeps the dispatch for its hold.
+#[tokio::test]
+async fn held_request_custody_never_settles_its_dispatch_pg() {
+    use crate::db::replay_disposition::write::{self, BeginFrom, CanonicalInput, EffectProjection};
+    use crate::services::discord::replay_policy::live::{
+        Activity, LiveAttempt, Seen, TerminalKind,
+    };
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    for protected in [false, true] {
+        let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "receipt_replay_hold",
+            "held request custody",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        Arc::get_mut(&mut driver.shared).unwrap().pg_pool = Some(pool.clone());
+        let (mut ctx, mut state, _) = receipt_parts(&driver, ProviderKind::Codex);
+        let mut successor = state.inflight_state.clone();
+        successor.turn_nonce = Some("successor".into());
+        inflight::save_inflight_state(&successor).unwrap();
+        ctx.codex_tui_terminal_range = None;
+        ctx.should_complete_work_dispatch_after_delivery = true;
+        state.dispatch_id = Some("receipt-replay-hold".into());
+        if protected {
+            let request = CanonicalInput {
+                request_key: "receipt-replay-hold".into(),
+                provider: "codex".into(),
+                channel: DRIVER_CHANNEL_ID.to_string(),
+                sources: vec![DRIVER_USER_MSG_ID.to_string()],
+                original_text: "driver prompt".into(),
+                owner_id: "1".into(),
+                agent_id: "agent".into(),
+                attachments: serde_json::json!([]),
+                reply_context: None,
+                provenance: "new_input",
+            };
+            let receipt = write::register_or_reuse(&pool, &request, "node-a")
+                .await
+                .unwrap();
+            let nonce = receipt.episode_nonce.clone().unwrap();
+            let binding = serde_json::json!({});
+            let effect = EffectProjection {
+                effect_target: "provider-start",
+                input_hash: "input",
+                binding: &binding,
+            };
+            let from = BeginFrom::Registered { nonce: &nonce };
+            let ack = write::begin(&pool, receipt.id, from, &effect, "incarnation-a").await;
+            let live = LiveAttempt::new(ack.unwrap().into_parts().0);
+            // Two provider terminals: never an ordinary classification.
+            for fact in [
+                Seen::StdoutEof,
+                Seen::Exited { waited: true },
+                Seen::StderrDrained,
+                Seen::Activity(Activity::Output),
+                Seen::Terminal(TerminalKind::Done),
+                Seen::Terminal(TerminalKind::Error),
+            ] {
+                live.record(fact);
+            }
+            assert!(state.cancel_token.attach_replay_attempt(Arc::new(live)));
+        }
+        let output = run(ctx, state).await;
+        assert!(matches!(
+            output.outcome,
+            TerminalOutcomeDeliveryOutcome::DeferredToCustody { .. }
+        ));
+        let records = custody_records(&driver);
+        assert_eq!(records.len(), 1);
+        let completes = &records[0]["payload"]["should_complete"];
+        assert_eq!(
+            completes,
+            &serde_json::json!(!protected),
+            "protected={protected}"
+        );
+        pool.close().await;
+        db.drop().await;
+    }
+}

@@ -72,7 +72,6 @@ pub(crate) struct RawObservation {
 }
 
 impl RawObservation {
-    #[cfg(test)]
     pub(crate) fn for_attempt(attempt: &ExactAttempt) -> Self {
         Self {
             receipt_id: attempt.receipt_id(),
@@ -205,7 +204,6 @@ pub(crate) struct LiveAttempt {
 }
 
 impl LiveAttempt {
-    #[cfg(test)]
     pub(crate) fn new(attempt: ExactAttempt) -> Self {
         Self {
             observation: Mutex::new(RawObservation::for_attempt(&attempt)),
@@ -213,6 +211,7 @@ impl LiveAttempt {
             recorded: tokio::sync::Notify::new(),
             verdict: Mutex::new(None),
             stale: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
             after_check: Mutex::new(Vec::new()),
         }
     }
@@ -288,20 +287,36 @@ impl RawTap {
         }
     }
 
-    /// Reads stderr to its end; a read error yields the same empty text and breaks the record.
-    pub(crate) fn read_stderr(&self, stderr: Option<std::process::ChildStderr>) -> String {
-        match stderr.map(std::io::read_to_string) {
-            Some(Ok(text)) => {
-                self.see(Seen::StderrDrained);
-                text
+    /// Reads stderr to its end and returns the fact to record once the last message is sent. A
+    /// protected attempt waits at most `STDERR_SETTLE`; an unfinished or failed read is broken.
+    pub(crate) fn read_stderr(&self, stderr: Option<std::process::ChildStderr>) -> (String, Seen) {
+        let read = match (stderr, self.active()) {
+            (None, _) => None,
+            (Some(stderr), false) => std::io::read_to_string(stderr).ok(),
+            (Some(stderr), true) => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || tx.send(std::io::read_to_string(stderr)));
+                rx.recv_timeout(STDERR_SETTLE).ok().and_then(Result::ok)
             }
-            _ => {
-                self.see(Seen::Broken);
-                String::new()
-            }
+        };
+        match read {
+            Some(text) => (text, Seen::StderrDrained),
+            None => (String::new(), Seen::Broken),
         }
     }
+
+    /// Records the stderr fact last, after any failed send, so a decision never judges a record
+    /// that is complete but still missing that failure.
+    pub(crate) fn finish(&self, delivered: bool, drained: Seen) {
+        if !delivered {
+            self.see(Seen::Broken);
+        }
+        self.see(drained);
+    }
 }
+
+/// How long a protected attempt's reader waits for stderr to end after the child exited.
+const STDERR_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())

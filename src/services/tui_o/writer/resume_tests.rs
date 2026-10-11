@@ -247,6 +247,11 @@ async fn out_of_space(keep: Keep) {
     assert_eq!(scene.resumes(), ["pending", "cleared", "settled"]);
     assert_eq!(scene.halts(), 1);
     assert!(scene.ready.accepts(CHANNEL));
+    let unavailable = scene.harness.lease.unavailable.lock().unwrap().clone();
+    assert!(
+        unavailable.is_empty(),
+        "a transient halt is not terminal: {keep:?}"
+    );
     scene.restart_posts_nothing().await;
 }
 
@@ -363,6 +368,12 @@ async fn a_permanent_stop_is_never_resumed() {
         assert!(scene.writers_after(booted).is_empty(), "{name}");
         assert_eq!(scene.resumes(), Vec::<&str>::new(), "{name}");
         assert!(!scene.ready.is_ready(CHANNEL), "{name}");
+        let unavailable = scene.harness.lease.unavailable.lock().unwrap().clone();
+        assert_eq!(
+            unavailable,
+            [CHANNEL],
+            "{name}: a permanent stop is reported once"
+        );
     }
 }
 
@@ -392,6 +403,8 @@ async fn store_damage_found_while_resuming_holds_the_channel_without_more_attemp
     );
     assert_eq!(scene.resumes(), ["pending", "settled"]);
     assert_eq!(scene.posts(), ["one"]);
+    let unavailable = scene.harness.lease.unavailable.lock().unwrap().clone();
+    assert_eq!(unavailable, [CHANNEL], "a failed recovery is reported once");
 }
 
 #[tokio::test(start_paused = true)]

@@ -28,7 +28,10 @@ use super::send::RepostIds;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
-use crate::services::tui_o::store::ledger::{PieceOutcome, PieceRecord};
+use crate::services::tui_o::store::ledger::{
+    LedgerEntry, PieceDisposition, PieceOutcome, PieceRecord,
+};
+use crate::services::tui_o::store::{Initialized, OStore, STORE_DIR_NAME, StoreConfig};
 
 pub(super) const CHANNEL: u64 = 6325;
 pub(super) const BOT: u64 = 900;
@@ -158,6 +161,110 @@ fn only_an_uncertain_original_sent_while_on_is_eligible_and_the_rest_is_reported
     assert!(report_backlog(&mut log, latest()).unwrap().is_empty());
     let mut reopened = sidecar(&dir);
     assert!(report_backlog(&mut reopened, latest()).unwrap().is_empty());
+}
+
+#[test]
+fn d4act_not_sent_replays_as_settled_without_reclassifying_legacy_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, dir.path())
+        .unwrap()
+        .unwrap();
+    let era = store
+        .begin_era(&[CHANNEL], Utc::now(), |channel| {
+            Ok(Initialized {
+                channel,
+                sources: Vec::new(),
+                initial_anchor: 40,
+                build_digest: "d4act".into(),
+                at: Utc::now(),
+            })
+        })
+        .unwrap();
+    let mut channel = store.open_channel(&era, CHANNEL).unwrap().unwrap();
+    let records = [
+        record(
+            "legacy-not-found",
+            "same payload",
+            Some(PieceOutcome::NotFound),
+        ),
+        record("definitely-not-sent", "same payload", None),
+        record("legacy-prepared", "same payload", None),
+    ];
+    for (serial, piece) in records.iter().enumerate() {
+        let serial = serial as u64;
+        channel
+            .append_ledger(LedgerEntry::Prepared {
+                serial,
+                unit_key: piece.unit_key.clone(),
+                piece_index: piece.piece_index,
+                payload: piece.payload.clone(),
+                anchor_id: piece.anchor_id,
+                epoch: piece.epoch,
+            })
+            .unwrap();
+        let terminal = match serial {
+            0 => Some(LedgerEntry::NotFound { serial }),
+            1 => Some(
+                serde_json::from_value(serde_json::json!({"type": "not_sent", "serial": serial}))
+                    .expect("the new reader understands the durable not_sent tag"),
+            ),
+            _ => None,
+        };
+        if let Some(terminal) = terminal {
+            channel.append_ledger(terminal).unwrap();
+            assert!(channel.ledger().unresolved().is_none());
+            assert_eq!(channel.ledger().anchor(), 40);
+        }
+    }
+    drop(channel);
+    let bytes_before = std::fs::read(
+        dir.path()
+            .join(STORE_DIR_NAME)
+            .join(CHANNEL.to_string())
+            .join("ledger.jsonl"),
+    )
+    .unwrap();
+    let channel = store.open_channel(&era, CHANNEL).unwrap().unwrap();
+    let replayed = channel.ledger();
+    assert_eq!(replayed.violation(), None);
+    assert_eq!((replayed.anchor(), replayed.next_serial()), (40, 3));
+    assert_eq!(replayed.unresolved().unwrap().0, 2);
+    assert_eq!(
+        replayed.piece(0).unwrap().outcome,
+        Some(PieceOutcome::NotFound)
+    );
+    assert_eq!(replayed.piece(2).unwrap().outcome, None);
+    assert_eq!(
+        replayed.disposition(&records[1].unit_key, 0),
+        PieceDisposition::Settled
+    );
+    assert_eq!(replayed.piece(1).unwrap().payload, "same payload");
+
+    let mut log = sidecar(&dir);
+    sent_while_on(
+        &mut log,
+        0,
+        &[(0, &records[0]), (1, &records[1]), (2, &records[2])],
+    );
+    for (serial, expected) in [(0, true), (1, false), (2, true)] {
+        let class = classify(serial, replayed.piece(serial).unwrap(), log.state());
+        if expected {
+            assert!(matches!(class, Candidate::Eligible(original) if original.serial == serial));
+        } else {
+            assert_eq!(class, Candidate::Settled);
+        }
+    }
+    let bytes_after = std::fs::read(
+        dir.path()
+            .join(STORE_DIR_NAME)
+            .join(CHANNEL.to_string())
+            .join("ledger.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(
+        bytes_after, bytes_before,
+        "recovery never migrates old ledger entries"
+    );
 }
 
 #[test]

@@ -42,6 +42,8 @@ fn restart_and_reconnect(fx: &Fixture) -> ReconnectCounts {
     let pass = reconnect_restarted_herdr_panes(
         Some(&fx.pool),
         &crate::services::provider::ProviderKind::Claude,
+        // Bound evidence exists only for an observer's own pass.
+        Some(crate::services::discord::codex_adoption_runtime::ObservationRuntimeId::for_tests(7)),
     );
     let channel = Some(CHANNEL);
     BOUND.set(pass.map(|rows| {

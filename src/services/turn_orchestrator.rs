@@ -1238,6 +1238,8 @@ impl ChannelMailboxRegistry {
 
 // Once `CloseIfIdle` sets `state.closed`, the exhaustive `registry_purge::gate_closed_arm` passes
 // reads and refuses every other arm; CommitCapturedReadyDelivery refuses closed actors in its own arm.
+pub(crate) mod installed_actor_handoff;
+
 enum ChannelMailboxMsg {
     FreezeInput {
         closing: Arc<crate::services::discord::input_runtime::fence::Closing>,
@@ -1345,6 +1347,8 @@ enum ChannelMailboxMsg {
         user_message_id: Option<MessageId>,
         reply: oneshot::Sender<RecoveryKickoffResult>,
     },
+    #[cfg(test)]
+    InstalledActorHandoff(installed_actor_handoff::Request),
     ClearRecoveryMarker {
         reply: closed_verdict::VerdictReply<()>,
     },
@@ -2102,6 +2106,10 @@ fn input_mailbox_step(
             state.turn_started_instant = Some(recovery_started_at);
             let _ = reply.send(RecoveryKickoffResult::Activated);
         }
+        #[cfg(test)]
+        ChannelMailboxMsg::InstalledActorHandoff(request) => {
+            installed_actor_handoff::step(&mut state, channel_id, own_recovery_done, request);
+        }
         ChannelMailboxMsg::ClearRecoveryMarker { reply } => {
             state.recovery_started_at = None;
             let _ = reply.send(());
@@ -2571,14 +2579,31 @@ fn input_mailbox_step(
             }
         }
         ChannelMailboxMsg::Clear { persistence, reply } => {
-            let _ = reply.send(clear_channel_state(&mut state, channel_id, persistence));
-            mark_turn_finished_signal_done(channel_id);
+            let result = clear_channel_state(&mut state, channel_id, persistence);
+            if result.persistence_error.is_none() || result.removed_token.is_some() {
+                mark_turn_finished_signal_done(channel_id);
+            }
+            let _ = reply.send(result);
         }
         ChannelMailboxMsg::PurgeQueue {
             persistence,
             clear_cancelled_active_anchor,
             reply,
         } => {
+            if let Err(error) =
+                queued_head::refuse_destructive(&mut state, channel_id, &persistence)
+            {
+                tracing::warn!(%channel_id, %error, "queued head refused mailbox purge");
+                let _ = reply.send(PurgeQueueResult {
+                    input_refusal: Some(
+                        crate::services::discord::input_runtime::fence::Failure::Busy,
+                    ),
+                    own_files_removed: Some(0),
+                    queue_len_after: state.intervention_queue.len(),
+                    ..Default::default()
+                });
+                return state;
+            }
             // #2706: queue-only purge. Leaves `cancel_token`,
             // `active_request_owner`, `active_user_message_id`
             // untouched so a turn that entered the actor in
@@ -3439,7 +3464,7 @@ mod actor_hydrate_regression_tests {
     /// against a discounted clock, not one that expired under the turn.
     #[test]
     fn a_cleared_turn_that_held_the_slot_discounts_the_window_it_occupied() {
-        let (_lock, tmp, _env_guard) = locked_root();
+        let (_lock, _tmp, _env_guard) = locked_root();
         run_async(async {
             let token_hash = "inbound_order_clear_discount";
             let channel_id = ChannelId::new(5_937_171);
@@ -3456,11 +3481,8 @@ mod actor_hydrate_regression_tests {
             f.handle.age_active_turn_for_test(PAST_STALL_WINDOW).await;
             f.handle.age_inbound_waits_for_test(PAST_STALL_WINDOW).await;
 
-            // An emptied queue is persisted by removing its file, so a directory
-            // in that file's place makes the clear's persist fail and roll back.
-            let path = queue_file_path(tmp.path(), &ProviderKind::Claude, token_hash, channel_id);
-            std::fs::remove_file(&path).unwrap();
-            std::fs::create_dir(&path).unwrap();
+            // Fail the save after checked preflight so the original rollback contract is exercised.
+            pending_queue_persistence::save_fault::fail_next(channel_id);
             let cleared = f.handle.clear(f.persistence.clone()).await;
 
             assert!(

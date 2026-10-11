@@ -539,6 +539,51 @@ impl HomeGate {
             .flatten()
     }
 
+    /// The installation's home epoch and permit are checked under the same local gate lock.
+    #[cfg(test)]
+    pub(crate) fn admit_at_epoch(
+        &self,
+        provider: &str,
+        expected: i64,
+        recovery: bool,
+    ) -> Option<CommandPermit> {
+        self.admit_at_epoch_checked(provider, expected, recovery, |_| {})
+    }
+
+    #[cfg(test)]
+    fn admit_at_epoch_checked(
+        &self,
+        provider: &str,
+        expected: i64,
+        recovery: bool,
+        minted: impl FnOnce(i64),
+    ) -> Option<CommandPermit> {
+        let mut local = self.locked();
+        self.expire(&mut local, Instant::now());
+        let held = local.held.as_ref()?;
+        if held.home_epoch != expected
+            || (!recovery
+                && !matches!(
+                    self.read(&local),
+                    HomeOwnership::Owned {
+                        intake: HomeIntake::Open,
+                        ..
+                    }
+                ))
+        {
+            return None;
+        }
+        self.gate
+            .admit(|epoch| {
+                (epoch == held.gate_epoch).then(|| {
+                    let permit = CommandPermit::new(&local.commands, &self.channel_id, provider);
+                    minted(held.home_epoch);
+                    permit
+                })
+            })
+            .flatten()
+    }
+
     pub(crate) fn commands_in_flight(&self) -> usize {
         self.locked().commands.count.load(Ordering::Acquire)
     }
@@ -904,4 +949,60 @@ pub(crate) fn command_mutant(name: &str) -> bool {
         .ok()
         .as_deref()
         == Some(name)
+}
+
+#[cfg(test)]
+mod b3a2_epoch_tests {
+    use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn s3act_b3a2_epoch_check_and_permit_share_lock() {
+        let home = HomeGate::new("5340530", "mini");
+        home.confirm(
+            &HeldHome::for_test("5340530", "mini", 1, HomeState::Worker),
+            Instant::now(),
+        )
+        .unwrap();
+        for recovery in [false, true] {
+            let mut competed = false;
+            let permit = home
+                .admit_at_epoch_checked("claude", 1, recovery, |epoch| {
+                    assert_eq!(epoch, 1, "permit must name the checked epoch");
+                    assert_eq!(
+                        home.local
+                            .try_lock()
+                            .err()
+                            .map(|e| matches!(e, std::sync::TryLockError::WouldBlock)),
+                        Some(true),
+                        "mint callback must still hold the local lock"
+                    );
+                    competed = std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| home.local.try_lock().is_err())
+                            .join()
+                            .unwrap()
+                    });
+                })
+                .unwrap();
+            assert!(
+                competed,
+                "actual competing thread must encounter the held lock"
+            );
+            assert_eq!(home.commands_in_flight(), 1);
+            drop(permit);
+            assert_eq!(home.commands_in_flight(), 0);
+        }
+        home.confirm(
+            &HeldHome::for_test("5340530", "mini", 2, HomeState::Worker),
+            Instant::now(),
+        )
+        .unwrap();
+        for recovery in [false, true] {
+            assert!(home.admit_at_epoch("claude", 1, recovery).is_none());
+        }
+        home.close_intake();
+        assert!(home.admit_at_epoch("claude", 2, false).is_none());
+        assert!(home.admit_at_epoch("claude", 2, true).is_some());
+        home.close();
+        assert!(home.admit_at_epoch("claude", 2, true).is_none());
+    }
 }

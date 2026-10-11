@@ -20,15 +20,32 @@ const O_LEASE_DEADLINE_MS: u64 = 180_000;
 pub(crate) struct GatewayPort {
     http: Arc<serenity::Http>,
     bot_id: u64,
+    #[cfg(test)]
+    repost_base: Option<String>,
 }
 
 impl GatewayPort {
     pub(crate) fn new(http: Arc<serenity::Http>, bot_id: u64) -> Self {
-        Self { http, bot_id }
+        Self {
+            http,
+            bot_id,
+            #[cfg(test)]
+            repost_base: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_repost_base(mut self, base: String) -> Self {
+        self.repost_base = Some(base);
+        self
     }
 
     /// The re-post transport over this port's client, so both share its route buckets.
     pub(crate) fn repost_http(&self) -> Result<RepostHttp, Unsupported> {
+        #[cfg(test)]
+        if let Some(base) = &self.repost_base {
+            return RepostHttp::at(Arc::clone(&self.http), base.clone());
+        }
         RepostHttp::new(Arc::clone(&self.http))
     }
 
@@ -153,6 +170,11 @@ impl DeliveryLease for ChannelLeases {
         let won = cell.try_acquire(key.clone(), holder, serial, serial + 1, deadline);
         won.then(|| OLeaseHold { cell, key, serial })
     }
+
+    fn writer_unavailable(&self, channel: u64) {
+        use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission;
+        admission::revoke_channel(channel, "o_unavailable");
+    }
 }
 
 #[cfg(test)]
@@ -217,5 +239,61 @@ mod tests {
             );
         }
         assert!(trips.iter().all(RoundTrip::matched));
+    }
+
+    /// A writer stopped for good leaves the channel's issued episode records refusing admission.
+    #[test]
+    fn a_writer_reported_unavailable_revokes_its_channels_episode_records() {
+        use crate::services::provider::CancelToken;
+        use crate::services::tui_o::shadow::SourceId;
+        use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission;
+        use crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::OwedOrigin;
+        use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
+            CodexEpisodeSpan, ExecutionProofRef, TurnEpisodeRef,
+        };
+        let channel = 584_631;
+        let source = SourceId {
+            session_id: "native".into(),
+            path: "/native".into(),
+            dev: 1,
+            ino: 2,
+        };
+        let execution = ExecutionProofRef {
+            owner_runtime_root: "/runtime".into(),
+            tmux_session: "pane".into(),
+            execution_nonce: "execution".into(),
+            proof_seq: 3,
+            source,
+        };
+        let episode = TurnEpisodeRef {
+            channel_id: channel,
+            user_message_id: 10,
+            request_owner_id: 8,
+            turn_nonce: "turn".into(),
+            native_turn_id: "n1".into(),
+        };
+        let token =
+            std::sync::Arc::new(CancelToken::from_persisted_turn_nonce(Some("turn".into())));
+        let record =
+            admission::issue_for_tests(execution.clone(), episode.clone(), &token).unwrap();
+        let span = CodexEpisodeSpan {
+            execution,
+            episode,
+            delivery_channel_id: channel,
+            offset_authority_channel_id: channel,
+            generation_mtime_ns: 1,
+            start: 0,
+            end: Some(9),
+        };
+        let origin = OwedOrigin { span, range: 0..4 };
+        admission::set_ready_for_tests(channel, true);
+        assert_eq!(record.admit(&origin, || ()), Ok(()));
+        let leases = ChannelLeases {
+            cell_for: Box::new(move |_| Arc::new(DeliveryLeaseCell::new(ChannelId::new(channel)))),
+        };
+        leases.writer_unavailable(channel);
+        assert_eq!(record.admit(&origin, || ()), Err("o_unavailable"));
+        admission::set_ready_for_tests(channel, false);
+        admission::forget_channel_for_tests(channel);
     }
 }

@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 111
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 113
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -20,6 +20,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | Variable | Defined at | Description |
 |---|---|---|
 | `ADK_API_URL` | `src/cli/monitoring.rs` | This module's api_base() prefers ADK_API_URL over AGENTDESK_API_URL — the hint must match that order. |
+| `ADK_B3B2_MUTANT` | `src/services/discord/inflight.rs` |  |
 | `ADK_BUSY_INJECT` | `src/services/discord/health/turn_deliver/inject.rs` | `ADK_BUSY_INJECT` turns on busy-turn injection of human input into Claude TUI sessions, read once per process: `external` or `all` opens it for any turn holder… |
 | `ADK_BUSY_INJECT_DISCORD_CHANNELS` | `src/services/discord/router/intake_gate/busy_inject.rs` | `ADK_BUSY_INJECT_DISCORD_CHANNELS` opens busy-turn injection of admitted Discord text, read once per process: `*` or channel ids split by commas or spaces, thr… |
 | `ADK_BUSY_INJECT_STASH_CHANNELS` | `src/services/claude_tui/busy_inject.rs` | Channel ids whose panes may take the stash path, comma-separated and read once; unset is none. |
@@ -38,6 +39,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_QUALITY_ALERT_DRILL_BASE` | `src/services/agent_quality/regression_alerts.rs` | Resolve the drill-down base URL (env override or fallback const). |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_S3ACT_B1_MUTANT` | `src/services/discord/inflight/removal.rs` |  |
+| `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs`, `src/services/turn_orchestrator/installed_actor_handoff.rs` |  |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
 | `ADK_TEST_CODEX_PROMOTE_READY` | `src/services/discord/router/message_handler/tui_followup.rs` | ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests. |
 | `ADK_TEST_HOME_COMMAND_MUTANT` | `src/services/cluster/channel_home.rs` |  |

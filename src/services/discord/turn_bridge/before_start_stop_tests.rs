@@ -1001,6 +1001,67 @@ async fn coldstop_bridge_shows_the_stop_only_on_its_own_body() {
 }
 
 const CRASH_FILTER: &str = "coldstop_restart_finishes_a_close_that_crashed_midway";
+
+#[tokio::test(flavor = "current_thread")]
+async fn coldstop_policy_clear_requires_exact_acked_snapshot() {
+    use discord::inflight::{GuardedClearOutcome, InflightTurnIdentity};
+    let close = Close::open(925, |_| {}).await;
+    let generation = close.shared.restart.current_generation;
+    let admitted = close
+        .row
+        .admit_before_start_receipt(&close.proof.turn_nonce, close.proof.basis, generation)
+        .await
+        .unwrap();
+    let acked = admitted
+        .ack_before_start_notice(&shown().await)
+        .await
+        .unwrap();
+    let before = close.bytes();
+    let changes: [Shape; 5] = [
+        |row| row.save_generation += 1,
+        |row| row.current_msg_id += 1,
+        |row| row.turn_nonce = Some("other-policy-turn".into()),
+        |row| row.born_generation += 1,
+        |row| row.herdr_before_start_stop = None,
+    ];
+    for change in changes {
+        let mut wrong = acked.clone();
+        change(&mut wrong);
+        assert_eq!(
+            wrong.clear_before_start_policy_receipt(generation),
+            GuardedClearOutcome::UserMsgMismatch
+        );
+        assert_eq!(close.bytes(), before);
+    }
+    assert_eq!(
+        admitted.clear_before_start_policy_receipt(generation),
+        GuardedClearOutcome::UserMsgMismatch
+    );
+    assert_eq!(
+        acked.clear_before_start_policy_receipt(generation + 1),
+        GuardedClearOutcome::UserMsgMismatch
+    );
+    assert_eq!(
+        discord::inflight::clear_inflight_state_for_captured_episode(
+            &close.shared.provider,
+            close.row.channel_id,
+            &InflightTurnIdentity::from_state(&acked),
+            acked.turn_nonce.as_deref(),
+        ),
+        GuardedClearOutcome::IoError
+    );
+    assert!(!discord::inflight::delete_inflight_state_file(
+        &close.shared.provider,
+        925
+    ));
+    assert_eq!(close.bytes(), before);
+    assert_eq!(
+        acked.clear_before_start_policy_receipt(generation),
+        GuardedClearOutcome::Cleared
+    );
+    assert!(close.bytes().is_none());
+}
+
 const CRASH_PHASE: &str = "ADK_COLDSTOP_B_PHASE";
 const CRASH_ROOT: &str = "ADK_COLDSTOP_B_ROOT";
 const CRASH_CHANNEL: u64 = 1_479_671_301_387_210_000;
