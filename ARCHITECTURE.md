@@ -1069,12 +1069,14 @@ src/
 │   │   │   │   ├── scope_tests.rs
 │   │   │   │   └── selection_tests.rs
 │   │   │   ├── fence/
+│   │   │   │   ├── g1b_modes_tests.rs
 │   │   │   │   ├── modes.rs
 │   │   │   │   └── modes_tests.rs
 │   │   │   ├── supervisor/
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_entry_tests.rs
 │   │   │   │   ├── drive_tests.rs
+│   │   │   │   ├── g1b_entry_tests.rs
 │   │   │   │   ├── receipt_entry_tests.rs
 │   │   │   │   └── reserve.rs
 │   │   │   ├── activation.rs
@@ -1090,6 +1092,8 @@ src/
 │   │   │   ├── external_tests.rs
 │   │   │   ├── fence.rs
 │   │   │   ├── fence_tests.rs
+│   │   │   ├── g1b_command_tests.rs
+│   │   │   ├── g1b_ordering_tests.rs
 │   │   │   ├── mapping.rs
 │   │   │   ├── mapping_guard_tests.rs
 │   │   │   ├── mod.rs
@@ -2467,6 +2471,8 @@ src/
 │   │   ├── bounded_tmux_tests.rs
 │   │   ├── durability_tests.rs
 │   │   ├── durable.rs
+│   │   ├── g1b_receipt_identity_tests.rs
+│   │   ├── g1b_rows_tests.rs
 │   │   ├── handover.rs
 │   │   ├── input_key.rs
 │   │   ├── input_key_tests.rs
