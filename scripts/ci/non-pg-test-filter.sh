@@ -125,6 +125,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::relay_recovery::apply::host_deferred_tests
   --skip services::discord::relay_recovery::circuit_breaker::tests
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
+  --skip services::discord::replay_policy::live_tests
   --skip services::discord::replay_policy::permit_tests
   --skip services::discord::replay_policy::policy_tests
   --skip services::discord::router::intake_dispatch::home_order_tests
@@ -890,6 +891,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::relay_recovery::apply::host_deferred_tests
   services::discord::relay_recovery::circuit_breaker::tests
   services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
+  services::discord::replay_policy::live_tests
   services::discord::replay_policy::permit_tests
   services::discord::replay_policy::policy_tests
   services::discord::router::intake_dispatch::home_order_tests

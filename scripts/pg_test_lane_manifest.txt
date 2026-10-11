@@ -157,6 +157,7 @@ src/services/discord/recovery_engine/routing_orphan_tests.rs
 src/services/discord/relay_recovery/tests/host_deferred.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
+src/services/discord/replay_policy/live_tests.rs
 src/services/discord/replay_policy/permit_tests.rs
 src/services/discord/replay_policy/policy_tests.rs
 src/services/discord/router/intake_dispatch/home_order_tests.rs
@@ -429,6 +430,7 @@ services::discord::recovery_engine::routing_orphan::host_guard_tests
 services::discord::relay_recovery::apply::host_deferred_tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
+services::discord::replay_policy::live_tests
 services::discord::replay_policy::permit_tests
 services::discord::replay_policy::policy_tests
 services::discord::router::intake_dispatch::home_order_tests
@@ -1398,6 +1400,9 @@ services::discord::relay_recovery::circuit_breaker::tests::pg_alert_is_actionabl
 services::discord::relay_recovery::circuit_breaker::tests::progress_during_pg_stage_cancels_stale_alert_and_reopen_is_distinct
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::enqueue_default_off_leaves_all_circuit_columns_null_pg
+services::discord::replay_policy::live_tests::decision_wakes_on_a_fact_recorded_after_its_check_pg
+services::discord::replay_policy::live_tests::direct_adapter_completes_the_observation_past_its_done_pg
+services::discord::replay_policy::live_tests::direct_adapter_without_a_live_attempt_is_unchanged_pg
 services::discord::replay_policy::permit_tests::start_permit_runs_one_effect_only_on_its_own_target_pg
 services::discord::replay_policy::policy_tests::stale_attempt_retries_only_on_committed_no_effect_evidence_pg
 services::discord::replay_policy::policy_tests::stale_decision_failures_hold_without_a_permit_pg

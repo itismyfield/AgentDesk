@@ -363,6 +363,7 @@ jobs:
               - 'src/services/discord/relay_recovery/tests/host_deferred.rs'
               - 'src/services/discord/relay_recovery_circuit_alert_producer.rs'
               - 'src/services/discord/relay_recovery_circuit_breaker.rs'
+              - 'src/services/discord/replay_policy/live_tests.rs'
               - 'src/services/discord/replay_policy/permit_tests.rs'
               - 'src/services/discord/replay_policy/policy_tests.rs'
               - 'src/services/discord/router/intake_dispatch/home_order_tests.rs'

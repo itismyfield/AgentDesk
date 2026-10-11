@@ -44,6 +44,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/db/replay_disposition/write_tests.rs",
         "src/services/discord/replay_policy/permit_tests.rs",
         "src/services/discord/replay_policy/policy_tests.rs",
+        "src/services/discord/replay_policy/live_tests.rs",
         "src/db/replay_disposition/register_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs",
         "src/services/discord/router/intake_dispatch/replay_admission_tests.rs",
