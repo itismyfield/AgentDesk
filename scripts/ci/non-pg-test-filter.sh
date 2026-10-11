@@ -745,6 +745,7 @@ NON_PG_FILTER_REPLAY=(
   services::session_host::herdr_gate::tests::m2_already_finalized_with_active_a_is_indeterminate_pg
   services::session_host::herdr_gate::tests::m2_settlement_mailbox_unreadable_is_indeterminate_pg
   services::session_host::herdr_gate::tests::m2_turn_changed_before_close_has_zero_effect_pg
+  services::session_host::herdr_gate::tests::m2t_u8_stop_between_close_and_cas_then_rerun_pg
   services::session_resume::tests::completed_critical_section_cancels_its_watchdog
   services::session_resume::tests::critical_section_watchdog_records_once_without_cancelling_work
   services::session_resume::tests::discover_excludes_live_bound_session

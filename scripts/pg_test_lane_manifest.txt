@@ -1031,6 +1031,7 @@ server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dis
 server::routes::escalation::manual_decision_gate_tests::emit_escalation_pg_rejects_superseded_manual_decision_cards_without_discord_send
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_defers_before_the_tmux_probe_unless_the_row_is_legacy_pg
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_names_and_records_an_unmeasured_tail_pg
+server::routes::herdr_legacy_tests::m2t_t8_auth_unlink_cleans_auth_only_and_refuses_a_herdr_claim_pg
 server::routes::herdr_legacy_tests::m2t_t8_legacy_delete_and_force_routes_preserve_host_guards_pg
 server::routes::memory_api::request_body_tests::local_memory_api_uses_migrated_table
 server::routes::memory_api::request_body_tests::local_memory_migration_preserves_preexisting_route_table_rows
@@ -1669,7 +1670,8 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registe
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_session_starts_its_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6_sealed_tail_delivered_once_after_termination_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6b_successor_launch_preserves_a_tail_and_cursor_pg
-services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7_unsealed_survives_termination_and_rotation_stall_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7_codex_execution_unsealed_survives_its_own_termination_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7u_o_actor_unsealed_survives_rotation_stall_pg
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e::reconcile_stale_turn_held_release_arms_backstop_and_runs_preserved_q_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg

@@ -419,6 +419,7 @@ async fn registered_retired(rig: herdr::P11TerminationRig, nameless_session: boo
         ["workspace.create", "pane.send_input"],
         "{writes:?}"
     );
+    assert_launch_typed_its_script(&rig, &tmux);
     assert!(
         harness
             .messages()
