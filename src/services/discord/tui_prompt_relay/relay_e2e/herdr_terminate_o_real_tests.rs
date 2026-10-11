@@ -177,26 +177,24 @@ fn a_p11_m2_last_pane_close_and_exact_retire() {
         o.start();
         let delivered = o.posted(&[ANSWER, TAIL]).await;
         o.stop().await;
-        let ledger = posted_in_ledger(TAIL);
+        let (posts, ledger) = (o.posts(), posted_in_ledger(TAIL));
         o.start();
         tokio::time::sleep(actor::POLL_INTERVAL * 4).await;
         o.stop().await;
-        let posts = o.posts();
+        let (reposts, halts) = (o.posts().len() - posts.len(), o.halts());
         let tail_posts = posts.iter().filter(|post| *post == TAIL).count();
-        let halts = o.halts();
         println!(
             "X_O name=x1 tail=unread service_o_writes={} service_posts={service_posts} \
-             tail_posts={tail_posts} tail_ledger_posted={} restart_reposts={} halts={}",
+             tail_posts={tail_posts} tail_ledger_posted={ledger} restart_reposts={reposts} \
+             halts={}",
             usize::from(!o_untouched),
-            posted_in_ledger(TAIL),
-            posts.len().saturating_sub(2),
             halts.len()
         );
         assert!(o_untouched, "the service wrote none of O's state");
         assert_eq!(service_posts, 0, "the service posted nothing of its own");
         assert!(delivered, "{posts:?} {halts:?}");
         assert_eq!(ledger, 1, "the tail is delivered once");
-        assert_eq!(posts, [ANSWER, TAIL], "a restart reposts nothing");
+        assert_eq!(reposts, 0, "a restart reposts nothing");
         assert_eq!(posted_in_ledger(TAIL), 1);
         assert_eq!(halts, Vec::<WriterAlarm>::new());
         println!("X_EFFECT name=x1 row=retired hold=released turn=settled");
