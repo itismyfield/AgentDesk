@@ -352,6 +352,10 @@ impl Utf8ChunkDecoder {
         }
     }
 
+    pub(super) fn pending_len(&self) -> u64 {
+        self.pending.len() as u64
+    }
+
     pub(super) fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }

@@ -231,6 +231,68 @@ async fn the_promote_gate_reads_the_channel_row_under_another_name_pg() {
     db.drop().await;
 }
 
+// On a Herdr-configured channel only a retired row promotes; a live execution, the same row on
+// an unconfigured channel, or an unreadable row still holds the queue.
+#[tokio::test]
+async fn the_promote_gate_releases_only_a_retired_row_on_a_herdr_channel_pg() {
+    use crate::db::dispatched_sessions::hosted_execution::HostedState;
+    use crate::db::dispatched_sessions::hosted_execution::tests::record;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install("-");
+    let (db, pool) = postgres().await;
+    let shared = shared_on(&pool).await;
+    let provider = ProviderKind::Claude;
+    let gate = crate::services::discord::router::hosted_tui_promote_readiness_blocked;
+    let channel_of = |n: u64| ChannelId::new(1_479_671_301_387_063_000 + n);
+    let configured: Vec<_> = (0..3).map(|n| (channel_of(n).get(), "mac-mini")).collect();
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &configured);
+    // (state, configured, held)
+    let cases = [
+        (Some(HostedState::Retired), true, false),
+        (Some(HostedState::Bound), true, true),
+        (None, true, true),
+        (Some(HostedState::Retired), false, true),
+    ];
+    for (n, (state, on_herdr, held)) in cases.into_iter().enumerate() {
+        let channel = if on_herdr {
+            channel_of(n as u64)
+        } else {
+            channel_of(10)
+        };
+        let channel_name = format!("p11-q-promote-{n}");
+        map_channel(&shared, channel, &channel_name).await;
+        let name = provider.build_tmux_session_name(&channel_name);
+        let mut row_owner = owner(&channel.get().to_string());
+        row_owner.discord_token_hash = shared.token_hash.clone();
+        let raw = match state {
+            Some(state) => wire(&record(&row_owner, "n1", state)),
+            None => wire(&pending(&row_owner, "n1")),
+        };
+        let seed = crate::services::discord::host_key_derivation::tests::seed_row;
+        let hash = Some(shared.token_hash.as_str());
+        seed(
+            &pool,
+            "claude",
+            hash,
+            &channel_key(&shared, &name),
+            channel.get(),
+            Some(raw),
+        )
+        .await;
+        assert_eq!(
+            gate(&shared, &provider, channel).await,
+            held,
+            "{state:?} configured={on_herdr}"
+        );
+    }
+    pool.close().await;
+    assert!(
+        gate(&shared, &provider, channel_of(0)).await,
+        "an unreadable row never reads as retired"
+    );
+    db.drop().await;
+}
+
 /// What the channel rows say to a runtime that holds no channel name for the channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Nameless {

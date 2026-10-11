@@ -42,6 +42,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/adoption_past_stall_tests.rs",
         "src/services/tui_o/writer/stall_handoff_tests.rs",
         "src/services/tui_o/writer/deferred_pg_tests.rs",
+        "src/services/tui_o/writer/unpinned_past_tests.rs",
         "src/db/o_channel_activation_fence_tests.rs",
         "src/services/tui_o/n1_observation/sink_tests.rs",
         "src/services/tui_o/n1_observation_tests.rs",
@@ -311,6 +312,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/catch_up/injected_catch_up_tests.rs",
         "src/services/discord/inject_disposition_tests.rs",
         "src/services/discord/catch_up/consumed_commands_tests.rs",
+        "src/services/discord/catch_up/duplicate_race_tests.rs",
         "src/services/discord/catch_up/frontier_sweep_tests.rs",
         "src/services/discord/catch_up/handled_command_tests.rs",
         "src/services/discord/catch_up/merged_alias_tests.rs",
@@ -334,6 +336,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/inflight/save_store/identity_gate/runtime_stamp/claude_terminal_tests.rs",
         "src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_admission_tests.rs",
         "src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_restart_tests.rs",
+        "src/services/discord/inflight/save_store/identity_gate/runtime_stamp/before_start_stop_admission_tests.rs",
         "src/services/discord/inflight/save_store/outcome_decomposition_tests.rs",
         "src/services/discord/inflight/save_store/post_loop_identity_guard_tests.rs",
         "src/services/discord/outbound/manual_delivery/production_nonce_tests.rs",
@@ -546,6 +549,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/cli/herdr_tests.rs",
         "src/services/discord/recovery_engine/herdr_reader_tests.rs",
         "src/services/discord/recovery_engine/herdr_admitted_restart_tests.rs",
+        "src/services/discord/recovery_engine/herdr_before_start_restart_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs",
         "src/services/session_host/herdr_clear_adapter_tests.rs",
         "src/services/tui_o/writer/rotation_unsettled_tests.rs",
@@ -586,6 +590,13 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/retired_host_tick_tests.rs",
         "src/services/discord/tmux_watcher/retired_o_boundary_tests.rs",
         "src/cli/o_tests.rs",
+        "src/services/discord/session_relay_sink/o_retired_terminal_e2e_tests.rs",
+        "src/services/discord/task_supervisor/n4d_spawn_observation_tests.rs",
+        "src/services/discord/tmux_watcher/inherited_fixture_tests.rs",
+        "src/services/discord/tmux_watcher/streaming_status_tick/retired_transport_tests.rs",
+        "src/services/discord/session_relay_sink/o_retired_terminal_race_tests.rs",
+        "src/services/discord/session_relay_sink/o_retired_terminal_legacy_fixture_tests.rs",
+        "src/services/discord/session_relay_sink/o_retired_terminal_source_tests.rs",
     }
 )
 
@@ -676,6 +687,8 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/watchers/lifecycle/o_only_install.rs",
         "src/services/discord/inflight/o_seed_observation.rs",
         "src/services/discord/tmux_watcher/turn_stream_collector/observations.rs",
+        "src/services/discord/inflight/o_seed_observation/terminal_barrier_test.rs",
+        "src/services/discord/inflight/o_seed_observation/initial_parse_barrier_test.rs",
     }
 )
 

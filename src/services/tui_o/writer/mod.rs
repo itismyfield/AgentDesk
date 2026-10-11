@@ -173,6 +173,7 @@ pub trait AlarmSink: Send + Sync {
 }
 
 mod historical_hops;
+mod past_bind;
 mod renumbered;
 
 #[cfg(test)]
