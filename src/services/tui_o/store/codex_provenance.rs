@@ -107,9 +107,8 @@ fn whole(channel: u64, episode: &TurnEpisodeRef, execution: &ExecutionProofRef) 
         && !execution.source.path.as_os_str().is_empty()
 }
 
-/// Every span names this channel and a whole identity; no two share an episode, put one
-/// execution on two files, or overlap or repeat a native turn on one file. A deny may predate
-/// its native turn, but never names another execution for a stored episode.
+/// Spans and denies name whole identities of this channel; spans never share an episode, split
+/// an execution or overlap on one file, and a deny never names another execution of a stored span.
 fn valid(channel: u64, next: &CodexProvenance) -> bool {
     let denies = next.denies.iter().all(|deny| {
         let foreign = next.spans.iter().any(|span| {
