@@ -309,6 +309,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/catch_up/injected_catch_up_tests.rs",
         "src/services/discord/inject_disposition_tests.rs",
         "src/services/discord/catch_up/consumed_commands_tests.rs",
+        "src/services/discord/catch_up/duplicate_race_tests.rs",
         "src/services/discord/catch_up/frontier_sweep_tests.rs",
         "src/services/discord/catch_up/handled_command_tests.rs",
         "src/services/discord/catch_up/merged_alias_tests.rs",
