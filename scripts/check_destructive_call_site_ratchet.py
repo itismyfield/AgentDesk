@@ -208,6 +208,7 @@ HOST_TERMINATE_OWNER = "src/services/termination_audit/host_terminate.rs"
 # Fixed model, judged leaf and test spellings need no baseline growth;
 # any additional spelling still exceeds a measured per-file ceiling.
 HOST_TERMINATE_DECLARED_SITES = {
+    "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs": 1,
     "src/services/session_host/herdr/model.rs": 2,
     "src/services/session_host/herdr_gate.rs": 3,
     "src/services/session_host/herdr_gate_tests.rs": 5,

@@ -50,6 +50,10 @@ pub mod reviews;
 pub mod routines;
 #[cfg(test)]
 mod runtime_profile_tests;
+// The literal test gate keeps the source censuses from reading this file as production.
+#[cfg(test)]
+#[cfg(unix)]
+mod herdr_legacy_tests;
 pub mod scheduled_messages;
 pub(crate) mod session_activity;
 mod session_evidence;

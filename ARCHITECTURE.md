@@ -430,6 +430,7 @@ src/
 │   │   ├── github.rs
 │   │   ├── github_dashboard.rs
 │   │   ├── health_api.rs
+│   │   ├── herdr_legacy_tests.rs
 │   │   ├── herdr_terminate.rs
 │   │   ├── herdr_terminate_tests.rs
 │   │   ├── home_metrics.rs
@@ -1728,6 +1729,7 @@ src/
 │   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── herdr_terminate_e2e_tests.rs
+│   │   │   │   ├── herdr_terminate_o_e2e_tests.rs
 │   │   │   │   ├── herdr_terminate_route_e2e_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── n1a_turn_mode_tests.rs

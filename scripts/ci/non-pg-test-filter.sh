@@ -52,6 +52,7 @@ NON_PG_SKIP_ARGS=(
   --skip server::routes::dispatched_sessions::tests
   --skip server::routes::escalation::manual_decision_gate_tests
   --skip server::routes::health_api::host_guard_tests
+  --skip server::routes::herdr_legacy_tests
   --skip server::routes::memory_api::request_body_tests
   --skip server::routes::message_outbox::tests
   --skip server::routes::pipeline::stage_save_tests
@@ -167,6 +168,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
@@ -749,6 +751,7 @@ NON_PG_FILTER_REPLAY=(
   services::session_host::herdr_gate::tests::m2_already_finalized_with_active_a_is_indeterminate_pg
   services::session_host::herdr_gate::tests::m2_settlement_mailbox_unreadable_is_indeterminate_pg
   services::session_host::herdr_gate::tests::m2_turn_changed_before_close_has_zero_effect_pg
+  services::session_host::herdr_gate::tests::m2t_u8_stop_between_close_and_cas_then_rerun_pg
   services::session_resume::tests::completed_critical_section_cancels_its_watchdog
   services::session_resume::tests::critical_section_watchdog_records_once_without_cancelling_work
   services::session_resume::tests::discover_excludes_live_bound_session
@@ -850,6 +853,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   server::routes::dispatched_sessions::tests
   server::routes::escalation::manual_decision_gate_tests
   server::routes::health_api::host_guard_tests
+  server::routes::herdr_legacy_tests
   server::routes::memory_api::request_body_tests
   server::routes::message_outbox::tests
   server::routes::pipeline::stage_save_tests
@@ -965,6 +969,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
   services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
+  services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
   services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e
   services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e

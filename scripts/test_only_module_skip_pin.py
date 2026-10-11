@@ -601,6 +601,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/herdr_terminate_route_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs",
         "src/services/session_host/herdr_terminate_real_tests.rs",
+        "src/server/routes/herdr_legacy_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs",
     }
 )
 
