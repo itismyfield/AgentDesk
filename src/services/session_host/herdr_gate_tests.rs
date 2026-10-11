@@ -1927,7 +1927,10 @@ fn m2t_u8_stop_between_close_and_cas_then_rerun_pg() {
         };
         assert_eq!(first, None, "the run stopped after its close");
         assert_eq!(closes(&rig).len(), 1);
-        assert_eq!(service.row().await, ("bound".into(), NONCE.into()));
+        // The rerun loads this row as the service does: still Bound under the same nonce.
+        let pool: &sqlx::PgPool = &service.pool;
+        let bound = Some((HostedState::Bound, NONCE.to_string()));
+        assert_eq!(p11::row(pool, service::KEY).await, bound);
         assert!(held(NONCE), "no CAS ran, so the hold stays");
         let active = test_turn::active(&service.shared, channel).await;
         assert!(active.is_some_and(|active| Arc::ptr_eq(&active, &token)));

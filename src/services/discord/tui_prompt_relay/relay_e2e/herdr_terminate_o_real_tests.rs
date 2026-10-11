@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::{
-    CHANNEL_ID, OHost, TAIL, actor, append, assistant, begin_era, bind_source, cursor_of, o_state,
-    posted_in_ledger, root,
+    CHANNEL_ID, OHost, RESTART_OUTPUT, TAIL, append, assistant, begin_era, bind_source, cursor_of,
+    o_state, posted_in_ledger, root,
 };
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::dispatched_sessions::hosted_execution::HostedState;
@@ -68,7 +68,7 @@ fn a_p11_m2_last_pane_close_and_exact_retire() {
         let mut o = OHost::new();
         o.start();
         append(&a_path, &assistant("m1", ANSWER));
-        assert!(o.posted(&[ANSWER]).await, "{:?} {:?}", o.posts(), o.halts());
+        o.posted(&[ANSWER]).await;
         o.stop().await;
         append(&a_path, &assistant("m2", TAIL));
         let cursor = cursor_of(&a_source);
@@ -173,29 +173,44 @@ fn a_p11_m2_last_pane_close_and_exact_retire() {
         assert!(!token.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
 
-        // O, back, delivers the sealed tail once; a restart posts nothing again.
+        // O, back, delivers the sealed tail once. A restart posts its own new output once and
+        // nothing again.
         o.start();
-        let delivered = o.posted(&[ANSWER, TAIL]).await;
+        let delivered = o.until(|posts| posts.len() >= 2).await;
         o.stop().await;
         let (posts, ledger) = (o.posts(), posted_in_ledger(TAIL));
         o.start();
-        tokio::time::sleep(actor::POLL_INTERVAL * 4).await;
+        append(&a_path, &assistant("c1", RESTART_OUTPUT));
+        let restarted = o
+            .until(|posts| posts.iter().any(|p| p == RESTART_OUTPUT))
+            .await;
         o.stop().await;
-        let (reposts, halts) = (o.posts().len() - posts.len(), o.halts());
-        let tail_posts = posts.iter().filter(|post| *post == TAIL).count();
+        let (after, halts) = (o.posts(), o.halts());
+        let count =
+            |posts: &[String], payload: &str| posts.iter().filter(|p| *p == payload).count();
+        let restart_output = count(&after, RESTART_OUTPUT);
+        let reposts = after.len() - posts.len() - restart_output;
         println!(
             "X_O name=x1 tail=unread service_o_writes={} service_posts={service_posts} \
-             tail_posts={tail_posts} tail_ledger_posted={ledger} restart_reposts={reposts} \
-             halts={}",
+             tail_posts={} tail_ledger_posted={ledger} restart_output={restart_output} \
+             restart_reposts={reposts} halts={}",
             usize::from(!o_untouched),
+            count(&posts, TAIL),
             halts.len()
         );
         assert!(o_untouched, "the service wrote none of O's state");
         assert_eq!(service_posts, 0, "the service posted nothing of its own");
         assert!(delivered, "{posts:?} {halts:?}");
+        assert_eq!(posts, [ANSWER, TAIL], "{halts:?}");
         assert_eq!(ledger, 1, "the tail is delivered once");
-        assert_eq!(reposts, 0, "a restart reposts nothing");
+        assert!(restarted, "the restart posts its new output: {halts:?}");
+        assert_eq!(
+            after,
+            [ANSWER, TAIL, RESTART_OUTPUT],
+            "a restart reposts nothing"
+        );
         assert_eq!(posted_in_ledger(TAIL), 1);
+        assert_eq!(posted_in_ledger(RESTART_OUTPUT), 1);
         assert_eq!(halts, Vec::<WriterAlarm>::new());
         println!("X_EFFECT name=x1 row=retired hold=released turn=settled");
         pool.close().await;

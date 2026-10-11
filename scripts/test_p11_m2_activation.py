@@ -13,7 +13,8 @@ under the scratch directory and a pid ledger. Both must pass on one clean head:
       snapshot per server and phase, the target's after one exactly its before one less the
       target pane for X1 and unchanged for X2, every other server unchanged; one effect line;
       for X1 one O line: the sealed tail unread at the termination, the service writing none
-      of O's state, then posted and recorded once with no repost after a restart
+      of O's state, then posted and recorded once; a restart posts its own new output once and
+      reposts nothing
   W5  each run starts and ends on the PR head with no change, untracked files included
 
 The run also requires each server offline (no curl under it, its update check unable to spawn
@@ -51,7 +52,7 @@ TESTS = {
 EFFECT = {"x1": "row=retired hold=released turn=settled", "x2": "row=bound hold=kept turn=active"}
 O_EVIDENCE = {
     "x1": "tail=unread service_o_writes=0 service_posts=0 tail_posts=1 tail_ledger_posted=1 "
-          "restart_reposts=0 halts=0",
+          "restart_output=1 restart_reposts=0 halts=0",
 }
 WIDER_CLOSES = ("workspace.close", "tab.close", "group.close", "worktree_group.close",
                 "server.stop")

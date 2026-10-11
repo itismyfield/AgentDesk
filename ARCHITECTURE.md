@@ -1729,6 +1729,7 @@ src/
 │   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── herdr_terminate_e2e_tests.rs
+│   │   │   │   ├── herdr_terminate_o_activation_tests.rs
 │   │   │   │   ├── herdr_terminate_o_e2e_tests.rs
 │   │   │   │   ├── herdr_terminate_o_real_tests.rs
 │   │   │   │   ├── herdr_terminate_route_e2e_tests.rs

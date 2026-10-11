@@ -208,6 +208,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs
+src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs
@@ -259,6 +260,7 @@ src/services/scheduled_messages/postgres_tests.rs
 src/services/session_forwarding.rs
 src/services/session_forwarding/home_stop_tests.rs
 src/services/session_host/herdr_clear_adapter_tests.rs
+src/services/session_host/herdr_gate_tests.rs
 src/services/session_host/herdr_terminate_real_tests.rs
 src/services/session_host/session_record.rs
 src/services/session_resume.rs
@@ -498,6 +500,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
@@ -548,6 +551,7 @@ services::scheduled_messages::postgres_tests
 services::session_forwarding::home_stop::tests
 services::session_forwarding::tests
 services::session_host::herdr_clear_adapter::tests
+services::session_host::herdr_gate::tests
 services::session_host::herdr_terminate_real_tests
 services::session_host::session_record::tests
 services::session_resume::tests
@@ -1692,6 +1696,7 @@ services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cancelled_a
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_real_intake_through_termination_to_one_herdr_start_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_channel_name_starts_its_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_session_starts_its_input_once_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation::act_o_first_activation_applies_the_launched_source_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6_sealed_tail_delivered_once_after_termination_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6b_successor_launch_preserves_a_tail_and_cursor_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7_codex_execution_unsealed_survives_its_own_termination_pg
@@ -1948,6 +1953,7 @@ services::session_host::herdr_clear_adapter::tests::an_input_hold_refuses_the_cl
 services::session_host::herdr_clear_adapter::tests::an_unclear_clear_line_holds_without_a_second_and_its_late_pending_settles_pg
 services::session_host::herdr_clear_adapter::tests::an_unsettled_or_unread_rotation_refuses_the_clear_pg
 services::session_host::herdr_clear_adapter::tests::every_failed_check_refuses_before_any_change_pg
+services::session_host::herdr_gate::tests::m2t_u8_stop_between_close_and_cas_then_rerun_pg
 services::session_host::herdr_terminate_real_tests::a_p11_m2_confirmation_required_has_no_escalation
 services::session_host::session_record::tests::only_a_found_null_record_admits_the_legacy_clear_pg
 services::session_resume::tests::production_resume_lock_blocks_effective_intake_snapshot_until_rebind_finishes

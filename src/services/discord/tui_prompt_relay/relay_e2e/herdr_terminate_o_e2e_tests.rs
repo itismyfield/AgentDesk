@@ -1399,3 +1399,7 @@ async fn unsealed_actor(rig: herdr::P11TerminationRig) {
 // X1 runs this writer harness against real Herdr servers; ignored outside its runner.
 #[path = "herdr_terminate_o_real_tests.rs"]
 mod real;
+
+// A launched execution's source reaching O through the writer host's first activation.
+#[path = "herdr_terminate_o_activation_tests.rs"]
+mod activation;

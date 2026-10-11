@@ -8349,6 +8349,7 @@ services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::he
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_real_intake_through_termination_to_one_herdr_start_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_channel_name_starts_its_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_session_starts_its_input_once_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation::act_o_first_activation_applies_the_launched_source_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6_sealed_tail_delivered_once_after_termination_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6b_successor_launch_preserves_a_tail_and_cursor_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7_codex_execution_unsealed_survives_its_own_termination_pg
