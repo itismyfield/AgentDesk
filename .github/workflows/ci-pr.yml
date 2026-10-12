@@ -488,6 +488,7 @@ jobs:
               - 'src/services/tui_o/exact_pg_tests.rs'
               - 'src/services/tui_o/exact_submission.rs'
               - 'src/services/tui_o/repost/admission_tests.rs'
+              - 'src/services/tui_o/repost/backlog_tests.rs'
               - 'src/services/tui_o/repost/runner_activation_tests.rs'
               - 'src/services/tui_o/repost/runner_tests.rs'
               - 'src/services/tui_o/repost/runtime_host_activation_tests.rs'
@@ -499,6 +500,11 @@ jobs:
               - 'src/voice/announce_meta.rs'
               - 'src/voice/turn_link.rs'
               # END generated pg_db source paths
+              # Re-post production changes must run the shared-budget tests too.
+              - 'src/services/tui_o/repost/**'
+              - 'src/services/tui_o/writer/**'
+              - 'src/services/tui_o/store/ledger.rs'
+              - 'src/services/discord/outbound/o_writer*.rs'
               - '.github/workflows/**'
               - 'justfile'
               - 'Cargo.toml'
@@ -1258,6 +1264,16 @@ jobs:
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
 
+      # Rollback rehearsal executes the runbook's literal rg command.
+      - name: Install ripgrep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+
+      - name: Require ripgrep
+        shell: bash
+        run: rg --version
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -1755,6 +1771,16 @@ jobs:
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
 
+      # Rollback rehearsal executes the runbook's literal rg command.
+      - name: Install ripgrep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+
+      - name: Require ripgrep
+        shell: bash
+        run: rg --version
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -2224,7 +2250,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=972a796d719e4361d1a117e3aeffd51b7f939fdf6778c1fcc1ea8f9c91eee739
+          expected=a92a0553be96164462dc3a10306285e7427cb66b93cf610c2970de2510ed89d9
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2457,7 +2483,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=972a796d719e4361d1a117e3aeffd51b7f939fdf6778c1fcc1ea8f9c91eee739
+          expected=a92a0553be96164462dc3a10306285e7427cb66b93cf610c2970de2510ed89d9
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
