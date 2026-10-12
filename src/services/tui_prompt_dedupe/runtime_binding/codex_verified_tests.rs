@@ -673,6 +673,40 @@ fn cancelled_and_unknown_permission_preserve_proof_but_publish_nothing() {
 }
 
 #[test]
+fn production_default_permission_reaches_claim_publication_and_getters() {
+    let h = Fixture::canary();
+    h.header(ID, false);
+    codex_verified::clear_permissions_for_tests();
+    let outcome = h.send("session-start", ID, Value::Null, None);
+    assert!(h.fold().verified.is_some(), "the actual claim must resolve");
+    h.absent();
+    assert_eq!(
+        outcome,
+        IngressOutcome::Durable(
+            crate::services::claude_tui::hook_server::adoption_retry::DurableKind::Pending
+        )
+    );
+    assert!(h.consumer().is_none());
+
+    codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Allowed);
+    codex_verified::resolve_registered_claims();
+    h.assert_proof();
+    let binding = h.consumer().unwrap();
+    let marker = fs::read(h.marker()).unwrap();
+    codex_verified::clear_permissions_for_tests();
+    crate::services::tmux_common::with_tmux_source_authority(
+        &h.context.tmux_session,
+        |authority| {
+            assert!(codex_verified::proof_for_binding(authority, &h.context, &binding).is_ok());
+            assert!(!codex_verified::publication_allowed(authority, &binding));
+            assert!(runtime_binding_for_tmux_session_under_source_authority(authority).is_none());
+        },
+    );
+    assert!(h.consumer().is_none());
+    assert_eq!(fs::read(h.marker()).unwrap(), marker);
+}
+
+#[test]
 fn canonical_mismatch_and_stale_stamp_do_not_open_or_record_native_claim() {
     for stale in [false, true] {
         let h = Fixture::new("fresh", None);

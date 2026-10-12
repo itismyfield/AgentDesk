@@ -2750,6 +2750,9 @@ services::codex_tui::busy_inject::inject_tests::the_turn_is_rechecked_before_the
 services::codex_tui::busy_inject::inject_tests::unpredictable_renders_are_refused
 services::codex_tui::busy_inject::inject_tests::unproven_roots_and_reviews_never_read_as_steerable
 services::codex_tui::busy_inject::inject_tests::unreadable_tails_read_as_unknown
+services::codex_tui::canary::tests::herdr_sentinel_is_classified_outside_direct_tmux
+services::codex_tui::canary::tests::typed_base_policy_preserves_verified_not_landed
+services::codex_tui::canary::tests::typed_launch_wrappers_preserve_existing_mode_target_matrix
 services::codex_tui::host_input::tests::a_gate_refusal_is_typed_and_nothing_follows
 services::codex_tui::host_input::tests::a_send_that_may_have_landed_stops_and_is_never_resent
 services::codex_tui::host_input::tests::foldable_multiline_host_plan_is_a_typed_preflight_refusal
@@ -12525,6 +12528,7 @@ services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::admiss
 services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::admission::tests::cancellation_before_or_after_attach_withholds_every_later_admission
 services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::admission::tests::not_ready_or_revoked_records_admit_nothing
 services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::admission::tests::one_arc_per_exact_episode_even_when_issued_concurrently_and_a_conflict_never_replaces_it
+services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::admission::tests::production_readiness_fallback_withholds_real_writer_effects
 services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::dormant::construction::tests::actual_submit_success_is_required_for_exact_token_span
 services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::dormant::construction::tests::boot_completion_neither_uses_nor_creates_a_missing_sidecar
 services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::dormant::construction::tests::boot_eof_is_pinned_and_missing_record_never_completes_span
@@ -12581,6 +12585,7 @@ services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::nonverified_
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::optional_path_pending_does_not_merge_replaced_descriptors_or_other_parents
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::pending_ack_resolves_without_a_followup_hook
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::pending_retry_refuses_a_replacement_native_inode_after_restart
+services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::production_default_permission_reaches_claim_publication_and_getters
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::production_rollout_selector_still_picks_newest_mtime_even_with_an_owned_source
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::proof_refresh_rejects_foreign_source_nonce_and_nonproof_marker_sequences
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::published_proof_later_ups_and_discovery_preserve_delivery_cursors
