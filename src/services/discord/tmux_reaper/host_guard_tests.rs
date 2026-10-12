@@ -986,7 +986,9 @@ async fn n3bc_last_protection_release_allows_existing_orphan_cleanup_pg() {
         .await
         .unwrap();
     closing.begin_handback().unwrap();
-    let pending = AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0).pending_snapshot();
+    let pending = AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0)
+        .expect("fresh admission order")
+        .pending_snapshot();
     closing
         .release_after_handback_with_pending(&pending)
         .unwrap();
