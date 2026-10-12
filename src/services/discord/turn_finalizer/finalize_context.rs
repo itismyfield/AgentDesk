@@ -40,7 +40,7 @@ pub(in crate::services::discord) struct FinalizeContext {
 
 impl FinalizeContext {
     /// Only the captured hosted episode is settled; output ownership stays with its reader.
-    #[cfg(test)]
+    #[cfg(unix)]
     pub(in crate::services::discord) fn host_terminated() -> Self {
         Self {
             clear_inflight: true,

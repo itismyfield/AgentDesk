@@ -290,3 +290,17 @@ pub mod home_runtime {
 pub mod delegation_availability {
     pub use crate::services::cluster::home_availability::{Availability, Unavailable, state};
 }
+
+/// Prepared watcher restore API; runtime boot integration remains dormant.
+#[cfg(unix)]
+pub mod watcher_restore {
+    pub use crate::services::discord::{RetiredOWatcherRestore, restore_retired_o_watchers};
+}
+
+/// Dormant iMessage reply contracts for admission and claim/ACK integration.
+pub mod imsg_reply {
+    pub use crate::db::imsg_reply::{
+        AckOutcome, Action, ActionAck, ClaimAction, Obligation, Purpose, ack_action, claim_action,
+        read_action, read_obligation,
+    };
+}

@@ -33,7 +33,12 @@ pub(crate) struct Probe(Arc<OnceLock<Option<Vec<Arc<SharedData>>>>>);
 
 impl Probe {
     pub(crate) fn adopt(&self, expected: &[ProviderKind], runtimes: Vec<Arc<SharedData>>) -> bool {
-        let covered = runtimes.len() == expected.len()
+        let covered = !expected.is_empty()
+            && expected
+                .iter()
+                .enumerate()
+                .all(|(index, provider)| !expected[..index].contains(provider))
+            && runtimes.len() == expected.len()
             && expected
                 .iter()
                 .all(|provider| runtimes.iter().filter(|r| &r.provider == provider).count() == 1);

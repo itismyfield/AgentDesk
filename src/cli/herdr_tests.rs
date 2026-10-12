@@ -4,6 +4,7 @@
 
 use std::any::Any;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -384,4 +385,112 @@ fn a_hold_a_retire_left_is_shown_and_removed_by_the_next_retire_pg() {
     assert_eq!(node.row(), row);
     assert_eq!(again, retired(false));
     assert!(matches!(node.retire(), Err(RetireRefusal::NoRow(_))));
+    assert!(node.wrote_nothing());
+}
+
+const RACE_CHANNEL: u64 = 1_479_671_301_387_059_401;
+
+// A manual retire inside the close-to-CAS window on the real CLI path: the service reports the
+// stale CAS and settles nothing, and the captured turn waits for the operator's lease release.
+#[test]
+fn m2t_u9_manual_retire_inside_the_terminate_cas_window_pg() {
+    use crate::services::discord::herdr_terminate::{
+        OperatorTerminate, TerminationResult, terminate_explicit_herdr, test_turn,
+    };
+    use crate::services::discord::turn_lease;
+    use crate::services::session_host::herdr_termination_rig as herdr;
+    let path = concat!(
+        module_path!(),
+        "::m2t_u9_manual_retire_inside_the_terminate_cas_window_pg"
+    );
+    if !herdr::in_child(path, RACE_CHANNEL) {
+        return;
+    }
+    let rig = herdr::P11TerminationRig::boot(RACE_CHANNEL);
+    let install = rig.thread_installer();
+    install();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .on_thread_start(install)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let host = crate::services::platform::hostname_short();
+        // The runtime token hash `make_shared_data_for_tests` gives its shared state.
+        let token_hash = "test-token-hash".to_string();
+        let session_key = format!("claude/{token_hash}/{host}:AgentDesk-claude-p11-race");
+        let state = herdr::HostedState::Bound;
+        let switches = rig.bind(&pool, &token_hash, &session_key, state).await;
+        let channel = serenity::model::id::ChannelId::new(RACE_CHANNEL);
+        let token = test_turn::start(&shared, channel, 51, "turn-a").await;
+
+        let pause = rig.pause_end_check();
+        let (arrived, release) = (pause.arrived, pause.release);
+        let manual = async {
+            arrived.await.expect("the service reached its end check");
+            let manual = retire(&pool, RACE_CHANNEL).await;
+            release.send(()).unwrap();
+            manual
+        };
+        let request = OperatorTerminate {
+            session_key: session_key.clone(),
+            execution_nonce: herdr::EXECUTION.into(),
+        };
+        let service = terminate_explicit_herdr(request, shared.clone(), &pool);
+        let (result, manual) = tokio::join!(service, manual);
+        let won = Retired {
+            nonce: herdr::EXECUTION.into(),
+            now: true,
+            hold: HoldRelease::Released,
+        };
+        assert_eq!(manual, Ok(won), "the manual retire won the CAS");
+        assert_eq!(
+            result,
+            TerminationResult::Indeterminate("retire CAS stale".into())
+        );
+        // The service's close is the one write; the manual retire only read the pane.
+        let writes = rig.writes();
+        assert!(
+            matches!(writes.as_slice(), [(_, pane)] if pane == "w1-1"),
+            "{writes:?}"
+        );
+        let row = herdr::row(&pool, &session_key).await;
+        assert_eq!(
+            row,
+            Some((herdr::HostedState::Retired, herdr::EXECUTION.into()))
+        );
+        assert!(!herdr::held(), "the manual retire released the hold");
+        // Nothing settled the captured turn: it still holds the channel.
+        let active = test_turn::active(&shared, channel).await;
+        assert!(active.is_some_and(|active| Arc::ptr_eq(&active, &token)));
+        assert_eq!(
+            test_turn::inflight(channel),
+            Some((51, Some("turn-a".into())))
+        );
+
+        // The operator's lease release is the recovery: it ends exactly that turn.
+        let registry = crate::services::discord::health::HealthRegistry::new();
+        registry.register("claude".into(), shared.clone()).await;
+        let provider = crate::services::provider::ProviderKind::Claude;
+        let lease = turn_lease::inspect(&registry, &provider, channel).await;
+        let lease = lease.expect("the lease is inspectable").expect("a lease");
+        let request = turn_lease::ReleaseRequest {
+            expected: lease,
+            reason: "terminate raced a manual retire".into(),
+        };
+        let released = turn_lease::release(&registry, request).await.unwrap();
+        assert_eq!(released["status"], "operator_released", "{released}");
+        assert!(test_turn::active(&shared, channel).await.is_none());
+        assert_eq!(test_turn::inflight(channel), None);
+        assert!(!token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(rig.writes().len(), 1, "the release writes nothing to Herdr");
+        drop(switches);
+        pool.close().await;
+        db.drop().await;
+    });
 }
