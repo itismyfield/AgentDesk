@@ -1301,6 +1301,7 @@ mod service {
     pub(super) struct ScriptedOs {
         inner: Mutex<Arc<dyn ProcessOs>>,
         exists: Result<bool, RestoreUnverified>,
+        on_exists: Mutex<Option<CloseHook>>,
     }
 
     impl ScriptedOs {
@@ -1311,10 +1312,15 @@ mod service {
             Arc::new(Self {
                 inner: Mutex::new(inner),
                 exists,
+                on_exists: Mutex::new(None),
             })
         }
         pub(super) fn swap(&self, inner: Arc<dyn ProcessOs>) {
             *self.inner.lock().unwrap() = inner;
+        }
+        /// Runs once, inside the next read of whether the recorded provider still exists.
+        pub(super) fn on_exists(&self, hook: CloseHook) {
+            *self.on_exists.lock().unwrap() = Some(hook);
         }
         fn os(&self) -> Arc<dyn ProcessOs> {
             self.inner.lock().unwrap().clone()
@@ -1323,6 +1329,9 @@ mod service {
 
     impl ProcessOs for ScriptedOs {
         fn exists(&self, _: u32) -> Result<bool, RestoreUnverified> {
+            if let Some(hook) = self.on_exists.lock().unwrap().take() {
+                hook();
+            }
             self.exists
         }
         fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified> {
@@ -1889,6 +1898,66 @@ fn m2_turn_changed_before_close_has_zero_effect_pg() {
     });
 }
 
+// A stop between the close and the retire CAS leaves the row Bound with hold, turn and fence; a
+// rerun retires without a second close (a real restart also drops the mailbox turn and fence).
+#[test]
+fn m2t_u8_stop_between_close_and_cas_then_rerun_pg() {
+    if run_terminate_child("m2t_u8_stop_between_close_and_cas_then_rerun_pg") {
+        return;
+    }
+    use service::test_turn;
+    let _lock = crate::config::shared_test_env_lock();
+    let rig = rig();
+    let pane = PaneLife::new(&rig, false, true);
+    let os = ScriptedOs::new(launched_os(&rig), Ok(false));
+    block_on(async {
+        let service = Service::start(&rig, pane.clone(), os, NONCE).await;
+        let channel = serenity::model::id::ChannelId::new(1);
+        let token = test_turn::start(&service.shared, channel, 51, "turn-a").await;
+        let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel::<()>();
+        pane.on_close(Box::new(move || {
+            let _ = stopped_tx.send(());
+        }));
+        // The stop fires inside the close call, so the run is dropped before it sees the reply.
+        let first = tokio::select! {
+            biased;
+            _ = stopped_rx => None,
+            result = service.terminate(NONCE) => Some(result),
+        };
+        assert_eq!(first, None, "the run stopped after its close");
+        assert_eq!(closes(&rig).len(), 1);
+        // The rerun loads this row as the service does: still Bound under the same nonce.
+        let pool: &sqlx::PgPool = &service.pool;
+        let bound = Some((HostedState::Bound, NONCE.to_string()));
+        assert_eq!(p11::row(pool, service::KEY).await, bound);
+        assert!(held(NONCE), "no CAS ran, so the hold stays");
+        let active = test_turn::active(&service.shared, channel).await;
+        assert!(active.is_some_and(|active| Arc::ptr_eq(&active, &token)));
+        let mut record = stored(&rig.server, HostedState::Bound);
+        record.owner.discord_token_hash = service.shared.token_hash.clone();
+        let target = herdr_registry::registry().target(&record).unwrap();
+        let pinned = target.pin(Mutation::Input);
+        target.discard_pin();
+        assert!(
+            pinned.is_err(),
+            "the closed execution refuses input: {pinned:?}"
+        );
+
+        let rerun = service.terminate(NONCE).await;
+        assert_eq!(rerun, TerminationResult::Retired);
+        assert_eq!(closes(&rig).len(), 1, "an ended pane is never closed again");
+        assert_eq!(service.row().await.0, "retired");
+        assert!(!held(NONCE));
+        assert!(test_turn::active(&service.shared, channel).await.is_none());
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(
+            service.shared.restart.global_active.load(Ordering::Relaxed),
+            0
+        );
+        service.finish().await;
+    });
+}
+
 /// The fake Herdr server and scripted OS wired into a caller's runtime, pool and root; every
 /// runtime thread reads the boot registry, whose launch host dials the same server.
 pub(crate) mod p11 {
@@ -2053,6 +2122,75 @@ pub(crate) mod p11 {
             record
         }
 
+        /// As `bind`, for an execution of `provider` whose launch context file is `context`.
+        pub(crate) async fn bind_as(
+            &self,
+            pool: &sqlx::PgPool,
+            (token_hash, session_key): (&str, &str),
+            state: HostedState,
+            provider: &str,
+            context: &std::path::Path,
+        ) -> LiveSwitches {
+            let logical = session_key.rsplit_once(':').unwrap().1;
+            let marker = crate::services::tmux_common::session_temp_path(logical, "host_kind");
+            std::fs::write(marker, "herdr").unwrap();
+            self.os
+                .swap(Arc::new(FakeOs::launched(env_naming(context))));
+            let record = self.record_as((token_hash, session_key), state, provider);
+            sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id, hosted_execution) VALUES ($1, $2, 'idle', 'discord_channel', $3, $4, $5)")
+                .bind(session_key).bind(provider).bind(token_hash).bind(self.channel.to_string())
+                .bind(serde_json::to_value(&record).unwrap())
+                .execute(pool).await.unwrap();
+            if state != HostedState::Retired {
+                crate::services::claude::herdr_turn::hold(NONCE).unwrap();
+            }
+            let switches = LiveSwitches(LiveTerminateSwitch::new());
+            let mut config = switches.0.0.clone();
+            config.runtime.herdr_terminate_enabled = Some(true);
+            config.runtime.herdr_turn_enabled = Some(true);
+            crate::config_live_reload::install(config);
+            switches
+        }
+
+        /// The record `bind_as` stores for `provider` in `state`.
+        pub(crate) fn record_as(
+            &self,
+            (token_hash, session_key): (&str, &str),
+            state: HostedState,
+            provider: &str,
+        ) -> HostedExecution {
+            let logical = session_key.rsplit_once(':').unwrap().1;
+            let mut record = stored(&self.server, state);
+            record.owner.provider = provider.into();
+            record.owner.discord_token_hash = token_hash.into();
+            record.owner.channel_id = self.channel.to_string();
+            record.owner.logical_key = logical.into();
+            record.expected.as_mut().unwrap().binding_provider = provider.into();
+            record.source_ref.provider = provider.into();
+            record.source_ref.channel = self.channel.to_string();
+            record.source_ref.logical_key = logical.into();
+            record
+        }
+
+        /// Every write the server received, as `(method, params)`, in order.
+        pub(crate) fn writes_with_params(&self) -> Vec<(String, Value)> {
+            let method = |m: &Value| m["method"].as_str().unwrap_or("").to_owned();
+            let writes = self.server.mutations().into_iter();
+            writes.map(|m| (method(&m), m["params"].clone())).collect()
+        }
+
+        /// Holds the next provider-existence read, which only the service's end check makes
+        /// after its close: `arrived` fires there and the read waits until `release` is sent.
+        pub(crate) fn pause_end_check(&self) -> EndCheckPause {
+            let (arrived_tx, arrived) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            self.os.on_exists(Box::new(move || {
+                let _ = arrived_tx.send(());
+                let _ = wait.recv_timeout(Duration::from_secs(60));
+            }));
+            EndCheckPause { arrived, release }
+        }
+
         /// Every write the server received, as `(method, pane_id)`, in order.
         pub(crate) fn writes(&self) -> Vec<(String, String)> {
             self.server
@@ -2069,6 +2207,12 @@ pub(crate) mod p11 {
 
     /// Restores the live config the child started with.
     pub(crate) struct LiveSwitches(LiveTerminateSwitch);
+
+    /// A held end check: the service waits between its close and its retire CAS.
+    pub(crate) struct EndCheckPause {
+        pub(crate) arrived: tokio::sync::oneshot::Receiver<()>,
+        pub(crate) release: std::sync::mpsc::Sender<()>,
+    }
 
     /// Whether the execution's input hold is still taken.
     pub(crate) fn held() -> bool {
@@ -2101,5 +2245,167 @@ pub(crate) mod p11 {
         let pinned = target.pin(Mutation::Input);
         target.discard_pin();
         pinned
+    }
+
+    /// The server's reply to the next write, withheld until `release` is sent or dropped;
+    /// `reached` fires once that write is at the server. Reads pass straight through.
+    pub(crate) struct WriteHold {
+        pub(crate) reached: tokio::sync::oneshot::Receiver<()>,
+        pub(crate) release: std::sync::mpsc::Sender<()>,
+        stop: Arc<AtomicBool>,
+        /// The server's own socket, moved aside while the relay owns its path.
+        real: PathBuf,
+        path: PathBuf,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for WriteHold {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            // A reply still held is let go, so the relay thread can end.
+            drop(std::mem::replace(
+                &mut self.release,
+                std::sync::mpsc::channel().0,
+            ));
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+            let _ = std::fs::rename(&self.real, &self.path);
+        }
+    }
+
+    type Held = Option<(
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>;
+
+    /// Carries one connection's request to `real` and its reply back, holding a write's reply;
+    /// with `hide`, snapshots list no pane.
+    fn relay(client: UnixStream, real: &std::path::Path, held: &mut Held, hide: bool) {
+        let _ = client.set_nonblocking(false);
+        let _ = client.set_read_timeout(Some(Duration::from_secs(3)));
+        let mut request = String::new();
+        let _ = BufReader::new(&client).read_line(&mut request);
+        let Ok(mut server) = UnixStream::connect(real) else {
+            return;
+        };
+        let _ = server.write_all(request.as_bytes());
+        let mut reply = String::new();
+        let _ = BufReader::new(&server).read_line(&mut reply);
+        if let Ok(mut parsed) = serde_json::from_str::<Value>(&reply)
+            && hide
+            && parsed["result"]["type"] == "session_snapshot"
+        {
+            parsed["result"]["snapshot"]["panes"] = json!([]);
+            reply = format!("{parsed}\n");
+        }
+        // A witness-only dial carries no request; only a named write is held.
+        let write = serde_json::from_str::<Value>(&request).is_ok_and(|request| {
+            request["method"].as_str().is_some_and(|method| {
+                !matches!(method, "ping" | "session.snapshot" | "pane.process_info")
+            })
+        });
+        if write && let Some((reached, release)) = held.take() {
+            let _ = reached.send(());
+            let _ = release.recv_timeout(Duration::from_secs(60));
+        }
+        let mut client = client;
+        let _ = client.write_all(reply.as_bytes());
+        let _ = client.shutdown(Shutdown::Write);
+    }
+
+    impl P11TerminationRig {
+        /// Puts a relay at the server's path that holds the next write's reply.
+        pub(crate) fn hold_next_write(&self) -> WriteHold {
+            self.relay(true, false)
+        }
+
+        /// Puts a relay at the server's path under which every pane is gone.
+        pub(crate) fn hide_panes(&self) -> WriteHold {
+            self.relay(false, true)
+        }
+
+        fn relay(&self, hold: bool, hide: bool) -> WriteHold {
+            let real = self.server.path.with_extension("held");
+            std::fs::rename(&self.server.path, &real).unwrap();
+            let listener = UnixListener::bind(&self.server.path).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let (reached_tx, reached) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let stop = Arc::new(AtomicBool::new(false));
+            let (stopped, target) = (stop.clone(), real.clone());
+            let thread = thread::spawn(move || {
+                let mut held: Held = hold.then_some((reached_tx, wait));
+                while !stopped.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((client, _)) => relay(client, &target, &mut held, hide),
+                        Err(_) => thread::sleep(Duration::from_millis(2)),
+                    }
+                }
+            });
+            WriteHold {
+                reached,
+                release,
+                stop,
+                real,
+                path: self.server.path.clone(),
+                thread: Some(thread),
+            }
+        }
+
+        /// While `required`, a close is answered as Herdr 0.9.3 answers a worktree-group
+        /// parent's last pane, and the pane stays.
+        pub(crate) fn require_confirmation(&self, required: bool) {
+            let reply = json!({"error": {
+                "code": "confirmation_required",
+                "message": "closing this pane would close a worktree group"
+            }});
+            *self.server.close_reply.lock().unwrap() = required.then_some(reply);
+            self.server
+                .vanish_on_close
+                .store(!required, Ordering::SeqCst);
+        }
+    }
+
+    /// The child `in_child` would start for test `path`, its Herdr config written under `home`,
+    /// for a caller that judges the child's exit itself.
+    pub(crate) fn child_command(
+        path: &str,
+        channel: u64,
+        home: &std::path::Path,
+    ) -> std::process::Command {
+        let name = path.split_once("::").unwrap().1;
+        let config = home.join("config.toml");
+        std::fs::write(&config, CANONICAL_CONFIG).unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(3_600);
+        let file = std::fs::File::options().write(true).open(&config).unwrap();
+        file.set_modified(old).unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(TERMINATE_TEST_CHILD, name)
+            .env("HERDR_CONFIG_PATH", &config)
+            .env("XDG_CONFIG_HOME", home.join("xdg"))
+            .env_remove(crate::services::herdr_admission::ADMISSION_ENV)
+            .env(
+                crate::services::tui_o::cutover::test_override::CHILD_ENV,
+                "1",
+            )
+            .env(
+                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+                format!("[[{channel},\"claude_tui\"]]"),
+            );
+        command
+    }
+
+    /// Whether this process is a terminate test's child.
+    pub(crate) fn is_child() -> bool {
+        std::env::var_os(TERMINATE_TEST_CHILD).is_some()
+    }
+
+    /// This thread sees no Herdr endpoint until its installer runs again.
+    pub(crate) fn clear_endpoints_here() {
+        let none = BootSessionHosts::from_config(&crate::config::Config::default()).unwrap();
+        std::mem::forget(herdr_registry::force_for_test(HerdrRegistry::build(&none)));
     }
 }

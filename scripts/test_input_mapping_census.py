@@ -71,8 +71,13 @@ def retain_arguments(source):
 
 
 TOKEN = re.compile(r"->|::|[A-Za-z_]\w*|\S")
-# The one private turn-presence Ports impl; any other Ports impl, or a second copy, is installation.
-ALLOWED_PORTS = {(D + "turn_presence/activity.rs", "impl Ports for LivePorts"): 1}
+# Both impls are exact; the input adapter remains unreachable from production boot.
+ALLOWED_PORTS = {
+    (D + "turn_presence/activity.rs", "impl Ports for LivePorts"): 1,
+    (D + "input_runtime/runtime/ports.rs", "impl Ports for RuntimePorts"): 1,
+}
+RUNTIME_PATH = D + "input_runtime/runtime.rs"
+ALLOWED_STARTS = {RUNTIME_PATH: 1}
 
 
 def skip_generics(tokens, index):
@@ -110,25 +115,126 @@ def ports_impls(source):
 
 
 def supervisor_starts(source):
-    """`Supervisor::start(` with any turbofish, nested or spaced."""
+    """Supervisor::start references, including function values and nested turbofish."""
     tokens, calls = TOKEN.findall(source), 0
     for index, token in enumerate(tokens):
-        if token != "Supervisor" or tokens[index + 1:index + 2] != ["::"]:
+        if token != "Supervisor":
             continue
-        at = index + 2
+        at = index + 1
+        if tokens[at:at + 1] == ["<"]:
+            at = skip_generics(tokens, at)
+        if tokens[at:at + 1] == [">"]:
+            at += 1
+        if tokens[at:at + 1] != ["::"]:
+            continue
+        at += 1
         if tokens[at:at + 1] == ["<"]:
             at = skip_generics(tokens, at)
             if tokens[at:at + 1] != ["::"]:
                 raise AssertionError("unparsed Supervisor turbofish")
             at += 1
-        calls += tokens[at:at + 2] == ["start", "("]
+        calls += tokens[at:at + 1] == ["start"]
     return calls
+
+
+def runtime_constructor_starts(source):
+    """The pinned start must be inside the single inherent Runtime::new body."""
+    tokens = TOKEN.findall(source)
+    starts = []
+    outer = 0
+    for index, token in enumerate(tokens):
+        outer += (token == "{") - (token == "}")
+        if token != "impl" or outer or tokens[index + 1:index + 3] != ["Runtime", "{"]:
+            continue
+        depth, at = 1, index + 3
+        while at < len(tokens) and depth:
+            if depth == 1 and tokens[at:at + 2] == ["fn", "new"]:
+                body = next((i for i in range(at + 2, len(tokens)) if tokens[i] == "{"), None)
+                if body is None:
+                    raise AssertionError("Runtime::new body missing")
+                end, nested = body + 1, 1
+                while end < len(tokens) and nested:
+                    nested += (tokens[end] == "{") - (tokens[end] == "}")
+                    end += 1
+                if nested:
+                    raise AssertionError("Runtime::new body unbalanced")
+                starts.append(supervisor_starts(" ".join(tokens[body + 1:end - 1])))
+                at = end
+                continue
+            depth += (tokens[at] == "{") - (tokens[at] == "}")
+            at += 1
+        if depth:
+            raise AssertionError("Runtime impl unbalanced")
+    return starts
+
+
+def runtime_activations(source):
+    """Reject dormant Runtime constructors/import indirection; known external runtimes differ."""
+    allowed = set()
+    modules = {"tokio": "tokio", "rquickjs": "rquickjs"}
+    forbidden = 0
+    for match in re.finditer(r"\buse\s+([^;]+);", source):
+        item = match[1]
+        prefix = re.sub(r"\s+", "", item).split("{", 1)[0].rstrip(":")
+        module_alias = re.fullmatch(r"(tokio\s*::\s*runtime|rquickjs)\s+as\s+(\w+)", item.strip())
+        if module_alias:
+            modules[module_alias[2]] = module_alias[1].split("::", 1)[0].strip()
+        elif re.search(r"\bas\s+(?:tokio|rquickjs)\b", item):
+            forbidden += 1
+        for name in re.finditer(r"\bRuntime\b(?:\s+as\s+(\w+))?", item):
+            if prefix == "rquickjs" or prefix.startswith("rquickjs::") or prefix == "tokio::runtime" or prefix.startswith("tokio::runtime::"):
+                allowed.add(name[1] or "Runtime")
+            else:
+                forbidden += 1
+    forbidden += len(re.findall(r"\bmod\s+(?:tokio|rquickjs)\b", source))
+    # Alias/re-export declarations cannot hide an input type behind a new constructor spelling.
+    for item in re.finditer(r"\btype\s+\w+(?:\s*<[^;]+?>)?\s*=\s*([^;]+);", source):
+        if re.search(r"\bRuntime\b", item[1]):
+            forbidden += 1
+    tokens = TOKEN.findall(source)
+    for index, token in enumerate(tokens):
+        if token != "Runtime" and token not in allowed:
+            continue
+        at = index + 1
+        if tokens[at:at + 1] == ["<"]:
+            at = skip_generics(tokens, at)
+        if tokens[at:at + 1] == ["as"]:
+            at += 1
+            while at < len(tokens) and tokens[at] != ">":
+                at = skip_generics(tokens, at) if tokens[at] == "<" else at + 1
+        if tokens[at:at + 1] == [">"]:
+            at += 1
+        if tokens[at:at + 1] != ["::"]:
+            continue
+        at += 1
+        if tokens[at:at + 1] == ["<"]:
+            at = skip_generics(tokens, at)
+            if tokens[at:at + 1] != ["::"]:
+                raise AssertionError("unparsed Runtime turbofish")
+            at += 1
+        if tokens[at:at + 1] != ["new"]:
+            continue
+        start = index
+        while start >= 2 and tokens[start - 1] == "::" and re.fullmatch(r"[A-Za-z_]\w*", tokens[start - 2]):
+            start -= 2
+        external = modules.get(tokens[start]) if start != index else None
+        if not external and not (start == index and token in allowed):
+            forbidden += 1
+    return forbidden
+
+
+def reject_installation_aliases(source):
+    for item in re.finditer(r"\buse\s+([^;]+);", source):
+        if re.search(r"\b(?:Supervisor|Ports|reserve_boot)\s+as\s+\w+", item[1]):
+            raise AssertionError("installation symbol renamed by use")
+    for item in re.finditer(r"\btype\s+\w+(?:\s*<[^;]+?>)?\s*=\s*([^;]+);", source):
+        if re.search(r"\b(?:Supervisor|Ports)\b", item[1]):
+            raise AssertionError("installation symbol hidden by type alias")
 
 
 def calls(source, name):
     tokens = TOKEN.findall(source)
-    return sum(tokens[i + 1:i + 2] == ["("] and tokens[i - 1:i] != ["fn"]
-               for i, token in enumerate(tokens) if token == name)
+    return sum(tokens[i - 1:i] != ["fn"] for i, token in enumerate(tokens) if token == name)
 
 
 EXPECTED = {
@@ -240,13 +346,19 @@ class Census(unittest.TestCase):
             self.assertEqual(expressions(source), ["unclassified"])
 
     def test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation(self):
-        impls = Counter()
+        impls, starts = Counter(), Counter()
         for path, source in self.sources.items():
+            reject_installation_aliases(source)
             impls.update((path, header) for header in ports_impls(source))
-            self.assertEqual(supervisor_starts(source), 0, path)
+            count = supervisor_starts(source)
+            if count:
+                starts[path] = count
+            self.assertEqual(runtime_activations(source), 0, path)
             self.assertEqual(calls(source, "reserve_boot"), 0, path)
             self.assertEqual(len(re.findall(r"\bmapping\s*::\s*inspect\s*\(", source)), 0, path)
         self.assertEqual(dict(impls), ALLOWED_PORTS)
+        self.assertEqual(dict(starts), ALLOWED_STARTS)
+        self.assertEqual(runtime_constructor_starts(self.sources[RUNTIME_PATH]), [1])
         # The probe's only map read is one iter() inside Probe::check, over each handed-over runtime.
         probe = re.sub(r"\s+", "", self.sources[D + "input_runtime/mapping.rs"])
         self.assertEqual(Counter(expressions(probe)), {"iter": 1})
@@ -290,8 +402,12 @@ class Census(unittest.TestCase):
         guard = Census("test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation")
         helper_path = D + "input_runtime/mapping.rs"
         private_ports_path = D + "turn_presence/activity.rs"
+        runtime_ports_path = D + "input_runtime/runtime/ports.rs"
         allowed = "impl Ports for LivePorts {}"
-        base = {helper_path: self.sources[helper_path], private_ports_path: allowed}
+        runtime_ports = "impl Ports for RuntimePorts {}"
+        runtime = "impl Runtime { fn new() { Supervisor::start(reserved, config, ports); } }"
+        base = {helper_path: self.sources[helper_path], private_ports_path: allowed,
+                runtime_ports_path: runtime_ports, RUNTIME_PATH: runtime}
         guard.sources = dict(base)
         guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
         fixtures = [
@@ -304,8 +420,14 @@ class Census(unittest.TestCase):
             "fn activate() { input_runtime::supervisor::Supervisor :: start(); }",
             "fn activate() { Supervisor :: <Live> :: start (); }",
             "fn activate() { Supervisor::<Live<Vec<u8>>>::start(); }",
+            "fn activate() { <Supervisor<Live<Vec<u8>>>>::start(); }",
             "fn activate() { supervisor::Supervisor\n  ::<Live<Vec<Box<dyn Fn() -> u8>>>>\n  ::start(); }",
             "fn boot() { REGISTRY.reserve_boot(root, &selection, &config, &snapshots, &probe); }",
+            "fn boot() { REGISTRY.reserve_boot::<View>(root); }",
+            "fn boot() { let reserve = Registry::reserve_boot; reserve(root); }",
+            "use input_runtime::supervisor::Supervisor as S; fn activate() { S::start(); }",
+            "use input_runtime::supervisor::{Ports as P}; impl P for Live {}",
+            "type S = input_runtime::supervisor::Supervisor<Live>; fn activate() { S::start(); }",
             "fn inspect() { crate::services::discord::input_runtime::supervisor::mapping :: inspect (&parents, channel); }",
         ]
         for path in ["src/other_module.rs", private_ports_path]:
@@ -315,11 +437,22 @@ class Census(unittest.TestCase):
                     guard.sources = dict(base, **{path: extra})
                     with self.assertRaises(AssertionError):
                         guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
-        # The one allowed impl is exact: zero, two, or a moved copy all fail.
-        for sources in [{private_ports_path: "fn none() {}"},
-                        {private_ports_path: allowed + "\n" + allowed},
-                        {private_ports_path: "fn none() {}", "src/other_module.rs": allowed}]:
-            with self.subTest(sources=sources):
+        # Zero, duplicate, or moved copies of either exact impl fail.
+        for path, header in [(private_ports_path, allowed), (runtime_ports_path, runtime_ports)]:
+            for sources in [{path: "fn none() {}"}, {path: header + "\n" + header},
+                            {path: "fn none() {}", "src/other_module.rs": header}]:
+                with self.subTest(sources=sources):
+                    guard.sources = dict(base, **sources)
+                    with self.assertRaises(AssertionError):
+                        guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
+        for sources in [
+            {RUNTIME_PATH: "impl Runtime { fn new() {} }"},
+            {RUNTIME_PATH: runtime + " fn duplicate() { Supervisor::start(); }"},
+            {RUNTIME_PATH: "impl Runtime { fn new() {} fn run() { Supervisor::start(); } }"},
+            {RUNTIME_PATH: "mod nested { " + runtime + " }"},
+            {RUNTIME_PATH: "impl Runtime { fn new() {} }", "src/other_module.rs": runtime},
+        ]:
+            with self.subTest(starts=sources):
                 guard.sources = dict(base, **sources)
                 with self.assertRaises(AssertionError):
                     guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
@@ -327,6 +460,46 @@ class Census(unittest.TestCase):
             with self.subTest(unparsed=source), self.assertRaises(AssertionError):
                 guard.sources = dict(base, **{"src/other_module.rs": source})
                 guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
+
+    def test_runtime_activation_rejects_qualified_turbofish_and_alias_callers(self):
+        base = {
+            D + "input_runtime/mapping.rs": self.sources[D + "input_runtime/mapping.rs"],
+            D + "turn_presence/activity.rs": "impl Ports for LivePorts {}",
+            D + "input_runtime/runtime/ports.rs": "impl Ports for RuntimePorts {}",
+            RUNTIME_PATH: "impl Runtime { fn new() { Supervisor::start(reserved, config, ports); } }",
+        }
+        fixtures = [
+            "fn activate() { Runtime::new(reserved, config); }",
+            "fn activate() { crate::services::discord::input_runtime::runtime::Runtime::new(); }",
+            "fn activate() { input_runtime::supervisor::runtime::Runtime::<View<Vec<u8>>>::new(); }",
+            "fn activate() { runtime :: Runtime :: new :: <View> (); }",
+            "fn activate() { <runtime::Runtime>::new(); }",
+            "fn activate() { <runtime::Runtime as Construct<View>>::new(); }",
+            "fn activate() { let create = runtime::Runtime::new; create(); }",
+            "use input_runtime::runtime::Runtime as R; fn activate() { R::new(); }",
+            "use input_runtime::runtime::{Runtime as R}; fn activate() { R::<View>::new(); }",
+            "pub use input_runtime::runtime::Runtime as R;",
+            "use input_runtime::runtime as adapter; fn activate() { adapter::Runtime::new(); }",
+            "use input_runtime as ir; use ir::runtime::Runtime as R; fn activate() { R::new(); }",
+            "type R = input_runtime::runtime::Runtime; fn activate() { R::new(); }",
+            "use input_runtime::runtime::*; fn activate() { Runtime::new(); }",
+            "use input_runtime as tokio; fn activate() { tokio::runtime::Runtime::new(); }",
+            "use input_runtime as rquickjs; fn activate() { rquickjs::runtime::Runtime::new(); }",
+            "mod tokio { pub use input_runtime::runtime; } fn activate() { tokio::runtime::Runtime::new(); }",
+        ]
+        for path in ["src/other_module.rs", RUNTIME_PATH]:
+            for source in fixtures:
+                with self.subTest(path=path, source=source):
+                    guard = Census("test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation")
+                    guard.sources = dict(base)
+                    guard.sources[path] = guard.sources.get(path, "") + "\n" + source
+                    with self.assertRaises(AssertionError):
+                        guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
+        for source in ["tokio::runtime::Runtime::new();", "use rquickjs::{Context, Runtime}; Runtime::new();",
+                       "use tokio::runtime::Runtime as R; R::new();",
+                       "use tokio::runtime as rt; rt::Runtime::new();"]:
+            with self.subTest(external=source):
+                self.assertEqual(runtime_activations(source), 0)
 
     def test_input_runtime_reader_pin_rejects_aliases_mutators_and_extra_reads(self):
         probe = D + "input_runtime/mapping.rs"

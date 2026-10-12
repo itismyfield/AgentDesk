@@ -178,6 +178,21 @@ while True:
             .len()
     }
 
+    /// `kill-server` returns before the server process exits; a client started in that gap
+    /// fails with "server exited unexpectedly", so wait until the old server is gone.
+    fn kill_server(&self) {
+        let pid = self.tmux(&["display-message", "-p", "#{pid}"]);
+        self.tmux(&["kill-server"]);
+        wait_until(|| {
+            !Command::new("kill")
+                .args(["-0", &pid])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        });
+    }
+
     fn attach(&self, session: &str) {
         let driver = format!("{}-driver", self.socket);
         let command = format!(
@@ -618,10 +633,10 @@ fn cg_b2a_replaced_same_name_and_dead_identity_never_enter() {
     assert!(!pinned.geometry_matches());
     refused(pinned.enter());
     f.assert_enter("respawn-new", 0);
-    f.tmux(&["kill-server"]);
+    f.kill_server();
     let old = f.session("restart");
     let pinned = SubmissionTmux.pin_guarded("restart").unwrap();
-    f.tmux(&["kill-server"]);
+    f.kill_server();
     let command = f.receiver("restart-new");
     let new = f.tmux(&[
         "new-session",

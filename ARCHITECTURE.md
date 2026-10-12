@@ -69,6 +69,7 @@ src/
 │   ├── discord_thread_create_lock.rs
 │   ├── doctor.rs
 │   ├── herdr.rs
+│   ├── herdr_terminate_tests.rs
 │   ├── herdr_tests.rs
 │   ├── init.rs
 │   ├── intake_outbox.rs
@@ -95,6 +96,7 @@ src/
 │   ├── cluster_role.rs
 │   ├── disk_write.rs
 │   ├── peer_filter.rs
+│   ├── readers_live_reload_tests.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_settings.rs
 │   ├── session_hosts.rs
@@ -433,6 +435,9 @@ src/
 │   │   ├── github.rs
 │   │   ├── github_dashboard.rs
 │   │   ├── health_api.rs
+│   │   ├── herdr_legacy_tests.rs
+│   │   ├── herdr_terminate.rs
+│   │   ├── herdr_terminate_tests.rs
 │   │   ├── home_metrics.rs
 │   │   ├── hooks.rs
 │   │   ├── idle_recap.rs
@@ -972,10 +977,13 @@ src/
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   └── inject_tests.rs
 │   │   │   ├── watcher_respawn/
+│   │   │   │   ├── absence_state.rs
 │   │   │   │   ├── claude_original_tests.rs
 │   │   │   │   ├── idle_relay_absence.rs
 │   │   │   │   ├── input_fence_tests.rs
-│   │   │   │   └── live_bridge_guard.rs
+│   │   │   │   ├── live_bridge_guard.rs
+│   │   │   │   ├── o_only_retry.rs
+│   │   │   │   └── o_only_retry_tests.rs
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── legacy_supervision.rs
 │   │   │   ├── liveness_authority.rs
@@ -1096,11 +1104,20 @@ src/
 │   │   │   │   ├── g1b_modes_tests.rs
 │   │   │   │   ├── modes.rs
 │   │   │   │   └── modes_tests.rs
+│   │   │   ├── runtime/
+│   │   │   │   ├── dormant_tests.rs
+│   │   │   │   ├── drive.rs
+│   │   │   │   ├── drive_tests.rs
+│   │   │   │   ├── notice.rs
+│   │   │   │   ├── notice_tests.rs
+│   │   │   │   ├── ports.rs
+│   │   │   │   └── ports_tests.rs
 │   │   │   ├── supervisor/
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_entry_tests.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── g1b_entry_tests.rs
+│   │   │   │   ├── g2b_entry_tests.rs
 │   │   │   │   ├── receipt_entry_tests.rs
 │   │   │   │   └── reserve.rs
 │   │   │   ├── activation.rs
@@ -1128,6 +1145,7 @@ src/
 │   │   │   ├── receipt_tests.rs
 │   │   │   ├── reconcile.rs
 │   │   │   ├── reserve_tests.rs
+│   │   │   ├── runtime.rs
 │   │   │   ├── source.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
@@ -1285,6 +1303,7 @@ src/
 │   │   │   │   ├── ready_without_output_tests.rs
 │   │   │   │   ├── replay_hold.rs
 │   │   │   │   ├── replay_hold_tests.rs
+│   │   │   │   ├── scoped_policy_receipt_tests.rs
 │   │   │   │   └── scoped_restore.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
@@ -1747,6 +1766,10 @@ src/
 │   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── herdr_terminate_e2e_tests.rs
+│   │   │   │   ├── herdr_terminate_o_activation_tests.rs
+│   │   │   │   ├── herdr_terminate_o_e2e_tests.rs
+│   │   │   │   ├── herdr_terminate_o_real_tests.rs
+│   │   │   │   ├── herdr_terminate_route_e2e_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
@@ -2032,12 +2055,18 @@ src/
 │   │   │   │   ├── claude_restore.rs
 │   │   │   │   ├── liveness.rs
 │   │   │   │   ├── liveness_tests.rs
+│   │   │   │   ├── n4d2_boundary_tests.rs
+│   │   │   │   ├── n4d2_entry_test.rs
+│   │   │   │   ├── n4d2_o_writer_test.rs
+│   │   │   │   ├── n4d2_restore_tests.rs
 │   │   │   │   ├── o_only_install.rs
 │   │   │   │   ├── o_only_install_tests.rs
+│   │   │   │   ├── o_only_restore.rs
 │   │   │   │   ├── output_policy.rs
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
 │   │   │   │   ├── restore.rs
+│   │   │   │   ├── restore_mapping.rs
 │   │   │   │   ├── restore_support.rs
 │   │   │   │   ├── restore_tests.rs
 │   │   │   │   ├── tests.rs
@@ -2080,6 +2109,8 @@ src/
 │   │   ├── gateway_voice_queue.rs
 │   │   ├── health.rs
 │   │   ├── herdr_terminate.rs
+│   │   ├── herdr_terminate_exit_tests.rs
+│   │   ├── herdr_terminate_route_tests.rs
 │   │   ├── host_defer_gate.rs
 │   │   ├── host_defer_gate_tests.rs
 │   │   ├── host_key_derivation.rs
@@ -2462,6 +2493,7 @@ src/
 │   │   ├── herdr_host_tests.rs
 │   │   ├── herdr_registry.rs
 │   │   ├── herdr_socket_rig_tests.rs
+│   │   ├── herdr_terminate_real_tests.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
 │   │   ├── process_host.rs
@@ -2589,6 +2621,7 @@ src/
 │   │   ├── store/
 │   │   │   ├── codex_provenance/
 │   │   │   │   └── mutation.rs
+│   │   │   ├── cleanup_witness.rs
 │   │   │   ├── codex_provenance.rs
 │   │   │   ├── codex_provenance_tests.rs
 │   │   │   ├── durable.rs
@@ -2620,7 +2653,8 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── rotation/
 │   │   │   │   ├── owe.rs
-│   │   │   │   └── provenance.rs
+│   │   │   │   ├── provenance.rs
+│   │   │   │   └── readers.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
@@ -2659,6 +2693,7 @@ src/
 │   │   │   ├── owed_tests.rs
 │   │   │   ├── past_bind.rs
 │   │   │   ├── pieces.rs
+│   │   │   ├── readers_host_tests.rs
 │   │   │   ├── reclaim_tests.rs
 │   │   │   ├── recovery_tests.rs
 │   │   │   ├── renumber_tests.rs

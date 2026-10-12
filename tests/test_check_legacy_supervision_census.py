@@ -1,6 +1,8 @@
 import tempfile
 import unittest
 import re
+import subprocess
+import sys
 from pathlib import Path
 from scripts import check_legacy_supervision_census as guard
 
@@ -31,12 +33,22 @@ class N4DInstallerDormancyTests(unittest.TestCase):
     def test_actual_installer_has_its_own_dormant_production_census(self):
         root = Path.cwd()
         files, skips = guard.classifier._scan_inputs(root, guard.classifier.PINNED_TEST_ONLY_MODULE_FILES)
-        self.assertIn(root / self.INSTALLER, skips, 'installer must remain resolver-test-only')
-        errors = []
-        for path in files:
-            if path not in skips:
-                errors.extend(self.errors(path.read_text(), guard.classifier._production_text(path), path.relative_to(root)))
-        self.assertEqual(errors, [], '\n'.join(errors))
+        self.assertIn(root / self.INSTALLER, files)
+        self.assertNotIn(root / self.INSTALLER, skips, 'installer must be scanned as production')
+        source = (root / 'src/services/discord/watchers/lifecycle/n4d2_boundary_tests.rs').read_text()
+        census = re.findall(
+            r'fn n4d2_dormant_census_counts_actual_production_callers\(\)\s*\{\s*let script = r#"(.*?)"#;',
+            source, re.S)
+        self.assertEqual(len(census), 1, 'shared dormant census must have exactly one definition')
+        result = subprocess.run([sys.executable, '-c', census[0], str(root)],
+                                capture_output=True, text=True, check=False, timeout=180)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            'canonical_retired_production_writers=0',
+            'restore_retired_o_watchers_owner_runtime_boot_callers=0',
+            'canonical_retired_condition_unchanged=true',
+            'activation_ready=false',
+        ])
 
     def test_installer_direct_call_function_value_alias_and_reexport_fail(self):
         for source in (
