@@ -9,6 +9,18 @@ pub(in crate::services::discord) async fn complete_force_clean_watcher_recovery(
     now_unix_secs: i64,
     repair_started_at: Instant,
 ) {
+    #[cfg(unix)]
+    if super::super::legacy_supervision::is_retired(provider.as_str(), channel_id.get()) {
+        o_only_retry::install_for_channel(
+            registry,
+            provider,
+            std::slice::from_ref(shared),
+            channel_id,
+            now_unix_secs,
+        )
+        .await;
+        return;
+    }
     let Ok(recovery) = discord::live_bridge::try_respawn_recovery(provider, channel_id.get())
     else {
         return;
@@ -33,6 +45,10 @@ pub(in crate::services::discord) async fn retry_pending_watcher_respawn(
     channel_id: ChannelId,
     now_unix_secs: i64,
 ) -> bool {
+    #[cfg(unix)]
+    if super::super::legacy_supervision::is_retired(provider.as_str(), channel_id.get()) {
+        return o_only_retry::retry(registry, provider, runtimes, channel_id, now_unix_secs).await;
+    }
     use discord::input_runtime::fence;
     // A closed input gate refuses before the retry's first read; the entry keeps its budget.
     let permit = match fence::effect::admit(provider, channel_id.get()) {
