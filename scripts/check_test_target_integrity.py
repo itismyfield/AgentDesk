@@ -922,28 +922,34 @@ def _syntax_words(snippet: str) -> list[str]:
     return _lex().scan_shell(snippet).syntax_masked.split()
 
 
-def _chained_commands(scan) -> list:
-    """A lexed line's outer simple commands, less a canonical source heading its `&&` chain."""
+# Reserved words that may head a command inside a one-line compound.
+_COMPOUND_HEADS = frozenset({"{", "}", "!", "if", "then", "elif", "else", "while", "until", "do"})
+
+
+def _chained_commands(scan) -> tuple[list, list]:
+    """A lexed line's outer simple commands and control operators, less a canonical
+    source heading its `&&` chain."""
     commands = _lex().simple_commands(scan)
+    ops = [token.raw for token in scan.tokens if token.kind == "OP" and not token.depth]
     if [token.value for token in commands[:1] for token in token] == [
-            "source", NON_PG_FILTER_REL.as_posix()] \
-            and [token.raw for token in scan.tokens if token.kind == "OP"][:1] == ["&&"]:
-        return commands[1:]
-    return commands
+            "source", NON_PG_FILTER_REL.as_posix()] and ops[:1] == ["&&"]:
+        return commands[1:], ops[1:]
+    return commands, ops
 
 
 def _unproven_cargo(scan) -> bool:
     """Whether a lexed line may run a cargo test outside the one command it extracts:
     in a second command, a substitution, or past a boundary the lexer cannot prove."""
-    commands = _chained_commands(scan)
+    commands, ops = _chained_commands(scan)
     words = [token.value or "" for token in scan.tokens if token.kind == "WORD"]
     pairs = any(words[index:index + 2] == ["cargo", "test"] for index in range(len(words)))
     nested = [token.value for token in scan.tokens if token.depth]
     return (bool(scan.issues) and pairs) \
         or any(nested[index:index + 2] == ["cargo", "test"] for index in range(len(nested))) \
-        or (len(commands) > 1 and any(
+        or ((ops or len(commands) > 1) and any(
             _direct_cargo_test(values, values) is not None
-            for values in ([token.value or "" for token in command] for command in commands)))
+            for values in ([token.value or "" for token in command if token.value not in
+                            _COMPOUND_HEADS] for command in commands)))
 
 
 def _direct_cargo_test(words: list[str], syntax: list[str]) -> list[str] | None:
@@ -1689,7 +1695,7 @@ def _command_lines(text: str) -> list[list[str]]:
         if any(words[index:index + 2] == ["cargo", "test"]
                for index in range(len(words) - 1)):
             # A joined, nested or unproven part would be observed as another command.
-            if scan.issues or len(_chained_commands(scan)) > 1 \
+            if scan.issues or len(_chained_commands(scan)[0]) > 1 \
                     or any(token.depth or token.kind == "REDIR" for token in scan.tokens):
                 raise RuntimeError(f"could not parse command: {snippet}")
             commands.append(words)

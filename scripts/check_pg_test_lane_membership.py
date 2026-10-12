@@ -1494,18 +1494,15 @@ _CLOSERS = frozenset({"fi", "esac", "done", "}"})
 def _at_top_level(shell: str, offset: int) -> bool:
     """Whether the word at ``offset`` runs as the shell's own command, not quoted, heredoc
     data, a continued line or inside a compound, function, subshell or substitution: a
-    fail-closed count that also refuses any boundary the shell lexer cannot prove before it."""
-    lex = shell_lexer()
-    scan = lex.scan_shell(shell)
+    fail-closed count."""
+    scan = shell_lexer().scan_shell(shell)
     before = [token for token in scan.tokens if token.start < offset and not token.depth]
     word = next((token for token in scan.tokens if token.start == offset), None)
-    # A continued line leaves no newline before the word, and code left ending in `&&`,
-    # `||` or a pipe makes it their conditional or piped part.
+    # A continued line or an enclosing substitution's word leaves no newline right before
+    # it, and code left ending in `&&`, `||` or a pipe makes it their conditional part.
     pending = next((token.raw for token in reversed(before) if token.kind != "NEWLINE"), "")
-    if word is None or word.kind != "WORD" or word.depth \
-            or (before and before[-1].kind != "NEWLINE") or pending in ("&&", "||", "|", "|&") \
-            or any(issue.start < offset and issue.kind in lex.OPEN_ISSUES
-                   for issue in scan.issues):
+    if word is None or word.kind != "WORD" \
+            or (before and before[-1].kind != "NEWLINE") or pending in ("&&", "||", "|", "|&"):
         return False
     depth = 0
     for line in scan.syntax_masked[:offset].split("\n"):
@@ -1538,7 +1535,13 @@ def known_array_source_problem(shell: str) -> tuple[str, int] | None:
     ``("unsourced", -1)`` without a covering canonical source, ``(array, line)`` when a
     later word but a ``$`` read rebinds one (0-based line of ``shell``), else None.
     """
-    scan = shell_lexer().scan_shell(shell)
+    lex = shell_lexer()
+    scan = lex.scan_shell(shell)
+    # Past a boundary the lexer cannot prove, no later line's place in the shell is known;
+    # the use's own line ends mid-word here, so only earlier lines count.
+    if any(issue.kind in lex.OPEN_ISSUES and issue.start <= shell.rfind("\n")
+           for issue in scan.issues):
+        return ("unsourced", -1)
     shell = scan.comment_masked
     # A source indented past the shell's outermost lines sits inside a compound command.
     outer = min((len(line) - len(line.lstrip()) for line in shell.split("\n") if line.strip()),

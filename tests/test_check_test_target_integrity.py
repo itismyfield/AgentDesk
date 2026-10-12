@@ -1433,6 +1433,8 @@ class KnownArrayProvenance(unittest.TestCase):
                 ((('echo "$(echo `date`)"', source, pg),), []),
                 ((("echo `echo \\`date\\``", source, pg),), pg_unsourced),
                 ((("while read -r x; do :; done < <(true)", source, pg),), []),
+                # Past an unclosed quote, the use may be data rather than a command.
+                (((source, "echo 'open", pg),), pg_unsourced),
                 # Quoted or escaped, `;`, `|` and `&&` are argument text, not a second command.
                 (((source, f"{non_pg} --logfile 'ci;pg.log'"),), []),
                 (((source, f"{non_pg} --logfile ci\\;pg.log"),), []),
@@ -1688,6 +1690,9 @@ class ParserContract(unittest.TestCase):
                 # A direct cargo test in a later command, a substitution or past an
                 # unsupported boundary cannot be judged.
                 ("echo ok; cargo test --lib missing", unparsed),
+                (f"({GOOD_COMMAND})", unparsed),
+                (f"{{ {GOOD_COMMAND}; }}", unparsed),
+                (f"if true; then {GOOD_COMMAND}; fi", unparsed),
                 (f"echo $(cargo test --lib missing) && {GOOD_COMMAND}", unparsed),
                 (f"{GOOD_COMMAND} --logfile \"$(cargo test --lib missing)\"", unparsed),
                 (f"{GOOD_COMMAND} --logfile `cargo test --lib missing`", unparsed),
