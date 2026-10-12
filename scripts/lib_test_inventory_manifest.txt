@@ -4758,6 +4758,15 @@ services::discord::input_runtime::fence::tests::ordinary_writer_waits_for_releas
 services::discord::input_runtime::fence::tests::queue_primitives_share_canonical_sidecar_wait_and_borrow_without_scheduler_stall
 services::discord::input_runtime::fence::tests::released_registration_and_stale_closing_cannot_issue_capabilities
 services::discord::input_runtime::fence::tests::stale_epoch_is_not_mode_or_duplicate
+services::discord::input_runtime::intake::c1_public_boundary_keeps_receipt_and_submit_readiness_separate
+services::discord::input_runtime::intake::classify::tests::c1_empty_unauthorized_unsupported_and_wrong_channels_are_explicit_refusals
+services::discord::input_runtime::intake::classify::tests::c1_every_protected_target_blocks_legacy_and_foreign_provider_execution
+services::discord::input_runtime::intake::classify::tests::c1_terminal_is_only_a_scan_classification_and_receipt_close_is_explicit
+services::discord::input_runtime::intake::classify::tests::c1_unknown_facts_never_approve_or_settle_and_unprotected_stays_legacy
+services::discord::input_runtime::intake::source::tests::c1_attachment_only_is_content_but_reply_or_voice_metadata_and_boilerplate_are_not
+services::discord::input_runtime::intake::source::tests::c1_rich_source_preserves_original_identity_text_reply_voice_and_all_staged_bytes
+services::discord::input_runtime::intake::source::tests::c1_slash_origin_is_fixed_actual_interaction_and_keeps_original_execution_channels
+services::discord::input_runtime::intake::source::tests::c1_source_rejects_missing_primary_zero_provenance_and_corrupt_staging
 services::discord::input_runtime::supervisor::activation::scope_tests::g2_e2_codex_primary_and_same_provider_routes_are_supported
 services::discord::input_runtime::supervisor::activation::scope_tests::g2_e2_confirmed_primary_non_thread_is_candidate_without_owner_lookup
 services::discord::input_runtime::supervisor::activation::scope_tests::g2_e2_each_missing_routing_field_is_unknown
