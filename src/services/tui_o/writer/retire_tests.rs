@@ -5,6 +5,9 @@ use crate::services::tui_o::store::rotation::{
 };
 use crate::services::tui_o::store::spool::source_key;
 
+#[path = "legacy_hop_retry_tests.rs"]
+mod legacy_hop_retry_tests;
+
 fn session_start() -> String {
     HookEventKind::SessionStart.as_str().to_owned()
 }

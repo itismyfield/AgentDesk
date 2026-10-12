@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serenity::{ChannelId, MessageId};
 
 use super::inflight::{self, InflightTurnState};
+use super::input_runtime::fence::{self, BootTarget};
 use super::{SharedData, http, runtime_store};
 use crate::services::provider::ProviderKind;
 
@@ -168,12 +169,18 @@ async fn reconcile_terminal_ui_obligation(
     obligation: TerminalUiObligation,
     now_unix: i64,
 ) {
+    if terminal_ui_input_protected(provider, obligation.channel_id) {
+        return;
+    }
     if obligation.channel_id == 0 || obligation.status_message_id == 0 {
         let _ = clear_obligation_by_key(&obligation.provider, obligation.channel_id);
         return;
     }
     let channel_id = ChannelId::new(obligation.channel_id);
     let lookup = resolve_terminal_ui_session(shared, provider, channel_id, &obligation).await;
+    if terminal_ui_input_protected(provider, obligation.channel_id) {
+        return;
+    }
     let snapshot = match lookup {
         TerminalUiSessionLookup::Current(snapshot) => snapshot,
         TerminalUiSessionLookup::Deferred => return,
@@ -220,14 +227,20 @@ async fn reconcile_terminal_ui_obligation(
     };
 
     super::discord_io::rate_limit_wait(shared, channel_id).await;
-    match http::edit_channel_message(
+    if terminal_ui_input_protected(provider, obligation.channel_id) {
+        return;
+    }
+    let response = http::edit_channel_message(
         http,
         channel_id,
         MessageId::new(obligation.status_message_id),
         content,
     )
-    .await
-    {
+    .await;
+    if terminal_ui_input_protected(provider, obligation.channel_id) {
+        return;
+    }
+    match response {
         Ok(_) => {
             let _ = clear_obligation_by_key(&obligation.provider, obligation.channel_id);
         }
@@ -249,6 +262,15 @@ async fn reconcile_terminal_ui_obligation(
             }
         }
     }
+}
+
+fn terminal_ui_input_protected(provider: &ProviderKind, channel_id: u64) -> bool {
+    let target = if channel_id == 0 {
+        BootTarget::Unknown
+    } else {
+        BootTarget::Channel(provider, channel_id)
+    };
+    fence::boot_skip(target)
 }
 
 async fn resolve_terminal_ui_session(
@@ -563,6 +585,11 @@ fn clear_obligation_in_root(root: &Path, provider: &str, channel_id: u64) -> boo
         }
     }
 }
+
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "terminal_ui_obligation/input_fence_tests.rs"]
+mod input_fence_tests;
 
 #[cfg(test)]
 mod tests {

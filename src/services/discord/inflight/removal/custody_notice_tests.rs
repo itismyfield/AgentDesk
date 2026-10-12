@@ -491,3 +491,267 @@ async fn a_root_reading_the_dm_session_readdresses_an_unclaimed_notice_pg() {
     assert_eq!(bots, ["notify", "claude"]);
     finish(db, pool).await;
 }
+
+fn old_notice(root: &Path, channel: u64, name: &str, copies: bool) {
+    let dir = root.join(name);
+    fs::create_dir_all(&dir).unwrap();
+    let mut turn = row(channel, Some("AgentDesk-claude-dm-343742347"));
+    turn.user_msg_id = 0;
+    if copies {
+        earlier_build_episode(root, &turn, name);
+    } else {
+        fs::write(
+            dir.join("episode.json"),
+            json!({"episode": {"channel_id": channel, "anchorless": name}, "tui_direct": true})
+                .to_string(),
+        )
+        .unwrap();
+    }
+}
+
+async fn notice_gate(
+    provider: ProviderKind,
+    channel: u64,
+    mode: crate::services::discord::input_runtime::fence::Mode,
+) -> Arc<crate::services::discord::input_runtime::fence::Gate> {
+    use crate::services::discord::input_runtime::fence::{Gate, Mode};
+    let gate = Gate::protect(provider.clone(), channel).unwrap();
+    if mode != Mode::LegacyOpen {
+        let closing = Arc::new(gate.close().unwrap());
+        if mode != Mode::Closing {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            shared
+                .freeze_legacy_queue(
+                    closing.clone(),
+                    crate::services::turn_orchestrator::QueuePersistenceContext::new(
+                        &provider,
+                        "notice-test",
+                        None,
+                    ),
+                )
+                .await
+                .unwrap();
+            match mode {
+                Mode::LedgerOpen => closing.open_ledger().unwrap(),
+                Mode::Held => closing.hold().unwrap(),
+                Mode::Handback => closing.begin_handback().unwrap(),
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(gate.mode(), mode);
+    gate
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn n3bc_old_custody_episodes_hold_all_modes_and_keep_siblings_pg() {
+    use crate::services::discord::input_runtime::fence::{Mode, test_health};
+    let (env, db, pool) = harness("old protected custody notices")
+        .await
+        .expect("mandatory PostgreSQL fixture");
+    let root = custody(&env);
+    let modes = [
+        Mode::LegacyOpen,
+        Mode::Closing,
+        Mode::Frozen,
+        Mode::LedgerOpen,
+        Mode::Handback,
+        Mode::Held,
+    ];
+    for (index, mode) in modes.into_iter().enumerate() {
+        let protected = 6_325_870_000 + index as u64 * 2;
+        let legacy = protected + 1;
+        old_notice(&root, protected, &format!("p-{index}-marker"), false);
+        old_notice(&root, protected, &format!("p-{index}-array"), true);
+        old_notice(&root, legacy, &format!("l-{index}-marker"), false);
+        old_notice(&root, legacy, &format!("l-{index}-array"), true);
+        let provider = if index == 0 {
+            ProviderKind::Codex
+        } else {
+            CLAUDE
+        };
+        let gate = notice_gate(provider, protected, mode).await;
+        let _health = test_health::Clear::new(&gate);
+        let before = snapshot(&root);
+        assert_eq!(
+            enqueue_custody_notices(&root, &CLAUDE, Some(&pool)).await,
+            (index + 1) * 2,
+            "protected episode enqueue held and Legacy sibling enqueues in {mode:?}"
+        );
+        assert_eq!(
+            snapshot(&root),
+            before,
+            "custody bytes preserved in {mode:?}"
+        );
+        let actual = rows(&pool).await;
+        assert_eq!(actual.len(), (index + 1) * 2);
+        assert!(
+            actual
+                .iter()
+                .all(|row| row.0 != format!("channel:{protected}")),
+            "protected episode did not enqueue in {mode:?}"
+        );
+        assert_eq!(
+            actual
+                .iter()
+                .filter(|row| row.0 == format!("channel:{legacy}"))
+                .count(),
+            2
+        );
+        assert!(
+            fs::read_dir(env.dir().join("claude"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .all(|entry| entry.path().extension().is_none_or(|ext| ext != "json")),
+            "no new inflight row was seeded"
+        );
+    }
+    finish(db, pool).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn n3bc_pending_notify_is_held_and_unprotected_bot_readdresses_pg() {
+    use crate::services::discord::input_runtime::fence::{Mode, test_health};
+    let (env, db, pool) = harness("protected pending custody bot")
+        .await
+        .expect("mandatory PostgreSQL fixture");
+    let root = custody(&env);
+    for (channel, name) in [(6_325_870_020, "a-protected"), (6_325_870_021, "b-legacy")] {
+        old_notice(&root, channel, name, false);
+    }
+    assert_eq!(
+        enqueue_custody_notices(&root, &CLAUDE, Some(&pool)).await,
+        2
+    );
+    assert!(rows(&pool).await.iter().all(|row| row.1 == "notify"));
+    for (channel, name) in [(6_325_870_020, "a-protected"), (6_325_870_021, "b-legacy")] {
+        let dir = root.join(name).join("rev-0000");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("0-row.json"),
+            serde_json::to_vec(&row(channel, Some("AgentDesk-claude-dm-343742347"))).unwrap(),
+        )
+        .unwrap();
+    }
+    let gate = notice_gate(CLAUDE, 6_325_870_020, Mode::LegacyOpen).await;
+    let _health = test_health::Clear::new(&gate);
+    let before = snapshot(&root);
+    assert_eq!(
+        enqueue_custody_notices(&root, &CLAUDE, Some(&pool)).await,
+        1
+    );
+    assert_eq!(snapshot(&root), before);
+    let actual = rows(&pool).await;
+    assert_eq!(actual.len(), 2);
+    assert_eq!((&*actual[0].1, &*actual[1].1), ("notify", "claude"));
+    finish(db, pool).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn n3bc_protection_after_enqueue_keeps_the_pending_notify_bot_pg() {
+    use crate::services::discord::input_runtime::fence::Gate;
+    let (env, db, pool) = harness("custody protection after enqueue")
+        .await
+        .expect("mandatory PostgreSQL fixture");
+    let root = custody(&env);
+    old_notice(&root, 6_325_870_022, "a-protected", false);
+    assert_eq!(
+        enqueue_custody_notices(&root, &CLAUDE, Some(&pool)).await,
+        1
+    );
+    let dir = root.join("a-protected/rev-0000");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("0-row.json"),
+        serde_json::to_vec(&row(6_325_870_022, Some("AgentDesk-claude-dm-343742347"))).unwrap(),
+    )
+    .unwrap();
+    let before = snapshot(&root);
+    super::custody_notice::AFTER_ENQUEUE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(|| {
+            Gate::protect(CLAUDE, 6_325_870_022).unwrap();
+        }));
+    });
+    assert_eq!(
+        enqueue_custody_notices(&root, &CLAUDE, Some(&pool)).await,
+        1,
+        "the existing enqueue completed before protection"
+    );
+    assert_eq!(
+        rows(&pool).await[0].1,
+        "notify",
+        "no bot readdress after protection"
+    );
+    assert_eq!(snapshot(&root), before);
+    finish(db, pool).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn n3bc_custody_with_protection_zero_keeps_existing_enqueue_pg() {
+    use crate::services::discord::input_runtime::fence;
+    use base64::Engine;
+    const CHILD: &str = "AGENTDESK_CUSTODY_FENCE_ZERO_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let qualified = concat!(
+            module_path!(),
+            "::n3bc_custody_with_protection_zero_keeps_existing_enqueue_pg"
+        );
+        let name = qualified.split_once("::").unwrap().1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("1 passed; 0 failed; 0 ignored;"),
+            "{stdout}"
+        );
+        assert!(stderr.contains("CUSTODY_PROTECTION_ZERO_DONE"), "{stderr}");
+        let encoding = base64::engine::general_purpose::STANDARD;
+        println!(
+            "CUSTODY_PROTECTION_ZERO_CHILD_STDOUT_B64={}",
+            encoding.encode(&output.stdout)
+        );
+        println!(
+            "CUSTODY_PROTECTION_ZERO_CHILD_STDERR_B64={}",
+            encoding.encode(&output.stderr)
+        );
+        eprintln!(
+            "CUSTODY_PROTECTION_ZERO_CHILD_VERIFIED passed=1 ignored=0 completed=CUSTODY_PROTECTION_ZERO_DONE"
+        );
+        return;
+    }
+    assert!(!fence::any_protected(), "fresh process protection0");
+    let (env, db, pool) = harness("custody protection zero")
+        .await
+        .expect("mandatory PostgreSQL fixture");
+    let root = custody(&env);
+    old_notice(&root, 6_325_870_023, "marker-only", false);
+    old_notice(&root, 6_325_870_024, "anchorless-array", true);
+    let before = snapshot(&root);
+    assert_eq!(
+        enqueue_custody_notices(&root, &CLAUDE, Some(&pool)).await,
+        2
+    );
+    assert_eq!(
+        enqueue_custody_notices(&root, &CLAUDE, Some(&pool)).await,
+        2
+    );
+    assert_eq!(rows(&pool).await.len(), 2, "persistent dedupe unchanged");
+    assert_eq!(
+        rows(&pool)
+            .await
+            .iter()
+            .map(|row| row.1.as_str())
+            .collect::<Vec<_>>(),
+        ["claude", "notify"]
+    );
+    assert_eq!(snapshot(&root), before);
+    assert!(!fence::any_protected(), "notice pass remains dormant");
+    finish(db, pool).await;
+    eprintln!("CUSTODY_PROTECTION_ZERO_DONE");
+}

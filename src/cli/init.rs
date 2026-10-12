@@ -512,8 +512,8 @@ fn generate_launchd_plist_for_flavor_with_root(
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <key>ThrottleInterval</key>
-  <integer>5</integer>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>ProcessType</key><string>Interactive</string>
 {nofile_resource_limit_xml}  <key>WorkingDirectory</key>
   <string>{root_str}</string>
   <key>EnvironmentVariables</key>
@@ -1338,8 +1338,8 @@ mod launchd_plist_tests {
         assert!(plist.contains(&format!("<string>{}</string>", root_dir.display())));
         assert!(plist.contains(&format!("<string>{}</string>", agentdesk_bin.display())));
         assert!(plist.contains("<key>AGENTDESK_ROOT_DIR</key>"));
-        assert!(!plist.contains("/Users/itismyfield"));
-        assert!(!plist.contains("/Users/kunkun"));
+        assert!(plist.contains("<key>ProcessType</key><string>Interactive</string>"));
+        assert!(!plist.contains("/Users/itismyfield") && !plist.contains("/Users/kunkun"));
         assert_plist_xml_valid(&plist);
     }
 }

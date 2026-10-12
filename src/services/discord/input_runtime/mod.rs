@@ -11,6 +11,7 @@ pub(crate) mod reconcile;
 #[allow(dead_code)]
 pub(crate) mod supervisor;
 pub(crate) use supervisor::runtime;
+pub(in crate::services::discord) mod intake;
 
 /// Fence, clear and supervisor holds; an unused supervisor registry adds nothing to the fence's.
 pub(crate) fn health_reasons() -> Vec<String> {

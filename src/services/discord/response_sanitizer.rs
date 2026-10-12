@@ -166,6 +166,11 @@ pub(crate) fn strip_leading_tui_response_chrome(input: &str) -> String {
     }
 }
 
+/// True when `text` is exactly one TUI chrome phrase apart from surrounding whitespace.
+pub(crate) fn is_standalone_tui_response_chrome(text: &str) -> bool {
+    TUI_IDLE_RESPONSE_CHROME_PREFIXES.contains(&text.trim())
+}
+
 fn leading_tui_chrome_prefix_matches(trimmed: &str, prefix: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix(prefix) else {
         return false;

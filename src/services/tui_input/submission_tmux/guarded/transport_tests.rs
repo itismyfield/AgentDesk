@@ -14,7 +14,7 @@ pub(crate) struct Fixture {
     pub(crate) root: tempfile::TempDir,
     pub(crate) real: PathBuf,
     pub(crate) socket: String,
-    _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+    _lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>,
 }
 
 fn quoted(path: &Path) -> String {
@@ -23,7 +23,16 @@ fn quoted(path: &Path) -> String {
 
 impl Fixture {
     pub(crate) fn new() -> Self {
-        let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        Self::with_lock(Some(
+            crate::config::test_env_lock::acquire_shared_test_env_lock(),
+        ))
+    }
+
+    pub(crate) fn after_shared_test_env_lock() -> Self {
+        Self::with_lock(None)
+    }
+
+    fn with_lock(lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>) -> Self {
         let root = tempfile::Builder::new()
             .prefix("cgb2-")
             .tempdir_in("/tmp")
@@ -194,10 +203,13 @@ while True:
     }
 
     fn attach(&self, session: &str) {
-        let driver = format!("{}-driver", self.socket);
+        self.attach_with_target(session, session, &format!("{}-driver", self.socket));
+    }
+
+    fn attach_with_target(&self, session: &str, target: &str, driver: &str) {
         let stderr_path = self.root.path().join("attach.stderr");
         let command = format!(
-            "{{ env -u TMUX {} -L {} -f /dev/null attach -t '={session}'; }} 2>{}",
+            "{{ env -u TMUX {} -L {} -f /dev/null attach -t '={target}'; }} 2>{}",
             quoted(&self.real),
             self.socket,
             quoted(&stderr_path)
@@ -205,7 +217,7 @@ while True:
         let started = Command::new(&self.real)
             .args([
                 "-L",
-                &driver,
+                driver,
                 "-f",
                 "/dev/null",
                 "new-session",
@@ -235,32 +247,22 @@ while True:
         );
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
-            if self.tmux(&[
-                "display-message",
-                "-p",
-                "-t",
-                &format!("={session}:"),
-                "#{session_attached}",
-            ]) == "1"
-            {
-                return;
-            }
             let state = Command::new(&self.real)
                 .args([
                     "-L",
-                    &driver,
+                    driver,
                     "-f",
                     "/dev/null",
                     "display-message",
                     "-p",
                     "-t",
                     "=driver:",
-                    "#{pane_dead} #{pane_dead_status}",
+                    "#{pane_dead}|#{pane_dead_status}|#{pane_tty}",
                 ])
                 .output()
                 .unwrap();
             let pane_status = String::from_utf8_lossy(&state.stdout);
-            if !state.status.success() || pane_status.split_ascii_whitespace().next() != Some("0") {
+            if !state.status.success() || pane_status.trim().split('|').next() != Some("0") {
                 let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
                 let diagnostic = if stderr.trim().is_empty() {
                     format!(
@@ -273,6 +275,25 @@ while True:
                 };
                 panic!("attach failed: {diagnostic}");
             }
+            let tty = pane_status
+                .trim()
+                .split('|')
+                .nth(2)
+                .filter(|tty| !tty.is_empty())
+                .expect("driver tty unavailable");
+            if self
+                .tmux(&[
+                    "list-clients",
+                    "-t",
+                    &format!("={session}:"),
+                    "-F",
+                    "#{client_tty}",
+                ])
+                .lines()
+                .any(|client| client == tty)
+            {
+                return;
+            }
             assert!(
                 Instant::now() < deadline,
                 "attach failed: driver did not attach before deadline"
@@ -284,6 +305,18 @@ while True:
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if let Ok(output) = Command::new(&self.real)
+            .args(["-L", &self.socket, "list-sessions", "-F", "#{session_name}"])
+            .output()
+        {
+            for session in String::from_utf8_lossy(&output.stdout).lines() {
+                crate::services::claude_tui::guarded_outcome::forget_test_hold(session);
+            }
+        }
+
+        let _ = Command::new(&self.real)
+            .args(["-L", &format!("{}-bad-driver", self.socket), "kill-server"])
+            .output();
         let _ = Command::new(&self.real)
             .args(["-L", &format!("{}-driver", self.socket), "kill-server"])
             .output();
@@ -787,4 +820,32 @@ fn cg_b2a_dormant_default_and_empty_allowlist_keep_legacy_transport() {
     );
     f.assert_enter("legacy", 1);
     assert_eq!(f.calls(), 0);
+}
+
+#[test]
+fn cg_b2c_attach_requires_this_driver_even_with_another_client() {
+    let f = Fixture::new();
+    f.session("attach-identity");
+    f.attach("attach-identity");
+    assert_eq!(
+        f.tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            "=attach-identity:",
+            "#{session_attached}"
+        ]),
+        "1"
+    );
+    let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        f.attach_with_target(
+            "attach-identity",
+            "absent-target",
+            &format!("{}-bad-driver", f.socket),
+        );
+    }));
+    assert!(
+        stopped.is_err(),
+        "a different client's attachment cannot prove this driver succeeded"
+    );
 }
