@@ -79,7 +79,8 @@ pub(crate) enum InjectAttempt {
         turn_id: String,
         veto: &'static str,
     },
-    /// The pane vetoed and the queue front was not written, or its result is unknown.
+    /// The pane vetoed or an admitted GUID stayed unbound, and the queue front was not written
+    /// or its result is unknown.
     HandbackFailed(&'static str),
     /// The owner died outside the pane effect: nothing was recorded and the paste is unknown.
     OwnerFailed {
