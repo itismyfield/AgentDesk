@@ -50,6 +50,7 @@ MOD_RE = re.compile(
 )
 CFG_TEST_RE = re.compile(r"#\s*\[\s*cfg\s*\([^\]]*\btest\b[^\]]*\)\s*\]")
 PATH_ATTR_RE = re.compile(r'#\s*\[\s*path\s*=\s*"(?P<path>[^"]+)"\s*\]')
+INNER_CFG_RE = re.compile(r"^[ \t]*#!\[\s*cfg\s*\(.*\)\s*\][ \t]*$", re.MULTILINE)
 ATTRIBUTED_FN_RE = re.compile(
     r"(?P<attrs>(?:#\s*\[[^\]]*\]\s*)+)"
     r"(?:(?:pub(?:\s*\([^)]*\))?)\s+)?"
@@ -225,7 +226,7 @@ def file_module_path(src_root: Path, path: Path) -> tuple[str, ...]:
 
 
 def _module_records(
-    source: str, base: tuple[str, ...]
+    source: str, base: tuple[str, ...], decls: dict | None = None
 ) -> tuple[
     set[str],
     dict[str, set[str]],
@@ -302,6 +303,8 @@ def _module_records(
         parent_names = tuple(item[1] for item in inline_stack)
         logical = (*base, *parent_names, name)
         is_test_module = bool(CFG_TEST_RE.search(attrs))
+        if decls is not None:
+            decls.setdefault(logical, []).append(attrs)
         if is_test_module:
             modules.add("::".join(logical))
             tests_by_module.setdefault("::".join(logical), set())
@@ -352,13 +355,17 @@ def _normalize_alias_path(
 
 
 def discover_test_inventory(
-    repo_root: Path, aliases_out: dict[tuple[str, ...], tuple[str, ...]] | None = None
+    repo_root: Path,
+    aliases_out: dict[tuple[str, ...], tuple[str, ...]] | None = None,
+    decls_out: dict[str, list[str]] | None = None,
 ) -> dict[str, set[str]]:
     """Inventory logical test modules and test paths without building; `aliases_out`
-    receives the physical-to-logical `#[path]` module map."""
+    receives the `#[path]` module map and `decls_out` every module's declaration attributes
+    (a file's inner `#![cfg]` under `#!<module>`)."""
     src_root = (repo_root / "src").resolve()
     physical_inventory: dict[tuple[str, ...], set[tuple[str, ...]]] = {}
     raw_aliases: dict[tuple[str, ...], tuple[str, ...]] = {}
+    decls: dict[tuple[str, ...], list[str]] = {}
 
     for path in sorted(src_root.rglob("*.rs")):
         rel = path.relative_to(src_root)
@@ -366,7 +373,9 @@ def discover_test_inventory(
             continue
         base = file_module_path(src_root, path)
         source = path.read_text(encoding="utf-8")
-        modules, tests_by_module, aliases = _module_records(source, base)
+        modules, tests_by_module, aliases = _module_records(source, base, decls)
+        inner = INNER_CFG_RE.findall(source)
+        decls.setdefault(("#!", *base), []).extend(inner)
         for module in modules:
             physical = tuple(module.split("::"))
             physical_inventory.setdefault(physical, set()).update(
@@ -404,6 +413,10 @@ def discover_test_inventory(
         aliases = updated
     if aliases_out is not None:
         aliases_out.update(aliases)
+    for path, attrs in decls.items() if decls_out is not None else ():
+        marker = path[:1] == ("#!",)
+        key = "::".join(_normalize_alias_path(path[marker:], aliases))
+        decls_out.setdefault("#!" * marker + key, []).extend(attrs)
 
     inventory: dict[str, set[str]] = {}
     for physical_module, physical_tests in physical_inventory.items():
@@ -885,7 +898,8 @@ def check(
     reference_sha: str | None = None,
 ) -> int:
     aliases: dict[tuple[str, ...], tuple[str, ...]] = {}
-    inventory = discover_test_inventory(repo_root, aliases)
+    decls: dict[str, list[str]] = {}
+    inventory = discover_test_inventory(repo_root, aliases, decls)
     lanes = discover_lane_filters(repo_root)
     skip_args = (
         load_non_pg_skip_args(repo_root)
@@ -962,7 +976,7 @@ def check(
     if reference_sha is not None:
         verdict = parity._sibling("lane_new_id_registration.py").judge(
             repo_root, reference_sha, sys.modules[__name__], parity, sources, pg_tests,
-            skip_args, aliases,
+            skip_args, aliases, set(inventory), decls,
         )
         for finding in verdict.findings:
             print(f"FAIL: new_required_test_ids: {finding.render()}", file=sys.stderr)

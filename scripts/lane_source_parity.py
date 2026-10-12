@@ -30,7 +30,8 @@ _UPSTREAM_RESULT = re.compile(
 )
 _KEY = re.compile(r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z0-9_-]+)\s*:(?P<value>.*)$")
 _STEP_GUARD = re.compile(r"^[ \t]*(?:-[ \t]+)?(?P<key>if|continue-on-error)\s*:(?P<value>.*)$")
-UNCONDITIONAL = frozenset({"", "false", "always()", "!cancelled()", "success()"})
+# `if:` values that always run the step; `continue-on-error` is safe only as false.
+RUNNING_IF = frozenset({"true", "always()", "!cancelled()", "success()"})
 
 
 def _sibling(filename: str):
@@ -310,19 +311,19 @@ def _steps(pgm, code: str) -> list[tuple[int, int]]:
     return [(first, last) for first, last in spans]
 
 
-def unconditional(value: str) -> bool:
-    """Whether an `if:`/`continue-on-error:` value leaves the run and its failure in place."""
+def unconditional(key: str, value: str) -> bool:
+    """Whether an `if:` value always runs, or a `continue-on-error:` value keeps failures."""
     value = value.strip().strip("'\"")
     if value.startswith("${{") and value.endswith("}}"):
         value = value[3:-2].strip()
-    return value in UNCONDITIONAL
+    return value == "false" if key == "continue-on-error" else value in RUNNING_IF
 
 
 def _step_guard(step_lines: list[str]) -> str:
     """The first `if:` or `continue-on-error:` of one step that may skip it or hide a failure."""
     for line in step_lines:
         match = _STEP_GUARD.match(line)
-        if match and not unconditional(match.group("value")):
+        if match and not unconditional(match.group("key"), match.group("value")):
             return f"step {match.group('key')}: {match.group('value').strip()}"
     return ""
 
@@ -356,8 +357,8 @@ def _mirror_upstreams(pgm, rel: Path, jobs, mirror_lines: dict[str, set[int]], h
                 problem = f"upstream {upstreams[0]} is not in needs"
             elif upstreams[0] not in names:
                 problem = f"upstream {upstreams[0]} is not a job in this workflow"
-            conditional = bool(_step_guard(lines[first:last + 1])) or not unconditional(
-                keys.get("if", ("", 0))[0]
+            conditional = bool(_step_guard(lines[first:last + 1])) or (
+                "if" in keys and not unconditional("if", keys["if"][0])
             )
             for upstream in upstreams or [""]:
                 mirrors.append(Mirror(job.name, context, upstream, not problem, conditional))

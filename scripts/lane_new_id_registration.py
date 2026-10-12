@@ -9,8 +9,10 @@ git diff only finds the touched files that may hide a test the manifest cannot l
 from __future__ import annotations
 
 import datetime
+import functools
 import re
 import subprocess
+import tomllib
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,13 +28,17 @@ EMPTY_MODULE = "new-test-module-empty"
 TARGET = "new-id-target-unresolved"
 INVALID = "new-id-exception-invalid"
 STALE = "stale-new-id-exception"
+HELPER = "helper-module"
 MODE_KINDS = {
+    HELPER: frozenset({EMPTY_MODULE}),
     "intentional-nonrequired": frozenset({UNREQUIRED}),
     "model-unresolved": frozenset({CONTEXT, PATH, RUNMODE}),
     "platform-unavailable": frozenset({PLATFORM}),
 }
 RUNNERS = (("ubuntu-", "linux"), ("macos-", "darwin"))
-TEST_MODULE = re.compile(r"(?:^|_)tests?$")
+TARGET_OS = {"linux": "linux", "darwin": "macos"}
+_CFG = re.compile(r"#\s*\[\s*cfg\s*\(|#!\[\s*cfg\s*\(")
+_CFG_TOKEN = re.compile(r'\s*(?:([A-Za-z_][A-Za-z0-9_]*)|("[^"]*")|([(),=]))')
 _OUTPUT_IF = re.compile(r"^needs\.changes\.outputs\.([A-Za-z0-9_-]+)\s*==\s*'true'$")
 _FILTER_REF = re.compile(r"steps\.filter\.outputs\.([A-Za-z0-9_-]+)")
 # `predicate-quantifier: every` ANDs the patterns, so no single match proves activation.
@@ -83,11 +89,13 @@ class Verdict:
     added: int
     mapped: tuple[Mapped, ...]
     excepted: int
+    helpers: int = 0
 
     def summary(self) -> str:
         return (
             f"OK: new_required_test_ids: base={self.base} added={self.added} "
             f"mapped={len(self.mapped)} excepted={self.excepted}"
+            + (f" helper_modules={self.helpers}" if self.helpers else "")
         )
 
 
@@ -102,12 +110,19 @@ def _git(repo_root: Path, *args: str) -> str:
         raise ValueError(f"git {' '.join(args)} failed: {detail.strip()}") from exc
 
 
-def changed_paths(repo_root: Path, base: str) -> dict[str, str]:
-    """Reference-to-checkout changes, path -> A/M/D; untracked files count as added."""
-    fields = _git(repo_root, "diff", "--name-status", "--no-renames", "-z", base).split("\0")
-    changed = {fields[i + 1]: fields[i][:1] for i in range(0, len(fields) - 1, 2)}
+def changed_paths(repo_root: Path, base: str) -> dict[str, tuple[str, str]]:
+    """Reference-to-checkout changes, path -> (A/M/D/R, reference path); a rename keeps its
+    old path so moved content is not new, and untracked files count as added."""
+    fields = _git(repo_root, "diff", "--name-status", "-M", "-z", base).split("\0")
+    changed: dict[str, tuple[str, str]] = {}
+    index = 0
+    while index < len(fields) - 1:
+        status = fields[index][:1]
+        moved = status in ("R", "C")
+        changed[fields[index + 1 + moved]] = (status, fields[index + 1])
+        index += 2 + moved
     untracked = _git(repo_root, "ls-files", "--others", "--exclude-standard", "-z")
-    changed.update(dict.fromkeys(filter(None, untracked.split("\0")), "A"))
+    changed.update({path: ("A", path) for path in filter(None, untracked.split("\0"))})
     return changed
 
 
@@ -272,18 +287,24 @@ def _test_names(coverage, text: str) -> Counter:
     )
 
 
+def _module_tails(coverage, text: str, physical: tuple[str, ...]) -> set[tuple[str, ...]]:
+    """cfg(test) module paths below the file's own module, so a moved file compares equal."""
+    modules = coverage.test_modules_in_source(text, physical)
+    return {tuple(module.split("::"))[len(physical):] for module in modules}
+
+
 def touched_sources(coverage, parity, repo_root, base, changed, head_ids, sites, aliases):
-    """New test fns the lib inventory cannot see, and new test-named cfg(test) modules
-    without a single inventoried id, in the changed Rust files."""
-    findings = []
+    """New test fns the lib inventory cannot see, and the new cfg(test) modules of the
+    changed Rust files that provide no inventoried id, as (logical module, path)."""
+    findings, empty = [], []
     src = (repo_root / "src").resolve()
-    for path, status in sorted(changed.items()):
+    for path, (status, old_path) in sorted(changed.items()):
         if status == "D" or not path.endswith(".rs"):
             continue
         head = (repo_root / path).read_text("utf-8")
-        old = _git(repo_root, "show", f"{base}:{path}") if status != "A" else ""
+        old = _git(repo_root, "show", f"{base}:{old_path}") if status != "A" else ""
         lib = path.startswith("src/") and path != "src/main.rs" and not path.startswith("src/bin/")
-        seen = {test_id.rsplit("::", 1)[-1] for test_id in sites.get(path, ())}
+        seen = {site.rsplit("::", 1)[-1] for site in sites.get(path, ())}
         for name in sorted((_test_names(coverage, head) - _test_names(coverage, old)).keys()):
             if not lib or name not in seen:
                 findings.append(parity.Finding(TARGET, path, (
@@ -295,19 +316,135 @@ def touched_sources(coverage, parity, repo_root, base, changed, head_ids, sites,
         if not lib:
             continue
         physical = coverage.file_module_path(src, (repo_root / path).resolve())
-        added = (coverage.test_modules_in_source(head, physical)
-                 - coverage.test_modules_in_source(old, physical))
-        for module in sorted(m for m in added if TEST_MODULE.search(m.rsplit("::", 1)[-1])):
-            logical = "::".join(coverage._normalize_alias_path(tuple(module.split("::")), aliases))
+        try:
+            before = coverage.file_module_path(src, (repo_root / old_path).resolve())
+        except ValueError:
+            before, old = (), ""
+        added = _module_tails(coverage, head, physical) - _module_tails(coverage, old, before)
+        for tail in sorted(added):
+            logical = "::".join(coverage._normalize_alias_path((*physical, *tail), aliases))
             if not any(test_id.startswith(logical + "::") for test_id in head_ids):
-                findings.append(parity.Finding(EMPTY_MODULE, path, (
-                    f"new test module `{logical}` adds no id to the lib inventory manifest; "
-                    "its tests are invisible to every lane gate"
-                )))
-    return findings
+                empty.append((logical, path))
+    return findings, empty
 
 
-def judge_id(test_id, site, sources, pg_tests, pg_only, gates, static_only):
+def _cfg_predicates(attrs: str) -> list[str]:
+    """The predicate text of every `#[cfg(...)]`/`#![cfg(...)]` in an attribute run."""
+    found: list[str] = []
+    for match in _CFG.finditer(attrs):
+        depth = 1
+        for index in range(match.end(), len(attrs)):
+            depth += {"(": 1, ")": -1}.get(attrs[index], 0)
+            if depth == 0:
+                found.append(attrs[match.end():index])
+                break
+        else:
+            found.append("(")
+    return found
+
+
+def cfg_holds(predicate: str, os: str, features: frozenset[str]) -> bool | None:
+    """Evaluate one cfg predicate for a `cargo test --lib` build on `os`; None is unknown."""
+    tokens = [next(t for t in m.groups() if t) for m in _CFG_TOKEN.finditer(predicate)]
+    if "".join(tokens) != "".join(predicate.split()):
+        return None
+
+    def parse(index: int) -> tuple[bool | None, int]:
+        word = tokens[index]
+        if word in ("all", "any", "not") and tokens[index + 1] == "(":
+            values, index = [], index + 2
+            while tokens[index] != ")":
+                value, index = parse(index)
+                values.append(value)
+                index += tokens[index] == ","
+            if word == "not":
+                single = values[0] if len(values) == 1 else None
+                return (None if single is None else not single), index + 1
+            decided = False if word == "all" else True
+            if decided in values:
+                return decided, index + 1
+            return (None if None in values else not decided), index + 1
+        if tokens[index + 1:index + 2] == ["="]:
+            key, value = word, tokens[index + 2].strip('"')
+            facts = {"target_os": os, "target_family": "windows" if os == "windows" else "unix"}
+            known = value in features if key == "feature" else (
+                facts[key] == value if key in facts else None
+            )
+            return known, index + 3
+        flags = {"test": True, "debug_assertions": True, "unix": os != "windows",
+                 "windows": os == "windows"}
+        return flags.get(word), index + 1
+
+    try:
+        value, end = parse(0)
+    except (IndexError, StopIteration):
+        return None
+    return value if end == len(tokens) else None
+
+
+def default_features(repo_root: Path) -> frozenset[str]:
+    """The crate features a plain `cargo test --lib` enables: `default` and what it names."""
+    table = tomllib.loads((repo_root / "Cargo.toml").read_text("utf-8")).get("features", {})
+    enabled: set[str] = set()
+    pending = ["default"]
+    while pending:
+        name = pending.pop()
+        for item in table.get(name, []) if name not in enabled else ():
+            pending.extend([item] if "/" not in item and not item.startswith("dep:") else [])
+        enabled.add(name)
+    return frozenset(enabled - {"default"})
+
+
+@functools.lru_cache(maxsize=None)
+def _fn_attrs(coverage, path: Path) -> dict[int, str]:
+    """Each test-like fn's attribute run in one file, keyed by the line of its name."""
+    text = path.read_text("utf-8")
+    return {
+        text.count("\n", 0, match.start("name")) + 1: text[match.start("attrs"):match.end("attrs")]
+        for match in coverage.ATTRIBUTED_FN_RE.finditer(coverage.strip_rust(text))
+    }
+
+
+def _holds(attrs: str, os: str, features: frozenset[str]) -> bool | None:
+    values = [cfg_holds(predicate, os, features) for predicate in _cfg_predicates(attrs)]
+    return False if False in values else None if None in values else True
+
+
+def platform_gap(coverage, repo_root, test_id, site, decls, aliases, features, platform,
+                 static_only):
+    """Why the runner `platform` may not compile `test_id`, or "" when the cfg of the fn and
+    of every enclosing module declaration (or inner `#![cfg]`) is proven to hold there."""
+    os = TARGET_OS.get(platform or "")
+    excluded = static_only(platform)
+    if os is None or excluded is None or test_id in excluded:
+        return f"{platform or 'its runner'} lacks it"
+    path, _, line = (site or "").rpartition(":")
+    attrs = _fn_attrs(coverage, repo_root / path).get(int(line)) if path else None
+    if attrs is None:
+        return f"no test fn found at {site} to read its cfg"
+    parts = test_id.split("::")
+    groups = [[attrs], *([inner] for inner in decls.get("#!", []))]
+    # A module the logical walk misses is looked up below the site file's own module path.
+    src = (repo_root / "src").resolve()
+    physical = coverage.file_module_path(src, (repo_root / path).resolve())
+    found = 0
+    for depth in range(1, len(parts)):
+        module = "::".join(parts[:depth])
+        below = (*physical, *parts[found:depth])
+        local = "::".join(coverage._normalize_alias_path(below, aliases))
+        key = module if module in decls and found == depth - 1 else local
+        if key not in decls:
+            return f"module {module} is not in the source inventory, so its cfg is unknown"
+        found += key == module
+        groups += [decls[key], *([inner] for inner in decls.get("#!" + key, []))]
+    for alternatives in groups:
+        if not any(_holds(attrs, os, features) for attrs in alternatives):
+            found = "; ".join(p for attrs in alternatives for p in _cfg_predicates(attrs))
+            return f"cfg({found}) is not proven to hold on {os}"
+    return ""
+
+
+def judge_id(test_id, site, sources, pg_tests, pg_only, gates, platform_of):
     """A Mapped proof through some required PR job, else [(kind, reason)] per selecting job."""
     selecting: dict[str, list] = {}
     for source in sources.sources:
@@ -323,7 +460,7 @@ def judge_id(test_id, site, sources, pg_tests, pg_only, gates, static_only):
         running = [source for source in group if source.runs and not source.guard]
         gate = gates.get(job, Gate((), (PATH, "parse_jobs did not return it"), None))
         live = [m for m in mirrors if m.proven and not m.conditional]
-        excluded = static_only(gate.platform)
+        source_file = (site or "").rpartition(":")[0]
         if group[0].origin != "pr-required":
             reasons.append((CONTEXT, f"{job}'s mirror {mirrors[0].job} is unproven") if mirrors
                            else (UNREQUIRED, f"only the non-required PR job {job} selects it"))
@@ -335,19 +472,20 @@ def judge_id(test_id, site, sources, pg_tests, pg_only, gates, static_only):
             reasons.append((gate.problem[0], f"{job}: {gate.problem[1]}"))
         elif not live:
             reasons.append((CONTEXT, f"{job}: every mirror reporting it runs under an `if:`"))
-        elif gate.patterns is not None and not (site and _activates(gate.patterns, site)):
-            reasons.append((PATH, f"{job}: {site or 'its unknown source'} wakes no path filter"))
-        elif excluded is None or test_id in excluded:
-            reasons.append((PLATFORM, f"{job}: {gate.platform or 'its runner'} lacks it"))
+        elif gate.patterns is not None and not _activates(gate.patterns, source_file):
+            reasons.append((PATH, f"{job}: {source_file or 'its unknown source'} wakes no path "
+                                  "filter"))
+        elif gap := platform_of(test_id, gate.platform):
+            reasons.append((PLATFORM, f"{job}: {gap}"))
         else:
-            gate_text = "no path gate" if gate.patterns is None else f"path {site}"
+            gate_text = "no path gate" if gate.patterns is None else f"path {source_file}"
             first = running[0].location
             return Mapped(test_id, job, first, live[0].job, live[0].context, gate_text)
     return reasons
 
 
 def judge(repo_root: Path, base: str, coverage, parity, sources, pg_tests, skip_args, aliases,
-          today: datetime.date | None = None) -> Verdict:
+          modules=frozenset(), decls=None, today: datetime.date | None = None) -> Verdict:
     """Every added id must be mapped or carry a live exception; exceptions must stay needed."""
     cti = parity._sibling("check_test_target_integrity.py")
     pgm = parity._sibling("check_pg_test_lane_membership.py")
@@ -360,13 +498,16 @@ def judge(repo_root: Path, base: str, coverage, parity, sources, pg_tests, skip_
     changed = changed_paths(repo_root, base)
     today = today or datetime.datetime.now(datetime.timezone.utc).date()
     rows, findings = load_exceptions(parity, repo_root / EXCEPTIONS_REL, today)
+    helpers = {row.test_id: row for row in rows if row.mode == HELPER}
+    rows = [row for row in rows if row.mode != HELPER]
     sites: dict[str, set[str]] = {}
     site_of: dict[str, str] = {}
+    empty: list[tuple[str, str]] = []
     if rows or manifest in changed or any(p.endswith(".rs") for p in changed):
         inventory = cti.collect_static_tests(cti.discover_targets(repo_root)["lib"], repo_root)
         for test_id, site in [*inventory.tests.items(),
                               *((d[0], d[2]) for d in inventory.duplicate_tests)]:
-            site_of.setdefault(test_id, site.rsplit(":", 1)[0])
+            site_of.setdefault(test_id, site)
             sites.setdefault(site.rsplit(":", 1)[0], set()).add(test_id)
         stale = sorted(set(inventory.tests) ^ head_ids)
         problems = [f"{m} unresolved at {s}" for m, s in sorted(inventory.module_errors.items())]
@@ -376,26 +517,33 @@ def judge(repo_root: Path, base: str, coverage, parity, sources, pg_tests, skip_
             findings.append(parity.Finding(STALE_MANIFEST, manifest, "; ".join(problems) + (
                 f"; regenerate with {cti.lib_inventory_regeneration_command()} and review it"
             )))
-        findings.extend(touched_sources(
+        touched, empty = touched_sources(
             coverage, parity, repo_root, base, changed, head_ids, sites, aliases
-        ))
+        )
+        findings.extend(touched)
     gates = job_gates(parity, pgm, sources.pr_jobs)
     lanes = [s.lane for s in sources.sources if s.origin.startswith("pr-") and s.lane]
     pg_only = coverage.pg_lanes(lanes, skip_args)
     by_id = {row.test_id: row for row in rows}
+    features = functools.cache(default_features)
+
+    def platform_of(test_id: str, platform: str | None) -> str:
+        return platform_gap(coverage, repo_root, test_id, site_of.get(test_id), decls or {},
+                            aliases, features(repo_root), platform, cti.expected_lib_static_only)
+
     mapped: list[Mapped] = []
     excepted = 0
     for test_id in sorted(set(added) | set(by_id)):
         row = by_id.get(test_id)
         location = (f"{EXCEPTIONS_REL.as_posix()}:{row.line}" if row
-                    else site_of.get(test_id, manifest))
+                    else site_of.get(test_id, manifest).rsplit(":", 1)[0])
         if row and test_id not in head_ids:
             findings.append(parity.Finding(
                 STALE, location, f"`{test_id}` is no lib inventory id; delete the row"
             ))
             continue
         outcome = judge_id(test_id, site_of.get(test_id), sources, pg_tests, pg_only, gates,
-                           cti.expected_lib_static_only)
+                           platform_of)
         if isinstance(outcome, Mapped):
             mapped.extend([outcome] if test_id in added else [])
             if row:
@@ -418,4 +566,22 @@ def judge(repo_root: Path, base: str, coverage, parity, sources, pg_tests, skip_
                 f"`{test_id} | <mode> | #<issue> | expires=YYYY-MM-DD | <reason>` in "
                 + EXCEPTIONS_REL.as_posix()
             )))
-    return Verdict(base, tuple(findings), len(added), tuple(mapped), excepted)
+    for module, path in empty:
+        if module not in helpers:
+            findings.append(parity.Finding(EMPTY_MODULE, path, (
+                f"new test module `{module}` adds no id to the lib inventory manifest; give it "
+                f"a test, or if it only serves other tests record `{module} | {HELPER} | "
+                f"#<issue> | expires=YYYY-MM-DD | <reason>` in {EXCEPTIONS_REL.as_posix()}"
+            )))
+    for module, row in sorted(helpers.items()):
+        location = f"{EXCEPTIONS_REL.as_posix()}:{row.line}"
+        if module not in modules:
+            findings.append(parity.Finding(
+                STALE, location, f"`{module}` is no cfg(test) module; delete the row"
+            ))
+        elif any(test_id.startswith(module + "::") for test_id in head_ids):
+            findings.append(parity.Finding(
+                STALE, location, f"`{module}` now provides lib ids; delete the row"
+            ))
+    used = sum(module in helpers for module, _ in empty)
+    return Verdict(base, tuple(findings), len(added), tuple(mapped), excepted, used)

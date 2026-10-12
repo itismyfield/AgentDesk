@@ -98,6 +98,7 @@ class Repo:
         self.mirror_text: dict[str, str] = {}
         self.id_exceptions: list[str] = []
         self.extra_ids: set[str] = set()
+        self.removed: list[str] = []
 
     def write(self, root: Path) -> None:
         for rel in ("src", "scripts/ci", ".github/workflows"):
@@ -110,6 +111,8 @@ class Repo:
         for rel, text in self.files.items():
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             (root / rel).write_text(text, "utf-8")
+        for rel in self.removed:
+            (root / rel).unlink(missing_ok=True)
         (root / "Cargo.toml").write_text('[package]\nname = "fixture"\n', "utf-8")
         ids = {f"{name}::{test}" for name, tests in self.modules.items() for test in tests}
         (root / "scripts/lib_test_inventory_manifest.txt").write_text(
@@ -169,19 +172,25 @@ class Repo:
 
 
     def delta(self, change) -> tuple[int, str]:
-        """Commit this repo as the reference, apply `change`, and run the coverage CLI
-        against the commit the way CI does."""
+        """Commit this repo as the reference, commit `change` on top, and run the coverage
+        CLI against the reference the way CI does."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             self.write(root)
             subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
             subprocess.run(GIT + ["-C", root, "add", "."], check=True)
             subprocess.run(GIT + ["-C", root, "commit", "-q", "-m", "reference"], check=True)
+            base = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True)
             change(self)
             self.write(root)
+            subprocess.run(GIT + ["-C", root, "add", "-A"], check=True)
+            subprocess.run(GIT + ["-C", root, "commit", "-q", "--allow-empty", "-m", "change"],
+                           check=True)
             output = io.StringIO()
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                result = coverage.main(["--repo-root", str(root), "--baseline-ref", "HEAD"])
+                result = coverage.main(
+                    ["--repo-root", str(root), "--baseline-ref", base.strip()]
+                )
         return result, output.getvalue()
 
 
@@ -558,12 +567,25 @@ class NewRequiredIdTests(unittest.TestCase):
                 "    runs-on:", "    if: ${{ github.event_name == 'push' }}\n    runs-on:"
             )
 
-        for change in (conditional, job_conditional):
+        def false_step(repo: Repo) -> None:
+            add_required(repo)
+            repo.mirror_text["targeted"] = mirror("targeted").replace(
+                "      - env:", "      - if: false\n        env:"
+            )
+
+        def false_job(repo: Repo) -> None:
+            add_required(repo)
+            repo.mirror_text["targeted"] = mirror("targeted").replace(
+                "    runs-on:", "    if: false\n    runs-on:"
+            )
+
+        for change in (conditional, job_conditional, false_step, false_job):
             with self.subTest(change=change.__name__):
                 result, output = debt_repo().delta(change)
                 context = new_findings(output, "new-id-context-unproven")
                 self.assertEqual(len(context), 1, output)
                 self.assertIn("every mirror reporting it runs under an `if:`", context[0])
+                self.assertNotIn("delta::reads_pg_env -> ", output)
                 self.assertEqual(result, 1)
 
     def test_path_filter_that_misses_the_test_file_is_path_unproven(self) -> None:
@@ -627,7 +649,10 @@ class NewRequiredIdTests(unittest.TestCase):
                 self.assertEqual(result, 1)
 
     def test_selecting_step_that_may_skip_or_swallow_failure_proves_no_run(self) -> None:
-        for key in ("continue-on-error: true", "if: ${{ github.event_name == 'push' }}"):
+        for key in (
+            "continue-on-error: true", "if: ${{ github.event_name == 'push' }}", "if: false",
+            "continue-on-error: ${{ false }} || true",
+        ):
             with self.subTest(key=key):
                 def guarded(repo: Repo, key=key) -> None:
                     add_required(repo)
@@ -637,6 +662,7 @@ class NewRequiredIdTests(unittest.TestCase):
                 runmode = new_findings(output, "new-id-runmode-unproven")
                 self.assertEqual(len(runmode), 1, output)
                 self.assertIn(f"sits under a step {key}", runmode[0])
+                self.assertNotIn("delta::reads_pg_env -> ", output)
                 self.assertEqual(result, 1)
 
     def test_mirror_env_on_another_step_is_unproven(self) -> None:
@@ -681,14 +707,70 @@ class NewRequiredIdTests(unittest.TestCase):
 
     def test_new_test_module_without_inventoried_ids_is_empty(self) -> None:
         def empty(repo: Repo) -> None:
-            repo.lib_tail = (
-                "#[cfg(test)]\nmod epsilon_tests {\n}\n#[cfg(test)]\nmod test_support {\n}\n"
-            )
+            repo.lib_tail = "#[cfg(test)]\nmod epsilon_tests {\n}\n"
 
         result, output = Repo().delta(empty)
         modules = new_findings(output, "new-test-module-empty")
         self.assertEqual(len(modules), 1, output)
         self.assertIn("new test module `epsilon_tests`", modules[0])
+        self.assertEqual(result, 1)
+
+    def test_any_new_empty_test_module_fails_unless_an_exact_helper_row_names_it(self) -> None:
+        row = "{} | helper-module | #5082 | expires=2099-12-31 | shared fixtures for sibling tests"
+        for name in ("regression", "spy", "test_support"):
+            with self.subTest(name=name):
+                def empty(repo: Repo, name=name) -> None:
+                    repo.lib_tail = f"#[cfg(test)]\nmod {name} {{\n    pub fn helper() {{}}\n}}\n"
+
+                result, output = Repo().delta(empty)
+                modules = new_findings(output, "new-test-module-empty")
+                self.assertEqual(len(modules), 1, output)
+                self.assertIn(f"new test module `{name}`", modules[0])
+                self.assertEqual(result, 1)
+
+                def excepted(repo: Repo, name=name) -> None:
+                    empty(repo)
+                    repo.id_exceptions = [row.format(name)]
+
+                result, output = Repo().delta(excepted)
+                self.assertEqual(new_findings(output, "new-test-module-empty"), [], output)
+                self.assertEqual(result, 0, output)
+
+        result, output = Repo().delta(lambda r: setattr(r, "id_exceptions", [row.format("gone")]))
+        stale = new_findings(output, "stale-new-id-exception")
+        self.assertEqual(len(stale), 1, output)
+        self.assertIn("`gone` is no cfg(test) module", stale[0])
+
+    def test_moved_file_keeps_its_empty_module_but_a_new_one_still_fails(self) -> None:
+        home = (
+            "#[cfg(test)]\nmod test_support {\n    pub fn helper() -> u32 {\n        7\n    }\n}\n"
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn helper_is_seven() {\n"
+            "        assert_eq!(super::test_support::helper(), 7);\n    }\n}\n"
+        )
+        repo = Repo()
+        repo.files["src/old_home.rs"] = home
+        repo.lib_tail = "pub mod old_home;\n"
+        repo.extra_ids = {"old_home::tests::helper_is_seven"}
+
+        def moved(r: Repo, extra: str = "") -> None:
+            r.removed = ["src/old_home.rs"]
+            r.files = {"src/new_home.rs": home + extra}
+            r.lib_tail = "pub mod new_home;\n"
+            r.extra_ids = {"new_home::tests::helper_is_seven"}
+
+        result, output = repo.delta(moved)
+        self.assertEqual(new_findings(output, "new-test-module-empty"), [], output)
+        self.assertIn("added=1 mapped=1", output)
+        self.assertEqual(result, 0, output)
+
+        repo = Repo()
+        repo.files["src/old_home.rs"] = home
+        repo.lib_tail = "pub mod old_home;\n"
+        repo.extra_ids = {"old_home::tests::helper_is_seven"}
+        result, output = repo.delta(lambda r: moved(r, "#[cfg(test)]\nmod regression {\n}\n"))
+        modules = new_findings(output, "new-test-module-empty")
+        self.assertEqual(len(modules), 1, output)
+        self.assertIn("new test module `new_home::regression`", modules[0])
         self.assertEqual(result, 1)
 
     def test_new_test_outside_the_lib_target_is_unresolved(self) -> None:
@@ -793,28 +875,57 @@ class NewRequiredIdTests(unittest.TestCase):
         self.assertIn("`pgmod::fresh_case`: no PR job selects it", unrequired[0])
         self.assertEqual(result, 1)
 
-    def test_id_the_runner_does_not_compile_is_platform_unproven(self) -> None:
-        cti = coverage._parity_module()._sibling("check_test_target_integrity.py")
-        linux = cti.LIB_INVENTORY_STATIC_ONLY_BY_PLATFORM["linux"] | {"delta::reads_pg_env"}
-        platforms = {**cti.LIB_INVENTORY_STATIC_ONLY_BY_PLATFORM, "linux": linux}
-        with mock.patch.object(cti, "LIB_INVENTORY_STATIC_ONLY_BY_PLATFORM", platforms):
-            result, output = debt_repo().delta(add_required)
-            platform = new_findings(output, "new-id-platform-unproven")
-            self.assertEqual(len(platform), 1, output)
-            self.assertIn("targeted: linux lacks it", platform[0])
-            self.assertEqual(result, 1)
+    def test_new_id_the_runner_cfg_excludes_is_platform_unproven(self) -> None:
+        tail = (
+            "#[cfg(test)]\nmod plat {\n"
+            "    #[cfg(windows)]\n    #[test]\n    fn windows_only() {}\n"
+            "    #[cfg(target_os = \"windows\")]\n    #[test]\n    fn windows_os_only() {}\n"
+            "    #[cfg(target_arch = \"riscv64\")]\n    #[test]\n    fn unreadable_arch() {}\n"
+            "    #[cfg(unix)]\n    #[test]\n    fn unix_runs() {}\n}\n"
+            "#[cfg(all(test, windows))]\nmod win_tests {\n"
+            "    #[test]\n    fn inherited_gate() {}\n}\n"
+        )
+        gated = {"plat::windows_only", "plat::windows_os_only", "plat::unreadable_arch",
+                 "win_tests::inherited_gate"}
 
-            def excepted(r: Repo) -> None:
-                add_required(r)
-                r.id_exceptions = [
-                    "delta::reads_pg_env | platform-unavailable | #5082 | expires=2099-12-31 | "
-                    "windows only behaviour"
-                ]
+        def platform_tests(repo: Repo) -> None:
+            repo.lib_tail = tail
+            repo.extra_ids = gated | {"plat::unix_runs"}
 
-            result, output = debt_repo().delta(excepted)
-            self.assertIn("added=1 mapped=0 excepted=1", output)
-            self.assertEqual(result, 0, output)
+        result, output = Repo().delta(platform_tests)
+        flagged = {
+            m.group(2) for m in map(NEW_FINDING.match, output.splitlines())
+            if m and m.group(1) == "new-id-platform-unproven"
+        }
+        self.assertEqual(flagged, gated, output)
+        self.assertEqual(result, 1)
 
+        def portable(repo: Repo) -> None:
+            repo.lib_tail = (
+                "#[cfg(test)]\nmod plat {\n    #[cfg(unix)]\n    #[test]\n    fn unix_runs() {}\n"
+                "    #[cfg(not(windows))]\n    #[test]\n    fn not_windows() {}\n}\n"
+                "#[cfg(all(test, target_os = \"linux\"))]\nmod linux_tests {\n"
+                "    #[test]\n    fn on_linux() {}\n}\n"
+            )
+            repo.extra_ids = {"plat::unix_runs", "plat::not_windows", "linux_tests::on_linux"}
+
+        result, output = Repo().delta(portable)
+        self.assertIn("added=3 mapped=3", output)
+        self.assertIn("  plat::unix_runs -> sweep (", output)
+        self.assertEqual(result, 0, output)
+
+        def excepted(repo: Repo) -> None:
+            repo.lib_tail = "#[cfg(test)]\nmod plat {\n    #[cfg(windows)]\n    #[test]\n" \
+                            "    fn windows_only() {}\n}\n"
+            repo.extra_ids = {"plat::windows_only"}
+            repo.id_exceptions = [
+                "plat::windows_only | platform-unavailable | #5082 | expires=2099-12-31 | "
+                "windows only behaviour"
+            ]
+
+        result, output = Repo().delta(excepted)
+        self.assertIn("added=1 mapped=0 excepted=1", output)
+        self.assertEqual(result, 0, output)
 
 if __name__ == "__main__":
     unittest.main()
