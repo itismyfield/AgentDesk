@@ -58,6 +58,8 @@ mod voice_announcement_scope;
 mod watchdog;
 
 use self::goal_lifecycle::*;
+#[cfg(test)]
+pub(in crate::services::discord) use self::provider_dispatch::producer_error_test_support::producer_error_frame;
 use self::provider_isolation::*;
 use self::tui_followup::*;
 pub(in crate::services::discord) use self::turn_lifecycle::mailbox_try_start_turn_with_terminal_marker_cleanup;

@@ -123,6 +123,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::input_runtime::supervisor::runtime::ports::tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
   --skip services::discord::placeholder_sweeper::retirement_tests
+  --skip services::discord::queue_io::queued_head_inject::tests
   --skip services::discord::recovery_engine::herdr_before_start_restart::tests
   --skip services::discord::recovery_engine::host_reconcile::tests
   --skip services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
@@ -131,6 +132,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::recovery_engine::restore_inflight::replay_hold_tests
   --skip services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests
   --skip services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
+  --skip services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests
   --skip services::discord::recovery_engine::routing_orphan::host_guard_tests
   --skip services::discord::relay_recovery::apply::host_deferred_tests
   --skip services::discord::relay_recovery::circuit_breaker::tests
@@ -608,6 +610,10 @@ NON_PG_FILTER_REPLAY=(
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_cutoffs_do_not_panic_for_extreme_values
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_spawns_exactly_once_per_process
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_task_can_restart_after_task_death
+  services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_rehearsal_tests::tests::d4act3_literal_rg_finds_spaced_not_sent_tags
+  services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_rehearsal_tests::tests::d4act3_literal_rg_missing_binary_requires_install
+  services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_rehearsal_tests::tests::d4act3_literal_rg_read_failure_and_incomplete_text_refuse
+  services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_rehearsal_tests::tests::d4act3_rollback_scan_requires_wait_and_every_activated_ledger
   services::discord::runtime_bootstrap::o_writer_host::fence_tests::a_host_without_an_intake_fence_refuses_deferred_activation_facts
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_checked_reads_distinguish_absence_from_corruption
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_install_rolls_back_on_required_persistence_failure
@@ -986,6 +992,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::input_runtime::supervisor::runtime::ports::tests
   services::discord::placeholder_sweeper::abandon_guard::tests
   services::discord::placeholder_sweeper::retirement_tests
+  services::discord::queue_io::queued_head_inject::tests
   services::discord::recovery_engine::herdr_before_start_restart::tests
   services::discord::recovery_engine::host_reconcile::tests
   services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
@@ -994,6 +1001,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::recovery_engine::restore_inflight::replay_hold_tests
   services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests
   services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
+  services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests
   services::discord::recovery_engine::routing_orphan::host_guard_tests
   services::discord::relay_recovery::apply::host_deferred_tests
   services::discord::relay_recovery::circuit_breaker::tests

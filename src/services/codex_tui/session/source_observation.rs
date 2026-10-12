@@ -407,6 +407,24 @@ pub(crate) enum CodexSourceMode {
     Verified,
     Invalid,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceLaunchPolicy {
+    Legacy,
+    Shadow,
+    Verified,
+}
+
+impl SourceLaunchPolicy {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Shadow => "shadow",
+            Self::Verified => "verified",
+        }
+    }
+}
+
 impl CodexSourceMode {
     pub(crate) fn parse(value: Option<&str>) -> Self {
         match value {
@@ -417,9 +435,13 @@ impl CodexSourceMode {
         }
     }
     pub(crate) fn launch_policy(self) -> Result<&'static str, &'static str> {
+        self.launch_decision().map(SourceLaunchPolicy::as_str)
+    }
+
+    pub(crate) fn launch_decision(self) -> Result<SourceLaunchPolicy, &'static str> {
         match self {
-            Self::Legacy => Ok("legacy"),
-            Self::Shadow => Ok("shadow"),
+            Self::Legacy => Ok(SourceLaunchPolicy::Legacy),
+            Self::Shadow => Ok(SourceLaunchPolicy::Shadow),
             Self::Verified => Err("SourceModeVerifiedNotLanded"),
             Self::Invalid => Err("SourceModeInvalid"),
         }

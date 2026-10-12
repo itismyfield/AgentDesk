@@ -22,6 +22,7 @@ pub(in crate::services::discord) use backstop::{
 #[path = "queue_io/cancel_reclaim_support_test.rs"]
 pub(in crate::services::discord) mod cancel_backstop_test_support;
 
+pub(in crate::services::discord) mod queued_head_inject;
 mod transport;
 mod turn_admission;
 use transport::QueueTransport;

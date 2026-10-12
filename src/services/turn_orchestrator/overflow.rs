@@ -12,12 +12,21 @@ use super::{Intervention, MAX_INTERVENTIONS_PER_CHANNEL, QueueExitEvent, QueueEx
 
 /// Drain the oldest `queue.len() - MAX` entries as `Overflow` exit events.
 pub(super) fn drain_head_overflow(queue: &mut Vec<Intervention>) -> Vec<QueueExitEvent> {
+    drain_head_overflow_behind(queue, false)
+}
+
+/// A reserved head keeps its payload; overflow evicts the oldest unprotected tail.
+pub(super) fn drain_head_overflow_behind(
+    queue: &mut Vec<Intervention>,
+    reserved_front: bool,
+) -> Vec<QueueExitEvent> {
     if queue.len() <= MAX_INTERVENTIONS_PER_CHANNEL {
         return Vec::new();
     }
     let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
+    let first = usize::from(reserved_front);
     queue
-        .drain(0..overflow)
+        .drain(first..first + overflow)
         .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Overflow))
         .collect()
 }
@@ -33,3 +42,7 @@ pub(crate) struct SoftInterventionProbe {
     pub(crate) has_pending: bool,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
 }
+
+#[cfg(test)]
+#[path = "overflow_s2b_tests.rs"]
+mod s2b_tests;

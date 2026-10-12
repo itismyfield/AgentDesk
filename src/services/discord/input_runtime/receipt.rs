@@ -19,6 +19,7 @@ pub(crate) enum Deferred {
     Unknown,
     Conflict,
     Persistence,
+    Gate(super::super::fence::Failure),
     SupervisorLost,
 }
 
