@@ -104,13 +104,20 @@ fn repost_config(enabled: bool, listed: &[u64]) -> RepostConfig {
     }
 }
 
-/// The production re-post turn over `pool`; it never opens a transport.
-fn receipt_turn(root: &Path, pool: PgPool, repost: RepostConfig) -> ChannelTurn<RepostHttp> {
-    let boot = TuiOConfig {
+fn tui_o(repost: RepostConfig) -> TuiOConfig {
+    TuiOConfig {
         repost,
         ..TuiOConfig::default()
-    };
-    let switch = RepostSwitch::new(Some(&boot), watch::channel(None).1);
+    }
+}
+
+/// The production re-post turn over `pool`; it never opens a transport.
+fn receipt_turn(root: &Path, pool: PgPool, repost: RepostConfig) -> ChannelTurn<RepostHttp> {
+    let switch = RepostSwitch::new(Some(&tui_o(repost)), watch::channel(None).1);
+    turn_over(root, pool, switch)
+}
+
+fn turn_over(root: &Path, pool: PgPool, switch: RepostSwitch) -> ChannelTurn<RepostHttp> {
     let run = RunScope {
         holder: "node-a".into(),
         run: "d4d".into(),
@@ -143,16 +150,29 @@ async fn until(mut done: impl FnMut() -> bool) {
 /// serial and whether the approval at serial 0 was consumed.
 type Started = (Vec<String>, Option<WriterAlarm>, u64, Option<Option<u64>>);
 
+/// A live config naming `repost`, as a validated reload installs it.
+fn live(repost: RepostConfig) -> Option<Arc<crate::config::Config>> {
+    let mut config = crate::config::Config::default();
+    config.tui_o = Some(tui_o(repost));
+    Some(Arc::new(config))
+}
+
 /// Starts the actor over a writer built with the receipts its production turn read, appends one
-/// row and reports what that start came to.
+/// row and reports what that start came to. `withdraw` unlists the channel after the read.
 async fn start_writer(
     harness: &Harness,
     path: &Path,
     pool: PgPool,
     repost: RepostConfig,
+    withdraw: bool,
 ) -> Started {
-    let mut hook = receipt_turn(harness._runtime.path(), pool, repost);
+    let (reload, installed) = watch::channel(live(repost));
+    let switch = RepostSwitch::new(None, installed);
+    let mut hook = turn_over(harness._runtime.path(), pool, switch);
     let receipts = <ChannelTurn<RepostHttp> as RepostHook<Writer>>::receipts(&mut hook).await;
+    if withdraw {
+        reload.send_replace(live(repost_config(true, &[OTHER])));
+    }
     let (gate, port) = (Arc::clone(&harness.gate), Arc::clone(&harness.port));
     let lease = Arc::clone(&harness.lease);
     let alarms = harness.alarms.clone();
@@ -184,8 +204,8 @@ async fn start_writer(
     )
 }
 
-/// A receipted 403 starts the writer with no POST of it; no receipt, a failed read, another payload
-/// or identity version keep the stop; off, the approval goes once. The ledger is only appended to.
+/// A receipted 403 starts the writer with no POST of it; no receipt, a failed read, other payload
+/// or version, an unreceipted 403 or a withdrawn listing keep the stop; off, approval goes once.
 #[tokio::test]
 async fn d4d_receipt_overlay_judges_the_recovered_writer_pg() {
     let db = TestPostgresDb::create().await;
@@ -209,6 +229,8 @@ async fn d4d_receipt_overlay_judges_the_recovered_writer_pg() {
         ("w-down", None, false),
         ("w-payload", Some(other_payload), false),
         ("w-version", Some(other_version), false),
+        ("w-two", Some(RECEIPTED), false),
+        ("w-withdrawn", Some(RECEIPTED), false),
         ("w-off", Some(RECEIPTED), true),
     ];
     let mut observed = Vec::new();
@@ -218,6 +240,9 @@ async fn d4d_receipt_overlay_judges_the_recovered_writer_pg() {
         }
         let (harness, path, _) = switched_over(b"");
         seed_rejection(&harness, native, 0, approve);
+        if native == "w-two" {
+            seed_rejection(&harness, "w-two-unreceipted", 1, false);
+        }
         let before = std::fs::read(ledger_path(&harness)).unwrap();
         harness.gate.acquired();
         let reachable = if stored.is_some() {
@@ -226,7 +251,8 @@ async fn d4d_receipt_overlay_judges_the_recovered_writer_pg() {
             unreachable_pool()
         };
         let repost = repost_config(native != "w-off", &[CHANNEL]);
-        let started = start_writer(&harness, &path, reachable, repost).await;
+        let withdraw = native == "w-withdrawn";
+        let started = start_writer(&harness, &path, reachable, repost, withdraw).await;
         let after = std::fs::read(ledger_path(&harness)).unwrap();
         assert!(
             after.starts_with(&before),
@@ -244,6 +270,8 @@ async fn d4d_receipt_overlay_judges_the_recovered_writer_pg() {
         ("w-down", blocked(None)),
         ("w-payload", blocked(None)),
         ("w-version", blocked(None)),
+        ("w-two", (vec![], Some(BLOCKED), 2, None)),
+        ("w-withdrawn", blocked(None)),
         ("w-off", (sent, None, 3, Some(Some(1)))),
     ];
     assert_eq!(observed, expected);
