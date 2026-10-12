@@ -139,6 +139,8 @@ pub struct Sources<B> {
     log_alarmed: bool,
     /// Hop seq and pane of successor records written without them, as the binding log names them.
     legacy_hops: HashMap<String, (u64, String)>,
+    /// The history needed to identify legacy hops has not been read successfully yet.
+    legacy_hops_unread: bool,
     names: Names,
     reader_config: Option<ReaderConfig>,
     last_wall: Option<SystemTime>,
@@ -296,6 +298,7 @@ impl<B: BindingEvents> Sources<B> {
             pending_alarmed: None,
             log_alarmed: false,
             legacy_hops: HashMap::new(),
+            legacy_hops_unread: false,
             names: Names::new(provider),
             reader_config: None,
             last_wall: None,
@@ -339,18 +342,21 @@ impl<B: BindingEvents> Sources<B> {
     fn restore_legacy_hops<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
-    ) {
+    ) -> Result<(), WriterAlarm> {
         let legacy = |next: &Successor| next.seq.is_none() && next.proof.is_none();
         let Some(checkpoint) = self.checkpoint else {
-            return;
+            self.legacy_hops_unread = false;
+            return Ok(());
         };
         if !self.rotation.successors.values().any(legacy) {
-            return;
+            self.legacy_hops_unread = false;
+            return Ok(());
         }
-        let read = self.bindings.binding_events_since(self.channel, 0);
-        let Some(events) = self.names.history(writer.store(), read, Some(checkpoint)) else {
-            return;
+        self.legacy_hops_unread = true;
+        let Some((_, events)) = self.read_log(writer, 0)? else {
+            return Ok(());
         };
+        let mut restored = HashMap::new();
         let applied = &events[..events.partition_point(|e| e.seq <= checkpoint)];
         for (key, next) in self.rotation.successors.iter().filter(|(_, n)| legacy(n)) {
             let last = applied.iter().rev().find_map(|e| {
@@ -360,9 +366,12 @@ impl<B: BindingEvents> Sources<B> {
             });
             if let Some((event, _)) = last.filter(|(_, (_, new))| **new == next.source) {
                 let pane = (event.seq, event.tmux_session.clone());
-                self.legacy_hops.insert(key.clone(), pane);
+                restored.insert(key.clone(), pane);
             }
         }
+        self.legacy_hops = restored;
+        self.legacy_hops_unread = false;
+        Ok(())
     }
 
     /// Applies binding events past the checkpoint in seq order, stopping at an unresolved bind that
@@ -380,6 +389,12 @@ impl<B: BindingEvents> Sources<B> {
         };
         if *self.notice.borrow() <= checkpoint {
             return Ok(());
+        }
+        if self.legacy_hops_unread {
+            self.restore_legacy_hops(writer)?;
+            if self.legacy_hops_unread {
+                return Ok(());
+            }
         }
         let Some((events, _)) = self.read_log(writer, checkpoint)? else {
             return Ok(());
