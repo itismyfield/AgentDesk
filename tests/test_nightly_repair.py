@@ -203,11 +203,11 @@ class NightlyRepairWiringTests(unittest.TestCase):
             with self.subTest(mutant=name):
                 mutated = mutate(self.text)
                 self.assertNotEqual(mutated, self.text)
-                # The target-integrity inventory loses the command entirely,
-                # while membership still finds a `cargo test` substring: a green
-                # exit status on either gate would hide the lost coverage.
+                # The target-integrity inventory loses the command entirely, and
+                # membership refuses it rather than read a lane past the wrapper.
                 self.assertNotIn(rendered, integrity_commands(mutated))
-                self.assertTrue(membership_commands(mutated))
+                with self.assertRaisesRegex(ValueError, "cargo-command-unparsed"):
+                    membership_commands(mutated)
 
 
     def test_each_job_profile_entry_is_required(self) -> None:
