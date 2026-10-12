@@ -162,8 +162,30 @@ pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileL
 
 // Contention is retryable; scheduler callers must not wait for another open handle.
 pub(crate) fn try_lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
+    try_lock_inflight_state_path_typed(path).map_err(TryLockRefusal::detail)
+}
+
+/// Why a non-blocking acquire took no lock: another open handle holds it, or anything else.
+pub(crate) enum TryLockRefusal {
+    Contended,
+    Failed(String),
+}
+
+impl TryLockRefusal {
+    fn detail(self) -> String {
+        match self {
+            Self::Contended => fs::TryLockError::WouldBlock.to_string(),
+            Self::Failed(detail) => detail,
+        }
+    }
+}
+
+/// `try_lock_inflight_state_path` with contention told apart from IO, without parsing its text.
+pub(crate) fn try_lock_inflight_state_path_typed(
+    path: &Path,
+) -> Result<InflightStateFileLock, TryLockRefusal> {
     if let Some(population) = crate::services::discord::input_runtime::fence::inflight_writer(path)
-        .map_err(|failure| format!("input fence: {failure:?}"))?
+        .map_err(|failure| TryLockRefusal::Failed(format!("input fence: {failure:?}")))?
     {
         return Ok(InflightStateFileLock {
             file: None,
@@ -171,8 +193,12 @@ pub(crate) fn try_lock_inflight_state_path(path: &Path) -> Result<InflightStateF
             state_path: path.to_owned(),
         });
     }
-    let file = open_inflight_lock_file(path)?;
-    file.try_lock().map_err(|e| e.to_string())?;
+    let file = open_inflight_lock_file(path).map_err(TryLockRefusal::Failed)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => return Err(TryLockRefusal::Contended),
+        Err(error) => return Err(TryLockRefusal::Failed(error.to_string())),
+    }
     Ok(InflightStateFileLock {
         file: Some(file),
         _population: None,
