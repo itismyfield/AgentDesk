@@ -120,6 +120,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::inflight::receipt_boundary_tests
   --skip services::discord::inflight::removal::custody_notice_tests
   --skip services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
+  --skip services::discord::input_runtime::fence::effect::tests::g1b_off
   --skip services::discord::input_runtime::supervisor::runtime::ports::tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
   --skip services::discord::placeholder_sweeper::retirement_tests
@@ -983,6 +984,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::inflight::receipt_boundary_tests
   services::discord::inflight::removal::custody_notice_tests
   services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
+  services::discord::input_runtime::fence::effect::tests::g1b_off
   services::discord::input_runtime::supervisor::runtime::ports::tests
   services::discord::placeholder_sweeper::abandon_guard::tests
   services::discord::placeholder_sweeper::retirement_tests

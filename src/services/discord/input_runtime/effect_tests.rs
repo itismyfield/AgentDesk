@@ -272,65 +272,72 @@ fn c1_worker_panic_restores_capability_and_blocking_backstop() {
         });
 }
 
-#[tokio::test]
-async fn c1_detached_panic_preserves_payload_and_effectful_drop_off_and_protected() {
+#[test]
+fn c1_detached_panic_preserves_payload_and_effectful_drop_off_and_protected() {
     let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
-    let root = tempfile::tempdir().unwrap();
-    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "AGENTDESK_ROOT_DIR",
-        root.path(),
-    );
-    struct Dispose {
-        channel: u64,
-        path: std::path::PathBuf,
-        protected: bool,
-    }
-    impl Drop for Dispose {
-        fn drop(&mut self) {
-            assert_eq!(current().is_some(), self.protected);
-            if self.protected {
-                assert_eq!(super::super::require_worker(), Ok(()));
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_ROOT_DIR",
+                root.path(),
+            );
+            struct Dispose {
+                channel: u64,
+                path: std::path::PathBuf,
+                protected: bool,
             }
-            super::super::write(&ProviderKind::Claude, self.channel, || {
-                std::fs::write(&self.path, b"panic cleanup").map_err(|error| error.to_string())
-            })
-            .unwrap();
-        }
-    }
-    for protected in [false, true] {
-        let channel = if protected { 6_325_429 } else { 6_325_428 };
-        let gate = protected.then(|| Gate::protect(ProviderKind::Claude, channel).unwrap());
-        let _health = gate.as_ref().map(super::super::test_health::Clear::new);
-        let permit = gate.as_ref().map(|gate| gate.admit().unwrap());
-        let path = root.path().join(channel.to_string());
-        let dispose = Dispose {
-            channel,
-            path: path.clone(),
-            protected,
-        };
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(detached(permit, async move {
-            let _dispose = dispose;
-            entered_tx.send(()).unwrap();
-            release_rx.await.unwrap();
-            std::panic::panic_any(6325_u64);
-        }));
-        entered_rx.await.unwrap();
-        let closing = gate.as_ref().map(|gate| gate.close().unwrap());
-        if let Some(closing) = &closing {
-            assert!(futures::FutureExt::now_or_never(closing.drain()).is_none());
-        }
-        release_tx.send(()).unwrap();
-        let error = task.await.unwrap_err();
-        assert!(error.is_panic());
-        assert_eq!(*error.into_panic().downcast::<u64>().unwrap(), 6325);
-        assert_eq!(std::fs::read(path).unwrap(), b"panic cleanup");
-        if let Some(closing) = closing {
-            closing.drain().await;
-        }
-        assert!(current().is_none());
-    }
+            impl Drop for Dispose {
+                fn drop(&mut self) {
+                    assert_eq!(current().is_some(), self.protected);
+                    if self.protected {
+                        assert_eq!(super::super::require_worker(), Ok(()));
+                    }
+                    super::super::write(&ProviderKind::Claude, self.channel, || {
+                        std::fs::write(&self.path, b"panic cleanup")
+                            .map_err(|error| error.to_string())
+                    })
+                    .unwrap();
+                }
+            }
+            for protected in [false, true] {
+                let channel = if protected { 6_325_429 } else { 6_325_428 };
+                let gate = protected.then(|| Gate::protect(ProviderKind::Claude, channel).unwrap());
+                let _health = gate.as_ref().map(super::super::test_health::Clear::new);
+                let permit = gate.as_ref().map(|gate| gate.admit().unwrap());
+                let path = root.path().join(channel.to_string());
+                let dispose = Dispose {
+                    channel,
+                    path: path.clone(),
+                    protected,
+                };
+                let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+                let task = tokio::spawn(detached(permit, async move {
+                    let _dispose = dispose;
+                    entered_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                    std::panic::panic_any(6325_u64);
+                }));
+                entered_rx.await.unwrap();
+                let closing = gate.as_ref().map(|gate| gate.close().unwrap());
+                if let Some(closing) = &closing {
+                    assert!(futures::FutureExt::now_or_never(closing.drain()).is_none());
+                }
+                release_tx.send(()).unwrap();
+                let error = task.await.unwrap_err();
+                assert!(error.is_panic());
+                assert_eq!(*error.into_panic().downcast::<u64>().unwrap(), 6325);
+                assert_eq!(std::fs::read(path).unwrap(), b"panic cleanup");
+                if let Some(closing) = closing {
+                    closing.drain().await;
+                }
+                assert!(current().is_none());
+            }
+        });
 }
 
 #[test]
@@ -435,32 +442,38 @@ fn c1_shutdown_disposes_queued_and_rejected_cleanup_with_preclose_effect() {
     }
 }
 
-#[tokio::test]
-async fn c1_async_accessory_worker_consumes_preclose_permit_and_keeps_scheduler_backstop() {
+#[test]
+fn c1_async_accessory_worker_consumes_preclose_permit_and_keeps_scheduler_backstop() {
     let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
-    let root = tempfile::tempdir().unwrap();
-    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "AGENTDESK_ROOT_DIR",
-        root.path(),
-    );
-    let channel = 6_325_405;
-    let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
-    let _health = super::super::test_health::Clear::new(&gate);
-    scope(Some(gate.admit().unwrap()), async {
-        let _closing = gate.close().unwrap();
-        assert!(super::super::write(&ProviderKind::Claude, channel, || Ok(())).is_err());
-        let path = root.path().join("written");
-        let saved = path.clone();
-        io(move || {
-            super::super::write(&ProviderKind::Claude, channel, || {
-                std::fs::write(path, b"existing effect").map_err(|e| e.to_string())
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_ROOT_DIR",
+                root.path(),
+            );
+            let channel = 6_325_405;
+            let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+            let _health = super::super::test_health::Clear::new(&gate);
+            scope(Some(gate.admit().unwrap()), async {
+                let _closing = gate.close().unwrap();
+                assert!(super::super::write(&ProviderKind::Claude, channel, || Ok(())).is_err());
+                let path = root.path().join("written");
+                let saved = path.clone();
+                io(move || {
+                    super::super::write(&ProviderKind::Claude, channel, || {
+                        std::fs::write(path, b"existing effect").map_err(|e| e.to_string())
+                    })
+                })
+                .await
+                .unwrap();
+                assert_eq!(std::fs::read(saved).unwrap(), b"existing effect");
             })
-        })
-        .await
-        .unwrap();
-        assert_eq!(std::fs::read(saved).unwrap(), b"existing effect");
-    })
-    .await;
+            .await;
+        });
 }
 
 #[tokio::test]
@@ -585,4 +598,222 @@ async fn c1b_explicit_empty_worker_scope_masks_task_capability() {
     .await;
     assert!(current().is_none());
     gate.close().unwrap().drain().await;
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod g1b_off {
+    type OutboxRow = (String, String, String, String, String, String, Option<bool>);
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::discord::input_runtime::{fence, supervisor};
+    use crate::services::discord::router::message_handler::IntakeDeps;
+    use crate::services::discord::router::{IntakeOrigin, dispatch_skill_intake};
+    use crate::services::provider::ProviderKind;
+    use crate::services::tui_input::ledger::{Ledger, OPENS, Presence};
+    use poise::serenity_prelude::{ChannelId, Http, MessageId, UserId};
+    use std::process::{Command, Stdio};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    const TEST: &str = "g1b_off_entrypoint_preserves_legacy_trace_pg";
+    const CHILD: &str = "ADK_G1B_OFF_CHILD";
+    const TMUX_LOG: &str = "ADK_G1B_OFF_TMUX_LOG";
+    const CHANNEL: u64 = 6_325_710;
+    const MESSAGE: u64 = 6_325_711;
+    const OWNER: &str = "g1b-off-foreign-owner";
+    const TEXT: &str = "off intake keeps the existing foreign route";
+
+    fn child() -> bool {
+        if std::env::var(CHILD).as_deref() == Ok(TEST) {
+            return true;
+        }
+        let sandbox = tempfile::tempdir().unwrap();
+        let runtime = sandbox.path().join("runtime");
+        let temporary = sandbox.path().join("tmp");
+        let bin = sandbox.path().join("bin");
+        for path in [&runtime, &temporary, &bin] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let stub = bin.join("tmux");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ADK_G1B_OFF_TMUX_LOG\"\nexit 97\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let qualified = format!("{}::{TEST}", module_path!().split_once("::").unwrap().1);
+        let mut process = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &qualified, "--nocapture"])
+            .env(CHILD, TEST)
+            .env("AGENTDESK_ROOT_DIR", &runtime)
+            .env("AGENTDESK_CONFIG", sandbox.path().join("unused-config"))
+            .env("TMPDIR", &temporary)
+            .env(TMUX_LOG, sandbox.path().join("tmux-calls"))
+            .env("ADK_INTAKE_ROUTING_MODE", "enforce")
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .env("NO_PROXY", "")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while process.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                process.kill().unwrap();
+                let _ = process.wait();
+                panic!("off intake child exceeded its deadline");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = process.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.starts_with("G1B_OFF_TRACE="))
+        );
+        print!("{stdout}");
+        false
+    }
+
+    async fn seed(pool: &sqlx::PgPool) {
+        let channel = CHANNEL.to_string();
+        let agent = format!("g1b-off-{CHANNEL}");
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id,
+             preferred_intake_node_labels) VALUES ($1, 'Off input', 'claude', $2, '[]'::jsonb)",
+        )
+        .bind(&agent)
+        .bind(&channel)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_nodes (instance_id, status, role, effective_role,
+             labels, capabilities, last_heartbeat_at, started_at, updated_at)
+             VALUES ($1, 'online', 'worker', 'worker', '[]'::jsonb,
+             '{\"intake_worker\":{\"enabled\":true,\"providers\":[\"claude\"],
+             \"features\":[\"preserve_on_cancel_v1\"]}}'::jsonb, NOW(), NOW(), NOW())",
+        )
+        .bind(OWNER)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (session_key, agent_id, provider, channel_id,
+             instance_id, status, last_heartbeat)
+             VALUES ($1, $2, 'claude', $3, $4, 'idle', NOW())",
+        )
+        .bind(format!("claude-{CHANNEL}"))
+        .bind(&agent)
+        .bind(&channel)
+        .bind(OWNER)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn resources(root: &std::path::Path, workers: &AtomicUsize) {
+        assert!(!supervisor::REGISTRY.used());
+        assert_eq!(supervisor::REGISTRY.population_for_test(), (0, 0));
+        assert_eq!(supervisor::ordering::handback_count_for_test(), 0);
+        assert_eq!(supervisor::ordering::handback_callback_count_for_test(), 0);
+        assert!(super::super::super::GATES.get().is_none());
+        assert!(fence::lookup(&ProviderKind::Claude, CHANNEL).is_none());
+        assert!(!supervisor::ordering::order_barrier(
+            &ProviderKind::Claude,
+            CHANNEL
+        ));
+        assert_eq!(OPENS.with(|opens| opens.get()), 0);
+        assert_eq!(workers.load(Ordering::SeqCst), 0);
+        assert_eq!(Ledger::probe(root, CHANNEL), Presence::Absent);
+        assert!(std::fs::read_dir(root).unwrap().next().is_none());
+        assert!(super::current().is_none());
+        assert!(fence::require_worker().is_err());
+    }
+
+    #[test]
+    fn g1b_off_entrypoint_preserves_legacy_trace_pg() {
+        if !child() {
+            return;
+        }
+        let config = serde_json::from_value(serde_json::json!({
+            "server": {},
+            "cluster": {"enabled": true, "instance_id": "g1b-off-gateway"},
+        }))
+        .unwrap();
+        crate::config_live_reload::install(config);
+        let setup = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let database = setup.block_on(async {
+            let database = TestPostgresDb::create().await;
+            let pool = database.connect_and_migrate().await;
+            seed(&pool).await;
+            pool.close().await;
+            database
+        });
+        drop(setup);
+        let workers = Arc::new(AtomicUsize::new(0));
+        let started = workers.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .on_thread_start(move || {
+                started.fetch_add(1, Ordering::SeqCst);
+            })
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let root = crate::config::runtime_root().unwrap();
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(4)
+                .connect(&database.database_url)
+                .await
+                .unwrap();
+            let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+            let http = Arc::new(Http::new("Bot off-intake-test"));
+            let deps = IntakeDeps { http: &http, cache: None, ctx_for_chained_dispatch: None, shared: &shared, token: "Bot off-intake-test" };
+            resources(&root, &workers);
+            dispatch_skill_intake(
+                &deps,
+                ProviderKind::Claude,
+                ChannelId::new(CHANNEL),
+                MessageId::new(MESSAGE),
+                UserId::new(6325),
+                "off input owner".to_owned(),
+                TEXT.to_owned(),
+                IntakeOrigin::LiveMessage,
+                Vec::new(),
+                None,
+            ).await.unwrap();
+            let rows: Vec<OutboxRow> = sqlx::query_as(
+                "SELECT target_instance_id, provider, channel_id, user_msg_id, user_text, status,
+                 preserve_on_cancel FROM intake_outbox WHERE channel_id = $1 ORDER BY id",
+            ).bind(CHANNEL.to_string()).fetch_all(&pool).await.unwrap();
+            assert_eq!(rows, vec![(OWNER.to_owned(), "claude".to_owned(), CHANNEL.to_string(), MESSAGE.to_string(), TEXT.to_owned(), "pending".to_owned(), Some(false))]);
+            assert!(shared.core.lock().await.sessions.is_empty());
+            assert!(shared.mailbox(ChannelId::new(CHANNEL)).snapshot().await.intervention_queue.is_empty());
+            resources(&root, &workers);
+            assert!(!std::path::PathBuf::from(std::env::var_os(TMUX_LOG).unwrap()).exists());
+            println!("G1B_OFF_TRACE={}", serde_json::json!({"processed": 1, "legacy_effects": rows.len(), "outbox": rows, "input_workers": workers.load(Ordering::SeqCst), "ledger_opens": OPENS.with(|opens| opens.get())}));
+            pool.close().await;
+        });
+        drop(runtime);
+        let cleanup = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        cleanup.block_on(database.drop());
+    }
 }
