@@ -535,6 +535,87 @@ pub(super) async fn recheck_node(env: &Env) {
     node.stop().await;
 }
 
+/// Reads through the real port, except that the running POST count reads as unknown while
+/// `blind` is set.
+struct BlindPosts {
+    reads: ChannelHomePort,
+    blind: Arc<AtomicBool>,
+}
+
+impl DrainPort for BlindPosts {
+    fn turn_running(&self) -> impl Future<Output = Option<bool>> + Send {
+        self.reads.turn_running()
+    }
+
+    fn owed(&self) -> impl Future<Output = Option<Owed>> + Send {
+        self.reads.owed()
+    }
+
+    fn posts_in_flight(&self) -> impl Future<Output = Option<usize>> + Send {
+        let blind = self.blind.load(Ordering::SeqCst);
+        let real = self.reads.posts_in_flight();
+        async move { if blind { None } else { real.await } }
+    }
+
+    fn reset_legacy_source(&self) -> impl Future<Output = Result<(), ResetRefused>> + Send {
+        self.reads.reset_legacy_source()
+    }
+}
+
+/// T-H7: a running POST count the drain cannot read is not zero: the row stays draining while it
+/// is unknown, and leaves once it reads zero.
+#[tokio::test(flavor = "current_thread")]
+async fn th7_unreadable_post_count_blocks_leave_pg() {
+    let (scene, _) = reclaim_while("th7_posts_unreadable", Duration::from_secs(180)).await;
+    scene.drop_db().await;
+}
+
+pub(super) async fn posts_unreadable_node(env: &Env) {
+    let epoch = epoch_of(env);
+    // Only the drain reads this port, so the count is unknown from boot without holding delivery.
+    let blind = Arc::new(AtomicBool::new(true));
+    let switch = Arc::clone(&blind);
+    let node = Booted::boot_with(env, move |id| BlindPosts {
+        reads: ChannelHomePort::new(id, host::process_readiness(), worker_restored()),
+        blind: Arc::clone(&switch),
+    })
+    .await;
+    until("the lease opens the home", WITHIN, || {
+        node.home_epoch() == Some(epoch)
+    })
+    .await;
+    until("the writer takes work", WITHIN, || node.accepts()).await;
+    append(&node.transcript, &row("m0", "base"));
+    node.until_posts(&["base"]).await;
+    let clear = || async { node.owed().await == Some(Owed::default()) };
+    until_async("nothing owed before the reclaim", WITHIN, clear).await;
+    signal(&env.dir, "owed_seen");
+    wait_signal(&env.dir, "reclaim_begun", WITHIN).await;
+    let gate = node.gate().expect("registered");
+    until("the drain's final close", WITHIN, || {
+        gate.final_closed(epoch)
+    })
+    .await;
+    tokio::time::sleep(TWO_ROUNDS).await;
+    let (blocker, running) = (node.drain_blocker(), deliver::posts_in_flight(C));
+    assert_eq!(
+        node.state().await,
+        Some(HomeState::Reclaiming),
+        "the row left while the POST count was unreadable: blocker {blocker:?}, in flight {running:?}"
+    );
+    assert_eq!(blocker.as_deref(), Some("posts_unreadable"));
+    assert_eq!(
+        running,
+        Some(0),
+        "no POST runs; only the unreadable count holds the row"
+    );
+    assert_eq!(node.owed().await, Some(Owed::default()));
+    blind.store(false, Ordering::SeqCst);
+    until_left(&node).await;
+    assert_eq!(node.discord().posts(), ["base"], "no POST while it drained");
+    node.stop().await;
+}
+
 /// T-H7: a halted actor's unknown projection is not zero: the row stays draining until the resumed
 /// actor's real projection clears, and only then leaves.
 #[tokio::test(flavor = "current_thread")]
