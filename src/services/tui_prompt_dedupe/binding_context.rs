@@ -369,7 +369,67 @@ impl PreparedIncarnation {
             let _ = fs::remove_file(&temp);
             result
         })?;
-        Ok(Self { context, path })
+        let prepared = Self { context, path };
+        #[cfg(unix)]
+        if prepared.context.provider == "codex"
+            && prepared.context.source_policy.as_deref() == Some("verified")
+        {
+            prepared.archive_verified()?;
+        }
+        Ok(prepared)
+    }
+
+    /// The archive retains launch evidence; readers still require the canonical context.
+    #[cfg(unix)]
+    fn archive_verified(&self) -> io::Result<PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+        tc::with_tmux_source_authority(&self.context.tmux_session, |_| {
+            let invalid = || io::Error::other("archive identity or snapshot mismatch");
+            let canonical = context_path("codex", &self.context.execution_nonce)?;
+            if self.context.provider != "codex"
+                || self.context.source_policy.as_deref() != Some("verified")
+                || self.path != canonical
+                || self.context.owner_runtime_root != tc::current_tmux_owner_marker()
+            {
+                return Err(invalid());
+            }
+            let file = fs::File::open(&canonical)?;
+            let identity = file.metadata()?;
+            let same_file = |path: &Path| {
+                fs::symlink_metadata(path).is_ok_and(|meta| {
+                    meta.is_file() && meta.dev() == identity.dev() && meta.ino() == identity.ino()
+                })
+            };
+            let mut bytes = Vec::new();
+            file.take(CONTEXT_LIMIT + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > CONTEXT_LIMIT
+                || serde_json::from_slice::<BindingContext>(&bytes)? != self.context
+                || !same_file(&canonical)
+            {
+                return Err(invalid());
+            }
+            let archive = Path::new(&self.context.owner_runtime_root)
+                .join("runtime/binding_evidence/codex")
+                .join(format!("{}.json", self.context.execution_nonce));
+            #[cfg(test)]
+            creation_fault("archive_directory")?;
+            durable_directory(archive.parent().ok_or_else(invalid)?)?;
+            #[cfg(test)]
+            creation_fault("archive_link")?;
+            match fs::hard_link(&canonical, &archive) {
+                Ok(()) => (),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+                Err(error) => return Err(error),
+            }
+            if !same_file(&canonical)
+                || !same_file(&archive)
+                || read_hook_context(&archive)? != self.context
+            {
+                return Err(invalid());
+            }
+            sync_archive_parent(&archive)?;
+            Ok(archive)
+        })
     }
 
     pub(crate) fn env_lines(&self) -> String {
@@ -450,6 +510,13 @@ fn context_temp(path: &Path) -> bool {
                 .and_then(|s| s.strip_suffix(".tmp"))
                 .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
         })
+}
+
+#[cfg(unix)]
+fn sync_archive_parent(path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    creation_fault("archive_parent")?;
+    crate::services::discord::runtime_store::fsync_parent_dir(path)
 }
 
 fn sweep(
@@ -587,6 +654,70 @@ pub(crate) mod tests {
     pub(crate) fn prepared() -> PreparedIncarnation {
         let tmux = format!("binding-{}", uuid::Uuid::new_v4().simple());
         PreparedIncarnation::prepare("claude", &tmux, Some(42), Some("native-id"), false).unwrap()
+    }
+
+    #[test]
+    fn verified_archive_retry_requires_the_same_inode_snapshot_and_durable_parent() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+        let (root, _env) = fixture();
+        let _tmux = fake_tmux(root.path());
+        let mut context = prepared().context;
+        context.provider = "codex".into();
+        context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+        context.source_policy = Some("verified".into());
+        let p = PreparedIncarnation::create(context).unwrap();
+        let archive = p.archive_verified().unwrap();
+        let bytes = fs::read(&archive).unwrap();
+        fs::remove_file(&archive).unwrap();
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| p.archive_verified().unwrap()))
+                .collect();
+            for worker in workers {
+                assert_eq!(worker.join().unwrap(), archive);
+            }
+        });
+        let canonical = fs::metadata(&p.path).unwrap();
+        let retained = fs::metadata(&archive).unwrap();
+        assert_eq!(
+            (canonical.dev(), canonical.ino()),
+            (retained.dev(), retained.ino())
+        );
+        CREATE_FAULT.with(|f| f.set(Some("archive_parent")));
+        let result = p.archive_verified();
+        CREATE_FAULT.with(|f| f.set(None));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected archive_parent")
+        );
+        assert_eq!(p.archive_verified().unwrap(), archive);
+
+        fs::remove_file(&archive).unwrap();
+        fs::write(&archive, &bytes).unwrap();
+        assert!(
+            p.archive_verified().is_err(),
+            "an identical snapshot in a different inode is not a retry"
+        );
+        assert_eq!(fs::read(&archive).unwrap(), bytes);
+        fs::remove_file(&archive).unwrap();
+        symlink(&p.path, &archive).unwrap();
+        assert!(
+            p.archive_verified().is_err(),
+            "a symlink is not a retained hard-link"
+        );
+        fs::remove_file(&archive).unwrap();
+        assert_eq!(p.archive_verified().unwrap(), archive);
+        let mismatched = PreparedIncarnation {
+            path: p.path.clone(),
+            context: BindingContext {
+                first_prompt_digest: Some("changed digest".into()),
+                ..p.context.clone()
+            },
+        };
+        assert!(mismatched.archive_verified().is_err());
+        assert_eq!(fs::read(&p.path).unwrap(), bytes);
     }
     pub(crate) fn child_context(lines: &str, expected: Option<&Path>) {
         let inherited = prepared();

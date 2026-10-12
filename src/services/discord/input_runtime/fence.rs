@@ -371,14 +371,26 @@ impl Closing {
             .store(state.epoch, std::sync::atomic::Ordering::Release);
         Ok(())
     }
-    /// Refuses a freeze whose epoch cannot advance before the queue freeze persists anything;
-    /// `freeze` still makes the final check. A refusal latches the Gate exhausted.
+    /// Refuses an invalid or exhausted freeze before queue persistence; `freeze` still rechecks.
+    /// Only a current, drained and protected Closing may latch generation exhaustion.
     pub(crate) fn check_freeze(&self) -> Result<(), Failure> {
         #[cfg(test)]
         if super::supervisor::mutant("drop_freeze_epoch_precheck") {
             return Ok(());
         }
         let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        let invalid = state.mode != Mode::Closing
+            || state.epoch != self.epoch.load(std::sync::atomic::Ordering::Acquire)
+            || !self
+                .gate
+                .protected
+                .load(std::sync::atomic::Ordering::Acquire)
+            || state.effects != 0;
+        #[cfg(test)]
+        let invalid = invalid && !super::supervisor::mutant("allow_invalid_freeze_precheck");
+        if invalid {
+            return Err(Failure::Busy);
+        }
         next_epoch(&mut state).map(drop)
     }
     pub(crate) fn frozen_population(&self, root: &Path) -> Result<ClosedPopulationGuard, Failure> {
@@ -735,9 +747,10 @@ thread_local! { static WAIT_OBSERVER: RefCell<Option<Box<dyn FnOnce()>>> = const
 mod tests;
 
 #[cfg(test)]
-static ACTOR_WAIT: std::sync::LazyLock<
-    Mutex<std::collections::HashMap<u64, Box<dyn FnOnce() + Send>>>,
-> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+type ActorWaitMap = std::collections::HashMap<u64, Box<dyn FnOnce() + Send>>;
+#[cfg(test)]
+static ACTOR_WAIT: std::sync::LazyLock<Mutex<ActorWaitMap>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 #[cfg(test)]
 pub(crate) fn install_wait_observer(channel: u64, hook: Box<dyn FnOnce() + Send>) {
     ACTOR_WAIT
@@ -749,6 +762,9 @@ pub(crate) fn install_wait_observer(channel: u64, hook: Box<dyn FnOnce() + Send>
 #[cfg(test)]
 pub(crate) mod test_health {
     use super::*;
+    pub(crate) fn population_unused() -> bool {
+        GATES.get().is_none()
+    }
     static OWNERS: std::sync::LazyLock<
         Mutex<std::collections::HashMap<u64, std::thread::ThreadId>>,
     > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));

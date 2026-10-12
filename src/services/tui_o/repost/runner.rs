@@ -494,6 +494,21 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
         let (Some(log), Some(admitter)) = (self.log.as_mut(), self.runner.admitter()) else {
             return false;
         };
+        let backlog = match super::admission::report_backlog(
+            log,
+            latest.iter().map(|(&serial, record)| (serial, record)),
+        ) {
+            Ok(backlog) => backlog,
+            Err(error) => {
+                tracing::warn!(channel = self.channel, %error, "[tui_o] re-post backlog report failed");
+                self.log = None;
+                return false;
+            }
+        };
+        if !backlog.is_empty() {
+            tracing::warn!(channel = self.channel, count = backlog.len(), pieces = ?backlog,
+                "[tui_o] re-post backlog retained");
+        }
         let resumed = admitter
             .resume_pending(log, |serial| latest.get(&serial))
             .await;

@@ -2,7 +2,7 @@ use super::*;
 use crate::services::discord::input_runtime::fence::{Closing, modes};
 
 fn order(channel: u64) -> AdmissionOrder {
-    AdmissionOrder::new(ProviderKind::Claude, channel, 7, 10)
+    AdmissionOrder::new(ProviderKind::Claude, channel, 7, 10).unwrap()
 }
 
 fn begin(
@@ -28,7 +28,7 @@ fn scan(
 
 // A producer order whose snapshot carries `pending` at dirty generation `dirty`.
 fn producer(channel: u64, pending: &[u64], dirty: u64) -> AdmissionOrder {
-    let mut order = AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0);
+    let mut order = AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0).unwrap();
     order.pending.extend(pending);
     order.stamp.dirty = dirty;
     order
@@ -89,7 +89,7 @@ fn g1a_deferred_head_cannot_be_overtaken_in_this_or_a_later_scan() {
 
 #[test]
 fn g1a_an_older_deferred_head_does_not_erase_the_previous_retry_obligation() {
-    let mut order = AdmissionOrder::new(ProviderKind::Claude, 6_325_719, 7, 0);
+    let mut order = AdmissionOrder::new(ProviderKind::Claude, 6_325_719, 7, 0).unwrap();
     let cap = scan(&mut order, 7, vec![20, 30], 30, true);
     order.defer(&cap, 7, 20).unwrap();
     let older = scan(&mut order, 7, vec![10, 20], 20, true);
@@ -108,7 +108,7 @@ fn g1a_epoch_dirty_scan_and_scope_changes_refuse_stale_commits() {
     let mut order = order(6_325_712);
     let cap = scan(&mut order, 7, vec![11], 11, true);
     assert_eq!(order.permits(&cap, 8, 11), Err(Failure::StalePermit));
-    let mut other = AdmissionOrder::new(ProviderKind::Claude, 6_325_712, 7, 10);
+    let mut other = AdmissionOrder::new(ProviderKind::Claude, 6_325_712, 7, 10).unwrap();
     let _other_cap = scan(&mut other, 7, vec![11], 11, true);
     assert_eq!(other.permits(&cap, 7, 11), Err(Failure::StalePermit));
     order.pending(&[12]);
@@ -613,6 +613,7 @@ fn handback_snapshot_rejects_before_release() {
         sources: vec![11, EXTERNAL],
         dirty_generation: 3,
         overflow: PendingOverflow::new(ProviderKind::Claude, channel),
+        exhausted: false,
     };
     let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
     closing.begin_handback().unwrap();

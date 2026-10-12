@@ -10,6 +10,18 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, watch};
 
+#[path = "rollback_rehearsal_tests.rs"]
+mod rollback_rehearsal_tests;
+use rollback_rehearsal_tests::scan_activated_ledgers;
+
+fn fixture_not_sent_tags(path: &std::path::Path) -> std::io::Result<usize> {
+    Ok(std::fs::read_to_string(path)?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|line| line["entry"]["type"] == "not_sent")
+        .count())
+}
+
 #[derive(Default)]
 struct Statements {
     armed: AtomicBool,
@@ -865,14 +877,6 @@ fn rollback_steps() -> Vec<RollbackStep> {
         .collect()
 }
 
-fn not_sent_tags(path: &std::path::Path) -> usize {
-    std::fs::read(path)
-        .unwrap()
-        .windows(b"\"type\":\"not_sent\"".len())
-        .filter(|part| *part == b"\"type\":\"not_sent\"")
-        .count()
-}
-
 fn validated_repost(path: &std::path::Path, enabled: bool) -> bool {
     std::fs::write(
         path,
@@ -1156,11 +1160,25 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
                 &canonical[..]
             };
             let mut scanned = None;
+            let mut off_confirmed = false;
+            let mut joined = false;
             for step in steps {
                 match step {
                     RollbackStep::Off => {
-                        reloads_applied &= validated_repost(&config_path, false);
-                        early_tags = not_sent_tags(&ledger_path);
+                        off_confirmed = validated_repost(&config_path, false);
+                        reloads_applied &= off_confirmed;
+                        assert!(
+                            scan_activated_ledgers(
+                                &activated_ledgers,
+                                off_confirmed,
+                                joined,
+                                true,
+                                fixture_not_sent_tags,
+                            )
+                            .is_err()
+                        );
+                        // This early observation cannot authorize rollback before the writer joins.
+                        early_tags = fixture_not_sent_tags(&ledger_path).unwrap();
                     }
                     RollbackStep::Wait => {
                         if let Some(waiter) = queued.take() {
@@ -1175,10 +1193,18 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
                         if let Some(writer) = handle.take() {
                             writer.stop_and_join().await.unwrap();
                         }
+                        joined = !readiness.is_hosted(channel) && handle.is_none();
                     }
                     RollbackStep::Scan => {
-                        scanned =
-                            Some(activated_ledgers.iter().any(|path| not_sent_tags(path) > 0));
+                        scanned = scan_activated_ledgers(
+                            &activated_ledgers,
+                            off_confirmed,
+                            joined,
+                            true,
+                            fixture_not_sent_tags,
+                        )
+                        .ok()
+                        .map(|reads| reads.iter().any(|(_, tags)| !matches!(tags, Ok(0))));
                     }
                     RollbackStep::Decide => {
                         allow_old = Some(scanned == Some(false));
@@ -1205,7 +1231,7 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
             valid_posts: server.valid_posts.load(Ordering::SeqCst),
             reads: server.reads.load(Ordering::SeqCst),
             early_tags,
-            late_tags: not_sent_tags(&ledger_path),
+            late_tags: fixture_not_sent_tags(&ledger_path).unwrap(),
             allow_old,
             queue_pending,
             rate_headers,

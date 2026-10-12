@@ -2,7 +2,7 @@
 //! an admitted terminal from its persisted kind.
 use super::*;
 use crate::services::discord::host_teardown_gate::test_support::{
-    Stored, busy_turn, channel_key, seed, shared_on,
+    busy_turn, channel_key, shared_on,
 };
 use crate::services::discord::recovery_engine::herdr_admitted_restart::ADMITTED_ABORT_NOTICE;
 use crate::services::discord::recovery_engine::herdr_admitted_restart::test_hooks::STOP_AFTER_ACK;
@@ -18,8 +18,15 @@ use std::sync::atomic::Ordering;
 
 const FILTER: &str = "a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg";
 const ACK_FILTER: &str = "an_admitted_ack_outlives_a_stop_before_cleanup_pg";
+const HOLD_FILTER: &str = "restart_preserves_execution_nonce_input_hold_pg";
 const BASE: u64 = 1_479_671_301_387_160_000;
 const ACK_BASE: u64 = 1_479_671_301_387_180_000;
+const HOLD_BASE: u64 = 1_479_671_301_387_190_000;
+
+/// Case `n`'s canonical execution nonce: its own, and never its inflight turn nonce.
+fn execution_nonce(n: usize) -> String {
+    format!("act7-execution-{n:02}")
+}
 
 /// Case `n`'s transcript result, distinct per case so a delivery names its row.
 fn body(n: usize) -> String {
@@ -123,7 +130,13 @@ impl Phase {
     ) -> Arc<crate::services::provider::CancelToken> {
         let shared = &self.shared;
         let key = channel_key(shared, name);
-        seed(&self.pool, &key, name, channel.get(), Stored::Hosted).await;
+        // The session's canonical Bound record names this case's own execution and pane.
+        use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
+        let mut owner = tests::owner(&channel.get().to_string());
+        owner.logical_key = name.to_owned();
+        let record = tests::record(&owner, &execution_nonce(n), HostedState::Bound);
+        let seed = crate::services::discord::inflight::seed_session_row_keyed;
+        seed(&self.pool, &key, channel.get(), Some(tests::wire(&record))).await;
         let marker = crate::services::tmux_common::session_temp_path(name, "host_kind");
         std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
         std::fs::write(marker, "herdr").unwrap();
@@ -145,15 +158,17 @@ impl Phase {
         token
     }
 
-    /// Runs restart recovery against a fresh fake Discord.
+    /// Runs restart recovery against a fresh fake Discord; the markers show it entered and returned.
     async fn restore(&self) -> DiscordRecorder {
         let discord = crate::services::discord::recovery_engine::o_cut_recorder::start(BASE).await;
+        println!("ACT7_RESTORE_ENTERED pid={}", std::process::id());
         crate::services::discord::recovery_engine::restore_inflight_turns(
             &discord.http,
             &self.shared,
             &self.provider,
         )
         .await;
+        println!("ACT7_RESTORE_RETURNED pid={}", std::process::id());
         discord
     }
 
@@ -200,7 +215,7 @@ enum Expect {
 async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
     if std::env::var("ADK_ACT7_PHASE").is_err() {
         let root = tempfile::tempdir().unwrap();
-        let root_guard = crate::config::set_agentdesk_root_for_test(root.path());
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         pool.close().await;
@@ -208,30 +223,8 @@ async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
             ("ADK_ACT7_ROOT", root.path().as_os_str()),
             ("ADK_ACT7_DB", std::ffi::OsStr::new(&db.database_url)),
         ];
-        if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
-            "restart_in_process",
-        ) {
-            // Exercise the same phases without the subprocess boundary, retaining the real actor.
-            let pool = db.connect_and_migrate().await;
-            let shared = shared_on(&pool).await;
-            let mut phase = Phase {
-                name: "PERSIST".into(),
-                root: root.path().into(),
-                _root: root_guard,
-                _legacy_output: crate::services::tui_o::cutover::test_override::force_channels(&[]),
-                pool,
-                shared,
-                provider: ProviderKind::Claude,
-            };
-            restart_cases(&phase).await;
-            phase.name = "RESTORE".into();
-            restart_cases(&phase).await;
-            phase.close(RESTART_CASES).await;
-            db.drop().await;
-            return;
-        }
         let persist = run_phase(FILTER, "PERSIST", "ACT7_PHASE PERSIST", &env);
-        let restore = run_phase(FILTER, "RESTORE", "ACT7_PHASE RESTORE", &env);
+        let restore = run_phase(FILTER, "RESTORE", "ACT7_RESTORE_RETURNED", &env);
         assert_ne!(persist, restore);
         db.drop().await;
         return;
@@ -267,7 +260,7 @@ async fn restart_cases(phase: &Phase) {
         (None, Expect::Held), // Source absent and mailbox not reconstructed.
     ];
     assert_eq!(cases.len(), RESTART_CASES);
-    let mut guards = Vec::new();
+    let (mut guards, mut warm) = (Vec::new(), Vec::new());
     for (n, (kind, _)) in cases.into_iter().enumerate() {
         let channel = ChannelId::new(BASE + n as u64);
         let name = phase
@@ -337,11 +330,6 @@ async fn restart_cases(phase: &Phase) {
                 legacy.as_object_mut().unwrap().remove("tui_terminal_kind");
                 std::fs::write(phase.path(channel), serde_json::to_vec(&legacy).unwrap()).unwrap();
             }
-            let row = phase.durable(channel).unwrap();
-            if kind.is_none() {
-                crate::services::claude::herdr_turn::hold(&row.turn_nonce.clone().unwrap())
-                    .unwrap();
-            }
             std::fs::write(&before_path, std::fs::read(phase.path(channel)).unwrap()).unwrap();
             if n == 6 {
                 std::fs::write(phase.root.join(format!("{}.jsonl", channel.get())), "").unwrap();
@@ -383,10 +371,8 @@ async fn restart_cases(phase: &Phase) {
                 assert!(token.release_claude_interrupt_claim());
             }
         } else {
-            assert!(
-                phase.shared.mailbox_peek(channel).is_none(),
-                "a process restart has no warm mailbox"
-            );
+            // Judged after the restore effects, so a warm restart fails there first.
+            warm.extend(phase.shared.mailbox_peek(channel).map(|_| n));
         }
     }
     if phase.name == "RESTORE" {
@@ -456,20 +442,12 @@ async fn restart_cases(phase: &Phase) {
                     .contains_key(&channel)
             );
             assert!(phase.shared.mailbox_peek(channel).is_none());
-            {
-                let row = phase.durable(channel).unwrap();
-                assert!(
-                    crate::services::claude::herdr_turn::not_held(
-                        row.turn_nonce.as_deref().unwrap()
-                    )
-                    .is_err()
-                );
-            }
         }
         assert!(
             lost_holds.is_empty(),
             "restart lost hold effects: {lost_holds:?}"
         );
+        assert!(warm.is_empty(), "a process restart has no warm mailbox");
     }
     drop(guards);
 }
@@ -543,4 +521,136 @@ async fn an_admitted_ack_outlives_a_stop_before_cleanup_pg() {
         }
     }
     phase.close(1).await;
+}
+
+/// The canonical Bound record of `name`'s session, as the executor loads it.
+async fn canonical_execution(
+    phase: &Phase,
+    name: &str,
+) -> crate::db::dispatched_sessions::hosted_execution::HostedExecution {
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedLookup, HostedLookupKey, HostedRecord, load_hosted_execution_pg,
+    };
+    let key = channel_key(&phase.shared, name);
+    let lookup = load_hosted_execution_pg(&phase.pool, HostedLookupKey::SessionKey(&key)).await;
+    let HostedLookup::Found(found) = lookup else {
+        panic!("{name}: no canonical row: {lookup:?}");
+    };
+    let HostedRecord::Known(record) = found.record else {
+        panic!("{name}: no readable record");
+    };
+    record
+}
+
+const HOLD_CASES: usize = 3;
+
+/// A held turn's input hold names its canonical execution nonce, the key the executor checks; a
+/// restart keeps that hold as it was, and no hold is ever keyed by the inflight turn nonce.
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn restart_preserves_execution_nonce_input_hold_pg() {
+    use crate::services::claude::herdr_turn::{hold, input_holds, not_held};
+    if std::env::var("ADK_ACT7_PHASE").is_err() {
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        pool.close().await;
+        let env = [
+            ("ADK_ACT7_ROOT", root.path().as_os_str()),
+            ("ADK_ACT7_DB", std::ffi::OsStr::new(&db.database_url)),
+        ];
+        let persist = run_phase(HOLD_FILTER, "PERSIST", "ACT7_PHASE PERSIST", &env);
+        let restore = run_phase(HOLD_FILTER, "RESTORE", "ACT7_RESTORE_RETURNED", &env);
+        assert_ne!(persist, restore);
+        db.drop().await;
+        return;
+    }
+    let phase = Phase::open().await.unwrap();
+    let holds_before = phase.root.join("holds.before");
+    let mut guards = Vec::new();
+    let mut nonces = Vec::new();
+    for n in 0..HOLD_CASES {
+        let channel = ChannelId::new(HOLD_BASE + n as u64);
+        let name = phase
+            .provider
+            .build_tmux_session_name(&format!("act7-hold-{n}"));
+        let session = HostSessionRef::tmux(&name);
+        guards.push((
+            InjectedLivenessGuard::set(session, HostLiveness::DeadOrAbsent),
+            InjectedPresenceGuard::set(session, HostPresence::Present),
+        ));
+        if phase.name != "PERSIST" {
+            continue;
+        }
+        phase.persist(n, channel, &name, |_| {}).await;
+        let row = phase.durable(channel).unwrap();
+        let record = canonical_execution(&phase, &name).await;
+        assert_eq!(record.source_ref.execution_nonce, record.execution_nonce);
+        assert_eq!(record.owner.channel_id, row.channel_id.to_string());
+        assert_eq!(
+            Some(&record.owner.logical_key),
+            row.tmux_session_name.as_ref()
+        );
+        let turn = row.turn_nonce.clone().unwrap();
+        assert_ne!(
+            turn, record.execution_nonce,
+            "the turn nonce is not the execution's"
+        );
+        nonces.push(record.execution_nonce.clone());
+        let key =
+            match crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
+                "restart_hold_uses_turn_nonce",
+            ) {
+                true => turn,
+                false => record.execution_nonce,
+            };
+        hold(&key).unwrap();
+        assert_eq!(input_holds().unwrap().len(), n + 1);
+        std::fs::write(
+            phase.root.join(format!("hold-{n}.before")),
+            std::fs::read(phase.path(channel)).unwrap(),
+        )
+        .unwrap();
+    }
+    if phase.name == "PERSIST" {
+        nonces.sort();
+        nonces.dedup();
+        assert_eq!(nonces.len(), HOLD_CASES, "each case has its own execution");
+        let holds = serde_json::to_vec(&input_holds().unwrap()).unwrap();
+        std::fs::write(&holds_before, holds).unwrap();
+    } else {
+        let rig = crate::services::session_host::herdr_socket_rig_tests::HerdrRig::start();
+        let _registry = rig.registry_on_this_thread();
+        let discord = phase.restore().await;
+        assert!(rig.sends().is_empty(), "restart writes nothing to a pane");
+        for n in 0..HOLD_CASES {
+            let channel = ChannelId::new(HOLD_BASE + n as u64);
+            let name = phase
+                .provider
+                .build_tmux_session_name(&format!("act7-hold-{n}"));
+            let before = std::fs::read(phase.root.join(format!("hold-{n}.before"))).unwrap();
+            assert!(written(&discord, channel).is_empty(), "case={n}");
+            assert_eq!(
+                std::fs::read(phase.path(channel)).unwrap(),
+                before,
+                "case={n}"
+            );
+            let nonce = canonical_execution(&phase, &name).await.execution_nonce;
+            assert!(
+                not_held(&nonce).is_err(),
+                "case={n}: the executor's check of {nonce} still refuses input after restart"
+            );
+            let turn = phase.durable(channel).unwrap().turn_nonce.unwrap();
+            assert_eq!(not_held(&turn), Ok(()), "case={n}: no hold names the turn");
+        }
+        let holds = serde_json::to_vec(&input_holds().unwrap()).unwrap();
+        assert_eq!(
+            holds,
+            std::fs::read(&holds_before).unwrap(),
+            "holds as recorded"
+        );
+    }
+    drop(guards);
+    phase.close(HOLD_CASES).await;
 }

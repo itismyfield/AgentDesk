@@ -469,29 +469,40 @@ async fn without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o(
     assert_eq!(owned, Ok(true), "Legacy does not take the body back");
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_recovered_channel_knows_its_newest_post_while_the_gateway_is_down() {
-    let (harness, _, _) = switched_over(&row("m0", "before the switch"));
-    harness.gate.acquired();
-    let mut writer = harness.writer();
-    assert_eq!(writer.deliver(&piece("m1", "hello")).await, Step::Done);
-    let Some(PieceOutcome::Posted(posted)) = outcome(&mut writer, "m1") else {
-        panic!("piece not posted");
-    };
-    drop(writer);
+#[test]
+fn a_recovered_channel_knows_its_newest_post_while_the_gateway_is_down() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    let (harness, posted) = runtime.block_on(async {
+        let (harness, _, _) = switched_over(&row("m0", "before the switch"));
+        harness.gate.acquired();
+        let mut writer = harness.writer();
+        assert_eq!(writer.deliver(&piece("m1", "hello")).await, Step::Done);
+        let Some(PieceOutcome::Posted(posted)) = outcome(&mut writer, "m1") else {
+            panic!("piece not posted");
+        };
+        drop(writer);
+        (harness, posted)
+    });
+    // Serialize the simulated reboot on the test thread, outside the actor future.
     let _restart = deliver::forget_posted_for_tests(CHANNEL);
-    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
-    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
-    io.port_down.store(true, Ordering::SeqCst);
-    let tasks = hosted(&harness, &io, true, &ready);
-    polls(3).await;
-    assert_eq!(
-        io.calls(),
-        [("port", 0)],
-        "the actor still waits for its gateway"
-    );
-    assert!(deliver::last_posted(CHANNEL) >= Some(posted));
-    abort(tasks);
+    runtime.block_on(async {
+        let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+        let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+        io.port_down.store(true, Ordering::SeqCst);
+        let tasks = hosted(&harness, &io, true, &ready);
+        polls(3).await;
+        assert_eq!(
+            io.calls(),
+            [("port", 0)],
+            "the actor still waits for its gateway"
+        );
+        assert!(deliver::last_posted(CHANNEL) >= Some(posted));
+        abort(tasks);
+    });
 }
 
 fn p5_log(root: &Path, channel: u64, line: &[u8]) {
@@ -1260,3 +1271,7 @@ mod renumber;
 #[cfg(unix)]
 #[path = "readers_host_tests.rs"]
 mod readers_host;
+
+#[cfg(unix)]
+#[path = "s2a_actor_tests.rs"]
+mod s2a;

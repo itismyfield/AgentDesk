@@ -5,7 +5,7 @@ use crate::services::discord::input_runtime::fence::{Closing, Mode, modes};
 use std::cell::Cell;
 
 fn producer(channel: u64) -> AdmissionOrder {
-    AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0)
+    AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0).unwrap()
 }
 
 // Releases a frozen Closing with an empty snapshot that shares `order`'s overflow handle.
@@ -312,7 +312,7 @@ fn g1b_generation_exhaustion_matrix_handback() {
         Some(u64::MAX - 2)
     );
     settle_all(channel, 0);
-    // The last generation was issued; a later release is refused before protection moves.
+    // This allocator stops when its next stored value is MAX-1, before protection moves.
     let next = 6_326_140;
     for _ in 0..2 {
         let closing = Closing::frozen_for_test(ProviderKind::Claude, next);
@@ -335,6 +335,166 @@ fn g1b_generation_exhaustion_matrix_handback() {
     assert_eq!(with_entry(channel, |entry| entry.settled_overflow), marker);
     assert!(modes::order_barrier(&ProviderKind::Claude, channel));
     assert_eq!(scan(channel, vec![], 0).err(), Some(EXHAUSTED));
+}
+
+#[test]
+fn g1b_generation_exhaustion_matrix_owner() {
+    if std::env::var("ADK_G1B_OWNER_CHILD").as_deref() != Ok("1") {
+        let name = format!("{}::g1b_generation_exhaustion_matrix_owner", module_path!());
+        let name = name.split_once("::").unwrap().1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--nocapture"])
+            .env("ADK_G1B_OWNER_CHILD", "1")
+            .output()
+            .unwrap();
+        let result = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{result}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(result.contains("1 passed; 0 failed; 0 ignored"), "{result}");
+        return;
+    }
+    NEXT_OWNER.store(u64::MAX - 1, Ordering::Release);
+    let mut last = AdmissionOrder::new(ProviderKind::Claude, 6_326_144, 7, 0).unwrap();
+    assert_eq!(last.stamp.owner, u64::MAX - 1);
+    assert_eq!(NEXT_OWNER.load(Ordering::Acquire), u64::MAX);
+    for _ in 0..2 {
+        assert_eq!(
+            AdmissionOrder::new(ProviderKind::Claude, 6_326_145, 7, 0).err(),
+            Some(EXHAUSTED)
+        );
+        assert_eq!(
+            NEXT_OWNER.load(Ordering::Acquire),
+            u64::MAX,
+            "exhaustion never wraps"
+        );
+    }
+    assert!(
+        last.fetch_ticket(7).is_ok(),
+        "MAX-1 owner can fetch a ticket"
+    );
+}
+
+#[test]
+fn g1b_owner_exhaustion_refuses_before_raw_release() {
+    if std::env::var("ADK_G1B_OWNER_RELEASE_CHILD").as_deref() != Ok("1") {
+        let name = format!(
+            "{}::g1b_owner_exhaustion_refuses_before_raw_release",
+            module_path!()
+        );
+        let name = name.split_once("::").unwrap().1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--nocapture"])
+            .env("ADK_G1B_OWNER_RELEASE_CHILD", "1")
+            .output()
+            .unwrap();
+        let result = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{result}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(result.contains("1 passed; 0 failed; 0 ignored"), "{result}");
+        return;
+    }
+    let channel = 6_326_146;
+    let snapshot = producer(channel).pending_snapshot();
+    let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
+    closing.begin_handback().unwrap();
+    NEXT_OWNER.store(u64::MAX, Ordering::Release);
+    let calls = Cell::new(0);
+    for _ in 0..2 {
+        assert_eq!(
+            install_handback_snapshot(&closing, &snapshot, || {
+                calls.set(calls.get() + 1);
+                Err(Failure::Persistence)
+            }),
+            Err(EXHAUSTED)
+        );
+        assert_eq!(calls.get(), 0, "owner allocation precedes raw release");
+        assert!(!modes::order_barrier(&ProviderKind::Claude, channel));
+        assert_eq!(closing.begin_handback(), Err(Failure::Mode(Mode::Handback)));
+    }
+}
+
+#[test]
+fn g1b_owner_exhaustion_refuses_registration() {
+    if std::env::var("ADK_G1B_OWNER_REGISTER_CHILD").as_deref() != Ok("1") {
+        let name = format!(
+            "{}::g1b_owner_exhaustion_refuses_registration",
+            module_path!()
+        );
+        let name = name.split_once("::").unwrap().1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--nocapture"])
+            .env("ADK_G1B_OWNER_REGISTER_CHILD", "1")
+            .output()
+            .unwrap();
+        let result = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{result}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(result.contains("1 passed; 0 failed; 0 ignored"), "{result}");
+        return;
+    }
+    let channel = 6_326_149;
+    let registry = Box::leak(Box::new(super::super::Registry::new()));
+    let root = tempfile::tempdir().unwrap();
+    NEXT_OWNER.store(u64::MAX, Ordering::Release);
+    for _ in 0..2 {
+        assert_eq!(
+            registry
+                .register(&ProviderKind::Claude, channel, root.path())
+                .err(),
+            Some(super::super::Refused::GenerationExhausted)
+        );
+        assert_eq!(
+            registry
+                .reserve_for_test(&ProviderKind::Claude, channel, root.path())
+                .err(),
+            Some(super::super::Refused::GenerationExhausted)
+        );
+        assert!(!registry.used());
+        assert!(registry.entries.lock().unwrap().is_empty());
+        assert!(registry.health_reasons().is_empty());
+        assert!(
+            crate::services::discord::input_runtime::fence::lookup(&ProviderKind::Claude, channel)
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn g1b_exhausted_snapshot_refuses_before_raw_release() {
+    for (offset, pending_snapshot) in [(0, false), (1, true)] {
+        let channel = 6_326_147 + offset;
+        let mut order = producer(channel);
+        exhaust_dirty(&mut order);
+        assert_eq!(order.admit_pending(&[11]).err(), Some(EXHAUSTED));
+        order.pending_overflow().mark_dirty();
+        let snapshot = if pending_snapshot {
+            order.pending(&[])
+        } else {
+            order.pending_snapshot()
+        };
+        assert!(snapshot.sources.is_empty());
+        let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
+        closing.begin_handback().unwrap();
+        assert_eq!(
+            closing.release_after_handback_with_pending(&snapshot),
+            Err(EXHAUSTED)
+        );
+        assert!(!modes::order_barrier(&ProviderKind::Claude, channel));
+        assert_eq!(closing.begin_handback(), Err(Failure::Mode(Mode::Handback)));
+        assert_eq!(
+            handback_fetch_ticket(&ProviderKind::Claude, channel).err(),
+            Some(Failure::StalePermit)
+        );
+    }
 }
 
 #[test]
