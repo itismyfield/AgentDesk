@@ -32,6 +32,13 @@ fn sync_parent(path: &std::path::Path) -> std::io::Result<()> {
 impl ChannelStore {
     pub(crate) fn prepare_codex_floor(&mut self, floor: SubmitFloor) -> Result<(), StoreError> {
         let current = self.codex_provenance();
+        if let SubmitFloor::NativeFloor(native) = &floor
+            && !matches!(&current, Sidecar::Present(read) if read.1.as_ref().is_some_and(|saved| saved.floors.contains(&floor)))
+        {
+            native
+                .verify_before_prepare()
+                .map_err(|reason| StoreError::Rejected(reason.into()))?;
+        }
         if let Sidecar::Present(read) = &current
             && read.1.is_none()
         {
@@ -111,11 +118,8 @@ impl ChannelStore {
             };
             use crate::services::tui_o::shadow::capture::SourceCapture;
             use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource};
-            let mut capture = SourceCapture::reopen(
-                floor.canonical_source.clone(),
-                floor.through,
-                &floor.prefix_hash,
-            )?;
+            let (source, through, hash) = floor.checkpoint();
+            let mut capture = SourceCapture::reopen(source.clone(), through, hash)?;
             let end = span
                 .end
                 .ok_or_else(|| StoreError::Rejected("native terminal unavailable".into()))?;

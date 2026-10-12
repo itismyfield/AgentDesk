@@ -284,10 +284,12 @@ fn s2a_prepare_rejects_corrupt_foreign_unknown_and_conflicting_floors_without_re
         fixture.store.close_codex_episode(span.clone()).is_err(),
         "unbound prepared launch has no native floor"
     );
+    fixture = Fixture::new();
     fixture
         .store
         .prepare_codex_floor(SubmitFloor::NativeFloor(Box::new(fixture.floor.clone())))
         .unwrap();
+    let span = terminal(&fixture.floor);
     let before = std::fs::read(fixture.path()).unwrap();
     let mut wrong = fixture.floor.clone();
     wrong.launch.episode.request_owner_id += 1;
@@ -332,7 +334,7 @@ fn s2a_prepare_and_close_never_ack_before_parent_sync_and_validated_readback() {
                 let old = old_evidence(&fixture.floor);
                 std::fs::write(fixture.path(), serde_json::to_vec(&old).unwrap()).unwrap();
             }
-            let span = terminal(&fixture.floor);
+            let span = close.then(|| terminal(&fixture.floor));
             let stages = Arc::new(Mutex::new(Vec::new()));
             let seen = Arc::clone(&stages);
             COMMIT_HOOK.with(|hook| {
@@ -349,8 +351,8 @@ fn s2a_prepare_and_close_never_ack_before_parent_sync_and_validated_readback() {
             let acknowledged = if close {
                 fixture
                     .store
-                    .close_codex_episode(span.clone())
-                    .map(|closed| assert_eq!(closed.span(), &span))
+                    .close_codex_episode(span.clone().unwrap())
+                    .map(|closed| assert_eq!(Some(closed.span()), span.as_ref()))
             } else {
                 fixture
                     .store
@@ -464,5 +466,130 @@ fn s2a_schema2_rejects_unknown_floor_context_fields_and_identity_loss() {
                 .is_err()
         );
         assert_eq!(std::fs::read(fixture.path()).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn s2b1a_prepare_rejects_forged_or_stale_native_floor_before_writing() {
+    let mut fixture = Fixture::new();
+    let before = tree(fixture.root.path());
+    for (through, hash) in [
+        (
+            0,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned(),
+        ),
+        (fixture.floor.through, "b".repeat(64)),
+    ] {
+        let mut serialized = serde_json::to_value(&fixture.floor).unwrap();
+        serialized["through"] = through.into();
+        serialized["prefix_hash"] = hash.into();
+        let floor: NativeFloor = serde_json::from_value(serialized).unwrap();
+        assert!(
+            fixture
+                .store
+                .prepare_codex_floor(SubmitFloor::NativeFloor(Box::new(floor)))
+                .is_err(),
+            "a forged checkpoint was acknowledged"
+        );
+        assert_eq!(tree(fixture.root.path()), before);
+    }
+    let _ = terminal(&fixture.floor);
+    let before = tree(fixture.root.path());
+    assert!(
+        fixture
+            .store
+            .prepare_codex_floor(SubmitFloor::NativeFloor(Box::new(fixture.floor)))
+            .is_err(),
+        "a new prepare must pin the current complete EOF"
+    );
+    assert_eq!(tree(fixture.root.path()), before);
+}
+
+#[test]
+fn s2b1a_strict_old_reader_rejects_schema2_and_unknown_schema1_without_writes() {
+    let mut fixture = Fixture::new();
+    fixture
+        .store
+        .prepare_codex_floor(SubmitFloor::NativeFloor(Box::new(fixture.floor.clone())))
+        .unwrap();
+    let before = tree(fixture.root.path());
+    assert!(
+        matches!(fixture.store.read_codex_schema1(), Sidecar::Unavailable(_)),
+        "the old reader cannot decode the gated schema2 envelope"
+    );
+    assert_eq!(tree(fixture.root.path()), before);
+    let old = old_evidence(&fixture.floor);
+    let mut value = serde_json::to_value(&old).unwrap();
+    value["future"] = true.into();
+    std::fs::write(fixture.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+    let before = tree(fixture.root.path());
+    assert!(matches!(
+        fixture.store.read_codex_schema1(),
+        Sidecar::Unavailable(_)
+    ));
+    assert_eq!(tree(fixture.root.path()), before);
+    std::fs::write(fixture.path(), serde_json::to_vec(&old).unwrap()).unwrap();
+    assert_eq!(
+        fixture.store.read_codex_schema1(),
+        Sidecar::Present(super::super::ValidatedCodexProvenance::checked(7, old).unwrap())
+    );
+}
+
+#[test]
+fn s2b1a_real_parent_sync_failure_prevents_prepare_and_close_ack() {
+    use super::super::mutation::{COMMIT_HOOK, CommitStage};
+    struct Restore {
+        parent: PathBuf,
+        held: PathBuf,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            COMMIT_HOOK.with(|hook| hook.borrow_mut().take());
+            if self.held.exists() {
+                std::fs::rename(&self.held, &self.parent).unwrap();
+            }
+        }
+    }
+    for close in [false, true] {
+        let mut fixture = Fixture::new();
+        if close {
+            fixture
+                .store
+                .prepare_codex_floor(SubmitFloor::NativeFloor(Box::new(fixture.floor.clone())))
+                .unwrap();
+        }
+        let span = close.then(|| terminal(&fixture.floor));
+        let parent = fixture.path().parent().unwrap().to_owned();
+        let held = parent.with_extension("parent-sync-held");
+        let restore = Restore {
+            parent: parent.clone(),
+            held: held.clone(),
+        };
+        COMMIT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |stage| {
+                match stage {
+                    CommitStage::Renamed => std::fs::rename(&parent, &held)?,
+                    CommitStage::ParentSynced => std::fs::rename(&held, &parent)?,
+                    CommitStage::ReadBack => {}
+                }
+                Ok(())
+            }))
+        });
+        let acknowledged = match span {
+            Some(span) => fixture.store.close_codex_episode(span).map(|_| ()),
+            None => fixture
+                .store
+                .prepare_codex_floor(SubmitFloor::NativeFloor(Box::new(fixture.floor.clone()))),
+        };
+        drop(restore);
+        assert!(
+            acknowledged.is_err(),
+            "removing just the real fsync call must make this assertion RED"
+        );
+        assert!(fixture.store.io_failure().is_some());
+        assert!(matches!(
+            fixture.store.codex_provenance(),
+            Sidecar::Unavailable(_)
+        ));
     }
 }

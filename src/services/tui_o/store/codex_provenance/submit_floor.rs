@@ -77,15 +77,36 @@ fn hash(value: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeFloor {
-    pub launch: PreparedLaunch,
-    pub execution: ExecutionProofRef,
-    pub canonical_source: SourceId,
-    pub through: u64,
-    pub prefix_hash: String,
-    pub generation_mtime_ns: i64,
+    launch: PreparedLaunch,
+    execution: ExecutionProofRef,
+    canonical_source: SourceId,
+    through: u64,
+    prefix_hash: String,
+    generation_mtime_ns: i64,
 }
 
 impl NativeFloor {
+    pub(crate) fn execution(&self) -> &ExecutionProofRef {
+        &self.execution
+    }
+
+    pub(crate) fn checkpoint(&self) -> (&SourceId, u64, &str) {
+        (&self.canonical_source, self.through, &self.prefix_hash)
+    }
+
+    pub(super) fn verify_before_prepare(&self) -> Result<(), &'static str> {
+        let cursor = Cursor {
+            source: self.canonical_source.clone(),
+            captured_through: self.through,
+            prefix_hash: self.prefix_hash.clone(),
+            retired: false,
+        };
+        let current = NativeSubmitFloor::capture_before_submit(&self.execution, &cursor)?;
+        (self.valid(self.launch.episode.channel_id) && current.checkpoint() == self.checkpoint())
+            .then_some(())
+            .ok_or("native_floor_changed_before_prepare")
+    }
+
     pub(crate) fn capture(
         launch: PreparedLaunch,
         execution: ExecutionProofRef,

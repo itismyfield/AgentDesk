@@ -201,6 +201,51 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn s2b1a_owned_source_snapshot_is_read_only_without_delivery_permission_and_rechecks_descriptor() {
+    let h = Fixture::new("fresh", None);
+    h.header(ID, false);
+    h.send("session-start", ID, Value::Null, None);
+    codex_verified::clear_permissions_for_tests();
+    let before = h.fold();
+    let marker = fs::read(h.marker()).unwrap();
+    let snapshot = crate::services::tmux_common::with_tmux_source_authority(
+        &h.context.tmux_session,
+        |authority| codex_verified::VerifiedSourceSnapshot::capture(authority).unwrap(),
+    );
+    assert_eq!(snapshot.context(), &h.context);
+    assert_eq!(
+        snapshot.execution().source,
+        before.verified.as_ref().unwrap().source
+    );
+    assert_eq!(
+        snapshot.execution().proof_seq,
+        before.verified.as_ref().unwrap().seq
+    );
+    assert_eq!(h.fold(), before);
+    assert_eq!(fs::read(h.marker()).unwrap(), marker);
+    assert!(
+        h.consumer().is_none(),
+        "source evidence does not grant delivery"
+    );
+    crate::services::tmux_common::with_tmux_source_authority(
+        &h.context.tmux_session,
+        |authority| snapshot.recheck(authority),
+    )
+    .unwrap();
+    fs::rename(h.path(ID), h.path(ID).with_extension("held")).unwrap();
+    h.header(ID, false);
+    assert!(
+        crate::services::tmux_common::with_tmux_source_authority(
+            &h.context.tmux_session,
+            |authority| snapshot.recheck(authority)
+        )
+        .is_err(),
+        "a replacement inode cannot inherit the captured proof"
+    );
+    assert_eq!(snapshot.execution().source, before.verified.unwrap().source);
+}
+
+#[test]
 fn lifecycle_stop_preserves_proof_pending_and_cursors_without_permission() {
     let h = Fixture::new("fresh", None);
     h.header(ID, false);

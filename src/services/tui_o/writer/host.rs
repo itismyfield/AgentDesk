@@ -252,11 +252,17 @@ impl Readiness {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_closed_reply<T>(
+    pub(crate) fn drop_submission_for_tests(&self, channel: u64) {
+        if let Some(live) = locked(&self.live).get_mut(&channel) {
+            live.submission = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_submission<T>(
         &self,
         channel: u64,
-        reply: actor::codex_submission::Reply,
-        issue: impl FnOnce(&actor::codex_submission::Closed) -> T,
+        consume: impl FnOnce(&actor::codex_submission::Port) -> Result<T, &'static str>,
     ) -> Result<T, &'static str> {
         let live = locked(&self.live);
         let live = live.get(&channel).ok_or("actor_unavailable")?;
@@ -268,12 +274,7 @@ impl Readiness {
         {
             return Err("actor_unavailable");
         }
-        let closed = live
-            .submission
-            .as_ref()
-            .ok_or("actor_unavailable")?
-            .take_closed(reply)?;
-        Ok(issue(&closed))
+        consume(live.submission.as_ref().ok_or("actor_unavailable")?)
     }
 
     /// Hosts `owed` for `channel` as a running actor would publish it, with no actor behind it.

@@ -72,6 +72,10 @@ impl ChannelStore {
         if let Some(read) = submit_floor::read(self) {
             return read;
         }
+        self.read_codex_schema1()
+    }
+
+    pub(crate) fn read_codex_schema1(&self) -> Sidecar {
         let channel = self.init.channel;
         match durable::read_json::<CodexProvenance>(&self.dir.join(CODEX_PROVENANCE_FILE)) {
             Ok(None) => Sidecar::Missing,

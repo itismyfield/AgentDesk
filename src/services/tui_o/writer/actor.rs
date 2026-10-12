@@ -313,17 +313,19 @@ where
             }
         }
         #[cfg(test)]
-        if let Some(commands) = &mut commands {
+        if let Some(receiver) = &mut commands {
             tokio::select! {
-                request = commands.next() => {
+                request = receiver.next() => {
                     if let Some(request) = request {
-                        commands.apply(&mut actor.writer, request);
-                    } else { break; }
+                        receiver.apply(&mut actor.writer, request);
+                    } else { commands = None; }
                 }
                 () = tokio::time::sleep(POLL_INTERVAL) => {}
                 changed = stop.changed() => if changed.is_err() { break },
             }
-            continue;
+            if commands.is_some() {
+                continue;
+            }
         }
         tokio::select! {
             () = tokio::time::sleep(POLL_INTERVAL) => {}
@@ -365,9 +367,11 @@ pub(crate) mod codex_submission {
     use super::*;
     use crate::services::tui_o::store::StoreError;
     use crate::services::tui_o::store::codex_provenance::submit_floor::{
-        DurableClosedEpisode, SubmitFloor,
+        DurableClosedEpisode, NativeFloor, PreparedLaunch, SubmitFloor,
     };
-    use crate::services::tui_prompt_dedupe::codex_verified::provenance::CodexEpisodeSpan;
+    use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
+        CodexEpisodeSpan, ExecutionProofRef,
+    };
     use tokio::sync::{mpsc, oneshot};
 
     #[derive(Clone, Debug)]
@@ -385,6 +389,7 @@ pub(crate) mod codex_submission {
 
     pub(crate) enum Operation {
         Prepare(SubmitFloor),
+        Capture(Box<(PreparedLaunch, ExecutionProofRef)>),
         Close(Box<CodexEpisodeSpan>),
     }
 
@@ -399,6 +404,19 @@ pub(crate) mod codex_submission {
         generation: u64,
         run: Arc<()>,
         closed: Option<Closed>,
+        prepared: Option<Prepared>,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct Prepared {
+        run: Arc<()>,
+        floor: NativeFloor,
+    }
+
+    impl Prepared {
+        pub(crate) fn floor(&self) -> &NativeFloor {
+            &self.floor
+        }
     }
 
     #[derive(Debug)]
@@ -462,6 +480,17 @@ pub(crate) mod codex_submission {
             }
             Ok(closed)
         }
+
+        pub(crate) fn take_prepared(&self, reply: Reply) -> Result<Prepared, &'static str> {
+            if self.generation != reply.generation || !Arc::ptr_eq(&self.run, &reply.run) {
+                return Err("stale_actor_reply");
+            }
+            let prepared = reply.prepared.ok_or("episode_not_prepared")?;
+            if !Arc::ptr_eq(&self.run, &prepared.run) {
+                return Err("stale_actor_reply");
+            }
+            Ok(prepared)
+        }
     }
 
     impl Receiver {
@@ -474,12 +503,47 @@ pub(crate) mod codex_submission {
             writer: &mut ChannelWriter<P, L, A>,
             request: Request,
         ) {
+            let mut prepared = None;
             let result = if !Arc::ptr_eq(&self.run, &request.run) {
                 Err(StoreError::Rejected("foreign actor command".into()))
             } else {
                 match request.operation {
                     Operation::Prepare(floor) => {
+                        if let SubmitFloor::NativeFloor(floor) = &floor {
+                            prepared = Some((**floor).clone());
+                        }
                         writer.store().prepare_codex_floor(floor).map(|()| None)
+                    }
+                    Operation::Capture(intent) => {
+                        let (launch, execution) = *intent;
+                        let capture = || -> Result<NativeFloor, StoreError> {
+                            let cursor = writer
+                                .store()
+                                .cursor(&execution.source)
+                                .ok_or_else(|| {
+                                    StoreError::Rejected("canonical cursor unavailable".into())
+                                })?
+                                .clone();
+                            let modified = std::fs::metadata(&execution.source.path)?.modified()?;
+                            let generation = modified
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .ok()
+                                .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+                                .ok_or_else(|| {
+                                    StoreError::Rejected("native generation unavailable".into())
+                                })?;
+                            NativeFloor::capture(launch, execution, &cursor, generation)
+                                .map_err(|reason| StoreError::Rejected(reason.into()))
+                        };
+                        capture().and_then(|floor| {
+                            writer
+                                .store()
+                                .prepare_codex_floor(SubmitFloor::NativeFloor(Box::new(
+                                    floor.clone(),
+                                )))?;
+                            prepared = Some(floor);
+                            Ok(None)
+                        })
                     }
                     Operation::Close(span) => writer.store().close_codex_episode(*span).map(Some),
                 }
@@ -499,8 +563,34 @@ pub(crate) mod codex_submission {
                 generation: self.generation,
                 run: Arc::clone(&self.run),
                 closed,
+                prepared: prepared.map(|floor| Prepared {
+                    run: Arc::clone(&self.run),
+                    floor,
+                }),
             });
             let _ = request.reply.send(reply);
+        }
+    }
+
+    impl crate::services::tui_o::writer::host::Readiness {
+        /// Consumers must be bounded and synchronous, without re-entering Readiness.
+        pub(crate) fn with_prepared_reply<T>(
+            &self,
+            channel: u64,
+            reply: Reply,
+            consume: impl FnOnce(&Prepared) -> T,
+        ) -> Result<T, &'static str> {
+            self.with_submission(channel, |port| Ok(consume(&port.take_prepared(reply)?)))
+        }
+
+        /// Consumers must be bounded and synchronous, without re-entering Readiness.
+        pub(crate) fn with_closed_reply<T>(
+            &self,
+            channel: u64,
+            reply: Reply,
+            issue: impl FnOnce(&Closed) -> T,
+        ) -> Result<T, &'static str> {
+            self.with_submission(channel, |port| Ok(issue(&port.take_closed(reply)?)))
         }
     }
 
