@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 use axum::{
     Router,
@@ -28,6 +29,7 @@ struct Fixture {
     holder: Arc<CancelToken>,
     holder_message: MessageId,
     http: Arc<serenity::Http>,
+    channel_gets: Arc<AtomicUsize>,
     server: tokio::task::JoinHandle<()>,
     _rest: crate::services::discord::shared_state::test_rest::Guard,
 }
@@ -57,6 +59,7 @@ impl Fixture {
             .set("s2b-test-token".into())
             .unwrap();
         let pane = InjectPane::new(channel, mode);
+        inject_hook::set_queued_head(channel, true);
         let holder_message = MessageId::new(channel + 500);
         pane.reseat_row(TurnSource::Managed, holder_message.get());
         let holder = Arc::new(CancelToken::new());
@@ -68,21 +71,29 @@ impl Fixture {
                 .await
         );
 
+        let channel_gets = Arc::new(AtomicUsize::new(0));
+        let counted_gets = channel_gets.clone();
         let rest_app = Router::new().route("/gateway", axum::routing::get(
             |ws: axum::extract::ws::WebSocketUpgrade| async {
                 ws.on_upgrade(|mut socket| async move {
                     while socket.recv().await.is_some() {}
                 })
             },
-        )).fallback(move |method: Method, uri: axum::http::Uri| async move {
+        )).fallback(move |method: Method, uri: axum::http::Uri| {
+            let counted_gets = counted_gets.clone();
+            async move {
             assert_eq!(method, Method::GET, "queued injection cannot publish or tear down a queued card before consume: {uri}");
             assert!(uri.path().starts_with("/api/v10/channels/"), "{uri}");
+            if uri.path() == format!("/api/v10/channels/{}", channel.get()) {
+                counted_gets.fetch_add(1, Relaxed);
+            }
             axum::Json(json!({
                 "id": channel.get().to_string(), "type": 0,
                 "name": "s2b-claude", "guild_id": "6813000",
                 "position": 0, "permission_overwrites": [], "nsfw": false,
                 "parent_id": null
             }))
+            }
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -125,6 +136,7 @@ impl Fixture {
             holder,
             holder_message,
             http,
+            channel_gets,
             server,
             _rest: rest,
         };
@@ -200,6 +212,10 @@ impl Fixture {
 
     fn bytes(&self) -> Vec<u8> {
         std::fs::read(self.path()).unwrap()
+    }
+
+    fn gets(&self) -> usize {
+        self.channel_gets.load(Relaxed)
     }
 
     fn disk(&self) -> Value {
@@ -342,11 +358,17 @@ fn items(disk: Value) -> Value {
 #[tokio::test(flavor = "current_thread")]
 async fn s2b_actual_router_kickoff_keeps_each_gate_independently_off_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    for (channel, mode, discord_open) in [(6_813_401, "off", true), (6_813_402, "all", false)] {
+    for (channel, mode, discord_open, queued_open) in [
+        (6_813_401, "off", true, true),
+        (6_813_402, "all", false, true),
+        (6_813_423, "all", true, false),
+    ] {
         let fixture = Fixture::new(channel, mode).await;
+        inject_hook::set_queued_head(channel, queued_open);
         let _gate = discord_open.then(|| router::busy_inject_support::open_gate(channel));
         let before = fixture.bytes();
         let queue = format!("{:?}", fixture.queue().await);
+        let gets = fixture.gets();
         fixture.kick().await;
         assert_eq!(
             fixture.pane.tmux_calls(),
@@ -355,6 +377,10 @@ async fn s2b_actual_router_kickoff_keeps_each_gate_independently_off_pg() {
         );
         assert_eq!(fixture.bytes(), before);
         assert_eq!(format!("{:?}", fixture.queue().await), queue);
+        if !queued_open || mode == "off" {
+            // Main's busy KICKOFF performs three routing GETs and has no parent lookup afterward.
+            assert_eq!(fixture.gets() - gets, 3, "queued_open={queued_open}");
+        }
         fixture.assert_holder_kept().await;
     }
 }
@@ -434,6 +460,7 @@ async fn s2b_actual_router_kickoff_opens_both_gates_for_the_same_durable_head_pg
     let fixture = Fixture::new(6_813_422, "all").await;
     let enabled = inject_hook::forced(fixture.channel.get()).unwrap();
     inject_hook::clear(fixture.channel.get());
+    inject_hook::set_queued_head(fixture.channel.get(), true);
     let before = fixture.queue().await;
     let before_bytes = fixture.bytes();
     let before_queue = format!("{before:?}");

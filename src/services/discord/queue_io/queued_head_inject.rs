@@ -28,6 +28,19 @@ pub(in crate::services::discord) fn persistence_failed(error: String) -> health:
     health::InjectAttempt::HandbackFailed("queued_head_blocked")
 }
 
+/// `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off.
+pub(in crate::services::discord) fn queued_head_enabled(channel: u64) -> bool {
+    #[cfg(test)]
+    return health::inject_hook::queued_head_enabled(channel);
+    #[cfg(not(test))]
+    {
+        static PROCESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let _ = channel;
+        *PROCESS
+            .get_or_init(|| std::env::var("ADK_QUEUED_HEAD_INJECT").is_ok_and(|value| value == "1"))
+    }
+}
+
 pub(in crate::services::discord) async fn try_busy(
     deps: &router::IntakeDeps<'_>,
     provider: &ProviderKind,
@@ -35,6 +48,9 @@ pub(in crate::services::discord) async fn try_busy(
     gate: Option<fn(ChannelId, Option<ChannelId>) -> bool>,
 ) -> bool {
     let Some(gate) = gate else { return false };
+    if !health::InjectOrigin::queued_head_ready(provider, channel) {
+        return false;
+    }
     let parent = session_runtime::resolve_thread_parent(deps.http, channel)
         .await
         .map(|(id, _)| id);

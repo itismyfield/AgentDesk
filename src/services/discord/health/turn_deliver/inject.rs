@@ -17,7 +17,7 @@ use crate::services::discord::inflight::{InflightTurnState, TurnSource};
 use crate::services::discord::inject_disposition::{self, InjectionOutcome, SourceGuard};
 use crate::services::discord::input_runtime::fence;
 use crate::services::discord::queue_io::queued_head_inject::{
-    BindingKey, binding_key, persistence_failed,
+    BindingKey, binding_key, persistence_failed, queued_head_enabled,
 };
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
@@ -99,15 +99,20 @@ pub(crate) enum Origin {
 }
 
 impl Origin {
+    pub(crate) fn queued_head_ready(provider: &ProviderKind, channel: ChannelId) -> bool {
+        !cfg!(windows)
+            && *provider == ProviderKind::Claude
+            && mode(channel.get()) != InjectMode::Off
+            && queued_head_enabled(channel.get())
+    }
+
     pub(crate) fn queued_head_gate_enabled(
         provider: &ProviderKind,
         channel: ChannelId,
         parent: Option<ChannelId>,
         gate: fn(ChannelId, Option<ChannelId>) -> bool,
     ) -> bool {
-        *provider == ProviderKind::Claude
-            && mode(channel.get()) != InjectMode::Off
-            && gate(channel, parent)
+        Self::queued_head_ready(provider, channel) && gate(channel, parent)
     }
 }
 
@@ -996,6 +1001,7 @@ pub(crate) mod test_hook {
 
     static FORCED: Mutex<Option<HashMap<u64, (InjectMode, PathBuf)>>> = Mutex::new(None);
     static CODEX_ENABLED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    static QUEUED_ENABLED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
     static CRASHING: Mutex<Vec<u64>> = Mutex::new(Vec::new());
     static FINAL_LOOKUP: Mutex<Option<HashMap<u64, Arc<Notify>>>> = Mutex::new(None);
     type Park = (Arc<Notify>, Arc<Notify>);
@@ -1153,6 +1159,21 @@ pub(crate) mod test_hook {
             .insert(channel_id, (mode, program));
     }
 
+    pub(crate) fn set_queued_head(channel_id: u64, open: bool) {
+        let mut enabled = QUEUED_ENABLED.lock().unwrap_or_else(|e| e.into_inner());
+        enabled.retain(|channel| *channel != channel_id);
+        if open {
+            enabled.push(channel_id);
+        }
+    }
+
+    pub(crate) fn queued_head_enabled(channel_id: u64) -> bool {
+        QUEUED_ENABLED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&channel_id)
+    }
+
     /// Opens Codex injection on the channel, as turning the constant on would.
     pub(crate) fn enable_codex(channel_id: u64) {
         let mut enabled = CODEX_ENABLED.lock().unwrap_or_else(|e| e.into_inner());
@@ -1165,6 +1186,7 @@ pub(crate) mod test_hook {
     }
 
     pub(crate) fn clear(channel_id: u64) {
+        set_queued_head(channel_id, false);
         let mut enabled = CODEX_ENABLED.lock().unwrap_or_else(|e| e.into_inner());
         enabled.retain(|channel| *channel != channel_id);
         let mut forced = FORCED.lock().unwrap_or_else(|e| e.into_inner());
