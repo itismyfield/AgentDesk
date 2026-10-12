@@ -8,6 +8,8 @@ use crate::services::claude_tui::host_input::InputTransport;
 use crate::services::platform::binary_resolver::runtime_command;
 use crate::services::session_host::{HostKey, tmux_key_name};
 
+pub(crate) mod guarded;
+
 pub(crate) struct SubmissionTmux;
 
 impl SubmissionTmux {
