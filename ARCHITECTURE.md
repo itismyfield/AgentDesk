@@ -1105,6 +1105,9 @@ src/
 │   │   │   │   ├── g1b_modes_tests.rs
 │   │   │   │   ├── modes.rs
 │   │   │   │   └── modes_tests.rs
+│   │   │   ├── intake/
+│   │   │   │   ├── classify.rs
+│   │   │   │   └── source.rs
 │   │   │   ├── runtime/
 │   │   │   │   ├── dormant_tests.rs
 │   │   │   │   ├── drive.rs
@@ -1136,6 +1139,7 @@ src/
 │   │   │   ├── fence_tests.rs
 │   │   │   ├── g1b_command_tests.rs
 │   │   │   ├── g1b_ordering_tests.rs
+│   │   │   ├── intake.rs
 │   │   │   ├── mapping.rs
 │   │   │   ├── mapping_guard_tests.rs
 │   │   │   ├── mod.rs
