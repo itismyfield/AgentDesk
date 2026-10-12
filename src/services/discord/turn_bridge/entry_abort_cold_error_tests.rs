@@ -5,7 +5,7 @@ use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
 use crate::services::discord::gateway::GatewayFuture;
 use crate::services::discord::recovery_engine::herdr_admitted_restart::ADMITTED_ABORT_NOTICE;
-use crate::services::discord::turn_bridge::before_start_stop::{test_hooks, tests::NoLaunch};
+use crate::services::discord::turn_bridge::before_start_stop::test_hooks;
 use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
@@ -88,6 +88,110 @@ impl TurnGateway for Shown {
     }
 }
 
+/// The executor's ports with no launch host; each request for one is counted.
+#[derive(Default)]
+struct Launches(std::sync::atomic::AtomicUsize);
+
+impl Launches {
+    fn host(&self) -> Option<Arc<dyn crate::services::herdr_launch::HerdrLaunchHost>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        None
+    }
+}
+
+impl crate::services::claude::herdr_turn::HerdrTurnPorts for Launches {
+    fn launch_host(&self) -> Option<Arc<dyn crate::services::herdr_launch::HerdrLaunchHost>> {
+        self.host()
+    }
+    fn hook_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent> {
+        tokio::sync::broadcast::channel(1).1
+    }
+    fn attach(
+        &self,
+        _: &crate::services::claude::herdr_turn::AttachRequest<'_>,
+    ) -> Result<bool, String> {
+        panic!("no attach")
+    }
+    fn confirm_bound(
+        &self,
+        _: &HostedOwner,
+        _: &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
+        _: &crate::services::session_host::HerdrTarget,
+    ) -> Result<(), String> {
+        panic!("no bound")
+    }
+}
+
+impl crate::services::codex::herdr_turn::CodexHerdrPorts for Launches {
+    fn launch_host(&self) -> Option<Arc<dyn crate::services::herdr_launch::HerdrLaunchHost>> {
+        self.host()
+    }
+    fn attach(
+        &self,
+        _: &HostedOwner,
+        _: &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
+        _: &crate::services::tui_prompt_dedupe::binding_events::SourceId,
+        _: &crate::services::session_host::HerdrTarget,
+    ) -> Result<bool, String> {
+        panic!("no attach")
+    }
+    fn confirm_bound(
+        &self,
+        _: &HostedOwner,
+        _: &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
+        _: &crate::services::session_host::HerdrTarget,
+    ) -> Result<(), String> {
+        panic!("no bound")
+    }
+}
+
+/// The executor's error once it asked for the launch host it lacks.
+const NO_LAUNCH_HOST: &str = "herdr turn: no launch host";
+
+/// A Codex CLI advertising hooks and daemon isolation, with a published hook endpoint, so the
+/// Codex launch preflight admits the turn and only the missing launch host refuses it.
+struct CodexCli {
+    _endpoint: crate::services::claude_tui::hook_server::HookEndpointGuard,
+    _env: Vec<crate::config::test_env::TestEnvVarGuard>,
+    _dir: tempfile::TempDir,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+/// Needs the shared env lock already held, as `set_agentdesk_root_for_test` takes it.
+fn codex_cli() -> CodexCli {
+    use crate::config::test_env::TestEnvVarGuard as Guard;
+    let lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex");
+    let stub = "#!/bin/bash\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.160.0'\n\
+        elif [ \"$1 $2\" = 'resume --help' ]; then echo '--dangerously-bypass-hook-trust --no-daemon'\n\
+        fi\n";
+    std::fs::write(&codex, stub).unwrap();
+    let executable = std::os::unix::fs::PermissionsExt::from_mode(0o700);
+    std::fs::set_permissions(&codex, executable).unwrap();
+    let env = vec![
+        Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &codex),
+        Guard::set_path_after_shared_test_env_lock("CODEX_HOME", dir.path()),
+        Guard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
+            "1".as_ref(),
+        ),
+    ];
+    let endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+        "http://127.0.0.1:9".into(),
+    );
+    CodexCli {
+        _endpoint: endpoint,
+        _env: env,
+        _dir: dir,
+        _lock: lock,
+    }
+}
+
 /// One cold turn as intake leaves it: its actor holds the mailbox, its row is saved, and one
 /// active turn is counted.
 struct Cold {
@@ -155,10 +259,13 @@ async fn cold(provider: ProviderKind, channel_id: u64) -> Cold {
 }
 
 impl Cold {
-    /// The actual provider executor with no launch host, on its blocking thread, as `owner`.
-    async fn execute(&self, owner: HostedOwner) -> Result<(), String> {
+    /// The actual provider executor with no launch host, on its blocking thread, as `owner`;
+    /// returns its error and how often it asked for a launch host.
+    async fn execute(&self, owner: HostedOwner) -> (Result<(), String>, usize) {
         let (actor, provider) = (self.cancel.clone(), self.provider.clone());
-        tokio::task::spawn_blocking(move || {
+        let launches = Arc::new(Launches::default());
+        let ports = launches.clone();
+        let result = tokio::task::spawn_blocking(move || {
             let pool = sqlx::postgres::PgPoolOptions::new()
                 .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
                 .unwrap();
@@ -184,7 +291,7 @@ impl Cold {
                     hook_endpoint: None,
                     cancel: Some(actor),
                 };
-                crate::services::claude::herdr_turn::execute(turn, &NoLaunch, sender)
+                crate::services::claude::herdr_turn::execute(turn, ports.as_ref(), sender)
             } else {
                 let turn = crate::services::codex::herdr_turn::CodexHerdrTurn {
                     pool: &pool,
@@ -202,11 +309,12 @@ impl Cold {
                     compact_token_limit: None,
                     cancel: Some(actor),
                 };
-                crate::services::codex::herdr_turn::execute(turn, &NoLaunch, sender)
+                crate::services::codex::herdr_turn::execute(turn, ports.as_ref(), sender)
             }
         })
         .await
-        .unwrap()
+        .unwrap();
+        (result, launches.0.load(Ordering::SeqCst))
     }
 
     fn stop(&self) {
@@ -308,12 +416,17 @@ async fn cold_launch_error_reaches_bridge_policy_close_both_providers() {
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
     // The bridge owns these bodies; the policy close shows its stop only there.
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let _codex = codex_cli();
     for (n, provider) in [ProviderKind::Claude, ProviderKind::Codex]
         .into_iter()
         .enumerate()
     {
         let turn = cold(provider.clone(), 5_340_661_000 + n as u64).await;
-        let error = turn.execute(turn.owner.clone()).await.unwrap_err();
+        let (result, launches) = turn.execute(turn.owner.clone()).await;
+        // Each executor passed its preflight and failed only at the launch host it asked for.
+        assert_eq!(launches, 1, "{provider:?}: {result:?}");
+        let error = result.unwrap_err();
+        assert_eq!(error, NO_LAUNCH_HOST, "{provider:?}");
         turn.stop();
         let state = turn.cancel.herdr_interrupt_state().unwrap();
         assert_eq!(state.closed_probe(), Some(false), "{provider:?}: {error}");
@@ -346,6 +459,9 @@ async fn cold_launch_error_reaches_bridge_policy_close_both_providers() {
     }
 }
 
+/// The prelaunch refusal of an executor whose token already holds another turn's stop state.
+const PRELAUNCH_FOREIGN_STOP: &str = "herdr turn: the token holds another turn's stop state";
+
 /// How a failed cold turn lacks a before-start proof.
 #[derive(Clone, Copy, Debug)]
 enum Unproven {
@@ -362,6 +478,7 @@ async fn cold_error_without_proof_remains_held() {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let _codex = codex_cli();
     let cases = [
         Unproven::NoExecution,
         Unproven::Input(HerdrSubmission::Submitted),
@@ -388,7 +505,17 @@ async fn cold_error_without_proof_remains_held() {
                 turn.owner.clone()
             }
         };
-        let error = turn.execute(executor).await.unwrap_err();
+        let (result, launches) = turn.execute(executor).await;
+        // A refusal before launch never asks for a host; an executor past its preflight does.
+        let (asked, expected) = match unproven {
+            Unproven::NoExecution => (0, PRELAUNCH_FOREIGN_STOP),
+            Unproven::Input(_) => (1, NO_LAUNCH_HOST),
+        };
+        assert_eq!(
+            (launches, result.as_ref().err().map(String::as_str)),
+            (asked, Some(expected))
+        );
+        let error = result.unwrap_err();
         turn.stop();
         let steps = observe_receipt(provider.clone(), error.clone());
         let submitted = test_hooks::submitted();
@@ -434,9 +561,15 @@ async fn cold_error_does_not_clear_successor() {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let _codex = codex_cli();
     for (n, successor) in [Successor::Row, Successor::Actor].into_iter().enumerate() {
         let turn = cold(ProviderKind::Codex, 5_340_663_000 + n as u64).await;
-        let error = turn.execute(turn.owner.clone()).await.unwrap_err();
+        let (result, launches) = turn.execute(turn.owner.clone()).await;
+        assert_eq!(
+            (launches, result.as_ref().err().map(String::as_str)),
+            (1, Some(NO_LAUNCH_HOST))
+        );
+        let error = result.unwrap_err();
         turn.stop();
         let next = Arc::new(CancelToken::new());
         let mut row = turn.row.clone();
