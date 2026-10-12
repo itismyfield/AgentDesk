@@ -339,6 +339,23 @@ async fn restore_cuts(root: &Path, pool: &sqlx::PgPool) {
     }
     let rig = HerdrRig::start();
     let _registry = rig.registry_on_this_thread();
+    // The restarted node reaches the same Herdr endpoint, served here by this process's socket.
+    let socket = rig.socket().display().to_string();
+    let moved = sqlx::query(
+        "UPDATE sessions SET hosted_execution = jsonb_set(hosted_execution, \
+         '{location,socket_addr}', to_jsonb($1::text)) WHERE hosted_execution->'location' IS NOT NULL",
+    );
+    let moved = moved.bind(&socket).execute(pool).await.unwrap();
+    assert_eq!(moved.rows_affected(), CUTS.len() as u64);
+    // The held Sent turn's provider still runs in that pane, so a replayed stop would land there.
+    let (_, sent) = CUTS[1];
+    let contexts = crate::config::runtime_root()
+        .unwrap()
+        .join("runtime/binding_contexts/claude");
+    let context = contexts.join(format!("{sent:032x}.json"));
+    assert!(context.exists(), "the Sent cut's launch context");
+    rig.run_provider(&context, false);
+    rig.show_panes(&[PANE]);
     let discord = crate::services::discord::recovery_engine::o_cut_recorder::start(5_340_103_000);
     let discord = discord.await;
     let restore = crate::services::discord::recovery_engine::restore_inflight_turns;
