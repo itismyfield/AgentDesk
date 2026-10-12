@@ -175,6 +175,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
   --skip services::discord::tmux::watcher_lifecycle::o_only_restore::tests
   --skip services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
+  --skip services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests
   --skip services::discord::tmux_reaper::host_guard_tests
   --skip services::discord::tui_prompt_relay::herdr_source::tests
   --skip services::discord::tui_prompt_relay::rehydration::tests::host_defer
@@ -1048,6 +1049,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
   services::discord::tmux::watcher_lifecycle::o_only_restore::tests
   services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
+  services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests
   services::discord::tmux_reaper::host_guard_tests
   services::discord::tui_prompt_relay::herdr_source::tests
   services::discord::tui_prompt_relay::rehydration::tests::host_defer

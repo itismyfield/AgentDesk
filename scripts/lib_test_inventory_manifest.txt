@@ -7801,6 +7801,9 @@ services::discord::tmux::tmux_output_stream::tests::unique_provider_prose_flood_
 services::discord::tmux::tmux_output_stream::tests::watcher_status_panel_bound_placeholder_keeps_events_on_status_panel
 services::discord::tmux::tmux_output_stream::tests::watcher_status_panel_fallback_inlines_events_without_status_message
 services::discord::tmux::tmux_session_files::input_fence_tests::c2b_orphan_file_sweep_leaves_protected_and_unplaced_groups
+services::discord::tmux::tmux_session_files::input_fence_tests::n3bc_file_sweep_rechecks_under_source_authority
+services::discord::tmux::tmux_session_files::input_fence_tests::n3bc_orphan_file_sweep_off_retains_main_gc
+services::discord::tmux::tmux_session_files::input_fence_tests::n3bc_public_file_sweep_preserves_six_protected_modes
 services::discord::tmux::tmux_session_files::tests::adoption_current_generation_marker_is_a_noop
 services::discord::tmux::tmux_session_files::tests::adoption_never_stamps_a_fresh_incarnation_with_an_old_mtime
 services::discord::tmux::tmux_session_files::tests::adoption_recovers_an_absent_marker_with_nonzero_identity
@@ -8365,6 +8368,12 @@ services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests::streaming_placeholder_without_inflight_is_skipped
 services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests::c2b_startup_cleanup_leaves_a_protected_channel_alone_pg
 services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests::startup_cleanup_runs_only_after_the_host_guard_admits_the_stored_rows_pg
+services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests::n3bc_protected_legacy_restore_six_modes_keeps_effects_zero_pg
+services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests::n3bc_restore_named_await_windows_preserve_installation_snapshot_pg
+services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests::n3bc_restore_off_registry_keeps_legacy_adoption_and_old_row_semantics_pg
+services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests::n3bc_restore_other_provider_protection_is_channel_wide_pg
+services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests::n3bc_restore_real_core_lock_wait_rechecks_protection_pg
+services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests::n3bc_restore_recovery_signal_wait_preserves_marker_after_protection_pg
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::configured_channel_binding_is_last_resort_and_provider_scoped
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::dispatched_origin_ghost_marker_is_consumed_only_for_matching_turn
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::interactive_restore_without_dispatch_is_untouched
@@ -8406,6 +8415,13 @@ services::discord::tmux_reaper::host_guard_tests::c2b_orphan_cleanup_leaves_prot
 services::discord::tmux_reaper::host_guard_tests::dead_session_reaper_kills_only_what_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::fresh_routine_backstop_keeps_the_session_when_ownership_is_unreadable_pg
 services::discord::tmux_reaper::host_guard_tests::fresh_routine_backstop_reads_the_run_that_owned_the_listed_session_pg
+services::discord::tmux_reaper::host_guard_tests::n3bc_fresh_post_await_boundaries_preserve_after_install_pg
+services::discord::tmux_reaper::host_guard_tests::n3bc_last_protection_release_allows_existing_orphan_cleanup_pg
+services::discord::tmux_reaper::host_guard_tests::n3bc_mapped_dead_post_await_preserves_after_install_pg
+services::discord::tmux_reaper::host_guard_tests::n3bc_orphan_dispatch_boundary_preserves_after_install_pg
+services::discord::tmux_reaper::host_guard_tests::n3bc_orphan_post_await_boundaries_preserve_after_install_pg
+services::discord::tmux_reaper::host_guard_tests::n3bc_public_orphan_conflicting_channel_is_unknown_pg
+services::discord::tmux_reaper::host_guard_tests::n3bc_public_periodic_fresh_hold_keeps_mapped_sibling_pg
 services::discord::tmux_reaper::host_guard_tests::orphan_cleanup_kills_only_what_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::stale_busy_heal_finalizes_only_a_turn_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::unified_thread_kill_signal_kills_only_what_the_host_guard_admits_pg

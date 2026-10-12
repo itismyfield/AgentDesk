@@ -1638,7 +1638,8 @@ src/
 │   │   │   ├── finalize.rs
 │   │   │   ├── host_guard.rs
 │   │   │   ├── host_guard_tests.rs
-│   │   │   └── retirement_await_tests.rs
+│   │   │   ├── retirement_await_tests.rs
+│   │   │   └── stale_busy_identity.rs
 │   │   ├── tmux_session_files/
 │   │   │   └── input_fence_tests.rs
 │   │   ├── tmux_watcher/
@@ -2083,6 +2084,7 @@ src/
 │   │   │   │   ├── claude_restore.rs
 │   │   │   │   ├── liveness.rs
 │   │   │   │   ├── liveness_tests.rs
+│   │   │   │   ├── n3bc_restore_tests.rs
 │   │   │   │   ├── n4d2_boundary_tests.rs
 │   │   │   │   ├── n4d2_entry_test.rs
 │   │   │   │   ├── n4d2_o_writer_test.rs
@@ -2094,6 +2096,7 @@ src/
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
 │   │   │   │   ├── restore.rs
+│   │   │   │   ├── restore_core.rs
 │   │   │   │   ├── restore_mapping.rs
 │   │   │   │   ├── restore_support.rs
 │   │   │   │   ├── restore_tests.rs
