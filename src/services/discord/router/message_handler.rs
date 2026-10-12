@@ -278,7 +278,7 @@ pub(super) async fn finish_admitted_local(
     queued_drain: bool,
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
-) -> Result<(), Error> {
+) -> Result<IntakeExecution, Error> {
     intake_turn::handle_text_message(
         deps,
         preserve_on_cancel,

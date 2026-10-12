@@ -179,6 +179,7 @@ pub struct DiffRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceAnomalyKind {
+    Missing,
     Replaced,
     Shrunk,
     PrefixMismatch,

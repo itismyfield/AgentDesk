@@ -130,6 +130,7 @@ fn payload(channel: &str, message: &str) -> InsertPendingPayload {
         attachment_refs: serde_json::json!([]),
         channel_id: channel.into(),
         user_msg_id: message.into(),
+        replay_source_message_ids: None,
         request_owner_id: "user".into(),
         request_owner_name: None,
         user_text: "original request".into(),

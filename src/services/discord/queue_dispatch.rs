@@ -8,6 +8,63 @@ mod input_effect_tests;
 
 type DispatchLeaseHandle = Arc<crate::services::turn_orchestrator::DispatchLease>;
 
+/// A confirmed active queued execution releases queue custody UI without restarting its turn view.
+pub(super) async fn settle_executed_queued_intake(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    intervention: &Intervention,
+    source: &'static str,
+) {
+    for owner in intervention.source_message_queued_generations() {
+        for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
+            queue_marker::note_removed_queued_generation(
+                shared,
+                http,
+                channel_id,
+                owner.message_id,
+                emoji,
+                owner.queued_generation,
+                source,
+            )
+            .await;
+        }
+    }
+    if let Some(card) = shared
+        .remove_queued_placeholder(channel_id, intervention.message_id)
+        .await
+        && let QueuedCardDisposition::Released(teardown) = queued_card_gate::release_or_rekey(
+            shared,
+            channel_id,
+            card,
+            &intervention.source_message_ids,
+        )
+        .await
+    {
+        let _ = queued_card_gate::teardown_delete(http, shared, teardown).await;
+    }
+    let drained = gateway::drain_merged_queued_placeholders(
+        shared,
+        channel_id,
+        intervention.message_id,
+        &intervention.source_message_ids,
+    )
+    .await;
+    for teardown in drained {
+        let card = teardown.card();
+        let result = queued_card_gate::teardown_delete(http, shared, teardown).await;
+        crate::services::observability::emit_relay_delete_result(
+            provider.as_str(),
+            channel_id.get(),
+            card.get(),
+            source,
+            "delete_nonterminal",
+            &result,
+        );
+    }
+}
+
 pub(super) fn persistence_context(
     shared: &SharedData,
     provider: &ProviderKind,

@@ -39,15 +39,22 @@ impl Fixture {
         Self(dir)
     }
 
-    fn pane(&self, offer: Offer) -> TmuxPane {
+    fn base_pane(&self) -> TmuxPane {
         let mut pane = TmuxPane::with_program(
             &format!("epoch-{}", self.0.path().display()),
             self.0.path().join("tmux"),
             Duration::from_secs(5),
-        )
-        .with_offer(offer);
+        );
         pane.attest_test_nonce("epoch-test");
         pane
+    }
+
+    fn pane(&self, offer: Offer) -> TmuxPane {
+        self.base_pane().with_offer(offer)
+    }
+
+    fn owned_pane(&self, ownership: Arc<OwnershipGate>) -> TmuxPane {
+        self.base_pane().with_ownership(ownership)
     }
 
     fn calls(&self, command: &str) -> usize {
@@ -59,9 +66,13 @@ impl Fixture {
     }
 
     fn submit_during(&self, offer: Offer, change: impl FnOnce()) -> SendOutcome {
+        self.submit_pane_during(self.pane(offer), change)
+    }
+
+    fn submit_pane_during(&self, mut pane: TmuxPane, change: impl FnOnce()) -> SendOutcome {
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| {
-                let outcome = self.pane(offer).with_composer(|p| p.submit("hello"));
+                let outcome = pane.with_composer(|p| p.submit("hello"));
                 fs::write(self.0.path().join("outcome"), format!("{outcome:?}")).unwrap();
                 outcome.unwrap()
             });
@@ -188,4 +199,104 @@ fn an_offer_for_another_provider_cannot_spawn_paste_or_enter() {
     assert!(matches!(outcome, SendOutcome::NotSent(_)));
     assert_eq!(fixture.calls("paste-buffer"), 0);
     assert_eq!(fixture.calls("send-keys"), 0);
+}
+
+#[test]
+fn b_runtime_pane_unknown_and_lost_do_not_begin_submission() {
+    for unknown in [false, true] {
+        let gate = Arc::new(OwnershipGate::default());
+        if unknown {
+            gate.acquired();
+            gate.uncertain();
+        }
+        let fixture = Fixture::new("");
+        let outcome = fixture
+            .owned_pane(gate)
+            .with_composer(|pane| pane.submit("hello"))
+            .unwrap();
+        assert!(
+            matches!(outcome, SendOutcome::NotSent(_)),
+            "unsafe ownership must not start input: {outcome:?}"
+        );
+        assert_eq!(fixture.calls("load-buffer"), 0);
+        assert_eq!(fixture.calls("paste-buffer"), 0);
+        assert_eq!(fixture.calls("send-keys"), 0);
+    }
+}
+
+#[test]
+fn b_runtime_pane_offer_epoch_at_both_spawns() {
+    for pause in ["load", "capture"] {
+        for state in ["unknown", "lost", "reacquired"] {
+            let gate = Arc::new(OwnershipGate::default());
+            gate.acquired();
+            let fixture = Fixture::new(pause);
+            let outcome =
+                fixture.submit_pane_during(fixture.owned_pane(Arc::clone(&gate)), || match state {
+                    "unknown" => gate.uncertain(),
+                    "lost" => gate.lost(),
+                    _ => {
+                        gate.acquired();
+                    }
+                });
+            assert_eq!(fixture.calls("load-buffer"), 1);
+            assert_eq!(fixture.calls("send-keys"), 0, "{pause}/{state}");
+            if pause == "load" {
+                assert!(
+                    matches!(outcome, SendOutcome::NotSent(_)),
+                    "loss before paste must stay NotSent: {state}: {outcome:?}"
+                );
+                assert_eq!(fixture.calls("paste-buffer"), 0, "{state}");
+            } else {
+                assert!(
+                    matches!(outcome, SendOutcome::Indeterminate(_)),
+                    "{state}: {outcome:?}"
+                );
+                assert_eq!(fixture.calls("paste-buffer"), 1);
+                assert!(
+                    fs::read_to_string(fixture.0.path().join("screen"))
+                        .unwrap()
+                        .contains("hello")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn b_runtime_pane_reacquisition_uses_a_fresh_offer_per_submission() {
+    let gate = Arc::new(OwnershipGate::default());
+    gate.acquired();
+    let fixture = Fixture::new("");
+    let mut pane = fixture.owned_pane(Arc::clone(&gate));
+    assert_eq!(
+        pane.with_composer(|p| p.submit("hello")),
+        Some(SendOutcome::Sent)
+    );
+    gate.lost();
+    gate.acquired();
+    fs::write(
+        fixture.0.path().join("screen"),
+        "────────────────────\n❯ \n────────────────────\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pane.with_composer(|p| p.submit("next")),
+        Some(SendOutcome::Sent)
+    );
+    assert_eq!(fixture.calls("load-buffer"), 2);
+    assert_eq!(fixture.calls("paste-buffer"), 2);
+    assert_eq!(fixture.calls("send-keys"), 2);
+}
+
+#[test]
+fn b_runtime_pane_legacy_has_no_ownership_requirement() {
+    let fixture = Fixture::new("");
+    assert_eq!(
+        fixture.base_pane().with_composer(|p| p.submit("hello")),
+        Some(SendOutcome::Sent)
+    );
+    assert_eq!(fixture.calls("load-buffer"), 1);
+    assert_eq!(fixture.calls("paste-buffer"), 1);
+    assert_eq!(fixture.calls("send-keys"), 1);
 }

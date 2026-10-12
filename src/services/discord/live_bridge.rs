@@ -283,6 +283,12 @@ pub(super) async fn defer_unstarted_turn(
     handback_gap::pause(channel).await;
     let queued =
         super::mailbox_requeue_inflight_for_followup_retry(shared, provider, channel, state).await;
+    #[cfg(test)]
+    let queued = {
+        let mut queued = queued;
+        handback_gap::memory_ack_on_persistence_failure(channel, &mut queued);
+        queued
+    };
     drop(transition);
     tracing::warn!(
         channel_id = state.channel_id,
@@ -290,15 +296,19 @@ pub(super) async fn defer_unstarted_turn(
         accepted = queued.enqueued,
         "{reason}"
     );
-    let accepted = queued.enqueued
-        || queued.merged
-        || matches!(
-            queued.refusal_reason,
-            Some(
-                crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued
-                    | crate::services::turn_orchestrator::EnqueueRefusalReason::LastItemDedup
+    let accepted = if super::router::checkpoint_waits_for_admission(channel) {
+        queued.persistence_error.is_none() && queued.enqueued
+    } else {
+        queued.enqueued
+            || queued.merged
+            || matches!(
+                queued.refusal_reason,
+                Some(
+                    crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued
+                        | crate::services::turn_orchestrator::EnqueueRefusalReason::LastItemDedup
+                )
             )
-        );
+    };
     if accepted {
         super::arm_slow_idle_queue_backstop_if_queue_nonempty(shared, provider, channel, reason)
             .await;
@@ -400,7 +410,7 @@ async fn fence_handback(
 /// Stops one channel's handback between its claim release and its front requeue.
 #[cfg(test)]
 pub(crate) mod handback_gap {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
 
     use poise::serenity_prelude::ChannelId;
@@ -408,6 +418,29 @@ pub(crate) mod handback_gap {
 
     type Gap = (Arc<Notify>, Arc<Notify>);
     static GAPS: Mutex<Option<HashMap<u64, Gap>>> = Mutex::new(None);
+    static MEMORY_ACKS: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
+
+    pub(crate) fn arm_memory_ack_on_persistence_failure(channel: u64) {
+        MEMORY_ACKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(HashSet::new)
+            .insert(channel);
+    }
+
+    pub(super) fn memory_ack_on_persistence_failure(
+        channel: ChannelId,
+        queued: &mut super::super::MailboxEnqueueOutcome,
+    ) {
+        let armed = MEMORY_ACKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            .is_some_and(|channels| channels.remove(&channel.get()));
+        if armed && queued.persistence_error.is_some() {
+            queued.enqueued = true;
+        }
+    }
 
     /// Returns (reached, resume) for the channel's next handback.
     pub(crate) fn arm(channel: u64) -> Gap {
