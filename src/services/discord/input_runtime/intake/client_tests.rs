@@ -274,3 +274,70 @@ async fn c2_apply_from_real_scan_keeps_receipt_distinct_from_failed_settlement_a
     assert!(matches!(result, Responsibility::Known { key: 10, .. }));
     assert!(supervisor.release());
 }
+
+#[tokio::test]
+async fn c2_external_reply_loss_retains_original_and_does_not_cancel_the_received_loan() {
+    let rig = Rig::new(6_325_205);
+    let mut supervisor = rig.supervisor(Request::Ledger, vec![]);
+    assert_eq!(supervisor.boot().await, Landing::Admitted);
+    let (sender, mut receiver) = mpsc::channel(1);
+    let client = supervisor.bind_intake(sender).unwrap();
+    supervisor.adopt_task(rig.channel).unwrap();
+    supervisor.publish_intake();
+    let original = prepare_source(SourceDraft {
+        origin: Origin::SlashInteraction {
+            interaction_id: 123,
+            author_id: 7,
+            original_channel_id: rig.channel,
+            execution_channel_id: rig.channel,
+        },
+        author_is_bot: false,
+        original_text: "/skill explain".into(),
+        prompt: "expanded prompt".into(),
+        reply_context: None,
+        attachments: vec![],
+        voice_announcement: None,
+    })
+    .unwrap();
+    let identity = original.identity().clone();
+    let input = original.input().clone();
+    let mut request = Box::pin(client.submit_external(&original));
+    let command = tokio::select! {
+        command = receiver.recv() => command.unwrap(),
+        result = &mut request => panic!("no receiver produced this result: {result:?}"),
+    };
+    drop(request);
+    assert_eq!(supervisor.pending_overflow().generation(), 1);
+    assert_eq!(original.identity(), &identity);
+    assert_eq!(original.input(), &input);
+    supervisor.input_command(command, true).await;
+    let rows = supervisor.slot().get().unwrap().rows().unwrap();
+    assert_eq!(rows.receipt_identity(original.key()), Some(identity));
+    assert_eq!(rows.row(original.key()).unwrap().input, input);
+    assert_eq!(rows.folded_seq(), 1);
+    let result = roundtrip(
+        client.submit_external(&original),
+        &mut supervisor,
+        &mut receiver,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        result,
+        external::ExternalReceipt::Received {
+            duplicate: true,
+            ..
+        }
+    ));
+    assert_eq!(
+        supervisor
+            .slot()
+            .get()
+            .unwrap()
+            .rows()
+            .unwrap()
+            .folded_seq(),
+        1
+    );
+    assert!(supervisor.release());
+}

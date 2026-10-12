@@ -57,7 +57,7 @@ impl Ports for HandoffFake {
     fn source_policy<'a>(
         &'a mut self,
         source: &'a super::super::super::source::Source,
-    ) -> Step<'a, super::super::super::super::intake::Classification> {
+    ) -> Step<'a, bool> {
         self.inner.source_policy(source)
     }
     fn mapping(&self) -> mapping::Probe {

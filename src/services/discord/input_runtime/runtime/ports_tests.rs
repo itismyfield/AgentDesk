@@ -86,10 +86,7 @@ fn c2_runtime_source_policy_reads_current_author_provider_routing_and_holds_unkn
         assert_eq!(before.authorized, Some(true));
         assert_eq!(before.supported, Some(true));
         assert!(matches!(before.voice_target, VoiceTarget::Unknown));
-        assert_eq!(
-            port.source_policy(&source).await,
-            Classification::Retry(intake::Retry::Unknown)
-        );
+        assert!(!port.source_policy(&source).await);
         shared.settings.write().await.owner_user_id = Some(8);
         let revoked = port.policy_facts(&source).await;
         assert_eq!(
@@ -118,10 +115,7 @@ fn c2_runtime_source_policy_reads_current_author_provider_routing_and_holds_unkn
             .sessions
             .remove(&ChannelId::new(channel));
         assert_eq!(port.policy_facts(&source).await.supported, None);
-        assert_eq!(
-            port.source_policy(&source).await,
-            Classification::Retry(intake::Retry::Unknown)
-        );
+        assert!(!port.source_policy(&source).await);
         assert_eq!(source.input(), &original);
         assert!(!port.root.join("input_ledger").exists());
         assert!(!port.root.join("discord_pending_queue").exists());

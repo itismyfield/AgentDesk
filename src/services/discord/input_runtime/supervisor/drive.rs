@@ -12,7 +12,6 @@ pub(crate) use crate::services::discord::input_runtime::supervisor::command::Sup
 use super::{BUDGET, Cursor, Landing, Ports, Supervisor, clear_loan, held, loan};
 use crate::services::discord::input_runtime::clear::{self, ClearHost, Outcome, Unresolved};
 use crate::services::discord::input_runtime::fence::{self, Closing};
-use crate::services::discord::input_runtime::intake::{Classification, Refusal, Retry};
 use crate::services::discord::input_runtime::reconcile::{self, HoldCause};
 use crate::services::discord::reaction_lifecycle::is_real_discord_message_id_value;
 use crate::services::tui_input::actor::pane::Pane;
@@ -724,25 +723,17 @@ impl<P: Ports> Supervisor<P> {
             super::source::Source::new(key, identity, row.input.clone(), vec![]).ok()
         });
         // Policy IO runs before the WAL loan; a changed policy keeps the accepted row intact.
-        let policy = match material {
+        let permitted = match material {
             Some(source) => self.ports.source_policy(&source).await,
-            None => Classification::Retry(Retry::Unknown),
+            None => false,
         };
-        let permitted = policy == Classification::Target;
         #[cfg(test)]
-        let permitted = permitted
-            || super::mutant("c2_skip_offer_policy")
-            || (policy == Classification::Retry(Retry::Unknown)
-                && super::mutant("c2_offer_unknown_policy"));
+        let permitted = permitted || super::mutant("c2_skip_offer_policy");
         if !permitted {
-            let reason = match policy {
-                Classification::Rejected(Refusal::Unauthorized) => "source_policy_unauthorized",
-                Classification::Rejected(Refusal::ProviderMismatch) => "source_policy_provider",
-                Classification::Retry(Retry::Unknown) => "source_policy_unknown",
-                _ => "source_policy_not_target",
-            };
             drive.life.restore(instance);
-            return self.hold(drive, cause(reason), now).await;
+            return self
+                .hold(drive, cause("source_policy_not_target"), now)
+                .await;
         }
         let guard = self.guard();
         let stepped = loan(&mut self.slot, move |lease| {

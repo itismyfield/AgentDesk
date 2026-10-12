@@ -4884,6 +4884,7 @@ services::discord::input_runtime::supervisor::tests::a_cause_leaves_health_once_
 services::discord::input_runtime::supervisor::tests::abandoned_clear_loan_pins_the_slot_poisons_the_channel_and_keeps_the_worker_write
 services::discord::input_runtime::supervisor::tests::baseline_and_wakes_apply_each_event_once_in_seq_order
 services::discord::input_runtime::supervisor::tests::c2_intake_client::c2_apply_from_real_scan_keeps_receipt_distinct_from_failed_settlement_and_retry
+services::discord::input_runtime::supervisor::tests::c2_intake_client::c2_external_reply_loss_retains_original_and_does_not_cancel_the_received_loan
 services::discord::input_runtime::supervisor::tests::c2_intake_client::c2_mailbox_full_closed_reply_loss_and_cancellation_keep_catchup_obligations
 services::discord::input_runtime::supervisor::tests::c2_intake_client::c2_off_client_lookup_does_not_register_open_or_create_input_effects
 services::discord::input_runtime::supervisor::tests::c2_intake_client::c2_prebind_preadopt_dirty_and_weak_mailbox_share_the_existing_order

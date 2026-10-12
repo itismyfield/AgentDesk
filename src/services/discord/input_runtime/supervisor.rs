@@ -424,11 +424,8 @@ pub(crate) trait Ports: Send + 'static {
     /// False when delivery failed, so the same Notice may be sent again later.
     fn notice(&mut self, text: String) -> Step<'_, bool>;
     /// Rechecks this source outside ledger loans; an unavailable policy never grants admission.
-    fn source_policy<'a>(
-        &'a mut self,
-        _source: &'a source::Source,
-    ) -> Step<'a, intake::Classification> {
-        Box::pin(async { intake::Classification::Retry(intake::Retry::Unknown) })
+    fn source_policy<'a>(&'a mut self, _source: &'a source::Source) -> Step<'a, bool> {
+        Box::pin(async { false })
     }
 }
 

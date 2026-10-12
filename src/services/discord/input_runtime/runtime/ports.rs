@@ -13,8 +13,8 @@ use crate::services::discord::input_runtime::clear::Step;
 use crate::services::discord::input_runtime::effects::{Deps, ProdEffects};
 use crate::services::discord::input_runtime::fence::{self, Closing, Failure};
 use crate::services::discord::input_runtime::intake::{
-    self, Classification, InputDisposition, PolicyFacts, PreparedSource, Protection, Refusal,
-    TargetFacts, VoiceTarget,
+    self, Classification, InputDisposition, PolicyFacts, PreparedSource, Protection, TargetFacts,
+    VoiceTarget,
 };
 use crate::services::discord::input_runtime::supervisor::Ports;
 use crate::services::discord::input_runtime::supervisor::mapping::Probe;
@@ -227,7 +227,7 @@ impl Ports for RuntimePorts {
     type Clear = LedgerClear;
     type Move = RuntimeMove;
 
-    fn source_policy<'a>(&'a mut self, source: &'a Source) -> Step<'a, Classification> {
+    fn source_policy<'a>(&'a mut self, source: &'a Source) -> Step<'a, bool> {
         Box::pin(async move {
             let prepared = match PreparedSource::from_material(
                 source.key(),
@@ -235,9 +235,9 @@ impl Ports for RuntimePorts {
                 source.input().clone(),
             ) {
                 Ok(prepared) => prepared,
-                Err(_) => return Classification::Rejected(Refusal::Provenance),
+                Err(_) => return false,
             };
-            intake::classify(&self.policy_facts(source).await, &prepared)
+            intake::classify(&self.policy_facts(source).await, &prepared) == Classification::Target
         })
     }
 

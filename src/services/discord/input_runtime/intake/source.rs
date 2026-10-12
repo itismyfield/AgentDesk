@@ -45,6 +45,7 @@ pub(in crate::services::discord) struct SourceDraft {
     pub voice_announcement: Option<VoiceTranscriptAnnouncement>,
 }
 
+#[derive(Clone)]
 pub(in crate::services::discord) struct PreparedSource {
     key: u64,
     identity: ReceiptIdentity,

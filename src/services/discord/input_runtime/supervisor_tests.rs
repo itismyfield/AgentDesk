@@ -324,10 +324,7 @@ struct Fake {
 impl Ports for Fake {
     type Clear = ClearFake;
     type Move = MoveFake;
-    fn source_policy<'a>(
-        &'a mut self,
-        source: &'a super::source::Source,
-    ) -> Step<'a, super::super::intake::Classification> {
+    fn source_policy<'a>(&'a mut self, source: &'a super::source::Source) -> Step<'a, bool> {
         self.world
             .source_policy_inputs
             .lock()
@@ -339,7 +336,13 @@ impl Ports for Fake {
             .lock()
             .unwrap()
             .unwrap_or(super::super::intake::Classification::Target);
-        Box::pin(async move { policy })
+        let permitted = policy == super::super::intake::Classification::Target
+            || (policy
+                == super::super::intake::Classification::Retry(
+                    super::super::intake::Retry::Unknown,
+                )
+                && super::mutant("c2_offer_unknown_policy"));
+        Box::pin(async move { permitted })
     }
     fn mapping(&self) -> mapping::Probe {
         self.world.mapping_checks.fetch_add(1, Ordering::SeqCst);

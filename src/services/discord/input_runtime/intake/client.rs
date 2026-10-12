@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::{Classification, PreparedSource};
 use crate::services::discord::input_runtime::fence;
 use crate::services::discord::input_runtime::supervisor::{
-    Ports, Refused, Registry, Supervisor, command, ordering, receipt, source,
+    Ports, Refused, Registry, Supervisor, command, external, ordering, receipt, source,
 };
 use crate::services::provider::ProviderKind;
 use crate::services::tui_input::rows::receipt_identity::{ReceiptIdentity, Responsibility};
@@ -153,6 +153,20 @@ impl Client {
             .map_err(|_| receipt::Deferred::Order)
     }
 
+    /// The caller retains the original material when delivery or its reply becomes uncertain.
+    pub(in crate::services::discord) async fn submit_external(
+        &self,
+        prepared: &PreparedSource,
+    ) -> Result<external::ExternalReceipt, receipt::Deferred> {
+        let source = source::Source::from_prepared(prepared.clone())
+            .map_err(|_| receipt::Deferred::Conflict)?;
+        self.call(|reply| command::SupervisorCmd::SubmitExternal {
+            source: Box::new(source),
+            reply,
+        })
+        .await
+    }
+
     /// This certifies admission closure and flush at the ACK; a later Clear can still write.
     pub(in crate::services::discord) async fn close(
         &self,
@@ -252,7 +266,7 @@ impl Registry {
 
 impl<P: Ports> Supervisor<P> {
     /// Binds the existing mailbox without retaining its sender in the registry or this task.
-    pub(crate) fn bind_intake(
+    pub(in crate::services::discord) fn bind_intake(
         &mut self,
         sender: tokio::sync::mpsc::Sender<command::SupervisorCmd>,
     ) -> Result<Arc<Client>, Refused> {
@@ -336,6 +350,6 @@ impl<P: Ports> Supervisor<P> {
         if super::super::mutant("c2_skip_receipt_policy") {
             return true;
         }
-        policy == Classification::Target
+        policy
     }
 }

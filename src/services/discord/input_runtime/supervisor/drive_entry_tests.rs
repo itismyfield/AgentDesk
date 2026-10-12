@@ -779,15 +779,15 @@ async fn c2_policy_change_after_receipt_keeps_identity_and_blocks_offer_until_re
     for (index, (policy, reason)) in [
         (
             Classification::Rejected(Refusal::Unauthorized),
-            "source_policy_unauthorized",
+            "source_policy_not_target",
         ),
         (
             Classification::Rejected(Refusal::ProviderMismatch),
-            "source_policy_provider",
+            "source_policy_not_target",
         ),
         (
             Classification::Retry(Retry::Unknown),
-            "source_policy_unknown",
+            "source_policy_not_target",
         ),
     ]
     .into_iter()
