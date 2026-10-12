@@ -9,12 +9,17 @@ pub(in crate::services::discord::turn_bridge) enum StreamLoopOutcome {
     AuthorityLost,
 }
 
-/// The managed attempt's fence refused before any payload, so the request stays in its Waiting
-/// row; a user stop still ends the turn as before.
+/// Guarded input stays held through cancellation; Legacy fence refusals still yield to user stops.
 pub(in crate::services::discord::turn_bridge) fn held_before_submit(
     creator_state: &crate::services::discord::inflight::InflightTurnState,
     cancelled: bool,
 ) -> bool {
+    if creator_state
+        .managed_submission_capability()
+        .is_some_and(|submission| submission.guarded_hold())
+    {
+        return true;
+    }
     !cancelled
         && creator_state
             .managed_submission_capability()
