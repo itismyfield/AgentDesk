@@ -27,7 +27,7 @@ async fn close(supervisor: &mut Supervisor<Fake>) -> Result<(), Deferred> {
     supervisor
         .input_command(SupervisorCmd::Close { ack }, false)
         .await;
-    reply.await.unwrap()
+    reply.await.unwrap().map(|_| ())
 }
 
 fn codex_runtime() -> Arc<crate::services::discord::SharedData> {

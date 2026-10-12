@@ -28,7 +28,7 @@ fn serve(
 
 #[tokio::test]
 async fn g1b_hm1_generation_refusal_keeps_pending_guard() {
-    let mut order = AdmissionOrder::new(ProviderKind::Claude, 6_326_170, 7, 0);
+    let mut order = AdmissionOrder::new(ProviderKind::Claude, 6_326_170, 7, 0).unwrap();
     let overflow = order.pending_overflow();
     exhaust_dirty(&mut order);
     assert_eq!(order.admit_pending(&[11]).err(), Some(EXHAUSTED));
@@ -51,7 +51,7 @@ async fn g1b_hm1_generation_refusal_keeps_pending_guard() {
 #[tokio::test]
 async fn g1b_release_keeps_old_producer_overflow() {
     let channel = 6_326_171;
-    let original = AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0);
+    let original = AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0).unwrap();
     let overflow = original.pending_overflow();
     let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
     closing.begin_handback().unwrap();
