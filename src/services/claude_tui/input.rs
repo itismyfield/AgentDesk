@@ -7,6 +7,9 @@ use tokio::sync::Notify;
 
 use super::host_input;
 
+mod literal_chunks;
+use literal_chunks::split_literal_chunks;
+
 mod draft_hold;
 use draft_hold::{admit_automatic_write, dismiss_startup_dialog, refuse_composer_draft};
 pub(crate) use draft_hold::{composer_refusal, stranded_draft_is_ours};
@@ -2309,28 +2312,6 @@ fn validate_prompt_not_empty(input: &str) -> Result<(), String> {
         return Err("prompt must contain non-whitespace text".to_string());
     }
     Ok(())
-}
-
-fn split_literal_chunks(input: &str, max_chars: usize) -> Vec<String> {
-    if input.is_empty() {
-        return Vec::new();
-    }
-    let max_chars = max_chars.max(1);
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut current_chars = 0usize;
-    for ch in input.chars() {
-        if current_chars >= max_chars {
-            chunks.push(std::mem::take(&mut current));
-            current_chars = 0;
-        }
-        current.push(ch);
-        current_chars += 1;
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
 }
 
 #[cfg(test)]
