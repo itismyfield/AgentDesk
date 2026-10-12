@@ -248,6 +248,11 @@ if run_check guards "N1 observation effect boundary"; then
 "$PYTHON" -m unittest tests.test_n1_observation_boundary
 fi
 
+if run_check guards "N1 canary oracle input contracts"; then
+"$PYTHON" -m unittest tests.test_n1_canary_oracle tests.test_n1_canary_collection
+"$PYTHON" tests/run_n1_canary_mutations.py
+fi
+
 if run_check guards "Alert dedupe/authority/routing wiring contract (#4448/#4449)"; then
 "$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 fi
