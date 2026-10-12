@@ -1311,6 +1311,7 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
             )
             self.assertTrue(plist["KeepAlive"])
             self.assertEqual(plist["ThrottleInterval"], 10)
+            self.assertEqual(plist["ProcessType"], "Interactive")
 
     def test_missing_machine_config_does_not_touch_launchd(self):
         with tempfile.TemporaryDirectory() as tmp:
