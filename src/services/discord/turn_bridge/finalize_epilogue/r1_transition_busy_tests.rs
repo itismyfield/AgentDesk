@@ -10,9 +10,7 @@ async fn t5_real_gateway_busy_never_arms_finalize_error_kick() {
         atomic::{AtomicUsize, Ordering::SeqCst},
     };
     use std::time::{Duration, Instant};
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",

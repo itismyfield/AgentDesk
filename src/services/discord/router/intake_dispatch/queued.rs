@@ -252,9 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_admission_carries_every_absorbed_source_message_id() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _mode = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
             "ADK_INTAKE_ROUTING_MODE",
             std::ffi::OsStr::new("disabled"),

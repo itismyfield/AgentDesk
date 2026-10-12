@@ -243,9 +243,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn t1_a_busy_restores_original_uploads_and_new_lease() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let mut f = Fixture::new(8_001_000).await;
     let registry = Arc::new(discord::health::HealthRegistry::new());
     registry
@@ -459,9 +457,7 @@ async fn t1_a_busy_restores_original_uploads_and_new_lease() {
 
 #[tokio::test]
 async fn t1_b_selection_before_restore_must_not_take_tail() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let f = Fixture::new(8_002_000).await;
     f.enqueue(item(8_002_002)).await;
     f.enqueue(item(8_002_003)).await;
@@ -523,9 +519,7 @@ async fn t1_b_selection_before_restore_must_not_take_tail() {
 #[tokio::test]
 async fn t1_c_restore_arms_only_sixty_second_wake_with_real_take() {
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let f = Fixture::new(8_003_000).await;
     f.enqueue(item(8_003_002)).await;
     f.enqueue(item(8_003_003)).await;
@@ -613,9 +607,7 @@ async fn t1_c_restore_arms_only_sixty_second_wake_with_real_take() {
 #[tokio::test]
 async fn t4_failed_restore_holds_payload_until_sixty_second_retry() {
     use futures::FutureExt;
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let f = Fixture::new(8_004_000).await;
     let mut original = item(8_004_002);
     original.pending_uploads = vec!["Q".into()];
@@ -722,9 +714,7 @@ async fn t4_failed_restore_holds_payload_until_sixty_second_retry() {
 
 #[tokio::test]
 async fn t2_fresh_busy_keeps_tail_order() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let f = Fixture::new(8_005_000).await;
     f.enqueue(item(8_005_003)).await;
     let _held = f
@@ -775,9 +765,7 @@ async fn t2_fresh_busy_keeps_tail_order() {
 
 #[tokio::test]
 async fn t3_capped_physical_head_allows_eligible_tail() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let f = Fixture::new(8_006_000).await;
     f.enqueue(item(8_006_002)).await;
     f.enqueue(item(8_006_003)).await;
@@ -815,9 +803,7 @@ async fn t3_capped_physical_head_allows_eligible_tail() {
 #[tokio::test]
 async fn p2_a_full_identity_changes_refuse_but_matching_identity_takes() {
     use crate::services::turn_orchestrator::{QueueIdentity, TakeHeadCondition};
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let f = Fixture::new(8_007_000).await;
     let original = item(8_007_002);
     let expected = QueueIdentity::of(&original);
@@ -891,9 +877,7 @@ async fn p2_a_full_identity_changes_refuse_but_matching_identity_takes() {
 #[tokio::test]
 async fn t3_observed_empty_is_stale_after_marker_recovery() {
     use crate::services::turn_orchestrator::TakeHeadCondition;
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let f = Fixture::new(8_008_000).await;
     let head = item(8_008_002);
     crate::services::turn_orchestrator::save_channel_pending_dispatch_marker(
@@ -929,9 +913,7 @@ async fn t3_observed_empty_is_stale_after_marker_recovery() {
 
 #[tokio::test]
 async fn t5_old_lease_cleanup_preserves_new_reservation_and_marker() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let f = Fixture::new(8_009_000).await;
     f.enqueue(item(8_009_002)).await;
     f.enqueue(item(8_009_003)).await;
@@ -985,9 +967,7 @@ async fn t5_old_lease_cleanup_preserves_new_reservation_and_marker() {
 
 #[tokio::test]
 async fn missing_lease_refuses_local_intake_without_consuming_session() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let f = Fixture::new(8_010_000).await;
     let original = item(8_010_002);
     let result = admit_queued_intake(
@@ -1019,9 +999,7 @@ async fn missing_lease_refuses_local_intake_without_consuming_session() {
 #[tokio::test]
 async fn s2b_on_bidirectional_claims_and_reserved_front_protection() {
     use crate::services::turn_orchestrator::{QueueIdentity, QueuedHeadClaim};
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let mut f = Fixture::new(8_011_000).await;
     f.provider = ProviderKind::Claude;
     f.shared.settings.write().await.provider = f.provider.clone();
@@ -1140,9 +1118,7 @@ async fn p2_b_actual_redirect_busy_restores_origin_channel() {
     )) {
         return;
     }
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let f = Fixture::new(8_012_000).await;
     let target = ChannelId::new(8_012_100);
     *f.redirect.lock().unwrap() = Some(target);
@@ -1219,9 +1195,7 @@ async fn p2_b_actual_redirect_busy_restores_origin_channel() {
 
 #[tokio::test]
 async fn t5_kickoff_busy_reports_no_start_after_durable_restore() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _ready = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "ADK_TEST_CODEX_PROMOTE_READY",
         "1".as_ref(),
@@ -1283,9 +1257,7 @@ async fn t5_kickoff_busy_reports_no_start_after_durable_restore() {
 #[tokio::test]
 async fn t5_gateway_busy_returns_ok_after_durable_restore() {
     use discord::gateway::{DiscordGateway, LiveDiscordTurnContext, TurnGateway};
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _ready = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "ADK_TEST_CODEX_PROMOTE_READY",
         "1".as_ref(),
@@ -1344,9 +1316,7 @@ async fn t5_gateway_busy_returns_ok_after_durable_restore() {
 
 #[tokio::test]
 async fn legacy_array_bot_busy_preserves_restored_original() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let f = Fixture::new(8_015_000).await;
     let mut head = item(8_015_002);
     head.author_is_bot = true;

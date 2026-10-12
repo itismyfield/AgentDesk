@@ -192,6 +192,7 @@ impl MailboxTakeNextSoftOutcome {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn mailbox_take_next_soft_intervention(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

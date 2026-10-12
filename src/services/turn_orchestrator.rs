@@ -114,6 +114,7 @@ pub(crate) use queue_enqueue::enqueue_intervention;
 pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim};
 #[derive(Clone, Debug)]
 pub(crate) enum TakeHeadCondition {
+    #[cfg(test)]
     Unchecked,
     Observed(Option<QueueIdentity>),
 }
@@ -2236,9 +2237,14 @@ fn input_mailbox_step(
                 return state;
             }
             // Recovery may change the physical head after the selector's snapshot.
-            if let TakeHeadCondition::Observed(expected) = head_condition
-                && state.intervention_queue.first().map(QueueIdentity::of) != expected
-            {
+            let selection_stale = match head_condition {
+                TakeHeadCondition::Observed(expected) => {
+                    state.intervention_queue.first().map(QueueIdentity::of) != expected
+                }
+                #[cfg(test)]
+                TakeHeadCondition::Unchecked => false,
+            };
+            if selection_stale {
                 let _ = reply.send(TakeNextSoftResult {
                     selection_stale: true,
                     intervention: None,
