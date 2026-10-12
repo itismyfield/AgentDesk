@@ -1,6 +1,7 @@
 use super::*;
 
 pub(crate) struct TakeNextSoftResult {
+    pub(crate) selection_stale: bool,
     pub(crate) intervention: Option<Intervention>,
     pub(crate) dispatch_lease: Option<Arc<DispatchLease>>,
     pub(crate) has_more: bool,
@@ -47,6 +48,7 @@ pub(crate) fn dequeue_next_soft_intervention(
         .map(|index| queue.remove(index));
     let has_more = queue.iter().any(|item| item.mode == InterventionMode::Soft);
     TakeNextSoftResult {
+        selection_stale: false,
         intervention,
         dispatch_lease: None,
         has_more,

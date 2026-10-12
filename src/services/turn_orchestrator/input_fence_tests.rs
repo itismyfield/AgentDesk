@@ -277,7 +277,9 @@ fn actual_actor_barrier_preserves_queue_and_refuses_enqueue_kickoff_finish_and_t
                 .is_some()
         );
         assert!(matches!(
-            handle.take_soft_matching_or_refused(context(), None).await,
+            handle
+                .take_soft_matching_or_refused(context(), None, super::TakeHeadCondition::Unchecked)
+                .await,
             Err(MailboxRefusal::InputFenced(Failure::Mode(Mode::Frozen)))
         ));
         assert_eq!(std::fs::read(path).unwrap(), before);

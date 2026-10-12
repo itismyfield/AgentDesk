@@ -20,6 +20,46 @@ pub(crate) enum QueuedAdmissionDisposition {
 pub(crate) struct AdmittedQueuedIntake {
     submission: IntakeSubmission,
     local_permit: Option<LocalAdmissionPermit>,
+    restore_owner: Option<QueuedRestoreOwner>,
+}
+struct QueuedRestoreOwner {
+    original: Intervention,
+    provider: ProviderKind,
+    channel_id: serenity::ChannelId,
+    dispatch_lease: std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+}
+impl QueuedRestoreOwner {
+    async fn restore(
+        self,
+        deps: &super::super::message_handler::IntakeDeps<'_>,
+    ) -> super::super::IntakeExecution {
+        loop {
+            let restored = super::super::super::mailbox_restore_dequeued_head(
+                deps.shared,
+                &self.provider,
+                self.channel_id,
+                self.original.clone(),
+                self.dispatch_lease.clone(),
+            )
+            .await;
+            if restored.enqueued && restored.persistence_error.is_none() {
+                break;
+            }
+            tracing::error!(provider = self.provider.as_str(), channel_id = self.channel_id.get(),
+                refusal_reason = ?restored.refusal_reason, persistence_error = ?restored.persistence_error,
+                "queued busy owner retains payload until authorized durable restore succeeds");
+            tokio::time::sleep(super::super::super::queue_io::DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY)
+                .await;
+        }
+        super::super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
+            deps.shared,
+            &self.provider,
+            self.channel_id,
+            "queued transition busy restored",
+        )
+        .await;
+        super::super::IntakeExecution::Deferred
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -152,26 +192,59 @@ pub(crate) async fn admit_queued_intake(
             return QueuedAdmissionDisposition::Deferred;
         }
     };
+    let restore_owner = if local_permit.is_some() {
+        let Some(dispatch_lease) = dispatch_lease else {
+            tracing::error!(
+                channel_id = channel_id.get(),
+                "local queued intake is missing its dispatch lease"
+            );
+            return QueuedAdmissionDisposition::RejectedRestore;
+        };
+        Some(QueuedRestoreOwner {
+            original: intervention.clone(),
+            provider: submission.provider.clone(),
+            channel_id,
+            dispatch_lease,
+        })
+    } else {
+        None
+    };
     QueuedAdmissionDisposition::Admitted(AdmittedQueuedIntake {
         submission,
         local_permit,
+        restore_owner,
     })
 }
 
 pub(crate) async fn finish_admitted_queued_intake(
     deps: &super::super::message_handler::IntakeDeps<'_>,
     admitted: AdmittedQueuedIntake,
-    intervention: &Intervention,
 ) -> Result<super::super::IntakeExecution, super::super::super::Error> {
     let Some(permit) = admitted.local_permit else {
         return Ok(super::super::IntakeExecution::Executed);
     };
-    if let Some(announcement) = intervention.voice_announcement.as_ref() {
+    let mut owner = admitted
+        .restore_owner
+        .expect("local queued admission owns its original and lease");
+    if let Some(announcement) = owner.original.voice_announcement.as_ref() {
         crate::voice::announce_meta::global_store()
-            .insert_accepted_replay(intervention.message_id, announcement.clone());
+            .insert_accepted_replay(owner.original.message_id, announcement.clone());
     }
-    finish_admitted_local(deps, permit, admitted.submission).await
+    match finish_admitted_local(deps, permit, admitted.submission).await {
+        Err(error) => match error.downcast::<super::QueuedTransitionBusyHandoff>() {
+            Ok(handoff) => {
+                // The handoff already includes the original queue uploads once.
+                owner.original.pending_uploads = handoff.owned_uploads;
+                Ok(owner.restore(deps).await)
+            }
+            Err(error) => Err(error),
+        },
+        Ok(result) => Ok(result),
+    }
 }
+
+#[cfg(test)]
+pub(in crate::services::discord::router) mod transition_busy_tests;
 
 #[cfg(test)]
 mod tests {
@@ -186,19 +259,11 @@ mod tests {
             "ADK_INTAKE_ROUTING_MODE",
             std::ffi::OsStr::new("disabled"),
         );
-        // A cluster-less config, data dir included, under a runtime root of its own, so a host
-        // config with the cluster enabled cannot block the Postgres-less local admission here.
+        // An isolated runtime root keeps local admission independent of host routing.
         let root = tempfile::tempdir().expect("runtime root");
-        let config = crate::runtime_layout::config_file_path(root.path());
-        std::fs::create_dir_all(config.parent().expect("config dir")).expect("create config dir");
-        std::fs::write(&config, "server: {}\ndata: {dir: data}\n").expect("write config");
         let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",
             root.path(),
-        );
-        let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_CONFIG",
-            &config,
         );
         let shared = crate::services::discord::make_shared_data_for_tests();
         let http = std::sync::Arc::new(serenity::Http::new("Bot queued-source-id-test"));
@@ -229,17 +294,29 @@ mod tests {
             voice_announcement: None,
         };
 
+        let channel = serenity::ChannelId::new(5_071_204);
+        let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+            &ProviderKind::Claude,
+            &shared.token_hash,
+            None,
+        );
+        shared
+            .mailbox(channel)
+            .enqueue(intervention.clone(), persistence.clone())
+            .await;
+        let taken = shared.mailbox(channel).take_next_soft(persistence).await;
+        let intervention = taken.intervention.unwrap();
         let admitted = admit_queued_intake(
             &deps,
             ProviderKind::Claude,
-            serenity::ChannelId::new(5_071_204),
+            channel,
             &intervention,
             intervention.author_id,
             "source-owner".to_string(),
             false,
             false,
             "queued_source_id_test",
-            None,
+            taken.dispatch_lease,
         )
         .await;
         let QueuedAdmissionDisposition::Admitted(admitted) = admitted else {

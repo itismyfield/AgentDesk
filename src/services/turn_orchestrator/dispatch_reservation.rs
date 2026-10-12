@@ -486,6 +486,7 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
         .flatten();
     if state.pending_user_dispatch.is_some() || absorb_error.is_some() {
         return Some(TakeNextSoftResult {
+            selection_stale: false,
             intervention: None,
             dispatch_lease: None,
             has_more: state
@@ -560,6 +561,7 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
     );
     if let Some(error) = marker_result.persistence_error {
         return Some(TakeNextSoftResult {
+            selection_stale: false,
             intervention: None,
             dispatch_lease: None,
             has_more: state

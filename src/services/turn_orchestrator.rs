@@ -112,6 +112,11 @@ use queue_enqueue::enqueue_behind;
 #[cfg(test)]
 pub(crate) use queue_enqueue::enqueue_intervention;
 pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim};
+#[derive(Clone, Debug)]
+pub(crate) enum TakeHeadCondition {
+    Unchecked,
+    Observed(Option<QueueIdentity>),
+}
 pub(crate) use recovery_kickoff::RecoveryKickoffResult;
 use recovery_kickoff::{kickoff_refusal, reset_activation_signals};
 pub(crate) use reply_results::{
@@ -834,16 +839,21 @@ impl ChannelMailboxHandle {
         persistence: QueuePersistenceContext,
         primary_message_id: Option<MessageId>,
     ) -> TakeNextSoftResult {
-        self.take_soft_matching_or_refused(persistence, primary_message_id)
-            .await
-            .unwrap_or(TakeNextSoftResult {
-                intervention: None,
-                dispatch_lease: None,
-                has_more: false,
-                queue_len_after: 0,
-                queue_exit_events: Vec::new(),
-                persistence_error: None,
-            })
+        self.take_soft_matching_or_refused(
+            persistence,
+            primary_message_id,
+            TakeHeadCondition::Unchecked,
+        )
+        .await
+        .unwrap_or(TakeNextSoftResult {
+            selection_stale: false,
+            intervention: None,
+            dispatch_lease: None,
+            has_more: false,
+            queue_len_after: 0,
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        })
     }
 
     pub(crate) async fn requeue_front(
@@ -1365,6 +1375,7 @@ enum ChannelMailboxMsg {
     TakeNextSoft {
         persistence: QueuePersistenceContext,
         primary_message_id: Option<MessageId>,
+        head_condition: TakeHeadCondition,
         reply: closed_verdict::VerdictReply<TakeNextSoftResult>,
     },
     RequeueFront {
@@ -2202,6 +2213,7 @@ fn input_mailbox_step(
         ChannelMailboxMsg::TakeNextSoft {
             persistence,
             primary_message_id,
+            head_condition,
             reply,
         } => {
             state.last_persistence = Some(persistence.clone());
@@ -2221,6 +2233,24 @@ fn input_mailbox_step(
                 &persistence,
             ) {
                 let _ = reply.send(result);
+                return state;
+            }
+            // Recovery may change the physical head after the selector's snapshot.
+            if let TakeHeadCondition::Observed(expected) = head_condition
+                && state.intervention_queue.first().map(QueueIdentity::of) != expected
+            {
+                let _ = reply.send(TakeNextSoftResult {
+                    selection_stale: true,
+                    intervention: None,
+                    dispatch_lease: None,
+                    has_more: state
+                        .intervention_queue
+                        .iter()
+                        .any(|i| i.mode == InterventionMode::Soft),
+                    queue_len_after: state.intervention_queue.len(),
+                    queue_exit_events: Vec::new(),
+                    persistence_error: None,
+                });
                 return state;
             }
             let previous_queue = state.intervention_queue.clone();
@@ -2258,6 +2288,7 @@ fn input_mailbox_step(
                     &error,
                 );
                 TakeNextSoftResult {
+                    selection_stale: false,
                     intervention: None,
                     dispatch_lease: None,
                     has_more: state
@@ -2281,6 +2312,7 @@ fn input_mailbox_step(
                 // durable backstop for this head until the queue-without-head
                 // write succeeds.
                 TakeNextSoftResult {
+                    selection_stale: false,
                     intervention: None,
                     dispatch_lease: None,
                     has_more: state
@@ -2299,6 +2331,7 @@ fn input_mailbox_step(
                     let dispatch_lease =
                         set_pending_user_dispatch(&mut state, head, &dispatched_head_sources);
                     TakeNextSoftResult {
+                        selection_stale: false,
                         intervention: next_result.intervention,
                         dispatch_lease: Some(dispatch_lease),
                         has_more: next_result.has_more,
@@ -2308,6 +2341,7 @@ fn input_mailbox_step(
                     }
                 } else {
                     TakeNextSoftResult {
+                        selection_stale: false,
                         intervention: next_result.intervention,
                         dispatch_lease: None,
                         has_more: next_result.has_more,

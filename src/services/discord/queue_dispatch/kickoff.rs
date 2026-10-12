@@ -161,8 +161,7 @@ async fn kickoff_admitted_queue_channel(
         }
     }
 
-    let dispatch_result =
-        router::finish_admitted_queued_intake(deps, admitted, &intervention).await;
+    let dispatch_result = router::finish_admitted_queued_intake(deps, admitted).await;
     match dispatch_result {
         Err(e) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
