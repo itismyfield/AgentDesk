@@ -10,7 +10,8 @@
     "accepts_ignores_home", "orphan_read_opens_gate", "skip_post_abort_join", "posts_unreadable_as_zero"
   ],
   "cases": [
-    {"id": "H6-1", "profile": "now", "piece": 4, "status": "pending", "tests": [],
+    {"id": "H6-1", "profile": "now", "piece": 4, "status": "implemented",
+     "tests": ["services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_worker_holder_restart_rehydrates_pg"],
      "what": "worker holder restart on the same root rehydrates its O store and posts each owed piece once"},
     {"id": "H6-2a", "profile": "after", "piece": 6, "status": "blocked:B3b-4/5/6 standby restore", "tests": [],
      "what": "reclaiming standby holder restores persisted turns before its drain leaves"},
@@ -26,7 +27,8 @@
      "what": "holder dies, CLI force, both nodes reboot; the orphaned row holds every consumer"},
     {"id": "H6-5-live", "profile": "now", "piece": 4, "status": "pending", "tests": [],
      "what": "a target alive through the holder's death and the force never gains readiness or admission"},
-    {"id": "H6-6a", "profile": "now", "piece": 4, "status": "pending", "tests": [],
+    {"id": "H6-6a", "profile": "now", "piece": 4, "status": "implemented",
+     "tests": ["services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg"],
      "what": "a gateway role move alone leaves the PG holder and epoch unchanged"},
     {"id": "H6-6b", "profile": "after", "piece": 6, "status": "blocked:B3b-6 standby lifecycle", "tests": [],
      "what": "a real gateway/standby switch stops and resumes the writer"},
