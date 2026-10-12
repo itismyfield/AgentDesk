@@ -972,10 +972,13 @@ src/
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   └── inject_tests.rs
 │   │   │   ├── watcher_respawn/
+│   │   │   │   ├── absence_state.rs
 │   │   │   │   ├── claude_original_tests.rs
 │   │   │   │   ├── idle_relay_absence.rs
 │   │   │   │   ├── input_fence_tests.rs
-│   │   │   │   └── live_bridge_guard.rs
+│   │   │   │   ├── live_bridge_guard.rs
+│   │   │   │   ├── o_only_retry.rs
+│   │   │   │   └── o_only_retry_tests.rs
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── legacy_supervision.rs
 │   │   │   ├── liveness_authority.rs
@@ -2046,12 +2049,18 @@ src/
 │   │   │   │   ├── claude_restore.rs
 │   │   │   │   ├── liveness.rs
 │   │   │   │   ├── liveness_tests.rs
+│   │   │   │   ├── n4d2_boundary_tests.rs
+│   │   │   │   ├── n4d2_entry_test.rs
+│   │   │   │   ├── n4d2_o_writer_test.rs
+│   │   │   │   ├── n4d2_restore_tests.rs
 │   │   │   │   ├── o_only_install.rs
 │   │   │   │   ├── o_only_install_tests.rs
+│   │   │   │   ├── o_only_restore.rs
 │   │   │   │   ├── output_policy.rs
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
 │   │   │   │   ├── restore.rs
+│   │   │   │   ├── restore_mapping.rs
 │   │   │   │   ├── restore_support.rs
 │   │   │   │   ├── restore_tests.rs
 │   │   │   │   ├── tests.rs

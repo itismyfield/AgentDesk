@@ -286,6 +286,23 @@ async fn clean_orphan_sessions(shared: &Arc<SharedData>, output: &[String]) {
             });
 
             if !has_owner {
+                if crate::services::tmux_common::read_tmux_channel_binding(session_name)
+                    .is_some_and(|channel| {
+                        super::health::legacy_supervision::is_retired(provider.as_str(), channel)
+                            && crate::services::tmux_common::resolve_tmux_runtime_kind_marker(
+                                session_name,
+                            )
+                            .is_some_and(|kind| match provider {
+                                ProviderKind::Claude => kind
+                                    == crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                                ProviderKind::Codex => kind
+                                    == crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+                                _ => false,
+                            })
+                    })
+                {
+                    continue;
+                }
                 // An unowned session of a protected channel, or one no binding places while
                 // any channel is protected, waits for that move or handback.
                 let target =
