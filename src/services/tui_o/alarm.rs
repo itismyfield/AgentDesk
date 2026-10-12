@@ -216,6 +216,7 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
         WriterAlarm::SourceStillGrowing { .. } => "source_still_growing",
         WriterAlarm::TooManyReaders { .. } => "too_many_readers",
         WriterAlarm::RetiredSourceGrew { .. } => "retired_source_grew",
+        WriterAlarm::CleanupRetired { .. } => "cleanup_retired",
         WriterAlarm::BindingLogUnavailable { .. } => "binding_log_unavailable",
         WriterAlarm::RotationStalled { .. } => "rotation_stalled",
         WriterAlarm::SelectionMissing => "selection_missing",
