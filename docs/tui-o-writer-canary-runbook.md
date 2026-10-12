@@ -311,11 +311,15 @@ Run the following procedure on the O home:
    ```
 
    `--operator` defaults to `operator`. A `--from` that parses as an unsigned integer is a byte
-   offset; otherwise it is a UUID. The command requires one matching Pending source, the same
-   source file identity, and a record start offset or unique UUID. An already recorded resolution
-   is refused with an instruction to restart the writer (`src/cli/o.rs:48–83`,
+   offset; otherwise it is a UUID. The source selector must match exactly one stored source,
+   whose boundary must be Pending and whose file identity must still match. A numeric `--from`
+   validates a line-start byte offset, not the existence of a complete record: newline-aligned
+   EOF, offset 0 in an empty file, and the start of an incomplete trailing line can pass. UUID
+   lookup requires exactly one matching complete JSON line. An already recorded resolution is
+   refused with an instruction to restart the writer (`src/cli/o.rs:48–83`,
    `src/services/tui_o/store/rotation.rs:220–285`).
-   These checks do not prove where resume occurred; the operator must establish the correct start.
+   Neither check proves the resume boundary; leave the source Pending unless the first owed
+   position can be established.
 3. Wait for the command to succeed, then use the managed restart path. The command only appends
    and fsyncs `BoundaryResolved`; it sends no output and applies at the next writer start. That
    start changes Pending to `Owed { from }` and replays the retained spool. Confirm that the
