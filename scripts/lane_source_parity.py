@@ -20,6 +20,7 @@ OTHER_WORKFLOWS = (
 )
 EXCEPTIONS_REL = Path("scripts/test_lane_pr_parity_exceptions.txt")
 MIRROR_SCRIPT = "required-check-mirror.sh"
+INERT_MODES = ("--list", "--ignored")
 SWEEP_COVERED = "sweep-covered"
 MAIN_ONLY_TARGET = "main-only-target"
 LIBRARY_TARGETS = frozenset({"lib", "all-targets", "default"})
@@ -27,7 +28,8 @@ _UPSTREAM_NAME = re.compile(r"\bUPSTREAM_JOB_NAME\s*:\s*['\"]?([A-Za-z0-9_-]+)")
 _UPSTREAM_RESULT = re.compile(
     r"\bUPSTREAM_RESULT\s*:\s*['\"]?\$\{\{\s*needs\.([A-Za-z0-9_-]+)\.result\s*\}\}"
 )
-_NEEDS = re.compile(r"^(?P<indent>[ \t]*)needs\s*:(?P<value>.*)$")
+_KEY = re.compile(r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z0-9_-]+)\s*:(?P<value>.*)$")
+_STEP_IF = re.compile(r"^[ \t]*(?:-[ \t]+)?if\s*:")
 
 
 def _sibling(filename: str):
@@ -55,6 +57,8 @@ class LaneSource:
     filters: tuple[str, ...]
     lane: object | None
     selection: str
+    # False for libtest `--list`/`--ignored`: the command names ids without running them.
+    runs: bool = True
 
 
 @dataclass(frozen=True)
@@ -68,13 +72,27 @@ class Finding:
 
 
 @dataclass(frozen=True)
+class Mirror:
+    """One required-check-mirror step: the context it publishes and the job it reports."""
+
+    job: str
+    context: str
+    upstream: str
+    proven: bool
+    conditional: bool
+
+
+@dataclass(frozen=True)
 class Sources:
     sources: tuple[LaneSource, ...]
     findings: tuple[Finding, ...]
     justfile_findings: tuple[Finding, ...]
+    mirrors: tuple[Mirror, ...] = ()
+    pr_jobs: tuple = ()
 
     def of(self, *origins: str) -> tuple[LaneSource, ...]:
-        return tuple(source for source in self.sources if source.origin in origins)
+        """The running sources of these origins; `--list`/`--ignored` commands prove no run."""
+        return tuple(s for s in self.sources if s.origin in origins and s.runs)
 
     @property
     def required_test_jobs(self) -> str:
@@ -132,6 +150,9 @@ def _source(cti, coverage, expansions, origin, owner, location, words):
     spec = cti.parse_command(list(words))
     if spec.opaque_skip or spec.target_inconclusive:
         return None, _unreadable(location, shlex.join(words))
+    inert = "--list" in words[split + 1:] or spec.ignored_only
+    if inert:
+        words = words[:split + 1] + [w for w in words[split + 1:] if w not in INERT_MODES]
     lane = coverage.cargo_test_filter(
         coverage.expand_lane_command(shlex.join(words), *expansions)
     )
@@ -145,7 +166,7 @@ def _source(cti, coverage, expansions, origin, owner, location, words):
     # An empty positive matches every id, so it selects like the unfiltered sweep.
     broad = lane is not None and (not lane.positives or "" in lane.positives)
     selection = "sweep" if broad else "named"
-    return LaneSource(origin, owner, location, target, filters, lane, selection), None
+    return LaneSource(origin, owner, location, target, filters, lane, selection, not inert), None
 
 
 def justfile_sources(cti, coverage, repo_root: Path, expansions):
@@ -174,14 +195,15 @@ def justfile_sources(cti, coverage, repo_root: Path, expansions):
     return sources, findings
 
 
-def _line_owners(text: str, jobs) -> tuple[dict[int, str], list[str]]:
-    """Map each line to its job, and name the jobs whose text is no later slice of the file;
-    parse_jobs slices the jobs block contiguously in order."""
+def _line_owners(text: str, jobs) -> tuple[dict[int, str], list[str], dict[str, int]]:
+    """Map each line to its job, name the jobs whose text is no later slice of the file
+    (parse_jobs slices the jobs block contiguously in order) and give each job's header line."""
     starts = [0]
     for line in text.splitlines(keepends=True):
         starts.append(starts[-1] + len(line))
     owners: dict[int, str] = {}
     unmatched: list[str] = []
+    headers: dict[str, int] = {}
     cursor = 0
     for job in jobs:
         offset = text.find(job.text, cursor) if job.text else -1
@@ -192,7 +214,8 @@ def _line_owners(text: str, jobs) -> tuple[dict[int, str], list[str]]:
         first = bisect.bisect_right(starts, offset) + 1
         last = bisect.bisect_right(starts, cursor - 1)
         owners.update(dict.fromkeys(range(first, last + 1), job.name))
-    return owners, unmatched
+        headers[job.name] = first - 1
+    return owners, unmatched, headers
 
 
 def _read_workflow(cti, pgm, repo_root: Path, rel: Path):
@@ -204,9 +227,9 @@ def _read_workflow(cti, pgm, repo_root: Path, rel: Path):
     jobs = pgm.parse_jobs(path, repo_root)
     shells: list[list[tuple[int, str]]] = []
     commands = {line: words for line, words, _ in cti.extract_commands(path, None, shells)}
-    owners, unmatched = _line_owners(path.read_text("utf-8"), jobs)
+    owners, unmatched, headers = _line_owners(path.read_text("utf-8"), jobs)
     lines = [(owners.get(line), line, snippet) for shell in shells for line, snippet in shell]
-    return jobs, lines, commands, unmatched
+    return jobs, lines, commands, unmatched, headers
 
 
 def _unowned(rel: Path, lines, commands, unmatched) -> list[Finding]:
@@ -221,8 +244,8 @@ def _unowned(rel: Path, lines, commands, unmatched) -> list[Finding]:
     ]
     for job, line, snippet in lines:
         words = _words(snippet)
-        selects = line in commands or "cargo test" in snippet or words[:1] in (
-            ["just"], ["run_non_pg_filter_replay"]
+        selects = line in commands or "cargo test" in snippet or _runs_mirror(words) or (
+            words[:1] in (["just"], ["run_non_pg_filter_replay"])
         )
         if job is None and selects:
             findings.append(Finding(
@@ -233,62 +256,101 @@ def _unowned(rel: Path, lines, commands, unmatched) -> list[Finding]:
     return findings
 
 
+def job_keys(pgm, code: str) -> dict[str, tuple[str, int]]:
+    """A job's own mapping keys: name -> (inline value, line index in `code`)."""
+    indent = pgm._job_body_indent(code)
+    keys: dict[str, tuple[str, int]] = {}
+    for index, line in enumerate(code.splitlines()):
+        match = _KEY.match(line)
+        if match and pgm._indent_width(match.group("indent")) == indent:
+            keys.setdefault(match.group("key"), (match.group("value").strip(), index))
+    return keys
+
+
 def _needs(pgm, code: str) -> set[str]:
     """The job's own `needs:` names in scalar, flow or block-sequence form."""
+    value, index = job_keys(pgm, code).get("needs", ("", -1))
+    if index < 0:
+        return set()
+    if value:
+        return {item.strip(" '\"") for item in value.strip("[]").split(",")} - {""}
     indent = pgm._job_body_indent(code)
-    lines = code.splitlines()
-    for index, line in enumerate(lines):
-        match = _NEEDS.match(line)
-        if not match or pgm._indent_width(match.group("indent")) != indent:
+    names: set[str] = set()
+    for item in code.splitlines()[index + 1:]:
+        stripped = item.strip()
+        if not stripped:
             continue
-        value = match.group("value").strip()
-        if value:
-            return {item.strip(" '\"") for item in value.strip("[]").split(",")} - {""}
-        names: set[str] = set()
-        for item in lines[index + 1:]:
-            stripped = item.strip()
-            if not stripped:
-                continue
-            width = pgm._indent_width(item[: len(item) - len(item.lstrip())])
-            if not stripped.startswith("-") or width < indent:
-                break
-            names.add(stripped[1:].strip(" '\""))
-        return names
-    return set()
+        width = pgm._indent_width(item[: len(item) - len(item.lstrip())])
+        if not stripped.startswith("-") or width < indent:
+            break
+        names.add(stripped[1:].strip(" '\""))
+    return names
 
 
-def _mirror_upstreams(pgm, rel: Path, jobs, mirror_jobs: set[str]):
-    """Required PR jobs are the upstreams a required-check mirror both needs and reports."""
+def _steps(pgm, code: str) -> list[tuple[int, int]]:
+    """(first, last) line index in `code` of each item under the job's `steps:` key."""
+    lines = code.splitlines()
+    indent = pgm._job_body_indent(code)
+    start = job_keys(pgm, code).get("steps", ("", -1))[1]
+    spans: list[list[int]] = []
+    item = None
+    for index in range(start + 1, len(lines)) if start >= 0 else ():
+        line, stripped = lines[index], lines[index].strip()
+        width = pgm._indent_width(line[: len(line) - len(line.lstrip())])
+        if stripped and width <= indent and not stripped.startswith("-"):
+            break
+        if stripped.startswith("-") and item in (None, width):
+            item = width
+            spans.append([index, index])
+        elif spans and stripped:
+            spans[-1][1] = index
+    return [(first, last) for first, last in spans]
+
+
+def _mirror_upstreams(pgm, rel: Path, jobs, mirror_lines: dict[str, set[int]], headers):
+    """Required PR jobs are the upstreams a required-check-mirror step both reports in its
+    own env and its job needs; env on any other step proves nothing."""
     names = {job.name for job in jobs}
     required: set[str] = set()
     findings: list[Finding] = []
+    mirrors: list[Mirror] = []
     for job in jobs:
-        if job.name not in mirror_jobs:
+        if job.name not in mirror_lines:
             continue
-        upstreams = _UPSTREAM_NAME.findall(job.code)
-        results = _UPSTREAM_RESULT.findall(job.code)
         needs = _needs(pgm, job.code)
-        problem = None
-        if not upstreams or len(upstreams) != len(results):
-            problem = "UPSTREAM_JOB_NAME and UPSTREAM_RESULT do not pair one to one"
-        for upstream, result in zip(upstreams, results):
-            if problem:
-                break
-            if upstream != result:
-                problem = f"UPSTREAM_JOB_NAME {upstream} reports needs.{result}.result"
-            elif upstream not in needs:
-                problem = f"upstream {upstream} is not in needs"
-            elif upstream not in names:
-                problem = f"upstream {upstream} is not a job in this workflow"
-        if problem:
-            findings.append(Finding(
-                "pr-context-unproven", f"{rel.as_posix()}:{job.name}",
-                f"{problem}; no job counts as required through this mirror until its "
-                "needs, UPSTREAM_JOB_NAME and UPSTREAM_RESULT name the same job",
+        keys = job_keys(pgm, job.code)
+        context = keys.get("name", (job.name, 0))[0].strip(" '\"") or job.name
+        lines = job.code.splitlines()
+        for first, last in _steps(pgm, job.code):
+            span = range(headers[job.name] + first, headers[job.name] + last + 1)
+            if not mirror_lines[job.name] & set(span):
+                continue
+            step = "\n".join(lines[first:last + 1])
+            upstreams, results = _UPSTREAM_NAME.findall(step), _UPSTREAM_RESULT.findall(step)
+            problem = None
+            if len(upstreams) != 1 or len(results) != 1:
+                problem = "the mirror step lacks one UPSTREAM_JOB_NAME and UPSTREAM_RESULT"
+            elif upstreams != results:
+                problem = f"UPSTREAM_JOB_NAME {upstreams[0]} reports needs.{results[0]}.result"
+            elif upstreams[0] not in needs:
+                problem = f"upstream {upstreams[0]} is not in needs"
+            elif upstreams[0] not in names:
+                problem = f"upstream {upstreams[0]} is not a job in this workflow"
+            conditional = bool(_STEP_IF.search(lines[first]) or any(
+                _STEP_IF.match(line) for line in lines[first + 1:last + 1]
             ))
-        else:
-            required.update(upstreams)
-    return required, findings
+            for upstream in upstreams or [""]:
+                mirrors.append(Mirror(job.name, context, upstream, not problem, conditional))
+            if problem:
+                findings.append(Finding(
+                    "pr-context-unproven", f"{rel.as_posix()}:{job.name}",
+                    f"{problem}; no job counts as required through this mirror until the "
+                    "step that runs it names the same job in needs, UPSTREAM_JOB_NAME and "
+                    "UPSTREAM_RESULT",
+                ))
+            else:
+                required.update(upstreams)
+    return required, findings, mirrors
 
 
 def _job_sources(cti, coverage, expansions, recipes, rel, lines, commands, origins):
@@ -338,15 +400,23 @@ def collect_sources(repo_root: Path, coverage) -> Sources:
     recipes: dict[str, list[LaneSource]] = {}
     for source in sources:
         recipes.setdefault(source.owner, []).append(source)
+    mirrors: list[Mirror] = []
+    pr_jobs: tuple = ()
     for name, rel in (("pr", PR_WORKFLOW_REL), *OTHER_WORKFLOWS):
         parsed = _read_workflow(cti, pgm, repo_root, rel)
         if parsed is None:
             continue
-        jobs, lines, commands, unmatched = parsed
+        jobs, lines, commands, unmatched, headers = parsed
         if name == "pr":
+            pr_jobs = tuple(jobs)
             findings.extend(_unowned(rel, lines, commands, unmatched))
-            mirrors = {job for job, _, snippet in lines if job and _runs_mirror(_words(snippet))}
-            required, unproven = _mirror_upstreams(pgm, rel, jobs, mirrors)
+            mirror_lines: dict[str, set[int]] = {}
+            for job, line, snippet in lines:
+                if job and _runs_mirror(_words(snippet)):
+                    mirror_lines.setdefault(job, set()).add(line)
+            required, unproven, mirrors = _mirror_upstreams(
+                pgm, rel, jobs, mirror_lines, headers
+            )
             findings.extend(unproven)
             origins = {
                 job.name: "pr-required" if job.name in required else "pr-advisory"
@@ -359,7 +429,9 @@ def collect_sources(repo_root: Path, coverage) -> Sources:
         )
         sources.extend(found)
         findings.extend(problems)
-    return Sources(tuple(sources), tuple(findings), tuple(justfile_findings))
+    return Sources(
+        tuple(sources), tuple(findings), tuple(justfile_findings), tuple(mirrors), pr_jobs
+    )
 
 
 def load_test_ids(repo_root: Path) -> frozenset[str]:

@@ -13,7 +13,8 @@ snapshot, and any newly uncovered module or stale entry also fails. Baseline
 debt can therefore only shrink without a redundant scalar lock.
 
 Required-PR jobs alone form a second ratchet axis with its own baseline, and
-lane_source_parity.py judges each explicit justfile filter's PR parity.
+lane_source_parity.py judges each explicit justfile filter's PR parity. Against the
+reference commit, lane_new_id_registration.py requires each added test ID in a required job.
 """
 
 from __future__ import annotations
@@ -350,8 +351,11 @@ def _normalize_alias_path(
     return current
 
 
-def discover_test_inventory(repo_root: Path) -> dict[str, set[str]]:
-    """Inventory logical test modules and test paths without building."""
+def discover_test_inventory(
+    repo_root: Path, aliases_out: dict[tuple[str, ...], tuple[str, ...]] | None = None
+) -> dict[str, set[str]]:
+    """Inventory logical test modules and test paths without building; `aliases_out`
+    receives the physical-to-logical `#[path]` module map."""
     src_root = (repo_root / "src").resolve()
     physical_inventory: dict[tuple[str, ...], set[tuple[str, ...]]] = {}
     raw_aliases: dict[tuple[str, ...], tuple[str, ...]] = {}
@@ -398,6 +402,8 @@ def discover_test_inventory(repo_root: Path) -> dict[str, set[str]]:
         if updated == aliases:
             break
         aliases = updated
+    if aliases_out is not None:
+        aliases_out.update(aliases)
 
     inventory: dict[str, set[str]] = {}
     for physical_module, physical_tests in physical_inventory.items():
@@ -876,8 +882,10 @@ def check(
     reference_label: str = "reference snapshot",
     emit_success: bool = True,
     reference_required_pr: set[str] = frozenset(),
+    reference_sha: str | None = None,
 ) -> int:
-    inventory = discover_test_inventory(repo_root)
+    aliases: dict[tuple[str, ...], tuple[str, ...]] = {}
+    inventory = discover_test_inventory(repo_root, aliases)
     lanes = discover_lane_filters(repo_root)
     skip_args = (
         load_non_pg_skip_args(repo_root)
@@ -950,7 +958,18 @@ def check(
             f"{verdict.matched} selected by required PR named filters, "
             f"{verdict.excepted} by proven exceptions."
         )
-    return int(all_failed or required_failed or bool(parity_findings))
+    new_failed = False
+    if reference_sha is not None:
+        verdict = parity._sibling("lane_new_id_registration.py").judge(
+            repo_root, reference_sha, sys.modules[__name__], parity, sources, pg_tests,
+            skip_args, aliases,
+        )
+        for finding in verdict.findings:
+            print(f"FAIL: new_required_test_ids: {finding.render()}", file=sys.stderr)
+        new_failed = bool(verdict.findings)
+        if emit_success and not new_failed:
+            print("\n".join([verdict.summary(), *(row.render() for row in verdict.mapped)]))
+    return int(all_failed or required_failed or bool(parity_findings) or new_failed)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -974,6 +993,7 @@ def main(argv: list[str] | None = None) -> int:
             reference_baseline,
             reference_label=f"commit {reference_sha}",
             reference_required_pr=reference_required_pr,
+            reference_sha=reference_sha,
         )
     except (OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
