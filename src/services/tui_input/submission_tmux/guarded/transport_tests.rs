@@ -195,12 +195,14 @@ while True:
 
     fn attach(&self, session: &str) {
         let driver = format!("{}-driver", self.socket);
+        let stderr_path = self.root.path().join("attach.stderr");
         let command = format!(
-            "env -u TMUX {} -L {} -f /dev/null attach -t ={session}",
+            "{{ env -u TMUX {} -L {} -f /dev/null attach -t '={session}'; }} 2>{}",
             quoted(&self.real),
-            self.socket
+            self.socket,
+            quoted(&stderr_path)
         );
-        let output = Command::new(&self.real)
+        let started = Command::new(&self.real)
             .args([
                 "-L",
                 &driver,
@@ -210,20 +212,73 @@ while True:
                 "-d",
                 "-s",
                 "driver",
+                "sleep 30",
+                ";",
+                "set-window-option",
+                "-t",
+                "=driver:",
+                "remain-on-exit",
+                "on",
+                ";",
+                "respawn-pane",
+                "-k",
+                "-t",
+                "=driver:",
                 &command,
             ])
             .output()
             .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        wait_until(|| {
-            self.tmux(&[
+        assert!(
+            started.status.success(),
+            "attach failed: {}",
+            String::from_utf8_lossy(&started.stderr)
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if self.tmux(&[
                 "display-message",
                 "-p",
                 "-t",
                 &format!("={session}:"),
                 "#{session_attached}",
             ]) == "1"
-        });
+            {
+                return;
+            }
+            let state = Command::new(&self.real)
+                .args([
+                    "-L",
+                    &driver,
+                    "-f",
+                    "/dev/null",
+                    "display-message",
+                    "-p",
+                    "-t",
+                    "=driver:",
+                    "#{pane_dead} #{pane_dead_status}",
+                ])
+                .output()
+                .unwrap();
+            let pane_status = String::from_utf8_lossy(&state.stdout);
+            if !state.status.success() || pane_status.split_ascii_whitespace().next() != Some("0") {
+                let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+                let diagnostic = if stderr.trim().is_empty() {
+                    format!(
+                        "driver pane dead/status={:?}; {}",
+                        pane_status.trim(),
+                        String::from_utf8_lossy(&state.stderr).trim()
+                    )
+                } else {
+                    stderr.trim().to_owned()
+                };
+                panic!("attach failed: {diagnostic}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "attach failed: driver did not attach before deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
