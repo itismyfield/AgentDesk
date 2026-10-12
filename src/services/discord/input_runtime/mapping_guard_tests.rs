@@ -154,7 +154,7 @@ async fn x13_mapping_new_process_rechecks_empty_views() {
     assert!(supervisor.release());
     // A new process: fresh registry, gates and runtime view over the same durable root.
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "--ignored", "--test-threads=1"])
+        .args(["--exact", "--ignored"])
         .arg("services::discord::input_runtime::supervisor::tests::mapping_guard::x13_mapping_new_process_child")
         .env("ADK_X13_B4_ROOT", &rig.root)
         .output()

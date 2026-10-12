@@ -290,7 +290,7 @@ fn g1b_generation_exhaustion_matrix_handback() {
         );
         let name = name.split_once("::").unwrap().1;
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([name, "--exact", "--nocapture", "--test-threads=1"])
+            .args([name, "--exact", "--nocapture"])
             .env("ADK_G1B_EXHAUST_CHILD", "1")
             .output()
             .unwrap();
