@@ -178,6 +178,11 @@ pub(super) fn sha(bytes: &[u8]) -> String {
 
 /// `None` when the file vanished after listing; any other read failure is kept for the manifest.
 fn read_source(path: &Path) -> Option<Result<Vec<u8>, String>> {
+    #[cfg(test)]
+    super::super::store::boot_observation::attempt(
+        path,
+        super::super::store::boot_observation::Attempt::Read,
+    );
     match fs::read(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         read => Some(read.map_err(|error| error.to_string())),

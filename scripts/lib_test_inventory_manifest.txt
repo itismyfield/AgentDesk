@@ -4419,6 +4419,7 @@ services::discord::inflight::removal::input_fence_reaper_tests::c2_boot_reaper_l
 services::discord::inflight::removal::input_fence_reaper_tests::c2_stale_generation_invalidate_leaves_input_protected_rows_untouched
 services::discord::inflight::removal::input_fence_reaper_tests::c2b_boot_custody_leaves_a_protected_channel_unread
 services::discord::inflight::removal::input_fence_reaper_tests::c2b_boot_preparation_settles_before_the_reaper_pass_is_reserved
+services::discord::inflight::removal::input_fence_reaper_tests::c2b_public_boot_preparation_and_access_attempts
 services::discord::inflight::removal::loader_gate_observation_tests::allocation_route_is_observed_but_never_changes_loader_preservation
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_carries_the_generation_and_name_filter
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_marks_the_unnamed_current_generation_row
