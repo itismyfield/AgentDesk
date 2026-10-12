@@ -797,7 +797,10 @@ mod tests {
         assert!(!crate::services::tui_o::repost::config::RepostConfig::default().enabled);
         let mut on = Config::default();
         on.tui_o = Some(crate::services::tui_o::shadow::tap::TuiOConfig {
-            repost: crate::services::tui_o::repost::config::RepostConfig { enabled: true },
+            repost: crate::services::tui_o::repost::config::RepostConfig {
+                enabled: true,
+                channels: [6325].into_iter().collect(),
+            },
             ..crate::services::tui_o::shadow::tap::TuiOConfig::default()
         });
         let mut boot = RepostSwitch::new(on.tui_o.as_ref(), tokio::sync::watch::channel(None).1);

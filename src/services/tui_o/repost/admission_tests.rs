@@ -58,8 +58,15 @@ fn record(native_key: &str, payload: &str, outcome: Option<PieceOutcome>) -> Pie
 }
 
 pub(super) fn switch(enabled: bool) -> RepostSwitch {
+    switch_for(enabled, CHANNEL)
+}
+
+pub(super) fn switch_for(enabled: bool, channel: u64) -> RepostSwitch {
     let boot = TuiOConfig {
-        repost: RepostConfig { enabled },
+        repost: RepostConfig {
+            enabled,
+            channels: [channel].into_iter().collect(),
+        },
         ..TuiOConfig::default()
     };
     RepostSwitch::new(Some(&boot), watch::channel(None).1)

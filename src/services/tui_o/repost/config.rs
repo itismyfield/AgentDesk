@@ -1,6 +1,7 @@
 //! `tui_o.repost`: the re-post switch. Off unless set, and read from the live config on every check
 //! so turning it off stops new re-post work without a restart.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -9,20 +10,28 @@ use tokio::sync::watch;
 use crate::config::Config;
 use crate::services::tui_o::shadow::tap::TuiOConfig;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RepostConfig {
     pub enabled: bool,
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub channels: BTreeSet<u64>,
 }
 
 impl RepostConfig {
+    pub(crate) fn allowed(&self, channel: u64) -> bool {
+        self.enabled && self.channels.contains(&channel)
+    }
+
     /// Keeps the default out of saved YAML, so a file without the section saves back unchanged.
     pub(crate) fn is_default(&self) -> bool {
         *self == Self::default()
     }
 
     fn of(config: Option<&TuiOConfig>) -> Self {
-        config.map(|config| config.repost).unwrap_or_default()
+        config
+            .map(|config| config.repost.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -56,16 +65,22 @@ pub(crate) struct RepostSwitch {
 struct SwitchState {
     live: LiveConfig,
     snapshot: RepostSnapshot,
+    config: RepostConfig,
 }
 
 impl RepostSwitch {
     pub(crate) fn new(boot: Option<&TuiOConfig>, live: LiveConfig) -> Self {
+        let config = RepostConfig::of(boot);
         let snapshot = RepostSnapshot {
-            enabled: RepostConfig::of(boot).enabled,
+            enabled: config.enabled,
             generation: 0,
             source: SnapshotSource::Boot,
         };
-        let mut state = SwitchState { live, snapshot };
+        let mut state = SwitchState {
+            live,
+            snapshot,
+            config,
+        };
         let installed = state.live.borrow_and_update().clone();
         state.observe(installed);
         Self {
@@ -81,15 +96,21 @@ impl RepostSwitch {
     }
 
     /// Shares the validated value with requests that outlive the runner's current poll.
-    pub(crate) fn live(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+    pub(crate) fn live_for(&self, channel: u64) -> Arc<dyn Fn() -> bool + Send + Sync> {
         let state = Arc::clone(&self.state);
         Arc::new(move || {
             state
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
-                .current()
-                .enabled
+                .allowed(channel)
         })
+    }
+
+    pub(crate) fn allowed(&mut self, channel: u64) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .allowed(channel)
     }
 
     /// Runs `work` only while the switch is on; off returns before `work` runs, so it may hold
@@ -104,6 +125,11 @@ impl RepostSwitch {
 }
 
 impl SwitchState {
+    fn allowed(&mut self, channel: u64) -> bool {
+        self.current();
+        self.config.allowed(channel)
+    }
+
     fn current(&mut self) -> RepostSnapshot {
         // A closed sender leaves the last observed value in force.
         if self.live.has_changed().unwrap_or(false) {
@@ -117,8 +143,9 @@ impl SwitchState {
         let Some(config) = installed else {
             return;
         };
+        self.config = RepostConfig::of(config.tui_o.as_ref());
         self.snapshot = RepostSnapshot {
-            enabled: RepostConfig::of(config.tui_o.as_ref()).enabled,
+            enabled: self.config.enabled,
             generation: self.snapshot.generation + 1,
             source: SnapshotSource::Live,
         };
@@ -137,6 +164,45 @@ mod tests {
 
     fn config(tui_o: &str) -> Arc<Config> {
         Arc::new(parse(tui_o))
+    }
+
+    #[test]
+    fn d4b_channels_are_required_and_enabled_is_anded_with_membership() {
+        for yaml in [
+            "tui_o:\n  repost:\n    enabled: true\n",
+            "tui_o:\n  repost:\n    enabled: true\n    channels: []\n",
+            "tui_o:\n  repost:\n    enabled: false\n    channels: [6325]\n",
+        ] {
+            let parsed = parse(yaml);
+            let repost = RepostConfig::of(parsed.tui_o.as_ref());
+            assert!(!repost.allowed(6325), "{yaml}");
+            let saved = serde_yaml::to_string(&parsed).unwrap();
+            let restored: Config = serde_yaml::from_str(&saved).unwrap();
+            assert!(!RepostConfig::of(restored.tui_o.as_ref()).allowed(6325));
+        }
+        let included = parse("tui_o:\n  repost:\n    enabled: true\n    channels: [6325]\n");
+        let repost = RepostConfig::of(included.tui_o.as_ref());
+        assert!(repost.allowed(6325));
+        assert!(!repost.allowed(6326));
+    }
+
+    #[test]
+    fn d4b_live_callback_keeps_channels_separate_across_reloads() {
+        let (tx, rx) = watch::channel(Some(config(
+            "tui_o:\n  repost:\n    enabled: true\n    channels: [6325]\n",
+        )));
+        let mut switch = RepostSwitch::new(None, rx);
+        let included = switch.live_for(6325);
+        let excluded = switch.live_for(6326);
+        assert!(included() && !excluded());
+        tx.send_replace(Some(config("tui_o:\n  repost:\n    enabled: true\n")));
+        assert!(!included() && !excluded());
+        assert!(!switch.allowed(6325));
+        tx.send_replace(Some(config(
+            "tui_o:\n  repost:\n    enabled: true\n    channels: [6326]\n",
+        )));
+        assert!(!included() && excluded());
+        assert_eq!(switch.current().generation, 3);
     }
 
     #[test]
