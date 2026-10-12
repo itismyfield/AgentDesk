@@ -31,6 +31,7 @@ struct Outcome {
     at_provider: AtProvider,
     row: Option<crate::services::discord::inflight::InflightTurnState>,
     mailbox_active: bool,
+    requeued: usize,
     /// Every Discord write of the turn, so a generic failure post is visible.
     discord: Vec<String>,
 }
@@ -42,6 +43,8 @@ struct Cell {
     warm: bool,
     refuse: bool,
     fail_after_fence: bool,
+    guarded: bool,
+    cancel_pending: bool,
 }
 
 const PROVIDER_EXIT: &str = "zp1 provider exited after submit";
@@ -82,9 +85,14 @@ async fn run_turn(
         fault::arm(channel.get(), fault::FenceWriteFault::Write);
     }
     let (report, at_provider) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let driver_shared = Arc::clone(shared);
     *super::CLAUDE_LEGACY_PROBE.lock().unwrap() = Some((
         channel.get(),
         Box::new(move || {
+            if cell.guarded {
+                crate::services::claude_tui::guarded_outcome::begin();
+            }
             let phase_at_entry = durable_phase(channel);
             let fence = crate::services::claude_tui::submission_fence::before_first_payload();
             let _ = report.send(AtProvider {
@@ -92,6 +100,29 @@ async fn run_turn(
                 fence: fence.clone(),
                 phase_after_fence: durable_phase(channel),
             });
+            if cell.guarded && fence.is_ok() {
+                if cell.cancel_pending {
+                    let mailbox = driver_shared.mailbox_peek(channel).unwrap();
+                    let snapshot = tokio::runtime::Handle::current().block_on(mailbox.snapshot());
+                    snapshot
+                        .cancel_token
+                        .unwrap()
+                        .cancelled
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    released
+                        .recv_timeout(std::time::Duration::from_secs(20))
+                        .unwrap();
+                }
+                use crate::services::claude_tui::{
+                    guarded_outcome::SubmissionError,
+                    host_input::{InputRun, StopCause},
+                };
+                return Err(SubmissionError::Guarded(InputRun::Indeterminate {
+                    confirmed: 0,
+                    cause: StopCause::Send("guarded payload ACK unknown".into()),
+                })
+                .into_legacy());
+            }
             match fence {
                 Ok(()) if cell.fail_after_fence => Err(PROVIDER_EXIT.to_string()),
                 fence => fence,
@@ -176,15 +207,17 @@ async fn run_turn(
         at_provider,
         row,
         mailbox_active: mailbox.cancel_token.is_some(),
+        requeued: mailbox.intervention_queue.len(),
         discord,
     };
+    let _ = release.send(());
     tokio::time::timeout(timeout, gate.close().unwrap().drain())
         .await
         .expect("no input effect outlives the turn");
     outcome
 }
 
-async fn creator_cells(creator: Creator) {
+async fn creator_cells(creator: Creator, guarded: bool) {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let root = crate::config::runtime_root().unwrap();
     let _tmux = crate::services::tui_prompt_dedupe::binding_context::tests::fake_tmux(&root);
@@ -210,14 +243,31 @@ async fn creator_cells(creator: Creator) {
         warm,
         refuse,
         fail_after_fence,
+        guarded: false,
+        cancel_pending: false,
     };
-    let cells = [
-        cell(false, false, false),
-        cell(true, false, false),
-        cell(false, true, false),
-        cell(true, true, false),
-        cell(false, false, true),
-    ];
+    let cells = if guarded {
+        vec![
+            Cell {
+                guarded: true,
+                ..cell(true, false, false)
+            },
+            Cell {
+                guarded: true,
+                cancel_pending: true,
+                ..cell(true, false, false)
+            },
+        ]
+    } else {
+        vec![
+            cell(false, false, false),
+            cell(true, false, false),
+            cell(false, true, false),
+            cell(true, true, false),
+            cell(false, false, true),
+        ]
+    };
+    let mut guarded_failures = 0;
     for (index, cell) in cells.into_iter().enumerate() {
         let channel = ChannelId::new(base + index as u64 * 10);
         mock.allow_channel(channel.get());
@@ -239,7 +289,41 @@ async fn creator_cells(creator: Creator) {
         // The headless fixture is a silent turn, so only intake surfaces a failure post.
         let visible = creator == Creator::Intake;
         let posted = |text: &str| outcome.discord.iter().any(|write| write.contains(text));
-        if cell.refuse {
+        if let Ok(directory) = std::env::var("CG_B2C_EVIDENCE_DIR") {
+            let row_phase = outcome
+                .row
+                .as_ref()
+                .and_then(|row| row.managed_submission.as_ref())
+                .map(|record| format!("{:?}", record.phase));
+            let writes: Vec<_> = outcome
+                .discord
+                .iter()
+                .map(|write| {
+                    write
+                        .replace(&workspace.path().display().to_string(), "<workspace>")
+                        .replace(&root.display().to_string(), "<root>")
+                })
+                .collect();
+            let record = serde_json::json!({"case": case, "phase_at_entry": format!("{:?}", at.phase_at_entry), "fence": at.fence, "phase_after_fence": format!("{:?}", at.phase_after_fence), "row_phase": row_phase, "mailbox_active": outcome.mailbox_active, "requeued": outcome.requeued, "writes": writes});
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                std::path::Path::new(&directory).join(format!("{creator:?}-{index}.json")),
+                serde_json::to_vec_pretty(&record).unwrap(),
+            )
+            .unwrap();
+        }
+        if cell.guarded {
+            let phase = outcome
+                .row
+                .as_ref()
+                .and_then(|row| row.managed_submission.as_ref())
+                .map(|record| &record.phase);
+            let held = phase == Some(&SubmissionPhase::MayHaveSubmitted)
+                && outcome.mailbox_active
+                && outcome.requeued == 0
+                && !posted("guarded payload ACK unknown");
+            guarded_failures += usize::from(!held);
+        } else if cell.refuse {
             let error = at.fence.as_ref().expect_err(&case);
             assert!(error.contains("held before submit"), "{case}: {error}");
             let row = outcome.row.as_ref().unwrap_or_else(|| {
@@ -286,6 +370,10 @@ async fn creator_cells(creator: Creator) {
         shared.mailboxes.remove_fixture_for_test(channel);
     }
     server.abort();
+    assert_eq!(
+        guarded_failures, 0,
+        "guarded stops and pending cancellation retain the row and slot"
+    );
 }
 
 #[tokio::test]
@@ -296,7 +384,7 @@ async fn headless_creator_installs_waiting_and_holds_a_refused_prompt() {
     )) {
         return;
     }
-    creator_cells(Creator::Headless).await;
+    creator_cells(Creator::Headless, false).await;
 }
 
 #[tokio::test]
@@ -307,5 +395,27 @@ async fn intake_creator_installs_waiting_and_holds_a_refused_prompt() {
     )) {
         return;
     }
-    creator_cells(Creator::Intake).await;
+    creator_cells(Creator::Intake, false).await;
+}
+
+#[tokio::test]
+async fn cg_b2c_headless_bridge_holds_guarded_stop_and_pending_cancel() {
+    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::submission_tests::",
+        "cg_b2c_headless_bridge_holds_guarded_stop_and_pending_cancel"
+    )) {
+        return;
+    }
+    creator_cells(Creator::Headless, true).await;
+}
+
+#[tokio::test]
+async fn cg_b2c_intake_bridge_holds_guarded_stop_and_pending_cancel() {
+    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::submission_tests::",
+        "cg_b2c_intake_bridge_holds_guarded_stop_and_pending_cancel"
+    )) {
+        return;
+    }
+    creator_cells(Creator::Intake, true).await;
 }

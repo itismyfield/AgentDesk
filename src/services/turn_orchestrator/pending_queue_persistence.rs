@@ -12,7 +12,9 @@ use super::{
 };
 use crate::services::provider::ProviderKind;
 
+mod queue_exit_debt;
 mod queued_recovery;
+pub(super) use queue_exit_debt::{QueueExitDebt, check_queue_exit_debts};
 pub(crate) use queued_recovery::load_pending_queues_checked;
 
 const STALE_PENDING_QUEUE_TMP_AGE: Duration = Duration::from_secs(60);

@@ -142,6 +142,8 @@ pub(in crate::services::discord) fn second_handle_try_lock(
 /// network-filesystem behavior and non-cooperating writers are outside the
 /// contract.
 pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
+    #[cfg(test)]
+    boot_observation::attempt(path, boot_observation::Attempt::Lock);
     if let Some(population) = crate::services::discord::input_runtime::fence::inflight_writer(path)
         .map_err(|failure| format!("input fence: {failure:?}"))?
     {
@@ -219,8 +221,109 @@ fn open_inflight_lock_file(path: &Path) -> Result<fs::File, String> {
 }
 
 #[cfg(test)]
-mod population_tests {
+pub(super) mod population_tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tokio::sync::oneshot;
+
+    #[derive(Clone, Debug, Default)]
+    pub(crate) struct Counts {
+        pub(crate) preparations: usize,
+        pub(crate) reservations: usize,
+        pub(crate) sources: BTreeMap<PathBuf, [usize; 3]>,
+    }
+
+    pub(crate) enum Attempt {
+        Lock,
+        Read,
+        Unlink,
+    }
+
+    struct Observation {
+        counts: Mutex<Counts>,
+        latch: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    fn registry() -> &'static Mutex<BTreeMap<PathBuf, Arc<Observation>>> {
+        static ROOTS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Observation>>>> = OnceLock::new();
+        ROOTS.get_or_init(Mutex::default)
+    }
+
+    // Root-keyed process state follows custody/reaper work onto blocking threads.
+    pub(crate) struct Probe {
+        root: PathBuf,
+        observation: Arc<Observation>,
+    }
+
+    impl Probe {
+        pub(crate) fn new(root: PathBuf, latch: oneshot::Receiver<()>) -> Self {
+            let observation = Arc::new(Observation {
+                counts: Mutex::new(Counts::default()),
+                latch: Mutex::new(Some(latch)),
+            });
+            assert!(
+                registry()
+                    .lock()
+                    .unwrap()
+                    .insert(root.clone(), observation.clone())
+                    .is_none()
+            );
+            Self { root, observation }
+        }
+
+        pub(crate) fn counts(&self) -> Counts {
+            self.observation.counts.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            registry().lock().unwrap().remove(&self.root);
+        }
+    }
+
+    fn at(path: &Path) -> Option<Arc<Observation>> {
+        registry()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(root, _)| path.starts_with(root))
+            .map(|(_, observation)| observation.clone())
+    }
+
+    pub(crate) fn attempt(path: &Path, attempt: Attempt) {
+        if let Some(observation) = at(path) {
+            let index = match attempt {
+                Attempt::Lock => 0,
+                Attempt::Read => 1,
+                Attempt::Unlink => 2,
+            };
+            observation
+                .counts
+                .lock()
+                .unwrap()
+                .sources
+                .entry(path.to_owned())
+                .or_default()[index] += 1;
+        }
+    }
+
+    pub(crate) fn preparing() -> Option<oneshot::Receiver<()>> {
+        let observation = at(&crate::services::discord::runtime_store::runtime_root()?)?;
+        observation.counts.lock().unwrap().preparations += 1;
+        observation.latch.lock().unwrap().take()
+    }
+
+    pub(crate) fn reserved() {
+        if let Some(observation) =
+            crate::services::discord::runtime_store::runtime_root().and_then(|root| at(&root))
+        {
+            observation.counts.lock().unwrap().reservations += 1;
+        }
+    }
+
     #[test]
     fn b2_off_lock_error_detail_and_representative_writer_results_are_unchanged() {
         let root = tempfile::tempdir().unwrap();
@@ -650,9 +753,12 @@ mod relay_state_contract_refs {
             let _ = &s.last_watcher_relayed_offset;
         };
         let _ = super::super::model::InflightTurnState::effective_relay_owner_kind;
-        use super::super::clear_store::refresh_inflight_last_offset_if_matches_identity as _;
-        use super::super::clear_store::refresh_inflight_last_offset_if_matches_identity_in_root as _;
-        use super::super::save_store::save_inflight_state as _;
-        use super::validate_inflight_state_for_save as _;
+        let _ = super::super::clear_store::refresh_inflight_last_offset_if_matches_identity;
+        let _ = super::super::clear_store::refresh_inflight_last_offset_if_matches_identity_in_root;
+        let _ = super::super::save_store::save_inflight_state;
+        let _ = super::validate_inflight_state_for_save;
     }
 }
+
+#[cfg(test)]
+pub(super) use population_tests as boot_observation;

@@ -85,7 +85,7 @@ async fn d4act3_channel_turn_reports_old_backlog_once_across_reopen_and_reload_p
     let config = |enabled| {
         Arc::new(
             serde_yaml::from_str::<crate::config::Config>(&format!(
-                "server:\n  port: 8791\ntui_o:\n  repost:\n    enabled: {enabled}\n"
+                "server:\n  port: 8791\ntui_o:\n  repost:\n    enabled: {enabled}\n    channels: [{CHANNEL}]\n"
             ))
             .unwrap(),
         )

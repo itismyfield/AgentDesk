@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "384f558fd8f1bce71546c7ccd2a095bf10accf11",
+  "measured_at_sha": "ad1007b0686187ff15667f73ecd085dc77eec2ca",
   "records": [
     {
       "root": "migrations/postgres",
@@ -40645,6 +40645,33 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:facd251a7e550bd54f58bd38c02f9e0396a95201eb90fa109dee180e290378d1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/writer/late_adopt_delegated_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:af19729b85930eb7eccefd02d370a7cbbab1fe576fc0ba160dc2d8e0247f748b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/writer/late_adopt_delegated_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e498704785aa30bc277d94cff76c1efa3dd49dd1e461c09fff15184738451c79"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/writer/late_adopt_delegated_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:85a756546a851d8bc6a8d6cd50258317d213bb4807c381391371eabaace19518"
     },
     {
       "root": "src",

@@ -28,6 +28,8 @@ pub(crate) struct BootChannels {
     channels: BTreeSet<u64>,
     selected: BTreeSet<u64>,
     dormant_channels: BTreeSet<u64>,
+    /// Initial reservations can only be installed before this snapshot is published.
+    late_adopt_capable: bool,
     kinds: BTreeMap<u64, RuntimeHandoffKind>,
     site: Site,
     configured_id: Option<String>,
@@ -224,6 +226,7 @@ impl BootChannels {
         Ok(Self {
             selected: channels.clone(),
             dormant_channels,
+            late_adopt_capable: config.tui_o.as_ref().is_some_and(|c| c.writer.late_adopt),
             channels,
             kinds,
             site,
@@ -265,7 +268,7 @@ impl BootChannels {
                 }
                 self.kinds.extend(kinds);
                 self.channels.extend(kept);
-                let candidate = |(channel, state)| (channel, Candidate::new(state));
+                let candidate = |(channel, state)| (channel, self.seed_candidate(channel, state));
                 self.candidates = states.into_iter().map(candidate).collect();
             }
             Site::Foreign { home } => {
@@ -275,11 +278,23 @@ impl BootChannels {
                 for (&channel, _) in states.iter().filter(|(_, s)| **s != Adoption::Pending) {
                     alarms.raise_at(channel, &alarm, Instant::now());
                 }
-                let standby = |(channel, state)| (channel, Candidate::new(state));
+                let standby = |(channel, state)| (channel, self.seed_candidate(channel, state));
                 self.standby = states.into_iter().map(standby).collect();
             }
         }
         Ok(self)
+    }
+
+    fn seed_candidate(&self, channel: u64, state: Adoption) -> Candidate {
+        let reserve = self.late_adopt_capable
+            && self.selected.contains(&channel)
+            && self.kind(channel) == Some(RuntimeHandoffKind::ClaudeTui)
+            && state == Adoption::Pending;
+        if reserve {
+            Candidate::reserved_late()
+        } else {
+            Candidate::new(state)
+        }
     }
 
     /// Every channel O may own here: the selection plus, on the home, its kept committed channels.
@@ -295,6 +310,10 @@ impl BootChannels {
     /// Installed dormant policy, kept fixed across live config reloads.
     pub(crate) fn dormant_channels(&self) -> &BTreeSet<u64> {
         &self.dormant_channels
+    }
+
+    pub(crate) fn late_adopt_capable(&self) -> bool {
+        self.late_adopt_capable
     }
 
     pub(crate) fn kind(&self, channel: u64) -> Option<RuntimeHandoffKind> {
@@ -423,3 +442,6 @@ pub(crate) fn owns_output(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod late_reservation_tests;
