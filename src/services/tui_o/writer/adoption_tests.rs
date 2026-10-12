@@ -13,6 +13,13 @@ use tokio::sync::watch;
 
 const TMUX: &str = "adoption-unit";
 
+#[test]
+fn logged_empty_is_final_for_shared_consumers() {
+    let refused = logged(&[]).unwrap_err();
+    assert_eq!(refused.hold, Hold::Final);
+    assert_eq!(refused.to_string(), "no source is bound");
+}
+
 /// Legacy's state as each test sets it; every fact passes unless the test changes it.
 struct Legacy {
     cursor: Mutex<Option<u64>>,

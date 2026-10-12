@@ -293,6 +293,7 @@ src/services/tui_o/repost/runner_tests.rs
 src/services/tui_o/repost/runtime_host_activation_tests.rs
 src/services/tui_o/repost/writer_activation_tests.rs
 src/services/tui_o/writer/deferred_pg_tests.rs
+src/services/tui_o/writer/late_adopt_delegated_tests.rs
 src/services/tui_o/writer/repost_turn_tests.rs
 src/services/turn_host_tests.rs
 src/services/turn_lifecycle.rs
@@ -608,6 +609,7 @@ services::tui_o::repost::runner::activation_tests::allowlist
 services::tui_o::repost::runner::activation_tests::backlog_tests
 services::tui_o::repost::runner_tests
 services::tui_o::writer::tests::actor::host_start::deferred::pg
+services::tui_o::writer::tests::actor::host_start::late_delegated
 services::tui_o::writer::tests::actor::repost_turn
 services::tui_o::writer::tests::actor::repost_turn::activation
 services::tui_o::writer::tests::actor::repost_turn::allowlist
@@ -2251,6 +2253,11 @@ services::tui_o::writer::tests::actor::host_start::deferred::pg::normal_deferred
 services::tui_o::writer::tests::actor::host_start::deferred::pg::queued_headless_pending_and_processing_block_expired_handoff_until_worker_sent_pg
 services::tui_o::writer::tests::actor::host_start::deferred::pg::sweep_before_expired_handoff_fence_observes_fresh_child_pg
 services::tui_o::writer::tests::actor::host_start::deferred::pg::sweep_before_normal_deferred_fence_observes_fresh_child_pg
+services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_delegated_deferred_closed_and_lost_hold_routes_and_worker_pending
+services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_delegated_first_pg_worker_executes_then_same_host_commits
+services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_foreign_body_gate_and_host_share_candidate
+services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_home_body_before_first_decision_preserves_reservation
+services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_off_foreign_standby_legacy_body_releases_before_host_can_adopt
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_actor_stop_during_429_wait_prevents_retry_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_actor_stop_receiver_reaches_a_running_repost_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_channel_turn_binds_switch_before_real_repost_pg
