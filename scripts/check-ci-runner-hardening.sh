@@ -923,7 +923,7 @@ targets = {
     # unchanged, and the exact commands below pin each source/use pair.
     # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
     # Re-pinned after raising the `just test-postgres` step budget from 40 to 60 minutes.
-    "job_sha256" => "0a4bf73e7cc453625d7e8fafb5fcc7d31b07db1793e0db4c24fd86cf7c9e74c1",
+    "job_sha256" => "058d450aa87871bdc002d7137def8f4500fe5f777bddc4ce4a7147c919716ad0",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
@@ -994,7 +994,7 @@ targets = {
     # from the PG manifest instead of hand-kept.
     # Re-pinned after adding the ensure-swap step ahead of the first cargo step.
     # Re-pinned for the two Codex legacy lock child summaries.
-    "job_sha256" => "ac5c10900533d6673911e5e6f9efabb2180792c5edc35762ad7ed31e2d2de2a0",
+    "job_sha256" => "0c861374748187c524880e21dab92cb028c0adb6e0658b773c59601e649851f7",
     "cargo_steps" => {
       "Library sweep (selection-set gated)" => {
         "commands" => [
