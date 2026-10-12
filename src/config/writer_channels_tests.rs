@@ -205,3 +205,108 @@ fn writer_all_tui_selects_only_tui_bindings_and_applies_on_restart() {
     );
     load(unnamed, "tui_o: {writer: {all_tui: false}}").unwrap();
 }
+
+#[test]
+fn readers_s1b_dormant_disk_loader_defaults_empty_and_omits_empty_set() {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    for writer in [
+        "",
+        "tui_o: {writer: {channels: [41]}}",
+        "tui_o: {writer: {channels: [41], dormant_channels: []}}",
+    ] {
+        let config = load_fixture(root.path(), writer, BINDINGS, "{}").unwrap();
+        let value = serde_json::to_value(config).unwrap();
+        assert_eq!(
+            value.pointer("/tui_o/writer/dormant_channels"),
+            None,
+            "default OFF must not serialize an activation list"
+        );
+    }
+}
+
+#[test]
+fn readers_s1b_dormant_disk_loader_normalizes_without_granting_ownership() {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let config = load_fixture(
+        root.path(),
+        "tui_o: {writer: {channels: [41, 42], dormant_channels: [42, 41, 42]}}",
+        BINDINGS,
+        "{}",
+    )
+    .expect("valid dormant subset must pass the real disk loader");
+    let value = serde_json::to_value(&config).unwrap();
+    assert_eq!(
+        value.pointer("/tui_o/writer/dormant_channels"),
+        Some(&serde_json::json!([41, 42]))
+    );
+    assert_eq!(roundtrip_channels(&config), serde_json::json!([41, 42]));
+    let restored: Config = serde_json::from_value(value).unwrap();
+    let value = serde_json::to_value(restored).unwrap();
+    assert_eq!(
+        value.pointer("/tui_o/writer/dormant_channels"),
+        Some(&serde_json::json!([41, 42]))
+    );
+}
+
+#[test]
+fn readers_s1b_dormant_disk_loader_rejects_zero_invalid_and_unselected_ids() {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    load_fixture(
+        root.path(),
+        "tui_o: {writer: {channels: [41], dormant_channels: [41]}}",
+        BINDINGS,
+        "{}",
+    )
+    .expect("rejection cases must not pass merely because the key is unknown");
+    for dormant in [
+        "[0]",
+        "['41']",
+        "[-1]",
+        "[41.0]",
+        "[18446744073709551616]",
+        "[42]",
+        "[99]",
+    ] {
+        let writer = format!("tui_o: {{writer: {{channels: [41], dormant_channels: {dormant}}}}}");
+        let error = load_fixture(root.path(), &writer, BINDINGS, "{}").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("dormant_channels"),
+            "{dormant}: rejection must identify dormant membership: {error:#}"
+        );
+    }
+    assert!(
+        load_fixture(
+            root.path(),
+            "tui_o: {writer: {dormant_channels: [41]}}",
+            BINDINGS,
+            "{}",
+        )
+        .is_err(),
+        "a dormant list alone must not select an O writer"
+    );
+}
+
+#[test]
+fn readers_s1b_dormant_disk_loader_validates_actual_all_tui_selection() {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let bindings = "claude: {id: '41', runtime: tui}\n      codex: {id: '42', runtime: pipe}";
+    let config = load_fixture(
+        root.path(),
+        "tui_o: {writer: {all_tui: true, dormant_channels: [41, 41]}}",
+        bindings,
+        "{}",
+    )
+    .expect("all_tui dormant membership uses the resolved TUI selection");
+    let value = serde_json::to_value(config).unwrap();
+    assert_eq!(
+        value.pointer("/tui_o/writer/dormant_channels"),
+        Some(&serde_json::json!([41]))
+    );
+    for dormant in ["[0]", "[42]", "[99]"] {
+        let writer = format!("tui_o: {{writer: {{all_tui: true, dormant_channels: {dormant}}}}}");
+        assert!(
+            load_fixture(root.path(), &writer, bindings, "{}").is_err(),
+            "all_tui must reject non-selected dormant IDs: {dormant}"
+        );
+    }
+}

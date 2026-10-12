@@ -960,6 +960,7 @@ mod pg_tests {
             channel_id: channel,
             policy_channel_id: channel,
             user_msg_id: "9999",
+            replay_source_message_ids: None,
             request_owner_id: "100",
             request_owner_name: Some("Tester"),
             user_text: "hello",

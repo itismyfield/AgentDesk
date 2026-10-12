@@ -162,9 +162,9 @@ pub(crate) async fn finish_admitted_queued_intake(
     deps: &super::super::message_handler::IntakeDeps<'_>,
     admitted: AdmittedQueuedIntake,
     intervention: &Intervention,
-) -> Result<(), super::super::super::Error> {
+) -> Result<super::super::IntakeExecution, super::super::super::Error> {
     let Some(permit) = admitted.local_permit else {
-        return Ok(());
+        return Ok(super::super::IntakeExecution::Executed);
     };
     if let Some(announcement) = intervention.voice_announcement.as_ref() {
         crate::voice::announce_meta::global_store()

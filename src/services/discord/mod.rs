@@ -145,6 +145,8 @@ mod tmux;
 pub use tmux::{
     OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
 };
+#[cfg(unix)]
+pub use tmux::{RetiredOWatcherRestore, restore_retired_o_watchers};
 #[cfg(all(test, unix))]
 pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
     requested_channel_id: ChannelId,
@@ -258,7 +260,8 @@ pub(in crate::services::discord) use recovery_engine as recovery;
 // path (surface freeze, #3294/#3295 pattern).
 pub(crate) use restart_mode::InflightRestartMode;
 pub(crate) use router::{
-    HeadlessTurnStartError, IntakeRequest, TurnKind, execute_intake_turn_core,
+    HeadlessTurnStartError, IntakeExecution, IntakeRequest, TurnKind,
+    checkpoint_waits_for_admission, execute_intake_turn_core,
 };
 #[cfg(unix)]
 pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;

@@ -39,6 +39,10 @@ use crate::config::{
 };
 use crate::voice::barge_in::BargeInSensitivity;
 
+#[cfg(test)]
+#[path = "config/readers_live_reload_tests.rs"]
+mod readers_tests;
+
 /// Process-global live config snapshot. `None` until [`install`] runs at boot.
 static LIVE: OnceLock<RwLock<Arc<Config>>> = OnceLock::new();
 
@@ -398,6 +402,13 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
         != crate::services::tui_o::channel_policy::configured_channels(new)
     {
         changed.push("tui_o.writer.channels");
+    }
+    if crate::services::tui_o::channel_policy::boot()
+        .map(|boot| boot.dormant_channels().clone())
+        .unwrap_or_else(|| crate::services::tui_o::channel_policy::configured_dormant_channels(old))
+        != crate::services::tui_o::channel_policy::configured_dormant_channels(new)
+    {
+        changed.push("tui_o.writer.dormant_channels");
     }
     changed
 }

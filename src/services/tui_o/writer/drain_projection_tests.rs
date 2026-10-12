@@ -62,7 +62,7 @@ fn spawn_owing(
         owing,
     );
     let config = WriterConfig { enabled: true };
-    let task = spawn_projecting(&config, writer, provider, bindings, watches);
+    let task = spawn_projecting(&config, None, writer, provider, bindings, watches);
     (stop, task.expect("enabled"), owed, demand)
 }
 

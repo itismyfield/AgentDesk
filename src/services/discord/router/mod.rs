@@ -10,6 +10,7 @@ mod thread_binding;
 mod turn_start;
 
 pub(crate) use authorization::TurnKind;
+pub(crate) use intake_dispatch::replay_admission::IntakeExecution;
 #[cfg(test)]
 pub(in crate::services::discord) use intake_dispatch::replay_admission::test_activation as replay_test_activation;
 pub(crate) use intake_dispatch::{

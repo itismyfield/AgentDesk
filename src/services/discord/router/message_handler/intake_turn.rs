@@ -258,7 +258,7 @@ pub(super) async fn handle_text_message(
     _queued_drain: bool,
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
-) -> Result<(), Error> {
+) -> Result<IntakeExecution, Error> {
     use crate::services::discord::input_runtime::fence::effect;
     let permit = effect::admit(&deps.shared.provider, request.channel_id.get())
         .map_err(|failure| format!("input admission refused: {failure:?}"))?;
@@ -308,7 +308,7 @@ async fn handle_text_message_admitted(
     _queued_drain: bool,
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
-) -> Result<(), Error> {
+) -> Result<IntakeExecution, Error> {
     let IntakeDeps {
         http,
         cache,
@@ -385,7 +385,7 @@ async fn handle_text_message_admitted(
         channel_id,
         user_msg_id,
     ) {
-        return Ok(());
+        return Ok(IntakeExecution::Executed);
     }
     let is_voice_announcement = voice_announcement.is_some();
     let voice_prompt_text = voice_announcement.as_ref().map(|announcement| {
@@ -450,7 +450,7 @@ async fn handle_text_message_admitted(
     )
     .await;
     if voice_route_outcome.bypasses_normal_turn() {
-        return Ok(());
+        return Ok(IntakeExecution::Executed);
     }
     if !is_voice_announcement
         && shared
@@ -458,7 +458,7 @@ async fn handle_text_message_admitted(
             .try_handle_voice_channel_text_reply(http, channel_id, user_text)
             .await
     {
-        return Ok(());
+        return Ok(IntakeExecution::Executed);
     }
     let is_dm_channel = matches!(
         channel_id.to_channel(http).await.ok(),
@@ -511,7 +511,7 @@ async fn handle_text_message_admitted(
     let (inbound, input) = ((channel_id, channel_id), (preloaded_uploads, None));
     let admitted = host_refusal::admitted_uploads(http, shared, &settings_provider, inbound, input);
     let Some(preloaded_uploads) = admitted.await? else {
-        return Ok(());
+        return Ok(IntakeExecution::Executed);
     };
     if let GoalCommandKind::Lifecycle(command) = classify_codex_goal_command_for_provider(
         &early_provider,
@@ -531,7 +531,7 @@ async fn handle_text_message_admitted(
             early_stale_session_id,
         )
         .await;
-        return Ok(());
+        return Ok(IntakeExecution::Executed);
     }
     // #5660 [R1]: ordinary inputs own their session state before later awaits.
     let session_info = {
@@ -786,18 +786,20 @@ async fn handle_text_message_admitted(
                         let _ = channel_id
                             .say(http, "No active session. Use `/start <path>` first.")
                             .await;
-                        return Ok(());
+                        return Ok(IntakeExecution::Executed);
                     }
                 } else {
                     rate_limit_wait(shared, channel_id).await;
                     let _ = channel_id
                         .say(http, "No active session. Use `/start <path>` first.")
                         .await;
-                    return Ok(());
+                    return Ok(IntakeExecution::Executed);
                 }
             }
         };
     let turn_start_attempt = if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
+        && !(_queued_drain
+            && super::super::intake_dispatch::checkpoint_waits_for_admission(channel_id))
         && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
     {
         tv_start_current_with_attempt(shared, http, channel_id, user_msg_id, "intake_start")
@@ -906,7 +908,7 @@ async fn handle_text_message_admitted(
         })
         .await?
     else {
-        return Ok(());
+        return Ok(IntakeExecution::Executed);
     };
     let final_provider =
         if let Some(override_channel) = shared.dispatch.role_overrides.get(&channel_id) {
@@ -962,7 +964,7 @@ async fn handle_text_message_admitted(
     )
     .await?
     else {
-        return Ok(());
+        return Ok(IntakeExecution::deferred(channel_id));
     };
     let (mut session_id, mut memento_context_loaded, current_path) =
         intake_runtime_transition.state.clone();
@@ -1175,7 +1177,7 @@ async fn handle_text_message_admitted(
             let restore = super::super::super::admin_host_guard::return_intake_input;
             let input = (pending_uploads, session_was_cleared);
             restore(shared, original_channel_id, input).await;
-            return Ok(());
+            return Ok(IntakeExecution::Executed);
         }
         session_id = None;
         memento_context_loaded = false;
@@ -1226,7 +1228,7 @@ async fn handle_text_message_admitted(
         )
         .await
     else {
-        return Ok(());
+        return Ok(IntakeExecution::Executed);
     };
     // #5660 [R2]: classification passed; the mailbox claim still follows below.
     let taken_cleared = if let Some(cleared) = session_was_cleared {
@@ -1370,7 +1372,7 @@ async fn handle_text_message_admitted(
     )
     .await
     {
-        return Ok(());
+        return Ok(IntakeExecution::Executed);
     }
 
     claim_bootstrap::bootstrap_claimed_turn(
@@ -1384,7 +1386,9 @@ async fn handle_text_message_admitted(
     )
     .await;
 
-    let queued_placeholder_handoff = if started {
+    let preserve_queued_view = _queued_drain
+        && super::super::intake_dispatch::checkpoint_waits_for_admission(channel_id);
+    let queued_placeholder_handoff = if started && !preserve_queued_view {
         shared
             .remove_queued_placeholder(channel_id, user_msg_id)
             .await
@@ -1392,33 +1396,7 @@ async fn handle_text_message_admitted(
         None
     };
 
-    // #3182: the normal dequeue path removed the `📬 메시지 대기 중` placeholder
-    // CARD above (`remove_queued_placeholder`) but historically left the
-    // queue-pending REACTION (`📬` standalone / `➕` merged) on the user message,
-    // so a processed message kept showing `📬`+`✅` together — the queue version
-    // of the #3164 stuck-hourglass. The reaction was added in `intake_gate` via
-    // the provider bot's `ctx.http`, which is the SAME @me identity as the `http`
-    // available here (kickoff passes `&ctx.http`, the live dispatch passes
-    // `&live_turn.ctx.http`; both resolve to `cached_serenity_ctx` = the provider
-    // bot — see runtime_bootstrap.rs `cached_serenity_ctx.set(ctx)`), so this
-    // `http` can actually remove the bot's own reaction (Discord remove-reaction
-    // only clears the calling bot's @me reaction).
-    //
-    // AUTHORITATIVE cleanup lives at the two queued-dispatch ENTRYPOINTS, which
-    // each clear `📬`/`➕` on EVERY `source_message_ids` entry (head + merged
-    // tails) BEFORE re-entering `handle_text_message`:
-    //   • live dispatch — `DiscordGateway::dispatch_queued_turn` (gateway.rs)
-    //   • idle/restart kickoff — `kickoff_idle_queues` (mod.rs, #3182 codex P1)
-    // That entrypoint pass covers the merged-tail and no-mapping cases the
-    // per-head hand-off cannot see. This block is an idempotent HEAD-level
-    // belt-and-suspenders for the dispatch hand-off (where a `queued_placeholders`
-    // mapping for the head was consumed just above): it re-asserts the head is
-    // clear even if the message reached here by some path other than the two
-    // entrypoints. Gate: only when THIS message actually held a queued
-    // placeholder mapping (`queued_placeholder_handoff.is_some()`), and not for
-    // background-trigger turns (#796 — those keep their info-only placeholder and
-    // never reacted the user message). A redundant remove is a no-op, so this
-    // composes safely with the entrypoint drains.
+    // Active queue views remain intact until execution; dormant handoffs keep their head cleanup.
     if queued_placeholder_handoff.is_some() && !turn_kind.is_background_trigger() {
         for emoji in crate::services::discord::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
             queue_marker::note_removed_current(
@@ -1469,7 +1447,7 @@ async fn handle_text_message_admitted(
             preserve_on_cancel,
             race_loss::QueuedIntakeCause::RaceLoss,
         )
-        .await;
+        .await.map(|_| IntakeExecution::deferred(channel_id));
     }
 
     let reusable_busy_notice = placeholder_handoff::reuse_bound_busy_notice(
@@ -1587,7 +1565,7 @@ async fn handle_text_message_admitted(
                     recovery,
                     &error.to_string(),
                 );
-                return Err::<(), Error>(error.into());
+                return Err::<IntakeExecution, Error>(error.into());
             }
         }
     } else {
@@ -1648,7 +1626,7 @@ async fn handle_text_message_admitted(
                     recovery,
                     &error.to_string(),
                 );
-                return Err::<(), Error>(error.into());
+                return Err::<IntakeExecution, Error>(error.into());
             }
         }
     };
@@ -2235,7 +2213,7 @@ async fn handle_text_message_admitted(
         // emit the partial span (input/total render `-`); the retry re-enters
         // intake and emits its own `submitted` span.
         intake_latency.log(channel_id.get(), provider_label, "deferred_busy");
-        return Ok(());
+        return Ok(IntakeExecution::deferred(channel_id));
     }
     #[cfg(unix)]
     if recapture_offset_after_busy_wait {
@@ -2358,13 +2336,18 @@ async fn handle_text_message_admitted(
     .await
     {
         Ok(registration) => registration,
-        Err(true) => return Ok(()),
+        Err(true) => return Ok(IntakeExecution::deferred(channel_id)),
         Err(false) => return Err("original bridge start deferred; retry enqueue refused".into()),
     };
     inflight_create_log::record_turn_start_origin(&provider, channel_id, &inflight_state).await;
     let row = super::super::super::inflight::save_inflight_state_create_new(&inflight_state);
     if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {
-        return Ok(());
+        return Ok(IntakeExecution::deferred(channel_id));
+    }
+
+    if preserve_queued_view {
+        tv_start_current_with_attempt(shared, http, channel_id, user_msg_id, "queued_replay_input_started")
+            .await;
     }
 
     // Create channel for streaming
@@ -2617,7 +2600,7 @@ async fn handle_text_message_admitted(
             .map_err(|_| "queued turn completion wait failed".to_string())?;
     }
 
-    Ok(())
+    Ok(IntakeExecution::Executed)
     }).await
     }).await
 }
@@ -2718,7 +2701,7 @@ mod recovery_context_take_order_tests {
             .expect("intake stale-dispatch guard call exists");
         let stale_return_pos = stale_guard_pos
             + module_src[stale_guard_pos..]
-                .find("return Ok(());")
+                .find("return Ok(IntakeExecution::Executed);")
                 .expect("intake stale-dispatch abort return exists");
         let take_call = recovery_context_take_call();
         let take_pos = module_src
@@ -2980,7 +2963,7 @@ mod turn_start_dispatch_guard_preservation_tests {
             .expect("live intake calls the turn-start guard");
         assert!(
             module_src[call_pos..]
-                .find("return Ok(());")
+                .find("return Ok(IntakeExecution::Executed);")
                 .is_some_and(|r| r < 400),
             "the live-intake caller must return early when the guard aborts"
         );

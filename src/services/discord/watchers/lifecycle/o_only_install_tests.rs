@@ -21,7 +21,7 @@ impl InstallFixture {
     pub async fn new(provider: ProviderKind, channel: u64) -> Self {
         Self::new_with_pool(provider, channel, None).await
     }
-    async fn new_with_pool(
+    pub(in crate::services::discord) async fn new_with_pool(
         provider: ProviderKind,
         channel: u64,
         pool: Option<sqlx::PgPool>,
@@ -52,6 +52,7 @@ impl InstallFixture {
         let output = tc::session_temp_path(&session, "jsonl");
         std::fs::create_dir_all(Path::new(&output).parent().unwrap()).unwrap();
         std::fs::write(&output, []).unwrap();
+        std::fs::write(tc::session_temp_path(&session, "generation"), "n4d-source").unwrap();
         std::fs::write(
             tc::tmux_owner_path(&session),
             tc::current_tmux_owner_marker(),
@@ -131,9 +132,9 @@ fn at_reopen(action: impl FnOnce() + 'static) {
     BEFORE_REOPEN.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
 }
 
-struct HostPause {
-    entered: Notify,
-    resume: Notify,
+pub(in crate::services::discord) struct HostPause {
+    pub(in crate::services::discord) entered: Notify,
+    pub(in crate::services::discord) resume: Notify,
 }
 static HOST_PAUSES: LazyLock<Mutex<HashMap<ChannelId, Arc<HostPause>>>> =
     LazyLock::new(Mutex::default);
@@ -144,7 +145,7 @@ pub(super) async fn after_host(channel: ChannelId) {
         pause.resume.notified().await;
     }
 }
-fn pause_host(channel: ChannelId) -> Arc<HostPause> {
+pub(in crate::services::discord) fn pause_host(channel: ChannelId) -> Arc<HostPause> {
     let pause = Arc::new(HostPause {
         entered: Notify::new(),
         resume: Notify::new(),
