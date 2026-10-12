@@ -2245,18 +2245,7 @@ fn input_mailbox_step(
                 TakeHeadCondition::Unchecked => false,
             };
             if selection_stale {
-                let _ = reply.send(TakeNextSoftResult {
-                    selection_stale: true,
-                    intervention: None,
-                    dispatch_lease: None,
-                    has_more: state
-                        .intervention_queue
-                        .iter()
-                        .any(|i| i.mode == InterventionMode::Soft),
-                    queue_len_after: state.intervention_queue.len(),
-                    queue_exit_events: Vec::new(),
-                    persistence_error: None,
-                });
+                let _ = reply.send(TakeNextSoftResult::stale(&state.intervention_queue));
                 return state;
             }
             let previous_queue = state.intervention_queue.clone();

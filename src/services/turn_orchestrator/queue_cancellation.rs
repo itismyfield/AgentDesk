@@ -10,6 +10,20 @@ pub(crate) struct TakeNextSoftResult {
     pub(crate) persistence_error: Option<String>,
 }
 
+impl TakeNextSoftResult {
+    pub(super) fn stale(queue: &[Intervention]) -> Self {
+        Self {
+            selection_stale: true,
+            intervention: None,
+            dispatch_lease: None,
+            has_more: queue.iter().any(|item| item.mode == InterventionMode::Soft),
+            queue_len_after: queue.len(),
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        }
+    }
+}
+
 pub(crate) fn has_soft_intervention_at(
     queue: &mut Vec<Intervention>,
     now: Instant,
