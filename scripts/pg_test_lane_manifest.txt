@@ -1383,8 +1383,10 @@ services::cluster::intake_worker::dispatch_stamp_tests::worker_mark_done_false_o
 services::cluster::intake_worker::dispatch_stamp_tests::worker_mark_done_false_on_missing_row_is_a_divergence_pg
 services::cluster::intake_worker::home_accept_tests::a_home_moved_after_the_last_check_refuses_the_accept_and_keeps_the_row_open_pg
 services::cluster::intake_worker::home_route_tests::a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg
+services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_codex_unsealed_alone_blocks_reclaim_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_each_responsibility_blocks_leave_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_last_post_blocks_cas_pg
+services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_pending_bind_alone_blocks_reclaim_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_post_close_recheck_finds_tail_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_prepared_alone_blocks_reclaim_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_releasing_tail_posts_before_release_pg
