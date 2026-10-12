@@ -162,6 +162,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/codex_tui/rollout_tail/child_binding_tests.rs",
         "src/services/discord/tui_prompt_relay/rehydration/child_binding_tests.rs",
         "src/config/writer_channels_tests.rs",
+        "src/config/readers_live_reload_tests.rs",
+        "src/services/tui_o/writer/readers_host_tests.rs",
         "src/server/routes/pipeline_stage_save_tests.rs",
         "src/services/pipeline_routes/stage_validation_tests.rs",
         "src/services/tui_o/channel_policy/tests.rs",
