@@ -1423,3 +1423,261 @@ async fn readers_s1a_hourly_refresh_unlink_discards_result_and_keeps_cleanup_ava
         ));
     }
 }
+
+fn s1b_spawn_reader_actor(
+    harness: &Harness,
+    bindings: Arc<FakeBindings>,
+) -> (watch::Sender<bool>, Actor, watch::Receiver<bool>) {
+    use crate::services::tui_o::writer::{ReaderConfig, actor};
+    let (stop, stopped) = watch::channel(false);
+    let (resumed, ready) = watch::channel(false);
+    let unsettled = watch::channel(None).0;
+    let task = actor::spawn_projecting(
+        &WriterConfig { enabled: true },
+        Some(ReaderConfig { dormant: true }),
+        harness.writer(),
+        ShadowProvider::Claude,
+        bindings,
+        (stopped, resumed, unsettled, actor::Owing::default()),
+    )
+    .expect("the production actor is enabled");
+    (stop, task, ready)
+}
+
+async fn s1b_actor_until(mut observed: impl FnMut() -> bool) {
+    for _ in 0..160 {
+        if observed() {
+            return;
+        }
+        polls(1).await;
+        tokio::task::yield_now().await;
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        observed(),
+        "the production actor reached the required state"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn readers_s1b_actor_on_cleanup_retires_and_latest_still_posts() {
+    use std::time::{Duration, SystemTime};
+    let (h, path, old, bindings) = started(&row("m0", "before"));
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(48 * 3600))
+        .unwrap();
+    let (next_path, new) = transcript(&path, "next.jsonl", "s2", b"");
+    bindings.commit(hop_at(2, "tmux", Some(&old), &new, BindingCause::Clear, ""));
+    let (stop, task, ready) = s1b_spawn_reader_actor(&h, bindings);
+    s1b_actor_until(|| *ready.borrow() && h.alarms.readers() == Some(1)).await;
+    let before = h.channel().cursor(&old).unwrap().clone();
+    let witness = h.channel().cleanup_witness(&old).unwrap().unwrap();
+    assert!(witness.bound_to(&before) && witness.eligible(SystemTime::now()));
+    assert!(!before.retired, "Dormant does not mean retired");
+    std::fs::remove_file(&path).unwrap();
+    s1b_actor_until(|| retired(&h, &old)).await;
+    assert!(h.alarms.taken().iter().any(|alarm| {
+        matches!(alarm, WriterAlarm::CleanupRetired { source, .. } if source == &old)
+    }));
+    assert!(!task.is_finished(), "cleanup keeps the actor running");
+    append(&next_path, &row("fresh", "latest after cleanup"));
+    s1b_actor_until(|| h.port.posts() == ["latest after cleanup"]).await;
+    halt(stop, task).await;
+    let mut writer = h.writer();
+    let cursor = writer.store().cursor(&old).unwrap();
+    assert!(cursor.retired);
+    assert_eq!(cursor.captured_through, before.captured_through);
+    assert_eq!(cursor.prefix_hash, before.prefix_hash);
+    assert!(matches!(
+        reader_outcome(&mut writer, "fresh"),
+        Some(PieceOutcome::Posted(_))
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn readers_s1b_actor_on_late_tail_spools_and_posts_once() {
+    use crate::services::tui_o::store::spool::SpoolFrame;
+    let (h, path, old, bindings) = started(&row("m0", "before"));
+    let (_, new) = transcript(&path, "next.jsonl", "s2", b"");
+    bindings.commit(hop_at(2, "tmux", Some(&old), &new, BindingCause::Clear, ""));
+    let (stop, task, ready) = s1b_spawn_reader_actor(&h, bindings);
+    s1b_actor_until(|| *ready.borrow() && h.alarms.readers() == Some(1)).await;
+    let before = h.channel().cursor(&old).unwrap().clone();
+    append(&path, &row("late", "late actor tail"));
+    s1b_actor_until(|| h.port.posts() == ["late actor tail"]).await;
+    polls(3).await;
+    assert!(!task.is_finished());
+    halt(stop, task).await;
+    let mut writer = h.writer();
+    let mut spans = Vec::new();
+    writer
+        .store()
+        .for_each_frame(&old, |frame| {
+            if let SpoolFrame::Record(record) = frame {
+                spans.push((record.start, record.end));
+            }
+        })
+        .unwrap();
+    assert_eq!(spans, [(before.captured_through, len(&path))]);
+    let cursor = writer.store().cursor(&old).unwrap();
+    assert!(!cursor.retired);
+    assert_eq!(cursor.captured_through, len(&path));
+    assert_eq!(
+        cursor.prefix_hash,
+        hex::encode(Sha256::digest(std::fs::read(&path).unwrap()))
+    );
+    assert_eq!(h.port.posts(), ["late actor tail"]);
+    assert!(matches!(
+        reader_outcome(&mut writer, "late"),
+        Some(PieceOutcome::Posted(_))
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn readers_s1b_actor_on_recent_missing_halts_without_retirement() {
+    let (h, path, old, bindings) = started(&row("m0", "before"));
+    let (_, new) = transcript(&path, "next.jsonl", "s2", b"");
+    bindings.commit(hop_at(2, "tmux", Some(&old), &new, BindingCause::Clear, ""));
+    let (stop, task, ready) = s1b_spawn_reader_actor(&h, bindings);
+    s1b_actor_until(|| *ready.borrow() && h.alarms.readers() == Some(1)).await;
+    let before = h.channel().cursor(&old).unwrap().clone();
+    std::fs::remove_file(&path).unwrap();
+    s1b_actor_until(|| task.is_finished()).await;
+    let cause = task.await.unwrap().expect("unsafe missing stops the actor");
+    assert!(matches!(cause.alarm, WriterAlarm::Halted { .. }));
+    assert!(
+        cause.io.is_none(),
+        "source damage is not a transient store retry"
+    );
+    assert!(ready.has_changed().is_err(), "the resumed publisher ended");
+    assert_eq!(h.channel().cursor(&old).unwrap(), &before);
+    assert!(h.port.posts().is_empty());
+    assert!(
+        !h.alarms
+            .taken()
+            .iter()
+            .any(|alarm| { matches!(alarm, WriterAlarm::CleanupRetired { .. }) })
+    );
+    drop(stop);
+}
+
+#[tokio::test(start_paused = true)]
+async fn readers_s1b_actor_on_resume_publishes_after_init_only_eof_pending_flush() {
+    let (h, path, old, bindings) = started(&row("m0", "before"));
+    let (_, new) = transcript(&path, "next.jsonl", "s2", b"");
+    bindings.commit(hop_at(2, "tmux", Some(&old), &new, BindingCause::Clear, ""));
+    let (_, mut writer, _, _) = reader_engine(&h, bindings.clone(), None);
+    let cursor_path = path
+        .parent()
+        .unwrap()
+        .join("o_store")
+        .join(CHANNEL.to_string())
+        .join("cursor")
+        .join(format!("{}.json", source_key(&old)));
+    assert!(
+        !cursor_path.exists(),
+        "the old source still comes from init"
+    );
+    let mut rotation = writer.store().rotation().unwrap();
+    let mut link = owed_link(&old, 1);
+    link.boundary = Boundary::Undecided;
+    rotation.links.insert(source_key(&old), link);
+    writer.store().write_rotation(&rotation).unwrap();
+    drop(writer);
+    let (stop, task, ready) = s1b_spawn_reader_actor(&h, bindings);
+    s1b_actor_until(|| *ready.borrow()).await;
+    assert_eq!(
+        h.channel().rotation().unwrap().link(&old).unwrap().boundary,
+        Boundary::Pending {
+            candidates: vec![0, len(&path)]
+        }
+    );
+    assert!(
+        h.alarms
+            .taken()
+            .contains(&WriterAlarm::BoundaryPending { source: old })
+    );
+    assert!(h.port.posts().is_empty());
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn readers_s1b_actor_on_drains_predecessor_before_successor() {
+    let (h, path, old, bindings) = started(&row("m0", "before"));
+    append(
+        &path,
+        &[backlog(0), row("last", "old barrier tail")].concat(),
+    );
+    let (_, new) = transcript(
+        &path,
+        "next.jsonl",
+        "s2",
+        &row("first", "new after barrier"),
+    );
+    bindings.commit(hop_at(2, "tmux", Some(&old), &new, BindingCause::Clear, ""));
+    let (stop, task, ready) = s1b_spawn_reader_actor(&h, bindings);
+    s1b_actor_until(|| *ready.borrow() && h.port.posts().len() == 2).await;
+    assert_eq!(h.port.posts(), ["old barrier tail", "new after barrier"]);
+    assert_eq!(
+        h.channel().cursor(&old).unwrap().captured_through,
+        len(&path)
+    );
+    assert!(successor(&h, &old).proof.is_none());
+    assert!(!retired(&h, &old));
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn readers_s1b_configless_actor_keeps_the_legacy_off_path() {
+    let (h, path, old, bindings) = started(&row("m0", "before"));
+    let (_, new) = transcript(&path, "next.jsonl", "s2", b"");
+    bindings.commit(hop_at(2, "tmux", Some(&old), &new, BindingCause::Clear, ""));
+    let (stop, task) = spawn_with(h.writer(), ShadowProvider::Claude, bindings);
+    s1b_actor_until(|| h.alarms.readers() == Some(2)).await;
+    polls(35).await;
+    assert_eq!(h.alarms.readers(), Some(2));
+    assert!(!retired(&h, &old));
+    assert!(
+        !path
+            .parent()
+            .unwrap()
+            .join("o_store")
+            .join(CHANNEL.to_string())
+            .join("cleanup_witness")
+            .exists()
+    );
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn readers_s1b_actor_on_proof_waits_for_successor_and_fresh_quiet() {
+    let (h, path, old, bindings) = started(&row("m0", "before"));
+    let (next_path, new) = transcript(&path, "next.jsonl", "s2", b"");
+    bindings.commit(hop_at(2, "tmux", Some(&old), &new, BindingCause::Clear, ""));
+    let (stop, task, ready) = s1b_spawn_reader_actor(&h, bindings.clone());
+    s1b_actor_until(|| *ready.borrow() && h.alarms.readers() == Some(1)).await;
+    bindings.commit(resumed(3, "tmux", &new));
+    s1b_actor_until(|| successor(&h, &old).proof.is_some()).await;
+    polls(20).await;
+    assert!(
+        !retired(&h, &old),
+        "proof alone cannot retire an empty successor"
+    );
+    append(&next_path, &row("first", "successor starts quiet"));
+    s1b_actor_until(|| h.port.posts() == ["successor starts quiet"]).await;
+    polls(7).await;
+    assert!(
+        !retired(&h, &old),
+        "old Dormant quiet is not retirement quiet"
+    );
+    s1b_actor_until(|| retired(&h, &old)).await;
+    assert!(!task.is_finished());
+    halt(stop, task).await;
+    let mut writer = h.writer();
+    assert!(matches!(
+        reader_outcome(&mut writer, "first"),
+        Some(PieceOutcome::Posted(_))
+    ));
+    assert_eq!(h.port.posts(), ["successor starts quiet"]);
+}

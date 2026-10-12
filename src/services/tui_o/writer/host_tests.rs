@@ -1238,3 +1238,7 @@ mod managed;
 #[cfg(unix)]
 #[path = "host_renumber_tests.rs"]
 mod renumber;
+
+#[cfg(unix)]
+#[path = "readers_host_tests.rs"]
+mod readers_host;

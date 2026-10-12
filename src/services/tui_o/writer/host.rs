@@ -1,6 +1,5 @@
-//! Starts the O writer on the gateway runtime: one actor per channel this home may adopt, creating
-//! a new channel's first store unless Legacy took it. Ready only while resumed and Owned. A
-//! delegated channel waits on, posts under and is ready by its registered home gate instead.
+//! One actor per adopted channel, creating its first store unless Legacy took it.
+//! Ready while resumed and Owned; delegated channels use their registered home gate.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -18,7 +17,7 @@ use super::binding::BindingEvents;
 use super::deferred;
 use super::deliver::{ChannelWriter, StopCause};
 use super::resume::{self, Backoff};
-use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
+use super::{AlarmSink, DeliveryLease, DiscordPort, ReaderConfig, WriterAlarm, WriterConfig};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::cluster::channel_home::{self, HomeOwnership};
 use crate::services::cluster::home_availability;
@@ -54,8 +53,7 @@ pub trait HostIo: Send + Sync + 'static {
     ) -> impl Future<Output = Result<FencedFacts, String>> + Send {
         std::future::ready(Err("this host has no intake fence".into()))
     }
-    /// What local Legacy inflight, custody or a pending start holds of the channel. Read under its
-    /// adoption lock right before the first `init`, so it must not judge TUI output itself.
+    /// Legacy custody under its adoption lock before first `init`; never judges TUI output.
     fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<Custody, String>;
     /// Legacy's relay state, asked only for a Claude channel whose sources already hold output.
     fn legacy(&self) -> Arc<dyn LegacyView>;
@@ -113,8 +111,7 @@ pub struct ReadinessClaim {
 }
 
 impl ReadinessClaim {
-    /// Ends this hosting: not ready, no live view, and the channel free to host again. Called
-    /// only once its host and actor ended, so a new actor never runs beside them.
+    /// Clears readiness and frees the channel only after its host and actor ended.
     fn release(self) {
         self.clear(true);
     }
@@ -148,8 +145,7 @@ struct Live {
     stopping: watch::Receiver<bool>,
 }
 
-/// A hosted channel's owed pieces as a drain reads them: the actor's published view, and the
-/// demand that makes the actor read its store at all.
+/// The actor's published owed view and the demand that requests a store read.
 #[derive(Clone)]
 pub struct OwedView {
     pub published: watch::Receiver<Option<Undelivered>>,
@@ -211,8 +207,7 @@ impl Readiness {
         locked(&self.live).insert(channel, live);
     }
 
-    /// Ready and, read now rather than from the published flag that trails them, the gate is Owned
-    /// and the actor is still running resumed.
+    /// Ready, with the gate Owned and actor running resumed as read now.
     pub fn accepts(&self, channel: u64) -> bool {
         let live = locked(&self.live);
         let Some(live) = live.get(&channel).filter(|_| self.is_ready(channel)) else {
@@ -234,8 +229,7 @@ impl Readiness {
         *unsettled.borrow()
     }
 
-    /// The running actor's view of what the channel still owes; `None` when no actor runs. The
-    /// map is locked only to clone it.
+    /// Running actor's owed view, cloned under the map lock; `None` without an actor.
     pub fn undelivered(&self, channel: u64) -> Option<OwedView> {
         let live = locked(&self.live);
         Some(live.get(&channel)?.owed.clone())
@@ -434,8 +428,7 @@ impl ManagedWriterHandle {
     }
 }
 
-/// [`start`] over `owned`, returning a handle per hosted channel. A channel whose delegation is
-/// unavailable is held with an alarm and not claimed.
+/// [`start`] over `owned`; unavailable delegations are held without a claim.
 pub fn start_managed<I: HostIo>(
     provider: ShadowProvider,
     pg_gateway: bool,
@@ -730,8 +723,7 @@ struct Hosted<'a, I: HostIo> {
 }
 
 impl<I: HostIo> Hosted<'_, I> {
-    /// Runs the actor; after a transient store halt, waits and starts it again from the store as
-    /// a restart recovers it, until it stops for any other reason.
+    /// Restarts from the recovered store after transient halts; other stops end hosting.
     async fn serve(self, mut store: ChannelStore) {
         let (channel, alarms) = (self.channel, &self.alarms);
         let mut backoff = Backoff::default();
@@ -790,7 +782,11 @@ impl<I: HostIo> Hosted<'_, I> {
         let config = WriterConfig { enabled: true };
         let bindings = Arc::clone(&self.bindings);
         let watches = (stop, resumed_tx, unsettled_tx, owing);
-        let spawned = actor::spawn_projecting(&config, writer, self.provider, bindings, watches);
+        let readers = crate::services::tui_o::channel_policy::boot()
+            .filter(|boot| boot.dormant_channels().contains(&channel))
+            .map(|_| ReaderConfig { dormant: true });
+        let spawned =
+            actor::spawn_projecting(&config, readers, writer, self.provider, bindings, watches);
         let actor = spawned?;
         let watched = (resumed.clone(), unsettled, owed, self.stopping.clone());
         self.claim

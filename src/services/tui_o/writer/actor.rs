@@ -13,7 +13,7 @@ use super::binding::BindingEvents;
 use super::deliver::{ChannelWriter, Step, StopCause};
 use super::pieces::{Derived, UnitDeriver};
 use super::rotation::Sources;
-use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
+use super::{AlarmSink, DeliveryLease, DiscordPort, ReaderConfig, WriterAlarm, WriterConfig};
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey};
 use crate::services::tui_o::store::rotation::Boundary;
 use crate::services::tui_o::store::spool::source_key;
@@ -39,6 +39,7 @@ where
     let (unsettled, owing) = (watch::channel(None).0, Owing::default());
     spawn_projecting(
         config,
+        None,
         writer,
         provider,
         bindings,
@@ -125,9 +126,10 @@ impl Default for Owing {
     }
 }
 
-/// [`spawn_if_enabled`] that also publishes the channel's [`Unsettled`] count and [`Owing`].
+/// Publishes [`Unsettled`] and [`Owing`]; `None` keeps legacy readers without cleanup policy.
 pub fn spawn_projecting<P, L, A, B>(
     config: &WriterConfig,
+    readers: Option<ReaderConfig>,
     writer: ChannelWriter<P, L, A>,
     provider: ShadowProvider,
     bindings: Arc<B>,
@@ -153,6 +155,7 @@ where
             (stop, resumed),
             projections,
             None,
+            readers,
         ))
     };
     config.enabled.then(run)
@@ -218,6 +221,7 @@ where
         (stop, resumed),
         projections,
         None,
+        None,
     )
     .await
 }
@@ -230,6 +234,7 @@ async fn run_publishing<P, L, A, B>(
     (mut stop, resumed): (watch::Receiver<bool>, watch::Sender<bool>),
     (unsettled, owing): (Unsettled, Owing),
     utc: Option<chrono::DateTime<chrono::Utc>>,
+    readers: Option<ReaderConfig>,
 ) -> Option<StopCause>
 where
     P: DiscordPort,
@@ -239,7 +244,10 @@ where
 {
     let writer = writer.with_repost_stop(stop.clone());
     let deriver = UnitDeriver::new(writer.channel(), provider);
-    let sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings));
+    let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings));
+    if let Some(readers) = readers {
+        sources = sources.with_readers(readers);
+    }
     let owed = VecDeque::new();
     let mut actor = Actor {
         writer,
@@ -319,6 +327,7 @@ where
         (stop, watch::channel(false).0),
         (watch::channel(None).0, Owing::default()),
         Some(utc),
+        None,
     )
     .await
 }
