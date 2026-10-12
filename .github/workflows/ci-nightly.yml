@@ -104,7 +104,7 @@ jobs:
 
       - name: Require ripgrep
         shell: bash
-        run: rg --version
+        run: rg -V
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -176,7 +176,7 @@ jobs:
 
       - name: Require ripgrep
         shell: bash
-        run: rg --version
+        run: rg -V
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -250,7 +250,7 @@ jobs:
 
       - name: Require ripgrep
         shell: bash
-        run: rg --version
+        run: rg -V
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
