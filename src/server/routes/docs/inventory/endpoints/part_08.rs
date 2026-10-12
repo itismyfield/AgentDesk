@@ -619,6 +619,27 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )]),
         ep(
             "POST",
+            "/api/herdr/terminate",
+            "sessions",
+            "Close one Herdr execution's pane on this node and retire its row, hold and running turn; unix only. Loopback peers without Origin only, with the ServerAdmin Bearer when server.auth_token is set; 409 `disabled` while runtime.herdr_terminate_enabled is off. Only `retired` is 200; `indeterminate` is 500 and the pane may be closed.",
+        )
+        .with_params([
+            ("session_key", body_param("string", true, "Hosted session key, as `agentdesk herdr status` shows it")),
+            ("execution_nonce", body_param("string", true, "The execution's nonce; another execution of the key is refused")),
+            ("reason", body_param("string", true, "Operator reason, logged with the result")),
+        ])
+        .with_example(
+            json!({"body": {"session_key": "claude/<token-hash>/mac-mini:AgentDesk-claude-adk-dash-cc", "execution_nonce": "0123456789abcdef0123456789abcdef", "reason": "pane wedged"}}),
+            json!({"ok": true, "result": "retired", "detail": "retired", "session_key": "claude/<token-hash>/mac-mini:AgentDesk-claude-adk-dash-cc", "execution_nonce": "0123456789abcdef0123456789abcdef"}),
+        )
+        .with_error_example(
+            409,
+            json!({"body": {"session_key": "claude/<token-hash>/mac-mini:AgentDesk-claude-adk-dash-cc", "execution_nonce": "0123456789abcdef0123456789abcdef", "reason": "pane wedged"}}),
+            json!({"ok": false, "result": "disabled", "detail": "terminate disabled"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/herdr/terminate -H \"Authorization: Bearer $ADK_AUTH_TOKEN\" -H 'Content-Type: application/json' -d '{\"session_key\":\"<key>\",\"execution_nonce\":\"<nonce>\",\"reason\":\"pane wedged\"}'"),
+        ep(
+            "POST",
             "/api/internal/escalation/emit",
             "internal",
             "Emit a manual-decision escalation for a card through the configured user-thread or PM Discord route.",

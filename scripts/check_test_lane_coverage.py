@@ -11,11 +11,15 @@ The existing uncovered set is recorded as sorted names in the baseline file.
 The checked-out candidate baseline must be a subset of an immutable reference
 snapshot, and any newly uncovered module or stale entry also fails. Baseline
 debt can therefore only shrink without a redundant scalar lock.
+
+Required-PR jobs alone form a second ratchet axis with its own baseline, and
+lane_source_parity.py judges each explicit justfile filter's PR parity.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import re
 import shlex
 import subprocess
@@ -26,6 +30,7 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_REL = Path("scripts/test_lane_coverage_baseline.txt")
+REQUIRED_PR_BASELINE_REL = Path("scripts/test_lane_required_pr_baseline.txt")
 NON_PG_FILTER_REL = Path("scripts/ci/non-pg-test-filter.sh")
 PG_MANIFEST_REL = Path("scripts/pg_test_lane_manifest.txt")
 
@@ -620,12 +625,13 @@ def expand_lane_command(
 
 
 def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
-    """Parse selection contracts from positive main-push and PR test lanes."""
+    """Parse selection contracts from main-push, PR, nightly and trusted test lanes."""
     just_text = (repo_root / "justfile").read_text(encoding="utf-8")
     workflow_paths = (
         repo_root / ".github/workflows/ci-main.yml",
         repo_root / ".github/workflows/ci-pr.yml",
         repo_root / ".github/workflows/ci-macos-trusted.yml",
+        repo_root / ".github/workflows/ci-nightly.yml",
     )
     workflows = tuple(
         path.read_text(encoding="utf-8") for path in workflow_paths if path.is_file()
@@ -692,14 +698,25 @@ def covered_by_lanes(
     running only on ubuntu is not coverage, and that is how a stale replay list
     would drop it."""
     required = set(test_names)
-    if not required:
-        return False
+    return bool(required) and not unselected_tests(required, lanes, pg_tests, pg_only)
+
+
+def unselected_tests(
+    test_names: Iterable[str],
+    lanes: Iterable[LaneFilter],
+    pg_tests: frozenset[str] = frozenset(),
+    pg_only: frozenset[LaneFilter] = frozenset(),
+) -> list[str]:
+    """The tests no lane runs, counting the PG lane only for PG tests."""
     active = tuple(lanes)
     non_pg = tuple(lane for lane in active if lane not in pg_only)
-    return all(
-        any(lane.selects_test(name) for lane in (active if name in pg_tests else non_pg))
-        for name in required
-    )
+    return [
+        name
+        for name in sorted(set(test_names))
+        if not any(
+            lane.selects_test(name) for lane in (active if name in pg_tests else non_pg)
+        )
+    ]
 
 
 def uncovered_modules(
@@ -764,10 +781,16 @@ def resolve_commit(repo_root: Path, ref: str) -> str:
     return sha
 
 
-def load_baseline_from_git(repo_root: Path, ref: str) -> tuple[str, set[str]]:
+def load_baseline_from_git(
+    repo_root: Path, ref: str, rel: Path = BASELINE_REL, *, missing_ok: bool = False
+) -> tuple[str, set[str]]:
     """Read the baseline blob from one immutable commit snapshot."""
     sha = resolve_commit(repo_root, ref)
-    source = f"{sha}:{BASELINE_REL.as_posix()}"
+    source = f"{sha}:{rel.as_posix()}"
+    probe = ["git", "cat-file", "-e", source]
+    if missing_ok and subprocess.run(probe, cwd=repo_root, capture_output=True).returncode:
+        # A snapshot that predates this baseline carries no debt, so every entry is growth.
+        return sha, set()
     try:
         result = subprocess.run(
             ["git", "show", source],
@@ -791,6 +814,60 @@ def baseline_growth(
     return sorted(baseline - reference_baseline)
 
 
+def _parity_module():
+    """The source/parity judge, loaded on use so scripts copied alone keep importing."""
+    path = Path(__file__).with_name("lane_source_parity.py")
+    spec = importlib.util.spec_from_file_location("lane_source_parity", path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"cannot import the source parity judge: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def report_axis(
+    axis: str,
+    kind: str,
+    uncovered: dict[str, list[str]],
+    baseline: set[str],
+    reference_baseline: set[str],
+    reference_label: str,
+    repair: str,
+) -> bool:
+    """Print one axis's baseline growth or drift; True when the axis fails."""
+    growth = baseline_growth(baseline, reference_baseline)
+    current = set(uncovered)
+    new, stale = sorted(current - baseline), sorted(baseline - current)
+    if growth:
+        lines = [
+            f"FAIL: {axis}: {kind}-baseline-drift: baseline growth forbidden: "
+            f"{len(growth)} entr{'y' if len(growth) == 1 else 'ies'} absent from "
+            f"{reference_label}.",
+            *(f"  + {module}" for module in growth),
+            "Remove '+' entries; the candidate baseline may only preserve or "
+            "remove debt from its immutable reference snapshot.",
+        ]
+    elif new or stale:
+        kinds = [f"{kind}-uncovered"] * bool(new) + [f"{kind}-baseline-drift"] * bool(stale)
+        lines = [
+            f"FAIL: {axis}: {', '.join(kinds)}: coverage baseline drift: {len(new)} "
+            f"newly uncovered, {len(stale)} stale/covered, {len(current)} currently "
+            f"uncovered (candidate baseline {len(baseline)}).",
+            *(
+                f"  + {module}"
+                + (f" (e.g. {', '.join(uncovered[module][:3])})" if uncovered[module] else "")
+                for module in new
+            ),
+            *(f"  - {module}" for module in stale),
+            repair,
+        ]
+    else:
+        return False
+    print("\n".join(lines), file=sys.stderr)
+    return True
+
+
 def check(
     repo_root: Path,
     baseline_path: Path,
@@ -798,6 +875,7 @@ def check(
     *,
     reference_label: str = "reference snapshot",
     emit_success: bool = True,
+    reference_required_pr: set[str] = frozenset(),
 ) -> int:
     inventory = discover_test_inventory(repo_root)
     lanes = discover_lane_filters(repo_root)
@@ -806,58 +884,73 @@ def check(
         if (repo_root / NON_PG_FILTER_REL).is_file()
         else ()
     )
-    current = uncovered_modules(
-        inventory, lanes, load_pg_manifest_tests(repo_root), pg_lanes(lanes, skip_args)
+    pg_tests = load_pg_manifest_tests(repo_root)
+    parity = _parity_module()
+    sources = parity.collect_sources(repo_root, sys.modules[__name__])
+    required_lanes = tuple(
+        dict.fromkeys(s.lane for s in sources.of("pr-required") if s.lane is not None)
     )
+    exceptions, exception_findings = parity.load_exceptions(
+        repo_root / parity.EXCEPTIONS_REL
+    )
+    verdict = parity.judge_parity(
+        sources, parity.load_test_ids(repo_root), exceptions, pg_tests,
+        pg_lanes(required_lanes, skip_args),
+    )
+
+    def uncovered(active: tuple[LaneFilter, ...]) -> dict[str, list[str]]:
+        pg_only = pg_lanes(active, skip_args)
+        return {
+            module: unselected_tests(inventory[module], active, pg_tests, pg_only)
+            for module in uncovered_modules(inventory, active, pg_tests, pg_only)
+        }
+
+    current = uncovered(lanes)
+    required_current = uncovered(required_lanes)
     baseline = load_baseline(baseline_path)
-
-    growth = baseline_growth(baseline, reference_baseline)
-    if growth:
-        print(
-            f"FAIL: baseline growth forbidden: {len(growth)} entr"
-            f"{'y' if len(growth) == 1 else 'ies'} absent from {reference_label}.",
-            file=sys.stderr,
-        )
-        for module in growth:
-            print(f"  + {module}", file=sys.stderr)
-        print(
-            "Remove '+' entries; the candidate baseline may only preserve or "
-            "remove debt from its immutable reference snapshot.",
-            file=sys.stderr,
-        )
-        return 1
-
-    new = sorted(current - baseline)
-    stale = sorted(baseline - current)
-    if new or stale:
-        print(
-            f"FAIL: coverage baseline drift: {len(new)} newly uncovered, "
-            f"{len(stale)} stale/covered, {len(current)} currently uncovered "
-            f"(candidate baseline {len(baseline)}).",
-            file=sys.stderr,
-        )
-        for module in new:
-            print(f"  + {module}", file=sys.stderr)
-        for module in stale:
-            print(f"  - {module}", file=sys.stderr)
-        print(
-            "Add broad module coverage for '+' entries. Remove '-' entries to "
-            "lock in debt reduction.",
-            file=sys.stderr,
-        )
-        return 1
-
-    if emit_success:
+    required_baseline = load_baseline(repo_root / REQUIRED_PR_BASELINE_REL)
+    jobs = sources.required_test_jobs
+    all_failed = report_axis(
+        "all_coverage", "all", current, baseline, reference_baseline, reference_label,
+        "Add broad module coverage for '+' entries. Remove '-' entries to lock in "
+        "debt reduction.",
+    )
+    required_failed = report_axis(
+        "required_pr_coverage", "required-pr", required_current, required_baseline,
+        set(reference_required_pr), reference_label,
+        f"Select '+' modules in a required PR job ({jobs}); main, nightly and "
+        "justfile lanes do not count. Remove '-' entries to lock in debt reduction.",
+    )
+    parity_findings = [*exception_findings, *verdict.findings]
+    for axis, found in (
+        ("required_pr_coverage", sources.findings), ("pr_filter_parity", parity_findings)
+    ):
+        for finding in found:
+            print(f"FAIL: {axis}: {finding.render()}", file=sys.stderr)
+    required_failed |= bool(sources.findings)
+    if emit_success and not all_failed:
         removed = len(reference_baseline - baseline)
         print(
-            f"OK: {len(inventory)} logical Rust cfg(test) modules and "
+            f"OK: all_coverage: {len(inventory)} logical Rust cfg(test) modules and "
             f"{sum(map(len, inventory.values()))} test function(s) inventoried; "
             f"{len(current)} uncovered module(s) exactly match the candidate "
             f"baseline, which removed {removed} debt entr"
             f"{'y' if removed == 1 else 'ies'} from {reference_label}; "
             f"{len(lanes)} curated cargo-test invocation(s)."
         )
-    return 0
+    if emit_success and not required_failed:
+        print(
+            f"OK: required_pr_coverage: {len(required_current)} uncovered module(s) "
+            f"match the required-PR baseline; {len(required_lanes)} invocation(s) in "
+            f"required PR jobs: {jobs}."
+        )
+    if emit_success and not parity_findings:
+        print(
+            f"OK: pr_filter_parity: {verdict.explicit} explicit justfile filter(s); "
+            f"{verdict.matched} selected by required PR named filters, "
+            f"{verdict.excepted} by proven exceptions."
+        )
+    return int(all_failed or required_failed or bool(parity_findings))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -872,11 +965,15 @@ def main(argv: list[str] | None = None) -> int:
         reference_sha, reference_baseline = load_baseline_from_git(
             repo_root, args.baseline_ref
         )
+        _, reference_required_pr = load_baseline_from_git(
+            repo_root, reference_sha, REQUIRED_PR_BASELINE_REL, missing_ok=True
+        )
         return check(
             repo_root,
             baseline,
             reference_baseline,
             reference_label=f"commit {reference_sha}",
+            reference_required_pr=reference_required_pr,
         )
     except (OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

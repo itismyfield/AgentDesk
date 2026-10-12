@@ -705,6 +705,11 @@
       "path": "migrations/postgres/0138_o_piece_delivery.sql",
       "sha256": "7e834babe7a018f9a7313d1944d530a9c8e9da77e9b50c36ea39fc517274e528",
       "version": 138
+    },
+    {
+      "path": "migrations/postgres/0139_imsg_reply_obligations.sql",
+      "sha256": "f86980b491854f579e65fb1f168db329d863eaa8a8247fc886dfe5ba8a6fd041",
+      "version": 139
     }
   ],
   "version": 1

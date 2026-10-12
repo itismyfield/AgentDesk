@@ -225,7 +225,7 @@ if run_check guards "Writer namespace Windows exact-target runner fixtures (#567
 fi
 
 if run_check guards "Postgres migration checksum guard"; then
-"$PYTHON" scripts/check_postgres_migration_checksums.py
+"$PYTHON" scripts/check_postgres_migration_checksums.py --require-base
 "$PYTHON" -m unittest tests.test_postgres_migration_checksum_guard
 fi
 
@@ -481,6 +481,7 @@ if [[ -z "${TEST_LANE_BASELINE_REF:-}" ]]; then
 fi
 "$PYTHON" scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_test_lane_coverage
+"$PYTHON" -m unittest tests.test_lane_source_parity
 fi
 
 if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
