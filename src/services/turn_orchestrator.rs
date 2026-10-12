@@ -111,8 +111,7 @@ use queue_cancellation::{
 use queue_enqueue::enqueue_behind;
 #[cfg(test)]
 pub(crate) use queue_enqueue::enqueue_intervention;
-#[cfg(test)]
-pub(crate) use queued_head::{QueueIdentity, QueuedHeadClaim};
+pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim};
 pub(crate) use recovery_kickoff::RecoveryKickoffResult;
 use recovery_kickoff::{kickoff_refusal, reset_activation_signals};
 pub(crate) use reply_results::{

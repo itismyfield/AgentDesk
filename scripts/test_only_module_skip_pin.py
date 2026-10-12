@@ -34,6 +34,9 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/queue_io/queued_head_inject_tests.rs",
+        "src/services/turn_orchestrator/overflow_s2b_tests.rs",
+        "src/services/turn_orchestrator/pending_queue_persistence/queued_recovery_tests.rs",
         "src/services/turn_orchestrator/queued_head_s2a_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_recovery_s2a_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs",

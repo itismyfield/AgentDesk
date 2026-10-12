@@ -73,12 +73,19 @@ fn listed(channel: u64) -> bool {
 
 /// Whether the gate opens `channel`, or the parent of thread `channel`. Never on Windows, whose
 /// provider file has no flock, nor on a Herdr-hosted channel.
-fn covers(channel: ChannelId, parent: Option<ChannelId>) -> bool {
+pub(in crate::services::discord) fn covers(channel: ChannelId, parent: Option<ChannelId>) -> bool {
     if cfg!(windows) || !(listed(channel.get()) || parent.is_some_and(|id| listed(id.get()))) {
         return false;
     }
     let herdr = crate::services::herdr_launch::herdr_configured_for_tui_launch;
     !herdr(Some(channel.get())) && !parent.is_some_and(|id| herdr(Some(id.get())))
+}
+
+#[cfg(test)]
+impl test_support::OpenGate {
+    pub(crate) fn queued_gate(channel: ChannelId, parent: Option<ChannelId>) -> bool {
+        covers(channel, parent)
+    }
 }
 
 /// Whether a thread may take a message its gated parent passed on; a parent injection that owns
