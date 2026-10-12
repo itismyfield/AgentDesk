@@ -25,7 +25,20 @@ pub(crate) enum FinalDisposition {
     PermanentRefusal,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum WakeCause {
+    Binding,
+    Retry,
+}
+
 pub(crate) enum SupervisorCmd {
+    Wake {
+        cause: WakeCause,
+    },
+    Adopt {
+        channel: u64,
+        ack: oneshot::Sender<Result<(), super::Refused>>,
+    },
     Clear,
     Close {
         ack: oneshot::Sender<Result<(), Deferred>>,
