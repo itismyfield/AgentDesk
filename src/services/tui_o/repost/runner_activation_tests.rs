@@ -19,6 +19,9 @@ use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
 use crate::services::tui_o::store::ledger::LedgerEntry;
 use crate::services::tui_o::store::{ChannelStore, Initialized, OEra, OStore, StoreConfig};
 
+#[path = "backlog_tests.rs"]
+mod backlog_tests;
+
 struct Writer {
     store: ChannelStore,
     gate: Arc<OwnershipGate>,

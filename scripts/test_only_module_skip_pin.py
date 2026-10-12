@@ -34,6 +34,7 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/claude_tui/host_input/guarded_submission/executor_tests.rs",
         "src/services/tui_input/actor/gate/claude_guarded/acceptance_tests.rs",
         "src/services/tui_input/submission_tmux/guarded/protocol_tests.rs",
         "src/services/tui_input/submission_tmux/guarded/transport_tests.rs",
@@ -594,6 +595,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/gates_m1_spool_tests.rs",
         "src/services/codex_tui/rollout_tail/provenance_tests.rs",
         "src/services/tui_o/store/codex_provenance_tests.rs",
+        "src/services/tui_o/store/codex_provenance/submit_floor_tests.rs",
+        "src/services/tui_o/writer/s2a_actor_tests.rs",
         "src/services/tui_o/writer/owed_tests.rs",
         "src/services/tui_o/writer/verified_delivery_tests.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/admission_tests.rs",
@@ -605,8 +608,12 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/permission_tests.rs",
         "src/services/session_forwarding/home_stop_tests.rs",
         "src/server/routes/queue_api_home_stop_tests.rs",
+        "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_cut_tests.rs",
+        "src/services/discord/turn_bridge/entry_abort_cold_error_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs",
         "src/services/discord/turn_bridge/before_start_stop_tests.rs",
+        "src/services/discord/turn_bridge/before_start_stop_disk_gate_tests.rs",
+        "src/services/discord/turn_bridge/before_start_stop_clear_order_tests.rs",
         "src/services/discord/inflight/managed_submission_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_submission_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/cohort_tests.rs",
@@ -621,6 +628,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/cli/o_tests.rs",
         "src/services/tui_o/repost/runner_activation_tests.rs",
         "src/services/tui_o/repost/runtime_host_activation_tests.rs",
+        "src/services/tui_o/repost/backlog_tests.rs",
+        "src/services/tui_o/repost/rollback_rehearsal_tests.rs",
         "src/services/tui_o/repost/writer_activation_tests.rs",
         "src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs",
@@ -653,6 +662,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/tui_o/store/codex_provenance/submit_floor.rs",
         "src/services/discord/turn_bridge/replay_policy.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
         "src/services/discord/queue_io/cancel_reclaim_support_test.rs",
@@ -729,6 +739,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/tmux_watcher/turn_stream_collector/observations.rs",
         "src/services/discord/inflight/o_seed_observation/terminal_barrier_test.rs",
         "src/services/discord/inflight/o_seed_observation/initial_parse_barrier_test.rs",
+        "src/services/discord/router/message_handler/provider_dispatch/producer_error_test_support.rs",
         "src/services/discord/watchers/lifecycle/n4d2_entry_test.rs",
         "src/services/discord/watchers/lifecycle/n4d2_o_writer_test.rs",
     }

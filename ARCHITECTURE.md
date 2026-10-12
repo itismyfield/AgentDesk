@@ -637,6 +637,10 @@ src/
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
 │   │   │   └── relay_receipts.rs
+│   │   ├── host_input/
+│   │   │   ├── guarded_submission/
+│   │   │   │   └── executor_tests.rs
+│   │   │   └── guarded_submission.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── host_draft.rs
@@ -646,6 +650,7 @@ src/
 │   │   ├── input/
 │   │   │   ├── draft_hold.rs
 │   │   │   ├── final_ready_tests.rs
+│   │   │   ├── literal_chunks.rs
 │   │   │   └── timeout_draft_tests.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
@@ -1428,6 +1433,8 @@ src/
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
+│   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   └── producer_error_test_support.rs
 │   │   │   │   ├── tui_followup/
 │   │   │   │   │   └── codex_observation.rs
 │   │   │   │   ├── attachments.rs
@@ -1920,6 +1927,7 @@ src/
 │   │   │   │   ├── claude_stop_delivery.rs
 │   │   │   │   ├── claude_stop_pane_tests.rs
 │   │   │   │   ├── codex_stop_delivery.rs
+│   │   │   │   ├── codex_stop_delivery_cut_tests.rs
 │   │   │   │   ├── codex_stop_delivery_home_stop_tests.rs
 │   │   │   │   ├── codex_stop_delivery_tests.rs
 │   │   │   │   ├── interrupt_policy.rs
@@ -1935,6 +1943,8 @@ src/
 │   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs
 │   │   │   ├── before_start_stop.rs
+│   │   │   ├── before_start_stop_clear_order_tests.rs
+│   │   │   ├── before_start_stop_disk_gate_tests.rs
 │   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
@@ -1950,6 +1960,7 @@ src/
 │   │   │   ├── context_window.rs
 │   │   │   ├── current_message_anchor.rs
 │   │   │   ├── early_tui_completion.rs
+│   │   │   ├── entry_abort_cold_error_tests.rs
 │   │   │   ├── entry_abort_mailbox_tests.rs
 │   │   │   ├── finalize_epilogue.rs
 │   │   │   ├── followup_requeue.rs
@@ -2284,6 +2295,8 @@ src/
 │   │   └── worktree_resolver.rs
 │   ├── health_diagnostics/
 │   │   └── session_state.rs
+│   ├── imsg_reply/
+│   │   └── mod.rs
 │   ├── kakao/
 │   │   ├── account.rs
 │   │   ├── calendar.rs
@@ -2588,6 +2601,7 @@ src/
 │   │   ├── repost/
 │   │   │   ├── admission.rs
 │   │   │   ├── admission_tests.rs
+│   │   │   ├── backlog_tests.rs
 │   │   │   ├── config.rs
 │   │   │   ├── dispatch.rs
 │   │   │   ├── evidence.rs
@@ -2597,6 +2611,7 @@ src/
 │   │   │   ├── probe.rs
 │   │   │   ├── probe_tests.rs
 │   │   │   ├── provenance.rs
+│   │   │   ├── rollback_rehearsal_tests.rs
 │   │   │   ├── runner.rs
 │   │   │   ├── runner_activation_tests.rs
 │   │   │   ├── runner_tests.rs
@@ -2618,7 +2633,9 @@ src/
 │   │   │   └── unit_plan.rs
 │   │   ├── store/
 │   │   │   ├── codex_provenance/
-│   │   │   │   └── mutation.rs
+│   │   │   │   ├── mutation.rs
+│   │   │   │   ├── submit_floor.rs
+│   │   │   │   └── submit_floor_tests.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── codex_provenance.rs
 │   │   │   ├── codex_provenance_tests.rs
@@ -2705,6 +2722,7 @@ src/
 │   │   │   ├── rotation_unsettled_resume_tests.rs
 │   │   │   ├── rotation_unsettled_tests.rs
 │   │   │   ├── round_trip.rs
+│   │   │   ├── s2a_actor_tests.rs
 │   │   │   ├── source_identity_tests.rs
 │   │   │   ├── stall_handoff_tests.rs
 │   │   │   ├── stall_tests.rs

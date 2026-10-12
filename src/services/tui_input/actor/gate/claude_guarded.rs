@@ -4,10 +4,44 @@ use crate::services::claude_tui::input::TuiInputAction;
 use crate::services::codex_tui::input::strip_ansi_escape_sequences;
 
 pub(crate) struct DraftEvidence<'a> {
-    pub frame: &'a str,
-    pub payload: &'a [TuiInputAction],
-    pub pre_empty: bool,
-    pub exclusive_writer: bool,
+    frame: &'a str,
+    payload: &'a [TuiInputAction],
+    pre_empty: bool,
+    exclusive_writer: bool,
+}
+
+impl<'a> DraftEvidence<'a> {
+    /// Derive PRE and ownership from the locked, detached pane and current target gate.
+    pub(crate) fn observe(
+        frame: &'a str,
+        payload: &'a [TuiInputAction],
+        permit: &'a crate::services::claude_tui::composer_lock::ComposerPermit<'_>,
+        pane: &crate::services::tui_input::submission_tmux::guarded::GuardedPane,
+        gate: &dyn crate::services::claude_tui::host_input::MutationGate,
+    ) -> Result<Self, crate::services::claude_tui::host_input::InputRefusal> {
+        use crate::services::claude_tui::host_input::InputRefusal;
+        use crate::services::tui_input::submission::Refusal;
+        if !pane.session_matches(permit.session()) {
+            return Err(InputRefusal::IdentityMismatch);
+        }
+        gate.admit(permit.session())?;
+        let before = pane
+            .capture_draft()
+            .ok_or(InputRefusal::Composer(Refusal::CaptureUnavailable))?;
+        let pre_empty = super::judge_pane(
+            crate::services::tui_o::shadow::ShadowProvider::Claude,
+            &before,
+        ) == super::PaneVerdict::Ready;
+        if !pre_empty {
+            return Err(InputRefusal::Composer(Refusal::NotReady));
+        }
+        Ok(Self {
+            frame,
+            payload,
+            pre_empty,
+            exclusive_writer: true,
+        })
+    }
 }
 
 pub(crate) fn claude_should_fold(frame: &str) -> bool {
