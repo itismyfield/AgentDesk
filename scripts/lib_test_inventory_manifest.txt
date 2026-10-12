@@ -2519,6 +2519,7 @@ services::cluster::intake_worker::home_route_tests::a_delegated_row_reaches_acce
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_codex_unsealed_alone_blocks_reclaim_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_each_responsibility_blocks_leave_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_last_post_blocks_cas_pg
+services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_pending_bind_alone_blocks_reclaim_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_post_close_recheck_finds_tail_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_prepared_alone_blocks_reclaim_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_releasing_tail_posts_before_release_pg
@@ -2527,6 +2528,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_tail_
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_unknown_is_not_empty_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_unreadable_post_count_blocks_leave_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_orphan_holds_every_consumer_pg
+services::cluster::intake_worker::home_route_tests::s3_real::harness::route_as_asks_for_the_given_provider
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_accepts_rechecks_home_after_ready_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_both_select_branches_make_progress_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_candidate_is_not_home_authority_pg
