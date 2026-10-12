@@ -5,15 +5,25 @@ use super::*;
 use crate::services::tmux_common::{self as tc, TmuxSourceAuthority};
 use crate::services::tui_prompt_dedupe::binding_context::{self, BindingContext, SpawnNonceMarker};
 
+pub(super) struct PinnedIncarnation(BindingContext);
+
+impl PinnedIncarnation {
+    pub(super) fn into_context(self) -> BindingContext {
+        self.0
+    }
+}
+
 pub(super) enum SourcePolicyState {
     Legacy,
-    VerifiedCurrent(BindingContext),
+    VerifiedCurrent(PinnedIncarnation),
     VerifiedUnavailable,
 }
 
 pub(super) fn disposition(authority: &TmuxSourceAuthority<'_>) -> SourcePolicyState {
     match codex_verified::current_context(authority) {
-        Ok(Some(context)) => return SourcePolicyState::VerifiedCurrent(context),
+        Ok(Some(context)) => {
+            return SourcePolicyState::VerifiedCurrent(PinnedIncarnation(context));
+        }
         Err(_) => return SourcePolicyState::VerifiedUnavailable,
         Ok(None) => {}
     }
@@ -80,7 +90,7 @@ pub(crate) fn codex_verified_source_allowed_under_source_authority(
     let context = match disposition(authority) {
         SourcePolicyState::Legacy => return true,
         SourcePolicyState::VerifiedUnavailable => return false,
-        SourcePolicyState::VerifiedCurrent(context) => context,
+        SourcePolicyState::VerifiedCurrent(pin) => pin.into_context(),
     };
     let Ok(fold) = binding_events::codex::read_ownership(&context) else {
         return false;
@@ -114,7 +124,8 @@ pub(crate) fn codex_verified_input_blocked(tmux: &str) -> bool {
     tc::with_tmux_source_authority(tmux, |authority| match disposition(authority) {
         SourcePolicyState::Legacy => false,
         SourcePolicyState::VerifiedUnavailable => true,
-        SourcePolicyState::VerifiedCurrent(context) => {
+        SourcePolicyState::VerifiedCurrent(pin) => {
+            let context = pin.into_context();
             let binding = with_runtime_binding_state_under_source_authority(authority, |state| {
                 state
                     .runtime_by_tmux
@@ -183,7 +194,7 @@ pub(crate) fn codex_verified_event_allowed(event: &binding_events::BindingEvent)
         let context = match disposition(authority) {
             SourcePolicyState::Legacy => return true,
             SourcePolicyState::VerifiedUnavailable => return false,
-            SourcePolicyState::VerifiedCurrent(context) => context,
+            SourcePolicyState::VerifiedCurrent(pin) => pin.into_context(),
         };
         if event.execution_nonce.as_deref() != Some(&context.execution_nonce)
             || event.channel_id != context.channel_id.unwrap_or(0)
@@ -271,7 +282,7 @@ fn owned_source_allowed(
     let context = match disposition(authority) {
         SourcePolicyState::Legacy => return true,
         SourcePolicyState::VerifiedUnavailable => return false,
-        SourcePolicyState::VerifiedCurrent(context) => context,
+        SourcePolicyState::VerifiedCurrent(pin) => pin.into_context(),
     };
     let Ok(fold) = binding_events::codex::read_ownership(&context) else {
         return false;

@@ -2600,6 +2600,7 @@ src/
 │   │   ├── repost/
 │   │   │   ├── admission.rs
 │   │   │   ├── admission_tests.rs
+│   │   │   ├── backlog_tests.rs
 │   │   │   ├── config.rs
 │   │   │   ├── dispatch.rs
 │   │   │   ├── evidence.rs
@@ -2609,6 +2610,7 @@ src/
 │   │   │   ├── probe.rs
 │   │   │   ├── probe_tests.rs
 │   │   │   ├── provenance.rs
+│   │   │   ├── rollback_rehearsal_tests.rs
 │   │   │   ├── runner.rs
 │   │   │   ├── runner_activation_tests.rs
 │   │   │   ├── runner_tests.rs

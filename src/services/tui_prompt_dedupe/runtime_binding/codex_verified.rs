@@ -78,6 +78,18 @@ pub(crate) enum DeliveryPermission {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnershipPublicationDecision {
+    Permitted,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceReadDecision {
+    Permitted,
+    Unavailable,
+}
+
 #[cfg(test)]
 thread_local! {
     static BEFORE_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
@@ -109,7 +121,11 @@ pub(super) fn permission(context: &BindingContext) -> DeliveryPermission {
     {
         return value;
     }
-    // The cancellation owner must supply exact episode disposition before delivery can proceed.
+    production_default_permission(context)
+}
+
+fn production_default_permission(context: &BindingContext) -> DeliveryPermission {
+    // The cancellation owner supplies exact episode disposition before delivery can proceed.
     let _ = context;
     DeliveryPermission::Unknown
 }
@@ -336,16 +352,31 @@ pub(super) fn publication_allowed(
     authority: &TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
 ) -> bool {
+    publication_decision(authority, binding) == OwnershipPublicationDecision::Permitted
+}
+
+fn publication_decision(
+    authority: &TmuxSourceAuthority<'_>,
+    binding: &TuiRuntimeBinding,
+) -> OwnershipPublicationDecision {
     if binding.runtime_kind != RuntimeHandoffKind::CodexTui {
-        return true;
+        return OwnershipPublicationDecision::Permitted;
     }
     match super::codex_policy::disposition(authority) {
-        super::codex_policy::SourcePolicyState::Legacy => true,
-        super::codex_policy::SourcePolicyState::VerifiedCurrent(context) => {
-            proof_for_binding(authority, &context, binding).is_ok()
+        super::codex_policy::SourcePolicyState::Legacy => OwnershipPublicationDecision::Permitted,
+        super::codex_policy::SourcePolicyState::VerifiedCurrent(pin) => {
+            let context = pin.into_context();
+            if proof_for_binding(authority, &context, binding).is_ok()
                 && permission(&context) == DeliveryPermission::Allowed
+            {
+                OwnershipPublicationDecision::Permitted
+            } else {
+                OwnershipPublicationDecision::Unavailable
+            }
         }
-        super::codex_policy::SourcePolicyState::VerifiedUnavailable => false,
+        super::codex_policy::SourcePolicyState::VerifiedUnavailable => {
+            OwnershipPublicationDecision::Unavailable
+        }
     }
 }
 
@@ -361,7 +392,7 @@ pub(super) fn marker_metadata(
 ) -> Result<Option<serde_json::Value>, String> {
     let context = match super::codex_policy::disposition(authority) {
         super::codex_policy::SourcePolicyState::Legacy => return Ok(None),
-        super::codex_policy::SourcePolicyState::VerifiedCurrent(context) => context,
+        super::codex_policy::SourcePolicyState::VerifiedCurrent(pin) => pin.into_context(),
         super::codex_policy::SourcePolicyState::VerifiedUnavailable => {
             return Err("Codex verified launch evidence unavailable".into());
         }
@@ -386,22 +417,31 @@ pub(super) fn consumer_allowed(
     authority: &TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
 ) -> bool {
+    source_read_decision(authority, binding) == SourceReadDecision::Permitted
+}
+
+fn source_read_decision(
+    authority: &TmuxSourceAuthority<'_>,
+    binding: &TuiRuntimeBinding,
+) -> SourceReadDecision {
     if binding.runtime_kind != RuntimeHandoffKind::CodexTui {
-        return true;
+        return SourceReadDecision::Permitted;
     }
     let context = match super::codex_policy::disposition(authority) {
-        super::codex_policy::SourcePolicyState::Legacy => return true,
-        super::codex_policy::SourcePolicyState::VerifiedCurrent(context) => context,
-        super::codex_policy::SourcePolicyState::VerifiedUnavailable => return false,
+        super::codex_policy::SourcePolicyState::Legacy => return SourceReadDecision::Permitted,
+        super::codex_policy::SourcePolicyState::VerifiedCurrent(pin) => pin.into_context(),
+        super::codex_policy::SourcePolicyState::VerifiedUnavailable => {
+            return SourceReadDecision::Unavailable;
+        }
     };
     let Ok(proof) = proof_for_binding(authority, &context, binding) else {
-        return false;
+        return SourceReadDecision::Unavailable;
     };
     if permission(&context) != DeliveryPermission::Allowed {
-        return false;
+        return SourceReadDecision::Unavailable;
     }
     let path = tc::session_temp_path(authority.session(), tc::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT);
-    std::fs::read(path)
+    if std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .is_some_and(|marker| {
@@ -409,6 +449,11 @@ pub(super) fn consumer_allowed(
                 && marker["rollout_path"].as_str() == proof.source.path.to_str()
                 && marker["session_id"].as_str() == Some(&proof.source.session_id)
         })
+    {
+        SourceReadDecision::Permitted
+    } else {
+        SourceReadDecision::Unavailable
+    }
 }
 
 pub(super) fn publish_proof(
@@ -589,7 +634,8 @@ pub(crate) fn channel_allowed_under_source_authority(
 ) -> bool {
     match super::codex_policy::disposition(authority) {
         super::codex_policy::SourcePolicyState::Legacy => true,
-        super::codex_policy::SourcePolicyState::VerifiedCurrent(context) => {
+        super::codex_policy::SourcePolicyState::VerifiedCurrent(pin) => {
+            let context = pin.into_context();
             context.channel_id == Some(channel)
                 && channel != 0
                 && with_runtime_binding_state_under_source_authority(authority, |state| {

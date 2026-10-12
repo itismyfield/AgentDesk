@@ -96,6 +96,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Rollback rehearsal executes the runbook's literal rg command.
+      - name: Install ripgrep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+
+      - name: Require ripgrep
+        shell: bash
+        run: rg --version
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -157,6 +167,16 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+
+      # Rollback rehearsal executes the runbook's literal rg command.
+      - name: Install ripgrep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+
+      - name: Require ripgrep
+        shell: bash
+        run: rg --version
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -221,6 +241,16 @@ jobs:
 
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
+
+      # Rollback rehearsal executes the runbook's literal rg command.
+      - name: Install ripgrep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+
+      - name: Require ripgrep
+        shell: bash
+        run: rg --version
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
