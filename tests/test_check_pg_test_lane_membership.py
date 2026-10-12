@@ -2246,6 +2246,58 @@ class PgDbCiWiring(unittest.TestCase):
             rc = membership.check_pg_db_generated_block(self.PR_WORKFLOW, manifest)
         self.assertEqual(rc, 0)
 
+    def test_repost_production_only_changes_select_the_required_pg_job(self) -> None:
+        patterns = membership.parse_pg_db_patterns(self.PR_WORKFLOW)
+        files = (
+            "src/services/tui_o/repost/provenance.rs",
+            "src/services/tui_o/repost/admission.rs",
+            "src/services/tui_o/repost/runner.rs",
+            "src/services/tui_o/repost/config.rs",
+            "src/services/tui_o/repost/projection.rs",
+            "src/services/tui_o/writer/deliver.rs",
+            "src/services/tui_o/writer/actor.rs",
+            "src/services/tui_o/writer/host.rs",
+            "src/services/tui_o/store/ledger.rs",
+            "src/services/discord/outbound/o_writer_repost_io.rs",
+            "src/services/discord/outbound/o_writer_discord_port.rs",
+            "src/services/discord/runtime_bootstrap/o_writer_host.rs",
+        )
+        for path in files:
+            with self.subTest(path=path):
+                self.assertTrue(membership.path_selected(path, patterns), path)
+        job = self.workflow["jobs"]["test_fast"]
+        self.assertIn("needs.changes.outputs.pg_db", job["if"])
+        self.assertEqual(str(job["env"]["AGENTDESK_REQUIRE_PG"]), "1")
+        self.assertTrue(any("just test-postgres" in step.get("run", "")
+                            for step in job["steps"]))
+
+    def test_repost_test_consumers_install_and_preflight_ripgrep(self) -> None:
+        consumers = {
+            "ci-pr.yml": ("test_fast", "library_sweep"),
+            "ci-main.yml": ("full_non_pg", "postgres"),
+            "ci-nightly.yml": ("full_macos", "full_windows", "postgres_full"),
+        }
+        for workflow, jobs in consumers.items():
+            shipped = yaml.safe_load((self.PR_WORKFLOW.parent / workflow).read_text("utf-8"))
+            for job_name in jobs:
+                with self.subTest(workflow=workflow, job=job_name):
+                    steps = shipped["jobs"][job_name]["steps"]
+                    installs = [index for index, step in enumerate(steps)
+                                if step.get("uses") == "taiki-e/install-action@v2"
+                                and "ripgrep" in step.get("with", {}).get("tool", "").split(",")
+                                and "if" not in step and not step.get("continue-on-error")]
+                    preflights = [index for index, step in enumerate(steps)
+                                  if step.get("run", "").strip() == "rg --version"
+                                  and "if" not in step and not step.get("continue-on-error")]
+                    self.assertTrue(installs, "install ripgrep before executing rollback tests")
+                    self.assertTrue(preflights, "require rg --version before executing rollback tests")
+                    tests = [index for index, step in enumerate(steps)
+                             if "cargo test" in step.get("run", "")
+                             or "just test-postgres" in step.get("run", "")]
+                    self.assertTrue(tests, "the consumer must still execute its test suite")
+                    self.assertLess(min(installs), min(preflights))
+                    self.assertLess(min(preflights), min(tests))
+
     PG_TITLE = '"PostgreSQL test-lane membership gate'
 
     def run_pg_gate_section(self, py_rc: int = 0, git_rc: int = 0) -> tuple[int, list[str]]:

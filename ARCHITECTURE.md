@@ -637,6 +637,10 @@ src/
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
 │   │   │   └── relay_receipts.rs
+│   │   ├── host_input/
+│   │   │   ├── guarded_submission/
+│   │   │   │   └── executor_tests.rs
+│   │   │   └── guarded_submission.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── host_draft.rs
@@ -646,6 +650,7 @@ src/
 │   │   ├── input/
 │   │   │   ├── draft_hold.rs
 │   │   │   ├── final_ready_tests.rs
+│   │   │   ├── literal_chunks.rs
 │   │   │   └── timeout_draft_tests.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
@@ -2594,6 +2599,7 @@ src/
 │   │   ├── repost/
 │   │   │   ├── admission.rs
 │   │   │   ├── admission_tests.rs
+│   │   │   ├── backlog_tests.rs
 │   │   │   ├── config.rs
 │   │   │   ├── dispatch.rs
 │   │   │   ├── evidence.rs
@@ -2603,6 +2609,7 @@ src/
 │   │   │   ├── probe.rs
 │   │   │   ├── probe_tests.rs
 │   │   │   ├── provenance.rs
+│   │   │   ├── rollback_rehearsal_tests.rs
 │   │   │   ├── runner.rs
 │   │   │   ├── runner_activation_tests.rs
 │   │   │   ├── runner_tests.rs
@@ -2624,7 +2631,9 @@ src/
 │   │   │   └── unit_plan.rs
 │   │   ├── store/
 │   │   │   ├── codex_provenance/
-│   │   │   │   └── mutation.rs
+│   │   │   │   ├── mutation.rs
+│   │   │   │   ├── submit_floor.rs
+│   │   │   │   └── submit_floor_tests.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── codex_provenance.rs
 │   │   │   ├── codex_provenance_tests.rs
@@ -2711,6 +2720,7 @@ src/
 │   │   │   ├── rotation_unsettled_resume_tests.rs
 │   │   │   ├── rotation_unsettled_tests.rs
 │   │   │   ├── round_trip.rs
+│   │   │   ├── s2a_actor_tests.rs
 │   │   │   ├── source_identity_tests.rs
 │   │   │   ├── stall_handoff_tests.rs
 │   │   │   ├── stall_tests.rs
