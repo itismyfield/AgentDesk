@@ -80,7 +80,7 @@ mod tests {
         let waiter = source[start..].split("#[cfg(test)]").next().unwrap();
         assert_eq!(
             waiter.trim(),
-            "if let Some(rx) = completion_rx {\n        rx.await\n            .map_err(|_| \"queued turn completion wait failed\".to_string())?;\n    }\n\n    Ok(())\n    }).await\n    }).await\n}"
+            "if let Some(rx) = completion_rx {\n        rx.await\n            .map_err(|_| \"queued turn completion wait failed\".to_string())?;\n    }\n\n    Ok(IntakeExecution::Executed)\n    }).await\n    }).await\n}"
         );
     }
 }

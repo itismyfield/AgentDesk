@@ -48,7 +48,9 @@ pub(crate) async fn dispatch_skill_intake(
         voice_announcement: None,
     };
     if let Some(permit) = admitted_local {
-        finish_admitted_local(deps, permit, submission).await
+        finish_admitted_local(deps, permit, submission)
+            .await
+            .map(|_| ())
     } else {
         dispatch_text_intake(deps, submission).await
     }
