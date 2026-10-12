@@ -1023,14 +1023,15 @@ class TestIdOracleContract(unittest.TestCase):
                 ["target-mismatch"])
 
     def judge(self, root: Path, command: str,
-              diagnostics: list[str] | None = None) -> list[str]:
+              diagnostics: list[str] | None = None,
+              allowlist: frozenset[str] = frozenset()) -> list[str]:
         # Like CI, the run scalar sources the generated filter before its command.
         workflow = root / ".github/workflows/ci-fixture.yml"
         workflow.write_text("jobs:\n  lane:\n    steps:\n      - run: |\n"
                             f"          source {integrity.NON_PG_FILTER_REL}\n"
                             f"          {command}\n", encoding="utf-8")
         return [v.kind for v in integrity.check_workflows(
-            root, [workflow], set(), False, diagnostics=diagnostics)
+            root, [workflow], set(allowlist), False, diagnostics=diagnostics)
             if v.workflow.endswith("ci-fixture.yml")]
 
     def test_class_flags_follow_cargo_target_flags(self) -> None:
@@ -1256,6 +1257,41 @@ class TestIdOracleContract(unittest.TestCase):
                 with self.subTest(skip=skip, command=command):
                     self.assertEqual(self.judge(root, command), kinds)
 
+    def test_restored_skips_still_bound_an_ignored_run(self) -> None:
+        # --ignored proves no candidate runs, yet the restored skips still drop known
+        # ones; none left is its own failure that no allowlist or doctest excuses.
+        array = "${NON_PG_SKIP_ARGS[@]}"
+        single = f"cargo test --lib high_risk_recovery -- {array} --ignored"
+        both = f"cargo test --lib recovery_case -- nested_case {array} --ignored"
+        zero, union = ["non-pg-ignored-zero-match"], ["unproven-union"]
+        literal = "NON_PG_SKIP_ARGS=(\n  --skip _pg\n  --skip {}\n)\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_fixture_repo(root, GOOD_COMMAND)
+            filter_file = root / "scripts/ci/non-pg-test-filter.sh"
+            filter_file.parent.mkdir(parents=True)
+            for skip, command, kinds in (
+                    ("high_risk_recovery", single, zero),
+                    ("postgres", single, []),
+                    ("_case", both, zero),
+                    ("recovery_case", both, union),
+                    ("postgres", both, union),
+                    ("high_risk_recovery", f"{single} $EXTRA", zero),
+                    ("recovery_case", f"{both} $EXTRA", union),
+                    ("high_risk_recovery", f"cargo test high_risk_recovery -- {array} --ignored",
+                     zero),
+                    ("x\n)\nNON_PG_SKIP_ARGS+=(\n  --skip y", single, ["non-pg-skip-unresolved"])):
+                filter_file.write_text(literal.format(skip), encoding="utf-8")
+                with self.subTest(skip=skip, command=command):
+                    self.assertEqual(self.judge(root, command), kinds)
+            filter_file.write_text(literal.format("high_risk_recovery"), encoding="utf-8")
+            self.assertEqual(self.judge(root, single, allowlist=frozenset({single})), zero)
+            filter_file.write_text(literal.format("postgres"), encoding="utf-8")
+            diagnostics: list[str] = []
+            self.assertEqual(self.judge(root, single, diagnostics), [])
+            self.assertIn("unjudged: --ignored keeps only #[ignore] tests among 1 candidate",
+                          " ".join(diagnostics))
+
     def test_an_unreadable_generated_array_fails_closed(self) -> None:
         # The array is known to carry skips, so a shape the reader cannot
         # restore fails; other opaque expansions keep their verdicts.
@@ -1341,6 +1377,7 @@ class KnownArrayProvenance(unittest.TestCase):
     def test_a_run_scalar_must_source_before_the_array_it_expands(self) -> None:
         source, non_pg, pg = self.SOURCE, self.NON_PG, self.PG
         unsourced = [("ci-fixture.yml", "non-pg-source-unproven")]
+        pg_unsourced = [("ci-fixture.yml", "pg-include-source-unproven")]
         redefined = [("ci-fixture.yml", "known-array-redefined")]
         for steps, kinds in (
                 (((source, non_pg),), []),
@@ -1364,11 +1401,29 @@ class KnownArrayProvenance(unittest.TestCase):
                 ((("(", source, ")", non_pg),), unsourced),
                 ((("echo \\", source, non_pg),), unsourced),
                 ((("echo \\\\", source, non_pg),), []),
+                # Code left open by `&&`, `||` or a pipe, or an open backtick, owns the source.
+                ((("false &&", source, pg),), pg_unsourced),
+                ((("true ||", "", source, pg),), pg_unsourced),
+                ((("echo |", source, non_pg),), unsourced),
+                ((("echo `", source, "`", pg),), pg_unsourced),
+                ((("true && echo ok", "echo `date`", source, pg),), []),
+                # A `#` right after the operator is a comment; inside a word it is not.
+                ((("false &&# note", source, pg),), pg_unsourced),
+                ((("true ||# note", source, pg),), pg_unsourced),
+                ((("echo |# note", source, non_pg),), unsourced),
+                ((("echo x#&&", source, pg),), pg_unsourced),
+                # Quoted or escaped, `;`, `|` and `&&` are argument text, not a second command.
+                (((source, f"{non_pg} --logfile 'ci;pg.log'"),), []),
+                (((source, f"{non_pg} --logfile ci\\;pg.log"),), []),
+                (((f'{source} && cargo test --lib -- --logfile "a;b||c" "${{PG_INCLUDE_ARGS[@]}}"',),),
+                 []),
                 ((('source "$FILTER"', non_pg),), unsourced),
                 (((f"{source} && {non_pg}",),), []),
                 ((f"'{source} && {non_pg}'",), []),
                 (((f"{source} && echo ok", non_pg),), unsourced),
                 (((source, "NON_PG_SKIP_ARGS=(--skip high_risk_recovery)", non_pg),), redefined),
+                (((f"{non_pg} --ignored",),), unsourced),
+                (((source, "unset NON_PG_SKIP_ARGS", f"{non_pg} --ignored"),), redefined),
                 (((source, "PG_INCLUDE_ARGS+=(extra_case)", pg),), redefined),
                 (((source, "unset PG_INCLUDE_ARGS", pg),), redefined),
                 (((source, "NON_PG_SKIP_ARGS[0]=--exact", non_pg),), redefined),
@@ -1399,6 +1454,7 @@ class KnownArrayProvenance(unittest.TestCase):
                 justfile)], [["cargo", "test", "--lib"]])
         for just_lines, kinds in (
                 ((f"{source} && {pg}", f"{source} && {GOOD_COMMAND}"), []),
+                ((f"{source} && {pg} --logfile 'ci;pg.log'",), []),
                 # Every recipe line is its own shell.
                 ((source, pg), [("justfile", "pg-include-source-unproven")]),
                 ((f"source scripts/other.sh && {pg}",),
@@ -1416,6 +1472,7 @@ class KnownArrayProvenance(unittest.TestCase):
                       (source, f"{non_pg} && cargo test --lib does_not_exist -- "
                                '"${NON_PG_SKIP_ARGS[@]}"'),
                       (source, f"{non_pg} | tee test.log"),
+                      (source, f"{non_pg} --logfile ci\\\\; echo done"),
                       (source, f"time {non_pg}"),
                       (source, f"bash -c '{non_pg}'"),
                       (source, "cargo test --lib high_risk_recovery \\",
@@ -1463,11 +1520,21 @@ class PgIncludeRestoration(unittest.TestCase):
                 ("nothing selected", {"skips": missing, "pg_case": None}, zero),
                 ("allowlisted", {"skips": missing, "pg_case": None,
                                  "allowlist": f"# reason: platform-gated\n{normalized}\n"}, zero),
+                # Another filter's tests cannot stand in for the generated selection's own.
+                ("other filter beside nothing", {"run": f"{pg} high_risk_recovery",
+                                                 "recipe": f"{pg} high_risk_recovery",
+                                                 "skips": missing, "pg_case": None}, zero),
+                ("other filter beside every shard", {"run": f"{pg} high_risk_recovery",
+                                                     "recipe": f"{pg} high_risk_recovery"}, []),
                 # Restoring the array keeps every other run-time uncertainty.
                 ("other expansion", {"run": f"{pg} $EXTRA", **run_only},
                  [(workflow, "unproven-union")] * 2),
                 ("ignored", {"run": f"{pg} --ignored", **run_only},
                  [(workflow, "unproven-union")] * 2),
+                # Every PG match carries a NON_PG skip value, so the restored skips leave none.
+                ("ignored beside the NON_PG skips",
+                 {"run": f'{pg} "${{NON_PG_SKIP_ARGS[@]}}" --ignored', **run_only},
+                 [(workflow, "non-pg-ignored-zero-match")]),
                 ("shard named", {"env": "    env:\n      PG_INCLUDE_SHARD: 2\n", **run_only},
                  [(workflow, "pg-include-shard-unresolved")]),
                 ("shard in a comment", {"env": "    # PG_INCLUDE_SHARD: 2\n", **run_only}, []),
@@ -1569,6 +1636,40 @@ class ParserContract(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(len(integrity.extract_justfile_commands(justfile)), 1)
+
+    def test_a_cargo_test_joined_to_another_command_is_unparsed(self) -> None:
+        # A direct cargo test refused for a control operator fails, array or not;
+        # other words, quoted text and redirections join nothing.
+        unparsed = ["cargo-command-unparsed"]
+        for command, kinds in (
+                (f"{GOOD_COMMAND} && cargo test --lib does_not_exist", unparsed),
+                (f"{GOOD_COMMAND}; echo done", unparsed),
+                (f"MODE=ci {GOOD_COMMAND} | tee test.log", unparsed),
+                (f"echo {GOOD_COMMAND} && true", []),
+                (f"time {GOOD_COMMAND} && true", []),
+                (f"{GOOD_COMMAND} --logfile 'ci;pg.log' 2>&1", []),
+                # Only a `#` opening a word starts a comment; inside one it is literal.
+                ("cargo test --lib high_risk_recovery#tag; cargo test --lib missing", unparsed),
+                ("cargo test --lib high_risk_recovery#tag", ["zero-match"]),
+                (f"{GOOD_COMMAND} # note; cargo test --lib missing", [])):
+            with self.subTest(command=command):
+                self.assertEqual([v.kind for v in run_fixture(command)], kinds)
+        just_text = f"fixture:\n    {GOOD_COMMAND} && cargo test --lib does_not_exist\n"
+        self.assertEqual([(v.workflow, v.kind) for v in run_fixture(
+            GOOD_COMMAND, just_text=just_text)], [("justfile", "cargo-command-unparsed")])
+
+    def test_unaligned_shell_words_refuse_a_direct_cargo_test(self) -> None:
+        # Words the syntax scan cannot align leave its operators unproven: a direct
+        # cargo test is refused, and a line holding none stays unflagged.
+        real = integrity._syntax_words
+        with mock.patch.object(integrity, "_syntax_words", lambda code: real(code)[:-1]):
+            for command, kinds in (
+                    (GOOD_COMMAND, [("ci-fixture.yml", "cargo-command-unparsed"),
+                                    ("justfile", "cargo-command-unparsed")]),
+                    (f"echo {GOOD_COMMAND}", [("justfile", "cargo-command-unparsed")])):
+                with self.subTest(command=command):
+                    self.assertEqual([(Path(v.workflow).name, v.kind)
+                                      for v in run_fixture(command)], kinds)
 
     def test_recognized_unsupported_env_string_split_is_inconclusive(self) -> None:
         diagnostics: list[str] = []
