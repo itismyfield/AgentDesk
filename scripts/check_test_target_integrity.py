@@ -188,8 +188,9 @@ return 1
 ;;
 esac
 readonly -a PG_INCLUDE_ARGS""".splitlines())
-# A word ending one command and starting another; redirections such as `2>&1` are not.
-SHELL_CONTROL = re.compile(r"[;|]|&&|(?<![<>])&(?!>)")
+# A control operator left visible in lexed syntax; the lexer masks quoted, escaped,
+# substituted and redirection text, so `2>&1` or a quoted `;` never matches.
+SHELL_CONTROL = re.compile(r"[;&|()]")
 # Violation kind prefix for a generated array expanded without a proven source.
 KNOWN_ARRAY_KINDS = {"NON_PG_SKIP_ARGS": "non-pg", "PG_INCLUDE_ARGS": "pg-include"}
 LIB_INVENTORY_MANIFEST_HEADER = (
@@ -904,59 +905,49 @@ def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
     return modules
 
 
+def _lex():
+    """The shell lexer the PG lane gate also reads shell with."""
+    return _membership().shell_lexer()
+
+
 def _shell_comment_start(snippet: str) -> int:
     """Where Bash starts a comment on one line: an unquoted `#` that opens a word, so
-    one inside a word (`x#tag`) stays literal; the line's length when there is none."""
-    quote, word_start, index = "", True, 0
-    while index < len(snippet):
-        char = snippet[index]
-        if quote:
-            if char == quote:
-                quote = ""
-            elif quote == '"' and char == "\\":
-                index += 1
-        elif char == "#" and word_start:
-            return index
-        elif char in "'\"":
-            quote = char
-        elif char == "\\":
-            index += 1
-        word_start = not quote and char in " \t\r\n;&|()<>"
-        index += 1
-    return len(snippet)
+    one inside a word (`x#tag`, `$(true)#tag`) stays literal; else the line's length."""
+    return _lex().comment_start(snippet)
 
 
 def _syntax_words(snippet: str) -> list[str]:
-    """``shlex.split(snippet)``'s words with every quoted or escaped character
-    blanked to `_`, so only the shell syntax around them stays visible."""
-    words: list[str] = []
-    word: list[str] | None = None
-    quote = ""
-    chars = iter(snippet)
-    for char in chars:
-        if quote:
-            if char == quote:
-                quote = ""
-                continue
-            if quote == '"' and char == "\\":
-                next(chars, "")
-            word.append("_")
-        elif char in " \t\r\n":
-            if word is not None:
-                words.append("".join(word))
-            word = None
-        else:
-            word = [] if word is None else word
-            if char in "'\"":
-                quote = char
-            elif char == "\\":
-                next(chars, "")
-                word.append("_")
-            else:
-                word.append(char)
-    if word is not None:
-        words.append("".join(word))
-    return words
+    """``snippet``'s shell words with quoted, escaped, substituted and redirection
+    text blanked to `_`, so only real control operators stay visible."""
+    return _lex().scan_shell(snippet).syntax_masked.split()
+
+
+# Reserved words that may head a command inside a one-line compound.
+_COMPOUND_HEADS = frozenset({"{", "}", "!", "if", "then", "elif", "else", "while", "until", "do"})
+
+
+def _chained_commands(scan) -> tuple[list, list]:
+    """A lexed line's outer simple commands and control operators, less a canonical
+    source heading its `&&` chain."""
+    commands = _lex().simple_commands(scan)
+    ops = [token.raw for token in scan.tokens if token.kind == "OP" and not token.depth]
+    if [token.value for token in commands[:1] for token in token] == [
+            "source", NON_PG_FILTER_REL.as_posix()] and ops[:1] == ["&&"]:
+        return commands[1:], ops[1:]
+    return commands, ops
+
+
+def _unproven_cargo(scan) -> bool:
+    """Whether a lexed line may run a cargo test outside the one command it extracts:
+    in a second command, a substitution, or past a boundary the lexer cannot prove."""
+    commands, ops = _chained_commands(scan)
+    nested = [token.value for token in scan.tokens if token.depth]
+    return _lex().may_execute_cargo(scan) \
+        or any(nested[index:index + 2] == ["cargo", "test"] for index in range(len(nested))) \
+        or ((ops or len(commands) > 1) and any(
+            _direct_cargo_test(values, values) is not None
+            for values in ([token.value or "" for token in command if token.value not in
+                            _COMPOUND_HEADS] for command in commands)))
 
 
 def _direct_cargo_test(words: list[str], syntax: list[str]) -> list[str] | None:
@@ -1036,16 +1027,20 @@ def _parse_command_line(line: str, *, yaml_run_scalar: bool = False,
     snippet = _shell_text(line, yaml_run_scalar)
     if not snippet or snippet.startswith("#"):
         return None
+    scan = _lex().scan_shell(snippet)
     code = snippet[:_shell_comment_start(snippet)]
     try:
         words = shlex.split(code)
     except ValueError:
-        return None
+        # Unsplittable words leave even a lone direct cargo test unextracted.
+        values = [token.value for token in scan.tokens if token.kind == "WORD"]
+        lone = any(values[index:index + 2] == ["cargo", "test"] for index in range(len(values)))
+        return [] if lone or _unproven_cargo(scan) else None
     syntax = _syntax_words(code)
     aligned = len(syntax) == len(words)
     # Quoted text never ends a command; unaligned words leave the syntax unproven.
     cargo = _direct_cargo_test(words, syntax if aligned else words)
-    if cargo and not aligned:
+    if (cargo and not aligned) or _unproven_cargo(scan):
         cargo = []
     if cargo is None and diagnostics is not None and "cargo test" in snippet:
         first = next((word for word in words
@@ -1059,6 +1054,28 @@ def _parse_command_line(line: str, *, yaml_run_scalar: bool = False,
     return cargo
 
 
+def _continued(text: str) -> bool:
+    """Whether a shell line ends in an unescaped backslash that joins the next line to it."""
+    code = text[:_shell_comment_start(text)]
+    return (len(code) - len(code.rstrip("\\"))) % 2 == 1
+
+
+def _record_command(source: Path, lineno: int, text: str,
+                    commands: list[tuple[int, list[str], str]],
+                    diagnostics: list[str] | None, refused: list[int] | None,
+                    yaml_run_scalar: bool = False) -> None:
+    """Parse one logical shell line and file it as a command, a refusal or neither."""
+    line_diagnostics: list[str] = []
+    words = _parse_command_line(text, yaml_run_scalar=yaml_run_scalar,
+                                diagnostics=line_diagnostics)
+    if diagnostics is not None:
+        diagnostics.extend(f"{source}:{lineno}: {detail}" for detail in line_diagnostics)
+    if words:
+        commands.append((lineno, words, " ".join(words)))
+    elif words == [] and refused is not None:
+        refused.append(lineno)
+
+
 def extract_commands(workflow: Path, diagnostics: list[str] | None = None,
                      shells: list[list[tuple[int, str]]] | None = None,
                      refused: list[int] | None = None) \
@@ -1067,45 +1084,48 @@ def extract_commands(workflow: Path, diagnostics: list[str] | None = None,
 
     ``shells`` collects each run scalar's (line, shell text) pairs: one shell each.
     ``refused`` collects lines whose direct cargo test is joined to another command.
+    Block lines a trailing backslash continues are parsed as one command at its first line.
     """
     commands: list[tuple[int, list[str], str]] = []
     block_indent: int | None = None
+    content_indent: int | None = None
     shell: list[tuple[int, str]] = []
+    pending: tuple[int, str] | None = None
     for lineno, line in enumerate(workflow.read_text("utf-8").splitlines(), 1):
         indent = len(line) - len(line.lstrip())
         if block_indent is not None and line.strip() and indent <= block_indent:
             block_indent = None
         match = re.match(r"^\s*(?:-\s*)?run:\s*(.*)$", line)
-        scalar = None
-        yaml_scalar = False
+        if pending is not None and (match or block_indent is None or not line.strip()):
+            # A blank line or the block's end finishes a continued command as it stands.
+            _record_command(workflow, pending[0], pending[1].removesuffix("\\")
+                            if not line.strip() else pending[1], commands, diagnostics, refused)
+            pending = None
         if match:
             value = match.group(1).strip()
             shell = []
             if shells is not None:
                 shells.append(shell)
             if value in {"|", "|-", "|+", ">", ">-", ">+"}:
-                block_indent = indent
+                block_indent, content_indent = indent, None
                 continue
-            scalar, yaml_scalar = value, True
-        elif block_indent is not None and indent > block_indent:
-            scalar = line.strip()
-        if scalar is None:
+            shell.append((lineno, _shell_text(value, True)))
+            _record_command(workflow, lineno, value, commands, diagnostics, refused, True)
             continue
+        if block_indent is None or indent <= block_indent:
+            continue
+        content_indent = indent if content_indent is None else content_indent
         # Block lines keep their YAML indentation, which shows what a compound command holds.
-        shell.append((lineno, _shell_text(scalar, yaml_scalar) if match else line.rstrip()))
-        line_diagnostics: list[str] = []
-        words = _parse_command_line(
-            scalar, yaml_run_scalar=yaml_scalar,
-            diagnostics=line_diagnostics,
-        )
-        if diagnostics is not None:
-            diagnostics.extend(
-                f"{workflow}:{lineno}: {detail}" for detail in line_diagnostics
-            )
-        if words:
-            commands.append((lineno, words, " ".join(words)))
-        elif words == [] and refused is not None:
-            refused.append(lineno)
+        shell.append((lineno, line.rstrip()))
+        first, text = (pending[0], pending[1][:-1] + line[min(indent, content_indent):]) \
+            if pending is not None else (lineno, line.strip())
+        pending = None
+        if _continued(text):
+            pending = (first, text)
+        else:
+            _record_command(workflow, first, text, commands, diagnostics, refused)
+    if pending is not None:
+        _record_command(workflow, *pending, commands, diagnostics, refused)
     return commands
 
 
@@ -1118,10 +1138,15 @@ def extract_justfile_commands(justfile: Path,
 
     ``shells`` collects every recipe line alone: just runs each in a new shell.
     ``refused`` collects lines whose direct cargo test is joined to another command.
+    Recipe lines a trailing backslash continues are parsed as one command at its first line.
     """
     commands: list[tuple[int, list[str], str]] = []
     in_recipe = False
+    pending: tuple[int, str] | None = None
     for lineno, line in enumerate(justfile.read_text("utf-8").splitlines(), 1):
+        if pending is not None and not (in_recipe and line[:1].isspace() and line.strip()):
+            _record_command(justfile, *pending, commands, diagnostics, refused)
+            pending = None
         if line and not line[0].isspace():
             in_recipe = bool(RECIPE_HEADER.match(line))
             continue
@@ -1129,16 +1154,15 @@ def extract_justfile_commands(justfile: Path,
             continue
         if shells is not None:
             shells.append([(lineno, line.strip())])
-        line_diagnostics: list[str] = []
-        words = _parse_command_line(line, diagnostics=line_diagnostics)
-        if diagnostics is not None:
-            diagnostics.extend(
-                f"{justfile}:{lineno}: {detail}" for detail in line_diagnostics
-            )
-        if words:
-            commands.append((lineno, words, " ".join(words)))
-        elif words == [] and refused is not None:
-            refused.append(lineno)
+        first, text = (pending[0], pending[1][:-1] + line.strip()) \
+            if pending is not None else (lineno, line.strip())
+        pending = None
+        if _continued(text):
+            pending = (first, text)
+        else:
+            _record_command(justfile, first, text, commands, diagnostics, refused)
+    if pending is not None:
+        _record_command(justfile, *pending, commands, diagnostics, refused)
     return commands
 
 
@@ -1391,11 +1415,8 @@ class PackageTestIds:
                           flags=re.MULTILINE)
             bodies = re.findall(r"^NON_PG_SKIP_ARGS=\((.*?)^\)$", rest,
                                 re.MULTILINE | re.DOTALL)
-            try:
-                words = shlex.split(bodies[0], comments=True) \
-                    if len(bodies) == 1 and rest.count("NON_PG_SKIP_ARGS") == 1 else []
-            except ValueError:
-                words = []
+            words = (_lex().shell_words(bodies[0]) or ()) \
+                if len(bodies) == 1 and rest.count("NON_PG_SKIP_ARGS") == 1 else ()
             values = tuple(words[1::2])
             if words and len(words) % 2 == 0 and set(words[::2]) == {"--skip"} \
                     and all(value and not SHELL_EXPANSION.search(value)
@@ -1693,14 +1714,20 @@ def run_list_check(words: list[str], repo_root: Path) -> str | None:
 def _command_lines(text: str) -> list[list[str]]:
     commands: list[list[str]] = []
     for line in text.splitlines():
+        snippet = line.strip()
+        scan = _lex().scan_shell(snippet)
         try:
-            words = shlex.split(line.strip(), comments=True)
+            words = shlex.split(snippet[:_shell_comment_start(snippet)])
         except ValueError as error:
-            raise RuntimeError(f"could not parse command: {line.strip()}") from error
+            raise RuntimeError(f"could not parse command: {snippet}") from error
         if words[:1] == ["run:"]:
             words = words[1:]
         if any(words[index:index + 2] == ["cargo", "test"]
                for index in range(len(words) - 1)):
+            # A joined, nested or unproven part would be observed as another command.
+            if scan.issues or len(_chained_commands(scan)[0]) > 1 \
+                    or any(token.depth or token.kind == "REDIR" for token in scan.tokens):
+                raise RuntimeError(f"could not parse command: {snippet}")
             commands.append(words)
     return commands
 
@@ -1733,7 +1760,7 @@ def curated_commands(repo_root: Path, workflow: Path,
     commands = _command_lines(text)
     for line in text.splitlines():
         try:
-            words = shlex.split(line.strip(), comments=True)
+            words = shlex.split(line.strip()[:_shell_comment_start(line.strip())])
         except ValueError:
             continue
         if words[:1] == ["run:"]:

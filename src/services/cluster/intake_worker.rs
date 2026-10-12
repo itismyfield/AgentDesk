@@ -28,7 +28,7 @@ use crate::db::intake_outbox_dispatch_stamp::observe_status;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
 #[cfg(not(test))]
 use crate::services::discord::execute_intake_turn_core;
-use crate::services::discord::{IntakeRequest, SharedData, TurnKind};
+use crate::services::discord::{IntakeExecution, IntakeRequest, SharedData, TurnKind};
 use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
@@ -333,6 +333,10 @@ pub(crate) async fn run_intake_worker_tick(
     let request = match intake_request_from_row(&row) {
         Ok(req) => req,
         Err(error) => {
+            if error.starts_with("replay source") {
+                tracing::warn!(row_id = row.id, %error, "worker replay source custody needs reconciliation");
+                return Ok(TickOutcome::Held);
+            }
             let msg = format!("payload conversion: {error}");
             tracing::warn!(
                 row_id = row.id,
@@ -467,6 +471,8 @@ pub(crate) async fn run_intake_worker_tick(
         return Ok(TickOutcome::Processed);
     }
 
+    #[cfg(test)]
+    test_executor::checkpoint(test_executor::Checkpoint::Spawned).await;
     let result = execute_intake_turn_core(
         &runtime.http,
         &runtime.shared,
@@ -479,7 +485,7 @@ pub(crate) async fn run_intake_worker_tick(
     #[cfg(test)]
     test_executor::checkpoint(test_executor::Checkpoint::FinalDb).await;
     let outcome = match result {
-        Ok(()) => {
+        Ok(IntakeExecution::Executed) => {
             let advanced = mark_done(pool, row.id, claim_owner).await?;
             if !advanced {
                 classify_mark_done_miss(
@@ -491,6 +497,10 @@ pub(crate) async fn run_intake_worker_tick(
                 .await;
             }
             Ok(TickOutcome::Processed)
+        }
+        Ok(IntakeExecution::Deferred | IntakeExecution::ConsumedProtected) => {
+            tracing::warn!(row_id = row.id, "worker delivery retains its original custody without execution settlement");
+            Ok(TickOutcome::Held)
         }
         Err(error) => {
             let msg = format!("turn execution: {error}");
@@ -687,7 +697,7 @@ fn intake_request_from_row(row: &IntakeOutboxRow) -> Result<IntakeRequest, Strin
         intake_outbox_id: Some(row.id),
         channel_id: ChannelId::new(channel_id),
         user_msg_id: MessageId::new(user_msg_id),
-        source_message_ids: Vec::new(),
+        source_message_ids: replay_sources_from_row(row, channel_id, user_msg_id)?,
         busy_followup_retry_user_msg_id: MessageId::new(user_msg_id),
         request_owner: UserId::new(request_owner),
         request_owner_name: owner_name,
@@ -706,6 +716,37 @@ fn intake_request_from_row(row: &IntakeOutboxRow) -> Result<IntakeRequest, Strin
         // leaders always persist Some(true/false).
         preserve_on_cancel: row.preserve_on_cancel.unwrap_or(false),
     })
+}
+
+/// Active workers carry every forwarded source; dormant and legacy rows keep the old payload.
+fn replay_sources_from_row(
+    row: &IntakeOutboxRow,
+    channel_id: u64,
+    user_msg_id: u64,
+) -> Result<Vec<MessageId>, String> {
+    if !crate::services::discord::checkpoint_waits_for_admission(ChannelId::new(channel_id)) {
+        return Ok(Vec::new());
+    }
+    let Some(stored) = row.replay_source_message_ids.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let mut sources = stored
+        .iter()
+        .map(|source| {
+            source
+                .parse::<u64>()
+                .ok()
+                .filter(|source| *source > 0)
+                .map(MessageId::new)
+                .ok_or_else(|| format!("replay source `{source}` is not a Discord message id"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !sources.iter().any(|source| source.get() == user_msg_id) {
+        return Err("replay sources do not contain the representative message".into());
+    }
+    sources.sort_unstable();
+    sources.dedup();
+    Ok(sources)
 }
 
 /// Decode the `intake_outbox.turn_kind` text column into the typed
@@ -736,6 +777,7 @@ mod tests {
             required_labels: serde_json::json!(["unreal"]),
             channel_id: "1234567890".to_string(),
             user_msg_id: "9876543210".to_string(),
+            replay_source_message_ids: None,
             request_owner_id: "555".to_string(),
             request_owner_name: Some("Tester".to_string()),
             user_text: "hello".to_string(),
@@ -833,7 +875,7 @@ mod tests {
             .expect("worker invokes the executor");
         let result = &tick[result_start..];
         let ok_start = result
-            .find("Ok(()) => {")
+            .find("Ok(IntakeExecution::Executed) => {")
             .expect("executor Ok branch exists");
         let err_start = result
             .find("Err(error) => {")

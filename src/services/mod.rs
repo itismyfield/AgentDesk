@@ -51,6 +51,7 @@ pub mod health_active_session_audit;
 pub mod health_diagnostics;
 pub(crate) mod herdr_admission;
 pub(crate) mod herdr_launch;
+pub(crate) mod imsg_reply;
 pub mod issue_announcements;
 pub mod kakao;
 pub mod kakao_message;

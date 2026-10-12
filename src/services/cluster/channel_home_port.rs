@@ -257,6 +257,12 @@ pub(crate) mod scoped_restore {
             kind: NativeTerminalKind,
         },
         Deferred(String),
+        /// A before-start policy receipt row kept byte for byte; never a native terminal.
+        PolicyReceiptHeld {
+            reason: RestoreFailure,
+        },
+        /// Only a guarded clear of the receipt's exact row, after any notice was shown and acked.
+        PolicyReceiptSettled,
     }
     /// Only installation metadata; mailbox and canonical rows remain the busy authorities.
     #[derive(Clone, Debug, PartialEq, Eq)]

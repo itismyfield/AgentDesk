@@ -633,6 +633,9 @@ mod codex_herdr_tests;
 mod submission_tests;
 
 #[cfg(test)]
+pub(super) mod producer_error_test_support;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

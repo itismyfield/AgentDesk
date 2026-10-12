@@ -367,6 +367,7 @@ jobs:
               - 'src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs'
+              - 'src/services/discord/recovery_engine/restore_inflight/scoped_policy_receipt_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/scoped_restore.rs'
               - 'src/services/discord/recovery_engine/routing_orphan_tests.rs'
               - 'src/services/discord/relay_recovery/tests/host_deferred.rs'
@@ -443,6 +444,7 @@ jobs:
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/background_child_ordering_tests.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs'
+              - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_cut_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs'
@@ -487,6 +489,7 @@ jobs:
               - 'src/services/tui_o/exact_pg_tests.rs'
               - 'src/services/tui_o/exact_submission.rs'
               - 'src/services/tui_o/repost/admission_tests.rs'
+              - 'src/services/tui_o/repost/backlog_tests.rs'
               - 'src/services/tui_o/repost/runner_activation_tests.rs'
               - 'src/services/tui_o/repost/runner_tests.rs'
               - 'src/services/tui_o/repost/runtime_host_activation_tests.rs'
@@ -498,6 +501,11 @@ jobs:
               - 'src/voice/announce_meta.rs'
               - 'src/voice/turn_link.rs'
               # END generated pg_db source paths
+              # Re-post production changes must run the shared-budget tests too.
+              - 'src/services/tui_o/repost/**'
+              - 'src/services/tui_o/writer/**'
+              - 'src/services/tui_o/store/ledger.rs'
+              - 'src/services/discord/outbound/o_writer*.rs'
               - '.github/workflows/**'
               - 'justfile'
               - 'Cargo.toml'
@@ -1119,7 +1127,8 @@ jobs:
 
       - name: Writer namespace exact Windows targets
         if: runner.os == 'Windows'
-        timeout-minutes: 30
+        # Healthy runs took 16-27 min on 2026-10-12 and two PRs were cut at 30.
+        timeout-minutes: 45
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -1255,6 +1264,16 @@ jobs:
 
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
+
+      # Rollback rehearsal executes the runbook's literal rg command.
+      - name: Install ripgrep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+
+      - name: Require ripgrep
+        shell: bash
+        run: rg --version
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -1753,6 +1772,16 @@ jobs:
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
 
+      # Rollback rehearsal executes the runbook's literal rg command.
+      - name: Install ripgrep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+
+      - name: Require ripgrep
+        shell: bash
+        run: rg --version
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -2222,7 +2251,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=713459343783731b3a38d23259809855ff8e29aa22bbe493dd038e8b2dc21f43
+          expected=a92a0553be96164462dc3a10306285e7427cb66b93cf610c2970de2510ed89d9
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2455,7 +2484,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=713459343783731b3a38d23259809855ff8e29aa22bbe493dd038e8b2dc21f43
+          expected=a92a0553be96164462dc3a10306285e7427cb66b93cf610c2970de2510ed89d9
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
