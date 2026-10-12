@@ -1,3 +1,2 @@
 # exact-test-id | mode | #issue | expires=YYYY-MM-DD | reason; rows stay sorted by test id.
-# Modes: intentional-nonrequired, model-unresolved, platform-unavailable. The coverage check
-# fails a row that is expired, names no lib id, or no longer matches how that id fails.
+# Modes: intentional-nonrequired, model-unresolved, platform-unavailable; expired or unneeded rows fail.

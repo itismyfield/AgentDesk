@@ -405,9 +405,9 @@ class RequiredPrParityTests(unittest.TestCase):
 
 NEW = "FAIL: new_required_test_ids: "
 NEW_FINDING = re.compile(r"^FAIL: new_required_test_ids: ([a-z-]+): [^`]*`([^`]+)`")
-REPLAY_EXPECTED = REPO_ROOT / "tests/fixtures/lane_new_id/pr5015_replay_expected.txt"
-PR5015_MODULE = "services::discord::router::message_handler::provider_isolation"
-PR5015_TESTS = (
+REPLAY_EXPECTED = REPO_ROOT / "tests/fixtures/lane_new_id/debt_module_replay_expected.txt"
+REPLAY_MODULE = "services::discord::router::message_handler::provider_isolation"
+REPLAY_TESTS = (
     "matrix_preserves_live_turns_and_only_recreates_strong_idle_mismatches",
     "weak_idle_mismatch_falls_back_at_escalation_threshold",
     "stale_inflight_falls_back_but_live_turn_never_recreates",
@@ -463,26 +463,26 @@ class NewRequiredIdTests(unittest.TestCase):
         self.assert_module_axes_ok(output)
         self.assertEqual(result, 1)
 
-    def test_pr5015_replay_fails_each_added_id_while_module_axes_pass(self) -> None:
+    def test_replayed_debt_module_additions_fail_each_id_while_module_axes_pass(self) -> None:
         repo = Repo()
         del repo.pr["sweep"], repo.mirrors["sweep"]
-        nest = "".join(f"pub mod {name} {{ " for name in PR5015_MODULE.split("::"))
-        close = "}" * len(PR5015_MODULE.split("::"))
+        nest = "".join(f"pub mod {name} {{ " for name in REPLAY_MODULE.split("::"))
+        close = "}" * len(REPLAY_MODULE.split("::"))
 
         def module(*tests: str) -> str:
             body = "".join(f"    #[test]\n    fn {test}() {{}}\n" for test in tests)
             inner = f"#[cfg(test)]\nmod thread_role_inheritance_tests {{\n{body}}}\n"
             return f"{nest}\n{inner}{close}\n"
 
-        prefix = f"{PR5015_MODULE}::thread_role_inheritance_tests"
+        prefix = f"{REPLAY_MODULE}::thread_role_inheritance_tests"
         repo.lib_tail = module("existing_case")
         repo.extra_ids = {f"{prefix}::existing_case"}
         debt = ["gamma", "pgmod", prefix]
         repo.baselines = (debt, debt)
 
         def replay(r: Repo) -> None:
-            r.lib_tail = module("existing_case", *PR5015_TESTS)
-            r.extra_ids |= {f"{prefix}::{test}" for test in PR5015_TESTS}
+            r.lib_tail = module("existing_case", *REPLAY_TESTS)
+            r.extra_ids |= {f"{prefix}::{test}" for test in REPLAY_TESTS}
 
         result, output = repo.delta(replay)
         observed = {

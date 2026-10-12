@@ -1,5 +1,5 @@
-# #5046 / PR #5015: five ids added to a module already on the debt baselines.
-# No lane selects that module, so the module axes stay green; each id must fail on its own.
+# Five ids a past change added to a module already on both debt baselines; no lane selects it,
+# so the module axes stay green and each id must fail on its own.
 new-id-unrequired services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::matrix_preserves_live_turns_and_only_recreates_strong_idle_mismatches
 new-id-unrequired services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::reconcile_defer_does_not_call_recreate_sink
 new-id-unrequired services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::reconcile_recreate_calls_sink_once_for_exact_tmux_session
