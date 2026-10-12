@@ -293,6 +293,25 @@ mod tests {
     }
 
     #[test]
+    fn s1b_started_contract_leads_only_a_marked_imessage_start() {
+        let metadata = json!({"human_input": {"source": "imessage", "origin_id": "p:0/G"}});
+        let marked = json!({"human_input": {
+            "source": "imessage", "origin_id": "p:0/G", STARTED_MARK: "v1",
+        }});
+        let retry = Some("retry context".to_string());
+        let lead = |source, metadata| with_started_contract(retry.clone(), source, metadata);
+        assert_eq!(lead(Some("imessage"), Some(&metadata)), retry);
+        assert_eq!(lead(Some("external"), Some(&marked)), retry);
+        let contract = contract::render("p:0/G");
+        assert_eq!(
+            lead(Some("imessage"), Some(&marked)),
+            Some(format!("{contract}\n\nretry context"))
+        );
+        let alone = with_started_contract(None, Some("imessage"), Some(&marked));
+        assert_eq!(alone, Some(contract));
+    }
+
+    #[test]
     fn hash_tracks_delivered_text_and_canonical_identity() {
         let mut input = AdmissionInput {
             origin_id: "Case-Preserved-GUID",

@@ -399,18 +399,20 @@ impl DeliveryPorts for LivePorts {
 
 impl LivePorts {
     async fn start_reserved(&self, reservation: router::HeadlessTurnReservation) -> StartAttempt {
+        let request = &self.request;
+        let metadata = match &self.reply {
+            Some(reply) => reply.mark_started(request.metadata.clone()),
+            None => request.metadata.clone(),
+        };
         #[cfg(test)]
-        if let Some(attempt) = inject::test_hook::start(&self.shared, &self.request, &reservation) {
+        if let Some(attempt) =
+            inject::test_hook::start(&self.shared, request, &reservation, &metadata)
+        {
             return attempt.await;
         }
         let (ctx, token) = match &self.runtime {
             Ok(runtime) => runtime,
             Err(error) => return StartAttempt::Unavailable(error.clone()),
-        };
-        let request = &self.request;
-        let metadata = match &self.reply {
-            Some(reply) => reply.mark_started(request.metadata.clone()),
-            None => request.metadata.clone(),
         };
         let result = router::start_reserved_headless_turn_with_owner(
             ctx,

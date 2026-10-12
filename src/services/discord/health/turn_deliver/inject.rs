@@ -1064,11 +1064,13 @@ pub(crate) mod test_hook {
         shared: &'a crate::services::discord::SharedData,
         request: &'a super::HumanInputRequest,
         reservation: &'a crate::services::discord::router::HeadlessTurnReservation,
+        metadata: &'a Option<serde_json::Value>,
     ) -> Option<impl std::future::Future<Output = super::super::StartAttempt> + 'a> {
         use super::super::StartAttempt;
         let starts = GATEWAYLESS.lock().unwrap_or_else(|e| e.into_inner());
         let begun = starts.as_ref()?.get(&request.channel_id.get())?.clone();
         Some(async move {
+            see_start(shared, request, metadata).await;
             begun.notify_one();
             let channel = request.channel_id;
             let owner = poise::serenity_prelude::UserId::new(request.author_id);
@@ -1082,6 +1084,43 @@ pub(crate) mod test_hook {
                 Err(error) => StartAttempt::Unavailable(error.to_string()),
             }
         })
+    }
+
+    /// What one gatewayless start saw as it began: its GUID's episode and its prompt's contract.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct StartSeen {
+        pub episode: Option<String>,
+        pub contract: Option<String>,
+    }
+
+    static STARTS_SEEN: Mutex<Vec<(u64, StartSeen)>> = Mutex::new(Vec::new());
+
+    async fn see_start(
+        shared: &crate::services::discord::SharedData,
+        request: &super::HumanInputRequest,
+        metadata: &Option<serde_json::Value>,
+    ) {
+        let origin = metadata
+            .as_ref()
+            .and_then(|m| m.pointer("/human_input/origin_id"));
+        let read = crate::db::imsg_reply::read_obligation;
+        let episode = match (shared.pg_pool.as_ref(), origin.and_then(|o| o.as_str())) {
+            (Some(pool), Some(origin)) => read(pool, origin).await.ok().flatten(),
+            _ => None,
+        };
+        let lead = crate::services::imsg_reply::with_started_contract;
+        let seen = StartSeen {
+            episode: episode.and_then(|row| row.episode_key),
+            contract: lead(None, Some(request.source.as_str()), metadata.as_ref()),
+        };
+        let mut starts = STARTS_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        starts.push((request.channel_id.get(), seen));
+    }
+
+    pub(crate) fn starts_seen(channel_id: u64) -> Vec<StartSeen> {
+        let starts = STARTS_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        let mine = starts.iter().filter(|(channel, _)| *channel == channel_id);
+        mine.map(|(_, seen)| seen.clone()).collect()
     }
 
     /// Parks the channel's next owner before its reservation: `(reached, resume)`.

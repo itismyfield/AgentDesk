@@ -359,6 +359,7 @@ server::resource_locks::resource_locks_pg_tests
 server::routes::agents::host_guard_tests
 server::routes::agents_turn_deliver::pg_tests
 server::routes::agents_turn_deliver::pg_tests::s1a
+server::routes::agents_turn_deliver::pg_tests::s1a::s1b
 server::routes::auto_queue_lifecycle_pg_tests::tests
 server::routes::auto_queue_preflight_harness_tests
 server::routes::campaigns::tests
@@ -815,6 +816,9 @@ db::imsg_reply::tests::pg_s0_c3_wrong_origin_ack_and_deferred_composite_fk_rejec
 db::imsg_reply::tests::pg_s0_c4_mirror_unknown_excluded_from_external_index
 db::imsg_reply::tests::pg_s0_c5_unknown_blocks_direct_insert_without_active_token
 db::imsg_reply::tests::pg_s0_c6_lifetime_one_shots_survive_not_sent
+db::imsg_reply::tests::pg_s1b_handback_requires_the_bound_episode_and_nonce
+db::imsg_reply::tests::progress_episode_binding_evidence
+db::imsg_reply::tests::s1b_multiple_origins_share_one_episode
 db::intake_outbox::home_tests::a_delegated_row_is_claimed_only_by_its_holder_at_its_home_epoch_pg
 db::intake_outbox::migration_pg_tests::agents_preferred_intake_node_labels_defaults_to_empty_array
 db::intake_outbox::migration_pg_tests::e1_channel_open_row_probe_sees_only_open_statuses_of_that_channel
@@ -1081,6 +1085,17 @@ server::routes::agents_turn_deliver::pg_tests::s1a::s1a_refusal_requires_no_effe
 server::routes::agents_turn_deliver::pg_tests::s1a::s1a_same_guid_concurrent_single_effect
 server::routes::agents_turn_deliver::pg_tests::s1a::s1a_settlement_failure_keeps_admitting_without_success_or_redelivery
 server::routes::agents_turn_deliver::pg_tests::s1a::s1a_unconfirmed_is_admitted_once
+server::routes::agents_turn_deliver::pg_tests::s1a::s1b::handback_episode_isolation
+server::routes::agents_turn_deliver::pg_tests::s1a::s1b::p1_2_a_busy_contract_transcript
+server::routes::agents_turn_deliver::pg_tests::s1a::s1b::p1_2_b_same_text_distinct_guids_queued
+server::routes::agents_turn_deliver::pg_tests::s1a::s1b::p1_2_c_queue_restart_contract_roundtrip
+server::routes::agents_turn_deliver::pg_tests::s1a::s1b::p1_2_e_binding_failure_zero_pane_effect
+server::routes::agents_turn_deliver::pg_tests::s1a::s1b::p1_2_f_unconfirmed_durable_nonce
+server::routes::agents_turn_deliver::pg_tests::s1a::s1b::s1b_effect_free_after_preflight_stays_unknown
+server::routes::agents_turn_deliver::pg_tests::s1a::s1b::s1b_off_preserves_existing_stash_path
+server::routes::agents_turn_deliver::pg_tests::s1a::s1b::s1b_reserved_start_conflict_clears_candidate
+server::routes::agents_turn_deliver::pg_tests::s1a::s1b::s1b_started_identity_before_provider_effect
+server::routes::agents_turn_deliver::pg_tests::s1a::s1b::s1b_unidentified_busy_episode_queues_safely
 server::routes::agents_turn_deliver::pg_tests::target_and_author_gates_run_at_the_route_boundary_pg
 server::routes::agents_turn_deliver::pg_tests::the_route_injects_into_a_busy_tui_direct_turn_only_when_switched_on_pg
 server::routes::agents_turn_deliver::pg_tests::the_route_reports_contaminated_submit_and_protects_a_mixed_direct_draft_pg
