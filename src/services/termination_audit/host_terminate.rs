@@ -67,8 +67,8 @@ pub(crate) fn terminate_hosted_session(
     })
 }
 
-// No external production caller until explicit operator activation.
-#[cfg(test)]
+// Its only production caller is the operator termination service.
+#[cfg(unix)]
 pub(crate) mod herdr_terminate {
     use crate::services::session_host::{HerdrGateRefusal, HerdrTarget};
 

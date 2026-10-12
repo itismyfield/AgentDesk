@@ -740,7 +740,7 @@ impl TurnFinalizer {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod host_terminated_tests {
     use super::*;
     use serenity::model::id::{MessageId, UserId};

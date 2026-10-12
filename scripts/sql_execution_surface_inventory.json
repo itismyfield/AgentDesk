@@ -20507,6 +20507,24 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/server/routes/herdr_legacy_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2adbe14756c8096f91172bf3772eff8d458666de64d9c2d930af0f06ec3871ac"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/herdr_legacy_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:106246697663bdfd3f3991633457271e35ad9a837cee9c9fc171727db42bf2a1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/server/routes/home_metrics.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -29143,6 +29161,33 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:e7cc1d7b4dc99af74fc279596246d9dcd149c62f626527b756126cc6fa55ca9b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/herdr_terminate_exit_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:079600e87121fa0e84d6d5c195ea2bec33ef61617587470aeabe27df4c1cfd2a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/herdr_terminate_route_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2d2799a9ccb358379b263b33bb48cf4df5e222b9e9c81e58229dd396a93ecafb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/herdr_terminate_route_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:afe5a94ac7d3975c05b1b6de2d84bf0ed4825262c77e58ade3f24d9a2fd57599"
     },
     {
       "root": "src",
@@ -39006,6 +39051,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:311e940a768b5eb67e4d80e6a791e090c2f17b29dd9c1317377441eccbcd6912"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_host/herdr_gate_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:5360c8ffe89c62db7dad3644d2a92be6d80277707b4ac06c9e93fd3fda52903c"
     },
     {
@@ -39034,6 +39088,15 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:4fa5adfd73f12b69cbe1b5b42f99bbd6c699cf3f0137fc34dfb10ca041d31750"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_host/herdr_terminate_real_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4081c7af22a805d0694ac7c88b0a37ce3883cbc0165f61cc2b507282e0a4226c"
     },
     {
       "root": "src",

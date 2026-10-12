@@ -3,13 +3,15 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::super::bounded_tmux::{BoundedTmuxError, run_with_budget};
 use super::gate::{PaneVerdict, judge_pane, own_draft};
+use crate::services::discord::input_runtime::offer::Offer;
+use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::ShadowProvider;
 
-#[cfg(test)]
 mod ownership;
 #[cfg(test)]
 mod ownership_tests;
@@ -64,8 +66,8 @@ pub struct TmuxPane {
     busy: bool,
     #[cfg(test)]
     test_nonce: Option<String>,
-    #[cfg(test)]
-    offer: Option<crate::services::discord::input_runtime::offer::Offer>,
+    ownership: Option<Arc<OwnershipGate>>,
+    offer: Option<Offer>,
 }
 
 impl TmuxPane {
@@ -83,7 +85,7 @@ impl TmuxPane {
             busy: false,
             #[cfg(test)]
             test_nonce: None,
-            #[cfg(test)]
+            ownership: None,
             offer: None,
         }
     }
@@ -91,6 +93,12 @@ impl TmuxPane {
     #[cfg(test)]
     pub(crate) fn attest_test_nonce(&mut self, nonce: &str) {
         self.test_nonce = Some(nonce.into());
+    }
+
+    /// Input supervisors opt into ownership at the native spawn boundary.
+    pub(crate) fn with_ownership(mut self, ownership: Arc<OwnershipGate>) -> Self {
+        self.ownership = Some(ownership);
+        self
     }
 
     #[cfg(test)]
@@ -123,7 +131,6 @@ impl TmuxPane {
                         .build()
                         .map_err(BoundedTmuxError::Spawn)?
                         .block_on(async {
-                            #[cfg(test)]
                             if let Some(offer) = &self.offer {
                                 let effect = args.first().copied();
                                 if matches!(effect, Some("paste-buffer" | "send-keys")) {
@@ -166,6 +173,13 @@ impl TmuxPane {
         }
         if text.trim().is_empty() {
             return SendOutcome::Refused("empty prompt".into());
+        }
+        // One fresh epoch covers paste and Enter for this submission.
+        if let Some(gate) = self.ownership.clone() {
+            let Some(offer) = Offer::begin(self.provider, gate) else {
+                return SendOutcome::NotSent("input offer ownership unavailable".into());
+            };
+            self.offer = Some(offer);
         }
         // Bounded tmux closes stdin, so load-buffer reads the prompt from a file.
         let mut file = match tempfile::NamedTempFile::new() {

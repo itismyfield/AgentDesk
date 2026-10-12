@@ -69,6 +69,7 @@ src/
 │   ├── discord_thread_create_lock.rs
 │   ├── doctor.rs
 │   ├── herdr.rs
+│   ├── herdr_terminate_tests.rs
 │   ├── herdr_tests.rs
 │   ├── init.rs
 │   ├── intake_outbox.rs
@@ -433,6 +434,9 @@ src/
 │   │   ├── github.rs
 │   │   ├── github_dashboard.rs
 │   │   ├── health_api.rs
+│   │   ├── herdr_legacy_tests.rs
+│   │   ├── herdr_terminate.rs
+│   │   ├── herdr_terminate_tests.rs
 │   │   ├── home_metrics.rs
 │   │   ├── hooks.rs
 │   │   ├── idle_recap.rs
@@ -1092,11 +1096,20 @@ src/
 │   │   │   │   ├── g1b_modes_tests.rs
 │   │   │   │   ├── modes.rs
 │   │   │   │   └── modes_tests.rs
+│   │   │   ├── runtime/
+│   │   │   │   ├── dormant_tests.rs
+│   │   │   │   ├── drive.rs
+│   │   │   │   ├── drive_tests.rs
+│   │   │   │   ├── notice.rs
+│   │   │   │   ├── notice_tests.rs
+│   │   │   │   ├── ports.rs
+│   │   │   │   └── ports_tests.rs
 │   │   │   ├── supervisor/
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_entry_tests.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── g1b_entry_tests.rs
+│   │   │   │   ├── g2b_entry_tests.rs
 │   │   │   │   ├── receipt_entry_tests.rs
 │   │   │   │   └── reserve.rs
 │   │   │   ├── activation.rs
@@ -1124,6 +1137,7 @@ src/
 │   │   │   ├── receipt_tests.rs
 │   │   │   ├── reconcile.rs
 │   │   │   ├── reserve_tests.rs
+│   │   │   ├── runtime.rs
 │   │   │   ├── source.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
@@ -1744,6 +1758,10 @@ src/
 │   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── herdr_terminate_e2e_tests.rs
+│   │   │   │   ├── herdr_terminate_o_activation_tests.rs
+│   │   │   │   ├── herdr_terminate_o_e2e_tests.rs
+│   │   │   │   ├── herdr_terminate_o_real_tests.rs
+│   │   │   │   ├── herdr_terminate_route_e2e_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
@@ -2077,6 +2095,8 @@ src/
 │   │   ├── gateway_voice_queue.rs
 │   │   ├── health.rs
 │   │   ├── herdr_terminate.rs
+│   │   ├── herdr_terminate_exit_tests.rs
+│   │   ├── herdr_terminate_route_tests.rs
 │   │   ├── host_defer_gate.rs
 │   │   ├── host_defer_gate_tests.rs
 │   │   ├── host_key_derivation.rs
@@ -2459,6 +2479,7 @@ src/
 │   │   ├── herdr_host_tests.rs
 │   │   ├── herdr_registry.rs
 │   │   ├── herdr_socket_rig_tests.rs
+│   │   ├── herdr_terminate_real_tests.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
 │   │   ├── process_host.rs
