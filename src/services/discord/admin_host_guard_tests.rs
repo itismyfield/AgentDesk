@@ -102,7 +102,7 @@ pub(crate) fn api_child(test: &str) -> bool {
     }
     let exe = std::env::current_exe().expect("test binary");
     let output = std::process::Command::new(exe)
-        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .args(["--exact", test, "--nocapture"])
         .env(CHILD, "1")
         .output()
         .expect("child test run");
@@ -869,6 +869,7 @@ async fn a_worker_refusal_without_a_session_fails_its_row_with_its_attachments_p
         attachment_refs: refs.clone(),
         channel_id: channel.to_string(),
         user_msg_id: "75001".into(),
+        replay_source_message_ids: None,
         request_owner_id: "100".into(),
         request_owner_name: Some("Tester".into()),
         user_text: "hello".into(),

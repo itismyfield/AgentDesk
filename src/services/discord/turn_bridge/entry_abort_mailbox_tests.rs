@@ -631,7 +631,8 @@ async fn herdr_cold_stop_settles_only_with_a_before_start_proof() {
             ("before_receipt", None),
             ("after_receipt", Some(true)),
             ("after_notice_ack", Some(false)),
-            ("before_finalize", Some(false)),
+            ("before_policy_clear", Some(false)),
+            ("before_finalize", None),
         ];
         assert_eq!(
             steps,
@@ -774,6 +775,10 @@ async fn herdr_cold_case(
     let active = shared.restart.global_active.load(Ordering::Relaxed);
     (signal, holds, row.is_some(), active)
 }
+
+#[cfg(unix)]
+#[path = "entry_abort_cold_error_tests.rs"]
+mod cold_error;
 
 /// A Herdr Codex turn from the real rollout reader through admission, the bridge and the finalizer.
 #[cfg(unix)]

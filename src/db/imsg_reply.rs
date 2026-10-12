@@ -101,6 +101,22 @@ pub struct ActionAck<'a> {
     pub receipt: Option<Value>,
 }
 
+pub(crate) struct AdmissionIdentity<'a> {
+    pub origin_id: &'a str,
+    pub agent_id: &'a str,
+    pub channel_id: &'a str,
+    pub person_id: i64,
+    pub request_hash: &'a str,
+}
+
+pub(crate) struct AdmissionSettlement<'a> {
+    pub admission: &'a str,
+    pub kind: Option<&'a str>,
+    pub result: &'a Value,
+    pub delivery_confirmed: Option<bool>,
+    pub turn_id: Option<&'a str>,
+}
+
 pub async fn read_obligation(
     pool: &PgPool,
     origin_id: &str,
@@ -116,6 +132,58 @@ pub async fn read_action(pool: &PgPool, id: Uuid) -> Result<Option<Action>, sqlx
         .bind(id)
         .fetch_optional(pool)
         .await
+}
+
+/// Only the inserted GUID owner may perform delivery; duplicates require a fresh read.
+pub(crate) async fn reserve_admission(
+    pool: &PgPool,
+    identity: &AdmissionIdentity<'_>,
+) -> Result<bool, sqlx::Error> {
+    let inserted: Option<String> = sqlx::query_scalar(
+        "INSERT INTO imsg_reply_obligations (
+             origin_id, source, agent_id, channel_id,
+             person_id, request_hash, opened_at, expires_at
+         ) VALUES ($1, 'imessage', $2, $3, $4, $5, NOW(), NOW() + INTERVAL '24 hours')
+         ON CONFLICT (origin_id) DO NOTHING RETURNING origin_id",
+    )
+    .bind(identity.origin_id)
+    .bind(identity.agent_id)
+    .bind(identity.channel_id)
+    .bind(identity.person_id)
+    .bind(identity.request_hash)
+    .fetch_optional(pool)
+    .await?;
+    Ok(inserted.is_some())
+}
+
+/// Settlement changes admission metadata without reopening a resolution recorded by an early ACK.
+pub(crate) async fn settle_admission(
+    pool: &PgPool,
+    origin_id: &str,
+    settlement: &AdmissionSettlement<'_>,
+) -> Result<bool, sqlx::Error> {
+    let changed = sqlx::query(
+        "UPDATE imsg_reply_obligations SET
+             admission = $2, admission_kind = $3, admission_result = $4,
+             delivery_confirmed = $5,
+             admitted_turn_id = COALESCE($6, admitted_turn_id),
+             resolution = CASE
+                 WHEN $2 = 'refused' AND resolution = 'open' THEN 'closed'
+                 ELSE resolution END,
+             closed_at = CASE
+                 WHEN $2 = 'refused' AND resolution = 'open' THEN NOW()
+                 ELSE closed_at END
+         WHERE origin_id = $1 AND admission = 'admitting'",
+    )
+    .bind(origin_id)
+    .bind(settlement.admission)
+    .bind(settlement.kind)
+    .bind(settlement.result)
+    .bind(settlement.delivery_confirmed)
+    .bind(settlement.turn_id)
+    .execute(pool)
+    .await?;
+    Ok(changed.rows_affected() == 1)
 }
 
 const CLAIM_SQL: &str = r#"

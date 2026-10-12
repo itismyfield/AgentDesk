@@ -13,6 +13,10 @@ pub(crate) enum Refusal {
     NotReady,
     CaptureUnavailable,
     OwnDraft,
+    GeometryChanged,
+    WriterContended,
+    SubmissionFence,
+    Confirmation,
 }
 
 pub(crate) struct Submission<'a> {

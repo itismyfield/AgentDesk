@@ -322,7 +322,7 @@ mod tests {
     fn intake_judges_its_row_create_before_any_provider_or_bridge_spawn() {
         let src = include_str!("intake_turn.rs");
         let create = "let row = super::super::super::inflight::save_inflight_state_create_new(&inflight_state);";
-        let admit = "if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {\n        return Ok(());\n    }";
+        let admit = "if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {\n        return Ok(IntakeExecution::deferred(channel_id));\n    }";
         // The provider spawn follows the teardown verdict; the bridge spawn comes after it.
         // Split so the bridge entry-site census does not count this file as a caller.
         let bridge = ["\n    spawn_turn_", "bridge("].concat();

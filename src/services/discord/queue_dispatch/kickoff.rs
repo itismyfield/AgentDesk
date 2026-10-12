@@ -136,26 +136,29 @@ async fn kickoff_admitted_queue_channel(
         }
     };
 
-    let source_message_generations = intervention.source_message_queued_generations();
-    queue_marker::start_and_drain_kickoff_markers(
-        shared,
-        deps.http,
-        channel_id,
-        intervention.message_id,
-        &source_message_generations,
-    )
-    .await;
+    let late_settlement = router::checkpoint_waits_for_admission(channel_id);
+    if !late_settlement {
+        let source_message_generations = intervention.source_message_queued_generations();
+        queue_marker::start_and_drain_kickoff_markers(
+            shared,
+            deps.http,
+            channel_id,
+            intervention.message_id,
+            &source_message_generations,
+        )
+        .await;
 
-    let drained_cards = gateway::drain_merged_queued_placeholders(
-        shared,
-        channel_id,
-        intervention.message_id,
-        &intervention.source_message_ids,
-    )
-    .await;
-    // #5035 (A5): the drain now yields tokens only for gate-released cards.
-    for teardown in drained_cards {
-        let _ = queued_card_gate::teardown_delete(deps.http, shared, teardown).await;
+        let drained_cards = gateway::drain_merged_queued_placeholders(
+            shared,
+            channel_id,
+            intervention.message_id,
+            &intervention.source_message_ids,
+        )
+        .await;
+        // #5035 (A5): the drain now yields tokens only for gate-released cards.
+        for teardown in drained_cards {
+            let _ = queued_card_gate::teardown_delete(deps.http, shared, teardown).await;
+        }
     }
 
     let dispatch_result =
@@ -193,7 +196,22 @@ async fn kickoff_admitted_queue_channel(
             drop(dispatch_lease);
             IdleQueueKickoffChannelOutcome { started: false }
         }
-        Ok(()) => {
+        Ok(router::IntakeExecution::Deferred | router::IntakeExecution::ConsumedProtected) => {
+            drop(dispatch_lease);
+            IdleQueueKickoffChannelOutcome { started: false }
+        }
+        Ok(router::IntakeExecution::Executed) => {
+            if late_settlement {
+                queue_dispatch::settle_executed_queued_intake(
+                    shared,
+                    deps.http,
+                    provider,
+                    channel_id,
+                    &intervention,
+                    "idle_kickoff_queue_executed",
+                )
+                .await;
+            }
             mailbox_abandon_unclaimed_dispatch_after_success(
                 shared,
                 provider,
