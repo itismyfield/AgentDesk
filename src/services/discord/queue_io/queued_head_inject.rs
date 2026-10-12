@@ -30,9 +30,9 @@ pub(in crate::services::discord) fn persistence_failed(error: String) -> health:
 
 /// `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off.
 pub(in crate::services::discord) fn queued_head_enabled(channel: u64) -> bool {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     return health::inject_hook::queued_head_enabled(channel);
-    #[cfg(not(test))]
+    #[cfg(not(all(test, unix)))]
     {
         static PROCESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let _ = channel;
