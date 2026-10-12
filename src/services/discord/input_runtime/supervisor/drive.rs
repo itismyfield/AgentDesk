@@ -378,6 +378,13 @@ impl<P: Ports> Supervisor<P> {
             Vec::new()
         };
         probe.adopt(expected, runtimes);
+        #[cfg(test)]
+        let publish = !super::mutant("c2_skip_ready_publish");
+        #[cfg(not(test))]
+        let publish = true;
+        if publish {
+            self.publish_intake();
+        }
         loop {
             let landing = self.boot().await;
             self.retry_notices().await;

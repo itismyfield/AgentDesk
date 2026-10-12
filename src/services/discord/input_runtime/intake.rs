@@ -7,12 +7,11 @@ pub(in crate::services::discord) mod client;
 #[path = "intake/source.rs"]
 mod source;
 
-#[cfg(test)]
-pub(in crate::services::discord) use classify::Refusal;
 pub(in crate::services::discord) use classify::{
-    Classification, InputDisposition, PolicyFacts, Protection, Retry, TargetFacts, VoiceTarget,
-    classify,
+    Classification, InputDisposition, PolicyFacts, Protection, TargetFacts, VoiceTarget, classify,
 };
+#[cfg(test)]
+pub(in crate::services::discord) use classify::{Refusal, Retry};
 pub(in crate::services::discord) use client::Client;
 #[cfg(test)]
 pub(in crate::services::discord) use client::{Access, Applied, apply_from_scan, lookup};

@@ -171,6 +171,13 @@ async fn c2_apply_from_real_scan_keeps_receipt_distinct_from_failed_settlement_a
     let rig = Rig::new(6_325_204);
     let mut supervisor = rig.supervisor(Request::Ledger, vec![]);
     assert_eq!(supervisor.boot().await, Landing::Admitted);
+    let before_receipt = supervisor
+        .slot()
+        .get()
+        .unwrap()
+        .rows()
+        .unwrap()
+        .folded_seq();
     let (sender, mut receiver) = mpsc::channel(4);
     let client = supervisor.bind_intake(sender).unwrap();
     supervisor.adopt_task(rig.channel).unwrap();
@@ -218,7 +225,7 @@ async fn c2_apply_from_real_scan_keeps_receipt_distinct_from_failed_settlement_a
             .rows()
             .unwrap()
             .folded_seq(),
-        1
+        before_receipt + 1
     );
     let ticket = roundtrip(client.fetch_ticket(), &mut supervisor, &mut receiver)
         .await
@@ -255,7 +262,7 @@ async fn c2_apply_from_real_scan_keeps_receipt_distinct_from_failed_settlement_a
             .rows()
             .unwrap()
             .folded_seq(),
-        1
+        before_receipt + 1
     );
     roundtrip(
         client.complete_scan(committed.capability),
@@ -280,6 +287,13 @@ async fn c2_external_reply_loss_retains_original_and_does_not_cancel_the_receive
     let rig = Rig::new(6_325_205);
     let mut supervisor = rig.supervisor(Request::Ledger, vec![]);
     assert_eq!(supervisor.boot().await, Landing::Admitted);
+    let before_receipt = supervisor
+        .slot()
+        .get()
+        .unwrap()
+        .rows()
+        .unwrap()
+        .folded_seq();
     let (sender, mut receiver) = mpsc::channel(1);
     let client = supervisor.bind_intake(sender).unwrap();
     supervisor.adopt_task(rig.channel).unwrap();
@@ -314,7 +328,7 @@ async fn c2_external_reply_loss_retains_original_and_does_not_cancel_the_receive
     let rows = supervisor.slot().get().unwrap().rows().unwrap();
     assert_eq!(rows.receipt_identity(original.key()), Some(identity));
     assert_eq!(rows.row(original.key()).unwrap().input, input);
-    assert_eq!(rows.folded_seq(), 1);
+    assert_eq!(rows.folded_seq(), before_receipt + 1);
     let result = roundtrip(
         client.submit_external(&original),
         &mut supervisor,
@@ -337,7 +351,7 @@ async fn c2_external_reply_loss_retains_original_and_does_not_cancel_the_receive
             .rows()
             .unwrap()
             .folded_seq(),
-        1
+        before_receipt + 1
     );
     assert!(supervisor.release());
 }

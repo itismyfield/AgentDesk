@@ -724,3 +724,97 @@ async fn b_ready_views_cannot_boot_before_adopt_then_open_the_ledger() {
     assert!(!returned);
     assert!(supervisor.release());
 }
+
+#[tokio::test]
+async fn c2_actual_serve_publishes_existing_client_only_after_adopt_and_final_views() {
+    use crate::services::discord::input_runtime::intake::{Access, lookup};
+    use crate::services::tui_input::rows::receipt_identity::Responsibility;
+
+    let rig = Rig::new(6_326_391);
+    let mut supervisor = handoff(&rig, reserved(&rig), vec![41]);
+    let overflow = supervisor.pending_overflow();
+    let (supply, supplied) = oneshot::channel();
+    let (commands, received) = mailbox::channel(8);
+    let client = supervisor.bind_intake(commands.clone()).unwrap();
+    let screen = Arc::new(Screen::default());
+    let mut run = task(
+        supervisor,
+        screen.clone(),
+        vec![ProviderKind::Claude, ProviderKind::Codex],
+        supplied,
+        received,
+    );
+    let before = overflow.generation();
+    assert!(matches!(
+        lookup(rig.registry, &ProviderKind::Claude, rig.channel),
+        Access::Deferred(Deferred::Closed)
+    ));
+    assert_eq!(
+        client.pending(vec![41]).await.unwrap_err(),
+        Deferred::Closed
+    );
+    assert_eq!(overflow.generation(), before + 2);
+    assert_eq!(adopt(&commands, rig.channel).await, Ok(()));
+    let before = overflow.generation();
+    assert!(matches!(
+        lookup(rig.registry, &ProviderKind::Claude, rig.channel),
+        Access::Deferred(Deferred::Closed)
+    ));
+    assert_eq!(
+        client.pending(vec![41]).await.unwrap_err(),
+        Deferred::Closed
+    );
+    assert_eq!(overflow.generation(), before + 2);
+    assert!(rig.world.log().is_empty());
+    assert!(!rig.root.join("input_ledger").exists());
+    assert!(
+        supply
+            .send(vec![
+                rig.world.runtime.shared.clone(),
+                runtime(ProviderKind::Codex),
+            ])
+            .is_ok()
+    );
+    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(
+            lookup(rig.registry, &ProviderKind::Claude, rig.channel),
+            Access::Ready(_)
+        ) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    if ready.is_err() {
+        run.abort();
+        let _ = (&mut run).await;
+    }
+    assert!(
+        ready.is_ok(),
+        "actual serve must publish the existing client after Adopt and final views"
+    );
+    assert!(matches!(
+        lookup(rig.registry, &ProviderKind::Claude, rig.channel),
+        Access::Ready(ref published) if Arc::ptr_eq(published, &client)
+    ));
+    eventually(|| rig.gate.mode() == Mode::LedgerOpen).await;
+    let pending = client.pending(vec![41]).await;
+    assert!(
+        pending.is_ok(),
+        "the published client uses the live mailbox"
+    );
+    assert_eq!(pending.unwrap().sources, vec![41]);
+    let identity = ReceiptIdentity::new(41, vec![41], 7, rig.channel, rig.channel).unwrap();
+    assert!(matches!(
+        client.lookup_responsibility(identity).await,
+        Ok(Responsibility::Known { key: 41, .. })
+    ));
+    assert!(client.close().await.is_ok());
+    assert!(screen.sent.lock().unwrap().is_empty());
+    drop(client);
+    drop(commands);
+    let (supervisor, returned) = run.await.unwrap();
+    assert!(!returned);
+    assert!(!supervisor.admission_open());
+    assert_eq!(supervisor.pending_snapshot().sources, vec![41]);
+    assert!(supervisor.release());
+}

@@ -244,8 +244,10 @@ impl Registry {
             .get(&(provider.as_str().to_owned(), channel))
             .ok_or(receipt::Deferred::Unknown)?;
         let client = entry.client.as_ref().and_then(Weak::upgrade);
-        if !entry.poisoned && client.as_ref().is_some_and(|client| client.ready()) {
-            return Ok(client.unwrap());
+        if !entry.poisoned
+            && let Some(client) = client.as_ref().filter(|client| client.ready())
+        {
+            return Ok(Arc::clone(client));
         }
         #[cfg(test)]
         let retain = !super::super::mutant("c2_drop_prebind_dirty");

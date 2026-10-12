@@ -87,7 +87,13 @@ fn c2_runtime_source_policy_reads_current_author_provider_routing_and_holds_unkn
         assert_eq!(before.supported, Some(true));
         assert!(matches!(before.voice_target, VoiceTarget::Unknown));
         assert!(!port.source_policy(&source).await);
-        shared.settings.write().await.owner_user_id = Some(8);
+        {
+            let mut current = shared.settings.write().await;
+            current.owner_user_id = Some(8);
+            current.allow_all_users = false;
+            current.allowed_user_ids.clear();
+            current.allowed_bot_ids.clear();
+        }
         let revoked = port.policy_facts(&source).await;
         assert_eq!(
             revoked.authorized,
@@ -106,7 +112,7 @@ fn c2_runtime_source_policy_reads_current_author_provider_routing_and_holds_unkn
             .sessions
             .get_mut(&ChannelId::new(channel))
             .unwrap()
-            .channel_name = Some("changed-codex".into());
+            .channel_name = Some("changed-cdx".into());
         assert_eq!(port.policy_facts(&source).await.supported, Some(false));
         shared
             .core
