@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::inflight::{ManagedSubmission, SubmissionFailure};
+use crate::services::discord::replay_policy::permit::EffectTarget;
+use crate::services::discord::router::intake_dispatch::replay_admission::ReplayStart;
 use crate::services::provider::{CancelToken, LegacyDispatchKind, ProviderKind};
 use crate::services::provider_teardown::TeardownClearance;
 use crate::services::remote::RemoteProfile;
@@ -167,8 +169,17 @@ pub(super) fn producer_error(
 
 pub(super) fn execute(
     turn: StreamingTurn<'_>,
+    start: ReplayStart,
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
+    // Spent before any driver, Herdr included, so a protected start's first input needs its permit.
+    let target = EffectTarget::ProviderStart {
+        provider: turn.provider.as_str().to_string(),
+        channel: turn.channel_id.to_string(),
+    };
+    start
+        .spend(&target, turn.prompt, &turn.cancel)
+        .map_err(|refusal| format!("replay start refused: {refusal:?}"))?;
     match turn.host {
         TurnHost::Tmux => {}
         TurnHost::Refused(refusal) => return Err(refusal.to_string()),
@@ -749,7 +760,9 @@ mod tests {
                 force_fresh: false,
                 submission: None,
             };
-            tokio::task::block_in_place(|| execute(turn, sender))
+            tokio::task::block_in_place(|| {
+                execute(turn, crate::services::discord::router::intake_dispatch::replay_admission::dormant_start("test").unwrap(), sender)
+            })
         };
 
         let off = force_admission(Admission::new(Some("off".as_ref()), None));

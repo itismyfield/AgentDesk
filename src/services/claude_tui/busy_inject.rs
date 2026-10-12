@@ -7,6 +7,8 @@ mod screen_tests;
 mod stash;
 #[cfg(all(test, unix))]
 mod stash_tests;
+#[cfg(all(test, unix))]
+pub(crate) use stash_tests::{FAKE_TUI as FAKE_STASH_TUI, StashChannelGuard};
 
 use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -49,6 +51,8 @@ pub(crate) enum Unconfirmed {
     CaptureFailed,
     ModalAfterPaste,
     DraftNotOwned,
+    ContaminatedSubmit,
+    CursorChangedBeforeEnter,
     EnterFailed,
     NotObserved,
 }
@@ -161,14 +165,24 @@ fn marker(nonce: &str) -> String {
 }
 
 /// Whether a complete transcript record after `offset` carries the nonce as human input.
+#[cfg(all(test, unix))]
 pub(crate) fn transcript_carries(path: &Path, offset: u64, nonce: &str) -> bool {
+    transcript_submission(path, offset, nonce, None).is_some()
+}
+
+pub(super) fn transcript_submission(
+    path: &Path,
+    offset: u64,
+    nonce: &str,
+    expected: Option<&str>,
+) -> Option<bool> {
     let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
+        return None;
     };
     if file.metadata().map(|meta| meta.len()).unwrap_or(0) < offset
         || file.seek(SeekFrom::Start(offset)).is_err()
     {
-        return false;
+        return None;
     }
     let marker = marker(nonce);
     let mut reader = std::io::BufReader::new(file);
@@ -180,28 +194,33 @@ pub(crate) fn transcript_carries(path: &Path, offset: u64, nonce: &str) -> bool 
         // A line without its newline may still be mid-write.
         if line.ends_with(b"\n")
             && let Ok(record) = serde_json::from_slice::<serde_json::Value>(&line)
-            && human_input_text(&record).is_some_and(|text| text.contains(&marker))
+            && let Some((text, has_nontext)) = human_input_text(&record, expected.is_some())
+            && text.contains(&marker)
         {
-            return true;
+            return Some(expected.is_none_or(|expected| !has_nontext && text == expected));
         }
         line.clear();
     }
-    false
+    None
 }
 
-/// Text of an enqueue, a queued command or a non-meta user prompt; other records never count.
-fn human_input_text(record: &serde_json::Value) -> Option<String> {
-    let text_of = |value: &serde_json::Value| -> Option<String> {
+/// Text and non-text presence in an enqueue, queued command or non-meta user prompt.
+/// Extra non-text blocks prevent an exact frame receipt even when its text matches.
+fn human_input_text(record: &serde_json::Value, prompt_only: bool) -> Option<(String, bool)> {
+    let text_of = |value: &serde_json::Value| -> Option<(String, bool)> {
         match value {
-            serde_json::Value::String(text) => Some(text.clone()),
-            serde_json::Value::Array(blocks) => Some(
+            serde_json::Value::String(text) => Some((text.clone(), false)),
+            serde_json::Value::Array(blocks) => Some((
                 blocks
                     .iter()
                     .filter(|block| block.get("type").and_then(|t| t.as_str()) == Some("text"))
                     .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
                     .collect::<Vec<_>>()
                     .join("\n"),
-            ),
+                blocks
+                    .iter()
+                    .any(|block| block.get("type").and_then(|t| t.as_str()) != Some("text")),
+            )),
             _ => None,
         }
     };
@@ -212,6 +231,14 @@ fn human_input_text(record: &serde_json::Value) -> Option<String> {
         "attachment" => {
             let attachment = record.get("attachment")?;
             if attachment.get("type")?.as_str()? != "queued_command" {
+                return None;
+            }
+            if prompt_only
+                && attachment
+                    .get("commandMode")
+                    .and_then(|mode| mode.as_str())
+                    .is_some_and(|mode| mode != "prompt")
+            {
                 return None;
             }
             text_of(attachment.get("prompt")?)
@@ -299,20 +326,31 @@ impl Pane {
         self.state().map(|state| state.generation)
     }
 
-    /// Runs `command` in the server only while no client is attached, none attached since `g0`,
-    /// and the pane is still `size`. tmux runs a client's queued commands in one pass.
+    /// Keeps the non-stash callers' no-attached-client contract.
     pub(crate) fn guarded(
         &self,
         g0: &Generation,
         size: Option<(usize, usize)>,
         command: &str,
     ) -> Guard {
+        self.guarded_for_input(g0, size, command, false, None)
+    }
+
+    fn guarded_for_input(
+        &self,
+        g0: &Generation,
+        size: Option<(usize, usize)>,
+        command: &str,
+        stash: bool,
+        cursor: Option<(usize, usize)>,
+    ) -> Guard {
+        let attached = if stash { g0.attached } else { 0 };
         let vetoed = format!(
             "display-message -p -t '{}' '{VETOED} #{{session_attached}} #{{session_last_attached}}'",
             self.target
         );
         let mut condition = format!(
-            "#{{&&:#{{==:#{{session_attached}},0}},#{{==:#{{session_last_attached}},{}}}}}",
+            "#{{&&:#{{==:#{{session_attached}},{attached}}},#{{==:#{{session_last_attached}},{}}}}}",
             g0.last
         );
         if let Some((width, height)) = size {
@@ -320,6 +358,10 @@ impl Pane {
                 "#{{&&:#{{==:#{{pane_width}},{width}}},#{{==:#{{pane_height}},{height}}}}}"
             );
             condition = format!("#{{&&:{condition},{sized}}}");
+        }
+        if let Some((x, y)) = cursor {
+            let positioned = format!("#{{&&:#{{==:#{{cursor_x}},{x}}},#{{==:#{{cursor_y}},{y}}}}}");
+            condition = format!("#{{&&:{condition},{positioned}}}");
         }
         let args = [
             "if-shell",
@@ -333,15 +375,18 @@ impl Pane {
         let Some(out) = self.ok(&args) else {
             return Guard::Failed;
         };
-        // The else branch ran, so the command did not; a count means a person attached since g0,
-        // unless no client was attached then and none since, which leaves only the size.
+        // A sized guard with the same generation can only have failed its size comparison.
         match out.trim().strip_prefix(VETOED).map(str::trim) {
             None if out.trim().is_empty() => Guard::Applied,
             None => Guard::Failed,
             Some(rest) => {
                 let mut fields = rest.split_whitespace();
                 match fields.next().map(str::parse::<u32>) {
-                    Some(Ok(0)) if size.is_some() && fields.next().unwrap_or("") == g0.last => {
+                    Some(Ok(count))
+                        if count == attached
+                            && size.is_some()
+                            && fields.next().unwrap_or("") == g0.last =>
+                    {
                         Guard::Resized
                     }
                     Some(Ok(_)) => Guard::Vetoed,
@@ -361,6 +406,27 @@ impl Pane {
             "-S",
             CAPTURE_SCROLLBACK,
         ])
+    }
+
+    fn capture_with_cursor(&self) -> Option<(String, (usize, usize))> {
+        let out = self.ok(&[
+            "capture-pane",
+            "-p",
+            "-e",
+            "-t",
+            &self.target,
+            "-S",
+            CAPTURE_SCROLLBACK,
+            ";",
+            "display-message",
+            "-p",
+            "-t",
+            &self.target,
+            "agentdesk-busy-inject-cursor #{cursor_x},#{cursor_y}",
+        ])?;
+        let (capture, position) = out.rsplit_once("\nagentdesk-busy-inject-cursor ")?;
+        let (x, y) = position.trim().split_once(',')?;
+        Some((format!("{capture}\n"), (x.parse().ok()?, y.parse().ok()?)))
     }
 }
 
@@ -450,7 +516,9 @@ pub(crate) fn draft_sighting(capture: &str) -> DraftSighting {
         (screen::Stash::AbsentInRecognizedLayout, screen::Composer::Empty) => {
             DraftSighting::Settled
         }
-        (screen::Stash::AbsentInRecognizedLayout, screen::Composer::Text(_)) => {
+        (screen::Stash::AbsentInRecognizedLayout, screen::Composer::Text(rows))
+            if !rows.iter().any(|row| row.contains("[📱 ")) =>
+        {
             DraftSighting::PersonDraft
         }
         _ => DraftSighting::Unsettled,
@@ -516,6 +584,7 @@ fn stash_channel_listed(channel: Option<u64>, listed: &[u64]) -> bool {
 
 /// Tries the composer lock a bounded number of times, then injects under it. No channel comes
 /// with this entry, so a person's draft is never stashed: it queues.
+#[cfg(test)]
 pub(crate) fn inject(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Outcome {
     inject_report(pane, request, None, timing).outcome
 }
@@ -528,6 +597,16 @@ pub(crate) fn inject_report(
     channel: Option<u64>,
     timing: &Timing,
 ) -> Report {
+    #[cfg(all(test, unix))]
+    if !stash_tests::USE_PRODUCTION_CHANNELS.get() {
+        return inject_listed(
+            pane,
+            request,
+            channel,
+            &stash_tests::configured_channels(),
+            timing,
+        );
+    }
     inject_listed(pane, request, channel, stash_channels_configured(), timing)
 }
 
@@ -604,12 +683,11 @@ fn inject_locked(
     timing: &Timing,
     stash: bool,
 ) -> Report {
-    // The composer lock fences other AgentDesk writers only; a person reaches the pane by attaching.
-    // The second is read first, so an attach after the state read lands in a later second.
+    // The lock fences AgentDesk writers; generation checks fence new clients, not human keys.
     let floor = unix_seconds();
     let state = match pane.state() {
         None => return Report::not_sent(Veto::AttachUnknown),
-        Some(state) if state.generation.attached > 0 => {
+        Some(state) if state.generation.attached > 0 && !stash => {
             return Report::not_sent(Veto::HumanAttached);
         }
         // A second attach within this second would leave the generation unchanged.
@@ -671,10 +749,24 @@ fn inject_locked(
         buffer,
         timing,
         size: state.size,
+        stash,
+        cursor: std::cell::Cell::new(None),
     };
     match plan {
         Plan::Direct(drawn) => {
-            Report::new(paste_into_empty(&attempt, &drawn), DraftState::Unchanged)
+            let mut last = None;
+            let outcome = paste_into_empty(&attempt, &drawn, &mut last);
+            let uncertain = attempt.g0.attached > 0 && matches!(outcome, Outcome::Unconfirmed(_));
+            let draft = if uncertain {
+                DraftState::Unknown
+            } else {
+                DraftState::Unchanged
+            };
+            let report = Report::new(outcome, draft);
+            if uncertain {
+                stash::protect(&attempt, &report, last.as_deref());
+            }
+            report
         }
         Plan::Stash(draft) => stash::run(&attempt, &draft),
     }
@@ -692,12 +784,20 @@ struct Attempt<'a> {
     timing: &'a Timing,
     /// The pane size the paste's rows were predicted for.
     size: Option<(usize, usize)>,
+    stash: bool,
+    cursor: std::cell::Cell<Option<(usize, usize)>>,
 }
 
 impl Attempt<'_> {
     fn key(&self, key: &str) -> Guard {
         let command = format!("send-keys -t '{}' {key}", self.pane.target);
-        self.pane.guarded(&self.g0, None, &command)
+        let cursor = if key == "Enter" {
+            self.cursor.get()
+        } else {
+            None
+        };
+        self.pane
+            .guarded_for_input(&self.g0, None, &command, self.stash, cursor)
     }
 
     /// With `size`, the paste lands only in a pane still that size.
@@ -706,15 +806,16 @@ impl Attempt<'_> {
             "paste-buffer -p -r -d -b {} -t '{}'",
             self.buffer, self.pane.target
         );
-        self.pane.guarded(&self.g0, size, &command)
+        self.pane
+            .guarded_for_input(&self.g0, size, &command, self.stash, None)
     }
 
     fn drop_buffer(&self) {
         let _ = self.pane.ok(&["delete-buffer", "-b", &self.buffer]);
     }
 
-    /// No client now and none since g0.
-    fn unattended(&self) -> bool {
+    /// No client attached or detached since g0, including an initially attached stash input.
+    fn generation_unchanged(&self) -> bool {
         self.pane.generation().as_ref() == Some(&self.g0)
     }
 
@@ -729,10 +830,17 @@ impl Attempt<'_> {
             if attempt > 0 {
                 std::thread::sleep(self.timing.recheck_interval);
             }
-            if !self.unattended() {
+            if !self.generation_unchanged() {
                 return Err(Unconfirmed::AttachedAfterPaste);
             }
-            let Some(after) = self.pane.capture() else {
+            let captured = if self.g0.attached > 0 {
+                self.pane
+                    .capture_with_cursor()
+                    .map(|(capture, cursor)| (capture, Some(cursor)))
+            } else {
+                self.pane.capture().map(|capture| (capture, None))
+            };
+            let Some((after, cursor)) = captured else {
                 return Err(Unconfirmed::CaptureFailed);
             };
             let shown_modal = modal(&after);
@@ -742,6 +850,7 @@ impl Attempt<'_> {
                 return Err(Unconfirmed::ModalAfterPaste);
             }
             if owned {
+                self.cursor.set(cursor);
                 return Ok(());
             }
         }
@@ -753,10 +862,13 @@ impl Attempt<'_> {
         // The server does not report when it applied the key, so the window starts just before
         // the request; a slow reply (an after-send-keys hook) only shortens it.
         let deadline = Instant::now() + self.timing.confirm_window;
-        // A person may still type after the last capture; an attach by then withholds the Enter.
+        // Cursor equality narrows the human-key window; the submitted body still decides success.
         match self.key("Enter") {
             Guard::Applied => {}
             Guard::Vetoed | Guard::Resized => {
+                if self.cursor.get().is_some() && self.generation_unchanged() {
+                    return Outcome::Unconfirmed(Unconfirmed::CursorChangedBeforeEnter);
+                }
                 return Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste);
             }
             Guard::Gone | Guard::Failed => return Outcome::Unconfirmed(Unconfirmed::EnterFailed),
@@ -767,10 +879,18 @@ impl Attempt<'_> {
             if Instant::now() >= deadline {
                 return Outcome::Unconfirmed(Unconfirmed::NotObserved);
             }
-            if transcript_carries(request.transcript, self.offset, request.nonce)
-                && Instant::now() < deadline
+            if let Some(exact) = transcript_submission(
+                request.transcript,
+                self.offset,
+                request.nonce,
+                Some(self.text),
+            ) && Instant::now() < deadline
             {
-                return Outcome::Injected;
+                return if exact {
+                    Outcome::Injected
+                } else {
+                    Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit)
+                };
             }
             let left = deadline.saturating_duration_since(Instant::now());
             std::thread::sleep(self.timing.confirm_poll.min(left));
@@ -779,7 +899,11 @@ impl Attempt<'_> {
 }
 
 /// The composer was empty: paste, prove the bytes are ours, then one Enter.
-fn paste_into_empty(attempt: &Attempt<'_>, drawn: &screen::Drawn) -> Outcome {
+fn paste_into_empty(
+    attempt: &Attempt<'_>,
+    drawn: &screen::Drawn,
+    last: &mut Option<String>,
+) -> Outcome {
     // From the paste on, absence of evidence never proves the input was not taken.
     match attempt.paste(attempt.size) {
         Guard::Applied => {}
@@ -799,7 +923,7 @@ fn paste_into_empty(attempt: &Attempt<'_>, drawn: &screen::Drawn) -> Outcome {
         own_draft(ShadowProvider::Claude, after, attempt.text, true)
             || matches!(drawn, screen::Drawn::Rows(rows) if own_wrapped_draft(after, rows))
     };
-    if let Err(detail) = attempt.await_own(owns, &mut None) {
+    if let Err(detail) = attempt.await_own(owns, last) {
         return Outcome::Unconfirmed(detail);
     }
     attempt.enter()

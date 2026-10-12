@@ -1,12 +1,113 @@
+use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use super::screen::{self, Composer, Stash};
 use super::*;
 
+mod environment_tests {
+    use super::*;
+
+    #[test]
+    fn production_environment_initialization_selects_only_the_listed_channel() {
+        const CHILD: &str = "ADK_BUSY_INJECT_STASH_CONFIG_SUBPROCESS";
+        if std::env::var_os(CHILD).is_none() {
+            let test = format!(
+                "{}::production_environment_initialization_selects_only_the_listed_channel",
+                module_path!().split_once("::").unwrap().1
+            );
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test, "--nocapture"])
+                .env(CHILD, "1")
+                .env("ADK_BUSY_INJECT_STASH_CHANNELS", "invalid, 6245, , 6245")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stdout.contains("running 1 test"), "{stdout}\n{stderr}");
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            assert!(
+                stdout.contains("1 passed; 0 failed; 0 ignored"),
+                "{stdout}\n{stderr}"
+            );
+            return;
+        }
+
+        USE_PRODUCTION_CHANNELS.set(true);
+        for channel in [Some(6245), Some(6246), None] {
+            let tui = Tui::new("human draft A");
+            tui.put("attached", "4");
+            let session = tui.session();
+            let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
+            let request = Request {
+                session: &session,
+                transcript: &tui.transcript,
+                source: "iMessage",
+                author: "ann",
+                nonce: NONCE,
+                text: TEXT,
+            };
+            let got = inject_report(&pane, &request, channel, &FAST);
+            if channel == Some(6245) {
+                assert_eq!(got, report(Outcome::Injected, DraftState::RestoredObserved));
+                assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
+                assert_eq!(tui.records(), [framed()]);
+            } else {
+                assert_eq!(
+                    got,
+                    report(Outcome::NotSent(Veto::HumanAttached), DraftState::Unchanged)
+                );
+                assert!(tui.applied().is_empty());
+                assert!(tui.records().is_empty());
+            }
+            assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
+        }
+    }
+}
 mod hold_tests;
+
+thread_local! {
+    pub(super) static USE_PRODUCTION_CHANNELS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+static STASH_CHANNELS: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(Default::default);
+
+/// Opens only this test's channel; unrelated parallel tests retain their own switches.
+pub(crate) struct StashChannelGuard(u64);
+
+impl StashChannelGuard {
+    pub(crate) fn new(channel: u64) -> Self {
+        let mut channels = STASH_CHANNELS
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert!(
+            channels.insert(channel),
+            "stash channel already enabled by a test"
+        );
+        Self(channel)
+    }
+}
+
+impl Drop for StashChannelGuard {
+    fn drop(&mut self) {
+        STASH_CHANNELS
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(&self.0);
+    }
+}
+
+pub(crate) fn configured_channels() -> Vec<u64> {
+    STASH_CHANNELS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .iter()
+        .copied()
+        .collect()
+}
 
 const NONCE: &str = "abcd1234";
 const TEXT: &str = "are you there?";
@@ -29,9 +130,13 @@ const FAST: Timing = Timing {
 
 /// A scripted Claude TUI behind `tmux`: composer, stash, the single-slot C-s, a submit handing the
 /// stash back, attach generation, a person, a barrier, and a faint idle placeholder only `-e` keeps.
-const FAKE_TUI: &str = r#"#!/bin/sh
+pub(crate) const FAKE_TUI: &str = r#"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
+cursor() {
+  tail -n 1 "$d/composer" | wc -m | tr -d ' ' > "$d/cursor_x"
+  wc -l < "$d/composer" | tr -d ' ' > "$d/cursor_y"
+}
 cs() {
   if [ -s "$d/composer" ]; then mv "$d/composer" "$d/stash"; : > "$d/composer"
   elif [ -f "$d/stash" ]; then mv "$d/stash" "$d/composer"; fi
@@ -50,14 +155,18 @@ paste() {
   else cat "$d/buffer" >> "$d/composer"; fi
 }
 apply() {
+  [ "$1" != Enter ] || [ ! -f "$d/human.before-Enter" ] || . "$d/human.before-Enter"
   echo "$1" >> "$d/applied"
   case "$1" in C-s) cs ;; Enter) enter ;; paste) paste ;; esac
+  cursor
+  [ "$1" != paste ] || [ ! -f "$d/human.after-paste" ] || . "$d/human.after-paste"
+  [ "$1" != C-s ] || [ ! -f "$d/human.after-C-s" ] || . "$d/human.after-C-s"
   # The key took effect but the reply never came back.
   [ ! -f "$d/lost.$1" ] || exit 1
 }
 attach() { echo 1 > "$d/attached"; echo "$1" > "$d/last"; }
 detach() { echo 0 > "$d/attached"; }
-type_text() { printf '%s' "$1" >> "$d/composer"; }
+type_text() { printf '%s' "$1" >> "$d/composer"; cursor; }
 render() {
   cat "$d/head"
   if [ -f "$d/status" ]; then cat "$d/status"; elif [ -f "$d/stash" ]; then cat "$d/stashrow"; else echo; fi
@@ -84,15 +193,29 @@ capture-pane)
     elif [ "$k" != never ]; then echo $((k-1)) > "$d/restore_in"; fi
   fi
   case " $* " in *" -e "*) render ;; *) render | sed "s/$(printf '\033')\[[0-9;]*m//g" ;; esac
+  case " $* " in *agentdesk-busy-inject-cursor*)
+    echo "agentdesk-busy-inject-cursor $(cat "$d/cursor_x" 2>/dev/null || echo 0),$(cat "$d/cursor_y" 2>/dev/null || echo 0)" ;;
+  esac
   [ -f "$d/human.$n" ] && . "$d/human.$n"
   ;;
 load-buffer) for last do :; done; cp "$last" "$d/buffer" ;;
 if-shell)
-  a=$(cat "$d/attached"); l=$(cat "$d/last"); ok=0
-  [ "$a" = 0 ] && ok=1
+  a=$(cat "$d/attached"); l=$(cat "$d/last"); ok=1
+  expected=$(printf '%s' "$6" | sed -n 's/.*session_attached},\([0-9]*\)}.*/\1/p')
+  [ -z "$expected" ] || [ "$a" = "$expected" ] || ok=0
   case "$6" in *session_last_attached*)
     g0=$(printf '%s' "$6" | sed 's/.*session_last_attached},\([0-9]*\)}.*/\1/')
     [ "$l" = "$g0" ] || ok=0 ;;
+  esac
+  case "$6" in *pane_width*)
+    w=$(printf '%s' "$6" | sed -n 's/.*pane_width},\([0-9]*\)}.*/\1/p')
+    h=$(printf '%s' "$6" | sed -n 's/.*pane_height},\([0-9]*\)}.*/\1/p')
+    [ "$(cat "$d/width")" = "$w" ] && [ "$(cat "$d/height")" = "$h" ] || ok=0 ;;
+  esac
+  case "$6" in *cursor_x*)
+    x=$(printf '%s' "$6" | sed -n 's/.*cursor_x},\([0-9]*\)}.*/\1/p')
+    y=$(printf '%s' "$6" | sed -n 's/.*cursor_y},\([0-9]*\)}.*/\1/p')
+    [ "$(cat "$d/cursor_x" 2>/dev/null || echo 0)" = "$x" ] && [ "$(cat "$d/cursor_y" 2>/dev/null || echo 0)" = "$y" ] || ok=0 ;;
   esac
   [ "$ok" = 1 ] || { echo "agentdesk-busy-inject-vetoed $a $l"; exit 0; }
   set -- $7; eval "key=\${$#}"; [ "$1" = paste-buffer ] && key=paste
@@ -130,6 +253,8 @@ impl Tui {
             ("last", "100".to_string()),
             ("width", "60".to_string()),
             ("height", "50".to_string()),
+            ("cursor_x", "0".to_string()),
+            ("cursor_y", "0".to_string()),
             (
                 "head",
                 "⏺ Working on it.\n\n✻ Thinking… (12s · esc to interrupt)\n".to_string(),
@@ -256,6 +381,318 @@ fn a_draft_is_stashed_then_the_input_entered_once_and_the_draft_handed_back() {
         assert_eq!(tui.drafts(), (draft.to_string(), None), "{draft:?}");
         assert!(tui.taken() && tui.alerts().is_empty(), "{draft:?}");
     }
+}
+
+#[test]
+fn an_allowlisted_attached_pane_stashes_submits_once_and_restores_the_exact_draft() {
+    for draft in ["human draft A", "first line\n\n  indented third"] {
+        let tui = Tui::new(draft);
+        tui.put("attached", "4");
+        assert_eq!(
+            tui.run(),
+            report(Outcome::Injected, DraftState::RestoredObserved),
+            "{draft:?}"
+        );
+        assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
+        assert_eq!(tui.records(), [framed()]);
+        assert_eq!(tui.drafts(), (draft.to_string(), None));
+        assert!(tui.alerts().is_empty());
+    }
+}
+
+#[test]
+fn only_an_allowlisted_empty_attached_pane_takes_the_direct_paste() {
+    let tui = Tui::new("");
+    tui.put("attached", "4");
+    let session = tui.session();
+    let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
+    let request = Request {
+        session: &session,
+        transcript: &tui.transcript,
+        source: "iMessage",
+        author: "ann",
+        nonce: NONCE,
+        text: TEXT,
+    };
+    assert_eq!(
+        inject_gated(&pane, &request, &FAST, false),
+        report(Outcome::NotSent(Veto::HumanAttached), DraftState::Unchanged)
+    );
+    assert!(tui.applied().is_empty());
+    assert_eq!(tui.run(), report(Outcome::Injected, DraftState::Unchanged));
+    assert_eq!(tui.applied(), ["paste", "Enter"]);
+    assert_eq!(tui.records(), [framed()]);
+}
+
+#[test]
+fn same_generation_contamination_after_ownership_never_confirms_a_nonce_only_match() {
+    let tui = Tui::new("human draft A");
+    tui.put("attached", "4");
+    // The person types, then returns the caret to the observed location: body evidence must
+    // reject the resulting submission even though the cursor and attach generation still match.
+    tui.person_after_capture(
+        3,
+        "x=$(cat \"$d/cursor_x\"); y=$(cat \"$d/cursor_y\"); type_text X; echo \"$x\" > \"$d/cursor_x\"; echo \"$y\" > \"$d/cursor_y\"",
+    );
+    assert_eq!(
+        tui.run(),
+        report(
+            Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit),
+            DraftState::RestoredObserved
+        )
+    );
+    assert_eq!(tui.records(), [format!("{}X", framed())]);
+    assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
+    assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
+}
+
+#[test]
+fn an_image_added_before_enter_is_contaminated_even_with_matching_text_and_generation() {
+    let tui = Tui::new("human draft A");
+    tui.put("attached", "4");
+    tui.put(
+        "submission",
+        &format!(
+            "{}\n",
+            serde_json::json!({"type": "user", "message": {"content": [
+                {"type": "text", "text": framed()},
+                {"type": "image", "source": {"type": "base64", "data": "AA=="}}
+            ]}})
+        ),
+    );
+    tui.put(
+        "human.before-Enter",
+        "enter() { cat \"$d/submission\" >> \"$d/transcript.jsonl\"; : > \"$d/composer\"; mv \"$d/stash\" \"$d/composer\"; }",
+    );
+    assert_eq!(
+        tui.run(),
+        report(
+            Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit),
+            DraftState::RestoredObserved
+        )
+    );
+    assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
+    assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
+    assert!(tui.taken());
+}
+
+#[test]
+fn a_same_generation_cursor_change_after_ownership_withholds_enter() {
+    let tui = Tui::new("human draft A");
+    tui.put("attached", "4");
+    tui.person_after_capture(3, "type_text X");
+    assert_eq!(
+        tui.run(),
+        report(
+            Outcome::Unconfirmed(Unconfirmed::CursorChangedBeforeEnter),
+            DraftState::Unknown
+        )
+    );
+    assert_eq!(tui.applied(), ["C-s", "paste"]);
+    assert!(tui.records().is_empty());
+    assert_eq!(
+        tui.drafts(),
+        (format!("{}X", framed()), Some("human draft A".to_string()))
+    );
+    assert_eq!(
+        tui.run(),
+        report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged)
+    );
+    assert_eq!(tui.applied(), ["C-s", "paste"]);
+}
+
+#[test]
+fn an_attached_direct_paste_beside_new_human_keys_is_unconfirmed_and_held() {
+    let tui = Tui::new("");
+    tui.put("attached", "4");
+    tui.person_after_capture(1, "type_text 'person typed '");
+    assert_eq!(
+        tui.run(),
+        report(
+            Outcome::Unconfirmed(Unconfirmed::DraftNotOwned),
+            DraftState::Unknown
+        )
+    );
+    assert_eq!(tui.applied(), ["paste"]);
+    assert!(tui.records().is_empty());
+    assert_eq!(tui.drafts(), (format!("person typed {}", framed()), None));
+    assert_eq!(tui.alerts().len(), 1);
+    assert_eq!(tui.alerts()[0]["automatic_writes_held"], true);
+    assert!(super::super::composer_lock::draft_guarded(&tui.session()));
+
+    // The attached-empty happy path and the unattended direct path keep their original axis.
+    for attached in ["4", "0"] {
+        let empty = Tui::new("");
+        empty.put("attached", attached);
+        assert_eq!(
+            empty.run(),
+            report(Outcome::Injected, DraftState::Unchanged)
+        );
+        assert_eq!(empty.applied(), ["paste", "Enter"]);
+        assert!(empty.alerts().is_empty());
+    }
+}
+
+#[test]
+fn an_attached_direct_paste_resize_is_not_misclassified_as_an_attach_change() {
+    let tui = Tui::new("");
+    tui.put("attached", "4");
+    tui.person_after_capture(1, "echo 61 > \"$d/width\"");
+    assert_eq!(
+        tui.run(),
+        report(
+            Outcome::NotSent(Veto::UnpredictableRender),
+            DraftState::Unchanged
+        )
+    );
+    assert!(tui.applied().is_empty());
+    assert!(tui.records().is_empty());
+    assert_eq!(tui.drafts(), (String::new(), None));
+}
+
+#[test]
+fn an_attached_generation_change_stops_the_next_stash_key() {
+    for (capture, action, draft, applied) in [
+        (1, "echo 5 > \"$d/attached\"", DraftState::Unchanged, vec![]),
+        (1, "echo 101 > \"$d/last\"", DraftState::Unchanged, vec![]),
+        (2, "detach", DraftState::StashedVerified, vec!["C-s"]),
+        (
+            2,
+            "echo 101 > \"$d/last\"",
+            DraftState::StashedVerified,
+            vec!["C-s"],
+        ),
+    ] {
+        let tui = Tui::new("human draft A");
+        tui.put("attached", "4");
+        tui.person_after_capture(capture, action);
+        assert_eq!(
+            tui.run(),
+            report(Outcome::NotSent(Veto::HumanAttached), draft)
+        );
+        assert_eq!(tui.applied(), applied);
+        assert!(tui.records().is_empty());
+        let expected = if capture == 1 {
+            ("human draft A".to_string(), None)
+        } else {
+            (String::new(), Some("human draft A".to_string()))
+        };
+        assert_eq!(tui.drafts(), expected);
+    }
+}
+
+#[test]
+fn an_attached_generation_change_after_ownership_withholds_enter_and_never_retries() {
+    for action in ["echo 5 > \"$d/attached\"", "echo 101 > \"$d/last\""] {
+        let tui = Tui::new("human draft A");
+        tui.put("attached", "4");
+        tui.person_after_capture(3, action);
+        assert_eq!(
+            tui.run(),
+            report(
+                Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste),
+                DraftState::Unknown
+            )
+        );
+        assert_eq!(tui.applied(), ["C-s", "paste"]);
+        assert!(tui.records().is_empty());
+        assert_eq!(tui.drafts(), (framed(), Some("human draft A".to_string())));
+        assert_eq!(
+            tui.run(),
+            report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged)
+        );
+        assert_eq!(tui.applied(), ["C-s", "paste"]);
+    }
+}
+
+#[test]
+fn a_stash_marker_and_empty_composer_are_required_before_paste() {
+    for action in [
+        "type_text 'human typed'",
+        "echo unknown-stash > \"$d/status\"",
+    ] {
+        let tui = Tui::new("human draft A");
+        tui.put("attached", "4");
+        tui.put("human.after-C-s", action);
+        assert_eq!(
+            tui.run(),
+            report(Outcome::NotSent(Veto::Draft), DraftState::Unknown)
+        );
+        assert_eq!(tui.applied(), ["C-s"]);
+        assert!(tui.records().is_empty());
+        assert_eq!(tui.get("stash").as_deref(), Some("human draft A"));
+        assert_eq!(
+            tui.run(),
+            report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged)
+        );
+        assert_eq!(tui.applied(), ["C-s"]);
+    }
+}
+
+#[test]
+fn generation_changes_stop_evidence_reads_after_stash_or_paste() {
+    for after in ["C-s", "paste"] {
+        let tui = Tui::new("human draft A");
+        tui.put("attached", "4");
+        tui.put(&format!("human.after-{after}"), "echo 101 > \"$d/last\"");
+        let (outcome, applied, captures) = if after == "C-s" {
+            (Outcome::NotSent(Veto::HumanAttached), vec!["C-s"], "1")
+        } else {
+            (
+                Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste),
+                vec!["C-s", "paste"],
+                "2",
+            )
+        };
+        assert_eq!(tui.run(), report(outcome, DraftState::Unknown));
+        assert_eq!(tui.applied(), applied);
+        assert_eq!(tui.get("cap.n").unwrap().trim_end(), captures);
+        assert!(tui.records().is_empty());
+        assert_eq!(tui.get("stash").as_deref(), Some("human draft A"));
+    }
+}
+
+#[test]
+fn human_text_mixed_after_an_attached_paste_is_unconfirmed_without_enter_or_retry() {
+    let tui = Tui::new("human draft A");
+    tui.put("attached", "4");
+    tui.put("human.after-paste", "type_text ' person typed'");
+    assert_eq!(
+        tui.run(),
+        report(
+            Outcome::Unconfirmed(Unconfirmed::DraftNotOwned),
+            DraftState::Unknown
+        )
+    );
+    assert_eq!(tui.applied(), ["C-s", "paste"]);
+    assert!(tui.records().is_empty());
+    assert_eq!(
+        tui.drafts(),
+        (
+            format!("{} person typed", framed()),
+            Some("human draft A".to_string())
+        )
+    );
+    assert_eq!(
+        tui.run(),
+        report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged)
+    );
+    assert_eq!(tui.applied(), ["C-s", "paste"]);
+}
+
+#[test]
+fn allowing_attached_clients_keeps_the_same_second_attach_floor_veto() {
+    let tui = Tui::new("human draft A");
+    tui.put("attached", "4");
+    // Future by a minute: a slow test cannot accidentally age this ambiguous attach out.
+    tui.put("last", &(unix_seconds() + 60).to_string());
+    assert_eq!(
+        tui.run(),
+        report(Outcome::NotSent(Veto::HumanAttached), DraftState::Unchanged)
+    );
+    assert!(tui.applied().is_empty());
+    assert!(tui.get("cap.n").is_none());
+    assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
 }
 
 /// A person who attaches after the pre-capture, stashes A, types B and leaves keeps both.

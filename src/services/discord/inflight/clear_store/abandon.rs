@@ -179,6 +179,9 @@ fn request_inflight_abandon_matching_in_root(
     let Ok(data) = fs::read_to_string(&path) else {
         return GuardedClearOutcome::Missing;
     };
+    if super::super::raw_before_start_receipt(&data) && !super::super::receipt_mutant("abandon") {
+        return GuardedClearOutcome::IoError;
+    }
     let Ok(state) = parse_inflight_state_content(&data) else {
         return GuardedClearOutcome::Missing;
     };

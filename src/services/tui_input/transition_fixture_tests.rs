@@ -642,3 +642,6 @@ fn moved_running_row_needs_the_accepted_record_end() {
         assert_eq!(rows.row(8).unwrap().state, state, "record end {end:?}");
     }
 }
+
+#[path = "g1b_transition_tests.rs"]
+mod g1b;

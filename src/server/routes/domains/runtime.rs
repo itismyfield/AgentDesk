@@ -155,7 +155,19 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/hook/session/{sessionKey}",
                 delete(hooks::disconnect_session),
             )
-            .route("/internal/node-probe", get(cluster::node_probe)),
+            .route("/internal/node-probe", get(cluster::node_probe))
+            .merge(herdr_routes()),
         state,
     )
+}
+
+/// Herdr hosting exists only on unix; elsewhere `/herdr/terminate` answers 404.
+fn herdr_routes() -> ApiRouter {
+    let routes = Router::new();
+    #[cfg(unix)]
+    let routes = routes.route(
+        "/herdr/terminate",
+        post(super::super::herdr_terminate::terminate),
+    );
+    routes
 }

@@ -25,6 +25,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::dispatched_sessions::tests
   --skip db::dispatches::delivery_events::tests
   --skip db::dispatches::outbox::delivery::tests
+  --skip db::imsg_reply::tests
   --skip db::intake_outbox::home_tests
   --skip db::intake_outbox_delivery_proof::tests
   --skip db::intake_outbox_dispatch_stamp::tests
@@ -52,6 +53,7 @@ NON_PG_SKIP_ARGS=(
   --skip server::routes::dispatched_sessions::tests
   --skip server::routes::escalation::manual_decision_gate_tests
   --skip server::routes::health_api::host_guard_tests
+  --skip server::routes::herdr_legacy_tests
   --skip server::routes::memory_api::request_body_tests
   --skip server::routes::message_outbox::tests
   --skip server::routes::pipeline::stage_save_tests
@@ -103,6 +105,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
   --skip services::discord::health::turn_deliver::inject_codex_tests
   --skip services::discord::health::turn_deliver::inject_tests
+  --skip services::discord::herdr_terminate::exit_tests
+  --skip services::discord::herdr_terminate::route_tests
   --skip services::discord::herdr_terminate::tests
   --skip services::discord::host_defer_gate::tests
   --skip services::discord::host_key_derivation::tests
@@ -112,16 +116,21 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::idle_relay_drift::tests
   --skip services::discord::inflight::host_recovery_guard::keyed_tests
   --skip services::discord::inflight::rebind_reap::tests
+  --skip services::discord::inflight::receipt_boundary_tests
   --skip services::discord::inflight::removal::custody_notice_tests
   --skip services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
+  --skip services::discord::input_runtime::supervisor::runtime::ports::tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
   --skip services::discord::placeholder_sweeper::retirement_tests
   --skip services::discord::queue_io::queued_head_inject::tests
+  --skip services::discord::recovery_engine::herdr_before_start_restart::tests
   --skip services::discord::recovery_engine::host_reconcile::tests
   --skip services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
   --skip services::discord::recovery_engine::restore_inflight::host_probe_tests
   --skip services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
   --skip services::discord::recovery_engine::restore_inflight::replay_hold_tests
+  --skip services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests
+  --skip services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
   --skip services::discord::recovery_engine::routing_orphan::host_guard_tests
   --skip services::discord::relay_recovery::apply::host_deferred_tests
   --skip services::discord::relay_recovery::circuit_breaker::tests
@@ -135,6 +144,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::intake_gate::stale_turn::host_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
+  --skip services::discord::router::message_handler::intake_turn::replay_start_tests
   --skip services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
   --skip services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests
@@ -146,6 +156,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::runtime_bootstrap::gateway_handback_integration_tests
   --skip services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+  --skip services::discord::runtime_bootstrap::o_writer_host::activation_tests
   --skip services::discord::runtime_bootstrap::o_writer_host::fence_tests
   --skip services::discord::runtime_bootstrap::orphan_recovery::fence_tests
   --skip services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
@@ -166,8 +177,11 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
   --skip services::discord::turn_bridge::intake_settlement::tests
@@ -193,6 +207,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::session_forwarding::home_stop::tests
   --skip services::session_forwarding::tests
   --skip services::session_host::herdr_clear_adapter::tests
+  --skip services::session_host::herdr_gate::tests
+  --skip services::session_host::herdr_terminate_real_tests
   --skip services::session_host::session_record::tests
   --skip services::session_resume::tests
   --skip services::settings::tests
@@ -200,6 +216,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::tui_o::exact_submission::tests
   --skip services::tui_o::repost::admission_tests
   --skip services::tui_o::repost::o_piece_ledger_tests
+  --skip services::tui_o::repost::runner::activation_tests
   --skip services::tui_o::repost::runner_tests
   --skip services::tui_o::writer::tests::actor::host_start::deferred::pg
   --skip services::tui_o::writer::tests::actor::repost_turn
@@ -222,6 +239,7 @@ NON_PG_FILTER_REPLAY=(
   cli::dcserver_pg_bootstrap::tests::schema_ahead_needs_every_unknown_version_past_the_latest
   cli::dcserver_pg_bootstrap::tests::slow_startup_timeout_exhausts_retries_and_reports_the_exit_line
   cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
+  cli::herdr::terminate_tests::act_cli_terminate_never_opens_postgres
   db::auto_queue::entries::tests::pinned_dispatch_identity_is_declared_before_the_stale_retry_loop
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::explicit_phase_gate_verdict_key_blocks_inference
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::non_string_explicit_verdict_preserves_checks_inference
@@ -452,6 +470,10 @@ NON_PG_FILTER_REPLAY=(
   services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
   services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
   services::discord::input_runtime::clear::tests::postgres_outage_holds_without_reset_or_cut_and_reports_it
+  services::discord::input_runtime::supervisor::runtime::ports::tests::b_adopt_requires_all_provider_mapping_views_ports
+  services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_freeze_failure_preserves_legacy_and_closing
+  services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_reject_unresolved_resources_without_effects
+  services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_sources_are_read_only_and_unreadable_is_not_empty
   services::discord::placeholder_sweeper::abandon_guard::tests::blocking_probe_join_failure_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_live_process_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_missing_or_legacy_identity_preserves_retry
@@ -480,6 +502,12 @@ NON_PG_FILTER_REPLAY=(
   services::discord::placeholder_sweeper::retirement_tests::inline_panel_rechecks_retirement_after_owner_probe
   services::discord::placeholder_sweeper::retirement_tests::tick_leaves_input_protected_rows_before_and_after_probe
   services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_without_mutating_retired_rows
+  services::discord::recovery_engine::herdr_before_start_restart::tests::a_destination_restart_does_not_own_keeps_the_receipt
+  services::discord::recovery_engine::herdr_before_start_restart::tests::a_prior_receipt_shows_one_stop_then_clears_its_row
+  services::discord::recovery_engine::herdr_before_start_restart::tests::an_unshown_notice_waits_and_a_durable_ack_is_not_shown_again
+  services::discord::recovery_engine::herdr_before_start_restart::tests::decode_takes_only_a_prior_readable_receipt_that_names_its_row
+  services::discord::recovery_engine::herdr_before_start_restart::tests::the_restart_scan_keeps_every_held_receipt_silent_and_untouched
+  services::discord::recovery_engine::herdr_before_start_restart::tests::the_restart_scan_settles_a_marked_receipt_before_the_marker_hold
   services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_follows_the_restore_table
   services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_rebind_on_a_withheld_herdr_pane_reports_the_withhold_not_a_reused_watcher
   services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_repeated_rebind_on_a_withheld_pane_adopts_fences_and_announces_nothing
@@ -488,6 +516,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_guard_precedes_recovery_marker_and_kickoff
   services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_plan_maps_pane_liveness_to_disposition_inputs
   services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ownerless_reacquired_row_has_no_kickoff_identity
+  services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_lock_contention_is_retryable
   services::discord::relay_recovery::circuit_breaker::tests::alert_enqueue_failure_stays_pending_and_retry_marks_only_alert_flag
   services::discord::relay_recovery::circuit_breaker::tests::alert_marker_is_exact_episode_scoped
   services::discord::relay_recovery::circuit_breaker::tests::crash_after_local_alert_commit_resumes_same_held_row_without_reenqueue
@@ -574,6 +603,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_protected_probe_does_not_backfill
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_probe_requires_complete_read_and_backfill
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_readers_preserve_foreign_files_and_mailboxes
+  services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b3a1_scoped_probe_excludes_stale_planned_restart
   services::discord::session_relay_sink::journal::pg_store::mixed_tests::mixed_strict_rows_leave_legacy_fold_frontier_and_shadow_bytes_unchanged
   services::discord::session_relay_sink::journal::pg_store::tests::stored_journal_event_mapping_is_closed_and_fail_closed
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reconcile_noop_when_db_matches_tmux
@@ -733,9 +763,27 @@ NON_PG_FILTER_REPLAY=(
   services::session_forwarding::tests::resolve_forward_target_rejects_invalid_owner_and_local_instance_ids
   services::session_forwarding::tests::resolve_forward_target_returns_trusted_foreign_owner
   services::session_forwarding::tests::stale_capability_and_missing_trust_config_fail_before_forwarding
+  services::session_host::herdr_gate::tests::a_failed_gate_check_writes_nothing_and_names_why
+  services::session_host::herdr_gate::tests::a_herdr_followup_retire_is_refused_and_kills_nothing
+  services::session_host::herdr_gate::tests::a_marker_not_naming_herdr_refuses_every_write
+  services::session_host::herdr_gate::tests::a_server_changed_after_the_gate_gets_no_byte
+  services::session_host::herdr_gate::tests::herdr_plan_pastes_once_bracketed_then_enter_each_on_its_own_connection
+  services::session_host::herdr_gate::tests::host_for_herdr_reads_the_registry_endpoint_and_never_writes
+  services::session_host::herdr_gate::tests::m0_close_effect_positive
+  services::session_host::herdr_gate::tests::m0_close_requires_both_stamps
+  services::session_host::herdr_gate::tests::m0_close_uncertain_reply_never_retries
+  services::session_host::herdr_gate::tests::m0_close_unknown_version_refused
+  services::session_host::herdr_gate::tests::m0_close_witness_mismatch_zero_bytes
+  services::session_host::herdr_gate::tests::m0_confirmation_required_no_escalation
+  services::session_host::herdr_gate::tests::m0_terminate_admission_off_still_judges
+  services::session_host::herdr_gate::tests::m0_terminate_off_has_zero_effect
+  services::session_host::herdr_gate::tests::m0_terminate_request_pair_is_exact
   services::session_host::herdr_gate::tests::m1_afterwrite_never_auto_retries_pg
   services::session_host::herdr_gate::tests::m1_confirmation_required_stops_pg
+  services::session_host::herdr_gate::tests::m1_input_pin_races_terminate_across_fresh_targets
   services::session_host::herdr_gate::tests::m1_last_pane_is_allowed_pg
+  services::session_host::herdr_gate::tests::m1_production_e7_accepts_audited_version
+  services::session_host::herdr_gate::tests::m1_production_e7_rejects_unaudited_version_before_provenance
   services::session_host::herdr_gate::tests::m1_provider_survived_close_keeps_bound_pg
   services::session_host::herdr_gate::tests::m1_replaced_root_refuses_before_send_pg
   services::session_host::herdr_gate::tests::m1_retire_cas_failure_keeps_hold_pg
@@ -745,6 +793,9 @@ NON_PG_FILTER_REPLAY=(
   services::session_host::herdr_gate::tests::m2_already_finalized_with_active_a_is_indeterminate_pg
   services::session_host::herdr_gate::tests::m2_settlement_mailbox_unreadable_is_indeterminate_pg
   services::session_host::herdr_gate::tests::m2_turn_changed_before_close_has_zero_effect_pg
+  services::session_host::herdr_gate::tests::only_a_registered_local_endpoint_makes_a_herdr_target
+  services::session_host::herdr_gate::tests::stopped_admission_refuses_input_but_lets_a_cancel_key_through
+  services::session_host::herdr_gate::tests::the_boot_registry_holds_only_this_nodes_endpoints
   services::session_resume::tests::completed_critical_section_cancels_its_watchdog
   services::session_resume::tests::critical_section_watchdog_records_once_without_cancelling_work
   services::session_resume::tests::discover_excludes_live_bound_session
@@ -775,6 +826,7 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::exact_pg::tests::exact_snapshot_sibling_construction_is_compile_rejected
   services::tui_o::exact_submission::tests::exact_submission_none_preserves_result_without_runtime
   services::tui_o::repost::admission_tests::a_torn_sidecar_tail_is_cut_and_any_other_damage_refuses_the_sidecar
+  services::tui_o::repost::admission_tests::d4act_not_sent_replays_as_settled_without_reclassifying_legacy_records
   services::tui_o::repost::admission_tests::f3r_a_failed_append_refuses_more_until_a_reopen_cuts_its_bytes
   services::tui_o::repost::admission_tests::f3r_an_original_sent_while_on_stays_eligible_across_off_and_on
   services::tui_o::repost::admission_tests::f6_a_conflicting_record_of_an_activation_never_moves_its_frontier
@@ -819,6 +871,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   db::dispatched_sessions::tests
   db::dispatches::delivery_events::tests
   db::dispatches::outbox::delivery::tests
+  db::imsg_reply::tests
   db::intake_outbox::home_tests
   db::intake_outbox_delivery_proof::tests
   db::intake_outbox_dispatch_stamp::tests
@@ -846,6 +899,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   server::routes::dispatched_sessions::tests
   server::routes::escalation::manual_decision_gate_tests
   server::routes::health_api::host_guard_tests
+  server::routes::herdr_legacy_tests
   server::routes::memory_api::request_body_tests
   server::routes::message_outbox::tests
   server::routes::pipeline::stage_save_tests
@@ -897,6 +951,8 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::health::recovery::stall_watchdog_auto_heal_tests
   services::discord::health::turn_deliver::inject_codex_tests
   services::discord::health::turn_deliver::inject_tests
+  services::discord::herdr_terminate::exit_tests
+  services::discord::herdr_terminate::route_tests
   services::discord::herdr_terminate::tests
   services::discord::host_defer_gate::tests
   services::discord::host_key_derivation::tests
@@ -906,16 +962,21 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::idle_relay_drift::tests
   services::discord::inflight::host_recovery_guard::keyed_tests
   services::discord::inflight::rebind_reap::tests
+  services::discord::inflight::receipt_boundary_tests
   services::discord::inflight::removal::custody_notice_tests
   services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
+  services::discord::input_runtime::supervisor::runtime::ports::tests
   services::discord::placeholder_sweeper::abandon_guard::tests
   services::discord::placeholder_sweeper::retirement_tests
   services::discord::queue_io::queued_head_inject::tests
+  services::discord::recovery_engine::herdr_before_start_restart::tests
   services::discord::recovery_engine::host_reconcile::tests
   services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
   services::discord::recovery_engine::restore_inflight::host_probe_tests
   services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
   services::discord::recovery_engine::restore_inflight::replay_hold_tests
+  services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests
+  services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
   services::discord::recovery_engine::routing_orphan::host_guard_tests
   services::discord::relay_recovery::apply::host_deferred_tests
   services::discord::relay_recovery::circuit_breaker::tests
@@ -929,6 +990,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::router::intake_gate::stale_turn::host_tests
   services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
+  services::discord::router::message_handler::intake_turn::replay_start_tests
   services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
   services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
   services::discord::router::message_handler::provider_dispatch::herdr_tests
@@ -940,6 +1002,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::runtime_bootstrap::gateway_handback_integration_tests
   services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+  services::discord::runtime_bootstrap::o_writer_host::activation_tests
   services::discord::runtime_bootstrap::o_writer_host::fence_tests
   services::discord::runtime_bootstrap::orphan_recovery::fence_tests
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
@@ -960,8 +1023,11 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
   services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
+  services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
+  services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e
   services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
+  services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
   services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
   services::discord::turn_bridge::headless_delivery::production_seam_tests
   services::discord::turn_bridge::intake_settlement::tests
@@ -987,6 +1053,8 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::session_forwarding::home_stop::tests
   services::session_forwarding::tests
   services::session_host::herdr_clear_adapter::tests
+  services::session_host::herdr_gate::tests
+  services::session_host::herdr_terminate_real_tests
   services::session_host::session_record::tests
   services::session_resume::tests
   services::settings::tests
@@ -994,6 +1062,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::tui_o::exact_submission::tests
   services::tui_o::repost::admission_tests
   services::tui_o::repost::o_piece_ledger_tests
+  services::tui_o::repost::runner::activation_tests
   services::tui_o::repost::runner_tests
   services::tui_o::writer::tests::actor::host_start::deferred::pg
   services::tui_o::writer::tests::actor::repost_turn

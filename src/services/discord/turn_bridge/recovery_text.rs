@@ -825,6 +825,13 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
         }
     };
 
+    // The history write and enqueue run only if the protected decision has not barred it since.
+    let claim = crate::services::discord::replay_policy::claim_legacy_retry;
+    if !claim(channel_id.get(), user_message_id.get()) {
+        tracing::warn!("  [{ts}] ⏭ auto-retry: protected request held for channel {channel_id}");
+        return;
+    }
+
     // Store history in kv_meta for the router to inject into LLM prompt.
     // Key: session_retry_context:{channel_id} — consumed on next turn start.
     if let Some((ref hist, message_count, ref skip_reason)) = recovery_context

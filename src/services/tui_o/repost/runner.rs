@@ -32,6 +32,12 @@ use crate::services::tui_o::store::ledger::{LedgerState, PieceOutcome, PieceReco
 /// How long a granted slot stays open before another holder may settle it as abandoned.
 pub(crate) const GRANT_TTL: Duration = Duration::from_secs(180);
 
+/// Re-post uses the gateway gate; delegated or unavailable homes need their own admission path.
+pub(crate) fn scope_allowed(channel: u64) -> bool {
+    crate::services::cluster::channel_home::registered_channel(channel).is_none()
+        && crate::services::cluster::home_availability::refusal(channel).is_none()
+}
+
 /// The O side's proof that an approval is current: the key's latest disposition is this
 /// rejection's Authorized, the id matches and is unconsumed, and key and payload are the same.
 pub(crate) trait ApprovalCheck {
@@ -159,6 +165,9 @@ impl Runner {
         settled_at: Instant,
     ) -> Result<Tick, LedgerError> {
         if self.switch.when_enabled(|_| ()).is_none() {
+            return Ok(Tick::Off);
+        }
+        if !scope_allowed(channel) {
             return Ok(Tick::Off);
         }
         let mut report = TickReport::default();
@@ -295,6 +304,10 @@ impl Runner {
                 (row, revision, Intent::OperatorResume { approval_id })
             }
         };
+        // Row and attempt reads yield; current source policy must still permit consuming a slot.
+        if let Err(reason) = writer.guard() {
+            return Ok(Admission::GuardRejected(GuardReason::Writer(reason)));
+        }
         let auto = matches!(intent, Intent::AutoReconfirm);
         let request = GrantRequest {
             key: &row.key,
@@ -330,6 +343,7 @@ pub(crate) trait TurnWriter: RepostWriter + Send {
     fn ledger(&mut self) -> &LedgerState;
     /// Whether a re-post request may still leave; read by every dispatch's wire guard.
     fn set_live(&self, live: bool);
+    fn bind_switch(&self, _effective: Arc<dyn Fn() -> bool + Send + Sync>) {}
 }
 
 pub(crate) type Turned<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -406,7 +420,11 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
             self.activated = false;
             return;
         }
-        self.admit(writer).await;
+        writer.bind_switch(self.runner.switch.live());
+        if !scope_allowed(self.channel) || writer.guard().is_err() || !self.admit(writer).await {
+            writer.set_live(false);
+            return;
+        }
         if self.io.is_none() {
             self.io = (self.open)();
         }
@@ -453,7 +471,7 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
 
     /// Finishes admissions a crash or an outage left pending, then admits each piece whose latest
     /// attempt is an uncertain original sent while on.
-    async fn admit<W: TurnWriter>(&mut self, writer: &mut W) {
+    async fn admit<W: TurnWriter>(&mut self, writer: &mut W) -> bool {
         let ledger = writer.ledger();
         let frontier = ledger.next_serial();
         let latest: BTreeMap<u64, PieceRecord> = (0..frontier)
@@ -461,7 +479,9 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
             .filter(|(serial, piece)| {
                 let uncertain = !matches!(
                     piece.outcome,
-                    Some(PieceOutcome::Posted(_) | PieceOutcome::Rejected(_))
+                    Some(
+                        PieceOutcome::Posted(_) | PieceOutcome::Rejected(_) | PieceOutcome::NotSent
+                    )
                 );
                 let latest = ledger.latest_piece(&piece.unit_key, piece.piece_index);
                 uncertain && latest.is_some_and(|(at, _)| at == *serial)
@@ -469,10 +489,10 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
             .map(|(serial, piece)| (serial, piece.clone()))
             .collect();
         if self.log(frontier).is_none() {
-            return;
+            return false;
         }
         let (Some(log), Some(admitter)) = (self.log.as_mut(), self.runner.admitter()) else {
-            return;
+            return false;
         };
         let resumed = admitter
             .resume_pending(log, |serial| latest.get(&serial))
@@ -480,6 +500,18 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
         let sidecar =
             |result: &Result<_, AdoptError>| matches!(result, Err(AdoptError::Sidecar(_)));
         let mut torn = resumed.iter().any(|(_, result)| sidecar(result));
+        let accepted = |result: &Result<_, AdoptError>| {
+            matches!(
+                result,
+                Ok(AdmitOutcome::Admitted(_) | AdmitOutcome::Existing(_))
+            )
+        };
+        if resumed.iter().any(|(_, result)| !accepted(result)) {
+            if torn {
+                self.log = None;
+            }
+            return false;
+        }
         for (serial, record) in &latest {
             let Candidate::Eligible(original) = classify(*serial, record, log.state()) else {
                 continue;
@@ -487,13 +519,14 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
             let adopted = admitter.adopt_uncertain(log, &original).await;
             torn |= sidecar(&adopted);
             // PostgreSQL left it pending; the next turn resumes it.
-            if torn || adopted.is_err() {
-                break;
+            if !accepted(&adopted) {
+                if torn {
+                    self.log = None;
+                }
+                return false;
             }
         }
-        if torn {
-            self.log = None;
-        }
+        true
     }
 
     async fn original_gate(&mut self, serial: u64, record: PieceRecord) -> OriginalGate {
@@ -506,20 +539,25 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
         if gate != OriginalGate::Send {
             return gate;
         }
-        // The intent lands before the POST; without it the original still goes but is never re-posted.
-        let Some(log) = self.log(serial) else {
+        if !scope_allowed(channel) || ProvenanceEntry::intent(serial, &record, 0).is_none() {
             return gate;
+        }
+        // Supported on originals wait until the intent is durable; failures are not opt-outs.
+        let Some(log) = self.log(serial) else {
+            return OriginalGate::Unknown;
         };
         let generation = log
             .state()
             .activation()
             .map(|activation| activation.generation);
-        let intent =
-            generation.and_then(|generation| ProvenanceEntry::intent(serial, &record, generation));
-        if let Some(intent) = intent
-            && log.append(intent).is_err()
-        {
+        let Some(intent) =
+            generation.and_then(|generation| ProvenanceEntry::intent(serial, &record, generation))
+        else {
+            return OriginalGate::Unknown;
+        };
+        if log.append(intent).is_err() {
             self.log = None;
+            return OriginalGate::Unknown;
         }
         gate
     }
@@ -551,3 +589,7 @@ where
         Box::pin(self.original_gate(serial, record))
     }
 }
+
+#[cfg(test)]
+#[path = "runner_activation_tests.rs"]
+mod activation_tests;

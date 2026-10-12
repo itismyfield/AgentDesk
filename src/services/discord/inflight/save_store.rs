@@ -1202,7 +1202,8 @@ fn save_inflight_state_create_new_in_root_with_io(
         "src/services/discord/inflight.rs:save_inflight_state_create_new_in_root",
     );
     updated.updated_at = now_string();
-    bump_save_generation_for_write(&path, &mut updated);
+    bump_save_generation_for_write(&path, &mut updated)
+        .map_err(CreateNewInflightError::Internal)?;
     let json = serde_json::to_string_pretty(&updated)
         .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
 
@@ -1261,7 +1262,7 @@ pub(super) fn save_inflight_state_in_root(
         return Ok(());
     }
     updated.updated_at = now_string();
-    bump_save_generation_for_write(&path, &mut updated);
+    bump_save_generation_for_write(&path, &mut updated)?;
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)
 }
@@ -1329,7 +1330,7 @@ fn save_inflight_state_if_absent_in_root_with_io(
         "src/services/discord/inflight.rs:save_inflight_state_if_absent_in_root",
     );
     updated.updated_at = now_string();
-    bump_save_generation_for_write(&path, &mut updated);
+    bump_save_generation_for_write(&path, &mut updated)?;
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     write(&path, &json)?;
     observe_synthetic_create(&updated, "if_absent", "committed");

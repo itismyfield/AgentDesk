@@ -274,7 +274,7 @@ pub(in crate::services::discord) struct InflightTurnState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tui_terminal_kind: Option<crate::services::agent_protocol::NativeTerminalKind>,
     /// The policy receipt of a stop before input started; `None` on every other turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "super::save_store::identity_gate::runtime_stamp::before_start_stop_admission::deserialize_receipt")]
     pub(in crate::services::discord) herdr_before_start_stop: Option<super::save_store::identity_gate::runtime_stamp::before_start_stop_admission::BeforeStartReceipt>,
     #[serde(default)]
     pub current_tool_line: Option<String>,

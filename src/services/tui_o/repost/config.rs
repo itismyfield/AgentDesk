@@ -1,7 +1,7 @@
 //! `tui_o.repost`: the re-post switch. Off unless set, and read from the live config on every check
 //! so turning it off stops new re-post work without a restart.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -48,7 +48,12 @@ pub(crate) struct RepostSnapshot {
 pub(crate) type LiveConfig = watch::Receiver<Option<Arc<Config>>>;
 
 /// One node's effective switch: the boot value until a live config is installed, then the latest.
+#[derive(Clone)]
 pub(crate) struct RepostSwitch {
+    state: Arc<Mutex<SwitchState>>,
+}
+
+struct SwitchState {
     live: LiveConfig,
     snapshot: RepostSnapshot,
 }
@@ -60,19 +65,31 @@ impl RepostSwitch {
             generation: 0,
             source: SnapshotSource::Boot,
         };
-        let mut switch = Self { live, snapshot };
-        let installed = switch.live.borrow_and_update().clone();
-        switch.observe(installed);
-        switch
+        let mut state = SwitchState { live, snapshot };
+        let installed = state.live.borrow_and_update().clone();
+        state.observe(installed);
+        Self {
+            state: Arc::new(Mutex::new(state)),
+        }
     }
 
     pub(crate) fn current(&mut self) -> RepostSnapshot {
-        // A closed sender leaves the last observed value in force.
-        if self.live.has_changed().unwrap_or(false) {
-            let installed = self.live.borrow_and_update().clone();
-            self.observe(installed);
-        }
-        self.snapshot
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .current()
+    }
+
+    /// Shares the validated value with requests that outlive the runner's current poll.
+    pub(crate) fn live(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let state = Arc::clone(&self.state);
+        Arc::new(move || {
+            state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .current()
+                .enabled
+        })
     }
 
     /// Runs `work` only while the switch is on; off returns before `work` runs, so it may hold
@@ -83,6 +100,17 @@ impl RepostSwitch {
             return None;
         }
         Some(work(snapshot))
+    }
+}
+
+impl SwitchState {
+    fn current(&mut self) -> RepostSnapshot {
+        // A closed sender leaves the last observed value in force.
+        if self.live.has_changed().unwrap_or(false) {
+            let installed = self.live.borrow_and_update().clone();
+            self.observe(installed);
+        }
+        self.snapshot
     }
 
     fn observe(&mut self, installed: Option<Arc<Config>>) {

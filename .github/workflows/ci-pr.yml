@@ -223,6 +223,7 @@ jobs:
               - 'src/db/dispatches/delivery_events.rs'
               - 'src/db/dispatches/outbox/delivery.rs'
               - 'src/db/idempotency.rs'
+              - 'src/db/imsg_reply_tests.rs'
               - 'src/db/intake_outbox.rs'
               - 'src/db/intake_outbox_delivery_proof.rs'
               - 'src/db/intake_outbox_dispatch_stamp/tests.rs'
@@ -265,13 +266,14 @@ jobs:
               - 'src/server/multinode_regression.rs'
               - 'src/server/resource_locks.rs'
               - 'src/server/routes/agents_host_guard_tests.rs'
-              - 'src/server/routes/agents_turn_deliver.rs'
+              - 'src/server/routes/agents_turn_deliver/pg_tests.rs'
               - 'src/server/routes/auto_queue_lifecycle_pg_tests.rs'
               - 'src/server/routes/campaigns.rs'
               - 'src/server/routes/dispatched_sessions_tests.rs'
               - 'src/server/routes/dispatches/crud.rs'
               - 'src/server/routes/escalation.rs'
               - 'src/server/routes/health_api/host_guard_tests.rs'
+              - 'src/server/routes/herdr_legacy_tests.rs'
               - 'src/server/routes/memory_api.rs'
               - 'src/server/routes/message_outbox.rs'
               - 'src/server/routes/pipeline_stage_save_tests.rs'
@@ -342,24 +344,30 @@ jobs:
               - 'src/services/discord/health/turn_deliver/inject_codex_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_tests.rs'
               - 'src/services/discord/herdr_terminate.rs'
+              - 'src/services/discord/herdr_terminate_exit_tests.rs'
+              - 'src/services/discord/herdr_terminate_route_tests.rs'
               - 'src/services/discord/host_defer_gate_tests.rs'
               - 'src/services/discord/host_key_derivation_tests.rs'
               - 'src/services/discord/idle_recap_interaction.rs'
               - 'src/services/discord/idle_relay_drift.rs'
               - 'src/services/discord/inflight/host_recovery_guard_keyed_tests.rs'
               - 'src/services/discord/inflight/rebind_reap/tests.rs'
+              - 'src/services/discord/inflight/receipt_boundary_tests.rs'
               - 'src/services/discord/inflight/removal/custody_notice_tests.rs'
               - 'src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_restart_tests.rs'
+              - 'src/services/discord/input_runtime/runtime/ports_tests.rs'
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/placeholder_sweeper/abandon_guard.rs'
               - 'src/services/discord/placeholder_sweeper/retirement_tests.rs'
               - 'src/services/discord/queue_io/queued_head_inject_tests.rs'
+              - 'src/services/discord/recovery_engine/herdr_before_start_restart_tests.rs'
               - 'src/services/discord/recovery_engine/host_reconcile_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs'
+              - 'src/services/discord/recovery_engine/restore_inflight/scoped_restore.rs'
               - 'src/services/discord/recovery_engine/routing_orphan_tests.rs'
               - 'src/services/discord/relay_recovery/tests/host_deferred.rs'
               - 'src/services/discord/relay_recovery_circuit_alert_producer.rs'
@@ -375,6 +383,7 @@ jobs:
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
               - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/native_fresh_prompt_tests.rs'
+              - 'src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/runtime_transition/native_hold_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_followup_tests.rs'
@@ -412,8 +421,13 @@ jobs:
               - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs'
               - 'src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs'
               - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs'
@@ -460,6 +474,8 @@ jobs:
               - 'src/services/session_forwarding.rs'
               - 'src/services/session_forwarding/home_stop_tests.rs'
               - 'src/services/session_host/herdr_clear_adapter_tests.rs'
+              - 'src/services/session_host/herdr_gate_tests.rs'
+              - 'src/services/session_host/herdr_terminate_real_tests.rs'
               - 'src/services/session_host/session_record.rs'
               - 'src/services/session_resume.rs'
               - 'src/services/settings.rs'
@@ -469,7 +485,10 @@ jobs:
               - 'src/services/tui_o/exact_pg_tests.rs'
               - 'src/services/tui_o/exact_submission.rs'
               - 'src/services/tui_o/repost/admission_tests.rs'
+              - 'src/services/tui_o/repost/runner_activation_tests.rs'
               - 'src/services/tui_o/repost/runner_tests.rs'
+              - 'src/services/tui_o/repost/runtime_host_activation_tests.rs'
+              - 'src/services/tui_o/repost/writer_activation_tests.rs'
               - 'src/services/tui_o/writer/deferred_pg_tests.rs'
               - 'src/services/tui_o/writer/repost_turn_tests.rs'
               - 'src/services/turn_host_tests.rs'
@@ -722,6 +741,8 @@ jobs:
               # session_host/'s TmuxHost has a not(unix) stub Windows compiles.
               - 'src/services/qwen/**'
               - 'src/services/session_host/**'
+              # The Herdr close owner is unix-gated production code.
+              - 'src/services/termination_audit/**'
               # DERIVED BLOCK (#5832) -- do not hand-edit. cross_os_rust does
               # not select 'src/services/discord/**' wholesale, so every file in
               # that subtree that carries a platform cfg shim (or names a
@@ -1324,9 +1345,10 @@ jobs:
 
       # Run 34926677210 selected 845 serial tests and completed 642 without
       # failure before the 20-minute budget expired during active migrations.
-      # Preserve all tests and fail-closed results; bound the complete run at 40m.
+      # Preserve all tests and fail-closed results; bound the complete run at 60m,
+      # the same budget as each ci-main.yml PostgreSQL shard.
       - name: just test-postgres
-        timeout-minutes: 40
+        timeout-minutes: 60
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -2198,7 +2220,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=999cdd16b47a51a31e8744caa83e8f627d26827d01df27658b2b548ab5444418
+          expected=713459343783731b3a38d23259809855ff8e29aa22bbe493dd038e8b2dc21f43
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2431,7 +2453,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=999cdd16b47a51a31e8744caa83e8f627d26827d01df27658b2b548ab5444418
+          expected=713459343783731b3a38d23259809855ff8e29aa22bbe493dd038e8b2dc21f43
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

@@ -277,6 +277,7 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
     let _ = super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_panes(
         shared.pg_pool.as_ref(),
         &ProviderKind::Claude,
+        None,
     );
 }
 
@@ -445,20 +446,20 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
     }
 }
 
-/// One Codex discovery pass. It returns the live sources it read; `observe` (an installed
-/// adoption runtime) adds the reads that judge each source's binding, else none is bound.
+/// One Codex discovery pass and the live sources it read, bound only for an installed `observer`.
 #[cfg(unix)]
 pub(super) fn rehydrate_existing_codex_tui_bindings(
     shared: &Arc<SharedData>,
-    observe: bool,
+    observer: Option<super::super::codex_adoption_runtime::ObservationRuntimeId>,
 ) -> super::super::codex_adoption_runtime::boot::DiscoveryPass {
     evict_dead_orphaned_codex_tui_mirrors(shared);
     // Codex Herdr rows, read whether or not tmux answers; off Herdr this reads nothing.
     let herdr = super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_panes(
         shared.pg_pool.as_ref(),
         &ProviderKind::Codex,
+        observer,
     );
-
+    let observe = observer.is_some();
     let mut sessions = match codex_pass_tmux_session_names() {
         Ok(sessions) => sessions,
         Err(error) => {
@@ -1324,7 +1325,7 @@ mod tests {
             let pass = shared.clone();
             tokio::task::spawn_blocking(move || {
                 rehydrate_existing_claude_tui_bindings(&pass);
-                let _ = rehydrate_existing_codex_tui_bindings(&pass, false);
+                let _ = rehydrate_existing_codex_tui_bindings(&pass, None);
             })
             .await
             .expect("rehydrate pass");

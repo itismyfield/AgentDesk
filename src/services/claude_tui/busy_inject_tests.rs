@@ -268,6 +268,144 @@ fn scanner_counts_only_complete_human_input_after_the_offset_by_containment() {
 }
 
 #[test]
+fn scanner_confirms_the_full_frame_and_rejects_same_nonce_contamination() {
+    let expected = text();
+    for body in [
+        expected.clone(),
+        format!("{expected}\noperator draft X"),
+        expected.lines().next().unwrap().to_string(),
+    ] {
+        let exact = body == expected;
+        let records = [
+            serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": body}),
+            serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": body}}),
+            serde_json::json!({"type": "user", "message": {"content": body}}),
+            serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": body}]}}),
+        ];
+        for record in records {
+            let fake = Fake::new();
+            let offset = fs::metadata(&fake.transcript).unwrap().len();
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(&fake.transcript)
+                .unwrap();
+            writeln!(file, "{}", real(record.clone())).unwrap();
+            assert_eq!(
+                transcript_submission(&fake.transcript, offset, NONCE, Some(&expected)),
+                Some(exact),
+                "same nonce must distinguish the submitted body: {record}"
+            );
+            assert_eq!(
+                transcript_submission(&fake.transcript, offset, NONCE, None),
+                Some(true),
+                "nonce-only callers retain their existing receipt contract: {record}"
+            );
+        }
+    }
+}
+
+#[test]
+fn scanner_rejects_nontext_blocks_without_changing_text_or_nonce_receipts() {
+    let expected = text();
+    let text_block = serde_json::json!({"type": "text", "text": expected});
+    let mut cases = vec![
+        (serde_json::json!(expected), true),
+        (serde_json::json!([text_block]), true),
+        (
+            serde_json::json!(
+                expected
+                    .lines()
+                    .map(|line| serde_json::json!({"type": "text", "text": line}))
+                    .collect::<Vec<_>>()
+            ),
+            true,
+        ),
+    ];
+    for extra in [
+        serde_json::json!({"type": "image", "source": {"type": "base64", "data": "AA=="}}),
+        serde_json::json!({"type": "tool_result", "content": "person input"}),
+        serde_json::json!({"type": "unknown"}),
+        serde_json::Value::Null,
+    ] {
+        cases.push((serde_json::json!([text_block, extra]), false));
+        cases.push((serde_json::json!([extra, text_block]), false));
+    }
+    for (content, exact) in cases {
+        for record in [
+            serde_json::json!({"type": "user", "message": {"content": content}}),
+            serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": content}),
+            serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": content}}),
+        ] {
+            let fake = Fake::new();
+            let offset = fs::metadata(&fake.transcript).unwrap().len();
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(&fake.transcript)
+                .unwrap();
+            writeln!(file, "{}", real(record.clone())).unwrap();
+            assert_eq!(
+                transcript_submission(&fake.transcript, offset, NONCE, Some(&expected)),
+                Some(exact),
+                "{record}"
+            );
+            assert!(
+                transcript_carries(&fake.transcript, offset, NONCE),
+                "{record}"
+            );
+        }
+    }
+}
+
+#[test]
+fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
+    let expected = text();
+    let fake = Fake::new();
+    let path = &fake.transcript;
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(enqueue_record(&expected).as_bytes())
+        .unwrap();
+    let offset = fs::metadata(path).unwrap().len();
+    for record in [
+        serde_json::json!({"type": "assistant", "message": {"content": expected}}),
+        serde_json::json!({"type": "user", "isMeta": true, "message": {"content": expected}}),
+        serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": expected}]}}),
+        serde_json::json!({"type": "queue-operation", "operation": "remove", "content": expected}),
+        serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "bash", "prompt": expected}}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": frame("iMessage", "ann", "ffff0000", "are you there?")}),
+    ] {
+        writeln!(file, "{}", real(record.clone())).unwrap();
+        assert_eq!(
+            transcript_submission(path, offset, NONCE, Some(&expected)),
+            None,
+            "this record cannot acknowledge or contaminate a prompt: {record}"
+        );
+    }
+    write!(file, "{}", enqueue_record(&expected).trim_end_matches('\n')).unwrap();
+    assert_eq!(
+        transcript_submission(path, offset, NONCE, Some(&expected)),
+        None
+    );
+    writeln!(file).unwrap();
+    assert_eq!(
+        transcript_submission(path, offset, NONCE, Some(&expected)),
+        Some(true)
+    );
+    assert_eq!(
+        transcript_submission(
+            path,
+            fs::metadata(path).unwrap().len() + 1,
+            NONCE,
+            Some(&expected)
+        ),
+        None
+    );
+    assert_eq!(
+        transcript_submission(&fake.dir.path().join("missing"), 0, NONCE, Some(&expected)),
+        None
+    );
+}
+
+#[test]
 fn the_header_names_the_source_and_cannot_start_a_command_or_close_early() {
     let framed = frame("iMessage", "a]b\nc", NONCE, "/clear");
     assert_eq!(framed, "[📱 iMessage · a b c · abcd1234]\n/clear");

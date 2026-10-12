@@ -716,7 +716,7 @@ impl PaneGate {
     }
 }
 
-#[cfg(test)]
+#[cfg(unix)]
 impl From<CloseEffect>
     for crate::services::termination_audit::host_terminate::herdr_terminate::HerdrTerminateResult
 {

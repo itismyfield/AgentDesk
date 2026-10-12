@@ -1,3 +1,4 @@
+use super::super::codex_adoption_runtime::ObservationRuntimeId;
 use super::super::codex_adoption_runtime::boot::DiscoveryPass;
 use super::super::{inflight, task_supervisor};
 use super::idle_transcript_scan::CodexTurnPrompt;
@@ -20,11 +21,13 @@ fn advance_codex_tui_runtime_binding_and_marker_offset(
 #[cfg(unix)]
 pub(super) async fn codex_discovery_pass(
     shared: &Arc<SharedData>,
-    pass: impl FnOnce(bool) -> DiscoveryPass + Send + 'static,
+    pass: impl FnOnce(Option<ObservationRuntimeId>) -> DiscoveryPass + Send + 'static,
 ) {
     let adoption = super::super::codex_adoption_runtime::installed(shared);
-    let observe = adoption.is_some();
-    let pass = tokio::task::spawn_blocking(move || pass(observe))
+    let observer = adoption
+        .as_ref()
+        .map(|adoption| adoption.observation_runtime_id());
+    let pass = tokio::task::spawn_blocking(move || pass(observer))
         .await
         .unwrap_or_else(|error| {
             tracing::warn!(
@@ -38,25 +41,52 @@ pub(super) async fn codex_discovery_pass(
     }
 }
 
+/// The runtime the one Codex relay serves: the latest to start it, held weakly so a replaced
+/// runtime is not kept alive by the relay.
+#[cfg(unix)]
+static CODEX_RELAY_TARGET: Mutex<std::sync::Weak<SharedData>> = Mutex::new(std::sync::Weak::new());
+
+#[cfg(unix)]
+fn codex_relay_target() -> Option<Arc<SharedData>> {
+    let target = CODEX_RELAY_TARGET.lock();
+    target
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .upgrade()
+}
+
 #[cfg(unix)]
 pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
+    // Retargeted before the started check, so a later runtime takes over the one running relay.
+    *CODEX_RELAY_TARGET
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(&shared);
+    drop(shared);
     if CODEX_IDLE_ROLLOUT_RELAY_STARTED.swap(true, Ordering::AcqRel) {
         return;
     }
+    #[cfg(test)]
+    RELAY_SPAWNS.fetch_add(1, Ordering::AcqRel);
     task_supervisor::spawn_observed("codex_idle_rollout_relay", async move {
         let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let mut active_tails: HashSet<String> = HashSet::new();
         let mut next_rehydrate = tokio::time::Instant::now();
 
         loop {
+            // Each cycle serves the current target; tails already started keep their own runtime.
+            let Some(shared) = codex_relay_target() else {
+                tokio::time::sleep(CODEX_IDLE_ROLLOUT_POLL_INTERVAL).await;
+                continue;
+            };
             // #3711: direct Codex TUI tmux sessions survive dcserver restarts,
             // but their in-memory rollout binding does not.
             let now = tokio::time::Instant::now();
             if now >= next_rehydrate {
                 let shared_for_rehydrate = shared.clone();
-                codex_discovery_pass(&shared, move |observe| {
+                codex_discovery_pass(&shared, move |observer| {
+                    #[cfg(test)]
+                    note_relay_target(RelayUse::Discovery, &shared_for_rehydrate);
                     crate::services::tui_prompt_dedupe::resolve_codex_claims();
-                    rehydrate_existing_codex_tui_bindings(&shared_for_rehydrate, observe)
+                    rehydrate_existing_codex_tui_bindings(&shared_for_rehydrate, observer)
                 })
                 .await;
                 next_rehydrate = now + CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL;
@@ -76,6 +106,8 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                 if active_tails.contains(&tmux_session_name) {
                     continue;
                 }
+                #[cfg(test)]
+                note_relay_target(RelayUse::Owner, &shared);
                 let Some(channel_id) =
                     owner_channel_for_tmux_session(&shared, &ProviderKind::Codex, &tmux_session_name, RelayEmissionKind::Poll)
                 else {
@@ -457,6 +489,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                 }
             }
 
+            drop(shared);
             tokio::time::sleep(CODEX_IDLE_ROLLOUT_POLL_INTERVAL).await;
         }
     }
@@ -465,6 +498,26 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
         provider = ProviderKind::Codex.as_str(),
         runtime_kind = RuntimeHandoffKind::CodexTui.as_str(),
     )));
+}
+
+/// Test hooks: relay tasks actually spawned, and which runtime each relay use served.
+#[cfg(test)]
+pub(super) static RELAY_SPAWNS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RelayUse {
+    Discovery,
+    Owner,
+}
+#[cfg(test)]
+pub(super) static RELAY_TARGETS: Mutex<Vec<(RelayUse, usize)>> = Mutex::new(Vec::new());
+#[cfg(test)]
+fn note_relay_target(used: RelayUse, shared: &Arc<SharedData>) {
+    RELAY_TARGETS
+        .lock()
+        .unwrap()
+        .push((used, Arc::as_ptr(shared) as usize));
 }
 
 /// Test hooks: channels whose response tail started, and a one-shot pause before bridge capture.
