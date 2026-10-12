@@ -13,13 +13,15 @@ use crate::services::cluster::channel_home_drain::{DrainPort, Owed, ResetRefused
 use crate::services::cluster::channel_home_port::ChannelHomePort;
 use crate::services::cluster::intake_router_hook::IntakeRouterDecision;
 use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
+use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
-use crate::services::tui_o::store::ledger::PieceOutcome;
-use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
+use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
+use crate::services::tui_o::store::{ChannelStore, InitSource, Initialized, OStore, StoreConfig};
 use crate::services::tui_o::writer::deliver::{self, ChannelWriter, Step};
 use crate::services::tui_o::writer::host::test_io::Alarms;
 use crate::services::tui_o::writer::host::{self, HostIo};
 use crate::services::tui_o::writer::pieces::{Derived, PieceWork};
+use crate::services::tui_o::writer::{DiscordPort, PostOutcome};
 
 const WITHIN: Duration = Duration::from_secs(60);
 /// Two drain rounds of the boot watch (`RENEW_EVERY` apart) and a margin.
@@ -30,11 +32,19 @@ fn epoch_of(env: &Env) -> i64 {
 }
 
 /// The parent's side of every reclaiming case: a worker home on MINI, the node's scenario, and
-/// the gateway's reclaim once the node says its responsibility shows in the projection.
+/// the gateway's reclaim once the node says its responsibility is in place.
 async fn reclaim_while(scenario: &str, within: Duration) -> (Scene, i64) {
+    reclaim_after(None, scenario, within).await
+}
+
+/// As [`reclaim_while`], after `seed` ran to its end as an earlier generation on MINI's root.
+async fn reclaim_after(seed: Option<&str>, scenario: &str, within: Duration) -> (Scene, i64) {
     let scene = Scene::new().await;
     let epoch = scene.worker_home().await;
     put(scene.dir(), "epoch", epoch);
+    if let Some(seed) = seed {
+        Node::spawn(&scene, seed, MINI).finish(WITHIN).await;
+    }
     let node = Node::spawn(&scene, scenario, MINI);
     wait_signal(scene.dir(), "owed_seen", WITHIN).await;
     let channel = C.to_string();
@@ -313,6 +323,149 @@ pub(super) async fn running_post_node(env: &Env) {
         ["base"],
         "the actor posted nothing more"
     );
+    node.stop().await;
+}
+
+/// The payload of the piece whose POST Discord accepted while its reply was lost.
+const MAYBE_SENT: &str = "maybe sent";
+const HISTORY: &str = "discord-history.jsonl";
+
+/// The unit `row("m1", MAYBE_SENT)` derives on `C`.
+fn maybe_sent_unit() -> UnitKey {
+    UnitKey {
+        channel_id: C,
+        provider: ShadowProvider::Claude,
+        native_key: "m1:0".into(),
+        kind: UnitKind::Body,
+    }
+}
+
+/// The store a first activation writes over the still-empty transcript `s1`, as the host makes it.
+fn activated_store(root: &Path) -> (OStore, ChannelStore) {
+    let transcript = root.join("c.jsonl");
+    std::fs::write(&transcript, b"").unwrap();
+    let source_id = source_id_for("s1", &transcript).unwrap();
+    let prefix_hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b""));
+    let sources = vec![InitSource {
+        source_id,
+        delivery_start: 0,
+        prefix_hash,
+    }];
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root);
+    let store = store.unwrap().expect("store enabled");
+    let at = chrono::Utc::now();
+    let init = |channel| {
+        let build_digest = env!("CARGO_PKG_VERSION").into();
+        let (sources, initial_anchor) = (sources.clone(), 0);
+        Ok(Initialized {
+            channel,
+            sources,
+            initial_anchor,
+            build_digest,
+            at,
+        })
+    };
+    let era = store.begin_era(&[C], at, init).unwrap();
+    let channel = store.open_channel(&era, C).unwrap().expect("era channel");
+    (store, channel)
+}
+
+/// T-H7 Prepared alone: an open Prepared left by a crash keeps the reclaim draining; the replayed
+/// source settles it as Posted from the history Discord kept, with no new POST, and only then leaves.
+#[tokio::test(flavor = "current_thread")]
+async fn th7_prepared_alone_blocks_reclaim_pg() {
+    let seed = Some("th7_prepared_seed");
+    let (scene, _) = reclaim_after(seed, "th7_prepared", Duration::from_secs(180)).await;
+    let history = std::fs::read_to_string(scene.dir().join(HISTORY)).unwrap();
+    let lines: Vec<&str> = history.lines().collect();
+    assert_eq!(lines.len(), 1, "Discord accepted no POST after the restart");
+    let accepted: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let root = scene.dir().join(format!("root-{MINI}"));
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root);
+    let store = store.unwrap().unwrap();
+    let era = store.read_era().unwrap().unwrap();
+    let channel = store.open_channel(&era, C).unwrap().unwrap();
+    assert_eq!(
+        channel.ledger().next_serial(),
+        1,
+        "no Prepared after the restart"
+    );
+    let (_, piece) = channel
+        .ledger()
+        .latest_piece(&maybe_sent_unit(), 0)
+        .unwrap();
+    let posted = PieceOutcome::Posted(accepted["id"].as_u64().unwrap());
+    assert_eq!(piece.outcome, Some(posted));
+    scene.drop_db().await;
+}
+
+/// First generation: the activated store, the Prepared a writer appends before its POST, and
+/// Discord accepting that POST; the reply is lost as this generation ends.
+pub(super) async fn prepared_seed_node(env: &Env) {
+    let root = crate::config::runtime_root().expect("node root");
+    let (_store, mut channel) = activated_store(&root);
+    let ledger = channel.ledger();
+    let prepared = LedgerEntry::Prepared {
+        serial: ledger.next_serial(),
+        unit_key: maybe_sent_unit(),
+        piece_index: 0,
+        payload: MAYBE_SENT.into(),
+        anchor_id: ledger.anchor(),
+        epoch: 1,
+    };
+    channel.append_ledger(prepared).unwrap();
+    let discord = Discord::kept_in(&env.dir.join(HISTORY));
+    let outcome = discord.post(C, MAYBE_SENT.into()).await;
+    assert!(matches!(outcome, PostOutcome::Created(_)), "{outcome:?}");
+    let (serial, open) = channel.ledger().unresolved().expect("the Prepared is open");
+    assert_eq!((serial, open.payload.as_str()), (0, MAYBE_SENT));
+}
+
+pub(super) async fn prepared_node(env: &Env) {
+    let epoch = epoch_of(env);
+    let discord = Discord::kept_in(&env.dir.join(HISTORY));
+    let kept = discord.kept();
+    assert_eq!(kept.len(), 1, "the history Discord kept across the restart");
+    let ours = (discord.bot_id(), MAYBE_SENT);
+    assert_eq!((kept[0].author_id, kept[0].content.as_str()), ours);
+    let node = Booted::boot_on(env, discord).await;
+    until("the lease opens the home", WITHIN, || {
+        node.home_epoch() == Some(epoch)
+    })
+    .await;
+    until("the writer takes work", WITHIN, || node.accepts()).await;
+    // The seed proved the Prepared; a projection wait here would let a mutant time out instead.
+    signal(&env.dir, "owed_seen");
+    wait_signal(&env.dir, "reclaim_begun", WITHIN).await;
+    let gate = node.gate().expect("registered");
+    let ran = || node.drain_blocker().is_some() || gate.final_closed(epoch);
+    until("the drain runs a round", WITHIN, ran).await;
+    tokio::time::sleep(TWO_ROUNDS).await;
+    let (blocker, running) = (node.drain_blocker(), deliver::posts_in_flight(C));
+    let owed = node.owed().await;
+    assert_eq!(
+        node.state().await,
+        Some(HomeState::Reclaiming),
+        "the row left while the Prepared stayed open: blocker {blocker:?}, projection {owed:?}, \
+         in flight {running:?}"
+    );
+    let alone = Owed {
+        prepared: 1,
+        ..Owed::default()
+    };
+    assert_eq!(owed, Some(alone), "the Prepared is the only responsibility");
+    assert_eq!(blocker.as_deref(), Some("owed"));
+    assert_eq!(running, Some(0));
+    append(&node.transcript, &row("m1", MAYBE_SENT));
+    let clear = || async { node.owed().await == Some(Owed::default()) };
+    until_async("the replayed piece settles the Prepared", WITHIN, clear).await;
+    until_left(&node).await;
+    assert_eq!(
+        node.discord().posts(),
+        Vec::<String>::new(),
+        "no POST after the restart"
+    );
+    assert_eq!(node.discord().seen(), Vec::<Seen>::new());
     node.stop().await;
 }
 
