@@ -551,6 +551,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_input/rows_tests.rs",
         "src/services/tui_o/writer/switch_tests.rs",
         "src/services/tui_o/writer/retire_tests.rs",
+        "src/services/tui_o/writer/legacy_hop_retry_tests.rs",
         "src/services/tui_o/writer/fork_tests.rs",
         "src/services/tui_o/writer/host_tests.rs",
         "src/services/tui_o/writer/host_renumber_tests.rs",
