@@ -1,0 +1,7 @@
+# Five ids a past change added to a module already on both debt baselines; no lane selects it,
+# so the module axes stay green and each id must fail on its own.
+new-id-unrequired services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::matrix_preserves_live_turns_and_only_recreates_strong_idle_mismatches
+new-id-unrequired services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::reconcile_defer_does_not_call_recreate_sink
+new-id-unrequired services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::reconcile_recreate_calls_sink_once_for_exact_tmux_session
+new-id-unrequired services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::stale_inflight_falls_back_but_live_turn_never_recreates
+new-id-unrequired services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::weak_idle_mismatch_falls_back_at_escalation_threshold
