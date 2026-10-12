@@ -439,6 +439,10 @@ fn send_prompt_with_readiness(
     readiness: PromptReadinessKind,
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
+    if let Some(run) = host_input::guarded_submission::selected(session_name, prompt, cancel_token)
+    {
+        return run.into_legacy();
+    }
     let actions = plan_prompt_submit(prompt)?;
     // Readiness can wait for a busy prior turn, but it must not hold the narrow
     // composer lock while doing so. Revalidate only after acquiring that lock so
@@ -629,6 +633,9 @@ pub(crate) fn steering_snapshot_decision(
 }
 
 pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
+    if let Some(run) = host_input::guarded_submission::steering_selected(session_name) {
+        return run.into_legacy();
+    }
     let actions = plan_prompt_submit(prompt)?;
     crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
         admit_automatic_write(session_name, PromptReadinessKind::Followup)?;
@@ -1185,6 +1192,10 @@ pub fn send_followup_prompt_or_idle_transcript(
     cancel_token: Option<&CancelToken>,
     transcript_path: &std::path::Path,
 ) -> Result<(), String> {
+    if let Some(run) = host_input::guarded_submission::selected(session_name, prompt, cancel_token)
+    {
+        return run.into_legacy();
+    }
     let actions = plan_prompt_submit(prompt)?;
     // The potentially long warm-follow-up readiness wait must not hold the
     // narrow composer lock: a busy-pane `/compact` still needs to steer while
@@ -4315,7 +4326,6 @@ line 37";
                 for entry in ENTRIES {
                     let session = format!("claude-r5-default-{}", uuid::Uuid::new_v4());
                     let spy = SpyGuard::install(SpyState {
-                        pane_size: Some((80, 24)),
                         captures: std::iter::repeat_n(Some(IDLE.to_string()), 16).collect(),
                         captures_after_send: Some(
                             std::iter::repeat_n(Some(BUSY.to_string()), 4).collect(),
