@@ -17,6 +17,7 @@ use serenity::{ChannelId, UserId};
 use super::HealthRegistry;
 use super::runtime_resolve::resolve_direct_meeting_shared;
 use crate::services::discord::{SharedData, router};
+use crate::services::imsg_reply::{self, ReplyObligation, episode};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
     Intervention, InterventionMode, SourceMessageQueuedGeneration,
@@ -293,6 +294,7 @@ struct LivePorts {
     request: HumanInputRequest,
     /// What a pane injection reported, kept apart from the final delivery for its log.
     inject_observed: std::sync::Mutex<InjectObservation>,
+    reply: Option<ReplyObligation>,
 }
 
 /// Whether a pane injection was asked for and the veto it answered, whatever came after.
@@ -317,40 +319,21 @@ impl DeliveryPorts for LivePorts {
                 router::reserve_headless_turn().behind_queue()
             }
         };
-        #[cfg(test)]
-        if let Some(attempt) = inject::test_hook::start(&self.shared, &self.request, &reservation) {
-            return attempt.await;
-        }
-        let (ctx, token) = match &self.runtime {
-            Ok(runtime) => runtime,
-            Err(error) => return StartAttempt::Unavailable(error.clone()),
+        let Some(reply) = &self.reply else {
+            return self.start_reserved(reservation).await;
         };
-        let request = &self.request;
-        let result = router::start_reserved_headless_turn_with_owner(
-            ctx,
-            request.channel_id,
-            &request.text,
-            &format!("{}:{}", request.source, request.author_id),
-            UserId::new(request.author_id),
-            &self.shared,
-            token,
-            Some(request.source.as_str()),
-            request.metadata.clone(),
-            request.channel_name_hint.clone(),
-            None,
-            None,
-            reservation,
-        )
-        .await;
-        match result {
-            Ok(outcome) => StartAttempt::Started(outcome.turn_id),
-            Err(router::HeadlessTurnStartError::Conflict(_)) => StartAttempt::Busy,
-            Err(router::HeadlessTurnStartError::InvalidTarget(error)) => {
-                StartAttempt::InvalidTarget(error)
+        // The reserved turn is named before anything can start it; a refused start releases it.
+        let (provider, channel) = (&self.request.provider, self.request.channel_id.get());
+        let episode = episode::turn(provider, channel, reservation.user_msg_id().get());
+        if !reply.bind_episode(&episode, None).await {
+            return StartAttempt::Unavailable(imsg_reply::UNBOUND.to_string());
+        }
+        match self.start_reserved(reservation).await {
+            StartAttempt::Started(turn_id) => StartAttempt::Started(turn_id),
+            _ if !reply.release_episode(&episode).await => {
+                StartAttempt::Unavailable(imsg_reply::UNBOUND.to_string())
             }
-            Err(router::HeadlessTurnStartError::Internal(error)) => {
-                StartAttempt::Unavailable(error)
-            }
+            refused => refused,
         }
     }
 
@@ -365,7 +348,13 @@ impl DeliveryPorts for LivePorts {
 
     async fn enqueue(&self) -> Result<String, String> {
         let request = &self.request;
-        let (intervention, turn_id) = request.queue_entry();
+        let (intervention, turn_id) = request.queue_entry(self.reply.as_ref());
+        // The GUID names its queue entry before the entry exists.
+        if let Some(reply) = &self.reply
+            && !reply.bind_queued(intervention.message_id.get()).await
+        {
+            return Err(imsg_reply::UNBOUND.to_string());
+        }
         let outcome = super::super::mailbox_enqueue_intervention(
             &self.shared,
             &request.provider,
@@ -387,7 +376,11 @@ impl DeliveryPorts for LivePorts {
     }
 
     async fn try_inject(&self) -> InjectAttempt {
-        let attempt = inject::attempt(&self.shared, &self.request, inject::Origin::External).await;
+        let origin = match &self.reply {
+            Some(reply) => inject::Origin::Obligated(reply.clone()),
+            None => inject::Origin::External,
+        };
+        let attempt = inject::attempt(&self.shared, &self.request, origin).await;
         let veto = match &attempt {
             InjectAttempt::NotSent(veto) | InjectAttempt::HandedBack { veto, .. } => Some(*veto),
             _ => None,
@@ -404,9 +397,53 @@ impl DeliveryPorts for LivePorts {
     }
 }
 
+impl LivePorts {
+    async fn start_reserved(&self, reservation: router::HeadlessTurnReservation) -> StartAttempt {
+        #[cfg(test)]
+        if let Some(attempt) = inject::test_hook::start(&self.shared, &self.request, &reservation) {
+            return attempt.await;
+        }
+        let (ctx, token) = match &self.runtime {
+            Ok(runtime) => runtime,
+            Err(error) => return StartAttempt::Unavailable(error.clone()),
+        };
+        let request = &self.request;
+        let metadata = match &self.reply {
+            Some(reply) => reply.mark_started(request.metadata.clone()),
+            None => request.metadata.clone(),
+        };
+        let result = router::start_reserved_headless_turn_with_owner(
+            ctx,
+            request.channel_id,
+            &request.text,
+            &format!("{}:{}", request.source, request.author_id),
+            UserId::new(request.author_id),
+            &self.shared,
+            token,
+            Some(request.source.as_str()),
+            metadata,
+            request.channel_name_hint.clone(),
+            None,
+            None,
+            reservation,
+        )
+        .await;
+        match result {
+            Ok(outcome) => StartAttempt::Started(outcome.turn_id),
+            Err(router::HeadlessTurnStartError::Conflict(_)) => StartAttempt::Busy,
+            Err(router::HeadlessTurnStartError::InvalidTarget(error)) => {
+                StartAttempt::InvalidTarget(error)
+            }
+            Err(router::HeadlessTurnStartError::Internal(error)) => {
+                StartAttempt::Unavailable(error)
+            }
+        }
+    }
+}
+
 impl HumanInputRequest {
     /// The queue entry this input becomes, under a fresh headless message id, and its turn id.
-    fn queue_entry(&self) -> (Intervention, String) {
+    fn queue_entry(&self, reply: Option<&ReplyObligation>) -> (Intervention, String) {
         let reservation = router::reserve_headless_turn();
         let message_id = reservation.user_msg_id();
         let generation = crate::services::discord::runtime_store::process_generation();
@@ -423,7 +460,7 @@ impl HumanInputRequest {
             text: self.text.clone(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),
-            reply_context: None,
+            reply_context: reply.map(ReplyObligation::contract),
             has_reply_boundary: false,
             merge_consecutive: false,
             pending_uploads: Vec::new(),
@@ -437,6 +474,23 @@ pub async fn deliver_human_input(
     registry: &HealthRegistry,
     request: HumanInputRequest,
 ) -> Result<HumanInputDelivery, HumanInputError> {
+    deliver_logged(registry, request, None).await
+}
+
+/// An admitted iMessage binds its GUID to the delivery it takes before that delivery's effect.
+pub(crate) async fn deliver_with_reply(
+    registry: &HealthRegistry,
+    request: HumanInputRequest,
+    reply: ReplyObligation,
+) -> Result<HumanInputDelivery, HumanInputError> {
+    deliver_logged(registry, request, Some(reply)).await
+}
+
+async fn deliver_logged(
+    registry: &HealthRegistry,
+    request: HumanInputRequest,
+    reply: Option<ReplyObligation>,
+) -> Result<HumanInputDelivery, HumanInputError> {
     let channel_id = request.channel_id.get();
     let provider = request.provider.clone();
     let source = request.source.clone();
@@ -446,7 +500,7 @@ pub async fn deliver_human_input(
         .and_then(|metadata| metadata.pointer("/human_input/origin_id"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
-    let (result, inject) = deliver_resolved(registry, request).await;
+    let (result, inject) = deliver_resolved(registry, request, reply).await;
     // One line per delivery, keyed by ids only; the input text never reaches the log.
     let (outcome, turn_id, reason) = match &result {
         Ok(HumanInputDelivery::Started { turn_id }) => ("started", Some(turn_id.clone()), None),
@@ -478,6 +532,7 @@ pub async fn deliver_human_input(
 async fn deliver_resolved(
     registry: &HealthRegistry,
     request: HumanInputRequest,
+    reply: Option<ReplyObligation>,
 ) -> (
     Result<HumanInputDelivery, HumanInputError>,
     InjectObservation,
@@ -522,6 +577,7 @@ async fn deliver_resolved(
         runtime,
         request,
         inject_observed: Default::default(),
+        reply,
     };
     let result = deliver_with_ports(&ports).await;
     let observed = ports.inject_observed.into_inner();

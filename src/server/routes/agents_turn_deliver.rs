@@ -13,7 +13,7 @@ use super::AppState;
 use super::agents_turn_target::{AgentTurnTarget, resolve_agent_turn_target};
 use crate::services::discord::health::{
     HealthRegistry, HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
-    preflight_human_input,
+    deliver_with_reply, preflight_human_input,
 };
 use crate::services::imsg_reply;
 
@@ -61,6 +61,7 @@ fn admission_enabled() -> bool {
 async fn observed_delivery(
     registry: &HealthRegistry,
     request: HumanInputRequest,
+    reply: Option<imsg_reply::ReplyObligation>,
 ) -> Result<HumanInputDelivery, HumanInputError> {
     #[cfg(test)]
     if let Ok(probe) = DELIVERY_PROBE_FOR_TEST.try_with(Clone::clone) {
@@ -74,7 +75,10 @@ async fn observed_delivery(
             release.notified().await;
         }
     }
-    deliver_human_input(registry, request).await
+    match reply {
+        Some(reply) => deliver_with_reply(registry, request, reply).await,
+        None => deliver_human_input(registry, request).await,
+    }
 }
 
 fn failure(status: StatusCode, error: &str) -> RouteResponse {
@@ -185,6 +189,7 @@ pub async fn deliver_turn_input(
             text,
         };
         let provider = request.provider.clone();
+        let reply = imsg_reply::ReplyObligation::new(pool.clone(), origin_id);
         imsg_reply::deliver_once(
             pool,
             &input,
@@ -196,12 +201,12 @@ pub async fn deliver_turn_input(
                     author_id,
                 )
             },
-            || observed_delivery(registry, request),
+            || observed_delivery(registry, request, Some(reply)),
             |result| delivery_response(channel_id, result),
         )
         .await
     } else {
-        delivery_response(channel_id, observed_delivery(registry, request).await)
+        delivery_response(channel_id, observed_delivery(registry, request, None).await)
     }
 }
 

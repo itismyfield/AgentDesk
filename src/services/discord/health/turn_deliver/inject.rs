@@ -2,6 +2,8 @@
 //! the mailbox order reservation, and the hand-off of one input to `claude_tui::busy_inject` or,
 //! once enabled, `codex_tui::busy_inject`.
 
+mod names;
+
 use futures::FutureExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,7 +12,7 @@ use poise::serenity_prelude::{ChannelId, MessageId};
 
 use super::HumanInputRequest;
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::claude_tui::busy_inject::{self, Outcome, Unconfirmed, Veto};
+use crate::services::claude_tui::busy_inject::{self, Outcome};
 use crate::services::codex_tui::busy_inject as codex_inject;
 use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{InflightTurnState, TurnSource};
@@ -19,11 +21,13 @@ use crate::services::discord::input_runtime::fence;
 use crate::services::discord::queue_io::queued_head_inject::{
     BindingKey, binding_key, persistence_failed, queued_head_enabled,
 };
+use crate::services::imsg_reply::{self, ReplyObligation, episode};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
     ActiveTurnKind, ChannelMailboxSnapshot, ExpectedClaim, HANDBACK_NOT_WRITTEN, HeadOutcome,
     HeadSettle, InjectionSettlement, Intervention, QueueIdentity, QueuedHeadClaim, ReserveOutcome,
 };
+use names::{codex_unconfirmed_name, codex_veto_name, unconfirmed_name, veto_name};
 use tokio::sync::OwnedMutexGuard;
 
 /// `ADK_BUSY_INJECT` turns on busy-turn injection of human input into Claude TUI sessions, read
@@ -35,6 +39,7 @@ pub(super) const INPUT_IN_FLIGHT: &str = "input_in_flight";
 const INPUT_RUNTIME_OWNED: &str = "input_runtime_owned";
 const MAILBOX_UNAVAILABLE: &str = "mailbox_unavailable";
 const NOT_BUSY: &str = "not_busy";
+const EPISODE_UNIDENTIFIED: &str = "episode_unidentified";
 /// The message is already queued, held, injected or claimed by another path.
 pub(crate) const SOURCE_OWNED: &str = "source_owned";
 pub(super) const QUEUE_NONEMPTY: &str = "queue_nonempty";
@@ -86,6 +91,9 @@ pub(crate) enum InjectAttempt {
 /// becomes, and the claim the owner holds on it until the injection ends.
 pub(crate) enum Origin {
     External,
+    /// An admitted iMessage: its paste carries the reply contract, and its GUID is bound to the
+    /// holder's episode before any pane effect.
+    Obligated(ReplyObligation),
     QueuedHead {
         expected: QueueIdentity,
         parent: Option<ChannelId>,
@@ -389,17 +397,29 @@ pub(crate) async fn attempt(
         Err(veto) => return InjectAttempt::NotSent(veto),
     };
     let channel = request.channel_id.get();
+    let reply = match &origin {
+        Origin::Obligated(reply) => match busy_episode(request, &target) {
+            Some(episode) => Some((reply.clone(), episode)),
+            None => return InjectAttempt::NotSent(EPISODE_UNIDENTIFIED),
+        },
+        _ => None,
+    };
+    let text = match &reply {
+        Some((reply, _)) => reply.frame(&request.text),
+        None => request.text.clone(),
+    };
     let input = Arc::new(Input {
         channel,
         provider: request.provider.as_str().to_string(),
         source: request.source.clone(),
         author: request.author_id.to_string(),
-        text: request.text.clone(),
+        text,
         nonce: busy_inject::fresh_nonce(),
     });
     let (session, turn_id) = (target.session.clone(), target.turn_id.clone());
     let (message, handback, guard) = match origin {
-        Origin::External => (None, request.queue_entry(), None),
+        Origin::External => (None, request.queue_entry(None), None),
+        Origin::Obligated(reply) => (None, request.queue_entry(Some(&reply)), None),
         Origin::Discord {
             message,
             handback,
@@ -414,6 +434,7 @@ pub(crate) async fn attempt(
         message,
         handback,
         guard,
+        reply,
     };
     // The owner outlives a cancelled request: it settles the reservation and any handback itself.
     match tokio::spawn(owner.run(target, input.clone())).await {
@@ -424,6 +445,19 @@ pub(crate) async fn attempt(
             InjectAttempt::OwnerFailed { turn_id }
         }
     }
+}
+
+/// The episode of the row the target verified; a holder that names no single turn has none.
+fn busy_episode(request: &HumanInputRequest, target: &Target) -> Option<String> {
+    let (_, user_msg_id, started_at, start_offset) = target.row.as_ref()?;
+    let holder = episode::Holder {
+        session: &target.session,
+        user_msg_id: *user_msg_id,
+        started_at,
+        start_offset: *start_offset,
+        native_turn: target.native_turn.as_deref(),
+    };
+    episode::busy(&request.provider, request.channel_id.get(), &holder)
 }
 
 async fn queued_target_matches(
@@ -630,6 +664,8 @@ struct Owner {
     /// Dropped before the result returns, so a caller that falls back to its own intake is not
     /// refused by this claim.
     guard: Option<SourceGuard>,
+    /// An admitted iMessage's obligation and the holder episode its paste joins.
+    reply: Option<(ReplyObligation, String)>,
 }
 
 impl Owner {
@@ -641,6 +677,7 @@ impl Owner {
             message,
             handback: (handback, queued_turn),
             guard,
+            reply,
         } = self;
         let Target {
             session,
@@ -670,10 +707,16 @@ impl Owner {
         };
         #[cfg(test)]
         test_hook::owner_crash(input.channel);
+        // The GUID names the holder's episode, with this paste's nonce, before the pane can take it.
+        let bound = match &reply {
+            Some((reply, episode)) => reply.bind_episode(episode, Some(&input.nonce)).await,
+            None => true,
+        };
         let pane = pane(input.channel, &session);
         let effect = tokio::task::spawn_blocking({
             let (input, session, turn_id) = (input.clone(), session.clone(), turn_id.clone());
             move || match native_turn {
+                _ if !bound => InjectAttempt::NotSent(imsg_reply::UNBOUND),
                 None => run(&pane, &session, &transcript, turn_id, &input),
                 Some(native) => {
                     let target = (session.as_str(), transcript.as_path(), native.as_str());
@@ -686,7 +729,20 @@ impl Owner {
             // The effect panicked outside its catch_unwind or never started, so it recorded nothing.
             Err(_) => unconfirmed(&input, &session, turn_id, "executor_failed"),
         };
+        // A refused paste leaves its episode before its queue entry exists; unbound, nothing queues.
+        let rebound = match (&attempt, &reply) {
+            (InjectAttempt::NotSent(_), Some((reply, episode))) => {
+                let queued = handback.message_id.get();
+                bound && reply.hand_back(episode, &input.nonce, queued).await
+            }
+            _ => true,
+        };
         let attempt = match attempt {
+            // The dropped ticket's reservation counts as gone; nothing reached the pane or queue.
+            InjectAttempt::NotSent(_) if !rebound => {
+                drop(ticket);
+                InjectAttempt::HandbackFailed(imsg_reply::UNBOUND)
+            }
             InjectAttempt::NotSent(veto) => {
                 let source = [handback.message_id.get()];
                 let handed =
@@ -884,41 +940,6 @@ fn run_codex(
     }
 }
 
-fn codex_veto_name(veto: codex_inject::Veto) -> &'static str {
-    use codex_inject::Veto;
-    match veto {
-        Veto::InvalidInput => "invalid_input",
-        Veto::LockContended => "lock_contended",
-        Veto::HumanAttached => "human_attached",
-        Veto::AttachUnknown => "attach_unknown",
-        Veto::PaneUnavailable => "pane_unavailable",
-        Veto::Modal => "modal",
-        Veto::NoComposer => "no_composer",
-        Veto::Draft => "draft",
-        Veto::QueueShown => "queue_shown",
-        Veto::NotSteerable => "not_steerable",
-        Veto::NotBusy => NOT_BUSY,
-        Veto::TurnUnknown => "turn_unknown",
-        Veto::TurnChanged => "turn_changed",
-        Veto::TranscriptUnavailable => "transcript_unavailable",
-        Veto::LoadFailed => "load_failed",
-        Veto::UnpredictableRender => "unpredictable_render",
-        Veto::LedgerFull => "ledger_full",
-    }
-}
-
-fn codex_unconfirmed_name(detail: codex_inject::Unconfirmed) -> &'static str {
-    use codex_inject::Unconfirmed;
-    match detail {
-        Unconfirmed::PasteFailed => "paste_failed",
-        Unconfirmed::AttachedAfterPaste => "attached_after_paste",
-        Unconfirmed::CaptureFailed => "capture_failed",
-        Unconfirmed::DraftNotOwned => "draft_not_owned",
-        Unconfirmed::EnterFailed => "enter_failed",
-        Unconfirmed::NotObserved => "not_observed",
-    }
-}
-
 fn unconfirmed(
     input: &Input,
     session: &str,
@@ -956,36 +977,6 @@ fn pane(channel_id: u64, session: &str) -> busy_inject::Pane {
         PathBuf::from("tmux")
     };
     busy_inject::Pane::with_program(session, program)
-}
-
-fn veto_name(veto: Veto) -> &'static str {
-    match veto {
-        Veto::InvalidInput => "invalid_input",
-        Veto::LockContended => "lock_contended",
-        Veto::HumanAttached => "human_attached",
-        Veto::AttachUnknown => "attach_unknown",
-        Veto::PaneUnavailable => "pane_unavailable",
-        Veto::Modal => "modal",
-        Veto::Draft => "draft",
-        Veto::NotBusy => "not_busy",
-        Veto::TranscriptUnavailable => "transcript_unavailable",
-        Veto::LoadFailed => "load_failed",
-        Veto::UnpredictableRender => "unpredictable_render",
-    }
-}
-
-fn unconfirmed_name(detail: Unconfirmed) -> &'static str {
-    match detail {
-        Unconfirmed::PasteFailed => "paste_failed",
-        Unconfirmed::AttachedAfterPaste => "attached_after_paste",
-        Unconfirmed::CaptureFailed => "capture_failed",
-        Unconfirmed::ModalAfterPaste => "modal_after_paste",
-        Unconfirmed::DraftNotOwned => "draft_not_owned",
-        Unconfirmed::ContaminatedSubmit => "contaminated_submit",
-        Unconfirmed::CursorChangedBeforeEnter => "cursor_changed_before_enter",
-        Unconfirmed::EnterFailed => "enter_failed",
-        Unconfirmed::NotObserved => "not_observed",
-    }
 }
 
 /// Per-channel mode and tmux program for tests, so parallel tests never share a switch.
