@@ -16,6 +16,7 @@ use crate::services::cluster::intake_worker::test_executor::{self, Checkpoint};
 use crate::services::cluster::intake_worker::{TickOutcome, run_intake_worker_tick};
 use crate::services::discord::SharedData;
 use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
+use crate::services::tui_o::writer::host;
 
 const WITHIN: Duration = Duration::from_secs(60);
 
@@ -377,6 +378,39 @@ pub(super) async fn candidate_node(env: &Env) {
     assert_eq!(tick(&node, &shared, MINI).await, TickOutcome::Processed);
     assert_eq!(recorder.channels(), [C]);
     node.until_posts(&["while-lost", "reply-1"]).await;
+    node.stop().await;
+}
+
+/// T-H8: a ready, resumed writer takes work only while its home is Owned now; closing the home
+/// refuses at once, before the readiness publisher has seen the close.
+#[tokio::test(flavor = "current_thread")]
+async fn th8_accepts_rechecks_home_after_ready_pg() {
+    let scene = Scene::new().await;
+    let epoch = scene.worker_home().await;
+    put(scene.dir(), "epoch", epoch);
+    Node::spawn(&scene, "th8_home_recheck", MINI)
+        .finish(Duration::from_secs(120))
+        .await;
+    scene.drop_db().await;
+}
+
+pub(super) async fn home_recheck_node(env: &Env) {
+    let (node, _) = open_holder(env).await;
+    let readiness = host::process_readiness();
+    assert!(readiness.is_ready(C), "the writer is published ready");
+    assert!(readiness.accepts(C), "ready and Owned: it takes work");
+    let gate = node.gate().expect("the holder's row registers its gate");
+    // No await until the refusal, so this current-thread runtime cannot run the publisher.
+    gate.close();
+    assert!(
+        readiness.is_ready(C),
+        "the publisher has not seen the close"
+    );
+    assert!(!readiness.accepts(C), "accepts re-reads the closed home");
+    until("the publisher withdraws readiness", WITHIN, || {
+        !readiness.is_ready(C)
+    })
+    .await;
     node.stop().await;
 }
 

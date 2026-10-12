@@ -554,8 +554,8 @@ fn a_corrupt_legacy_queue_refuses_input_and_keeps_its_bytes() {
     });
 }
 
-/// A full queue refuses new input rather than evicting the reserved head, and a restored item
-/// cannot land ahead of it.
+/// A full queue evicts the oldest unreserved tail, while the reserved head stays first.
+/// A restored item cannot land ahead of that head.
 #[test]
 fn overflow_and_restore_never_displace_a_reserved_head() {
     let _root = root();
@@ -570,7 +570,16 @@ fn overflow_and_restore_never_displace_a_reserved_head() {
             assert!(handle.enqueue(item, ctx()).await.enqueued);
         }
         let overflow = handle.enqueue(human(2_000, 99, "overflow"), ctx()).await;
-        assert!(!overflow.enqueued && overflow.persistence_error.is_some());
+        assert!(overflow.enqueued && overflow.persistence_error.is_none());
+        assert_eq!(overflow.queue_exit_events.len(), 1);
+        assert!(matches!(
+            overflow.queue_exit_events[0].kind,
+            QueueExitKind::Overflow
+        ));
+        assert_eq!(
+            overflow.queue_exit_events[0].intervention.message_id.get(),
+            1_001
+        );
         let restored = handle
             .merge_restored_queue_items(vec![human(999, 98, "restored")], ctx())
             .await;

@@ -11,6 +11,8 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
 
 #[cfg(test)]
 mod mutation;
+#[cfg(test)]
+pub(crate) mod submit_floor;
 
 pub(crate) const CODEX_PROVENANCE_FILE: &str = "codex_provenance";
 const SCHEMA: u32 = 1;
@@ -27,7 +29,10 @@ pub(crate) struct CodexProvenance {
 
 /// A snapshot only this module's validation constructs; an origin is read from nothing else.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ValidatedCodexProvenance(CodexProvenance);
+pub(crate) struct ValidatedCodexProvenance(
+    CodexProvenance,
+    #[cfg(test)] Option<submit_floor::Schema2>,
+);
 
 impl ValidatedCodexProvenance {
     pub(crate) fn spans(&self) -> &[CodexEpisodeSpan] {
@@ -42,7 +47,7 @@ impl ValidatedCodexProvenance {
     #[cfg(test)]
     pub(crate) fn checked(channel: u64, read: CodexProvenance) -> Option<Self> {
         let identity = read.schema == SCHEMA && read.channel == channel;
-        (identity && valid(channel, &read)).then_some(Self(read))
+        (identity && valid(channel, &read)).then_some(Self(read, None))
     }
 }
 
@@ -63,6 +68,10 @@ impl ChannelStore {
     pub(crate) fn codex_provenance(&self) -> Sidecar {
         #[cfg(test)]
         SIDECAR_IO.with(|io| io.set((io.get().0 + 1, io.get().1)));
+        #[cfg(test)]
+        if let Some(read) = submit_floor::read(self) {
+            return read;
+        }
         let channel = self.init.channel;
         match durable::read_json::<CodexProvenance>(&self.dir.join(CODEX_PROVENANCE_FILE)) {
             Ok(None) => Sidecar::Missing,
@@ -72,7 +81,11 @@ impl ChannelStore {
             Ok(Some(read)) if !valid(channel, &read) => {
                 Sidecar::Unavailable("codex_provenance_conflict")
             }
-            Ok(Some(read)) => Sidecar::Present(ValidatedCodexProvenance(read)),
+            Ok(Some(read)) => Sidecar::Present(ValidatedCodexProvenance(
+                read,
+                #[cfg(test)]
+                None,
+            )),
             Err(_) => Sidecar::Unavailable("codex_provenance_unreadable"),
         }
     }

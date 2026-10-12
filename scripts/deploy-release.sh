@@ -2821,6 +2821,7 @@ _install_pg_tunnel_plist() {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>$root_x/logs/pg-tunnel.launchd.out.log</string>
   <key>StandardErrorPath</key><string>$root_x/logs/pg-tunnel.launchd.err.log</string>
   <key>EnvironmentVariables</key>
