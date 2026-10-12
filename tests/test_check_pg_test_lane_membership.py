@@ -299,7 +299,10 @@ class NonPgFilterContract(unittest.TestCase):
                 (source + use, "          if [ -n \"$CI\" ]; then\n  " + source + "          fi\n"
                  + use, "used without sourcing"),
                 (use, "          unset PG_INCLUDE_ARGS\n" + use,
-                 "PG_INCLUDE_ARGS is reassigned after sourcing")):
+                 "PG_INCLUDE_ARGS is reassigned after sourcing"),
+                # An escaped operator keeps its `#` literal, so the line still ends in `&&`.
+                *((source + use, f"          false && echo ok\\{op}#tag &&\n" + source + use,
+                   "used without sourcing") for op in ";|&")):
             with self.subTest(new=new):
                 self.assertEqual(original.count(old), 1)
                 path.write_text(original.replace(old, new), "utf-8")
@@ -1702,6 +1705,23 @@ class CommentMarkerMutations(BypassFixtureCase):
         self.assertEqual(membership._strip_comments("  - run: x  # note"), "  - run: x")
         self.assertEqual(membership._strip_comments("      # note"), "")
         self.assertEqual(membership._strip_comments("run: echo a#b"), "run: echo a#b")
+        # In the run scalar's shell an escaped operator is word data, not a comment boundary.
+        self.assertEqual(membership._strip_comments("run: echo ok\\;#tag &&"),
+                         "run: echo ok\\;#tag &&")
+        self.assertEqual(membership._strip_comments("run: echo ok\\\\;# note"),
+                         "run: echo ok\\\\;")
+
+    def test_a_cargo_command_past_an_unproven_boundary_fails_the_gate(self) -> None:
+        # Its lane filter would be read from a shorter or joined command, so it is an error.
+        for command in (f"{self.SWEEP} --logfile foo$(true)#tag; cargo test --lib db::service",
+                        f"{self.SWEEP} --logfile x#tag"):
+            with self.subTest(command=command):
+                self.write_sweep(f"  sweep:\n    steps:\n      - run: {command}\n")
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+                    verdict = membership.main(["--repo-root", str(self.root), "--write-snapshots"])
+                self.assertEqual(verdict, 2)
+                self.assertIn("cargo-command-unparsed", stderr.getvalue())
 
     def test_a_quoted_hash_on_the_service_line_keeps_the_service(self) -> None:
         # The counterexample to cutting at every `#`: the service start here
