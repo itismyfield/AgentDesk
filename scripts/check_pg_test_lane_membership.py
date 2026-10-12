@@ -129,6 +129,23 @@ PG_DB_BLOCK_HEADER = (
 _PG_DB_ENTRY = re.compile(r"^-\s+['\"]([^'\"]+)['\"]\s*$")
 
 
+@lru_cache(maxsize=None)
+def shell_lexer():
+    """The shared shell lexer beside this file, which both CI gates read shell with;
+    a missing or broken lexer raises instead of lexing nothing."""
+    path = Path(__file__).with_name("ci_shell_lex.py")
+    loaded = sys.modules.get("ci_shell_lex")
+    if loaded is not None and Path(getattr(loaded, "__file__", "")).resolve() == path.resolve():
+        return loaded
+    spec = importlib.util.spec_from_file_location("ci_shell_lex", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot import the shell lexer: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_coverage_module(repo_root: Path):
     path = repo_root / "scripts/check_test_lane_coverage.py"
     spec = importlib.util.spec_from_file_location("pg_lane_coverage", path)
@@ -287,7 +304,8 @@ def _strip_line_comment(line: str) -> str:
     """Cut one line at its first real comment, honouring quoted ``#``.
 
     A ``#`` opens a comment only at the start of a line or after whitespace
-    (in shell also after ``;``, ``&`` or ``|``), and never inside a quoted
+    (in shell also after ``;``, ``&`` or ``|``) that no odd run of backslashes
+    escapes, and never inside a quoted
     scalar. That rule holds in YAML and in the POSIX
     shell that runs a ``run:`` body alike, which is why one scanner serves
     both: ``run: echo "a # b"`` keeps its ``#``, and a ``#`` line inside a
@@ -305,7 +323,8 @@ def _strip_line_comment(line: str) -> str:
         if quote is None:
             if char in "'\"":
                 quote = char
-            elif char == "#" and (index == 0 or line[index - 1] in " \t;&|"):
+            elif char == "#" and (index == 0 or line[index - 1] in " \t;&|"
+                                  and not (index - 1 - len(line[:index - 1].rstrip("\\"))) % 2):
                 return line[:index].rstrip()
         elif char == quote:
             if quote == "'" and line[index + 1:index + 2] == "'":
@@ -957,13 +976,12 @@ def _cargo_commands(
     breaks, per the YAML folding rules, so it is emitted as its own command
     rather than folded into its neighbours.
 
-    Two forms are deliberately not modelled, both of which make the extracted
-    command WIDER than the real one -- a wider filter selects more tests, so
-    rule5 over-reports rather than under-reports on them. An explicit
-    indentation indicator that declares a content indent smaller than the
-    first content line's own indent is read at the first line's indent. And a
-    shell line continuation (a trailing ``\\``) inside a literal body is left
-    split, so ``cargo test --lib -- \\`` reads as a command with no skips.
+    An explicit indentation indicator that declares a content indent smaller
+    than the first content line's own indent is read at the first line's
+    indent, which makes the extracted command WIDER than the real one -- a
+    wider filter selects more tests, so rule5 over-reports rather than
+    under-reports on it. A shell line continuation (a trailing ``\\``) inside a
+    literal body is not joined, so a cargo test line ending in one is refused.
     """
     commands: list[str] = []
     header_indent: int | None = None
@@ -981,9 +999,9 @@ def _cargo_commands(
             value = re.sub(
                 r"[\"']?\$\{PG_INCLUDE_ARGS\[@\]\}[\"']?", included, value
             )
-        start = value.find("cargo test")
-        if start >= 0:
-            commands.append(value[start:])
+        argv = _proven_cargo_argv(value)
+        if argv is not None:
+            commands.append(shlex.join(argv))
 
     def flush() -> None:
         if pending:
@@ -1017,7 +1035,8 @@ def _cargo_commands(
             continue
         if content_indent is None:
             content_indent = indent
-        value = stripped.strip('"\'')
+        # A block line is shell text as written: its quotes belong to the shell.
+        value = stripped
         if folded and indent <= content_indent:
             pending.append(value)
             continue
@@ -1025,6 +1044,67 @@ def _cargo_commands(
         collect(value)
     flush()
     return commands
+
+
+# The closed set of prefixes CI runs `cargo test` behind; any other prefix is unproven.
+_ROOT_UNSET = ["env", "-u", "AGENTDESK_ROOT_DIR"]
+# The run_test_lane.py options CI passes, each with the argparse value it accepts.
+_RUN_TEST_LANE_OPTIONS = {"--lane": r"[^-].*", "--max-summaries": r"[1-9][0-9]*", "--skip": r"[^-].*"}
+
+
+def _prefix_template(words: list[str]) -> bool:
+    """Whether the raw words before `cargo` are one of the CI prefix templates."""
+    if words[:2] == ["python3", "scripts/ci-timeout.py"]:
+        return re.fullmatch(r"[1-9][0-9]*", "".join(words[2:3])) is not None \
+            and words[3:] == _ROOT_UNSET
+    if words[:2] == ["python3", "scripts/run_test_lane.py"] and "--" in words:
+        end = words.index("--")
+        names, values = words[2:end:2], words[3:end:2]
+        # argparse requires --lane; the command runs only after `--`.
+        return len(names) == len(values) and names.count("--lane") == 1 \
+            and all(re.fullmatch(_RUN_TEST_LANE_OPTIONS.get(name, r"(?!)"), value)
+                    for name, value in zip(names, values)) \
+            and words[end + 1:] == _ROOT_UNSET
+    return words in ([], _ROOT_UNSET)
+
+
+def _proven_cargo_argv(command: str) -> list[str] | None:
+    """The `cargo test` argv ``command`` runs. None when no lexed word holds a cargo
+    program and `test`; a cargo-command-unparsed ValueError unless a template proves it."""
+    lex = shell_lexer()
+    scan = lex.scan_shell(command)
+    parts = {part for token in scan.tokens if token.kind == "WORD"
+             for part in re.split(r"[^\w.]+", token.value or "")}
+    if not ("test" in parts and any(part.startswith("cargo") for part in parts)) \
+            and not lex.may_execute_cargo(scan):
+        return None
+    tokens = list(scan.tokens)
+    sourced = [token.raw for token in tokens[:3]] == ["source", NON_PG_FILTER_REL.as_posix(), "&&"]
+    tokens = tokens[3:] if sourced else tokens
+    at = next((index for index, token in enumerate(tokens) if token.value == "cargo"), -1)
+    # A prefix word is plain text, so its raw form is the word the shell runs.
+    prefix = [token.raw for token in tokens[:max(at, 0)]
+              if token.raw == token.value] if at >= 0 else None
+    arrays = {f"${{{name}[@]}}" for name in KNOWN_ARRAYS}
+    try:
+        argv = shlex.split(command[tokens[at].start:], comments=True) if at >= 0 else None
+    except ValueError:
+        argv = None
+    if scan.issues or argv is None or argv[:2] != ["cargo", "test"] \
+            or argv != [token.value for token in tokens[at:]] \
+            or len(prefix) != at or not _prefix_template(prefix) or (sourced and prefix) \
+            or any(token.kind != "WORD" or token.depth for token in tokens) \
+            or any(token.dynamic and token.value not in arrays for token in tokens):
+        raise ValueError(
+            f"cargo-command-unparsed: {command!r} crosses a shell boundary or "
+            "run-time value this gate cannot prove, so the lane filter it selects is unknown")
+    return argv
+
+
+def _lane_filter(coverage, command: str):
+    """``coverage.cargo_test_filter`` on the proven argv of the cargo test ``command`` runs."""
+    argv = _proven_cargo_argv(command)
+    return None if argv is None else coverage.cargo_test_filter(shlex.join(argv))
 
 
 def pg_lane_filters(
@@ -1044,7 +1124,7 @@ def pg_lane_filters(
                 commands.extend(coverage.just_recipe_commands(just_text, recipe))
             except ValueError:
                 pass
-    lanes = [coverage.cargo_test_filter(command) for command in commands]
+    lanes = [_lane_filter(coverage, command) for command in commands]
     return tuple(dict.fromkeys(lane for lane in lanes if lane is not None))
 
 
@@ -1058,7 +1138,7 @@ def pgless_lane_filters(
         for command in _cargo_commands(job.code, non_pg_skip_args):
             if "--all-targets" not in command or "--skip" not in command:
                 continue
-            lane = coverage.cargo_test_filter(command)
+            lane = _lane_filter(coverage, command)
             if lane is not None:
                 lanes.append(lane)
     return tuple(dict.fromkeys(lanes))
@@ -1088,7 +1168,7 @@ def pr_pgless_lane_filters(
         if "postgres-service.sh start" in job.code:
             continue
         for command in _cargo_commands(job.code, non_pg_skip_args):
-            lane = coverage.cargo_test_filter(command)
+            lane = _lane_filter(coverage, command)
             if lane is not None:
                 lanes.append(lane)
     return tuple(dict.fromkeys(lanes))
@@ -1446,42 +1526,34 @@ _ARRAY_READ = re.compile(
     rf"\$\{{[!#]?(?:{'|'.join(KNOWN_ARRAYS)})\b[^}}\n]*\}}|{_ARRAY_USE.pattern}"
 )
 _ARRAY_NAME = re.compile(rf"\b({'|'.join(KNOWN_ARRAYS)})\b")
-# Quoted spans (an unterminated one runs to the end) and escapes hold no shell syntax.
-_QUOTED = re.compile(r"'[^']*(?:'|\Z)|\"(?:\\.|[^\"\\])*(?:\"|\Z)|\\.", re.S)
 _SHELL_WORD = re.compile(r"[;&|()]+|[^\s;&|()]+")
 # Words opening a compound command, group or loop; a closer counts only in command position.
 _OPENERS = frozenset({"if", "case", "for", "select", "while", "until", "{"})
 _CLOSERS = frozenset({"fi", "esac", "done", "}"})
 
 
-def _quoted_blank(shell: str) -> str:
-    """``shell`` with quoted and escaped text blanked at its own width, newlines kept."""
-    return _QUOTED.sub(lambda span: re.sub(r"[^\n]", " ", span.group()), shell)
-
-
 def _at_top_level(shell: str, offset: int) -> bool:
     """Whether the word at ``offset`` runs as the shell's own command, not quoted, heredoc
-    data, a continued line or inside a compound, function or subshell: a fail-closed count."""
-    syntax = _quoted_blank(shell)
-    newline = shell.rfind("\n", 0, offset)
-    # An odd run of backslashes ending the previous line makes this word an argument there.
-    continued = newline > 0 and (newline - len(shell[:newline].rstrip("\\"))) % 2
-    # Code left ending in `&&`, `||` or a pipe makes this word its conditional or piped
-    # part; an odd backtick count leaves it inside a command substitution.
-    pending = syntax[:max(newline, 0)].rstrip().endswith(("&&", "|", "|&"))
-    if continued or pending or syntax[:offset].count("`") % 2 \
-            or syntax[offset:offset + 1].isspace() \
-            or re.search(r"(?<!<)<<(?!<)", syntax[:offset]):
+    data, a continued line or inside a compound, function, subshell or substitution: a
+    fail-closed count."""
+    scan = shell_lexer().scan_shell(shell)
+    before = [token for token in scan.tokens if token.start < offset and not token.depth]
+    word = next((token for token in scan.tokens if token.start == offset), None)
+    # A continued line or an enclosing substitution's word leaves no newline right before
+    # it, and code left ending in `&&`, `||` or a pipe makes it their conditional part.
+    pending = next((token.raw for token in reversed(before) if token.kind != "NEWLINE"), "")
+    if word is None or word.kind != "WORD" \
+            or (before and before[-1].kind != "NEWLINE") or pending in ("&&", "||", "|", "|&"):
         return False
     depth = 0
-    for line in syntax[:offset].split("\n"):
+    for line in scan.syntax_masked[:offset].split("\n"):
         words = _SHELL_WORD.findall(line)
         for index, word in enumerate(words):
             if word in _OPENERS:
                 depth += 1
             elif word in _CLOSERS and (index == 0 or words[index - 1][-1] in ";&|("):
                 depth -= 1
-        # An open `(`/`$(` nests; only a line led by `)` closes one, unlike a case pattern.
+        # An open `(` nests; only a line led by `)` closes one, unlike a case pattern.
         opened = line.count("(") - line.count(")")
         if opened > 0 or line.lstrip().startswith(")"):
             depth += opened
@@ -1492,7 +1564,7 @@ def _at_top_level(shell: str, offset: int) -> bool:
 
 def known_array_use(line: str) -> tuple[int, tuple[str, ...]] | None:
     """Where one shell line first expands a generated array, and every one it expands."""
-    uses = list(_ARRAY_USE.finditer(_strip_line_comment(line)))
+    uses = list(_ARRAY_USE.finditer(shell_lexer().scan_shell(line).comment_masked))
     if not uses:
         return None
     return uses[0].start(), tuple(dict.fromkeys(use.group(1) for use in uses))
@@ -1504,12 +1576,19 @@ def known_array_source_problem(shell: str) -> tuple[str, int] | None:
     ``("unsourced", -1)`` without a covering canonical source, ``(array, line)`` when a
     later word but a ``$`` read rebinds one (0-based line of ``shell``), else None.
     """
-    shell = _strip_comments(shell)
+    lex = shell_lexer()
+    scan = lex.scan_shell(shell)
+    # Past a boundary the lexer cannot prove, no later line's place in the shell is known;
+    # the use's own line ends mid-word here, so only earlier lines count.
+    if any(issue.kind in lex.OPEN_ISSUES and issue.start <= shell.rfind("\n")
+           for issue in scan.issues):
+        return ("unsourced", -1)
+    shell = scan.comment_masked
     # A source indented past the shell's outermost lines sits inside a compound command.
     outer = min((len(line) - len(line.lstrip()) for line in shell.split("\n") if line.strip()),
                 default=0)
-    # A quoted `;` or `|` is data, not a break in the source's `&&` chain.
-    syntax = _quoted_blank(shell)
+    # A quoted or nested `;` or `|` is data, not a break in the source's `&&` chain.
+    syntax = scan.syntax_masked
     covering = [
         source for source in _CANONICAL_SOURCE.finditer(shell)
         if len(source.group(1)) == outer and _at_top_level(shell, source.end(1))
@@ -1632,7 +1711,10 @@ def load_pg_include_shards(repo_root: Path) -> tuple[tuple[str, ...], ...]:
         )
         if match is None:
             raise ValueError(f"{NON_PG_FILTER_REL}: missing PG_INCLUDE_ARGS_SHARD_{index}")
-        shards.append(tuple(shlex.split(match.group(1))))
+        words = shell_lexer().shell_words(match.group(1))
+        if words is None:
+            raise ValueError(f"{NON_PG_FILTER_REL}: PG_INCLUDE_ARGS_SHARD_{index} is not plain words")
+        shards.append(words)
     return tuple(shards)
 
 

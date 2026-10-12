@@ -111,6 +111,11 @@ impl HerdrFrame {
             )
             .map_err(|_| GuardedSaveOutcome::IoError)?
             .ok_or(refused)?;
+            #[cfg(all(test, unix))]
+            {
+                use crate::services::discord::recovery_engine::herdr_admitted_restart::test_hooks;
+                test_hooks::after_admitted_persist(channel, persisted.tui_terminal_kind);
+            }
             baseline.clone_from(&persisted);
             local.tui_terminal_kind = persisted.tui_terminal_kind;
             local.save_generation = persisted.save_generation;
