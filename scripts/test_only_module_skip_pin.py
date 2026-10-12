@@ -34,6 +34,11 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/queue_io/queued_head_inject_tests.rs",
+        "src/services/turn_orchestrator/overflow_s2b_tests.rs",
+        "src/services/turn_orchestrator/pending_queue_persistence/queued_recovery_tests.rs",
+        "src/services/turn_orchestrator/queued_head_s2a_tests.rs",
+        "src/services/discord/runtime_bootstrap/queued_recovery_s2a_tests.rs",
         "src/services/claude_tui/host_input/guarded_submission/executor_tests.rs",
         "src/services/tui_input/actor/gate/claude_guarded/acceptance_tests.rs",
         "src/services/tui_input/submission_tmux/guarded/protocol_tests.rs",
@@ -46,8 +51,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs",
-        "src/services/turn_orchestrator/queued_head_s2a_tests.rs",
-        "src/services/discord/runtime_bootstrap/queued_recovery_s2a_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs",
         "src/services/discord/runtime_bootstrap/scoped_inflight_restore_tests.rs",
         "src/services/discord/runtime_bootstrap/scoped_restore_lane_tests.rs",
@@ -663,6 +666,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs",
+        "src/services/discord/runtime_bootstrap/queued_placeholders/tests/n3bc_tests.rs",
     }
 )
 

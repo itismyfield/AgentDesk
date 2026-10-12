@@ -123,6 +123,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::input_runtime::supervisor::runtime::ports::tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
   --skip services::discord::placeholder_sweeper::retirement_tests
+  --skip services::discord::queue_io::queued_head_inject::tests
   --skip services::discord::recovery_engine::herdr_before_start_restart::tests
   --skip services::discord::recovery_engine::host_reconcile::tests
   --skip services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
@@ -992,6 +993,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::input_runtime::supervisor::runtime::ports::tests
   services::discord::placeholder_sweeper::abandon_guard::tests
   services::discord::placeholder_sweeper::retirement_tests
+  services::discord::queue_io::queued_head_inject::tests
   services::discord::recovery_engine::herdr_before_start_restart::tests
   services::discord::recovery_engine::host_reconcile::tests
   services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
