@@ -50,7 +50,8 @@ MOD_RE = re.compile(
 )
 CFG_TEST_RE = re.compile(r"#\s*\[\s*cfg\s*\([^\]]*\btest\b[^\]]*\)\s*\]")
 PATH_ATTR_RE = re.compile(r'#\s*\[\s*path\s*=\s*"(?P<path>[^"]+)"\s*\]')
-# Every inner `#![cfg...` to the line end, so trailing tokens or a cfg_attr stay visible.
+# Every inner `#![cfg...` to the line end (matched on stripped source, read from the raw
+# text), so trailing tokens or a cfg_attr stay visible.
 INNER_CFG_RE = re.compile(r"#\s*!\s*\[\s*cfg[^\n]*")
 ATTRIBUTED_FN_RE = re.compile(
     r"(?P<attrs>(?:#\s*\[[^\]]*\]\s*)+)"
@@ -241,7 +242,10 @@ def _module_records(
     """
     clean = strip_rust(source)
     if decls is not None:
-        decls.setdefault(("#!", *base), []).extend(INNER_CFG_RE.findall(clean))
+        decls.setdefault(("#!", *base), []).extend(
+            source[m.start():m.start() + len(m.group().rstrip())]
+            for m in INNER_CFG_RE.finditer(clean)
+        )
     attributes: dict[int, str] = {}
     for match in ATTRIBUTED_MOD_RE.finditer(clean):
         attributes[match.start("name")] = source[

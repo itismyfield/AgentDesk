@@ -38,7 +38,8 @@ MODE_KINDS = {
 RUNNERS = (("ubuntu-", "linux"), ("macos-", "darwin"))
 TARGET_OS = {"linux": "linux", "darwin": "macos"}
 _CFG = re.compile(r"#\s*\[\s*cfg\s*\(|#\s*!\s*\[\s*cfg\s*\(")
-_CFG_ATTR = re.compile(r"#\s*!?\s*\[\s*cfg_attr\b")
+_CFG_ATTR = re.compile(r"#\s*!?\s*\[\s*cfg_attr\b\s*\(?")
+_LINT = re.compile(r"(?:allow|warn|deny|forbid|expect)\s*\([\w\s:,]*\)")
 _CFG_TOKEN = re.compile(r'\s*(?:([A-Za-z_][A-Za-z0-9_]*)|("[^"]*")|([(),=]))')
 _OUTPUT_IF = re.compile(r"^needs\.changes\.outputs\.([A-Za-z0-9_-]+)\s*==\s*'true'$")
 _FILTER_REF = re.compile(r"steps\.filter\.outputs\.([A-Za-z0-9_-]+)")
@@ -406,9 +407,26 @@ def _fn_attrs(coverage, path: Path) -> dict[int, str]:
     }
 
 
+def _gating_cfg_attr(attrs: str) -> bool:
+    """Whether some cfg_attr adds more than lint levels (which never gate compilation)."""
+    for match in _CFG_ATTR.finditer(attrs):
+        depth, items = 1, [""]
+        for char in attrs[match.end():] if match.group().endswith("(") else ():
+            depth += {"(": 1, ")": -1}.get(char, 0)
+            if depth == 0:
+                break
+            items[-1:] = [items[-1], ""] if depth == 1 and char == "," else [items[-1] + char]
+        else:
+            return True
+        lints = [item.strip() for item in items[1:] if item.strip()]
+        if not lints or not all(map(_LINT.fullmatch, lints)):
+            return True
+    return False
+
+
 def _holds(attrs: str, os: str, features: frozenset[str]) -> bool | None:
     # A cfg_attr may expand to a cfg this evaluator does not model, so it proves nothing.
-    if _CFG_ATTR.search(attrs):
+    if _gating_cfg_attr(attrs):
         return None
     values = [cfg_holds(predicate, os, features) for predicate in _cfg_predicates(attrs)]
     return False if False in values else None if None in values else True
@@ -444,7 +462,7 @@ def platform_gap(coverage, repo_root, test_id, site, decls, aliases, features, p
     for alternatives in groups:
         if not any(_holds(attrs, os, features) for attrs in alternatives):
             found = "; ".join(p for attrs in alternatives for p in _cfg_predicates(attrs))
-            unread = " with an unevaluated cfg_attr" * any(map(_CFG_ATTR.search, alternatives))
+            unread = " with an unevaluated cfg_attr" * any(map(_gating_cfg_attr, alternatives))
             return f"cfg({found}){unread} is not proven to hold on {os}"
     return ""
 
