@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "d7c53eb97837fbd597675ed95680be4d2133578b",
+  "measured_at_sha": "3bf9fdbe0e1d641fd2fd8c888d1d8e8dc0c5ee60",
   "records": [
     {
       "root": "migrations/postgres",
@@ -39844,6 +39844,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:dbd0e82c6c89abdfdbe7fe811f868241655c3c7c3b8816477a0e3d73aea6e402"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/repost/backlog_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:a5e1442f78b9a9081ea857b67a2c90a43c279f40b24c9d5a25005e99bd46881f"
     },
     {
       "root": "src",

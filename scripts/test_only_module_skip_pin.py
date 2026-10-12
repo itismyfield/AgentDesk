@@ -615,6 +615,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/cli/o_tests.rs",
         "src/services/tui_o/repost/runner_activation_tests.rs",
         "src/services/tui_o/repost/runtime_host_activation_tests.rs",
+        "src/services/tui_o/repost/backlog_tests.rs",
+        "src/services/tui_o/repost/rollback_rehearsal_tests.rs",
         "src/services/tui_o/repost/writer_activation_tests.rs",
         "src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs",
