@@ -1034,7 +1034,7 @@ impl Out {
         );
         let config = WriterConfig { enabled: true };
         let provider = ShadowProvider::Codex;
-        let task = actor::spawn_projecting(&config, writer, provider, bindings, watches);
+        let task = actor::spawn_projecting(&config, None, writer, provider, bindings, watches);
         let task = task.expect("an enabled writer");
         Running { stop, task, view }
     }

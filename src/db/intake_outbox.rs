@@ -30,6 +30,7 @@ pub(crate) struct IntakeOutboxRow {
     pub attachment_refs: Value,
     pub channel_id: String,
     pub user_msg_id: String,
+    pub replay_source_message_ids: Option<Vec<String>>,
     pub request_owner_id: String,
     pub request_owner_name: Option<String>,
     pub user_text: String,
@@ -76,6 +77,7 @@ pub(crate) struct InsertPendingPayload {
     pub attachment_refs: Value,
     pub channel_id: String,
     pub user_msg_id: String,
+    pub replay_source_message_ids: Option<Vec<String>>,
     pub request_owner_id: String,
     pub request_owner_name: Option<String>,
     pub user_text: String,
@@ -123,7 +125,7 @@ pub(crate) async fn insert_pending(
             merge_consecutive, reply_to_user_message, defer_watcher_resume,
             wait_for_completion, preserve_on_cancel, agent_id, provider,
             status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs,
-            home_epoch
+            home_epoch, replay_source_message_ids
         ) VALUES (
             $1, $2, $3,
             $4, $5, $6, $7,
@@ -131,7 +133,7 @@ pub(crate) async fn insert_pending(
             $13, $14, $15,
             $16, $17, $18, $19,
             $20, $21, $22, $23, $24,
-            $25
+            $25, $26
         )
         RETURNING id
         "#,
@@ -161,6 +163,7 @@ pub(crate) async fn insert_pending(
     .bind(&payload.execution_requirements)
     .bind(&payload.attachment_refs)
     .bind(payload.home_epoch)
+    .bind(payload.replay_source_message_ids.as_deref())
     .fetch_one(pool)
     .await?;
     Ok(id)
@@ -514,10 +517,10 @@ pub(crate) async fn sweep_failed_pre_accept_once(
             wait_for_completion, preserve_on_cancel, agent_id, provider,
             owner_instance_id, owner_generation, admission_kind,
             status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs,
-            home_epoch
+            home_epoch, replay_source_message_ids
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
                   $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-                  $23, $24, $25, $26, $27, $28)
+                  $23, $24, $25, $26, $27, $28, $29)
         RETURNING id"#,
     )
     .bind(&target)
@@ -548,6 +551,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     .bind(&source.execution_requirements)
     .bind(&source.attachment_refs)
     .bind(source.home_epoch)
+    .bind(source.replay_source_message_ids.as_deref())
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -781,7 +785,7 @@ pub(crate) async fn mark_spawned(
 }
 
 /// Successful completion: `spawned → done`. Worker calls this on
-/// `Ok(())` from `execute_intake_turn_core`.
+/// an executed outcome from `execute_intake_turn_core`.
 ///
 /// Returns `Ok(true)` on a real transition. `Ok(false)` with `dispatched`
 /// means the bridge handoff stamp won first and is normal; `done` means terminal
@@ -1720,6 +1724,7 @@ mod postgres_tests {
             required_labels: json!(["unreal"]),
             channel_id: channel.to_string(),
             user_msg_id: msg.to_string(),
+            replay_source_message_ids: None,
             request_owner_id: "user-100".to_string(),
             request_owner_name: Some("Tester".to_string()),
             user_text: "hello world".to_string(),

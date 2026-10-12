@@ -1115,6 +1115,7 @@ mod spy {
 pub(crate) mod guarded_submission {
     use super::*;
     use crate::services::claude_tui::input::TuiInputAction;
+    use crate::services::tui_input::actor::gate::claude_guarded::claude_should_fold;
 
     fn with_transport_using<R>(
         default: &mut dyn InputTransport,
@@ -1129,7 +1130,7 @@ pub(crate) mod guarded_submission {
         operation(default)
     }
 
-    /// A necessary Claude capacity veto; the captured whole draft still proves actual ownership.
+    // This test-only estimate must be replaced by geometry admission before guard activation.
     fn claude_prompt_fits_pane(
         frame: &str,
         payload: &[TuiInputAction],
@@ -1142,11 +1143,10 @@ pub(crate) mod guarded_submission {
             if width == 0 || rows == 0 {
                 return false;
             }
-            let lf = frame.matches('\n').count();
             let paste =
                 matches!(payload, [TuiInputAction::PasteBuffer(text)] if text.as_str() == frame);
-            if paste && (frame.encode_utf16().count() > 800 || lf > rows.min(2)) {
-                return lf > 0 || frame.chars().count() > 800;
+            if paste && claude_should_fold(frame) {
+                return true;
             }
             frame
                 .split('\n')
@@ -1156,6 +1156,11 @@ pub(crate) mod guarded_submission {
                 })
                 .is_some_and(|needed| needed <= rows)
         })
+    }
+
+    pub(crate) fn folded_payload(frame: &str) -> Option<[TuiInputAction; 1]> {
+        (!frame.contains('\n') && claude_should_fold(frame))
+            .then(|| [TuiInputAction::PasteBuffer(frame.to_string())])
     }
 
     /// Submits only a prompt plan; the caller holds the existing composer mutex throughout.
@@ -1180,10 +1185,8 @@ pub(crate) mod guarded_submission {
                 _ => return InputRun::Refused(InputRefusal::Composer(Refusal::InvalidPrompt)),
             }
         }
-        // Paste a one-line frame over 800 chars whole: Claude folds it into the single
-        // B-FOLD placeholder own_draft proves, so typed rows never exceed the pane.
-        let folded = (!frame.contains('\n') && frame.chars().count() > 800)
-            .then(|| [TuiInputAction::PasteBuffer(frame.clone())]);
+        // Paste a folded one-line frame whole, preserving its bytes across literal replanning.
+        let folded = folded_payload(&frame);
         let payload = folded.as_ref().map_or(payload, |paste| &paste[..]);
         with_transport_using(
             &mut crate::services::tui_input::submission_tmux::SubmissionTmux,
@@ -1578,13 +1581,14 @@ mod tests {
             TuiInputAction::Literal("x".to_string()),
             TuiInputAction::Enter,
         ];
-        let cases: [(
-            &[TuiInputAction],
+        type SendFailure<'a> = (
+            &'a [TuiInputAction],
             usize,
             Result<Output, String>,
             usize,
-            &str,
-        ); 4] = [
+            &'a str,
+        );
+        let cases: [SendFailure<'_>; 4] = [
             // ACK lost after the paste write.
             (&paste, 1, Err("ack lost".to_string()), 0, "ack lost"),
             (
