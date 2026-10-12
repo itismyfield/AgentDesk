@@ -40,6 +40,10 @@ TARGET_OS = {"linux": "linux", "darwin": "macos"}
 _CFG = re.compile(r"#\s*\[\s*cfg\s*\(|#\s*!\s*\[\s*cfg\s*\(")
 _CFG_ATTR = re.compile(r"#\s*!?\s*\[\s*cfg_attr\b\s*\(?")
 _LINT = re.compile(r"(?:allow|warn|deny|forbid|expect)\s*\([\w\s:,]*\)")
+_ATTR_START = re.compile(r"#\s*!?\s*\[")
+_CFG_WORD = re.compile(r"\bcfg(?:_attr)?\b")
+_STRICT_CFG = re.compile(r"#!?\[cfg\((?P<predicate>[^\n/]*)\)\]")
+_STRICT_CFG_ATTR = re.compile(r"#!?\[cfg_attr\([^\n/]*\)\]")
 _CFG_TOKEN = re.compile(r'\s*(?:([A-Za-z_][A-Za-z0-9_]*)|("[^"]*")|([(),=]))')
 _OUTPUT_IF = re.compile(r"^needs\.changes\.outputs\.([A-Za-z0-9_-]+)\s*==\s*'true'$")
 _FILTER_REF = re.compile(r"steps\.filter\.outputs\.([A-Za-z0-9_-]+)")
@@ -424,11 +428,26 @@ def _gating_cfg_attr(attrs: str) -> bool:
     return False
 
 
-def _holds(attrs: str, os: str, features: frozenset[str]) -> bool | None:
-    # A cfg_attr may expand to a cfg this evaluator does not model, so it proves nothing.
-    if _gating_cfg_attr(attrs):
-        return None
-    values = [cfg_holds(predicate, os, features) for predicate in _cfg_predicates(attrs)]
+def _holds(coverage, attrs: str, os: str, features: frozenset[str]) -> bool | None:
+    """Whether every attribute of a raw run that names cfg/cfg_attr (seen with comments and
+    strings blanked) holds on `os`; None unless each is a one-line comment-free `#[cfg(..)]`,
+    `#![cfg(..)]` or lint-only cfg_attr."""
+    clean = coverage.strip_rust(attrs)
+    values: list[bool | None] = []
+    for start in _ATTR_START.finditer(clean):
+        depth, end = 0, len(clean)
+        for index in range(start.end() - 1, len(clean)):
+            depth += {"[": 1, "]": -1}.get(clean[index], 0)
+            if depth == 0:
+                end = index + 1
+                break
+        if not _CFG_WORD.search(clean[start.start():end]):
+            continue
+        span = attrs[start.start():end]
+        if match := _STRICT_CFG.fullmatch(span):
+            values.append(cfg_holds(match.group("predicate"), os, features))
+        elif not (_STRICT_CFG_ATTR.fullmatch(span) and not _gating_cfg_attr(span)):
+            values.append(None)
     return False if False in values else None if None in values else True
 
 
@@ -460,9 +479,11 @@ def platform_gap(coverage, repo_root, test_id, site, decls, aliases, features, p
         found += key == module
         groups += [decls[key], *([inner] for inner in decls.get("#!" + key, []))]
     for alternatives in groups:
-        if not any(_holds(attrs, os, features) for attrs in alternatives):
-            found = "; ".join(p for attrs in alternatives for p in _cfg_predicates(attrs))
-            unread = " with an unevaluated cfg_attr" * any(map(_gating_cfg_attr, alternatives))
+        if not any(_holds(coverage, attrs, os, features) for attrs in alternatives):
+            found = "; ".join(
+                " ".join(p.split()) for attrs in alternatives for p in _cfg_predicates(attrs))
+            unread = " with an unevaluated cfg attribute" * any(
+                _holds(coverage, attrs, os, features) is None for attrs in alternatives)
             return f"cfg({found}){unread} is not proven to hold on {os}"
     return ""
 

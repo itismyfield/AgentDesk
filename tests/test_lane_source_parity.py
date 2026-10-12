@@ -928,35 +928,51 @@ class NewRequiredIdTests(unittest.TestCase):
         self.assertEqual(result, 0, output)
 
     def test_unevaluated_conditional_attribute_leaves_only_its_id_platform_unproven(self) -> None:
+        unread = "cfg() with an unevaluated cfg attribute"
+
+        def fn_case(module: str, attr: str) -> str:
+            return (f"#[cfg(test)]\nmod {module} {{\n    {attr}\n"
+                    "    #[test]\n    fn new_case() {}\n}\n")
+
+        # Each hides or garbles a cfg; the multi-line `unix` one fails only by grammar.
         cases = {
-            "tests::new_platform_case": ("lib", "cfg() with an unevaluated cfg_attr", (
-                "#[cfg(test)]\nmod tests {\n    #[cfg_attr(unix, cfg(windows))]\n"
-                "    #[test]\n    fn new_platform_case() {}\n}\n")),
-            "inline_case::tests::new_windows_case": ("inline_case", "cfg(windows)", (
-                "#[cfg(test)]\nmod tests {\n    #![cfg(windows)] // Windows only\n"
-                "    #[test]\n    fn new_windows_case() {}\n}\n")),
-            "same_line::tests::new_token_case": ("same_line", "cfg(windows)", (
+            "tests::new_case": (
+                "lib", unread, fn_case("tests", "#[cfg_attr(unix, cfg(windows))]")),
+            "hidden_cfg::new_case": (
+                "lib", unread, fn_case("hidden_cfg", "#[cfg /* n */ (windows)]")),
+            "hidden_attr::new_case": (
+                "lib", unread, fn_case("hidden_attr", "#[ /* n */ cfg_attr(unix, cfg(windows))]")),
+            "multi_line::new_case": ("lib", "cfg(unix) with an unevaluated cfg attribute",
+                                     fn_case("multi_line", "#[cfg(\n        unix)]")),
+            "inline_case::tests::new_case": ("inline_case", "cfg(windows)", fn_case(
+                "tests", "#![cfg(windows)] // Windows only")),
+            "same_line::tests::new_case": ("same_line", "cfg(windows)", (
                 "#[cfg(test)]\nmod tests { #![cfg(windows)]\n"
-                "    #[test]\n    fn new_token_case() {}\n}\n")),
+                "    #[test]\n    fn new_case() {}\n}\n")),
+            "hidden_inner::new_case": (
+                "hidden_inner", unread, "#![cfg /* n */ (windows)]\n#[test]\nfn new_case() {}\n"),
         }
-        # Controls that must stay MAPPED: a plain test, lint-only cfg_attrs, a quoted inner cfg.
-        controls = (
-            "#[cfg(test)]\nmod plain_tests {\n    #[test]\n    fn runs_anywhere() {}\n}\n"
-            "#[cfg(test)]\nmod lint_tests {\n    #![cfg_attr(not(test), allow(dead_code))]\n"
-            "    #[cfg_attr(unix, allow(clippy::all, unused))]\n"
-            "    #[test]\n    fn lint_only() {}\n}\n"
-        )
-        quoted = "#![cfg(any(target_os = \"macos\", target_os = \"linux\"))]\n" \
-                 "#[test]\nfn on_linux() {}\n"
+        # Controls that must stay MAPPED: plain and `cfg(unix)` tests, lint-only cfg_attrs, a
+        # quoted inner cfg and a cfg that only appears inside a block comment.
+        controls = {
+            "lib": fn_case("plain_tests", "") + fn_case("unix_tests", "#[cfg(unix)]")
+            + "#[cfg(test)]\nmod lint_tests {\n    #![cfg_attr(not(test), allow(dead_code))]\n"
+              "    #[cfg_attr(unix, allow(clippy::all, unused))]\n"
+              "    #[test]\n    fn new_case() {}\n}\n",
+            "quoted": "#![cfg(any(target_os = \"macos\", target_os = \"linux\"))]\n"
+                      "#[test]\nfn new_case() {}\n",
+            "native": "#![cfg(unix)] /* #[cfg(windows)] */ #[test] fn new_case() {}\n",
+        }
 
         def conditional(repo: Repo) -> None:
-            repo.lib_tail = controls + cases["tests::new_platform_case"][2] + "pub mod quoted;\n"
-            repo.files["src/quoted.rs"] = quoted
-            for home, _, text in list(cases.values())[1:]:
-                repo.lib_tail += f"pub mod {home};\n"
-                repo.files[f"src/{home}.rs"] = text
+            homes = dict(controls)
+            for home, _, text in cases.values():
+                homes[home] = homes.get(home, "") + text
+            repo.lib_tail = homes.pop("lib") + "".join(f"pub mod {home};\n" for home in homes)
+            repo.files.update({f"src/{home}.rs": text for home, text in homes.items()})
             repo.extra_ids = set(cases) | {
-                "plain_tests::runs_anywhere", "lint_tests::lint_only", "quoted::on_linux"}
+                "plain_tests::new_case", "unix_tests::new_case", "lint_tests::new_case",
+                "quoted::new_case", "native::new_case"}
 
         result, output = Repo().delta(conditional)
         found = {
@@ -965,7 +981,7 @@ class NewRequiredIdTests(unittest.TestCase):
         }
         self.assertEqual(set(found), set(cases), output)
         for case, (_, reason, _) in cases.items():
-            self.assertIn(f"new-id-platform-unproven: src/", found[case])
+            self.assertIn("new-id-platform-unproven: src/", found[case])
             self.assertIn(f"{reason} is not proven to hold on linux", found[case])
         self.assertEqual(result, 1)
 
