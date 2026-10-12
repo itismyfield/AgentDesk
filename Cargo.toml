@@ -132,6 +132,10 @@ plist = "1.8"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 
+[profile.dev.build-override]
+# Keep proc-macros loadable on macOS when checks disable debug information.
+strip = false
+
 [profile.release]
 opt-level = "z"
 lto = true
