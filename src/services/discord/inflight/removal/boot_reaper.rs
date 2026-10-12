@@ -39,6 +39,8 @@ impl BootReapOnce {
             match passes.entry(provider.as_str().to_string()) {
                 std::collections::hash_map::Entry::Occupied(pass) => (pass.get().clone(), true),
                 std::collections::hash_map::Entry::Vacant(slot) => {
+                    #[cfg(test)]
+                    super::super::store::boot_observation::reserved();
                     let (done, pass) = tokio::sync::watch::channel(None);
                     tokio::task::spawn_blocking(move || done.send_replace(Some(reap())));
                     (slot.insert(pass).clone(), false)
@@ -64,6 +66,10 @@ pub(super) enum BootPreparation {
 }
 
 async fn prepare_before_reap(_provider: &ProviderKind) -> BootPreparation {
+    #[cfg(test)]
+    if let Some(latch) = super::super::store::boot_observation::preparing() {
+        let _ = latch.await;
+    }
     BootPreparation::Unconfigured
 }
 
@@ -211,6 +217,11 @@ pub(super) fn reap_inflight_rows_at_boot_in_root(
             &path,
             locked.as_ref(),
             generation,
+        );
+        #[cfg(test)]
+        super::super::store::boot_observation::attempt(
+            &path,
+            super::super::store::boot_observation::Attempt::Unlink,
         );
         if fs::remove_file(&path).is_ok() {
             *match (&stale, &locked) {

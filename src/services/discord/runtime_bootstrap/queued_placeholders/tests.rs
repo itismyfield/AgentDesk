@@ -299,3 +299,5 @@ async fn restore_and_cleanup_leave_a_protected_channel() {
     let protected_cards = protected_cards.filter(|e| [protected, idle].contains(&e.key().0));
     assert_eq!(protected_cards.count(), 0, "no protected card is rekeyed");
 }
+
+pub(super) mod n3bc_tests;

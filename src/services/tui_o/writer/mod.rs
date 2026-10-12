@@ -11,6 +11,7 @@ mod deferred;
 pub mod deliver;
 pub mod host;
 pub mod input_facts;
+pub(crate) mod late_adopt;
 pub(crate) mod owed;
 pub mod pieces;
 pub mod resume;

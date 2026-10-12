@@ -12,6 +12,14 @@ use crate::services::tui_o::writer::host::{
 };
 
 use super::*;
+#[path = "late_adopt_binding_tests.rs"]
+mod late_binding;
+#[path = "late_adopt_cleanup_tests.rs"]
+mod late_cleanup;
+#[path = "late_adopt_delegated_tests.rs"]
+mod late_delegated;
+#[path = "late_adopt_host_tests.rs"]
+mod late_host;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
 #[cfg(unix)]
 use chrono::{DateTime, TimeDelta};
@@ -83,6 +91,7 @@ struct TestIo {
     legacy: Mutex<Option<Arc<dyn LegacyView>>>,
     busy: std::sync::atomic::AtomicBool,
     relaying: std::sync::atomic::AtomicBool,
+    late_enabled: std::sync::atomic::AtomicBool,
     /// Each lease handed to a new writer: when, how many writers still held one, and how many
     /// piece leases were back by then.
     leases: Mutex<Vec<(tokio::time::Instant, usize, usize)>>,
@@ -120,6 +129,7 @@ impl TestIo {
             legacy: Mutex::default(),
             busy: Default::default(),
             relaying: Default::default(),
+            late_enabled: Default::default(),
             leases: Mutex::default(),
             repost_turns: Arc::default(),
         })
@@ -171,6 +181,10 @@ impl HostIo for TestIo {
     fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<ChannelBindingLog> {
         self.calls.lock().unwrap().push(("bindings", channel));
         Arc::new(ChannelBindingLog::new(channel, provider))
+    }
+
+    fn late_adopt_enabled(&self) -> bool {
+        self.late_enabled.load(Ordering::SeqCst)
     }
 
     fn activation_facts(

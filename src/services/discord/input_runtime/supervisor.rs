@@ -80,6 +80,7 @@ pub(crate) enum Refused {
     Sealed,
     /// The supervisor's config names another channel, provider or root than its reservation.
     Mismatch,
+    GenerationExhausted,
 }
 
 impl Registry {
@@ -92,6 +93,14 @@ impl Registry {
             #[cfg(test)]
             on_release: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn population_for_test(&self) -> (usize, usize) {
+        (
+            self.entries.lock().unwrap().len(),
+            self.closings.lock().unwrap().len(),
+        )
     }
 
     /// False until the first registration, so an unused registry costs health nothing.
@@ -127,12 +136,15 @@ impl Registry {
                 (false, false) => Refused::Duplicate,
             });
         }
+        let order = AdmissionOrder::new(provider.clone(), channel, 1, 0)
+            .map_err(|_| Refused::GenerationExhausted)?;
         entries.insert(key.clone(), Entry::default());
         self.used.store(true, Ordering::Release);
         Ok(Registration {
             registry: self,
             key,
             slot: Some(LedgerSlot::new(root, channel)),
+            order: Some(order),
             released: false,
         })
     }
@@ -169,6 +181,7 @@ pub(crate) struct Registration {
     registry: &'static Registry,
     key: (String, u64),
     slot: Option<LedgerSlot>,
+    order: Option<AdmissionOrder>,
     released: bool,
 }
 
@@ -209,6 +222,7 @@ impl Registration {
                     "ledger_receipt_identity_missing"
                         | "ledger_receipt_unconfirmed"
                         | "ledger_close_flush_unconfirmed"
+                        | "ledger_close_gate_unconfirmed"
                 ) =>
             {
                 *reason
@@ -438,6 +452,8 @@ pub(crate) struct Supervisor<P: Ports> {
     #[cfg(test)]
     pub(crate) after_receipt_io: Option<ordering::PendingOverflow>,
     #[cfg(test)]
+    pub(crate) after_close_loan: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
     pub(crate) handbacks: usize,
 }
 
@@ -460,7 +476,7 @@ impl<P: Ports> Supervisor<P> {
             return Err(Refused::Mismatch);
         }
         let slot = registration.slot().ok_or(Refused::Duplicate)?;
-        let order = AdmissionOrder::new(config.provider.clone(), config.channel, 1, 0);
+        let order = registration.order.take().ok_or(Refused::Duplicate)?;
         Ok(Self {
             config,
             ports,
@@ -482,6 +498,8 @@ impl<P: Ports> Supervisor<P> {
             #[cfg(test)]
             after_receipt_io: None,
             #[cfg(test)]
+            after_close_loan: Mutex::new(None),
+            #[cfg(test)]
             handbacks: 0,
         })
     }
@@ -491,7 +509,11 @@ impl<P: Ports> Supervisor<P> {
         let closed = self.closed;
         #[cfg(test)]
         let closed = closed && !mutant("close_allows_commit");
-        self.admitted && !closed && !self.slot.loaned() && self.registration.latched().is_none()
+        self.admitted
+            && !closed
+            && !self.order.exhausted()
+            && !self.slot.loaned()
+            && self.registration.latched().is_none()
     }
 
     pub(crate) fn pending_overflow(&self) -> ordering::PendingOverflow {
@@ -514,30 +536,6 @@ impl<P: Ports> Supervisor<P> {
         self.registration.release(self.slot)
     }
 
-    /// S1 to S7. A holding stage reports health and leaves every later stage unrun.
-    pub(crate) async fn boot(&mut self) -> Landing {
-        // Each boot must pass every stage again, so an earlier admission never outlives it.
-        self.admitted = false;
-        self.invalidate_order();
-        match self.stages().await {
-            Ok(landing) => landing,
-            Err(cause) => {
-                self.registration.report(&cause, true);
-                Landing::Held(cause)
-            }
-        }
-    }
-
-    fn invalidate_order(&mut self) {
-        match self.admission_gen.checked_add(1) {
-            Some(epoch) => {
-                self.admission_gen = epoch;
-                self.order.invalidate(epoch);
-            }
-            None => self.admitted = false,
-        }
-    }
-
     /// All receipt work borrows the existing slot; readiness for Enter is a separate decision.
     async fn input_command(&mut self, command: SupervisorCmd, receipt_open: bool) {
         use crate::services::tui_input::rows::receipt_identity::Responsibility;
@@ -546,21 +544,7 @@ impl<P: Ports> Supervisor<P> {
             SupervisorCmd::Adopt { channel, ack } => {
                 let _ = ack.send(self.adopt_task(channel));
             }
-            SupervisorCmd::Close { ack } => {
-                self.closed = true;
-                self.invalidate_order();
-                let result = loan(&mut self.slot, |lease| {
-                    let result = lease.get().and_then(|ledger| ledger.rows()).map(|_| ());
-                    lease.needs_reopen |= result.is_err();
-                    result
-                })
-                .await
-                .ok_or(Deferred::SupervisorLost)
-                .and_then(|result| result.map_err(|_| Deferred::Persistence));
-                self.registration
-                    .report(&held("ledger_close_flush_unconfirmed"), result.is_err());
-                let _ = ack.send(result);
-            }
+            SupervisorCmd::Close { ack } => self.close_command(ack).await,
             SupervisorCmd::FetchTicket { reply } => {
                 let _ = reply.send(self.order.fetch_ticket(self.admission_gen));
             }
@@ -960,6 +944,7 @@ impl<P: Ports> Supervisor<P> {
         #[cfg(test)]
         {
             self.handbacks += 1;
+            ordering::note_handback_callback_for_test();
         }
         closing
             .begin_handback()
@@ -976,6 +961,10 @@ impl<P: Ports> Supervisor<P> {
             self.notify(key, reason).await;
         }
         self.host = Some(host);
+        #[cfg(test)]
+        if mutant("handback_failure_as_handed_back") {
+            return Ok(self.returned(Landing::HandedBack));
+        }
         match outcome {
             Ok(Outcome::Legacy) => Ok(self.returned(Landing::HandedBack)),
             _ => Err(held("handback_held")),

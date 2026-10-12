@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use crate::services::claude_tui::guarded_outcome::{self, OwnedWarmOutcome, SubmissionError};
 mod process_session_launch;
 pub(crate) use process_session_launch::execute_streaming_local_process;
 
@@ -1828,20 +1830,27 @@ fn execute_streaming_local_tui_tmux(
     }
 
     if session_exists && has_live_pane && resume {
-        match try_claude_tui_warm_followup(
-            resolved_session_id,
-            transcript_path,
-            transcript_path_string,
-            resume,
-            working_dir_path,
-            prompt,
-            sender.clone(),
-            cancel_token.clone(),
-            &FollowupHost::legacy_tmux(tmux_session_name),
-            report_channel_id,
-        ) {
-            ClaudeTuiWarmFollowupOutcome::Terminal(result) => return result,
-            ClaudeTuiWarmFollowupOutcome::Recreate(updated) => {
+        match guarded_outcome::warm_owned(|| {
+            try_claude_tui_warm_followup(
+                resolved_session_id,
+                transcript_path,
+                transcript_path_string,
+                resume,
+                working_dir_path,
+                prompt,
+                sender.clone(),
+                cancel_token.clone(),
+                &FollowupHost::legacy_tmux(tmux_session_name),
+                report_channel_id,
+            )
+        }) {
+            OwnedWarmOutcome::Stopped(run) => {
+                return Err(SubmissionError::Guarded(run).into_legacy());
+            }
+            OwnedWarmOutcome::Legacy(ClaudeTuiWarmFollowupOutcome::Terminal(result)) => {
+                return result;
+            }
+            OwnedWarmOutcome::Legacy(ClaudeTuiWarmFollowupOutcome::Recreate(updated)) => {
                 resolved_session_id = updated.resolved_session_id;
                 transcript_path = updated.transcript_path;
                 transcript_path_string = updated.transcript_path_string;
@@ -1939,11 +1948,16 @@ fn run_claude_tui_fresh_turn_and_finalize(
     );
     let (read_result, harvest, turn_read_start_offset) = match fresh_turn_result {
         Ok(result) => result,
+        Err(SubmissionError::Guarded(run)) => {
+            return Err(SubmissionError::Guarded(run).into_legacy());
+        }
         // The prompt never reached the pane: keep the session and its owner marker.
-        Err(error) if crate::services::claude_tui::submission_fence::refusal().is_some() => {
+        Err(SubmissionError::Legacy(error))
+            if crate::services::claude_tui::submission_fence::refusal().is_some() =>
+        {
             return Err(error);
         }
-        Err(error) => {
+        Err(SubmissionError::Legacy(error)) => {
             let reason = format!("claude tui fresh turn failed: {error}");
             let component = "claude_tui_provider";
             if teardown_tmux(
@@ -2038,13 +2052,14 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
     tmux_session_name: &str,
     resolved_session_id: &str,
     prompt: &str,
-) -> Result<(ReadOutputResult, ReadHarvestStats, u64), String> {
+) -> Result<(ReadOutputResult, ReadHarvestStats, u64), SubmissionError> {
     for attempt in 1..=CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS {
         let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
         let turn_started_at = chrono::Utc::now();
-        match crate::services::claude_tui::input::send_fresh_prompt(
+        match crate::services::claude_tui::input::send_prompt_with_readiness(
             tmux_session_name,
             prompt,
+            crate::services::claude_tui::input::PromptReadinessKind::FreshTurn,
             cancel_token.as_deref(),
         ) {
             Ok(()) => {
@@ -2064,9 +2079,13 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
                     hook_rx,
                     hook_events_after,
                 )
-                .map(|(read_result, harvest)| (read_result, harvest, start_offset));
+                .map(|(read_result, harvest)| (read_result, harvest, start_offset))
+                .map_err(SubmissionError::from);
             }
-            Err(error) if should_retry_claude_tui_fresh_prompt_ready(&error, attempt) => {
+            Err(SubmissionError::Guarded(run)) => return Err(SubmissionError::Guarded(run)),
+            Err(SubmissionError::Legacy(error))
+                if should_retry_claude_tui_fresh_prompt_ready(&error, attempt) =>
+            {
                 let backoff = claude_tui_fresh_prompt_ready_backoff(attempt);
                 debug_log(&format!(
                     "Claude TUI fresh prompt readiness timed out on attempt {}/{}; retrying after {}s",
@@ -2084,14 +2103,15 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
                 );
                 std::thread::sleep(backoff);
             }
-            Err(error) => {
+            Err(SubmissionError::Legacy(error)) => {
                 if crate::services::claude_tui::input::is_prompt_ready_timeout_error(&error) {
                     return Err(format!(
                         "{}; fresh prompt readiness attempts exhausted ({} attempts)",
                         error, CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
-                    ));
+                    )
+                    .into());
                 }
-                return Err(error);
+                return Err(error.into());
             }
         }
     }
@@ -2099,7 +2119,8 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
     Err(format!(
         "claude tui fresh prompt readiness attempts exhausted ({} attempts)",
         CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
-    ))
+    )
+    .into())
 }
 
 #[cfg(unix)]
@@ -4156,5 +4177,90 @@ mod claude_tui_session_resolution_tests {
             }
             ClaudeTuiDraftRecoveryOutcome::Proceed { .. } => panic!("expected Terminal(Err)"),
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod guarded_owner_tests {
+    use super::*;
+    use crate::services::claude_tui::guarded_outcome;
+    use crate::services::claude_tui::host_input::{LegacyTmuxGate, guarded_submission};
+    use crate::services::claude_tui::submission_fence::{
+        self, PreSubmitPersistenceRefused, SubmissionFence,
+    };
+    use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
+    use guarded_submission::executor_tests::{install_shim, renderer, screen};
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    struct CancelFence(Arc<CancelToken>);
+    impl SubmissionFence for CancelFence {
+        fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
+            self.0
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn refusal(&self) -> Option<PreSubmitPersistenceRefused> {
+            None
+        }
+    }
+
+    #[test]
+    fn cg_b2c_fresh_finalize_preserves_the_typed_post_fence_stop() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let f = Fixture::after_shared_test_env_lock();
+        install_shim(&f);
+        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let name = "fresh-owner-fence-cancel";
+        renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+        let transcript = f.root.path().join("fresh.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        let owner = f.root.path().join("owner-marker");
+        std::fs::write(&owner, "owner").unwrap();
+        let token = Arc::new(CancelToken::new());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ((result, stopped), _) =
+            submission_fence::with_scope(Some(Arc::new(CancelFence(Arc::clone(&token)))), || {
+                guarded_submission::test_support::with_request(
+                    name,
+                    Rc::new(LegacyTmuxGate),
+                    || {
+                        guarded_outcome::capture(|| {
+                            run_claude_tui_fresh_turn_and_finalize(
+                                &transcript,
+                                &transcript.display().to_string(),
+                                tx,
+                                Some(token),
+                                name,
+                                Some(&TeardownClearance::Unkeyed),
+                                "fresh-owner",
+                                None,
+                                "own",
+                                owner.to_str().unwrap(),
+                            )
+                        })
+                    },
+                )
+            });
+        assert!(result.is_err());
+        assert!(owner.exists());
+        assert!(f.received(name).is_empty());
+        assert!(rx.try_recv().is_err());
+        assert!(
+            matches!(
+                stopped,
+                Some(
+                    crate::services::claude_tui::host_input::InputRun::Indeterminate {
+                        confirmed: 0,
+                        ..
+                    }
+                )
+            ),
+            "{stopped:?}"
+        );
     }
 }

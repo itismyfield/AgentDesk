@@ -771,7 +771,10 @@ async fn f4_partial_audit_preserves_known_ids_and_unknown_coverage() {
 
 fn switch(enabled: bool) -> RepostSwitch {
     let boot = TuiOConfig {
-        repost: RepostConfig { enabled },
+        repost: RepostConfig {
+            enabled,
+            channels: [CHANNEL].into_iter().collect(),
+        },
         ..TuiOConfig::default()
     };
     RepostSwitch::new(Some(&boot), watch::channel(None).1)
