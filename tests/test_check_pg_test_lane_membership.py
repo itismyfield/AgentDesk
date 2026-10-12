@@ -299,7 +299,10 @@ class NonPgFilterContract(unittest.TestCase):
                 (source + use, "          if [ -n \"$CI\" ]; then\n  " + source + "          fi\n"
                  + use, "used without sourcing"),
                 (use, "          unset PG_INCLUDE_ARGS\n" + use,
-                 "PG_INCLUDE_ARGS is reassigned after sourcing")):
+                 "PG_INCLUDE_ARGS is reassigned after sourcing"),
+                # An escaped operator keeps its `#` literal, so the line still ends in `&&`.
+                *((source + use, f"          false && echo ok\\{op}#tag &&\n" + source + use,
+                   "used without sourcing") for op in ";|&")):
             with self.subTest(new=new):
                 self.assertEqual(original.count(old), 1)
                 path.write_text(original.replace(old, new), "utf-8")
@@ -1702,6 +1705,106 @@ class CommentMarkerMutations(BypassFixtureCase):
         self.assertEqual(membership._strip_comments("  - run: x  # note"), "  - run: x")
         self.assertEqual(membership._strip_comments("      # note"), "")
         self.assertEqual(membership._strip_comments("run: echo a#b"), "run: echo a#b")
+        # In the run scalar's shell an escaped operator is word data, not a comment boundary.
+        self.assertEqual(membership._strip_comments("run: echo ok\\;#tag &&"),
+                         "run: echo ok\\;#tag &&")
+        self.assertEqual(membership._strip_comments("run: echo ok\\\\;# note"),
+                         "run: echo ok\\\\;")
+
+    def test_a_lane_is_read_only_from_a_cargo_test_the_whole_command_runs(self) -> None:
+        coverage = membership._load_coverage_module(self.root)
+        for command in (self.SWEEP, f"env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        f"python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --lane sweep --max-summaries 4 --skip _pg"
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --skip pg_ --max-summaries 1 --lane s"
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        f'source {membership.NON_PG_FILTER_REL} && cargo test --lib -- '
+                        '"${PG_INCLUDE_ARGS[@]}" --nocapture'):
+            with self.subTest(command=command):
+                self.assertIsNotNone(membership._lane_filter(coverage, command))
+        for command in ("echo cargo test --lib x", "false && cargo test --lib x",
+                        'cargo test --lib -- "$FILTER"', "MODE=x echo cargo test --lib x",
+                        'source "$F" && cargo test --lib x', "cargo test --lib x 2>&1",
+                        # Options whose value runs in place of the cargo test.
+                        "python3 -c pass cargo test --lib x", "python3 -m pytest cargo test --lib x",
+                        "python3 scripts/other.py cargo test --lib x",
+                        "env -S echo cargo test --lib x", "env --split-string=echo cargo test --lib x",
+                        # A wrapper option that swallows `--` or takes an unproven value.
+                        "env -u -- cargo test --lib x", "nice -n echo cargo test --lib x",
+                        "python3 scripts/run_test_lane.py --lane sweep cargo test --lib x",
+                        # Outside the CI prefix templates, though the shell might run cargo.
+                        f"env -- {self.SWEEP}", f"nice -n 5 {self.SWEEP}", f"A=1 {self.SWEEP}",
+                        f"env -u PATH {self.SWEEP}", f"python3 scripts/ci-timeout.py 0 {self.SWEEP}",
+                        f"source {membership.NON_PG_FILTER_REL} && env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        # Quoting or escaping that makes a prefix word something else to the shell.
+                        f'"A=1" {self.SWEEP}', f"A\\=1 {self.SWEEP}",
+                        f'env -u "AGENTDESK_ROOT_DIR" {self.SWEEP}', f"en\\v -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        '"cargo test" --lib x',
+                        # Arguments run_test_lane.py's argparse rejects before any command runs.
+                        f"python3 scripts/run_test_lane.py -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --lane s --max-summaries 0"
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --lane s --lane t"
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --lane s --log x"
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        f"python3 scripts/run_test_lane.py -- {self.SWEEP}",
+                        f"python3 scripts/run_test_lane.py --lane s --max-summaries 0 -- {self.SWEEP}",
+                        "cargo.exe test --lib x"):
+            with self.subTest(command=command), \
+                    self.assertRaisesRegex(ValueError, "cargo-command-unparsed"):
+                membership._lane_filter(coverage, command)
+
+    def test_a_cargo_command_past_an_unproven_boundary_fails_the_gate(self) -> None:
+        # Its lane filter would be read from a shorter or joined command, so it is an error.
+        for command in (f"{self.SWEEP} --logfile foo$(true)#tag; cargo test --lib db::service",
+                        f"{self.SWEEP} --logfile x#tag",
+                        # A prefix that keeps the cargo test from running as its command.
+                        "echo cargo test --lib db::service",
+                        f"false && {self.SWEEP}",
+                        # A run-time filter: empty here, so it selects every test.
+                        '|\n          FILTER=""\n          cargo test --lib -- "$FILTER" --nocapture',
+                        # A wrapper whose command, past its options, is not cargo.
+                        "env -- echo cargo test --lib db::service",
+                        "nice -- echo cargo test --lib db::service",
+                        "env -i echo cargo test --lib db::service",
+                        "python3 scripts/run_test_lane.py --lane sweep -- echo cargo test --lib db::service",
+                        # Quoted or escaped `=` is no assignment, so the shell runs `A=1`.
+                        'A"=1" cargo test --lib db::service',
+                        "A\\=1 cargo test --lib db::service",
+                        '|\n          "A=1" cargo test --lib db::service',
+                        # A block line's quotes are the shell's: this runs a program named so.
+                        '|\n          "cargo test --lib db::service"',
+                        # run_test_lane.py exits on these before it runs any command.
+                        "python3 scripts/run_test_lane.py -- env -u AGENTDESK_ROOT_DIR "
+                        "cargo test --lib db::service",
+                        "python3 scripts/run_test_lane.py --lane sweep --max-summaries 0 -- "
+                        "env -u AGENTDESK_ROOT_DIR cargo test --lib db::service",
+                        "cargo.exe test --lib db::service"):
+            with self.subTest(command=command):
+                self.write_sweep(f"  sweep:\n    steps:\n      - run: {command}\n")
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+                    verdict = membership.main(["--repo-root", str(self.root), "--write-snapshots"])
+                self.assertEqual(verdict, 2)
+                self.assertIn("cargo-command-unparsed", stderr.getvalue())
+
+    def test_a_cargo_test_is_found_however_its_words_are_spaced(self) -> None:
+        def gate(sweep):
+            self.write_sweep(f"  sweep:\n    steps:\n      - run: {sweep}\n")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+                verdict = membership.main(["--repo-root", str(self.root), "--write-snapshots"])
+            return verdict, [line for line in stderr.getvalue().splitlines() if "rule5" in line]
+        single = gate(self.SWEEP)
+        self.assertEqual(single[0], 1)
+        self.assertIn("[rule5] names 1 test(s)", "\n".join(single[1]))
+        for sweep in (self.SWEEP.replace("cargo test", "cargo  test"),
+                      self.SWEEP.replace("cargo test", "cargo\ttest"),
+                      f"env -u AGENTDESK_ROOT_DIR {self.SWEEP}"):
+            with self.subTest(sweep=sweep):
+                self.assertEqual(gate(sweep), single)
 
     def test_a_quoted_hash_on_the_service_line_keeps_the_service(self) -> None:
         # The counterexample to cutting at every `#`: the service start here
