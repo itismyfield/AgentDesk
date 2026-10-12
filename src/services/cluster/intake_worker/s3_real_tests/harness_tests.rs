@@ -766,10 +766,10 @@ pub(super) fn append(path: &Path, bytes: &[u8]) {
 }
 
 /// The boot config a node reads: clustered, the gateway as O home, `C` selected for the writer.
-fn node_config(role: &str, provider: ShadowProvider) -> crate::config::Config {
+fn node_config(role: &str, provider: ShadowProvider, gateway: &str) -> crate::config::Config {
     serde_json::from_value(serde_json::json!({
         "server": {},
-        "cluster": {"enabled": true, "instance_id": role, "gateway_preferred_instance_id": GW},
+        "cluster": {"enabled": true, "instance_id": role, "gateway_preferred_instance_id": gateway},
         "runtime": {"channel_home_delegation_enabled": true},
         "tui_o": {"writer": {"channels": [C]}},
         "agents": [{"id": format!("writer-{C}"), "name": "Writer",
@@ -809,13 +809,26 @@ impl Booted {
     /// As [`Booted::boot`], posting to `discord`.
     pub(super) async fn boot_on(env: &Env, discord: Discord) -> Self {
         let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
-        Self::boot_with_on(env, reads, discord, ShadowProvider::Claude).await
+        Self::boot_with_on(env, reads, discord, ShadowProvider::Claude, GW).await
+    }
+
+    /// As [`Booted::boot`], with `gateway` as the cluster's gateway role (and so the O home).
+    pub(super) async fn boot_with_gateway(env: &Env, gateway: &str) -> Self {
+        let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
+        Self::boot_with_on(
+            env,
+            reads,
+            Discord::default(),
+            ShadowProvider::Claude,
+            gateway,
+        )
+        .await
     }
 
     /// As [`Booted::boot`], with the config, boot and writer host on `provider`.
     pub(super) async fn boot_as(env: &Env, provider: ShadowProvider) -> Self {
         let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
-        Self::boot_with_on(env, reads, Discord::default(), provider).await
+        Self::boot_with_on(env, reads, Discord::default(), provider, GW).await
     }
 
     /// As [`Booted::boot`], with the drain reading through `reads`.
@@ -823,7 +836,7 @@ impl Booted {
     where
         R: DrainPort + Send + Sync + 'static,
     {
-        Self::boot_with_on(env, reads, Discord::default(), ShadowProvider::Claude).await
+        Self::boot_with_on(env, reads, Discord::default(), ShadowProvider::Claude, GW).await
     }
 
     async fn boot_with_on<R>(
@@ -831,6 +844,7 @@ impl Booted {
         reads: impl Fn(u64) -> R,
         discord: Discord,
         provider: ShadowProvider,
+        gateway: &str,
     ) -> Self
     where
         R: DrainPort + Send + Sync + 'static,
@@ -838,7 +852,7 @@ impl Booted {
         let role = env.role.clone();
         let root = crate::config::runtime_root().expect("node root");
         let hosts = crate::config::session_hosts::force_for_test(Some(&role), &[(C, &role)]);
-        let config = node_config(&role, provider);
+        let config = node_config(&role, provider, gateway);
         crate::services::tui_o::channel_policy::install(&config).expect("boot snapshot");
         let pool = env.pool().await;
         let rows = channel_home_boot::listed(&pool);

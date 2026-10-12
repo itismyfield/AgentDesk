@@ -7,6 +7,8 @@ mod drain_pg;
 mod force_pg;
 #[path = "harness_tests.rs"]
 mod harness;
+#[path = "holder_pg_tests.rs"]
+mod holder_pg;
 #[path = "route_pg_tests.rs"]
 mod route_pg;
 
@@ -35,6 +37,10 @@ fn s3_node_child() {
             "th7_binding" => drain_pg::binding_node(&env).await,
             "th7_prepared_seed" => drain_pg::prepared_seed_node(&env).await,
             "th7_prepared" => drain_pg::prepared_node(&env).await,
+            "th6_restart_first" => holder_pg::first_generation_node(&env).await,
+            "th6_restart_second" => holder_pg::second_generation_node(&env).await,
+            "th6_role_holder" => holder_pg::role_holder_node(&env).await,
+            "th6_role_gateway" => holder_pg::role_gateway_node(&env).await,
             "th8_holder" => route_pg::holder_node(&env).await,
             "th8_gateway" => route_pg::gateway_node(&env).await,
             "th8_branches" => route_pg::branches_node(&env).await,

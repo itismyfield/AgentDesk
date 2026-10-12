@@ -47,7 +47,7 @@ async fn rows(pool: &PgPool) -> String {
 
 /// The holder's executor stand-in: each turn it runs writes one assistant row to the channel's
 /// transcript, which only the real actor turns into a POST.
-fn replies(node: &Booted) -> (test_executor::Hook, test_executor::Recorder) {
+pub(super) fn replies(node: &Booted) -> (test_executor::Hook, test_executor::Recorder) {
     let transcript = node.transcript.clone();
     let turns = Arc::new(AtomicUsize::new(0));
     let hook = test_executor::hook(Box::new(move |seen| {
@@ -62,7 +62,7 @@ fn replies(node: &Booted) -> (test_executor::Hook, test_executor::Recorder) {
     (hook, test_executor::record())
 }
 
-async fn owner() -> Arc<SharedData> {
+pub(super) async fn owner() -> Arc<SharedData> {
     eprintln!("[s3] registering the owner runtime");
     let owner = crate::services::discord::health::owner_runtime_for_tests::registered("claude");
     let (registry, shared) = owner.await;
@@ -70,7 +70,7 @@ async fn owner() -> Arc<SharedData> {
     shared
 }
 
-async fn tick(node: &Booted, shared: &Arc<SharedData>, target: &str) -> TickOutcome {
+pub(super) async fn tick(node: &Booted, shared: &Arc<SharedData>, target: &str) -> TickOutcome {
     let owner = format!("o-{target}");
     eprintln!("[s3] tick on {target}");
     run_intake_worker_tick(&node.pool, shared, target, "claude", &owner, &|| false)
