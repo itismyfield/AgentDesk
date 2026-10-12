@@ -55,13 +55,15 @@ pub trait LegacyView: Send + Sync + 'static {
     }
 }
 
+pub type LegacyTurnIdentity = (u64, String, Option<String>, Option<u64>, Option<String>);
+
 /// Legacy's redrive episode as this process can read it: its frontier reset, watcher reattaches,
 /// and the inflight row's identity (user message, start, tmux, turn start) and turn nonce.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LegacyEpoch {
     pub reset_incarnation: u64,
     pub reconnects: u64,
-    pub turn: Option<(u64, String, Option<String>, Option<u64>, Option<String>)>,
+    pub turn: Option<LegacyTurnIdentity>,
 }
 
 /// Waits for Legacy's first rehydrate pass; false once the wait is over without one.
@@ -92,8 +94,6 @@ pub enum Hold {
     Cursor { tmux: String, path: PathBuf },
     /// A bind is pending or the log moved; any later log entry may clear it.
     Binding,
-    /// No valid source has been bound yet.
-    NoSource,
     /// Legacy's delivered frontier has not reached the cursor on a record end.
     Delivery {
         read: ReadVersion,
@@ -127,7 +127,7 @@ impl Refused {
                 LegacyCursor::Unbound => false,
                 LegacyCursor::NoPane => true,
             },
-            Hold::Binding | Hold::NoSource => false,
+            Hold::Binding => false,
             Hold::Delivery {
                 read,
                 tmux,
@@ -255,7 +255,7 @@ pub(crate) fn logged(events: &[BindingEvent]) -> Result<(Vec<&SourceId>, Vec<&So
         ));
     }
     if bound.is_empty() {
-        return Err(Refused::new(Hold::NoSource, "no source is bound"));
+        return Err(Refused::new(Hold::Final, "no source is bound"));
     }
     named.retain(|source| !bound.contains(source));
     Ok((bound, named))

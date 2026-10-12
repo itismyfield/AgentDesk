@@ -12089,6 +12089,7 @@ services::tui_o::writer::adoption::tests::a_running_legacy_tail_releases_the_cha
 services::tui_o::writer::adoption::tests::a_turn_legacys_reader_has_not_ended_is_reported_undelivered
 services::tui_o::writer::adoption::tests::an_open_turn_before_legacys_cursor_is_not_adopted
 services::tui_o::writer::adoption::tests::assistant_text_past_legacys_frontier_is_reported_undelivered
+services::tui_o::writer::adoption::tests::logged_empty_is_final_for_shared_consumers
 services::tui_o::writer::adoption::tests::o_starts_at_legacys_cursor_when_a_unit_lands_after_the_recheck
 services::tui_o::writer::adoption::tests::past_sources_exactly_at_the_byte_budget_are_all_pinned_and_the_next_older_is_dropped
 services::tui_o::writer::adoption::tests::past_sources_over_the_byte_budget_pin_only_the_newest
@@ -12268,9 +12269,11 @@ services::tui_o::writer::tests::actor::host_start::late_cleanup::cleanup_facts_p
 services::tui_o::writer::tests::actor::host_start::late_cleanup::cleanup_root_and_home_failures_leave_no_reserved_host
 services::tui_o::writer::tests::actor::host_start::late_cleanup::cleanup_stop_after_first_poll_finishes_before_host_claim_is_released
 services::tui_o::writer::tests::actor::host_start::late_cleanup::cleanup_store_corrupted_after_seed_settles_held_without_posts
+services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_delegated_deferred_closed_and_lost_hold_routes_and_worker_pending
 services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_delegated_first_pg_worker_executes_then_same_host_commits
 services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_foreign_body_gate_and_host_share_candidate
 services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_home_body_before_first_decision_preserves_reservation
+services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_off_foreign_standby_legacy_body_releases_before_host_can_adopt
 services::tui_o::writer::tests::actor::host_start::late_host::late_adopt_coalesced_bound_rotation_rejects_before_pin
 services::tui_o::writer::tests::actor::host_start::late_host::late_adopt_final_blocker_wins_over_transient_and_corruption_does_not_wait
 services::tui_o::writer::tests::actor::host_start::late_host::late_adopt_first_placement_before_spawn_then_late_binding_posts_only_new_payload

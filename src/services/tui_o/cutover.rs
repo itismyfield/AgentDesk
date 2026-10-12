@@ -74,8 +74,16 @@ fn owned_kind(channel: u64) -> Option<RuntimeHandoffKind> {
 fn owned_in(snapshot: &BootChannels, channel: u64) -> Option<RuntimeHandoffKind> {
     let kind = snapshot.kind(channel);
     let hosted = channel_policy::owns_output(true, snapshot.channels(), channel, kind);
-    output_candidate(snapshot, channel).filter(|c| hosted && c.peek().owned())?;
+    input_candidate(snapshot, channel).filter(|c| hosted && c.peek().owned())?;
     kind
+}
+
+fn input_candidate(snapshot: &BootChannels, channel: u64) -> Option<&Candidate> {
+    let Some(home) = delegated(channel) else {
+        return snapshot.candidate(channel);
+    };
+    let candidate = snapshot.candidate(channel).or(snapshot.standby(channel));
+    candidate.filter(|_| home.intake_open())
 }
 
 /// The host's actual candidate: standby participates only with a registered local home.

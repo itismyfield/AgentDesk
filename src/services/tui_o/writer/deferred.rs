@@ -568,7 +568,7 @@ fn leaves<I: HostIo>(waiting: &Waiting<'_, I>, alarms: &I::Alarms, again: &Refus
         );
         return true;
     }
-    if matches!(again.hold, Hold::Final | Hold::NoSource) {
+    if again.hold == Hold::Final {
         release(
             waiting.candidate,
             alarms,

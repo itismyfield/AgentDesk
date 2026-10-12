@@ -587,3 +587,193 @@ async fn late_adopt_home_body_before_first_decision_preserves_reservation() {
         body_candidate(false).await;
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn late_adopt_delegated_deferred_closed_and_lost_hold_routes_and_worker_pending() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::late_adopt_delegated_deferred_closed_and_lost_hold_routes_and_worker_pending"
+    )) {
+        return;
+    }
+    for lost in [false, true] {
+        let fixture = TestPostgresDb::create().await;
+        let pool = fixture.connect_and_migrate().await;
+        let (harness, _) = fresh(|_| Vec::new());
+        let _boot = seed(&harness, true);
+        let (gate, epoch) = home(&pool).await;
+        let row_id = pending(&pool, epoch).await;
+        let (io, entered, _release) = io(&harness, &pool);
+        let (handle, candidate, ready) = start_delegated(&harness, &io);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), entered)
+                .await
+                .unwrap()
+                .unwrap(),
+            1,
+            "the real reserved host observes the pending input before its decision"
+        );
+        assert_eq!(candidate.peek(), Adoption::Deferred);
+        assert!(candidate.late_adopt_origin());
+        assert_eq!(
+            intake_route::route("claude", CHANNEL),
+            intake_route::IntakeRoute::Unselected
+        );
+        assert_eq!(
+            intake_route::route_for_placement("claude", CHANNEL),
+            intake_route::IntakeRoute::Unselected
+        );
+        let (_registry, shared) =
+            crate::services::discord::health::owner_runtime_for_tests::registered("claude").await;
+        let recorder = test_executor::record();
+        let checkpoints = AtomicUsize::new(0);
+        let gate_closed_after_claim = AtomicBool::new(false);
+        renew(&gate, epoch);
+        // The probe always allows the worker; only the home closes after its actual row claim.
+        let cancelled = || {
+            if checkpoints.fetch_add(1, Ordering::SeqCst) == 1 {
+                if lost {
+                    gate.close();
+                } else {
+                    gate.close_intake();
+                }
+                gate_closed_after_claim.store(true, Ordering::SeqCst);
+            }
+            false
+        };
+        assert_eq!(
+            run_intake_worker_tick(&pool, &shared, WORKER, "claude", "late", &cancelled)
+                .await
+                .unwrap(),
+            TickOutcome::Held,
+            "a claimed input returns to pending when its reserved home closes"
+        );
+        assert!(gate_closed_after_claim.load(Ordering::SeqCst));
+        let ownership = gate.ownership();
+        if lost {
+            assert_eq!(ownership, channel_home::HomeOwnership::Lost);
+        } else {
+            assert!(matches!(
+                ownership,
+                channel_home::HomeOwnership::Owned {
+                    intake: channel_home::HomeIntake::Closed,
+                    ..
+                }
+            ));
+        }
+        assert!(matches!(
+            intake_route::route("claude", CHANNEL),
+            intake_route::IntakeRoute::Hold(_)
+        ));
+        assert!(matches!(
+            intake_route::route_for_placement("claude", CHANNEL),
+            intake_route::IntakeRoute::Hold(_)
+        ));
+        let row: (String, Option<String>, bool, bool) = sqlx::query_as(
+            "SELECT status::TEXT, claim_owner, accepted_at IS NULL, spawned_at IS NULL
+             FROM intake_outbox WHERE id = $1",
+        )
+        .bind(row_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row, ("pending".into(), None, true, true));
+        assert_eq!(
+            recorder.channels(),
+            Vec::<u64>::new(),
+            "neither Closed nor Lost admits an executor"
+        );
+        assert_eq!(candidate.peek(), Adoption::Deferred);
+        assert!(!ready.accepts(CHANNEL));
+        assert!(!harness.store.has_channel_dir(CHANNEL));
+        assert!(harness.port.posts().is_empty());
+        handle.stop_and_join().await.unwrap();
+        channel_home::unregister(&CHANNEL.to_string());
+        pool.close().await;
+        fixture.drop().await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn late_adopt_off_foreign_standby_legacy_body_releases_before_host_can_adopt() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::late_adopt_off_foreign_standby_legacy_body_releases_before_host_can_adopt"
+    )) {
+        return;
+    }
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let (harness, path) = fresh(|_| Vec::new());
+    let mut config = config(true);
+    config.tui_o.as_mut().unwrap().writer.late_adopt = false;
+    let snapshot = BootChannels::validate(&config)
+        .unwrap()
+        .seeded(true, &config, |channels, _| {
+            Ok(channel_policy::stored(
+                Some(harness._runtime.path()),
+                channels,
+            ))
+        })
+        .unwrap();
+    crate::config_live_reload::install(config);
+    let _boot = test_override::force_boot(snapshot);
+    let (gate, epoch) = home(&pool).await;
+    let owned = delegated_boot_ownership(|channel| channel == CHANNEL);
+    assert_eq!(owned.len(), 1);
+    let candidate = owned[0].2.clone().unwrap();
+    assert_eq!(candidate.peek(), Adoption::Pending);
+    assert!(!candidate.late_adopt_origin());
+    let (io, _entered, _release) = io(&harness, &pool);
+    io.pause.lock().unwrap().take();
+    io.enabled.store(false, Ordering::SeqCst);
+    let legacy = transcript(&harness, &path);
+    legacy
+        .frontier
+        .store(std::fs::metadata(&path).unwrap().len(), Ordering::SeqCst);
+    *io.base.legacy.lock().unwrap() = Some(legacy);
+    let old_calls = AtomicUsize::new(0);
+    assert_eq!(
+        claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
+            old_calls.fetch_add(1, Ordering::SeqCst);
+            "old"
+        })
+        .await
+        .unwrap(),
+        BodySend::Sent("old")
+    );
+    assert_eq!(old_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(candidate.peek(), Adoption::Released);
+    assert_eq!(
+        candidate.sends(),
+        (1, 1),
+        "OFF still counts the host's exact standby Candidate"
+    );
+    let (handle, hosted_candidate, ready) = start_delegated(&harness, &io);
+    assert_eq!(hosted_candidate.peek(), Adoption::Released);
+    assert_eq!(hosted_candidate.sends(), (1, 1));
+    let generation = handle.generation();
+    wait(
+        &gate,
+        epoch,
+        "the actual OFF host settles without adopting the released standby",
+        || !ready.is_hosted(CHANNEL),
+    )
+    .await;
+    assert_eq!(candidate.peek(), Adoption::Released);
+    assert!(io.facts.lock().unwrap().iter().all(|open| *open == 0));
+    assert!(!io.base.calls().iter().any(|(call, _)| *call == "adopted"));
+    assert!(!ready.accepts(CHANNEL));
+    assert!(!harness.store.has_channel_dir(CHANNEL));
+    assert_eq!(harness.store.read_init(CHANNEL).unwrap(), None);
+    assert!(
+        harness.port.posts().is_empty(),
+        "O must send neither old nor new after this OFF body claim"
+    );
+    assert_eq!(old_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(hosted_candidate.sends(), (1, 1));
+    assert_eq!(handle.stop_and_join().await.unwrap().generation, generation);
+    channel_home::unregister(&CHANNEL.to_string());
+    pool.close().await;
+    fixture.drop().await;
+}

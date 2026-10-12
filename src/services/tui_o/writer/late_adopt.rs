@@ -115,8 +115,19 @@ pub(super) async fn activate<I: HostIo>(
                 )
                 .await;
             }
+            let no_bound_source = first_bound(&events).is_none()
+                && !events.iter().any(|event| {
+                    matches!(
+                        &event.record,
+                        BindingRecord::Bound {
+                            new: BindingTarget::Pending { .. },
+                            ..
+                        }
+                    )
+                });
             match adoption::logged(&events) {
-                Err(refused) if matches!(refused.hold, Hold::NoSource | Hold::Binding) => {}
+                Err(refused) if refused.hold == Hold::Binding => {}
+                Err(_) if no_bound_source => {}
                 Err(refused) => {
                     release(candidate, &alarms, channel, &refused.to_string());
                     return false;

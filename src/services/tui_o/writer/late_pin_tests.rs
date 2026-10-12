@@ -114,7 +114,7 @@ impl Fixture {
 fn assert_retry(result: Result<Snapshot, Refused>, reason: &str) {
     let refused = result.expect_err(reason);
     assert!(
-        !matches!(refused.hold, Hold::Final | Hold::NoSource),
+        !matches!(refused.hold, Hold::Final),
         "must remain retryable: {refused}"
     );
 }
