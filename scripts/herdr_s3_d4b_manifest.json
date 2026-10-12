@@ -1,13 +1,13 @@
 {
-  "about": "D4-B acceptance roster (#5340 S3). implemented = lib tests registered, not passed; verdicts come from scripts/check_herdr_s3_d4b_manifest.py --results. Pieces: 1 G-HOME, 2 G-POST, 3 H7 sources, 4 H6 restart/H9 durable, 5 wall-clock, 6 after.",
+  "about": "D4-B acceptance roster (#5340 S3). implemented = lib tests registered, not passed; verdicts come from scripts/check_herdr_s3_d4b_manifest.py --require now|full --results. Pieces: 1 G-HOME, 2 G-POST, 3 H7 sources, 4 H6 restart/H9 durable, 5 wall-clock, 6 after.",
   "required_cases": [
     "H6-1", "H6-2a", "H6-2b", "H6-3a", "H6-3b", "H6-4", "H6-5", "H6-5-live", "H6-6a", "H6-6b",
-    "H7-P-posted", "H7-P-notfound", "H7-P-unresolved", "H7-U", "H7-B", "H7-R", "H7-G",
+    "H7-P-posted", "H7-P-notfound", "H7-P-unresolved", "H7-U", "H7-B", "H7-R", "H7-G", "H7-G-unreadable",
     "H8-G", "H9-D", "H9-W"
   ],
   "required_mutants": [
     "prepared_as_zero", "unsealed_as_zero", "binding_pending_as_zero", "drain_ignores_running_posts",
-    "accepts_ignores_home", "orphan_read_opens_gate", "skip_post_abort_join"
+    "accepts_ignores_home", "orphan_read_opens_gate", "skip_post_abort_join", "posts_unreadable_as_zero"
   ],
   "cases": [
     {"id": "H6-1", "profile": "now", "piece": 4, "status": "pending", "tests": [],
