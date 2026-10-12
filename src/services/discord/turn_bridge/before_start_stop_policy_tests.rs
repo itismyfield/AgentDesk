@@ -919,7 +919,7 @@ async fn p10_fin_input_fence_typed_refusals() {
         let _closing = match case {
             "closing" => Some(gate.close().unwrap()),
             "stale permit" => {
-                let other = Gate::protect(provider.clone(), 5_340_999 + n as u64).unwrap();
+                let other = Gate::protect(provider.clone(), 5_340_994 + n as u64).unwrap();
                 permit = Some(other.admit().unwrap());
                 None
             }

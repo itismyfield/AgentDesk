@@ -13,7 +13,7 @@ use crate::services::discord::turn_finalizer::{
 use crate::services::provider::CancelToken;
 use crate::services::provider::herdr_before_start::{BeforeStartProof, ExitDecision};
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
-use crate::services::turn_orchestrator::policy_close::PolicyCloseRequest;
+use crate::services::turn_orchestrator::policy_close::{PolicyCloseRequest, PolicyRetain};
 use poise::serenity_prelude::{ChannelId, MessageId};
 use std::sync::Arc;
 
@@ -145,10 +145,21 @@ async fn consume(
     let outcome = fin.submit_policy_close(intent, shared.clone()).await;
     #[cfg(test)]
     test_hooks::boundary("after_submit", &admitted);
-    matches!(
-        outcome,
-        PolicyCloseOutcome::Settled | PolicyCloseOutcome::DuplicateConfirmed
-    )
+    let reason: &dyn std::fmt::Debug = match &outcome {
+        PolicyCloseOutcome::Settled | PolicyCloseOutcome::DuplicateConfirmed => return true,
+        PolicyCloseOutcome::Superseded => return false,
+        PolicyCloseOutcome::Retained(PolicyRetain::Clear(clear)) => clear,
+        PolicyCloseOutcome::Retained(PolicyRetain::InputFence(failure)) => failure,
+        PolicyCloseOutcome::Retained(retain) => retain,
+        PolicyCloseOutcome::Unconfirmed(stage) => stage,
+    };
+    // The turn stays held with its acked receipt for restart; the reason names the stopping step.
+    tracing::warn!(
+        channel = row.channel_id,
+        ?reason,
+        "before-start policy close left its turn held"
+    );
+    false
 }
 
 /// The typed close of the row the notice ACK returned. The captured actor's own step clears its
