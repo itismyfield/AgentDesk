@@ -1717,9 +1717,10 @@ class CommentMarkerMutations(BypassFixtureCase):
                         f"python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
                         "python3 scripts/run_test_lane.py --lane sweep --max-summaries 4 --skip _pg"
                         f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --skip pg_ --max-summaries 1 --lane s"
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
                         f'source {membership.NON_PG_FILTER_REL} && cargo test --lib -- '
-                        '"${PG_INCLUDE_ARGS[@]}" --nocapture',
-                        f"env -- {self.SWEEP}", f"nice -n 5 {self.SWEEP}"):
+                        '"${PG_INCLUDE_ARGS[@]}" --nocapture'):
             with self.subTest(command=command):
                 self.assertIsNotNone(membership._lane_filter(coverage, command))
         for command in ("echo cargo test --lib x", "false && cargo test --lib x",
@@ -1731,7 +1732,24 @@ class CommentMarkerMutations(BypassFixtureCase):
                         "env -S echo cargo test --lib x", "env --split-string=echo cargo test --lib x",
                         # A wrapper option that swallows `--` or takes an unproven value.
                         "env -u -- cargo test --lib x", "nice -n echo cargo test --lib x",
-                        "python3 scripts/run_test_lane.py --lane sweep cargo test --lib x"):
+                        "python3 scripts/run_test_lane.py --lane sweep cargo test --lib x",
+                        # Outside the CI prefix templates, though the shell might run cargo.
+                        f"env -- {self.SWEEP}", f"nice -n 5 {self.SWEEP}", f"A=1 {self.SWEEP}",
+                        f"env -u PATH {self.SWEEP}", f"python3 scripts/ci-timeout.py 0 {self.SWEEP}",
+                        f"source {membership.NON_PG_FILTER_REL} && env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        # Quoting or escaping that makes a prefix word something else to the shell.
+                        f'"A=1" {self.SWEEP}', f"A\\=1 {self.SWEEP}",
+                        f'env -u "AGENTDESK_ROOT_DIR" {self.SWEEP}', f"en\\v -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        '"cargo test" --lib x',
+                        # Arguments run_test_lane.py's argparse rejects before any command runs.
+                        f"python3 scripts/run_test_lane.py -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --lane s --max-summaries 0"
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --lane s --lane t"
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --lane s --log x"
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "cargo.exe test --lib x"):
             with self.subTest(command=command), \
                     self.assertRaisesRegex(ValueError, "cargo-command-unparsed"):
                 membership._lane_filter(coverage, command)
@@ -1749,7 +1767,18 @@ class CommentMarkerMutations(BypassFixtureCase):
                         "env -- echo cargo test --lib db::service",
                         "nice -- echo cargo test --lib db::service",
                         "env -i echo cargo test --lib db::service",
-                        "python3 scripts/run_test_lane.py --lane sweep -- echo cargo test --lib db::service"):
+                        "python3 scripts/run_test_lane.py --lane sweep -- echo cargo test --lib db::service",
+                        # Quoted or escaped `=` is no assignment, so the shell runs `A=1`.
+                        'A"=1" cargo test --lib db::service',
+                        "A\\=1 cargo test --lib db::service",
+                        '|\n          "A=1" cargo test --lib db::service',
+                        # A block line's quotes are the shell's: this runs a program named so.
+                        '|\n          "cargo test --lib db::service"',
+                        # run_test_lane.py exits on these before it runs any command.
+                        "python3 scripts/run_test_lane.py -- cargo test --lib db::service",
+                        "python3 scripts/run_test_lane.py --lane sweep --max-summaries 0 -- "
+                        "cargo test --lib db::service",
+                        "cargo.exe test --lib db::service"):
             with self.subTest(command=command):
                 self.write_sweep(f"  sweep:\n    steps:\n      - run: {command}\n")
                 stderr = io.StringIO()
@@ -1770,7 +1799,7 @@ class CommentMarkerMutations(BypassFixtureCase):
         self.assertIn("[rule5] names 1 test(s)", "\n".join(single[1]))
         for sweep in (self.SWEEP.replace("cargo test", "cargo  test"),
                       self.SWEEP.replace("cargo test", "cargo\ttest"),
-                      f"env -- {self.SWEEP}"):
+                      f"env -u AGENTDESK_ROOT_DIR {self.SWEEP}"):
             with self.subTest(sweep=sweep):
                 self.assertEqual(gate(sweep), single)
 

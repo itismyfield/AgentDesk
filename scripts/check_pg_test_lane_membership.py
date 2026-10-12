@@ -1035,7 +1035,8 @@ def _cargo_commands(
             continue
         if content_indent is None:
             content_indent = indent
-        value = stripped.strip('"\'')
+        # A block line is shell text as written: its quotes belong to the shell.
+        value = stripped
         if folded and indent <= content_indent:
             pending.append(value)
             continue
@@ -1045,71 +1046,53 @@ def _cargo_commands(
     return commands
 
 
-# Each wrapper's options and the value each takes; after them comes its command.
-_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
-_WRAPPER_OPTIONS = {
-    "env": {"-u": r"[A-Za-z_][A-Za-z0-9_]*"},
-    "nice": {"-n": r"-?\d+"},
-    "scripts/run_test_lane.py": {
-        "--lane": r"[^-].*", "--inventory-manifest": r"[^-].*", "--skip": r"[^-].*",
-        "--max-summaries": r"\d+", "--platform": r"[^-].*", "--ledger": r"[^-].*",
-        "--log": r"[^-].*"},
-}
-_WRAPPER_SCRIPTS = frozenset({"scripts/ci-timeout.py", "scripts/run_test_lane.py"})
+# The closed set of prefixes CI runs `cargo test` behind; any other prefix is unproven.
+_ROOT_UNSET = ["env", "-u", "AGENTDESK_ROOT_DIR"]
+# The run_test_lane.py options CI passes, each with the argparse value it accepts.
+_RUN_TEST_LANE_OPTIONS = {"--lane": r"[^-].*", "--max-summaries": r"[1-9][0-9]*", "--skip": r"[^-].*"}
 
 
-def _wrapped_command(words: list[str], index: int) -> int:
-    """Where the command run by the wrapper at ``words[index]`` starts, or -1 when the
-    wrapper is unknown or its options and values are not in its table."""
-    wrapper, following = words[index], "".join(words[index + 1:index + 2])
-    if wrapper in ("python", "python3"):
-        return index + 1 if following in _WRAPPER_SCRIPTS else -1
-    if wrapper == "scripts/ci-timeout.py":
-        return index + 2 if re.fullmatch(r"\d+(\.\d+)?", following) else -1
-    options = _WRAPPER_OPTIONS.get(wrapper)
-    index += 1
-    while options is not None and index < len(words):
-        word, value = words[index], "".join(words[index + 1:index + 2])
-        if word == "--":
-            return index + 1
-        if wrapper == "env" and _ASSIGNMENT.match(word):
-            index += 1
-        elif word in options and re.fullmatch(options[word], value):
-            index += 2
-        elif word.startswith("-") or wrapper == "scripts/run_test_lane.py":
-            # Unknown options, and run_test_lane.py commands not after `--`, are unproven.
-            return -1
-        else:
-            return index
-    return -1
+def _prefix_template(words: list[str]) -> bool:
+    """Whether the raw words before `cargo` are one of the CI prefix templates."""
+    if words[:2] == ["python3", "scripts/ci-timeout.py"]:
+        return re.fullmatch(r"[1-9][0-9]*", "".join(words[2:3])) is not None \
+            and words[3:] == _ROOT_UNSET
+    if words[:2] == ["python3", "scripts/run_test_lane.py"] and "--" in words:
+        end = words.index("--")
+        names, values = words[2:end:2], words[3:end:2]
+        # argparse requires --lane; the command runs only after `--`.
+        return len(names) == len(values) and names.count("--lane") == 1 \
+            and all(re.fullmatch(_RUN_TEST_LANE_OPTIONS.get(name, r"(?!)"), value)
+                    for name, value in zip(names, values)) \
+            and words[end + 1:] == _ROOT_UNSET
+    return words in ([], _ROOT_UNSET)
 
 
 def _proven_cargo_argv(command: str) -> list[str] | None:
-    """The `cargo test` argv ``command`` runs. None when no lexed word holds both `cargo`
-    and `test`; a cargo-command-unparsed ValueError unless the whole command is proven."""
+    """The `cargo test` argv ``command`` runs. None when no lexed word holds a cargo
+    program and `test`; a cargo-command-unparsed ValueError unless a template proves it."""
     lex = shell_lexer()
     scan = lex.scan_shell(command)
     parts = {part for token in scan.tokens if token.kind == "WORD"
              for part in re.split(r"[^\w.]+", token.value or "")}
-    if not {"cargo", "test"} <= parts and not lex.may_execute_cargo(scan):
+    if not ("test" in parts and any(part.startswith("cargo") for part in parts)) \
+            and not lex.may_execute_cargo(scan):
         return None
     tokens = list(scan.tokens)
-    if [token.value for token in tokens[:2]] == ["source", NON_PG_FILTER_REL.as_posix()] \
-            and tokens[2:3] and tokens[2].raw == "&&":
-        tokens = tokens[3:]
-    words = [token.value or "" for token in tokens]
-    # Grammar: [NAME=value]* [wrapper [its options] [--]]* cargo test <static words>*
-    at = 0
-    while at < len(words) and _ASSIGNMENT.match(words[at]):
-        at += 1
-    while 0 <= at < len(words) and words[at] != "cargo":
-        at = _wrapped_command(words, at)
+    sourced = [token.raw for token in tokens[:3]] == ["source", NON_PG_FILTER_REL.as_posix(), "&&"]
+    tokens = tokens[3:] if sourced else tokens
+    at = next((index for index, token in enumerate(tokens) if token.value == "cargo"), -1)
+    # A prefix word is plain text, so its raw form is the word the shell runs.
+    prefix = [token.raw for token in tokens[:max(at, 0)]
+              if token.raw == token.value] if at >= 0 else None
     arrays = {f"${{{name}[@]}}" for name in KNOWN_ARRAYS}
     try:
         argv = shlex.split(command[tokens[at].start:], comments=True) if at >= 0 else None
-    except (IndexError, ValueError):
+    except ValueError:
         argv = None
-    if scan.issues or argv is None or argv[:2] != ["cargo", "test"] or argv != words[at:] \
+    if scan.issues or argv is None or argv[:2] != ["cargo", "test"] \
+            or argv != [token.value for token in tokens[at:]] \
+            or len(prefix) != at or not _prefix_template(prefix) or (sourced and prefix) \
             or any(token.kind != "WORD" or token.depth for token in tokens) \
             or any(token.dynamic and token.value not in arrays for token in tokens):
         raise ValueError(
