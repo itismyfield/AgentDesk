@@ -35,6 +35,8 @@ RUNNERS = (("ubuntu-", "linux"), ("macos-", "darwin"))
 TEST_MODULE = re.compile(r"(?:^|_)tests?$")
 _OUTPUT_IF = re.compile(r"^needs\.changes\.outputs\.([A-Za-z0-9_-]+)\s*==\s*'true'$")
 _FILTER_REF = re.compile(r"steps\.filter\.outputs\.([A-Za-z0-9_-]+)")
+# `predicate-quantifier: every` ANDs the patterns, so no single match proves activation.
+_EVERY = re.compile(r"predicate-quantifier\s*:\s*['\"]?every")
 _FILTERS = re.compile(r"^[ \t]*filters\s*:\s*\|[-+]?\s*$")
 _FILTER_NAME = re.compile(r"^[ \t]*([A-Za-z0-9_-]+)\s*:\s*$")
 _FILTER_ITEM = re.compile(r"^[ \t]*-\s+(['\"]?)(.+?)\1\s*$")
@@ -191,7 +193,7 @@ def _block(pgm, lines: list[str], start: int) -> list[str]:
 def path_filters(parity, pgm, changes) -> tuple[dict, dict]:
     """The `changes` job's paths-filter lists (None when unreadable) and, for each of its
     outputs, the one filter it forwards (None when it mixes or names none)."""
-    if changes is None:
+    if changes is None or _EVERY.search(changes.code):
         return {}, {}
     lines = changes.code.splitlines()
     filters: dict[str, list[str] | None] = {}
@@ -250,6 +252,15 @@ def job_gates(parity, pgm, jobs) -> dict[str, Gate]:
             found = _activation(keys["if"][0], parity._needs(pgm, job.code), filters, outputs)
             patterns, problem = (found, None) if isinstance(found, tuple) else ((), (PATH, found))
         gates[job.name] = Gate(patterns, problem, platform)
+    for _ in jobs:
+        for job in jobs:
+            gated = sorted(
+                need for need in parity._needs(pgm, job.code)
+                if need in gates and need != job.name
+                and (gates[need].patterns is not None or gates[need].problem)
+            )
+            if gated and not gates[job.name].problem:
+                gates[job.name] = Gate((), (PATH, f"it needs the gated job {gated[0]}"), None)
     return gates
 
 
@@ -309,7 +320,7 @@ def judge_id(test_id, site, sources, pg_tests, pg_only, gates, static_only):
     reasons: list[tuple[str, str]] = []
     for job, group in sorted(selecting.items(), key=lambda kv: kv[1][0].origin != "pr-required"):
         mirrors = [m for m in sources.mirrors if m.upstream == job]
-        running = [source for source in group if source.runs]
+        running = [source for source in group if source.runs and not source.guard]
         gate = gates.get(job, Gate((), (PATH, "parse_jobs did not return it"), None))
         live = [m for m in mirrors if m.proven and not m.conditional]
         excluded = static_only(gate.platform)
@@ -317,11 +328,13 @@ def judge_id(test_id, site, sources, pg_tests, pg_only, gates, static_only):
             reasons.append((CONTEXT, f"{job}'s mirror {mirrors[0].job} is unproven") if mirrors
                            else (UNREQUIRED, f"only the non-required PR job {job} selects it"))
         elif not running:
-            reasons.append((RUNMODE, f"{job} only lists or runs ignored ids, {group[0].location}"))
+            guard = next((source.guard for source in group if source.guard), "")
+            reasons.append((RUNMODE, f"{job} only lists, runs ignored ids or sits under a "
+                                     f"{guard or 'non-running mode'}, {group[0].location}"))
         elif gate.problem:
             reasons.append((gate.problem[0], f"{job}: {gate.problem[1]}"))
         elif not live:
-            reasons.append((CONTEXT, f"{job}'s mirror {mirrors[0].job} runs under a step `if:`"))
+            reasons.append((CONTEXT, f"{job}: every mirror reporting it runs under an `if:`"))
         elif gate.patterns is not None and not (site and _activates(gate.patterns, site)):
             reasons.append((PATH, f"{job}: {site or 'its unknown source'} wakes no path filter"))
         elif excluded is None or test_id in excluded:

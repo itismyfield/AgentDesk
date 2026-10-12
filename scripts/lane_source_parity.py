@@ -29,7 +29,8 @@ _UPSTREAM_RESULT = re.compile(
     r"\bUPSTREAM_RESULT\s*:\s*['\"]?\$\{\{\s*needs\.([A-Za-z0-9_-]+)\.result\s*\}\}"
 )
 _KEY = re.compile(r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z0-9_-]+)\s*:(?P<value>.*)$")
-_STEP_IF = re.compile(r"^[ \t]*(?:-[ \t]+)?if\s*:")
+_STEP_GUARD = re.compile(r"^[ \t]*(?:-[ \t]+)?(?P<key>if|continue-on-error)\s*:(?P<value>.*)$")
+UNCONDITIONAL = frozenset({"", "false", "always()", "!cancelled()", "success()"})
 
 
 def _sibling(filename: str):
@@ -59,6 +60,8 @@ class LaneSource:
     selection: str
     # False for libtest `--list`/`--ignored`: the command names ids without running them.
     runs: bool = True
+    # Why its step may skip or swallow a failure (`if:`, `continue-on-error`), else "".
+    guard: str = ""
 
 
 @dataclass(frozen=True)
@@ -307,6 +310,23 @@ def _steps(pgm, code: str) -> list[tuple[int, int]]:
     return [(first, last) for first, last in spans]
 
 
+def unconditional(value: str) -> bool:
+    """Whether an `if:`/`continue-on-error:` value leaves the run and its failure in place."""
+    value = value.strip().strip("'\"")
+    if value.startswith("${{") and value.endswith("}}"):
+        value = value[3:-2].strip()
+    return value in UNCONDITIONAL
+
+
+def _step_guard(step_lines: list[str]) -> str:
+    """The first `if:` or `continue-on-error:` of one step that may skip it or hide a failure."""
+    for line in step_lines:
+        match = _STEP_GUARD.match(line)
+        if match and not unconditional(match.group("value")):
+            return f"step {match.group('key')}: {match.group('value').strip()}"
+    return ""
+
+
 def _mirror_upstreams(pgm, rel: Path, jobs, mirror_lines: dict[str, set[int]], headers):
     """Required PR jobs are the upstreams a required-check-mirror step both reports in its
     own env and its job needs; env on any other step proves nothing."""
@@ -336,9 +356,9 @@ def _mirror_upstreams(pgm, rel: Path, jobs, mirror_lines: dict[str, set[int]], h
                 problem = f"upstream {upstreams[0]} is not in needs"
             elif upstreams[0] not in names:
                 problem = f"upstream {upstreams[0]} is not a job in this workflow"
-            conditional = bool(_STEP_IF.search(lines[first]) or any(
-                _STEP_IF.match(line) for line in lines[first + 1:last + 1]
-            ))
+            conditional = bool(_step_guard(lines[first:last + 1])) or not unconditional(
+                keys.get("if", ("", 0))[0]
+            )
             for upstream in upstreams or [""]:
                 mirrors.append(Mirror(job.name, context, upstream, not problem, conditional))
             if problem:
@@ -353,12 +373,25 @@ def _mirror_upstreams(pgm, rel: Path, jobs, mirror_lines: dict[str, set[int]], h
     return required, findings, mirrors
 
 
-def _job_sources(cti, coverage, expansions, recipes, rel, lines, commands, origins):
+def guarded_lines(pgm, jobs, headers) -> dict[int, str]:
+    """Workflow lines inside a step whose own `if:`/`continue-on-error:` is conditional."""
+    guarded: dict[int, str] = {}
+    for job in jobs:
+        lines = job.code.splitlines()
+        for first, last in _steps(pgm, job.code) if job.name in headers else ():
+            guard = _step_guard(lines[first:last + 1])
+            span = range(headers[job.name] + first, headers[job.name] + last + 1)
+            guarded.update(dict.fromkeys(span, guard) if guard else {})
+    return guarded
+
+
+def _job_sources(cti, coverage, expansions, recipes, rel, lines, commands, origins, guarded):
     sources: list[LaneSource] = []
     findings: list[Finding] = []
     for job, line, snippet in lines:
         if job is None:
             continue
+        before = len(sources)
         origin = origins[job]
         location = f"{rel.as_posix()}:{line}"
         words = _words(snippet)
@@ -381,6 +414,8 @@ def _job_sources(cti, coverage, expansions, recipes, rel, lines, commands, origi
         elif "cargo test" in snippet or words[:1] == ["just"]:
             finding = _unreadable(location, snippet.strip())
         sources.extend([source] if source else [])
+        if line in guarded:
+            sources[before:] = [replace(s, guard=guarded[line]) for s in sources[before:]]
         if finding and origin == "pr-required":
             findings.append(finding)
     return sources, findings
@@ -422,10 +457,12 @@ def collect_sources(repo_root: Path, coverage) -> Sources:
                 job.name: "pr-required" if job.name in required else "pr-advisory"
                 for job in jobs
             }
+            guarded = guarded_lines(pgm, jobs, headers)
         else:
             origins = dict.fromkeys((job.name for job in jobs), name)
+            guarded = {}
         found, problems = _job_sources(
-            cti, coverage, expansions, recipes, rel, lines, commands, origins
+            cti, coverage, expansions, recipes, rel, lines, commands, origins, guarded
         )
         sources.extend(found)
         findings.extend(problems)
