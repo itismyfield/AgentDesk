@@ -308,6 +308,10 @@ fn hm1_external_producer_census_is_zero() {
             "src/services/discord/input_runtime/intake/client.rs",
             "borrowed PreparedSource → existing supervisor mailbox; caller retains original; no runtime start/reservation",
         ),
+        (
+            "src/services/discord/input_runtime/intake/admit.rs",
+            "validated original slash kind/namespace → borrowed existing Client submit; no receipt or ACK before durable supervisor responsibility",
+        ),
     ];
     // Files classified for key derivation only may hold no other part of the surface.
     let key_only = ["src/services/discord/input_runtime/intake/source.rs"];

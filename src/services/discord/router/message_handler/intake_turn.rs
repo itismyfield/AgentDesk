@@ -254,6 +254,22 @@ mod intake_outbox_state_builder_tests {
 use super::super::intake_gate::ledger as live;
 use crate::services::discord::input_runtime::fence::effect;
 
+impl IntakeDeps<'_> {
+    pub(in crate::services::discord) async fn hold_live(
+        shared: &Arc<SharedData>,
+        http: &Arc<serenity::Http>,
+        provider: &crate::services::provider::ProviderKind,
+        message: &serenity::Message,
+        kind: crate::services::discord::input_runtime::intake::admit::SourceKind,
+        prompt: Option<String>,
+    ) -> Result<bool, Error> {
+        Box::pin(live::hold_live(
+            shared, http, provider, message, kind, prompt,
+        ))
+        .await
+    }
+}
+
 pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     preserve_on_cancel: bool,

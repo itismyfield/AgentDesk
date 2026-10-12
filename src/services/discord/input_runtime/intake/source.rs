@@ -90,7 +90,17 @@ impl PreparedSource {
     pub fn key(&self) -> u64 {
         self.key
     }
-
+    pub(super) fn label_kind(mut self, kind: &str, message_kind: Option<&str>) -> Self {
+        self.input["source_kind"] = json!(kind);
+        self.input["message_kind"] = json!(message_kind);
+        #[cfg(test)]
+        if crate::services::discord::input_runtime::supervisor::mutant(
+            "c2b_prepare_replaces_original",
+        ) {
+            self.input["original_text"] = self.input["text"].clone();
+        }
+        self
+    }
     pub fn identity(&self) -> &ReceiptIdentity {
         &self.identity
     }

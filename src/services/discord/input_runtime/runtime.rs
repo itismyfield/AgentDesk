@@ -19,6 +19,7 @@ pub(crate) mod drive;
 pub(crate) mod notice;
 #[path = "runtime/ports.rs"]
 pub(crate) mod ports;
+pub(in crate::services::discord) use ports::source_policy_facts;
 
 pub(crate) fn registry() -> &'static Registry {
     &REGISTRY

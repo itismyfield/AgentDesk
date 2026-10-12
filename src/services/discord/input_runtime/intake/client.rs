@@ -266,6 +266,32 @@ impl Registry {
     }
 }
 
+#[cfg(test)]
+impl super::super::Registration {
+    pub(crate) fn admission_order_for_test(&mut self) -> &mut ordering::AdmissionOrder {
+        self.order
+            .as_mut()
+            .expect("the fixture owns its original admission order")
+    }
+
+    pub(in crate::services::discord) fn ready_intake_for_test(
+        &self,
+        sender: mpsc::Sender<command::SupervisorCmd>,
+    ) -> Arc<Client> {
+        let overflow = self.order.as_ref().unwrap().pending_overflow();
+        let client = Arc::new(Client::new(sender, overflow));
+        client.publish();
+        self.registry
+            .entries
+            .lock()
+            .unwrap()
+            .get_mut(&self.key)
+            .unwrap()
+            .client = Some(Arc::downgrade(&client));
+        client
+    }
+}
+
 impl<P: Ports> Supervisor<P> {
     /// Binds the existing mailbox without retaining its sender in the registry or this task.
     pub(in crate::services::discord) fn bind_intake(

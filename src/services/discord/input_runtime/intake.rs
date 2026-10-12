@@ -1,9 +1,13 @@
 //! Shared source and policy boundaries for the existing supervisor, with no production start.
 
+#[path = "intake/admit.rs"]
+pub(in crate::services::discord) mod admit;
 #[path = "intake/classify.rs"]
 mod classify;
 #[path = "intake/client.rs"]
 pub(in crate::services::discord) mod client;
+#[path = "intake/skills.rs"]
+pub(in crate::services::discord) mod skills;
 #[path = "intake/source.rs"]
 mod source;
 
@@ -15,7 +19,6 @@ pub(in crate::services::discord) use classify::{Refusal, Retry};
 pub(in crate::services::discord) use client::Client;
 #[cfg(test)]
 pub(in crate::services::discord) use client::{Access, Applied, apply_from_scan, lookup};
-#[cfg(test)]
 pub(in crate::services::discord) use source::{Origin, SourceDraft, prepare_source};
 pub(in crate::services::discord) use source::{PreparedSource, StagedAttachment};
 
