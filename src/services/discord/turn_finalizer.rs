@@ -274,7 +274,7 @@ pub(in crate::services::discord) enum TerminalEvent {
     /// suppressed) terminal output and the turn is done.
     Complete,
     /// Physical hosted execution ended; settle its captured mailbox without provider output.
-    #[cfg(test)]
+    #[cfg(unix)]
     HostTerminated,
     /// `/!stop`, reaction, watchdog. `mark_completion_cleanup()` is skipped
     /// (the cancel is a real mid-stream stop) but `cancelled.store(true)`
@@ -299,7 +299,7 @@ impl TerminalEvent {
     pub(in crate::services::discord) fn is_mute_settlement(&self) -> bool {
         match self {
             Self::OperatorRelease(_) => true,
-            #[cfg(test)]
+            #[cfg(unix)]
             Self::HostTerminated => true,
             _ => false,
         }
@@ -310,7 +310,7 @@ fn terminal_event_kind_str(event: &TerminalEvent) -> &'static str {
     match event {
         TerminalEvent::OperatorRelease(_) => "operator_lease_release",
         TerminalEvent::Complete => "complete",
-        #[cfg(test)]
+        #[cfg(unix)]
         TerminalEvent::HostTerminated => "host_terminated",
         TerminalEvent::Cancel => "cancel",
         TerminalEvent::GateTimeout { .. } => "gate_timeout",
