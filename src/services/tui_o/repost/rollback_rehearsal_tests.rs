@@ -10,6 +10,13 @@ fn literal_rg(path: &Path) -> io::Result<Output> {
         .args(["-n", PATTERN])
         .arg(path)
         .output()
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                io::Error::new(error.kind(), "rg binary required (install ripgrep)")
+            } else {
+                error
+            }
+        })
 }
 
 pub(crate) fn not_sent_tags(path: &Path) -> io::Result<usize> {
@@ -42,6 +49,7 @@ pub(crate) fn scan_activated_ledgers(
     off: bool,
     joined: bool,
     complete_list: bool,
+    read_tags: impl Fn(&Path) -> io::Result<usize>,
 ) -> Result<Vec<(PathBuf, io::Result<usize>)>, &'static str> {
     if !off || !joined {
         return Err("confirm OFF and wait for writer quiescence before scanning");
@@ -52,7 +60,7 @@ pub(crate) fn scan_activated_ledgers(
     // Keep every file's result; one absent tag or a partial read cannot pass the whole list.
     Ok(paths
         .iter()
-        .map(|path| (path.clone(), not_sent_tags(path)))
+        .map(|path| (path.clone(), read_tags(path)))
         .collect())
 }
 
@@ -62,6 +70,35 @@ mod tests {
 
     fn permits_old(results: &[(PathBuf, io::Result<usize>)]) -> bool {
         !results.is_empty() && results.iter().all(|(_, tags)| matches!(tags, Ok(0)))
+    }
+
+    #[test]
+    fn d4act3_literal_rg_missing_binary_requires_install() {
+        const CHILD: &str = "AGENTDESK_TEST_RG_MISSING_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let error = literal_rg(Path::new("ledger.jsonl")).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::NotFound);
+            assert_eq!(error.to_string(), "rg binary required (install ripgrep)");
+            return;
+        }
+        let empty_path = tempfile::tempdir().unwrap();
+        let test = format!(
+            "{}::d4act3_literal_rg_missing_binary_requires_install",
+            module_path!()
+        );
+        let (_, test) = test.split_once("::").unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([test, "--exact", "--nocapture"])
+            .env("PATH", empty_path.path())
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "missing-rg child failed: {stdout} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -146,13 +183,13 @@ mod tests {
         let paths = vec![clean.clone(), tagged.clone(), missing.clone()];
         for (off, joined) in [(false, false), (false, true), (true, false)] {
             assert_eq!(
-                scan_activated_ledgers(&paths, off, joined, true).unwrap_err(),
+                scan_activated_ledgers(&paths, off, joined, true, not_sent_tags).unwrap_err(),
                 "confirm OFF and wait for writer quiescence before scanning"
             );
         }
-        assert!(scan_activated_ledgers(&paths, true, true, false).is_err());
-        assert!(scan_activated_ledgers(&[], true, true, true).is_err());
-        let reads = scan_activated_ledgers(&paths, true, true, true).unwrap();
+        assert!(scan_activated_ledgers(&paths, true, true, false, not_sent_tags).is_err());
+        assert!(scan_activated_ledgers(&[], true, true, true, not_sent_tags).is_err());
+        let reads = scan_activated_ledgers(&paths, true, true, true, not_sent_tags).unwrap();
         assert_eq!(
             reads.len(),
             3,
@@ -163,13 +200,13 @@ mod tests {
         assert!(reads[2].1.is_err());
         assert!(!permits_old(&reads), "a partial set of reads cannot pass");
         assert!(permits_old(
-            &scan_activated_ledgers(&[clean], true, true, true).unwrap()
+            &scan_activated_ledgers(&[clean], true, true, true, not_sent_tags).unwrap()
         ));
         assert!(!permits_old(
-            &scan_activated_ledgers(&[tagged], true, true, true).unwrap()
+            &scan_activated_ledgers(&[tagged], true, true, true, not_sent_tags).unwrap()
         ));
         assert!(!permits_old(
-            &scan_activated_ledgers(&[missing], true, true, true).unwrap()
+            &scan_activated_ledgers(&[missing], true, true, true, not_sent_tags).unwrap()
         ));
     }
 }

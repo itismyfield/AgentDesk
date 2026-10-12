@@ -488,6 +488,7 @@ jobs:
               # Re-post production changes must run the shared-budget tests too.
               - 'src/services/tui_o/repost/**'
               - 'src/services/tui_o/writer/**'
+              - 'src/services/tui_o/store/ledger.rs'
               - 'src/services/discord/outbound/o_writer*.rs'
               - '.github/workflows/**'
               - 'justfile'
@@ -1245,6 +1246,16 @@ jobs:
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
 
+      # Rollback rehearsal executes the runbook's literal rg command.
+      - name: Install ripgrep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+
+      - name: Require ripgrep
+        shell: bash
+        run: rg --version
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -1742,6 +1753,16 @@ jobs:
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
 
+      # Rollback rehearsal executes the runbook's literal rg command.
+      - name: Install ripgrep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+
+      - name: Require ripgrep
+        shell: bash
+        run: rg --version
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -2211,7 +2232,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=713459343783731b3a38d23259809855ff8e29aa22bbe493dd038e8b2dc21f43
+          expected=64b1bb5cb7dab5ccff35b7aa72c76db0d729b1e02390e8af12cc8a37ff8e57a5
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2444,7 +2465,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=713459343783731b3a38d23259809855ff8e29aa22bbe493dd038e8b2dc21f43
+          expected=64b1bb5cb7dab5ccff35b7aa72c76db0d729b1e02390e8af12cc8a37ff8e57a5
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
