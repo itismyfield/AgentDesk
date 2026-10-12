@@ -67,9 +67,8 @@ async fn coldstop_policy_clear_precedes_release_and_frees_the_successor() {
     assert_eq!(close.durable().unwrap().turn_nonce, row.turn_nonce);
 }
 
-/// A same-episode save between the ack and the step's clear moves the row on, so the exact clear
-/// refuses inside the step; the one submitted close then releases nothing, announces nothing and
-/// leaves the turn held with its acked receipt for restart to finish.
+/// A same-episode save before the step's clear makes the exact clear refuse; the one submitted
+/// close releases and announces nothing, leaving the acked receipt held for restart.
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_policy_clear_refused_releases_nothing() {
     let close = Close::open(929, |_| {}).await;
