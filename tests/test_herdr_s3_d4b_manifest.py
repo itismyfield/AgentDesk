@@ -135,6 +135,16 @@ class ManifestGateTests(unittest.TestCase):
         done = subprocess.run(base + ["--structure-only"], capture_output=True, check=False)
         self.assertEqual(done.returncode, 0)
 
+    def test_structure_only_refuses_results(self) -> None:
+        (self.dir / "manifest.json").write_text(json.dumps(complete()))
+        (self.dir / "results.json").write_text(json.dumps(passing()))
+        args = [sys.executable, str(SCRIPT), "--manifest", str(self.dir / "manifest.json"),
+                "--inventory", str(self.dir / "inventory.txt"), "--structure-only",
+                "--results", str(self.dir / "results.json")]
+        done = subprocess.run(args, capture_output=True, text=True, check=False)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("--structure-only takes no --results", done.stderr)
+
     def test_mutant_on_a_required_now_case_counts_for_now(self) -> None:
         manifest = complete()
         manifest["mutants"][0]["cases"] = ["N", "S"]

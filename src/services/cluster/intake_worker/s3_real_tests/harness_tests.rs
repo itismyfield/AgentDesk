@@ -869,12 +869,22 @@ pub(super) async fn route_as(
     message: &str,
 ) -> IntakeRouterDecision {
     let channel = C.to_string();
-    let ctx = IntakeRouterContext {
+    try_route_intake(pool, &router_context(leader, provider, &channel, message)).await
+}
+
+/// The intake [`route_as`] asks the router about: message `message` of `channel` on `provider`.
+fn router_context<'a>(
+    leader: &'a str,
+    provider: ShadowProvider,
+    channel: &'a str,
+    message: &'a str,
+) -> IntakeRouterContext<'a> {
+    IntakeRouterContext {
         mode: IntakeRoutingMode::Enforce,
         leader_instance_id: leader,
         provider: provider_name(provider),
-        channel_id: &channel,
-        policy_channel_id: &channel,
+        channel_id: channel,
+        policy_channel_id: channel,
         user_msg_id: message,
         replay_source_message_ids: None,
         request_owner_id: "100",
@@ -893,8 +903,18 @@ pub(super) async fn route_as(
         owner_authority: OwnerAuthorityChannelOptIn::NotOptedIn,
         has_nonportable_uploads: false,
         attachment_refs: &[],
-    };
-    try_route_intake(pool, &ctx).await
+    }
+}
+
+#[test]
+fn route_as_asks_for_the_given_provider() {
+    let channel = C.to_string();
+    for (provider, name) in [
+        (ShadowProvider::Claude, "claude"),
+        (ShadowProvider::Codex, "codex"),
+    ] {
+        assert_eq!(router_context(GW, provider, &channel, "1").provider, name);
+    }
 }
 
 /// A pending row for MINI routed at `home_epoch`, as the gateway's router would insert it.
