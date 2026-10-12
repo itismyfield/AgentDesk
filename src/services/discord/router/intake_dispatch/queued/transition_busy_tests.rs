@@ -141,7 +141,7 @@ impl Fixture {
                 let body = if uri.path() == "/api/internal/card-thread" {
                     serde_json::json!({"active_thread_id":target.map(|id|id.get().to_string()),"dispatch_type":"implementation"})
                 } else {
-                    serde_json::json!({"id": id.to_string(), "type": if is_thread {11} else {0}, "name": "r1-test",
+                    serde_json::json!({"id": id.to_string(), "type": if is_thread {11} else {0}, "name": "r1-test-cdx",
                         "guild_id": "8000000", "position": 0, "permission_overwrites": [], "nsfw": false,
                         "parent_id": if is_thread {Some(channel.get().to_string())} else {None},
                         "thread_metadata":{"archived":false,"locked":false,"auto_archive_duration":1440,"archive_timestamp":"2026-10-12T00:00:00Z"}})
@@ -193,11 +193,13 @@ impl Fixture {
         }
     }
     async fn enqueue(&self, intervention: Intervention) {
-        let result = discord::mailbox_enqueue_intervention(
-            &self.shared,
-            &self.provider,
-            self.channel,
-            intervention,
+        let result = discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
+            discord::mailbox_enqueue_intervention(
+                &self.shared,
+                &self.provider,
+                self.channel,
+                intervention,
+            ),
         )
         .await;
         assert!(result.enqueued && result.persistence_error.is_none());
@@ -265,6 +267,12 @@ async fn t1_a_busy_restores_original_uploads_and_new_lease() {
             text: "source one".into(),
         },
     );
+    original.text = original
+        .source_text_segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     original.voice_announcement = Some(crate::voice::prompt::VoiceTranscriptAnnouncement {
         transcript: "voice body".into(),
         user_id: "42".into(),
@@ -482,6 +490,15 @@ async fn t1_b_selection_before_restore_must_not_take_tail() {
     assert!(result.selection_stale, "the observed physical head changed");
     assert!(result.dispatch_lease.is_none());
     assert_eq!(f.ids().await, [8_002_002, 8_002_003]);
+    let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
+        &f.provider,
+        &f.shared.token_hash,
+        f.channel,
+    );
+    assert_eq!(
+        disk.iter().map(|i| i.message_id.get()).collect::<Vec<_>>(),
+        [8_002_002, 8_002_003]
+    );
     assert!(
         discord::mailbox_snapshot(&f.shared, f.channel)
             .await
@@ -572,7 +589,7 @@ async fn t1_c_restore_arms_only_sixty_second_wake_with_real_take() {
         tokio::task::yield_now().await;
     }
     assert_eq!(kicks.load(SeqCst), 0, "no wake before sixty seconds");
-    tokio::time::advance(Duration::from_millis(1)).await;
+    tokio::time::advance(Duration::from_millis(2)).await;
     for _ in 0..100 {
         tokio::task::yield_now().await;
         if !actual.lock().unwrap().is_empty() {
@@ -643,6 +660,10 @@ async fn t4_failed_restore_holds_payload_until_sixty_second_retry() {
         panic!("restore must attempt its first write");
     };
     tokio::select! { result = &mut finish => panic!("failed restore cannot finish: {result:?}"), _ = consumed => {} }
+    assert!(
+        finish.as_mut().now_or_never().is_none(),
+        "restore owner must enter its retry wait before advancing time"
+    );
     assert_eq!(f.ids().await, [8_004_003]);
     assert_eq!(
         discord::mailbox_snapshot(&f.shared, f.channel)
@@ -1201,7 +1222,22 @@ async fn t5_kickoff_busy_reports_no_start_after_durable_restore() {
     let _lock = crate::config::shared_test_env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _ready = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "ADK_TEST_CODEX_PROMOTE_READY",
+        "1".as_ref(),
+    );
     let f = Fixture::new(8_013_000).await;
+    let settings = f.shared.settings.read().await.clone();
+    discord::session_runtime::validate_rest_channel_routing(
+        &f.http,
+        None,
+        &f.provider,
+        &settings,
+        f.channel,
+        None,
+    )
+    .await
+    .expect("fixture provider routing must be accepted");
     let mut original = item(8_013_002);
     original.pending_uploads = vec!["Q".into()];
     f.enqueue(original).await;
@@ -1250,6 +1286,10 @@ async fn t5_gateway_busy_returns_ok_after_durable_restore() {
     let _lock = crate::config::shared_test_env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _ready = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "ADK_TEST_CODEX_PROMOTE_READY",
+        "1".as_ref(),
+    );
     let f = Fixture::new(8_014_000).await;
     let mut original = item(8_014_002);
     original.pending_uploads = vec!["Q".into()];
