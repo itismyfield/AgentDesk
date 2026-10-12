@@ -221,8 +221,109 @@ fn open_inflight_lock_file(path: &Path) -> Result<fs::File, String> {
 }
 
 #[cfg(test)]
-mod population_tests {
+pub(super) mod population_tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tokio::sync::oneshot;
+
+    #[derive(Clone, Debug, Default)]
+    pub(crate) struct Counts {
+        pub(crate) preparations: usize,
+        pub(crate) reservations: usize,
+        pub(crate) sources: BTreeMap<PathBuf, [usize; 3]>,
+    }
+
+    pub(crate) enum Attempt {
+        Lock,
+        Read,
+        Unlink,
+    }
+
+    struct Observation {
+        counts: Mutex<Counts>,
+        latch: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    fn registry() -> &'static Mutex<BTreeMap<PathBuf, Arc<Observation>>> {
+        static ROOTS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Observation>>>> = OnceLock::new();
+        ROOTS.get_or_init(Mutex::default)
+    }
+
+    // Root-keyed process state follows custody/reaper work onto blocking threads.
+    pub(crate) struct Probe {
+        root: PathBuf,
+        observation: Arc<Observation>,
+    }
+
+    impl Probe {
+        pub(crate) fn new(root: PathBuf, latch: oneshot::Receiver<()>) -> Self {
+            let observation = Arc::new(Observation {
+                counts: Mutex::new(Counts::default()),
+                latch: Mutex::new(Some(latch)),
+            });
+            assert!(
+                registry()
+                    .lock()
+                    .unwrap()
+                    .insert(root.clone(), observation.clone())
+                    .is_none()
+            );
+            Self { root, observation }
+        }
+
+        pub(crate) fn counts(&self) -> Counts {
+            self.observation.counts.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            registry().lock().unwrap().remove(&self.root);
+        }
+    }
+
+    fn at(path: &Path) -> Option<Arc<Observation>> {
+        registry()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(root, _)| path.starts_with(root))
+            .map(|(_, observation)| observation.clone())
+    }
+
+    pub(crate) fn attempt(path: &Path, attempt: Attempt) {
+        if let Some(observation) = at(path) {
+            let index = match attempt {
+                Attempt::Lock => 0,
+                Attempt::Read => 1,
+                Attempt::Unlink => 2,
+            };
+            observation
+                .counts
+                .lock()
+                .unwrap()
+                .sources
+                .entry(path.to_owned())
+                .or_default()[index] += 1;
+        }
+    }
+
+    pub(crate) fn preparing() -> Option<oneshot::Receiver<()>> {
+        let observation = at(&crate::services::discord::runtime_store::runtime_root()?)?;
+        observation.counts.lock().unwrap().preparations += 1;
+        observation.latch.lock().unwrap().take()
+    }
+
+    pub(crate) fn reserved() {
+        if let Some(observation) =
+            crate::services::discord::runtime_store::runtime_root().and_then(|root| at(&root))
+        {
+            observation.counts.lock().unwrap().reservations += 1;
+        }
+    }
+
     #[test]
     fn b2_off_lock_error_detail_and_representative_writer_results_are_unchanged() {
         let root = tempfile::tempdir().unwrap();
@@ -660,105 +761,4 @@ mod relay_state_contract_refs {
 }
 
 #[cfg(test)]
-pub(super) mod boot_observation {
-    use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex, OnceLock};
-    use tokio::sync::oneshot;
-
-    #[derive(Clone, Debug, Default)]
-    pub(crate) struct Counts {
-        pub(crate) preparations: usize,
-        pub(crate) reservations: usize,
-        pub(crate) sources: BTreeMap<PathBuf, [usize; 3]>,
-    }
-
-    pub(crate) enum Attempt {
-        Lock,
-        Read,
-        Unlink,
-    }
-
-    struct Observation {
-        counts: Mutex<Counts>,
-        latch: Mutex<Option<oneshot::Receiver<()>>>,
-    }
-
-    fn registry() -> &'static Mutex<BTreeMap<PathBuf, Arc<Observation>>> {
-        static ROOTS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Observation>>>> = OnceLock::new();
-        ROOTS.get_or_init(Mutex::default)
-    }
-
-    // Root-keyed process state follows custody/reaper work onto blocking threads.
-    pub(crate) struct Probe {
-        root: PathBuf,
-        observation: Arc<Observation>,
-    }
-
-    impl Probe {
-        pub(crate) fn new(root: PathBuf, latch: oneshot::Receiver<()>) -> Self {
-            let observation = Arc::new(Observation {
-                counts: Mutex::new(Counts::default()),
-                latch: Mutex::new(Some(latch)),
-            });
-            assert!(
-                registry()
-                    .lock()
-                    .unwrap()
-                    .insert(root.clone(), observation.clone())
-                    .is_none()
-            );
-            Self { root, observation }
-        }
-
-        pub(crate) fn counts(&self) -> Counts {
-            self.observation.counts.lock().unwrap().clone()
-        }
-    }
-
-    impl Drop for Probe {
-        fn drop(&mut self) {
-            registry().lock().unwrap().remove(&self.root);
-        }
-    }
-
-    fn at(path: &Path) -> Option<Arc<Observation>> {
-        registry()
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(root, _)| path.starts_with(root))
-            .map(|(_, observation)| observation.clone())
-    }
-
-    pub(crate) fn attempt(path: &Path, attempt: Attempt) {
-        if let Some(observation) = at(path) {
-            let index = match attempt {
-                Attempt::Lock => 0,
-                Attempt::Read => 1,
-                Attempt::Unlink => 2,
-            };
-            observation
-                .counts
-                .lock()
-                .unwrap()
-                .sources
-                .entry(path.to_owned())
-                .or_default()[index] += 1;
-        }
-    }
-
-    pub(crate) fn preparing() -> Option<oneshot::Receiver<()>> {
-        let observation = at(&crate::services::discord::runtime_store::runtime_root()?)?;
-        observation.counts.lock().unwrap().preparations += 1;
-        observation.latch.lock().unwrap().take()
-    }
-
-    pub(crate) fn reserved() {
-        if let Some(observation) =
-            crate::services::discord::runtime_store::runtime_root().and_then(|root| at(&root))
-        {
-            observation.counts.lock().unwrap().reservations += 1;
-        }
-    }
-}
+pub(super) use population_tests as boot_observation;
