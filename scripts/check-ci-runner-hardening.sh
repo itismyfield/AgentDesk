@@ -869,11 +869,12 @@ targets = {
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
     # The bounded Windows owner runner; broad runtime remains nightly.
-    "job_sha256" => "c8f9edc04ab62774a5c79006def01569c603c90286b2b903f9be728c0532434d",
+    # Re-pinned after raising the writer-namespace step budget from 30 to 45 minutes.
+    "job_sha256" => "315ad84a0f81d05183968a40b1be5b0c8d739be1fa111a47b0a2eb50798c3c34",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
-        "timeout_minutes" => 30,
+        "timeout_minutes" => 45,
         "if_condition" => "runner.os == 'Windows'",
       },
     },
