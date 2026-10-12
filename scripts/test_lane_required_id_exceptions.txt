@@ -2,3 +2,4 @@
 # Modes: intentional-nonrequired, model-unresolved, platform-unavailable, helper-module; stale rows fail.
 services::claude_tui::host_input::guarded_submission::test_support | helper-module | #6325 | expires=2026-10-26 | Scoped request and result fixtures used by executor_tests; this helper declares no test id.
 services::discord::router::message_handler::provider_dispatch::producer_error_test_support | helper-module | #5340 | expires=2027-10-12 | hands the turn-bridge cold-error tests intake's own producer_error frame; it holds no test of its own
+services::tui_o::writer::actor::codex_submission | helper-module | #5845 | expires=2026-10-26 | Test-only command port and per-run witnesses used by host_start::s2a; declares no test id.
