@@ -9,7 +9,9 @@ use tokio::sync::Notify;
 use tokio::time::Instant;
 
 use super::admission::{ApprovedRejected, OriginalGate, PriorBudget};
-use super::admission_tests::{BOT, CHANNEL, admit_on, next_grant, send_uncertain, sidecar, switch};
+use super::admission_tests::{
+    BOT, CHANNEL, admit_on, next_grant, send_uncertain, sidecar, switch, switch_for,
+};
 use super::dispatch::{Admission, DispatchEnd, DispatchPermit, GuardReason, RepostWriter, start};
 use super::identity::{PieceKey, marker};
 use super::io::probe::evidence::{EvidenceScope, NotFoundEvidence, RunScope};
@@ -870,10 +872,15 @@ async fn auto_missing_row_is_observe_only_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let run = super::io::probe::tests::run("run-1");
-    let mut runner = runner(&pool, true, &run);
     let mut writer = TestWriter::new();
     let gone = absent_evidence(super::io::probe::tests::scope(&[0]), run.clone());
     let key = gone.scope().key.clone();
+    let mut runner = Runner::new(
+        switch_for(true, key.unit().channel_id),
+        pool.clone(),
+        BOT,
+        run.clone(),
+    );
     assert!(load(&pool, &key).await.unwrap().is_none());
     let intent = DispatchIntent::Auto(Box::new(gone));
     let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);

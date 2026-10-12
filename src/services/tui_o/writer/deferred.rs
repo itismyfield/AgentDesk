@@ -39,6 +39,7 @@ pub(super) struct Waiting<'a, I: HostIo> {
     pub(super) legacy: Arc<dyn LegacyView>,
     /// The source the log bound when the adoption was deferred, as of that log entry.
     pub(super) bound: (SourceId, u64),
+    pub(super) late: bool,
 }
 
 /// How the first look at a channel that already holds output ends.
@@ -219,6 +220,9 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
         ..
     } = waiting;
     let alarms = io.alarms();
+    let mut wake = waiting
+        .late
+        .then(|| super::late_adopt::Wake::new(waiting.log, channel));
     let started = Instant::now();
     #[cfg(test)]
     if let Err(detail) =
@@ -240,7 +244,11 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
             stop(candidate, &alarms, channel, &detail);
             return false;
         }
-        tokio::time::sleep(RETRY).await;
+        if let Some(wake) = &mut wake {
+            wake.wait().await;
+        } else {
+            tokio::time::sleep(RETRY).await;
+        }
         if candidate.peek() != Adoption::Deferred {
             stop(
                 candidate,
@@ -251,9 +259,23 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
             return false;
         }
         until_owned(waiting.gate).await;
-        let Ok(observed) = events(&waiting) else {
+        if waiting.late && !io.late_adopt_enabled() {
             continue;
+        }
+        let observed = match events(&waiting) {
+            Ok(events) => events,
+            Err(detail) if waiting.late => {
+                release(candidate, &alarms, channel, &detail);
+                return false;
+            }
+            Err(_) => continue,
         };
+        if waiting.late
+            && let Some(detail) = rotation(&waiting, &observed)
+        {
+            release(candidate, &alarms, channel, &detail);
+            return false;
+        }
         let current = adoption::current(&observed);
         let version = current
             .as_ref()
@@ -261,10 +283,11 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
         clocks.observe(Progress::read(&waiting, current.as_ref()));
         let settled = quiet.settled(&version);
         let moved = observed.last().map_or(0, |event| event.seq) != seq;
-        let due = match &refused.hold {
-            Hold::Retry => version != read_at || pinned_at.elapsed() >= REREAD,
-            _ => refused.may_pass(&*waiting.legacy, channel),
-        };
+        let due = waiting.late
+            || match &refused.hold {
+                Hold::Retry => version != read_at || pinned_at.elapsed() >= REREAD,
+                _ => refused.may_pass(&*waiting.legacy, channel),
+            };
         if settled && (moved || due) && idle(&waiting, current.as_ref()).await {
             if let Some(detail) = rotation(&waiting, &observed) {
                 release(candidate, &alarms, channel, &detail);
@@ -272,13 +295,23 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
             }
             seq = observed.last().map_or(0, |event| event.seq);
             (pinned_at, read_at) = (Instant::now(), version);
-            let pinned = pin(
-                Arc::clone(&waiting.legacy),
-                Ok(observed),
-                channel,
-                At::Cursor,
-            )
-            .await;
+            let pinned = if waiting.late {
+                let legacy = Arc::clone(&waiting.legacy);
+                tokio::task::spawn_blocking(move || {
+                    adoption::pin_late(&*legacy, &observed, channel)
+                })
+                .await
+                .map_err(|error| Refused::retry(format!("late pin task: {error}")))
+                .and_then(|pinned| pinned)
+            } else {
+                pin(
+                    Arc::clone(&waiting.legacy),
+                    Ok(observed),
+                    channel,
+                    At::Cursor,
+                )
+                .await
+            };
             let again = match pinned {
                 Ok(snapshot) => match snapshot.owed() {
                     Some(again) => again,
@@ -306,7 +339,7 @@ pub(super) async fn retry<I: HostIo>(waiting: Waiting<'_, I>, refused: Refused, 
             );
             refused = again;
         }
-        if clocks.expired().is_none() {
+        if waiting.late || clocks.expired().is_none() {
             continue;
         }
         // A failed normal commit may have changed a source; EOF handoff still waits for quiet.
@@ -400,6 +433,9 @@ async fn commit<I: HostIo>(
     current: Option<&(SourceId, String)>,
 ) -> Result<(), Refused> {
     let (io, channel, provider) = (waiting.io, waiting.channel, waiting.provider);
+    if waiting.late && !io.late_adopt_enabled() {
+        return Err(Refused::retry("late adoption disabled before publication"));
+    }
     let GatewayOwnership::Owned { epoch: expected } = waiting.gate.current() else {
         return Err(Refused::retry(
             "gateway ownership changed before O activation",
@@ -438,6 +474,13 @@ async fn commit<I: HostIo>(
         let mut rechecked = None;
         let sources = || {
             let sources = (|| {
+                if waiting.late {
+                    let observed =
+                        events(waiting).map_err(|error| Refused::new(Hold::Final, error))?;
+                    if let Some(detail) = rotation(waiting, &observed) {
+                        return Err(Refused::new(Hold::Final, detail));
+                    }
+                }
                 if waiting.candidate.sends() != fence_sends {
                     return Err(Refused::retry(
                         "Legacy body send changed while O fenced activation",
