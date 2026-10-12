@@ -1102,6 +1102,8 @@ src/
 │   │   │   │   └── modes_tests.rs
 │   │   │   ├── intake/
 │   │   │   │   ├── classify.rs
+│   │   │   │   ├── client.rs
+│   │   │   │   ├── client_tests.rs
 │   │   │   │   └── source.rs
 │   │   │   ├── runtime/
 │   │   │   │   ├── dormant_tests.rs

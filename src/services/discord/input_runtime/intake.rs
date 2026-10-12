@@ -1,14 +1,19 @@
-//! Shared intake facts and source preparation, dormant until callers are wired together.
+//! Shared source and policy boundaries for the existing supervisor, with no production start.
 
+#[path = "intake/classify.rs"]
 mod classify;
+#[path = "intake/client.rs"]
+pub(in crate::services::discord) mod client;
+#[path = "intake/source.rs"]
 mod source;
 
-#[cfg(test)]
 pub(in crate::services::discord) use classify::{
     Classification, InputDisposition, PolicyFacts, Protection, Refusal, Retry, TargetFacts,
-    classify,
+    VoiceTarget, classify,
 };
+pub(in crate::services::discord) use client::Client;
 #[cfg(test)]
+pub(in crate::services::discord) use client::{Access, Applied, apply_from_scan, lookup};
 pub(in crate::services::discord) use source::{
     Origin, PreparedSource, SourceDraft, StagedAttachment, prepare_source,
 };
@@ -45,7 +50,7 @@ fn c1_public_boundary_keeps_receipt_and_submit_readiness_separate() {
         provider: Some(crate::services::provider::ProviderKind::Claude),
         original: target(8),
         execution: target(9),
-        voice_target: None,
+        voice_target: VoiceTarget::NotApplicable,
         authorized: Some(true),
         supported: Some(true),
         disposition: Some(InputDisposition::Prompt),

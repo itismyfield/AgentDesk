@@ -54,6 +54,12 @@ struct HandoffFake {
 impl Ports for HandoffFake {
     type Clear = ClearFake;
     type Move = HandoffMove;
+    fn source_policy<'a>(
+        &'a mut self,
+        source: &'a super::super::super::source::Source,
+    ) -> Step<'a, super::super::super::super::intake::Classification> {
+        self.inner.source_policy(source)
+    }
     fn mapping(&self) -> mapping::Probe {
         self.probe.clone()
     }

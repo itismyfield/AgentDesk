@@ -22,6 +22,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 use tokio::time::Instant;
 
+#[path = "intake/client_tests.rs"]
+mod c2_intake_client;
+
 const HOST: &str = "node-a";
 
 fn sandbox() -> tempfile::TempDir {
@@ -78,6 +81,8 @@ struct World {
     inject: Mutex<Option<Inject>>,
     effects: Mutex<Vec<&'static str>>,
     mapping_checks: AtomicUsize,
+    source_policy: Mutex<Option<super::super::intake::Classification>>,
+    source_policy_inputs: Mutex<Vec<serde_json::Value>>,
     freeze_failed: AtomicBool,
     log: Mutex<Vec<&'static str>>,
     clears: Mutex<Vec<(Instant, Vec<String>)>>,
@@ -319,6 +324,23 @@ struct Fake {
 impl Ports for Fake {
     type Clear = ClearFake;
     type Move = MoveFake;
+    fn source_policy<'a>(
+        &'a mut self,
+        source: &'a super::source::Source,
+    ) -> Step<'a, super::super::intake::Classification> {
+        self.world
+            .source_policy_inputs
+            .lock()
+            .unwrap()
+            .push(source.input().clone());
+        let policy = self
+            .world
+            .source_policy
+            .lock()
+            .unwrap()
+            .unwrap_or(super::super::intake::Classification::Target);
+        Box::pin(async move { policy })
+    }
     fn mapping(&self) -> mapping::Probe {
         self.world.mapping_checks.fetch_add(1, Ordering::SeqCst);
         let probe = mapping::Probe::default();

@@ -415,6 +415,65 @@ async fn g1b_exhausted_admission_cannot_reopen_on_boot() {
     }
 }
 
+#[tokio::test]
+async fn g1b_running_order_exhaustion_closes_submit_without_boot() {
+    let rig = Rig::new(6_326_430);
+    let screen = Arc::new(Screen::default());
+    let mut supervisor = admitted(&rig, &[]).await;
+    let (mut drive, _) = supervisor.start_drive(DriveFake(screen.clone())).unwrap();
+    supervisor.gate(&mut drive, true);
+    assert!(supervisor.admission_open());
+    assert!(
+        supervisor
+            .receipt_admission(&drive, Some(rig.gate.mode()))
+            .receipt_open
+    );
+    let before = supervisor
+        .slot()
+        .get()
+        .unwrap()
+        .rows()
+        .unwrap()
+        .folded_seq();
+    let stages = rig.world.log();
+    let generation = supervisor.admission_gen;
+
+    // Keep the running admission state so only dirty exhaustion can close it.
+    super::super::super::super::ordering::g1b_tests::exhaust_dirty(&mut supervisor.order);
+    assert!(supervisor.order.admit_pending(&[11]).is_err());
+    assert!(supervisor.order.exhausted());
+    assert!(supervisor.admitted);
+    assert!(!supervisor.closed);
+    assert!(!supervisor.admission_open());
+    assert!(supervisor.start_drive(DriveFake(screen.clone())).is_none());
+    assert!(
+        !supervisor
+            .receipt_admission(&drive, Some(rig.gate.mode()))
+            .receipt_open
+    );
+    assert_eq!(
+        external_receipt(&mut supervisor, &rig, "running-exhausted-new").await,
+        super::super::super::super::external::ExternalReceipt::Deferred(Deferred::Closed)
+    );
+    assert_eq!(
+        supervisor
+            .slot()
+            .get()
+            .unwrap()
+            .rows()
+            .unwrap()
+            .folded_seq(),
+        before
+    );
+    assert!(supervisor.admitted);
+    assert!(!supervisor.closed);
+    assert_eq!(supervisor.admission_gen, generation);
+    assert_eq!(rig.world.log(), stages);
+    assert_eq!(screen.sent.lock().unwrap().len(), 0);
+    drop(drive);
+    assert!(supervisor.release());
+}
+
 async fn external_receipt(
     supervisor: &mut Supervisor<Fake>,
     rig: &Rig,

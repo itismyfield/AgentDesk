@@ -1,26 +1,17 @@
 //! Original Discord provenance and attachment staging; preparation performs no persistence.
 
-#[cfg(test)]
 use std::io;
 
-#[cfg(test)]
 use serde_json::{Value, json};
-#[cfg(test)]
 use sha2::{Digest, Sha256};
 
-#[cfg(test)]
 use crate::services::cluster::attachment_transfer::AttachmentEntryV1;
-#[cfg(test)]
 use crate::services::discord::input_runtime::supervisor::{external, source::Source};
-#[cfg(test)]
 use crate::services::tui_input::rows::receipt_identity::ReceiptIdentity;
-#[cfg(test)]
 use crate::voice::prompt::VoiceTranscriptAnnouncement;
 
-#[cfg(test)]
 const SLASH_NAMESPACE: &str = "discord-slash-interaction-v1";
 
-#[cfg(test)]
 pub(in crate::services::discord) enum Origin {
     Message {
         message_id: u64,
@@ -37,7 +28,6 @@ pub(in crate::services::discord) enum Origin {
     },
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) struct StagedAttachment {
     pub filename: String,
@@ -45,7 +35,6 @@ pub(in crate::services::discord) struct StagedAttachment {
     pub staged: Option<AttachmentEntryV1>,
 }
 
-#[cfg(test)]
 pub(in crate::services::discord) struct SourceDraft {
     pub origin: Origin,
     pub author_is_bot: bool,
@@ -56,7 +45,6 @@ pub(in crate::services::discord) struct SourceDraft {
     pub voice_announcement: Option<VoiceTranscriptAnnouncement>,
 }
 
-#[cfg(test)]
 pub(in crate::services::discord) struct PreparedSource {
     key: u64,
     identity: ReceiptIdentity,
@@ -64,8 +52,40 @@ pub(in crate::services::discord) struct PreparedSource {
     attachments: Vec<StagedAttachment>,
 }
 
-#[cfg(test)]
 impl PreparedSource {
+    pub fn from_material(key: u64, identity: ReceiptIdentity, input: Value) -> io::Result<Self> {
+        let source = Source::new(key, identity, input, Vec::new())?;
+        let input = source.input().clone();
+        let invalid =
+            || io::Error::new(io::ErrorKind::InvalidInput, "invalid attachment reference");
+        let mut attachments = Vec::new();
+        if let Some(references) = input.get("attachments") {
+            for reference in references.as_array().ok_or_else(invalid)? {
+                let filename = reference
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(invalid)?;
+                let url = reference
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(invalid)?;
+                attachments.push(StagedAttachment {
+                    filename: filename.into(),
+                    url: url.into(),
+                    staged: None,
+                });
+            }
+        }
+        Ok(Self {
+            key: source.key(),
+            identity: source.identity().clone(),
+            input,
+            attachments,
+        })
+    }
+
     pub fn key(&self) -> u64 {
         self.key
     }
@@ -78,9 +98,15 @@ impl PreparedSource {
     pub fn attachments(&self) -> &[StagedAttachment] {
         &self.attachments
     }
+    pub fn into_parts(self) -> (u64, ReceiptIdentity, Value, Vec<StagedAttachment>) {
+        (self.key, self.identity, self.input, self.attachments)
+    }
     pub fn has_content(&self) -> bool {
         !self.attachments.is_empty()
-            || (self.input["original_text"]
+            || (self
+                .input
+                .get("original_text")
+                .unwrap_or(&self.input["text"])
                 .as_str()
                 .is_some_and(|text| !text.trim().is_empty())
                 && self.input["text"]
@@ -90,7 +116,6 @@ impl PreparedSource {
 }
 
 /// Bytes remain staged for pinning under the existing receipt loan; preparation is not a receipt.
-#[cfg(test)]
 pub(in crate::services::discord) fn prepare_source(
     draft: SourceDraft,
 ) -> io::Result<PreparedSource> {
@@ -174,6 +199,23 @@ pub(in crate::services::discord) fn prepare_source(
         "reply_context":draft.reply_context, "attachments":references,
         "voice_announcement":draft.voice_announcement, "http_origin":origin,
     });
+    #[cfg(test)]
+    let input = {
+        use crate::services::discord::input_runtime::supervisor::mutant;
+        let mut input = input;
+        if mutant("c2_author_bot_true") {
+            input["author_is_bot"] = json!(true);
+        }
+        if mutant("c2_voice_transcript_empty") {
+            input["voice_announcement"]["transcript"] = json!("");
+        }
+        if mutant("c2_voice_optional_removed")
+            && let Some(voice) = input["voice_announcement"].as_object_mut()
+        {
+            voice.remove("stt_latency_ms");
+        }
+        input
+    };
     Source::new(key, identity.clone(), input.clone(), Vec::new())?;
     Ok(PreparedSource {
         key,
@@ -189,55 +231,229 @@ mod tests {
 
     fn draft() -> SourceDraft {
         SourceDraft {
-            origin: Origin::Message { message_id: 10, source_ids: vec![11,10], author_id: 7,
-                original_channel_id: 8, execution_channel_id: 9 },
-            author_is_bot: true, original_text: "!skill explain".into(), prompt: "expanded skill prompt".into(),
+            origin: Origin::Message {
+                message_id: 10,
+                source_ids: vec![11, 10],
+                author_id: 7,
+                original_channel_id: 8,
+                execution_channel_id: 9,
+            },
+            author_is_bot: true,
+            original_text: "!skill explain".into(),
+            prompt: "expanded skill prompt".into(),
             reply_context: Some("reply to original 5".into()),
-            attachments: [b"first".as_slice(), b"second".as_slice()].into_iter().enumerate().map(|(index,bytes)| {
-                let filename = format!("{index}.txt");
-                StagedAttachment { filename: filename.clone(), url: format!("https://fixture.invalid/{index}"),
-                    staged: Some(AttachmentEntryV1 { filename, sha256: hex::encode(Sha256::digest(bytes)), bytes: bytes.into() }) }
-            }).collect(),
-            voice_announcement: Some(serde_json::from_value(json!({"transcript":"spoken words","user_id":"7",
-                "utterance_id":"utterance-10","language":"ko","verbose_progress":false,
-                "started_at":null,"completed_at":null,"samples_written":240,"control_channel_id":12})).unwrap()),
+            attachments: [b"first".as_slice(), b"second".as_slice()]
+                .into_iter()
+                .enumerate()
+                .map(|(index, bytes)| {
+                    let filename = format!("{index}.txt");
+                    StagedAttachment {
+                        filename: filename.clone(),
+                        url: format!("https://fixture.invalid/{index}"),
+                        staged: Some(AttachmentEntryV1 {
+                            filename,
+                            sha256: hex::encode(Sha256::digest(bytes)),
+                            bytes: bytes.into(),
+                        }),
+                    }
+                })
+                .collect(),
+            voice_announcement: Some(VoiceTranscriptAnnouncement {
+                transcript: "spoken words".into(),
+                user_id: "7".into(),
+                utterance_id: "utterance-10".into(),
+                language: "ko".into(),
+                verbose_progress: true,
+                started_at: Some("2026-10-12T08:00:00Z".into()),
+                completed_at: Some("2026-10-12T08:00:02Z".into()),
+                samples_written: Some(240),
+                control_channel_id: Some(12),
+                stt_mode: Some("streaming".into()),
+                stt_latency_ms: Some(321),
+            }),
         }
     }
 
     #[test]
     fn c1_rich_source_preserves_original_identity_text_reply_voice_and_all_staged_bytes() {
-        let source = prepare_source(draft()).unwrap();
-        assert_eq!(source.key, 10);
-        assert_eq!(
-            source.identity,
-            ReceiptIdentity::new(10, vec![10, 11], 7, 8, 9).unwrap()
-        );
-        assert_eq!(source.input["author_is_bot"], true);
-        assert_eq!(source.input["original_text"], "!skill explain");
-        assert_eq!(source.input["text"], "expanded skill prompt");
-        assert_eq!(source.input["reply_context"], "reply to original 5");
-        assert_eq!(
-            source.input["voice_announcement"]["utterance_id"],
-            "utterance-10"
-        );
-        assert_eq!(source.input["voice_announcement"]["control_channel_id"], 12);
-        assert_eq!(source.input["attachments"].as_array().unwrap().len(), 2);
-        assert_eq!(source.attachments.len(), 2);
-        for (index, bytes) in [b"first".as_slice(), b"second".as_slice()]
-            .into_iter()
-            .enumerate()
-        {
-            let staged = source.attachments[index].staged.as_ref().unwrap();
-            assert_eq!(staged.bytes, bytes);
-            assert_eq!(staged.sha256, hex::encode(Sha256::digest(bytes)));
+        for author_is_bot in [false, true] {
+            let mut d = draft();
+            d.author_is_bot = author_is_bot;
+            let expected_identity = ReceiptIdentity::new(10, vec![10, 11], 7, 8, 9).unwrap();
+            let expected_voice = d.voice_announcement.clone();
+            let expected_attachments = d.attachments.clone();
+            let references: Vec<_> = d
+                .attachments
+                .iter()
+                .map(|attachment| json!({"filename":attachment.filename,"url":attachment.url}))
+                .collect();
+            let expected_input = json!({
+                "message_id":10, "source_message_ids":expected_identity.source_ids,
+                "author_id":7, "original_channel_id":8, "execution_channel_id":9, "channel_id":9,
+                "receipt_identity":expected_identity, "author_is_bot":author_is_bot,
+                "original_text":d.original_text, "text":d.prompt, "reply_context":d.reply_context,
+                "attachments":references, "voice_announcement":expected_voice, "http_origin":null,
+            });
+            let source = prepare_source(d).unwrap();
+            assert_eq!(source.key(), 10);
+            assert_eq!(source.identity(), &expected_identity);
+            assert_eq!(source.input(), &expected_input);
             assert_eq!(
-                source.input["attachments"][index]["url"],
-                format!("https://fixture.invalid/{index}")
+                serde_json::from_value::<Option<VoiceTranscriptAnnouncement>>(
+                    source.input()["voice_announcement"].clone()
+                )
+                .unwrap(),
+                expected_voice
+            );
+            assert_eq!(source.attachments(), expected_attachments.as_slice());
+            assert!(source.has_content());
+            let (key, identity, input, attachments) = source.into_parts();
+            assert_eq!(key, 10);
+            assert_eq!(identity, expected_identity);
+            assert_eq!(input, expected_input);
+            assert_eq!(attachments, expected_attachments);
+            let source = Source::new(key, identity, input, Vec::new()).unwrap();
+            assert_eq!(source.input(), &expected_input);
+        }
+    }
+
+    #[test]
+    fn c2_material_roundtrip_retains_full_canonical_input_and_unfetched_references() {
+        let prepared = prepare_source(draft()).unwrap();
+        let mut input = prepared.input().clone();
+        let mut identity = prepared.identity().clone();
+        identity.source_ids.reverse();
+        input["receipt_identity"] = json!(identity);
+        input["opaque_metadata"] = json!({"nested":[1,{"future":"preserved"}]});
+        input["attachments"][0]["content_type"] = json!("text/plain");
+        let mut expected_input = input.clone();
+        expected_input["receipt_identity"] = json!(prepared.identity());
+        let expected_identity = prepared.identity().clone();
+        let expected_attachments: Vec<_> = prepared
+            .attachments()
+            .iter()
+            .cloned()
+            .map(|mut attachment| {
+                attachment.staged = None;
+                attachment
+            })
+            .collect();
+        let material = PreparedSource::from_material(prepared.key(), identity, input).unwrap();
+        assert_eq!(material.identity(), &expected_identity);
+        assert_eq!(material.input(), &expected_input);
+        assert_eq!(material.attachments(), expected_attachments.as_slice());
+        assert!(material.has_content());
+        let (key, identity, input, attachments) = material.into_parts();
+        assert_eq!(key, 10);
+        assert_eq!(identity, expected_identity);
+        assert_eq!(input, expected_input);
+        assert_eq!(attachments, expected_attachments);
+        let source = Source::new(key, identity, input, Vec::new()).unwrap();
+        assert_eq!(source.input(), &expected_input);
+    }
+
+    #[test]
+    fn c2_material_text_uses_original_when_present_and_metadata_alone_is_not_content() {
+        let identity = ReceiptIdentity::new(10, vec![10], 7, 8, 9).unwrap();
+        for (original_text, text, content) in [
+            (None, "actual actor request", true),
+            (None, " \n", false),
+            (Some(json!("original request")), "rendered request", true),
+            (Some(json!("")), "wrapper boilerplate", false),
+            (Some(json!(" \n")), "wrapper boilerplate", false),
+            (Some(Value::Null), "wrapper boilerplate", false),
+            (Some(json!(12)), "wrapper boilerplate", false),
+            (Some(json!("original request")), " \n", false),
+        ] {
+            let mut input = json!({
+                "text":text, "reply_context":"reply is not a request", "attachments":[],
+                "voice_announcement":draft().voice_announcement,
+            });
+            if let Some(original_text) = original_text {
+                input["original_text"] = original_text;
+            }
+            let source = PreparedSource::from_material(10, identity.clone(), input).unwrap();
+            assert_eq!(source.has_content(), content);
+            assert!(source.attachments().is_empty());
+        }
+        let source = PreparedSource::from_material(10, identity, json!({"text":""})).unwrap();
+        assert!(!source.has_content());
+        assert!(source.attachments().is_empty());
+    }
+
+    #[test]
+    fn c2_material_attachment_refs_are_content_without_claiming_staged_bytes() {
+        let identity = ReceiptIdentity::new(10, vec![10], 7, 8, 9).unwrap();
+        let input = json!({"text":"", "original_text":"", "attachments":[
+            {"filename":"note.txt","url":"https://fixture.invalid/note","bytes":"untrusted"},
+            {"filename":"image.png","url":"https://fixture.invalid/image"},
+        ]});
+        let source = PreparedSource::from_material(10, identity, input.clone()).unwrap();
+        assert!(source.has_content());
+        assert_eq!(source.input()["attachments"], input["attachments"]);
+        assert_eq!(
+            source.attachments(),
+            &[
+                StagedAttachment {
+                    filename: "note.txt".into(),
+                    url: "https://fixture.invalid/note".into(),
+                    staged: None
+                },
+                StagedAttachment {
+                    filename: "image.png".into(),
+                    url: "https://fixture.invalid/image".into(),
+                    staged: None
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn c2_material_rejects_malformed_attachment_fields_refs_and_source_provenance() {
+        let identity = ReceiptIdentity::new(10, vec![10], 7, 8, 9).unwrap();
+        for attachments in [
+            Value::Null,
+            json!({}),
+            json!("not refs"),
+            json!([null]),
+            json!([12]),
+            json!([[]]),
+            json!([{}]),
+            json!([{"filename":"note.txt"}]),
+            json!([{"url":"https://fixture.invalid/note"}]),
+            json!([{"filename":null,"url":"https://fixture.invalid/note"}]),
+            json!([{"filename":12,"url":"https://fixture.invalid/note"}]),
+            json!([{"filename":"","url":"https://fixture.invalid/note"}]),
+            json!([{"filename":" \n","url":"https://fixture.invalid/note"}]),
+            json!([{"filename":"note.txt","url":null}]),
+            json!([{"filename":"note.txt","url":12}]),
+            json!([{"filename":"note.txt","url":""}]),
+            json!([{"filename":"note.txt","url":" \n"}]),
+        ] {
+            assert!(
+                PreparedSource::from_material(
+                    10,
+                    identity.clone(),
+                    json!({
+                        "text":"request", "attachments":attachments,
+                    })
+                )
+                .is_err()
             );
         }
-        assert!(source.has_content());
-        let source = Source::new(source.key, source.identity, source.input, Vec::new()).unwrap();
-        assert_eq!(source.key(), 10);
+        for input in [
+            Value::Null,
+            json!({}),
+            json!({"text":12}),
+            json!({"text":"request","message_id":11}),
+            json!({"text":"request","author_id":8}),
+            json!({"text":"request","source_message_ids":[11]}),
+            json!({"text":"request","receipt_identity":{"source_ids":[10],"author_id":8,
+                "original_channel_id":8,"execution_channel_id":9}}),
+        ] {
+            assert!(PreparedSource::from_material(10, identity.clone(), input).is_err());
+        }
+        assert!(PreparedSource::from_material(11, identity, json!({"text":"request"})).is_err());
     }
 
     #[test]

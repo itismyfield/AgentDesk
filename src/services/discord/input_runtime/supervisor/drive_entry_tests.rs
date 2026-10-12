@@ -242,7 +242,15 @@ async fn admitted(rig: &Rig, keys: &[u64]) -> Supervisor<Fake> {
     assert_eq!(supervisor.boot().await, Landing::Admitted);
     let ledger = supervisor.slot().get().unwrap();
     for &key in keys {
-        let input = json!({ "text": format!("input {key}") });
+        let identity = crate::services::tui_input::rows::receipt_identity::ReceiptIdentity::new(
+            key,
+            vec![key],
+            7,
+            rig.channel,
+            rig.channel,
+        )
+        .unwrap();
+        let input = json!({ "text": format!("input {key}"), "receipt_identity": identity });
         ledger
             .append_entry(&Entry::Received { key, input }, &[])
             .unwrap();
@@ -569,7 +577,10 @@ async fn held_readiness_closes_the_gate_once_and_reopens_it_once_on_recovery() {
     recording.arm(Some(1));
     let entry = Entry::Received {
         key: 42,
-        input: json!({ "text": "42" }),
+        input: json!({ "text": "42", "receipt_identity":
+            crate::services::tui_input::rows::receipt_identity::ReceiptIdentity::new(
+                42, vec![42], 7, rig.channel, rig.channel,
+            ).unwrap() }),
     };
     let ledger = driven.supervisor.slot().get().unwrap();
     assert!(ledger.append_entry(&entry, &[]).is_err());
@@ -591,6 +602,271 @@ async fn held_readiness_closes_the_gate_once_and_reopens_it_once_on_recovery() {
     assert_eq!((counts.opens, counts.holds), (2, 1));
     assert_eq!(rig.gate.mode(), Mode::LedgerOpen);
     assert!(!rig.health().contains(&line));
+    assert!(driven.release());
+}
+
+#[tokio::test]
+async fn c2_policy_before_receipt_defers_unknown_scan_without_ack_or_source_loss() {
+    use crate::services::discord::input_runtime::intake::{Classification, Retry};
+    use crate::services::discord::input_runtime::supervisor::receipt::{Deferred, Receipt};
+    use crate::services::tui_input::rows::receipt_identity::{ReceiptIdentity, Responsibility};
+    let rig = Rig::new(6_326_976);
+    let screen = Arc::new(Screen::default());
+    let mut driven = Driven::start(admitted(&rig, &[]).await, &screen).await;
+    let identity = ReceiptIdentity::new(41, vec![41], 7, rig.channel, rig.channel).unwrap();
+    let input = json!({"text":"request", "original_text":"request", "author_is_bot":false});
+    let before = driven
+        .supervisor
+        .slot()
+        .get()
+        .unwrap()
+        .rows()
+        .unwrap()
+        .folded_seq();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(
+            SupervisorCmd::PendingSource {
+                sources: vec![41],
+                reply,
+            },
+            true,
+        )
+        .await;
+    assert_eq!(response.await.unwrap().unwrap().sources, [41]);
+    for accepted in [false, true] {
+        *rig.world.source_policy.lock().unwrap() = Some(if accepted {
+            Classification::Target
+        } else {
+            Classification::Retry(Retry::Unknown)
+        });
+        let (reply, response) = tokio::sync::oneshot::channel();
+        driven
+            .supervisor
+            .input_command(SupervisorCmd::FetchTicket { reply }, true)
+            .await;
+        let ticket = response.await.unwrap().unwrap();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        driven
+            .supervisor
+            .input_command(
+                SupervisorCmd::BeginScan {
+                    ticket,
+                    sources: vec![41],
+                    horizon: 41,
+                    complete_fetch: true,
+                    reply,
+                },
+                true,
+            )
+            .await;
+        let capability = response.await.unwrap().unwrap();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let source =
+            super::super::source::Source::new(41, identity.clone(), input.clone(), vec![]).unwrap();
+        driven
+            .supervisor
+            .input_command(
+                SupervisorCmd::CommitFromScan {
+                    source: Box::new(source),
+                    capability,
+                    reply,
+                },
+                true,
+            )
+            .await;
+        let result = response.await.unwrap();
+        let rows = driven.supervisor.slot().get().unwrap().rows().unwrap();
+        if accepted {
+            assert!(matches!(result.receipt, Receipt::Accepted(_)));
+            assert_eq!(rows.open_rows().count(), 1);
+            assert_eq!(rows.receipt_identity(41), Some(identity.clone()));
+            assert_eq!(rows.row(41).unwrap().input["original_text"], "request");
+            assert!(driven.supervisor.pending_snapshot().sources.is_empty());
+        } else {
+            assert_eq!(result.receipt, Receipt::Deferred(Deferred::Unknown));
+            assert_eq!(
+                rows.folded_seq(),
+                before,
+                "Unknown cannot append or acknowledge a receipt"
+            );
+            assert_eq!(rows.open_rows().count(), 0);
+            assert_eq!(rows.responsibility(&identity), Responsibility::Absent);
+            assert_eq!(driven.supervisor.pending_snapshot().sources, [41]);
+        }
+        assert_eq!(result.settlement, Ok(()));
+        assert_eq!(driven.sent(), 0);
+    }
+    assert!(driven.release());
+}
+
+#[tokio::test]
+async fn c2_policy_before_receipt_defers_unknown_external_and_retries_same_origin() {
+    use crate::services::discord::input_runtime::intake::{Classification, Retry};
+    use crate::services::discord::input_runtime::supervisor::{external, receipt::Deferred};
+    use crate::services::tui_input::rows::receipt_identity::Responsibility;
+    let rig = Rig::new(6_326_977);
+    let screen = Arc::new(Screen::default());
+    let mut driven = Driven::start(admitted(&rig, &[]).await, &screen).await;
+    let source =
+        external::source(rig.channel, 7, "request", Some("policy"), "actual-origin").unwrap();
+    let identity = source.identity().clone();
+    let original = source.input().clone();
+    let before = driven
+        .supervisor
+        .slot()
+        .get()
+        .unwrap()
+        .rows()
+        .unwrap()
+        .folded_seq();
+    *rig.world.source_policy.lock().unwrap() = Some(Classification::Retry(Retry::Unknown));
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(
+            SupervisorCmd::SubmitExternal {
+                source: Box::new(source),
+                reply,
+            },
+            true,
+        )
+        .await;
+    assert_eq!(
+        response.await.unwrap(),
+        external::ExternalReceipt::Deferred(Deferred::Unknown)
+    );
+    let rows = driven.supervisor.slot().get().unwrap().rows().unwrap();
+    assert_eq!(rows.folded_seq(), before);
+    assert_eq!(rows.open_rows().count(), 0);
+    assert_eq!(rows.responsibility(&identity), Responsibility::Absent);
+    *rig.world.source_policy.lock().unwrap() = Some(Classification::Target);
+    let source =
+        external::source(rig.channel, 7, "request", Some("policy"), "actual-origin").unwrap();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(
+            SupervisorCmd::SubmitExternal {
+                source: Box::new(source),
+                reply,
+            },
+            true,
+        )
+        .await;
+    assert!(matches!(
+        response.await.unwrap(),
+        external::ExternalReceipt::Received {
+            duplicate: false,
+            ..
+        }
+    ));
+    let rows = driven.supervisor.slot().get().unwrap().rows().unwrap();
+    assert_eq!(rows.open_rows().count(), 1);
+    assert_eq!(rows.row(identity.source_ids[0]).unwrap().input, original);
+    assert_eq!(
+        rows.receipt_identity(identity.source_ids[0]),
+        Some(identity)
+    );
+    assert_eq!(driven.sent(), 0);
+    assert!(driven.release());
+}
+
+#[tokio::test]
+async fn c2_policy_change_after_receipt_keeps_identity_and_blocks_offer_until_rechecked() {
+    use crate::services::discord::input_runtime::intake::{Classification, Refusal, Retry};
+    for (index, (policy, reason)) in [
+        (
+            Classification::Rejected(Refusal::Unauthorized),
+            "source_policy_unauthorized",
+        ),
+        (
+            Classification::Rejected(Refusal::ProviderMismatch),
+            "source_policy_provider",
+        ),
+        (
+            Classification::Retry(Retry::Unknown),
+            "source_policy_unknown",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rig = Rig::new(6_326_970 + index as u64);
+        let a = idle_transcript(&rig, "a", false);
+        push(&rig, "n1", source(None, &a));
+        let screen = Arc::new(Screen::default());
+        screen.busy.store(true, Ordering::SeqCst);
+        *screen.record.lock().unwrap() = Some(a.path.clone());
+        let mut driven = Driven::start(admitted(&rig, &[41]).await, &screen).await;
+        let before = rows(&rig.root, rig.channel);
+        let input = before.row(41).unwrap().input.clone();
+        let identity = before.receipt_identity(41).unwrap();
+        let responsibility = before.responsibility(&identity);
+        rig.world.source_policy_inputs.lock().unwrap().clear();
+        *rig.world.source_policy.lock().unwrap() = Some(policy);
+        screen.busy.store(false, Ordering::SeqCst);
+        driven.wait(2 * HOLD_GRACE).await;
+        let after = rows(&rig.root, rig.channel);
+        assert_eq!(
+            driven.sent(),
+            0,
+            "receipt-time permission cannot survive a policy change"
+        );
+        assert_eq!(after.row(41).unwrap().input, input);
+        assert_eq!(after.receipt_identity(41), Some(identity));
+        assert_eq!(
+            after.responsibility(&before.receipt_identity(41).unwrap()),
+            responsibility
+        );
+        assert!(!after.row(41).unwrap().state.is_terminal());
+        assert_eq!(input_lines(&rig), [held_line(&rig, reason, 41, 1)]);
+        let inputs = rig.world.source_policy_inputs.lock().unwrap().clone();
+        assert!(!inputs.is_empty(), "every held pass rereads the policy");
+        assert!(inputs.iter().all(|seen| seen == &input));
+        *rig.world.source_policy.lock().unwrap() = Some(Classification::Target);
+        driven.wait(2 * HOLD_GRACE).await;
+        assert_eq!(
+            driven.sent(),
+            1,
+            "fresh normal policy and actual Idle facts permit one offer"
+        );
+        assert!(input_lines(&rig).is_empty());
+        assert!(driven.release());
+    }
+}
+
+#[tokio::test]
+async fn c2_closed_ack_certifies_flush_before_later_clear_not_ledger_immutability() {
+    let rig = Rig::new(6_326_975);
+    push(&rig, "n1", pending("next", &rig.root.join("next.jsonl")));
+    let screen = Arc::new(Screen::default());
+    let mut driven = Driven::start(admitted(&rig, &[41]).await, &screen).await;
+    let (ack, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(SupervisorCmd::Close { ack }, true)
+        .await;
+    assert!(
+        response.await.unwrap().is_ok(),
+        "the typed close ACK confirms the current flush"
+    );
+    let before = driven.supervisor.slot().get().unwrap().rows().unwrap();
+    rig.world
+        .durable_ticket(rig.channel, driven.supervisor.slot().get().unwrap(), &[41]);
+    driven.supervisor.clear(&mut driven.drive, driven.at).await;
+    let after = driven.supervisor.slot().get().unwrap().rows().unwrap();
+    assert!(
+        after.folded_seq() > before.folded_seq(),
+        "a later Clear may write after a Close ACK"
+    );
+    assert_eq!(
+        after.row(41).unwrap().state,
+        RowState::Abandoned(AbandonReason::UserClear)
+    );
+    assert!(!driven.supervisor.admission_open());
+    assert_eq!(driven.sent(), 0);
     assert!(driven.release());
 }
 

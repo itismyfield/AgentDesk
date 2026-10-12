@@ -31,6 +31,14 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
+    /// Binds the sender whose receiver is passed to run; this starts no supervisor.
+    pub(in crate::services::discord) fn bind_intake(
+        &mut self,
+        sender: mpsc::Sender<SupervisorCmd>,
+    ) -> Result<Arc<super::intake::Client>, Refused> {
+        self.supervisor.bind_intake(sender)
+    }
+
     pub(crate) async fn new(
         reserved: Reserved,
         config: Config,

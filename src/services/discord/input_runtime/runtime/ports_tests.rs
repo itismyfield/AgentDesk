@@ -57,6 +57,79 @@ async fn ports(shared: Arc<SharedData>, channel: u64, probe: Probe) -> RuntimePo
 }
 
 #[test]
+fn c2_runtime_source_policy_reads_current_author_provider_routing_and_holds_unknown_voice() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    runtime().block_on(async {
+        let channel = 6_326_980;
+        let shared = shared(channel, None).await;
+        let mut port = ports(shared.clone(), channel, Probe::default()).await;
+        let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+        let input =
+            json!({"text":"transformed", "original_text":"original", "author_is_bot":false});
+        let source = Source::new(
+            41,
+            crate::services::tui_input::rows::receipt_identity::ReceiptIdentity::new(
+                41,
+                vec![41],
+                7,
+                channel,
+                channel,
+            )
+            .unwrap(),
+            input,
+            vec![],
+        )
+        .unwrap();
+        let original = source.input().clone();
+        let before = port.policy_facts(&source).await;
+        assert_eq!(before.authorized, Some(true));
+        assert_eq!(before.supported, Some(true));
+        assert!(matches!(before.voice_target, VoiceTarget::Unknown));
+        assert_eq!(
+            port.source_policy(&source).await,
+            Classification::Retry(intake::Retry::Unknown)
+        );
+        shared.settings.write().await.owner_user_id = Some(8);
+        let revoked = port.policy_facts(&source).await;
+        assert_eq!(
+            revoked.authorized,
+            Some(false),
+            "resource assembly cannot cache this author's authorization"
+        );
+        shared.settings.write().await.provider = ProviderKind::Codex;
+        let rebound = port.policy_facts(&source).await;
+        assert_eq!(rebound.provider, Some(ProviderKind::Codex));
+        assert_eq!(rebound.supported, Some(false));
+        shared.settings.write().await.provider = ProviderKind::Claude;
+        shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get_mut(&ChannelId::new(channel))
+            .unwrap()
+            .channel_name = Some("changed-codex".into());
+        assert_eq!(port.policy_facts(&source).await.supported, Some(false));
+        shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .remove(&ChannelId::new(channel));
+        assert_eq!(port.policy_facts(&source).await.supported, None);
+        assert_eq!(
+            port.source_policy(&source).await,
+            Classification::Retry(intake::Retry::Unknown)
+        );
+        assert_eq!(source.input(), &original);
+        assert!(!port.root.join("input_ledger").exists());
+        assert!(!port.root.join("discord_pending_queue").exists());
+        drop(gate);
+    });
+}
+
+#[test]
 fn b_runtime_ports_reject_unresolved_resources_without_effects() {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());

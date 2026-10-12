@@ -12,8 +12,13 @@ use crate::services::discord::commands::control::input_clear::LedgerClear;
 use crate::services::discord::input_runtime::clear::Step;
 use crate::services::discord::input_runtime::effects::{Deps, ProdEffects};
 use crate::services::discord::input_runtime::fence::{self, Closing, Failure};
+use crate::services::discord::input_runtime::intake::{
+    self, Classification, InputDisposition, PolicyFacts, PreparedSource, Protection, Refusal,
+    TargetFacts, VoiceTarget,
+};
 use crate::services::discord::input_runtime::supervisor::Ports;
 use crate::services::discord::input_runtime::supervisor::mapping::Probe;
+use crate::services::discord::input_runtime::supervisor::source::Source;
 use crate::services::discord::input_transition::Files;
 use crate::services::discord::{SharedData, discord_io, dispatch_policy, inflight, settings};
 use crate::services::provider::ProviderKind;
@@ -72,6 +77,77 @@ impl RuntimePorts {
 
     pub(crate) fn session(&self) -> &str {
         &self.resources.tmux
+    }
+
+    async fn policy_facts(&self, source: &Source) -> PolicyFacts {
+        let identity = source.identity();
+        let current = self.shared.settings.read().await.clone();
+        let announce = dispatch_policy::resolve_announce_bot_user_id(&self.shared).await;
+        let bot = source.input()["author_is_bot"].as_bool();
+        let raw = source.input()["original_text"].as_str();
+        let allowed_bot = current.allowed_bot_ids.contains(&identity.author_id)
+            || announce == Some(identity.author_id);
+        let authorized = bot.map(|is_bot| {
+            allowed_bot || (!is_bot && discord_io::user_is_authorized(&current, identity.author_id))
+        });
+        #[cfg(test)]
+        let authorized = if crate::services::discord::input_runtime::supervisor::mutant(
+            "c2_cached_source_policy",
+        ) {
+            Some(self.resources.authorized)
+        } else {
+            authorized
+        };
+        let disposition = bot.zip(raw).map(|(is_bot, text)| {
+            if dispatch_policy::is_allowed_turn_sender(
+                &current.allowed_bot_ids,
+                announce,
+                identity.author_id,
+                is_bot,
+                text,
+            ) {
+                InputDisposition::Prompt
+            } else {
+                InputDisposition::Unsupported
+            }
+        });
+        let name = {
+            let core = self.shared.core.lock().await;
+            core.sessions
+                .get(&ChannelId::new(self.channel))
+                .filter(|session| session.channel_id == Some(self.channel))
+                .and_then(|session| session.channel_name.clone())
+        };
+        let supported = name.filter(|name| !name.trim().is_empty()).map(|name| {
+            identity.execution_channel_id == self.channel
+                && current.provider == self.shared.provider
+                && settings::validate_bot_channel_routing(
+                    &current,
+                    &self.shared.provider,
+                    ChannelId::new(self.channel),
+                    Some(&name),
+                    false,
+                )
+                .is_ok()
+        });
+        let target = |channel| TargetFacts {
+            channel_id: channel,
+            protection: fence::channel_gate(channel).map_or(Protection::Unprotected, |gate| {
+                Protection::Protected(gate.provider().clone())
+            }),
+        };
+        PolicyFacts {
+            provider: Some(current.provider),
+            original: target(identity.original_channel_id),
+            execution: target(identity.execution_channel_id),
+            // The current voice accessor cannot distinguish an absent route from a failed lookup.
+            voice_target: VoiceTarget::Unknown,
+            authorized,
+            supported,
+            disposition,
+            client_ready: true,
+            admission_open: true,
+        }
     }
 
     async fn resources(shared: &SharedData, root: &Path, channel: u64) -> io::Result<Resources> {
@@ -150,6 +226,20 @@ impl RuntimePorts {
 impl Ports for RuntimePorts {
     type Clear = LedgerClear;
     type Move = RuntimeMove;
+
+    fn source_policy<'a>(&'a mut self, source: &'a Source) -> Step<'a, Classification> {
+        Box::pin(async move {
+            let prepared = match PreparedSource::from_material(
+                source.key(),
+                source.identity().clone(),
+                source.input().clone(),
+            ) {
+                Ok(prepared) => prepared,
+                Err(_) => return Classification::Rejected(Refusal::Provenance),
+            };
+            intake::classify(&self.policy_facts(source).await, &prepared)
+        })
+    }
 
     fn mapping(&self) -> Probe {
         self.probe.clone()
