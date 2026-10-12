@@ -164,6 +164,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::session_idle_cleanup::tests
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   --skip services::discord::task_notification_delivery::tests
+  --skip services::discord::terminal_ui_obligation::input_fence_tests
   --skip services::discord::terminal_ui_obligation::tests
   --skip services::discord::tmux::tmux_watcher::path_b_record::tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
@@ -1027,6 +1028,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::session_idle_cleanup::tests
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   services::discord::task_notification_delivery::tests
+  services::discord::terminal_ui_obligation::input_fence_tests
   services::discord::terminal_ui_obligation::tests
   services::discord::tmux::tmux_watcher::path_b_record::tests
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
