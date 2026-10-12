@@ -35,6 +35,8 @@ from pathlib import Path
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/services/tui_input/actor/gate/claude_guarded/acceptance_tests.rs",
+        "src/services/tui_input/submission_tmux/guarded/protocol_tests.rs",
+        "src/services/tui_input/submission_tmux/guarded/transport_tests.rs",
         "src/services/turn_orchestrator/queued_head_s2a_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_recovery_s2a_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs",
