@@ -230,3 +230,97 @@ async fn queue_guard_still_releases_a_process_turn_pg() {
     assert!(token.cancelled.load(Ordering::Relaxed));
     db.drop().await;
 }
+
+async fn receipt_cleanup_case(queue_guard: bool, protected: bool) {
+    crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE.set(false);
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ModeTmux::install();
+    tmux.serve(Tmux::Dead);
+    let (db, pool) = postgres().await;
+    let provider = ProviderKind::Gemini;
+    let (shared, _registry) = registered_runtime(&pool, &provider).await;
+    let channel = ChannelId::new(1_479_671_344_000_020_001);
+    map_channel(&shared, channel, "b3b2-stale").await;
+    let token = stale_turn(&shared, &provider, channel, None).await;
+    let path = inflight_path(&provider, channel);
+    let mut raw: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    raw["finalizer_turn_id"] = raw["user_msg_id"].clone();
+    if protected {
+        raw["herdr_before_start_stop"] = serde_json::Value::Null;
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let parent = ChannelId::new(channel.get() + 10);
+    shared.dispatch.thread_parents.insert(parent, channel);
+    let mut rx = crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+        shared.as_ref(),
+    );
+    if queue_guard {
+        let released = release_queue_blocked_stale_active_turn(
+            &shared,
+            &provider,
+            channel,
+            chrono::Utc::now().timestamp(),
+        )
+        .await;
+        assert_eq!(
+            released, !protected,
+            "B must reach protected deletion and stop"
+        );
+    } else {
+        thread_guard_force_clean_stale_thread(
+            &shared,
+            &provider,
+            ChannelId::new(channel.get() + 10),
+            channel,
+        )
+        .await;
+    }
+    let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel).await;
+    if protected {
+        assert!(
+            snapshot
+                .cancel_token
+                .as_ref()
+                .is_some_and(|t| Arc::ptr_eq(t, &token)),
+            "mailbox owner unchanged"
+        );
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            before,
+            "receipt row byte-identical"
+        );
+        assert!(rx.try_recv().is_err(), "finish/completion 0");
+        assert_eq!(
+            shared
+                .dispatch
+                .thread_parents
+                .get(&parent)
+                .map(|value| *value),
+            Some(channel),
+            "parent mapping unchanged"
+        );
+    } else {
+        assert!(
+            snapshot.cancel_token.is_none(),
+            "positive cleanup really executed"
+        );
+        assert!(!path.exists());
+        assert!(!shared.dispatch.thread_parents.contains_key(&parent));
+        assert!(token.cancelled.load(Ordering::Relaxed));
+    }
+    db.drop().await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b_stale_turn_a_stops_cleanup_after_protected_delete_pg() {
+    receipt_cleanup_case(false, true).await;
+    receipt_cleanup_case(false, false).await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b_stale_turn_b_stops_cleanup_after_protected_delete_pg() {
+    receipt_cleanup_case(true, true).await;
+    receipt_cleanup_case(true, false).await;
+}

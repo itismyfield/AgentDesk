@@ -113,6 +113,11 @@ pub(super) fn gate_closed_arm(
             let _ = reply.send(());
             "RestoreActiveTurn"
         }
+        #[cfg(test)]
+        M::InstalledActorHandoff(request) => {
+            request.refuse(crate::services::cluster::channel_home_port::RestoreFailure::Rejected("handoff actor closed".into()));
+            "InstalledActorHandoff"
+        }
         M::RecoveryKickoff { reply, .. } => {
             let _ = reply.send(RecoveryKickoffResult::RefusedClosed);
             "RecoveryKickoff"
