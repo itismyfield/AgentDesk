@@ -289,3 +289,42 @@ Follow these steps in order before selecting that older binary:
 
 This is a manual rollback procedure. A re-post rollback preflight in `scripts/deploy-release.sh`
 is follow-up work and is not implemented here.
+
+## 9. Resolve an unseen resume boundary
+
+An in-session resume can bind a transcript the O writer has never seen. If that source has no
+stored cursor or rotation link and no verified parent, its boundary is `Pending { candidates: [0] }`
+and the writer raises `BoundaryPending`. The candidate `0` is not an approved delivery start.
+While Pending, the source spools both history and new output but posts neither; its spool is
+ineligible for GC. The alarm appears in `/api/health` as `tui_o:boundary_pending:<channel>` and
+raises health to at least degraded. It reports withheld output, not proof of loss or duplication.
+
+Run the following procedure on the O home:
+
+1. Identify the channel and resumed source from the `BoundaryPending` alarm. Inspect the transcript
+   and establish the first record that should be delivered after resume. Keep its exact byte start
+   or unique record UUID, excluding the historical prefix while retaining all new owed output.
+2. Record that start using the source's spool key or transcript path:
+
+   ```sh
+   agentdesk o boundary resolve --channel <CHANNEL_ID> --source '<KEY_OR_PATH>' --from '<BYTE_OFFSET_OR_UUID>' --operator '<NAME>'
+   ```
+
+   `--operator` defaults to `operator`. A `--from` that parses as an unsigned integer is a byte
+   offset; otherwise it is a UUID. The command requires one matching Pending source, the same
+   source file identity, and a record start offset or unique UUID. An already recorded resolution
+   is refused with an instruction to restart the writer (`src/cli/o.rs:48–83`,
+   `src/services/tui_o/store/rotation.rs:220–285`).
+   These checks do not prove where resume occurred; the operator must establish the correct start.
+3. Wait for the command to succeed, then use the managed restart path. The command only appends
+   and fsyncs `BoundaryResolved`; it sends no output and applies at the next writer start. That
+   start changes Pending to `Owed { from }` and replays the retained spool. Confirm that the
+   historical range `[0, from)` is not posted and the owed output at or after `from` is delivered.
+
+Automatic resume byte boundaries and automatic re-evaluation of existing resume Pending states
+are not provided. Hook publication time, elapsed time and current EOF do not prove the resume
+position. Reopening automatic boundary work requires a provider signal proving the exact resume
+byte position or a separately verified boundary contract.
+
+See the [TUI O resume contract](relay-state-contract.md#appendix-tui-o-unseen-resume-boundary)
+for current-main code coordinates, acceptance-test assertions and the health follow-up.
