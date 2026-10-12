@@ -13,7 +13,7 @@ use crate::services::tui_o::shadow::SourceBinding;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::writer::input_facts::{ChannelFact, TurnState};
 
-const CHANNEL: u64 = 6_325_740;
+const CHANNEL: u64 = 6_326_940;
 const NONCE: &str = "runtime-drive-attempt";
 const READY: &str = "────────────────────\n❯ \n────────────────────\n";
 

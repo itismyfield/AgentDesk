@@ -657,3 +657,64 @@ async fn b_binding_wake_rereads_log_and_progresses_before_the_natural_tick() {
     assert!(!returned);
     assert!(supervisor.release());
 }
+
+#[tokio::test]
+async fn b_ready_views_cannot_boot_before_adopt_then_open_the_ledger() {
+    let rig = Rig::new(6_326_390);
+    let mut supervisor = handoff(&rig, reserved(&rig), vec![]);
+    let screen = Arc::new(Screen::default());
+    let (supply, supplied) = oneshot::channel();
+    let (commands, received) = mailbox::channel(4);
+    let expected = [ProviderKind::Claude, ProviderKind::Codex];
+    assert!(
+        supply
+            .send(vec![
+                rig.world.runtime.shared.clone(),
+                runtime(ProviderKind::Codex),
+            ])
+            .is_ok()
+    );
+    tokio::time::pause();
+    let returned = {
+        let run = supervisor.serve(DriveFake(screen.clone()), &expected, supplied, received);
+        tokio::pin!(run);
+        // Poll ready views first so premature boot reaches its synchronous port observations.
+        tokio::select! {
+            biased;
+            _ = &mut run => panic!("the task retains the unadopted reservation"),
+            () = tokio::task::yield_now() => {},
+        }
+        tokio::time::advance(3 * TICK).await;
+        tokio::select! {
+            biased;
+            _ = &mut run => panic!("the task retains the unadopted reservation"),
+            () = tokio::task::yield_now() => {},
+        }
+        assert!(
+            rig.world.log().is_empty(),
+            "ready views cannot run any boot stage before Adopt"
+        );
+        assert!(!rig.root.join("input_ledger").exists());
+        assert_eq!(rig.gate.mode(), Mode::Closing);
+        assert!(
+            rig.health()
+                .contains(&HoldCause::RuntimeViewPending.health("claude", rig.channel))
+        );
+        assert!(screen.sent.lock().unwrap().is_empty());
+        tokio::time::resume();
+        tokio::select! {
+            _ = &mut run => panic!("the adopted task reaches LedgerOpen"),
+            result = adopt(&commands, rig.channel) => assert_eq!(result, Ok(())),
+        }
+        tokio::select! {
+            _ = &mut run => panic!("the adopted task reaches LedgerOpen"),
+            () = eventually(|| rig.gate.mode() == Mode::LedgerOpen) => {},
+        }
+        assert!(rig.root.join("input_ledger").exists());
+        assert_eq!(rig.world.effects("freeze"), 1);
+        drop(commands);
+        run.await
+    };
+    assert!(!returned);
+    assert!(supervisor.release());
+}

@@ -4766,6 +4766,7 @@ services::discord::input_runtime::supervisor::tests::drive_entry::g2b_entry::b_d
 services::discord::input_runtime::supervisor::tests::drive_entry::g2b_entry::b_failed_buffered_notice_remains_pending_until_success
 services::discord::input_runtime::supervisor::tests::drive_entry::g2b_entry::b_mailbox_send_before_task_takeover_never_acks_completion
 services::discord::input_runtime::supervisor::tests::drive_entry::g2b_entry::b_mapping_present_latches_after_durable_move_across_wake_clear_and_receipts
+services::discord::input_runtime::supervisor::tests::drive_entry::g2b_entry::b_ready_views_cannot_boot_before_adopt_then_open_the_ledger
 services::discord::input_runtime::supervisor::tests::drive_entry::held_readiness_closes_the_gate_once_and_reopens_it_once_on_recovery
 services::discord::input_runtime::supervisor::tests::drive_entry::lost_worker_closes_gate_before_tick_returns
 services::discord::input_runtime::supervisor::tests::drive_entry::pending_binding_opens_the_gate_once_holds_input_and_its_resolution_submits_once

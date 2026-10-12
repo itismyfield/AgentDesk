@@ -61,7 +61,7 @@ fn b_runtime_ports_reject_unresolved_resources_without_effects() {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     runtime().block_on(async {
-        let channel = 6_325_810;
+        let channel = 6_326_910;
         let shared = shared(channel, None).await;
         let population = fence::population_root().unwrap();
         let http = Arc::new(Http::new("test-token"));
@@ -112,7 +112,7 @@ fn b_adopt_requires_all_provider_mapping_views_ports() {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     runtime().block_on(async {
-        let channel = 6_325_811;
+        let channel = 6_326_911;
         let selected = shared(channel, None).await;
         let mut foreign = crate::services::discord::make_shared_data_for_tests();
         Arc::get_mut(&mut foreign).unwrap().provider = ProviderKind::Codex;
@@ -163,7 +163,7 @@ fn b_runtime_ports_sources_are_read_only_and_unreadable_is_not_empty() {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     runtime().block_on(async {
-        let channel = 6_325_814;
+        let channel = 6_326_914;
         let selected = shared(channel, None).await;
         let population = fence::population_root().unwrap();
         let path = crate::services::discord::inflight::inflight_state_path(
@@ -231,7 +231,7 @@ fn b_runtime_ports_freeze_failure_preserves_legacy_and_closing() {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     runtime().block_on(async {
-        let channel = 6_325_812;
+        let channel = 6_326_912;
         let shared = shared(channel, None).await;
         let mut port = ports(shared.clone(), channel, Probe::default()).await;
         let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
@@ -285,8 +285,8 @@ fn b_runtime_ports_freeze_clear_move_fail_closed_pg() {
     runtime().block_on(async {
         let db = crate::dispatch::test_support::DispatchPostgresTestDb::create("adk_g2b_ports", "G2-B production ports").await;
         let pool = db.connect_and_migrate_with_max_connections(4).await;
-        let channel = 6_325_813;
-        let waiting_channel = 6_325_815;
+        let channel = 6_326_913;
+        let waiting_channel = 6_326_915;
         let waiting_shared = shared(waiting_channel, Some(pool.clone())).await;
         let registry = Box::leak(Box::new(crate::services::discord::input_runtime::supervisor::Registry::new()));
         let reserved = registry.reserve_for_test(&ProviderKind::Claude, waiting_channel, &fence::population_root().unwrap()).unwrap();

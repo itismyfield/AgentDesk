@@ -3,9 +3,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use poise::serenity_prelude::{ChannelId, Http, MessageId, ReactionType};
+use poise::serenity_prelude::Http;
 
+use crate::services::discord::outbound::o_writer_io::GatewayPort;
 use crate::services::tui_o::writer::input_facts::reactions::ReactionPort;
+use crate::services::tui_o::writer::{DiscordPort, PostOutcome};
 
 const NOTICE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -24,13 +26,11 @@ impl DiscordNotice {
         if self.channel == 0 {
             return false;
         }
+        // Plain posting uses the cached transport without bot identity or history lookup.
+        let port = GatewayPort::new(self.http.clone(), 0);
         matches!(
-            tokio::time::timeout(
-                NOTICE_TIMEOUT,
-                ChannelId::new(self.channel).say(&*self.http, text),
-            )
-            .await,
-            Ok(Ok(_))
+            tokio::time::timeout(NOTICE_TIMEOUT, port.post(self.channel, text)).await,
+            Ok(PostOutcome::Created(_))
         )
     }
 }
@@ -46,22 +46,12 @@ impl ReactionPort for DiscordNotice {
         if channel != self.channel || channel == 0 || message == 0 {
             return Err("reaction source does not name this input channel".into());
         }
-        let channel = ChannelId::new(channel);
-        let message = MessageId::new(message);
-        let reaction = ReactionType::Unicode(emoji.to_string());
-        let send = async {
-            if present {
-                channel.create_reaction(&self.http, message, reaction).await
-            } else {
-                channel
-                    .delete_reaction(&self.http, message, None, reaction)
-                    .await
-            }
-        };
-        tokio::time::timeout(NOTICE_TIMEOUT, send)
-            .await
-            .map_err(|_| "input reaction timed out".to_owned())?
-            .map_err(|error| error.to_string())
+        tokio::time::timeout(
+            NOTICE_TIMEOUT,
+            ReactionPort::set(self.http.as_ref(), channel, message, emoji, present),
+        )
+        .await
+        .map_err(|_| "input reaction timed out".to_owned())?
     }
 }
 

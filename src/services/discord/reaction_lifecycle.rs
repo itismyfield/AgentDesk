@@ -43,7 +43,6 @@ pub(in crate::services::discord) fn reaction_target_channel_for_shared(
     )
 }
 
-#[cfg(not(test))]
 #[derive(Clone, Copy)]
 enum ReactionAction {
     Add,
@@ -65,15 +64,14 @@ pub(in crate::services::discord) fn test_parent_retry_failure_status(
     parent_retry_failure_status(initial_status, final_status)
 }
 
-#[cfg(not(test))]
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct ReactionLifecycleError {
     message: String,
     status: Option<u16>,
 }
 
-#[cfg(not(test))]
 impl ReactionLifecycleError {
+    #[cfg(not(test))]
     pub(in crate::services::discord) fn status(&self) -> Option<u16> {
         self.status
     }
@@ -106,6 +104,7 @@ impl ReactionLifecycleError {
         )
     }
 
+    #[cfg(not(test))]
     fn with_dispatch_parent_retry_error(self, target_channel_id: ChannelId, second: Self) -> Self {
         let status = parent_retry_failure_status(self.status, second.status);
         Self::new(
@@ -118,14 +117,12 @@ impl ReactionLifecycleError {
     }
 }
 
-#[cfg(not(test))]
 impl std::fmt::Display for ReactionLifecycleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
     }
 }
 
-#[cfg(not(test))]
 impl ReactionAction {
     fn label(self) -> &'static str {
         match self {
@@ -135,7 +132,6 @@ impl ReactionAction {
     }
 }
 
-#[cfg(not(test))]
 async fn apply_reaction_action_detailed(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -156,7 +152,6 @@ async fn apply_reaction_action_detailed(
     }
 }
 
-#[cfg(not(test))]
 async fn thread_parent_channel_from_http(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -171,7 +166,6 @@ async fn thread_parent_channel_from_http(
     is_thread.then_some(channel.parent_id).flatten()
 }
 
-#[cfg(not(test))]
 async fn try_reaction_raw_once_on_channel_detailed(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -193,7 +187,6 @@ async fn try_reaction_raw_once_on_channel_detailed(
     apply_reaction_action_detailed(http, channel_id, message_id, emoji, action).await
 }
 
-#[cfg(not(test))]
 async fn try_reaction_raw_on_channel_detailed(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -320,7 +313,6 @@ pub(in crate::services::discord) async fn try_remove_reaction_raw_with_shared_de
 }
 
 // Dormant input reconciliation shares the existing reaction identity and channel fallback.
-#[cfg(not(test))]
 impl crate::services::tui_o::writer::input_facts::reactions::ReactionPort for serenity::Http {
     async fn set(
         &self,

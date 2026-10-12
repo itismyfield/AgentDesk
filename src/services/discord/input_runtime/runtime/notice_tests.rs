@@ -78,7 +78,7 @@ impl Mock {
 
 #[tokio::test]
 async fn b_failed_notice_remains_pending_http() {
-    let channel = 6_325_801;
+    let channel = 6_326_921;
     let mock = Mock::new(channel, 1).await;
     let notice = DiscordNotice::new(mock.http.clone(), channel);
     let text = "source 63258002 remains pending".to_owned();
@@ -108,14 +108,20 @@ async fn b_failed_notice_remains_pending_http() {
 
 #[tokio::test]
 async fn b_notice_reactions_use_original_source_and_http_failures() {
-    let channel = 6_325_803;
+    let channel = 6_326_923;
     let mock = Mock::new(channel, 0).await;
     let notice = DiscordNotice::new(mock.http.clone(), channel);
-    notice.set(channel, 6_325_804, '✅', true).await.unwrap();
-    notice.set(channel, 6_325_804, '⏳', false).await.unwrap();
+    notice
+        .set(channel, 940_000_006_326_924, '✅', true)
+        .await
+        .unwrap();
+    notice
+        .set(channel, 940_000_006_326_924, '⏳', false)
+        .await
+        .unwrap();
     assert!(
         notice
-            .set(channel + 1, 6_325_804, '✅', true)
+            .set(channel + 1, 940_000_006_326_924, '✅', true)
             .await
             .is_err()
     );
@@ -129,7 +135,9 @@ async fn b_notice_reactions_use_original_source_and_http_failures() {
     assert_eq!(calls[0].0, Method::PUT);
     assert_eq!(calls[1].0, Method::DELETE);
     assert!(calls.iter().all(|(_, path, _)| {
-        path.contains(&format!("/channels/{channel}/messages/6325804/reactions/"))
+        path.contains(&format!(
+            "/channels/{channel}/messages/940000006326924/reactions/"
+        ))
     }));
 }
 
@@ -144,9 +152,14 @@ async fn b_notice_network_failure_is_not_delivery() {
             .ratelimiter_disabled(true)
             .build(),
     );
-    let notice = DiscordNotice::new(http, 6_325_805);
+    let notice = DiscordNotice::new(http, 6_326_925);
     assert!(!notice.send("retry after network recovery".into()).await);
-    assert!(notice.set(6_325_805, 6_325_806, '✅', true).await.is_err());
+    assert!(
+        notice
+            .set(6_326_925, 940_000_006_326_926, '✅', true)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -166,7 +179,7 @@ async fn b_notice_timeout_remains_pending() {
             .build(),
     );
     let task = tokio::spawn(async move {
-        DiscordNotice::new(http, 6_325_807)
+        DiscordNotice::new(http, 6_326_927)
             .send("retain timeout notice".into())
             .await
     });
