@@ -53,12 +53,20 @@ use crate::services::discord::input_runtime::fence::{BootTarget, boot_skip};
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::ProviderKind;
 
+mod absence_state;
 #[cfg(all(test, unix))]
 mod claude_original_tests;
+use absence_state::{WatcherAbsenceKey, WatcherAbsenceState, respawn_backoff_secs};
 mod idle_relay_absence;
 mod live_bridge_guard;
+#[cfg(unix)]
+mod o_only_retry;
 pub(super) use live_bridge_guard::complete_force_clean_watcher_recovery;
 pub(in crate::services::discord) use live_bridge_guard::retry_pending_watcher_respawn;
+#[cfg(unix)]
+pub(in crate::services::discord) use o_only_retry::{
+    record_retired_o_install_outcome, retired_o_install_due,
+};
 
 use idle_relay_absence::observe_routable_unwatched_tui_sessions;
 
@@ -84,50 +92,6 @@ const WATCHER_RESPAWN_MAX_ATTEMPTS: u32 = 8;
 /// [`WATCHER_RESPAWN_BACKOFF_CEILING_SECS`].
 const WATCHER_RESPAWN_BACKOFF_BASE_SECS: u64 = 30;
 const WATCHER_RESPAWN_BACKOFF_CEILING_SECS: u64 = 960;
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct WatcherAbsenceKey {
-    provider: String,
-    channel_id: u64,
-}
-
-#[derive(Clone, Debug)]
-struct WatcherAbsenceState {
-    first_seen_unix_secs: i64,
-    last_seen_unix_secs: i64,
-    escalated: bool,
-    /// #5957: one-shot latch for the routable-but-unwatched WARN. Separate from
-    /// `escalated` because the two ladders arm from different authorities — this
-    /// one from the surviving registry entry, `escalated` from a health snapshot
-    /// that does not exist for an idle channel.
-    idle_relay_announced: bool,
-    minimum_initial_offset: Option<u64>,
-    failed_attempts: u32,
-    next_attempt_unix_secs: i64,
-    retirement_logged: bool,
-}
-
-impl WatcherAbsenceState {
-    fn newly_absent(now_unix_secs: i64) -> Self {
-        Self {
-            first_seen_unix_secs: now_unix_secs,
-            last_seen_unix_secs: now_unix_secs,
-            escalated: false,
-            idle_relay_announced: false,
-            minimum_initial_offset: None,
-            failed_attempts: 0,
-            next_attempt_unix_secs: now_unix_secs,
-            retirement_logged: false,
-        }
-    }
-}
-
-/// Delay before the next respawn attempt after `failed_attempts` consecutive
-/// failures.
-fn respawn_backoff_secs(failed_attempts: u32) -> u64 {
-    let doublings = failed_attempts.saturating_sub(1).min(5);
-    (WATCHER_RESPAWN_BACKOFF_BASE_SECS << doublings).min(WATCHER_RESPAWN_BACKOFF_CEILING_SECS)
-}
 
 static WATCHER_ABSENCE: LazyLock<dashmap::DashMap<WatcherAbsenceKey, WatcherAbsenceState>> =
     LazyLock::new(dashmap::DashMap::new);
@@ -352,6 +316,9 @@ pub(super) async fn observe_watcher_absence_for_unwatched_work(
     for (channel_id, shared) in
         unwatched_relay_work_candidates(provider, runtimes, watcher_derived).await
     {
+        if super::legacy_supervision::is_retired(provider.as_str(), channel_id.get()) {
+            continue;
+        }
         // Like boot, absence observation leaves a protected channel to its move or handback.
         if boot_skip(BootTarget::Channel(provider, channel_id.get())) {
             continue;
@@ -527,6 +494,12 @@ pub(super) async fn respawn_watcher_after_force_clean(
     minimum_initial_offset: Option<u64>,
     expected_episode: Option<&discord::inflight::InflightEpisodePin>,
 ) -> bool {
+    #[cfg(test)]
+    discord::inflight::o_seed_observation::record_event(
+        provider,
+        channel_id.get(),
+        "legacy_rebind_enter",
+    );
     let ts = chrono::Local::now().format("%H:%M:%S");
     match registry
         .rebind_inflight_after_force_clean(
@@ -594,6 +567,9 @@ pub(super) fn detect_and_escalate_watcher_absence(
     watcher_present: bool,
     now_unix_secs: i64,
 ) -> bool {
+    if super::legacy_supervision::is_retired(provider.as_str(), channel_id.get()) {
+        return false;
+    }
     if discord::live_bridge::is_live(provider, channel_id.get()) {
         return false;
     }
@@ -872,6 +848,12 @@ pub(in crate::services::discord) async fn reclaim_watcherless_session_bound_rela
     pin: &discord::inflight::InflightEpisodePin,
 ) {
     #[cfg(test)]
+    discord::inflight::o_seed_observation::record_event(
+        provider,
+        channel_id.get(),
+        "legacy_reclaim_enter",
+    );
+    #[cfg(test)]
     if let Some(mut counts) = RESPAWN_TEST_COUNTS.get_mut(&channel_id.get()) {
         counts[1] += 1;
     }
@@ -949,23 +931,15 @@ fn record_failed_respawn_attempt(
 }
 
 pub(super) fn gc_watcher_absence_state(now_unix_secs: i64) {
-    WATCHER_ABSENCE.retain(|_, state| {
-        saturating_age_secs(state.last_seen_unix_secs, now_unix_secs)
-            <= WATCHER_ABSENCE_STATE_TTL_SECS
+    WATCHER_ABSENCE.retain(|key, state| {
+        super::legacy_supervision::is_retired(&key.provider, key.channel_id)
+            || saturating_age_secs(state.last_seen_unix_secs, now_unix_secs)
+                <= WATCHER_ABSENCE_STATE_TTL_SECS
     });
 }
 
 fn saturating_age_secs(anchor_unix_secs: i64, now_unix_secs: i64) -> u64 {
     now_unix_secs.saturating_sub(anchor_unix_secs).max(0) as u64
-}
-
-impl WatcherAbsenceKey {
-    fn new(provider: &ProviderKind, channel_id: ChannelId) -> Self {
-        Self {
-            provider: provider.as_str().to_string(),
-            channel_id: channel_id.get(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -988,7 +962,7 @@ mod tests {
     };
     use super::*;
 
-    fn snapshot(
+    pub(super) fn snapshot(
         channel_id: u64,
         tmux_session: Option<&str>,
         tmux_alive: Option<bool>,
@@ -2593,6 +2567,34 @@ mod tests {
 #[cfg(test)]
 static RESPAWN_TEST_COUNTS: LazyLock<dashmap::DashMap<u64, [usize; 2]>> =
     LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) fn n4d2_absence(
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Option<(i64, u32, i64, Option<discord::tmux::OOnlyInstallReason>)> {
+    WATCHER_ABSENCE
+        .get(&WatcherAbsenceKey::new(provider, channel))
+        .map(|state| {
+            (
+                state.first_seen_unix_secs,
+                state.failed_attempts,
+                state.next_attempt_unix_secs,
+                state.o_install_reason,
+            )
+        })
+}
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) fn n4d2_arm_absence(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    now: i64,
+) {
+    WATCHER_ABSENCE
+        .entry(WatcherAbsenceKey::new(provider, channel))
+        .or_insert_with(|| WatcherAbsenceState::newly_absent(now));
+}
 
 #[cfg(test)]
 pub(in crate::services::discord) fn seed_live_bridge_respawn_test(channel: ChannelId) {

@@ -147,6 +147,24 @@ impl ReplayStart {
     }
 }
 
+/// Execution and replay custody remain separate outcomes through queued and worker settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IntakeExecution {
+    Executed,
+    Deferred,
+    ConsumedProtected,
+}
+
+impl IntakeExecution {
+    pub(crate) fn deferred(channel: poise::serenity_prelude::ChannelId) -> Self {
+        if super::checkpoint_waits_for_admission(channel) {
+            Self::Deferred
+        } else {
+            Self::Executed
+        }
+    }
+}
+
 /// Why a start did not happen; the request keeps its custody either way.
 #[derive(Debug)]
 pub(crate) enum StartStop {

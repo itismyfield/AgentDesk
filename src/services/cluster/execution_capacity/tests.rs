@@ -12,6 +12,7 @@ fn payload(node: &str, channel: &str) -> InsertPendingPayload {
         required_labels: json!([]),
         channel_id: channel.into(),
         user_msg_id: format!("message-{channel}"),
+        replay_source_message_ids: None,
         request_owner_id: "user".into(),
         request_owner_name: None,
         user_text: "test".into(),

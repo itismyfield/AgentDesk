@@ -52,6 +52,9 @@ pub struct WriterChannelsConfig {
     /// Selects every `agents[].channels` binding that resolves to a Claude or Codex TUI.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub all_tui: bool,
+    /// Channels allowed to close drained historical source FDs, without selecting a writer.
+    #[serde(skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub dormant_channels: std::collections::BTreeSet<u64>,
 }
 
 /// Bounded copy of bot-authored message events for allowlisted channels.
