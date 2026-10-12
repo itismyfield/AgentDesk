@@ -207,15 +207,61 @@ pub(crate) struct EffectProjection<'a> {
     pub(crate) binding: &'a serde_json::Value,
 }
 
+impl EffectProjection<'_> {
+    pub(crate) fn requires_prior_ack(&self) -> bool {
+        serde_json::from_str::<Vec<String>>(self.effect_target)
+            .is_ok_and(|key| key.first().is_some_and(|kind| kind == "busy_pane"))
+    }
+
+    /// Saves the busy binding before begin; a different saved projection is never replaced.
+    pub(crate) async fn save(
+        &self,
+        pool: &PgPool,
+        receipt_id: i64,
+        nonce: &str,
+    ) -> Result<(), WriteError> {
+        let mut tx = pool.begin().await.map_err(WriteError::Storage)?;
+        let saved = sqlx::query(
+            "UPDATE intake_outbox
+                SET replay_preserved = COALESCE(replay_preserved, '{}'::jsonb) || jsonb_build_object(
+                    'projection', jsonb_build_object('nonce', $2::TEXT, 'effect_target', $3::TEXT,
+                                                     'input_hash', $4::TEXT, 'binding', $5::JSONB))
+              WHERE id = $1 AND replay_episode_nonce = $2
+                AND replay_disposition = 'registered_not_started'
+                AND (replay_preserved #> '{projection}' IS NULL
+                     OR replay_preserved #> '{projection}' = jsonb_build_object(
+                         'nonce', $2::TEXT, 'effect_target', $3::TEXT,
+                         'input_hash', $4::TEXT, 'binding', $5::JSONB))",
+        )
+        .bind(receipt_id)
+        .bind(nonce)
+        .bind(self.effect_target)
+        .bind(self.input_hash)
+        .bind(self.binding)
+        .execute(&mut *tx)
+        .await
+        .map_err(refused)?;
+        if saved.rows_affected() != 1 {
+            return Err(WriteError::CasMiss);
+        }
+        commit(tx).await
+    }
+}
+
 /// A committed start; the permit layer seals it into the one `StartPermit` for this attempt.
 #[derive(Debug)]
 pub(crate) struct BeginAck {
     attempt: ExactAttempt,
     effect_target: String,
     input_hash: String,
+    binding: serde_json::Value,
 }
 
 impl BeginAck {
+    pub(crate) fn binding(&self) -> &serde_json::Value {
+        &self.binding
+    }
+
     pub(crate) fn into_parts(self) -> (ExactAttempt, String, String) {
         (self.attempt, self.effect_target, self.input_hash)
     }
@@ -249,7 +295,10 @@ pub(crate) async fn begin(
                                                      'input_hash', $6::TEXT, 'binding', $7::JSONB))
           WHERE id = $1 AND replay_episode_nonce = COALESCE($3, $2)
             AND replay_disposition = CASE WHEN $3::TEXT IS NULL THEN 'registered_not_started'
-                                          ELSE 'startup_failed_no_effect' END",
+                                          ELSE 'startup_failed_no_effect' END
+            AND (NOT $8::BOOLEAN OR replay_preserved #> '{projection}' = jsonb_build_object(
+                'nonce', $2::TEXT, 'effect_target', $5::TEXT,
+                'input_hash', $6::TEXT, 'binding', $7::JSONB))",
     )
     .bind(receipt_id)
     .bind(nonce)
@@ -258,6 +307,7 @@ pub(crate) async fn begin(
     .bind(effect.effect_target)
     .bind(effect.input_hash)
     .bind(effect.binding)
+    .bind(effect.requires_prior_ack())
     .execute(&mut *tx)
     .await
     .map_err(refused)?;
@@ -292,5 +342,6 @@ pub(crate) async fn begin(
         },
         effect_target: effect.effect_target.to_string(),
         input_hash: effect.input_hash.to_string(),
+        binding: effect.binding.clone(),
     })
 }
