@@ -14,6 +14,8 @@ use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_O
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const NONCE: &str = "policy-receipt";
+/// A change to a row's JSON before its raw write.
+type Edit = fn(&mut serde_json::Value);
 /// The restoring process's generation; the fixture receipt was admitted by generation 5.
 const CURRENT: u64 = 9;
 
@@ -125,7 +127,7 @@ fn receipt(notice: &str) -> serde_json::Value {
 fn write_row(
     state: &inflight::InflightTurnState,
     notice: Option<&str>,
-    edit: fn(&mut serde_json::Value),
+    edit: Edit,
 ) -> std::path::PathBuf {
     let mut value = serde_json::to_value(state).unwrap();
     if let Some(notice) = notice {
@@ -243,7 +245,7 @@ async fn s3act_b3b3_t12_receipt_restart_cannot_settle_stays_held_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let (db, pool, shared) = runtime().await;
-    let cases: [(&str, fn(&mut serde_json::Value)); 8] = [
+    let cases: [(&str, Edit); 8] = [
         ("live actor", same),
         ("drain restart", |row| {
             row["restart_mode"] = serde_json::to_value(InflightRestartMode::DrainRestart).unwrap()
@@ -474,9 +476,9 @@ async fn s3act_b3b3_g1_current_generation_receipt_is_held_without_actor_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let (db, pool, shared) = runtime().await;
-    let admitted_now: fn(&mut serde_json::Value) =
+    let admitted_now: Edit =
         |row| row["herdr_before_start_stop"]["admitted_generation"] = CURRENT.into();
-    let born_now: fn(&mut serde_json::Value) = |row| row["born_generation"] = CURRENT.into();
+    let born_now: Edit = |row| row["born_generation"] = CURRENT.into();
     for (n, (notice, edit)) in [
         ("pending", admitted_now),
         ("delivered", admitted_now),
