@@ -40,7 +40,7 @@ impl DispatchSlotPolarity {
 /// `BIGINT`, defaulting to `-1` when the context is empty / null / missing the
 /// key. `column` is the (optionally qualified) `context` column reference,
 /// e.g. `"d.context"` for an aliased table or `"context"` when unqualified.
-pub(crate) fn dispatch_slot_index_expr(column: &str) -> String {
+pub(crate) fn dispatch_slot_index_expr(column: &'static str) -> String {
     format!(
         "COALESCE(NULLIF((COALESCE(NULLIF({column}, ''), '{{}}')::jsonb)->>'slot_index', '')::BIGINT, -1)"
     )
@@ -48,12 +48,12 @@ pub(crate) fn dispatch_slot_index_expr(column: &str) -> String {
 
 /// SQL boolean expression that extracts `context.<key>` as a BOOLEAN, defaulting
 /// to `FALSE`.
-fn dispatch_bool_flag_expr(column: &str, key: &str) -> String {
+fn dispatch_bool_flag_expr(column: &'static str, key: &'static str) -> String {
     format!("COALESCE(((COALESCE(NULLIF({column}, ''), '{{}}')::jsonb)->>'{key}')::BOOLEAN, FALSE)")
 }
 
 /// SQL expression accessing `context.<key>` as raw JSONB (for `IS NULL` tests).
-fn dispatch_json_member_expr(column: &str, key: &str) -> String {
+fn dispatch_json_member_expr(column: &'static str, key: &'static str) -> String {
     format!("(COALESCE(NULLIF({column}, ''), '{{}}')::jsonb)->'{key}'")
 }
 
@@ -66,10 +66,10 @@ fn dispatch_json_member_expr(column: &str, key: &str) -> String {
 /// additional `AND (...)` filter inside the subquery (used to exclude a
 /// specific dispatch id, e.g. `"d.id != $3"`).
 pub(crate) fn active_dispatch_on_slot_predicate(
-    agent_expr: &str,
-    slot_expr: &str,
+    agent_expr: &'static str,
+    slot_expr: &'static str,
     polarity: DispatchSlotPolarity,
-    extra_clause: Option<&str>,
+    extra_clause: Option<&'static str>,
 ) -> String {
     let slot_index = dispatch_slot_index_expr("d.context");
     let sidecar = dispatch_bool_flag_expr("d.context", "sidecar_dispatch");

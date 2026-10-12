@@ -487,10 +487,10 @@ async fn retain_context_snapshots(
     report: &mut RetentionReport,
 ) -> Result<()> {
     if dry_run {
-        let would = sqlx::query(&format!(
+        let would = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(*)::BIGINT AS n FROM scheduled_message_context_snapshots \
              WHERE {CONTEXT_SNAPSHOT_RECLAIMABLE_PREDICATE}"
-        ))
+        )))
         .bind(CONTEXT_SNAPSHOT_RETENTION_DAYS)
         .fetch_one(pool)
         .await?;
@@ -507,14 +507,14 @@ async fn retain_context_snapshots(
     // delete the snapshots in one transaction so no definition can re-arm in between.
     let mut tx = pool.begin().await?;
 
-    let unref = sqlx::query(&format!(
+    let unref = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE scheduled_messages \
          SET context_snapshot_id = NULL, context_snapshot_reclaimed_at = NOW() \
          WHERE context_snapshot_id IN ( \
              SELECT id FROM scheduled_message_context_snapshots \
              WHERE {CONTEXT_SNAPSHOT_RECLAIMABLE_PREDICATE} \
          )"
-    ))
+    )))
     .bind(CONTEXT_SNAPSHOT_RETENTION_DAYS)
     .execute(&mut *tx)
     .await?;
@@ -524,10 +524,10 @@ async fn retain_context_snapshots(
         rows_affected: unref.rows_affected() as i64,
     });
 
-    let del = sqlx::query(&format!(
+    let del = sqlx::query(sqlx::AssertSqlSafe(format!(
         "DELETE FROM scheduled_message_context_snapshots \
          WHERE {CONTEXT_SNAPSHOT_RECLAIMABLE_PREDICATE}"
-    ))
+    )))
     .bind(CONTEXT_SNAPSHOT_RETENTION_DAYS)
     .execute(&mut *tx)
     .await?;
@@ -615,7 +615,7 @@ async fn count_intake_outbox_candidates<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     report: &mut RetentionReport,
 ) -> Result<()> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT COUNT(*)::BIGINT AS total, \
                 COUNT(*) FILTER (WHERE io.status = 'done')::BIGINT AS done, \
                 COUNT(*) FILTER (WHERE io.status = 'unknown')::BIGINT AS unknown, \
@@ -623,7 +623,7 @@ async fn count_intake_outbox_candidates<'e, E: sqlx::PgExecutor<'e>>(
                 COUNT(*) FILTER (WHERE io.status = 'failed_post_accept')::BIGINT AS failed_post \
          FROM intake_outbox io WHERE {}",
         intake_outbox_candidate_predicate()
-    ))
+    )))
     .bind(INTAKE_OUTBOX_DONE_RETENTION_DAYS)
     .bind(INTAKE_OUTBOX_FAILED_RETENTION_DAYS)
     .fetch_one(executor)
@@ -660,7 +660,7 @@ mod tests {
     /// Exceeds `i32::MAX`; archiving it fails unless the archive token columns are BIGINT.
     const BIG_TOKENS: i64 = 3_000_000_000;
 
-    async fn count(pool: &PgPool, sql: &str) -> i64 {
+    async fn count(pool: &PgPool, sql: &'static str) -> i64 {
         sqlx::query(sql)
             .fetch_one(pool)
             .await
@@ -1114,12 +1114,12 @@ mod tests {
             ("smsg_term_fresh", "smcs_term_fresh", "sent", "NOW()"),
             ("smsg_active", "smcs_active", "scheduled", "NOW()"),
         ] {
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "INSERT INTO scheduled_messages
                     (id, content, target_channel_id, delivery_kind, scheduled_at,
                      status, context_strategy, context_snapshot_id, updated_at)
                  VALUES ($1, 'c', '1', 'push', NOW(), $2, 'snapshot', $3, {updated})"
-            ))
+            )))
             .bind(def_id)
             .bind(status)
             .bind(snap_id)

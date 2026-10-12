@@ -216,7 +216,7 @@ pub async fn retarget_voice_turn_link_pg(
          DO NOTHING
          RETURNING {RETURNING_COLUMNS}"
     );
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(u64_to_i64(insert.guild_id))
         .bind(u64_to_i64(insert.voice_channel_id))
         .bind(u64_to_i64(insert.background_channel_id))
@@ -305,7 +305,7 @@ pub async fn attach_voice_turn_link_ids_pg(
             AND utterance_id = $3
             AND generation = $4"
     );
-    let current_row = sqlx::query(&select_sql)
+    let current_row = sqlx::query(sqlx::AssertSqlSafe(select_sql))
         .bind(u64_to_i64(patch.guild_id))
         .bind(u64_to_i64(patch.voice_channel_id))
         .bind(&patch.utterance_id)
@@ -361,7 +361,7 @@ pub async fn attach_voice_turn_link_ids_pg(
             AND ($7::TEXT IS NULL OR turn_id IS NULL OR turn_id = $7)
           RETURNING {RETURNING_COLUMNS}"
     );
-    let result = sqlx::query(&update_sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(update_sql))
         .bind(u64_to_i64(patch.guild_id))
         .bind(u64_to_i64(patch.voice_channel_id))
         .bind(&patch.utterance_id)
@@ -421,7 +421,7 @@ pub async fn lookup_active_voice_turn_link_by_dispatch_id_pg(
           ORDER BY updated_at DESC, id DESC
           LIMIT 1"
     );
-    let row = sqlx::query(&sql)
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(dispatch_id)
         .fetch_optional(pool)
         .await?;
@@ -440,7 +440,7 @@ pub async fn lookup_active_voice_turn_link_by_announce_message_id_pg(
           ORDER BY updated_at DESC, id DESC
           LIMIT 1"
     );
-    let row = sqlx::query(&sql)
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(u64_to_i64(announce_message_id))
         .fetch_optional(pool)
         .await?;
@@ -459,7 +459,10 @@ pub async fn lookup_active_voice_turn_link_by_turn_id_pg(
           ORDER BY updated_at DESC, id DESC
           LIMIT 1"
     );
-    let row = sqlx::query(&sql).bind(turn_id).fetch_optional(pool).await?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(turn_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row.as_ref().map(row_to_link))
 }
 
@@ -479,7 +482,7 @@ pub async fn lookup_active_voice_turn_link_by_utterance_pg(
           ORDER BY generation DESC, updated_at DESC, id DESC
           LIMIT 1"
     );
-    let row = sqlx::query(&sql)
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(u64_to_i64(guild_id))
         .bind(u64_to_i64(voice_channel_id))
         .bind(utterance_id)
@@ -515,7 +518,7 @@ pub async fn mark_terminal_voice_turn_link_pg(
             AND generation = $4
           RETURNING {RETURNING_COLUMNS}"
     );
-    let row = sqlx::query(&sql)
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(u64_to_i64(guild_id))
         .bind(u64_to_i64(voice_channel_id))
         .bind(utterance_id)

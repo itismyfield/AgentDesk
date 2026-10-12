@@ -5,7 +5,7 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use sqlx::encode::IsNull;
 use sqlx::error::BoxDynError;
 use sqlx::postgres::{PgArgumentBuffer, PgArguments, PgPool, PgTypeInfo};
-use sqlx::{Column, Encode, Postgres, Row, Type, TypeInfo};
+use sqlx::{AssertSqlSafe, Column, Encode, Postgres, Row, Type, TypeInfo};
 use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
@@ -203,7 +203,7 @@ fn db_query_raw_pg_with_json_mode(
     let query_sql = prepared_sql.sql.clone();
     let bind_params = prepared_sql.params.clone();
     let rows = match run_async_bridge_pg(&pool, move |pool| async move {
-        bind_policy_sql_params(sqlx::query(&query_sql), bind_params)
+        bind_policy_sql_params(sqlx::query(AssertSqlSafe(query_sql)), bind_params)
             .fetch_all(&pool)
             .await
             .map_err(|error| format!("query: {error}"))
@@ -282,10 +282,10 @@ pub(crate) fn execute_policy_sql(
         return Err("postgres backend is required for ExecuteSQL intent".to_string());
     };
 
-    let prepared_sql = prepare_policy_sql_for_pg(sql, params)?;
+    let PreparedPolicySql { sql, params } = prepare_policy_sql_for_pg(sql, params)?;
     let pool = pg_pool.clone();
     run_async_bridge_pg(&pool, move |pool| async move {
-        bind_policy_sql_params(sqlx::query(&prepared_sql.sql), prepared_sql.params)
+        bind_policy_sql_params(sqlx::query(AssertSqlSafe(sql)), params)
             .execute(&pool)
             .await
             .map(|result| result.rows_affected())
@@ -310,7 +310,7 @@ fn db_execute_raw_pg(
     let execute_sql = prepared_sql.sql.clone();
     let bind_params = prepared_sql.params.clone();
     let changes = match run_async_bridge_pg(&pool, move |pool| async move {
-        bind_policy_sql_params(sqlx::query(&execute_sql), bind_params)
+        bind_policy_sql_params(sqlx::query(AssertSqlSafe(execute_sql)), bind_params)
             .execute(&pool)
             .await
             .map(|result| result.rows_affected())

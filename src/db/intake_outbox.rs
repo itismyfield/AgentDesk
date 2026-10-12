@@ -14,7 +14,7 @@
 use super::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
 use super::intake_outbox_status::IntakeOutboxStatus;
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 /// Owned snapshot of an `intake_outbox` row. The `Phase 3` worker poll
 /// claims a row, deserializes the payload columns into this struct, then
@@ -327,7 +327,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
          FOR UPDATE OF parent SKIP LOCKED
         "#
     );
-    let capable_source: Option<IntakeOutboxRow> = sqlx::query_as(&capable_source_sql)
+    let capable_source: Option<IntakeOutboxRow> = sqlx::query_as(AssertSqlSafe(capable_source_sql))
         .bind(stale_after_secs)
         .bind(max_attempts)
         .bind(retry_after_secs)
@@ -360,7 +360,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
              FOR UPDATE OF parent SKIP LOCKED
             "#
         );
-        sqlx::query_as(&fallback_source_sql)
+        sqlx::query_as(AssertSqlSafe(fallback_source_sql))
             .bind(retry_after_secs)
             .fetch_optional(&mut *tx)
             .await?
@@ -595,7 +595,7 @@ pub(crate) async fn claim_pending_for_target_except(
 
     // With nothing held the claim runs the original statement and bindings unchanged.
     let candidate: Option<i64> = if held_channels.is_empty() {
-        sqlx::query_scalar(&format!(
+        sqlx::query_scalar(AssertSqlSafe(format!(
             "SELECT io.id FROM intake_outbox io
              WHERE io.target_instance_id = $1
                AND io.status = 'pending'
@@ -604,13 +604,13 @@ pub(crate) async fn claim_pending_for_target_except(
              ORDER BY io.created_at ASC
              LIMIT 1
              FOR UPDATE OF io SKIP LOCKED"
-        ))
+        )))
         .bind(target_instance_id)
         .bind(provider)
         .fetch_optional(&mut *tx)
         .await?
     } else {
-        sqlx::query_scalar(&format!(
+        sqlx::query_scalar(AssertSqlSafe(format!(
             "SELECT io.id FROM intake_outbox io
              WHERE io.target_instance_id = $1
                AND io.status = 'pending'
@@ -620,7 +620,7 @@ pub(crate) async fn claim_pending_for_target_except(
              ORDER BY io.created_at ASC
              LIMIT 1
              FOR UPDATE OF io SKIP LOCKED"
-        ))
+        )))
         .bind(target_instance_id)
         .bind(provider)
         .bind(held_channels)
@@ -652,14 +652,14 @@ async fn confirm_claim(
     id: i64,
     claim_owner: &str,
 ) -> Result<Option<IntakeOutboxRow>, sqlx::Error> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(AssertSqlSafe(format!(
         "UPDATE intake_outbox io
          SET status = $3,
              claim_owner = $2,
              claimed_at = NOW()
          WHERE io.id = $1 AND {HOME_CLAIM_FENCE} AND {REPLAY_CLAIM_FENCE}
          RETURNING *"
-    ))
+    )))
     .bind(id)
     .bind(claim_owner)
     .bind(IntakeOutboxStatus::Claimed)
@@ -739,12 +739,12 @@ pub(crate) async fn mark_accepted(
     claim_owner: &str,
 ) -> Result<bool, sqlx::Error> {
     // The claim's home fence in the same UPDATE: a home moved after the worker's last check refuses.
-    let result = sqlx::query(&format!(
+    let result = sqlx::query(AssertSqlSafe(format!(
         "UPDATE intake_outbox io
          SET status = $3, accepted_at = NOW()
          WHERE io.id = $1 AND io.status = $4 AND io.claim_owner = $2
            AND {HOME_CLAIM_FENCE} AND {REPLAY_CLAIM_FENCE}"
-    ))
+    )))
     .bind(id)
     .bind(claim_owner)
     .bind(IntakeOutboxStatus::Accepted)
@@ -945,7 +945,7 @@ pub(crate) async fn channel_has_open_row(
         "SELECT EXISTS (SELECT 1 FROM intake_outbox
                          WHERE channel_id = $1 AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL}))"
     );
-    sqlx::query_scalar(&sql)
+    sqlx::query_scalar(AssertSqlSafe(sql))
         .bind(channel_id)
         .fetch_one(pool)
         .await
@@ -986,7 +986,7 @@ mod migration_pg_tests {
     use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
     use crate::db::intake_outbox_status::{IntakeOutboxStatus, OperatorRetryClass};
     use serde_json::json;
-    use sqlx::Row;
+    use sqlx::{AssertSqlSafe, Row};
 
     /// Migration 0080 verbatim. Every statement is idempotent — the DDL is
     /// `IF [NOT] EXISTS` and each backfill/fail-closed UPDATE is gated on
@@ -1153,7 +1153,7 @@ mod migration_pg_tests {
             "SELECT COUNT(*)::BIGINT FROM intake_outbox
              WHERE provider = '' AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})"
         );
-        let unclaimable: i64 = sqlx::query_scalar(&unclaimable_sql)
+        let unclaimable: i64 = sqlx::query_scalar(AssertSqlSafe(unclaimable_sql))
             .fetch_one(&pool)
             .await
             .expect("count unclaimable open rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
@@ -1378,7 +1378,7 @@ mod migration_pg_tests {
              WHERE status IN ({prior_statuses})
              ORDER BY id"
         );
-        let old_ids: Vec<i64> = sqlx::query_scalar(&prior_sql)
+        let old_ids: Vec<i64> = sqlx::query_scalar(AssertSqlSafe(prior_sql))
             .fetch_all(&pool)
             .await
             .expect("select pre-T2-M open rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
@@ -1387,7 +1387,7 @@ mod migration_pg_tests {
              WHERE status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
              ORDER BY id"
         );
-        let widened_ids: Vec<i64> = sqlx::query_scalar(&widened_sql)
+        let widened_ids: Vec<i64> = sqlx::query_scalar(AssertSqlSafe(widened_sql))
             .fetch_all(&pool)
             .await
             .expect("select T2-M open rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module

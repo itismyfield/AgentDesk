@@ -4,7 +4,7 @@ use crate::db::replay_disposition::write::WriteError;
 use crate::services::discord::replay_policy::live::{RawObservation, Seen};
 use crate::services::discord::replay_policy::permit::{EffectTarget, PreparedRetryStart};
 use crate::services::discord::replay_policy::{ReplayDecision, decide_stale};
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 fn request(key: &str, sources: &[&str]) -> CanonicalInput {
     CanonicalInput {
@@ -80,7 +80,11 @@ async fn preflight_sends_every_blocking_state_to_protected_consumption_pg() {
         let id = started(&ctx, &request(state, &[state])).await;
         let sql =
             format!("UPDATE intake_outbox SET replay_disposition = '{state}'{extra} WHERE id = $1");
-        sqlx::query(&sql).bind(id).execute(&pool).await.unwrap();
+        sqlx::query(AssertSqlSafe(sql))
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
         let ReplayPreflight::ConsumeProtected(set) =
             preflight_source(&ctx, &request("again", &[state])).await
         else {

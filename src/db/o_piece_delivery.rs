@@ -4,7 +4,7 @@
 use std::fmt;
 
 use sqlx::postgres::{PgArguments, PgRow};
-use sqlx::{PgExecutor, PgPool, Postgres, Row};
+use sqlx::{AssertSqlSafe, PgExecutor, PgPool, Postgres, Row};
 
 use super::o_piece_attempts::{self, AttemptResult};
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
@@ -273,7 +273,7 @@ pub(crate) async fn admit(pool: &PgPool, new: &NewDelivery) -> Result<AdmitOutco
     );
     let inserted = new
         .key
-        .bind(sqlx::query(&insert))
+        .bind(sqlx::query(AssertSqlSafe(insert)))
         .bind(&new.payload)
         .bind(&new.payload_sha256)
         .bind(new.identity_version)
@@ -299,11 +299,11 @@ pub(crate) async fn admit(pool: &PgPool, new: &NewDelivery) -> Result<AdmitOutco
     } else if row.same_piece(new) {
         AdmitOutcome::Existing(row)
     } else {
-        let note = format!(
+        let note = AssertSqlSafe(format!(
             "UPDATE o_piece_delivery SET conflict_sha256 = $6, conflict_at = NOW() \
              WHERE {KEY_MATCH} RETURNING {ROW_COLUMNS}"
-        );
-        let noted = new.key.bind(sqlx::query(&note)).bind(&new.payload_sha256);
+        ));
+        let noted = new.key.bind(sqlx::query(note)).bind(&new.payload_sha256);
         AdmitOutcome::IdentityConflict(DeliveryRow::read(&noted.fetch_one(&mut *tx).await?)?)
     };
     tx.commit().await?;
@@ -313,10 +313,13 @@ pub(crate) async fn admit(pool: &PgPool, new: &NewDelivery) -> Result<AdmitOutco
 async fn select<'c>(
     executor: impl PgExecutor<'c>,
     key: &PieceKey,
-    lock: &str,
+    lock: &'static str,
 ) -> Result<Option<DeliveryRow>, LedgerError> {
     let sql = format!("SELECT {ROW_COLUMNS} FROM o_piece_delivery WHERE {KEY_MATCH}{lock}");
-    let row = key.bind(sqlx::query(&sql)).fetch_optional(executor).await?;
+    let row = key
+        .bind(sqlx::query(AssertSqlSafe(sql)))
+        .fetch_optional(executor)
+        .await?;
     row.as_ref().map(DeliveryRow::read).transpose()
 }
 
@@ -334,7 +337,7 @@ pub(crate) async fn admitted_keys(
     channel_id: u64,
 ) -> Result<Vec<PieceKey>, LedgerError> {
     let sql = format!("SELECT {KEY_COLUMNS} FROM o_piece_delivery WHERE channel_id = $1");
-    let rows = sqlx::query(&sql)
+    let rows = sqlx::query(AssertSqlSafe(sql))
         .bind(channel_id.to_string())
         .fetch_all(pool)
         .await?;
@@ -407,7 +410,7 @@ pub(crate) async fn record_receipt(
     );
     let inserted = receipt
         .key
-        .bind(sqlx::query(&insert))
+        .bind(sqlx::query(AssertSqlSafe(insert)))
         .bind(to_pg(receipt.message_id, "message")?)
         .bind(receipt.slot.map(i16::from))
         .bind(to_pg(receipt.author_id, "author")?)
@@ -424,7 +427,7 @@ pub(crate) async fn record_receipt(
         let sql = format!(
             "SELECT {KEY_COLUMNS} FROM o_piece_receipts WHERE channel_id = $1 AND message_id = $2"
         );
-        let holder = sqlx::query(&sql)
+        let holder = sqlx::query(AssertSqlSafe(sql))
             .bind(receipt.key.unit().channel_id.to_string())
             .bind(to_pg(receipt.message_id, "message")?)
             .fetch_one(&mut *tx)
@@ -448,7 +451,7 @@ pub(super) async fn advance(
          WHERE {KEY_MATCH} RETURNING revision"
     );
     Ok(key
-        .bind(sqlx::query(&sql))
+        .bind(sqlx::query(AssertSqlSafe(sql)))
         .fetch_one(&mut **tx)
         .await?
         .try_get(0)?)

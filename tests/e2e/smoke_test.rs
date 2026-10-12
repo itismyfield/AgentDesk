@@ -87,7 +87,9 @@ impl SmokeDatabase {
                 .block_on(async move {
                     use sqlx::Connection;
                     let mut connection = sqlx::PgConnection::connect(&admin_url).await?;
-                    sqlx::raw_sql(&sql).execute(&mut connection).await?;
+                    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                        .execute(&mut connection)
+                        .await?;
                     connection.close().await
                 })
         })

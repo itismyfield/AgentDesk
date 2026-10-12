@@ -79,7 +79,13 @@ pub(super) async fn run_bot_start_gateway_runtime(
                     Ok(allowed)
                 })
             }),
-            event_handler: |ctx, event, _framework, data| Box::pin(handle_event(ctx, event, data)),
+            event_handler: |framework, event| {
+                Box::pin(handle_event(
+                    framework.serenity_context,
+                    event,
+                    framework.user_data,
+                ))
+            },
             ..Default::default()
         })
         .setup(move |ctx, _ready, framework| {

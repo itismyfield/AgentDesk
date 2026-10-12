@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{AssertSqlSafe, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use super::o_piece_delivery::{
@@ -154,7 +154,7 @@ pub(crate) async fn grant(
     let lock =
         format!("SELECT revision, failure FROM o_piece_delivery WHERE {KEY_MATCH} FOR UPDATE");
     let Some(row) = key
-        .bind(sqlx::query(&lock))
+        .bind(sqlx::query(AssertSqlSafe(lock)))
         .fetch_optional(&mut *tx)
         .await?
     else {
@@ -164,7 +164,7 @@ pub(crate) async fn grant(
     let failure: Option<String> = row.try_get("failure")?;
     let resolved = format!("SELECT EXISTS (SELECT 1 FROM o_piece_receipts WHERE {KEY_MATCH})");
     if key
-        .bind(sqlx::query(&resolved))
+        .bind(sqlx::query(AssertSqlSafe(resolved)))
         .fetch_one(&mut *tx)
         .await?
         .try_get(0)?
@@ -199,7 +199,7 @@ pub(crate) async fn grant(
          run_id, deadline) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, \
          NOW() + make_interval(secs => $12))"
     );
-    key.bind(sqlx::query(&insert))
+    key.bind(sqlx::query(AssertSqlSafe(insert)))
         .bind(i16::from(slot))
         .bind(grant_id)
         .bind(kind.as_str())
@@ -233,7 +233,7 @@ pub(crate) async fn settle(
     );
     let settled = grant
         .key
-        .bind(sqlx::query(&sql))
+        .bind(sqlx::query(AssertSqlSafe(sql)))
         .bind(result.as_str())
         .bind(i16::from(grant.slot))
         .bind(grant.grant_id)
@@ -253,11 +253,11 @@ pub(crate) async fn settle(
 /// clock, so one node's clock never decides another's lease. Returns the slots it settled.
 pub(crate) async fn settle_expired(pool: &PgPool, key: &PieceKey) -> Result<Vec<u8>, LedgerError> {
     let mut tx = pool.begin().await?;
-    let sql = format!(
+    let sql = AssertSqlSafe(format!(
         "UPDATE o_piece_attempts SET result = 'abandoned', settled_at = NOW() \
          WHERE {KEY_MATCH} AND result IS NULL AND deadline <= NOW() RETURNING slot"
-    );
-    let rows = key.bind(sqlx::query(&sql)).fetch_all(&mut *tx).await?;
+    ));
+    let rows = key.bind(sqlx::query(sql)).fetch_all(&mut *tx).await?;
     let slots = rows
         .iter()
         .map(|row| slot_of(row.try_get("slot")?))
@@ -293,7 +293,7 @@ pub(super) async fn record_spent(
             _ => (AttemptKind::PriorRetry, AttemptResult::Uncertain),
         };
         new.key
-            .bind(sqlx::query(&insert))
+            .bind(sqlx::query(AssertSqlSafe(insert.as_str())))
             .bind(i16::from(slot))
             .bind(Uuid::new_v4())
             .bind(kind.as_str())
@@ -310,10 +310,10 @@ async fn attempts_in(
     tx: &mut Transaction<'_, Postgres>,
     key: &PieceKey,
 ) -> Result<Vec<AttemptRow>, LedgerError> {
-    let sql = format!(
+    let sql = AssertSqlSafe(format!(
         "SELECT slot, intent, result FROM o_piece_attempts WHERE {KEY_MATCH} ORDER BY slot"
-    );
-    let rows = key.bind(sqlx::query(&sql)).fetch_all(&mut **tx).await?;
+    ));
+    let rows = key.bind(sqlx::query(sql)).fetch_all(&mut **tx).await?;
     rows.iter()
         .map(|row| -> Result<AttemptRow, LedgerError> {
             let kind: String = row.try_get("intent")?;

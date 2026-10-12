@@ -817,9 +817,9 @@ async fn pg_fallback_requires_confirmed_episode_and_terminal_evidence() {
         ),
     ] {
         seed(&f.pool, origin, "admitted", false).await;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE imsg_reply_obligations SET {assignment} WHERE origin_id=$1"
-        ))
+        )))
         .bind(origin)
         .execute(&f.pool)
         .await
@@ -895,9 +895,9 @@ async fn pg_migration_rerun_preserves_checksum_and_check_contract() {
         "resolution='bad'",
     ] {
         assert_sqlstate(
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "UPDATE imsg_reply_obligations SET {assignment} WHERE origin_id='ddl'"
-            ))
+            )))
             .execute(&f.pool)
             .await
             .unwrap_err(),
@@ -914,9 +914,9 @@ async fn pg_migration_rerun_preserves_checksum_and_check_contract() {
     }
     for assignment in ["sent_at=NULL", "status='not_sent'"] {
         assert_sqlstate(
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "UPDATE imsg_reply_actions SET {assignment} WHERE id=$1"
-            ))
+            )))
             .bind(id)
             .execute(&f.pool)
             .await

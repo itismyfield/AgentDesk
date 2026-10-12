@@ -22,7 +22,7 @@ pub(super) async fn run_bot_framework_setup(
     let commands = &framework.options().commands;
     // Populate known slash command names for router fallback logic
     let cmd_names: std::collections::HashSet<String> =
-        commands.iter().map(|c| c.name.clone()).collect();
+        commands.iter().map(|c| c.name.to_string()).collect();
     let _ = shared_for_migrate
         .known_slash_commands
         .set(cmd_names.clone());

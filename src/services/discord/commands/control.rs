@@ -1341,7 +1341,7 @@ mod clear_persist_failure_tests {
             &["DROP TRIGGER reject_clear_boundary_trigger ON channel_session_clear_boundaries"]
         };
         for statement in statements {
-            sqlx::query(statement)
+            sqlx::query(*statement)
                 .execute(pool)
                 .await
                 .expect("toggle the clear boundary trap"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture

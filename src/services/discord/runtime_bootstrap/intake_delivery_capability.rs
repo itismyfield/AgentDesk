@@ -351,6 +351,7 @@ mod tests;
 mod postgres_tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
+    use sqlx::AssertSqlSafe;
     use uuid::Uuid;
 
     async fn database() -> (TestPostgresDb, PgPool) {
@@ -365,7 +366,10 @@ mod postgres_tests {
     }
 
     async fn execute(pool: &PgPool, statement: &str) {
-        sqlx::query(statement).execute(pool).await.unwrap();
+        sqlx::query(AssertSqlSafe(statement))
+            .execute(pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -384,13 +388,13 @@ mod postgres_tests {
         assert_eq!(forbidden, 0);
 
         let schema = format!("attacker_{}", Uuid::new_v4().simple());
-        sqlx::raw_sql(&format!(
+        sqlx::raw_sql(AssertSqlSafe(format!(
             "CREATE SCHEMA {schema};
              CREATE TABLE {schema}.intake_outbox
                (LIKE public.intake_outbox INCLUDING ALL);
              CREATE TABLE {schema}.delivery_journal_events
                (LIKE public.delivery_journal_events INCLUDING ALL)"
-        ))
+        )))
         .execute(&pool)
         .await
         .unwrap();
@@ -399,16 +403,20 @@ mod postgres_tests {
             .execute(&mut *tx)
             .await
             .unwrap();
-        sqlx::query(&format!("SET LOCAL search_path={schema},public"))
-            .execute(&mut *tx)
-            .await
-            .unwrap();
+        sqlx::query(AssertSqlSafe(format!(
+            "SET LOCAL search_path={schema},public"
+        )))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
         assert_eq!(probe_inner(&mut tx).await.unwrap(), SchemaReason::Ready);
         assert_eq!(
-            sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {schema}.intake_outbox"))
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap(),
+            sqlx::query_scalar::<_, i64>(AssertSqlSafe(format!(
+                "SELECT count(*) FROM {schema}.intake_outbox"
+            )))
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap(),
             0
         );
         tx.rollback().await.unwrap();
@@ -429,10 +437,10 @@ mod postgres_tests {
             .execute(&mut *snapshot)
             .await
             .unwrap();
-        let original_oid: i64 = sqlx::query_scalar(&format!(
+        let original_oid: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
             "SELECT oid::bigint FROM pg_catalog.pg_class
               WHERE oid='{snapshot_schema}.target'::pg_catalog.regclass"
-        ))
+        )))
         .fetch_one(&mut *snapshot)
         .await
         .unwrap();
@@ -446,23 +454,23 @@ mod postgres_tests {
             &format!("CREATE TABLE {snapshot_schema}.target(id bigint)"),
         )
         .await;
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "LOCK TABLE {snapshot_schema}.target IN ACCESS SHARE MODE"
-        ))
+        )))
         .execute(&mut *snapshot)
         .await
         .unwrap();
-        let snapshot_oid: i64 = sqlx::query_scalar(&format!(
+        let snapshot_oid: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
             "SELECT oid::bigint FROM pg_catalog.pg_class
               WHERE relnamespace='{snapshot_schema}'::pg_catalog.regnamespace
                 AND relname='target'"
-        ))
+        )))
         .fetch_one(&mut *snapshot)
         .await
         .unwrap();
-        let live_oid: i64 = sqlx::query_scalar(&format!(
+        let live_oid: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
             "SELECT '{snapshot_schema}.target'::pg_catalog.regclass::oid::bigint"
-        ))
+        )))
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -513,12 +521,12 @@ mod postgres_tests {
         }
 
         let domain_schema = format!("domain_{}", Uuid::new_v4().simple());
-        sqlx::raw_sql(&format!(
+        sqlx::raw_sql(AssertSqlSafe(format!(
             "CREATE SCHEMA {domain_schema};
              CREATE DOMAIN {domain_schema}.timestamptz AS pg_catalog.timestamptz;
              ALTER TABLE public.intake_outbox ALTER COLUMN completed_at
                TYPE {domain_schema}.timestamptz USING completed_at::{domain_schema}.timestamptz"
-        ))
+        )))
         .execute(&pool)
         .await
         .unwrap();
@@ -552,13 +560,13 @@ mod postgres_tests {
         .await
         .unwrap();
         assert_eq!(probe_schema(&pool).await, SchemaReason::Constraint);
-        sqlx::raw_sql(&format!(
+        sqlx::raw_sql(AssertSqlSafe(format!(
             "ALTER TABLE public.intake_outbox
                DROP CONSTRAINT intake_outbox_dispatched_requires_clock;
              ALTER TABLE public.intake_outbox
                ADD CONSTRAINT intake_outbox_dispatched_requires_clock {} NOT VALID",
             INTAKE_CHECKS[0].1
-        ))
+        )))
         .execute(&pool)
         .await
         .unwrap();
@@ -579,11 +587,11 @@ mod postgres_tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "ALTER TABLE public.intake_outbox
              ADD CONSTRAINT intake_outbox_dispatched_requires_clock {} NOT VALID",
             INTAKE_CHECKS[0].1
-        ))
+        )))
         .execute(&pool)
         .await
         .unwrap();
@@ -628,52 +636,55 @@ mod postgres_tests {
         .await;
         assert_eq!(probe_schema(&pool).await, SchemaReason::Index);
         execute(&pool, "DROP INDEX public.delivery_journal_obligation_order").await;
-        sqlx::raw_sql(&obligation_order)
+        sqlx::raw_sql(AssertSqlSafe(obligation_order))
             .execute(&pool)
             .await
             .unwrap();
         for (name, definition) in definitions {
             for bit in ["indisvalid", "indisready", "indislive"] {
-                sqlx::query(&format!(
+                sqlx::query(AssertSqlSafe(format!(
                     "UPDATE pg_catalog.pg_index SET {bit}=false
                       WHERE indexrelid='public.{name}'::regclass"
-                ))
+                )))
                 .execute(&pool)
                 .await
                 .unwrap();
                 assert_eq!(probe_schema(&pool).await, SchemaReason::Index);
-                sqlx::query(&format!(
+                sqlx::query(AssertSqlSafe(format!(
                     "UPDATE pg_catalog.pg_index SET {bit}=true
                       WHERE indexrelid='public.{name}'::regclass"
-                ))
+                )))
                 .execute(&pool)
                 .await
                 .unwrap();
             }
             execute(&pool, &format!("DROP INDEX public.{name}")).await;
-            sqlx::query(&format!(
+            sqlx::query(AssertSqlSafe(format!(
                 "CREATE INDEX {name} ON public.intake_outbox(id) WHERE status='pending'"
-            ))
+            )))
             .execute(&pool)
             .await
             .unwrap();
             assert_eq!(probe_schema(&pool).await, SchemaReason::Index);
             execute(&pool, &format!("DROP INDEX public.{name}")).await;
-            sqlx::raw_sql(&definition).execute(&pool).await.unwrap();
+            sqlx::raw_sql(AssertSqlSafe(definition))
+                .execute(&pool)
+                .await
+                .unwrap();
         }
         assert_eq!(probe_schema(&pool).await, SchemaReason::Ready);
 
         let role = format!("intake_probe_{}", Uuid::new_v4().simple());
-        sqlx::raw_sql(&format!(
+        sqlx::raw_sql(AssertSqlSafe(format!(
             "CREATE ROLE {role} NOLOGIN;
              GRANT USAGE ON SCHEMA public TO {role};
              GRANT SELECT ON public._sqlx_migrations TO {role}"
-        ))
+        )))
         .execute(&pool)
         .await
         .unwrap();
         let mut limited = pool.acquire().await.unwrap();
-        sqlx::query(&format!("SET ROLE {role}"))
+        sqlx::query(AssertSqlSafe(format!("SET ROLE {role}")))
             .execute(&mut *limited)
             .await
             .unwrap();
@@ -686,10 +697,12 @@ mod postgres_tests {
             .await
             .unwrap();
         drop(limited);
-        sqlx::raw_sql(&format!("DROP OWNED BY {role}; DROP ROLE {role}"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "DROP OWNED BY {role}; DROP ROLE {role}"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
 
         assert_eq!(probe_schema(&pool).await, SchemaReason::Ready);
         finish(database, pool).await;

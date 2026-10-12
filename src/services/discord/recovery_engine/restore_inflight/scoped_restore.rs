@@ -1565,9 +1565,9 @@ mod b3a2_tests {
             );
             let change = async {
                 barrier.entered.notified().await;
-                sqlx::query(&format!(
+                sqlx::query(sqlx::AssertSqlSafe(format!(
                     "UPDATE o_channel_homes SET {column}=$1 WHERE channel_id=$2"
-                ))
+                )))
                 .bind(value)
                 .bind(channel.to_string())
                 .execute(&pool)

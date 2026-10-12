@@ -628,7 +628,7 @@ pub(super) async fn query_agent_quality_daily_pg(
             LIMIT $3",
         agent_quality_daily_select_pg()
     );
-    let rows = sqlx::query(&sql)
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(agent_id)
         .bind(days as i32)
         .bind(limit as i64)
@@ -745,7 +745,7 @@ pub(super) async fn query_agent_quality_ranking_pg(
          ORDER BY rank ASC
          LIMIT $1"
     );
-    let rows = sqlx::query(&sql)
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(limit as i64)
         .fetch_all(pool)
         .await

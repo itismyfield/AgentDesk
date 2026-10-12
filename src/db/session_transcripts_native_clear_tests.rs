@@ -231,9 +231,9 @@ async fn native_write_is_all_or_nothing_and_partial_correlation_is_refused_pg() 
         ("legacy", "native_clear_generation = 1"),
         ("legacy", "native_clear_resolved_at = NOW()"),
     ] {
-        let error = sqlx::query(&format!(
+        let error = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE channel_session_clear_boundaries SET {set} WHERE channel_id = $1"
-        ))
+        )))
         .bind(channel)
         .execute(&pool)
         .await

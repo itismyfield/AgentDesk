@@ -41,16 +41,16 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 
 # Database
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate", "macros", "chrono", "json", "uuid"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "migrate", "macros", "chrono", "json", "uuid"] }
 
 # Discord
-serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend"] }
-poise = "0.6"
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "native_tls_backend"] }
+poise = { version = "0.7", default-features = false, features = ["cache", "chrono", "handle_panics"] }
 
 # Voice — 0.6.0 (Hoopoe) 부터 Discord DAVE/E2EE 프로토콜 지원. 2026-03-02 이후
 # Discord 가 non-stage voice channel 에 DAVE 강제 (close code 4017). 0.4/0.5
 # 는 거부되므로 0.6+ 필수. MSRV 1.83 (현재 1.94 사용 중 → OK).
-songbird = { version = "0.6", default-features = false, features = ["driver", "gateway", "receive", "serenity", "rustls", "tungstenite"] }
+songbird = { version = "0.6", default-features = false, features = ["driver", "gateway", "receive", "serenity", "native", "tungstenite"] }
 # #2054 v5 — songbird 0.6 의 File input 은 symphonia 만으로 디코드한다 (ffmpeg
 # 의존성 0.5 에서 제거). symphonia 의 default features 에는 mp3 코덱이 빠져
 # 있어서 edge-tts 로 받은 mp3 파일이 즉시 EOF 로 끝나며 무음 트랙이 된다.
@@ -105,7 +105,7 @@ blake3 = "1"
 dashmap = "6"
 
 # From RCC — HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "form", "query"] }
 
 # From RCC — crypto
 sha2 = "0.10"
