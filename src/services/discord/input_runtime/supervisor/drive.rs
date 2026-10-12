@@ -400,10 +400,115 @@ impl<P: Ports> Supervisor<P> {
         }
     }
 
+    /// S1 to S7; exhaustion and Close are process-local admission barriers.
+    pub(crate) async fn boot(&mut self) -> Landing {
+        self.admitted = false;
+        let result = match self.boot_guard() {
+            Err(cause) => Err(cause),
+            Ok(()) => {
+                self.invalidate_order();
+                match self.boot_guard() {
+                    Err(cause) => Err(cause),
+                    Ok(()) => self.stages().await,
+                }
+            }
+        };
+        match result {
+            Ok(landing) => landing,
+            Err(cause) => {
+                self.registration.report(&cause, true);
+                Landing::Held(cause)
+            }
+        }
+    }
+
+    fn boot_guard(&self) -> Result<(), HoldCause> {
+        if let Some(cause) = self.registration.latched() {
+            return Err(cause);
+        }
+        let exhausted = self.order.exhausted();
+        #[cfg(test)]
+        let exhausted = exhausted && !super::mutant("boot_reopens_exhausted_admission");
+        if exhausted {
+            return Err(held("generation_exhausted"));
+        }
+        if self.closed {
+            return Err(held("closed"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn invalidate_order(&mut self) {
+        match self
+            .admission_gen
+            .checked_add(1)
+            .filter(|epoch| *epoch != u64::MAX)
+        {
+            Some(epoch) => {
+                self.admission_gen = epoch;
+                self.order.invalidate(epoch);
+            }
+            None => self.order.exhaust(),
+        }
+        if self.order.exhausted() {
+            self.admitted = false;
+        }
+    }
+
+    pub(super) async fn close_command(
+        &mut self,
+        ack: tokio::sync::oneshot::Sender<
+            Result<super::command::ClosedAndFlushed, super::receipt::Deferred>,
+        >,
+    ) {
+        use super::receipt::Deferred;
+        self.closed = true;
+        self.invalidate_order();
+        let closing = {
+            let closings = self
+                .registration
+                .registry
+                .closings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            closings.get(&self.registration.key).cloned()
+        };
+        #[cfg(test)]
+        let observer = self.after_close_loan.get_mut().unwrap().take();
+        let (result, flushed) = super::command::close_slot(
+            &mut self.slot,
+            closing,
+            &self.config.provider,
+            self.config.channel,
+            ack,
+            #[cfg(test)]
+            observer,
+        )
+        .await;
+        if result.is_ok() || matches!(result, Err(Deferred::Gate(_))) {
+            self.registration
+                .report(&held("ledger_close_gate_unconfirmed"), result.is_err());
+        }
+        if flushed
+            || matches!(
+                result,
+                Err(Deferred::Persistence | Deferred::SupervisorLost)
+            )
+        {
+            self.registration
+                .report(&held("ledger_close_flush_unconfirmed"), !flushed);
+        }
+        #[cfg(test)]
+        if result.is_err() && super::mutant("close_failure_reopens_admission") {
+            self.closed = false;
+            self.admitted = true;
+        }
+    }
+
     /// S8: a drive over the whole binding log so far. Nothing opens before its first pass, and
     /// nothing starts before admission.
     pub(crate) fn start_drive<D: DrivePorts>(&mut self, ports: D) -> Option<Started<D>> {
-        if !self.admitted || self.registration.latched().is_some() {
+        if !self.admission_open() {
             return None;
         }
         let gate = fence::lookup(&self.config.provider, self.config.channel)?;
@@ -462,9 +567,8 @@ impl<P: Ports> Supervisor<P> {
                 }
                 Some(SupervisorCmd::Clear) => self.clear(&mut drive, Instant::now()).await,
                 Some(SupervisorCmd::Close { ack }) => {
-                    self.gate(&mut drive, false);
-                    self.input_command(SupervisorCmd::Close { ack }, false)
-                        .await;
+                    self.close_command(ack).await;
+                    drive.ready = false;
                 }
                 Some(command) => {
                     let latest = self.cursor.as_mut().map_or(Ok(Vec::new()), |cursor| {
@@ -743,6 +847,18 @@ impl<P: Ports> Supervisor<P> {
             drive.ready = false;
             return self.registration.report(&cause, true);
         }
+        if ready {
+            let advance = true;
+            #[cfg(test)]
+            let advance = advance && !super::mutant("drop_gate_generation");
+            if advance {
+                self.invalidate_order();
+            }
+            if !self.admission_open() {
+                drive.ready = false;
+                return;
+            }
+        }
         #[cfg(test)]
         match ready {
             true => drive.counts.opens += 1,
@@ -759,7 +875,7 @@ impl<P: Ports> Supervisor<P> {
         let advance = moved.is_ok();
         #[cfg(test)]
         let advance = advance && !super::mutant("drop_gate_generation");
-        if advance {
+        if advance && !ready {
             self.invalidate_order();
         }
         drive.ready = ready && moved.is_ok();
