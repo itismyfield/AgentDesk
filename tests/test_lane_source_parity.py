@@ -927,5 +927,36 @@ class NewRequiredIdTests(unittest.TestCase):
         self.assertIn("added=1 mapped=0 excepted=1", output)
         self.assertEqual(result, 0, output)
 
+    def test_unevaluated_conditional_attribute_leaves_only_its_id_platform_unproven(self) -> None:
+        plain = "#[cfg(test)]\nmod plain_tests {\n    #[test]\n    fn runs_anywhere() {}\n}\n"
+        cases = {
+            "tests::new_platform_case": ("lib", (
+                "#[cfg(test)]\nmod tests {\n    #[cfg_attr(unix, cfg(windows))]\n"
+                "    #[test]\n    fn new_platform_case() {}\n}\n")),
+            "inline_case::tests::new_windows_case": ("inline_case", (
+                "#[cfg(test)]\nmod tests {\n    #![cfg(windows)] // Windows only\n"
+                "    #[test]\n    fn new_windows_case() {}\n}\n")),
+            "same_line::tests::new_token_case": ("same_line", (
+                "#[cfg(test)]\nmod tests { #![cfg(windows)]\n"
+                "    #[test]\n    fn new_token_case() {}\n}\n")),
+        }
+        # The plain test shares lib.rs with the cfg_attr case and must stay MAPPED.
+        for case, (home, text) in cases.items():
+            reason = "cfg() with an unevaluated cfg_attr" if home == "lib" else "cfg(windows)"
+            with self.subTest(case=case):
+                def conditional(repo: Repo) -> None:
+                    repo.lib_tail = plain + (text if home == "lib" else f"pub mod {home};\n")
+                    if home != "lib":
+                        repo.files[f"src/{home}.rs"] = text
+                    repo.extra_ids = {case, "plain_tests::runs_anywhere"}
+
+                result, output = Repo().delta(conditional)
+                found = [line for line in output.splitlines() if line.startswith("FAIL")]
+                self.assertEqual(len(found), 1, output)
+                self.assertEqual(NEW_FINDING.match(found[0]).groups(),
+                                 ("new-id-platform-unproven", case), output)
+                self.assertIn(reason + " is not proven to hold on linux", found[0])
+                self.assertEqual(result, 1)
+
 if __name__ == "__main__":
     unittest.main()

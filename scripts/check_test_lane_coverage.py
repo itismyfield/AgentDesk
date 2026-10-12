@@ -50,7 +50,8 @@ MOD_RE = re.compile(
 )
 CFG_TEST_RE = re.compile(r"#\s*\[\s*cfg\s*\([^\]]*\btest\b[^\]]*\)\s*\]")
 PATH_ATTR_RE = re.compile(r'#\s*\[\s*path\s*=\s*"(?P<path>[^"]+)"\s*\]')
-INNER_CFG_RE = re.compile(r"^[ \t]*#!\[\s*cfg\s*\(.*\)\s*\][ \t]*$", re.MULTILINE)
+# Every inner `#![cfg...` to the line end, so trailing tokens or a cfg_attr stay visible.
+INNER_CFG_RE = re.compile(r"#\s*!\s*\[\s*cfg[^\n]*")
 ATTRIBUTED_FN_RE = re.compile(
     r"(?P<attrs>(?:#\s*\[[^\]]*\]\s*)+)"
     r"(?:(?:pub(?:\s*\([^)]*\))?)\s+)?"
@@ -239,6 +240,8 @@ def _module_records(
     ``outer/`` directory even though the source file itself is the parent file.
     """
     clean = strip_rust(source)
+    if decls is not None:
+        decls.setdefault(("#!", *base), []).extend(INNER_CFG_RE.findall(clean))
     attributes: dict[int, str] = {}
     for match in ATTRIBUTED_MOD_RE.finditer(clean):
         attributes[match.start("name")] = source[
@@ -374,8 +377,6 @@ def discover_test_inventory(
         base = file_module_path(src_root, path)
         source = path.read_text(encoding="utf-8")
         modules, tests_by_module, aliases = _module_records(source, base, decls)
-        inner = INNER_CFG_RE.findall(source)
-        decls.setdefault(("#!", *base), []).extend(inner)
         for module in modules:
             physical = tuple(module.split("::"))
             physical_inventory.setdefault(physical, set()).update(
