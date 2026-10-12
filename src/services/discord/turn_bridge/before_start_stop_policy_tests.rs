@@ -416,9 +416,13 @@ async fn p10_fin_lock_busy_snapshot_remains_responsive() {
     let deadline = std::time::Duration::from_secs(2);
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let path = close.path();
+    let (provider, channel, pin) = (
+        close.shared.provider.clone(),
+        close.row.channel_id,
+        discord::inflight::InflightEpisodePin::from_state(&acked),
+    );
     let holder = std::thread::spawn(move || {
-        let guard = discord::inflight::lock_inflight_state_path(&path).unwrap();
+        let guard = discord::inflight::lock_inflight_episode(&provider, channel, &pin).unwrap();
         held_tx.send(()).unwrap();
         // Released by the test, or on its own past the deadline so a blocking clear cannot hang.
         let _ = release_rx.recv_timeout(deadline * 2);
