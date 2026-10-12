@@ -3,7 +3,9 @@
 use std::fs::{File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::time::SystemTime;
 
 use super::{CaptureBatch, CaptureOutcome, CaptureSource, CapturedRecord, SourceAnomaly};
 use super::{SourceAnomalyKind as Kind, SourceId};
@@ -42,6 +44,59 @@ pub fn file_match(source: &SourceId, (dev, ino): (u64, u64)) -> FileMatch {
         (true, true) => FileMatch::Exact,
         (true, false) => FileMatch::Renumbered,
         (false, _) => FileMatch::Other,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fingerprint {
+    pub len: u64,
+    pub dev: u64,
+    pub ino: u64,
+    pub modified: SystemTime,
+    pub change: (i64, i64),
+}
+
+impl Fingerprint {
+    pub fn of(meta: &Metadata) -> io::Result<Self> {
+        let (dev, ino) = file_identity(meta);
+        #[cfg(unix)]
+        let change = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.ctime(), meta.ctime_nsec())
+        };
+        #[cfg(not(unix))]
+        let change = (0, 0);
+        Ok(Self {
+            len: meta.len(),
+            dev,
+            ino,
+            modified: meta.modified()?,
+            change,
+        })
+    }
+
+    pub fn path(source: &SourceId) -> Result<Self, (Kind, String)> {
+        let unreadable = |e: io::Error| (Kind::Unreadable, e.to_string());
+        let meta = match std::fs::metadata(&source.path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(match std::fs::symlink_metadata(&source.path) {
+                    Err(entry) if entry.kind() == io::ErrorKind::NotFound => {
+                        (Kind::Missing, e.to_string())
+                    }
+                    Ok(_) => (
+                        Kind::Replaced,
+                        "pathname entry no longer resolves to the source".into(),
+                    ),
+                    Err(entry) => unreadable(entry),
+                });
+            }
+            Err(e) => return Err(unreadable(e)),
+        };
+        if file_match(source, file_identity(&meta)) == FileMatch::Other {
+            return Err((Kind::Replaced, "path names a different inode".into()));
+        }
+        Self::of(&meta).map_err(unreadable)
     }
 }
 
@@ -179,12 +234,12 @@ impl SourceCapture {
         self.captured_through
     }
 
-    /// Hex sha256 of bytes `0..captured_through`.
     /// Bytes read so far, including a buffered line still missing its newline.
     pub fn read_through(&self) -> u64 {
         self.captured_through + self.partial.len() as u64
     }
 
+    /// Hex sha256 of bytes `0..captured_through`.
     pub fn prefix_hash(&self) -> String {
         hex::encode(self.prefix.clone().finalize())
     }
@@ -200,11 +255,37 @@ impl SourceCapture {
         Ok(hex::encode(disk.finalize()) == self.prefix_hash())
     }
 
+    pub fn fingerprint(&self) -> io::Result<Fingerprint> {
+        Fingerprint::of(&self.file.metadata()?)
+    }
+
+    /// Checks the retained FD even when its pathname has been unlinked.
+    pub fn verify_eof(&self, through: u64, hash: &str) -> io::Result<Fingerprint> {
+        let invalid = |detail| io::Error::new(io::ErrorKind::InvalidData, detail);
+        if self.captured_through != through
+            || self.read_through() != through
+            || self.prefix_hash() != hash
+        {
+            return Err(invalid("capture differs from the drained durable cursor"));
+        }
+        let before = self.fingerprint()?;
+        if before.len != through
+            || (before.dev, before.ino) != self.opened
+            || !self.verify_prefix()?
+        {
+            return Err(invalid("open source is not at its verified EOF"));
+        }
+        if before != self.fingerprint()? {
+            return Err(invalid("metadata changed during EOF validation"));
+        }
+        Ok(before)
+    }
+
     fn poll_inner(&mut self, max_bytes: u64) -> Result<CaptureBatch, (Kind, String)> {
         let io_err = |error: io::Error| (Kind::Unreadable, error.to_string());
         let len = self.file.metadata().map_err(io_err)?.len();
-        let path_identity = std::fs::metadata(&self.source.path).map(|meta| file_identity(&meta));
-        if path_identity.ok() != Some(self.opened) {
+        let path = Fingerprint::path(&self.source)?;
+        if (path.dev, path.ino) != self.opened {
             return Err((Kind::Replaced, "path no longer names the open file".into()));
         }
         let cursor = self.captured_through + self.partial.len() as u64;
@@ -418,5 +499,72 @@ mod tests {
             .unwrap();
         file.write_all(b"a").unwrap();
         assert_eq!(poll(&mut capture, budget), Err(Kind::Oversized));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn readers_s1a_access_error_is_unreadable_not_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        std::fs::write(&path, b"line\n").unwrap();
+        let source = source_id_for("session", &path).unwrap();
+        let mut capture = SourceCapture::open(source, 0).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+        assert!(
+            std::fs::metadata(&path).is_err(),
+            "fixture really fails to stat"
+        );
+        assert_eq!(poll(&mut capture, MAX), Err(Kind::Unreadable));
+    }
+    #[test]
+    #[cfg(unix)]
+    fn readers_s1a_missing_is_exact_and_first_anomaly_is_sticky() {
+        use std::os::unix::fs::symlink;
+        let (dir, path, mut capture) = open_fixture(0);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(poll(&mut capture, MAX), Err(Kind::Missing));
+        let mut capture = {
+            std::fs::write(&path, FIXTURE).unwrap();
+            SourceCapture::open(source_id_for("s", &path).unwrap(), 0).unwrap()
+        };
+        std::fs::rename(&path, dir.path().join("retained")).unwrap();
+        symlink(dir.path().join("absent"), &path).unwrap();
+        assert_eq!(poll(&mut capture, MAX), Err(Kind::Replaced));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(poll(&mut capture, MAX), Err(Kind::Replaced));
+    }
+
+    #[test]
+    fn readers_s1a_open_fd_verification_rejects_full_prefix_change_and_partial() {
+        let (_dir, path, mut capture) = open_fixture(0);
+        poll(&mut capture, MAX).unwrap();
+        let through = capture.captured_through();
+        let hash = capture.prefix_hash();
+        assert!(capture.verify_eof(through, &hash).is_ok());
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"partial")
+            .unwrap();
+        poll(&mut capture, MAX).unwrap();
+        assert!(capture.verify_eof(through, &hash).is_err());
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[0] ^= 1;
+        std::fs::write(&path, &bytes[..through as usize]).unwrap();
+        assert!(!capture.verify_prefix().unwrap());
+    }
+    #[test]
+    #[cfg(unix)]
+    fn readers_s1a_permission_denied_is_never_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, path, mut capture) = open_fixture(0);
+        let prior = std::fs::metadata(dir.path()).unwrap().permissions();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o0)).unwrap();
+        let raw = std::fs::metadata(&path);
+        let result = poll(&mut capture, MAX);
+        std::fs::set_permissions(dir.path(), prior).unwrap();
+        assert_eq!(raw.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(result, Err(Kind::Unreadable));
     }
 }

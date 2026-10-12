@@ -8,7 +8,70 @@ use std::time::Duration;
 use super::screen::{self, Composer, Stash};
 use super::*;
 
+mod environment_tests {
+    use super::*;
+
+    #[test]
+    fn production_environment_initialization_selects_only_the_listed_channel() {
+        const CHILD: &str = "ADK_BUSY_INJECT_STASH_CONFIG_SUBPROCESS";
+        if std::env::var_os(CHILD).is_none() {
+            let test = format!(
+                "{}::production_environment_initialization_selects_only_the_listed_channel",
+                module_path!().split_once("::").unwrap().1
+            );
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test, "--nocapture"])
+                .env(CHILD, "1")
+                .env("ADK_BUSY_INJECT_STASH_CHANNELS", "invalid, 6245, , 6245")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stdout.contains("running 1 test"), "{stdout}\n{stderr}");
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            assert!(
+                stdout.contains("1 passed; 0 failed; 0 ignored"),
+                "{stdout}\n{stderr}"
+            );
+            return;
+        }
+
+        USE_PRODUCTION_CHANNELS.set(true);
+        for channel in [Some(6245), Some(6246), None] {
+            let tui = Tui::new("human draft A");
+            tui.put("attached", "4");
+            let session = tui.session();
+            let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
+            let request = Request {
+                session: &session,
+                transcript: &tui.transcript,
+                source: "iMessage",
+                author: "ann",
+                nonce: NONCE,
+                text: TEXT,
+            };
+            let got = inject_report(&pane, &request, channel, &FAST);
+            if channel == Some(6245) {
+                assert_eq!(got, report(Outcome::Injected, DraftState::RestoredObserved));
+                assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
+                assert_eq!(tui.records(), [framed()]);
+            } else {
+                assert_eq!(
+                    got,
+                    report(Outcome::NotSent(Veto::HumanAttached), DraftState::Unchanged)
+                );
+                assert!(tui.applied().is_empty());
+                assert!(tui.records().is_empty());
+            }
+            assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
+        }
+    }
+}
 mod hold_tests;
+
+thread_local! {
+    pub(super) static USE_PRODUCTION_CHANNELS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 static STASH_CHANNELS: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(Default::default);
 
@@ -381,6 +444,36 @@ fn same_generation_contamination_after_ownership_never_confirms_a_nonce_only_mat
     assert_eq!(tui.records(), [format!("{}X", framed())]);
     assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
     assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
+}
+
+#[test]
+fn an_image_added_before_enter_is_contaminated_even_with_matching_text_and_generation() {
+    let tui = Tui::new("human draft A");
+    tui.put("attached", "4");
+    tui.put(
+        "submission",
+        &format!(
+            "{}\n",
+            serde_json::json!({"type": "user", "message": {"content": [
+                {"type": "text", "text": framed()},
+                {"type": "image", "source": {"type": "base64", "data": "AA=="}}
+            ]}})
+        ),
+    );
+    tui.put(
+        "human.before-Enter",
+        "enter() { cat \"$d/submission\" >> \"$d/transcript.jsonl\"; : > \"$d/composer\"; mv \"$d/stash\" \"$d/composer\"; }",
+    );
+    assert_eq!(
+        tui.run(),
+        report(
+            Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit),
+            DraftState::RestoredObserved
+        )
+    );
+    assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
+    assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
+    assert!(tui.taken());
 }
 
 #[test]
