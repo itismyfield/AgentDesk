@@ -2824,6 +2824,8 @@ src/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
 │   │   ├── pending_queue_persistence/
+│   │   │   ├── queue_exit_debt.rs
+│   │   │   ├── queue_exit_debt_tests.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs
 │   │   ├── registry_purge/
