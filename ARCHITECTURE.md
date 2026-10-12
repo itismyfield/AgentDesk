@@ -637,6 +637,10 @@ src/
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
 │   │   │   └── relay_receipts.rs
+│   │   ├── host_input/
+│   │   │   ├── guarded_submission/
+│   │   │   │   └── executor_tests.rs
+│   │   │   └── guarded_submission.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── host_draft.rs
@@ -646,6 +650,7 @@ src/
 │   │   ├── input/
 │   │   │   ├── draft_hold.rs
 │   │   │   ├── final_ready_tests.rs
+│   │   │   ├── literal_chunks.rs
 │   │   │   └── timeout_draft_tests.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
