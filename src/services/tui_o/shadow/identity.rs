@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::{ShadowProvider, UnitKind};
+use crate::services::discord::response_sanitizer::is_standalone_tui_response_chrome;
 // Variant values only: the write-zero allowlist audits these two, not ProviderKind's methods.
 use crate::services::provider::ProviderKind::{Claude as ClaudeKind, Codex as CodexKind};
 use crate::services::tui_turn_state::envelope_is_turn_end_terminator;
@@ -72,15 +73,16 @@ fn claude_block(record: &Value) -> Option<RecordFact> {
     let Some([block]) = blocks.map(Vec::as_slice) else {
         return Some(blocked("assistant row without exactly one content block"));
     };
+    // Locally synthesized rows such as API errors have no block index; the row uuid keys them.
+    let api_error = record.get("isApiErrorMessage") == Some(&Value::Bool(true));
+    let synthetic = api_error || str_at(message, "model") == Some("<synthetic>");
+    let resumed = synthetic && !api_error;
     let (kind, content) = match str_at(block, "type") {
         Some("thinking" | "redacted_thinking") => return None,
-        Some("text") => (UnitKind::Body, payload(str_at(block, "text").unwrap_or(""))),
+        Some("text") => (UnitKind::Body, claude_text(resumed, block)),
         Some("tool_use") => (UnitKind::Tool, tool_call(block, &["input"])),
         other => return Some(blocked(&format!("unsupported assistant block {other:?}"))),
     };
-    // Locally synthesized rows such as API errors have no block index; the row uuid keys them.
-    let synthetic = record.get("isApiErrorMessage") == Some(&Value::Bool(true))
-        || str_at(message, "model") == Some("<synthetic>");
     let index = record.get("apiBlockIndex").and_then(Value::as_u64);
     let native_key = match (str_at(message, "id"), index, row_key(record)) {
         (Some(id), Some(index), _) => format!("{id}:{index}"),
@@ -88,6 +90,16 @@ fn claude_block(record: &Value) -> Option<RecordFact> {
         _ => return Some(blocked("assistant row without a supported identity")),
     };
     Some(RecordFact::Unit(native_key, kind, content))
+}
+
+/// A cold resume writes a synthetic non-error row holding only TUI chrome; Legacy strips it, so it
+/// is not posted. API error rows always post.
+fn claude_text(resumed: bool, block: &Value) -> UnitContent {
+    let text = str_at(block, "text").unwrap_or("");
+    if resumed && is_standalone_tui_response_chrome(text) {
+        return UnitContent::Excluded("claude_synthetic_resume_chrome");
+    }
+    payload(text)
 }
 
 fn claude_user(record: &Value) -> Vec<RecordFact> {
@@ -244,6 +256,59 @@ mod tests {
             payload["turn_id"] = turn_id.into();
         }
         json!({"type": "event_msg", "payload": payload})
+    }
+
+    /// Only a synthetic non-error row that is nothing but resume chrome is excluded; API errors
+    /// (even chrome-worded), chrome followed by an answer and model text still post under their keys.
+    #[test]
+    fn claude_synthetic_resume_chrome_alone_is_excluded() {
+        use super::{RecordFact, UnitContent, classify};
+        use crate::services::tui_o::shadow::UnitKind;
+        let row = |uuid: &str, synthetic: bool, text: &str| {
+            let (model, index) = if synthetic {
+                ("<synthetic>", Value::Null)
+            } else {
+                ("claude-opus", json!(0))
+            };
+            json!({"type": "assistant", "uuid": uuid, "isApiErrorMessage": false,
+                "apiBlockIndex": index, "message": {"id": "m1", "model": model,
+                "content": [{"type": "text", "text": text}]}})
+        };
+        let api_error = |uuid: &str, text: &str| {
+            let mut error = row(uuid, true, text);
+            error["isApiErrorMessage"] = true.into();
+            error
+        };
+        let payload = |text: &str| UnitContent::Payload(text.into());
+        let excluded = UnitContent::Excluded("claude_synthetic_resume_chrome");
+        let cases = [
+            (row("s", true, " No response requested.\n"), "s", excluded),
+            (
+                api_error("err", "API Error: 500"),
+                "err",
+                payload("API Error: 500"),
+            ),
+            (
+                api_error("err-chrome", "No response requested."),
+                "err-chrome",
+                payload("No response requested."),
+            ),
+            (
+                row("more", true, "No response requested. But here is more."),
+                "more",
+                payload("No response requested. But here is more."),
+            ),
+            (
+                row("model", false, "No response requested."),
+                "m1:0",
+                payload("No response requested."),
+            ),
+        ];
+        for (record, key, content) in cases {
+            let unit = RecordFact::Unit(key.into(), UnitKind::Body, content);
+            let facts = classify(ShadowProvider::Claude, &record);
+            assert_eq!(facts, [RecordFact::Assistant, unit], "{record}");
+        }
     }
 
     #[test]

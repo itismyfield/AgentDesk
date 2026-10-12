@@ -125,7 +125,7 @@ impl<B: BindingEvents> Sources<B> {
             }
             self.readers.push(reader);
         }
-        self.restore_legacy_hops(writer);
+        self.restore_legacy_hops(writer)?;
         self.flush(writer)?;
         if self.reader_config.is_some() {
             for index in 0..self.readers.len() {

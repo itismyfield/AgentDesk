@@ -1,6 +1,7 @@
 //! Submission-boundary evidence of managed Claude TUI turns and its pre-payload fence.
 //! An absent record is LegacyUnknown; only the two turn creators install `Waiting`.
 
+use crate::services::claude_tui::{guarded_outcome::Owner, host_input::InputRun};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use super::*;
@@ -102,11 +103,18 @@ enum Gate {
     Refused(PreSubmitPersistenceRefused),
 }
 
+enum GuardedState {
+    Dormant,
+    Running,
+    Finished(InputRun),
+}
+
 struct Attempt {
     provider: ProviderKind,
     channel_id: u64,
     birth: InflightEpisodePin,
     gate: Mutex<Gate>,
+    guarded: Mutex<GuardedState>,
 }
 
 /// Live input capability of the attempt that installed the boundary; never persisted.
@@ -123,6 +131,8 @@ impl std::fmt::Debug for ManagedSubmission {
 
 /// How a provider `Err` of a managed attempt is reported.
 pub(in crate::services::discord) enum SubmissionFailure {
+    GuardedRunning,
+    GuardedStopped(InputRun),
     /// The fence refused before any payload; the request stays in its Waiting row.
     PreSubmitPersistenceRefused(PreSubmitPersistenceRefused),
     /// The fence passed, so the prompt may have reached the pane.
@@ -140,13 +150,56 @@ impl ManagedSubmission {
         self.0.refusal()
     }
 
+    pub(in crate::services::discord) fn observer(&self) -> Arc<dyn Owner> {
+        self.0.clone()
+    }
+    pub(in crate::services::discord) fn guarded_hold(&self) -> bool {
+        !matches!(
+            &*self
+                .0
+                .guarded
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            GuardedState::Dormant | GuardedState::Finished(InputRun::Applied)
+        )
+    }
     pub(in crate::services::discord) fn classify_failure(&self) -> SubmissionFailure {
+        match &*self
+            .0
+            .guarded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
+            GuardedState::Running => return SubmissionFailure::GuardedRunning,
+            GuardedState::Finished(run) if *run != InputRun::Applied => {
+                return SubmissionFailure::GuardedStopped(run.clone());
+            }
+            _ => {}
+        }
         match &*self.0.gate.lock().unwrap_or_else(PoisonError::into_inner) {
             Gate::Refused(refused) => {
                 SubmissionFailure::PreSubmitPersistenceRefused(refused.clone())
             }
             Gate::Fenced => SubmissionFailure::SubmissionIndeterminate,
             Gate::Open => SubmissionFailure::ProviderExecutionFailed,
+        }
+    }
+}
+
+impl Owner for Attempt {
+    fn started(&self) {
+        let mut state = self.guarded.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(
+            *state,
+            GuardedState::Dormant | GuardedState::Finished(InputRun::Applied)
+        ) {
+            *state = GuardedState::Running;
+        }
+    }
+    fn finished(&self, run: &InputRun) {
+        let mut state = self.guarded.lock().unwrap_or_else(PoisonError::into_inner);
+        if !matches!(&*state, GuardedState::Finished(stopped) if *stopped != InputRun::Applied) {
+            *state = GuardedState::Finished(run.clone());
         }
     }
 }
@@ -237,6 +290,7 @@ pub(in crate::services::discord) fn install_managed_submission_boundary(
         channel_id: state.channel_id,
         birth: InflightEpisodePin::from_state(state),
         gate: Mutex::new(Gate::Open),
+        guarded: Mutex::new(GuardedState::Dormant),
     }));
     state.bind_managed_submission(submission.clone());
     Some(submission)

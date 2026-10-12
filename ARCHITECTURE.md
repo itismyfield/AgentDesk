@@ -657,6 +657,7 @@ src/
 │   │   ├── busy_inject.rs
 │   │   ├── busy_inject_tests.rs
 │   │   ├── composer_lock.rs
+│   │   ├── guarded_outcome.rs
 │   │   ├── hook_bundle.rs
 │   │   ├── hook_output_guard.rs
 │   │   ├── hook_output_guard_tests.rs
@@ -1113,6 +1114,9 @@ src/
 │   │   │   │   ├── g1b_modes_tests.rs
 │   │   │   │   ├── modes.rs
 │   │   │   │   └── modes_tests.rs
+│   │   │   ├── intake/
+│   │   │   │   ├── classify.rs
+│   │   │   │   └── source.rs
 │   │   │   ├── runtime/
 │   │   │   │   ├── dormant_tests.rs
 │   │   │   │   ├── drive.rs
@@ -1144,6 +1148,7 @@ src/
 │   │   │   ├── fence_tests.rs
 │   │   │   ├── g1b_command_tests.rs
 │   │   │   ├── g1b_ordering_tests.rs
+│   │   │   ├── intake.rs
 │   │   │   ├── mapping.rs
 │   │   │   ├── mapping_guard_tests.rs
 │   │   │   ├── mod.rs
@@ -1610,6 +1615,8 @@ src/
 │   │   ├── terminal_delivery_custody/
 │   │   │   ├── pg_tests.rs
 │   │   │   └── tests.rs
+│   │   ├── terminal_ui_obligation/
+│   │   │   └── input_fence_tests.rs
 │   │   ├── tmux/
 │   │   │   ├── monitor_auto_turn_inflight.rs
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
@@ -2614,6 +2621,9 @@ src/
 │   │   ├── repost/
 │   │   │   ├── admission.rs
 │   │   │   ├── admission_tests.rs
+│   │   │   ├── allowlist_host_tests.rs
+│   │   │   ├── allowlist_runner_tests.rs
+│   │   │   ├── allowlist_writer_tests.rs
 │   │   │   ├── backlog_tests.rs
 │   │   │   ├── config.rs
 │   │   │   ├── dispatch.rs
@@ -2712,6 +2722,7 @@ src/
 │   │   │   ├── host_renumber_tests.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── input_facts.rs
+│   │   │   ├── legacy_hop_retry_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_resume_actor_tests.rs
 │   │   │   ├── operator_resume_delivery_tests.rs
