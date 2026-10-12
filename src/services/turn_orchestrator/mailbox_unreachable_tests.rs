@@ -231,7 +231,7 @@ async fn purge_reports_the_queue_it_rolled_back_after_a_failed_empty_save() {
         QueuePersistenceContext::new(&provider, "tokB", None),
     )
     .await;
-    std::fs::create_dir_all(flat_queue_path(channel_id)).unwrap();
+    super::pending_queue_persistence::save_fault::fail_next(ChannelId::new(channel_id));
 
     let purged = live.try_purge_queue(flat.clone(), true).await.unwrap();
     assert_eq!(
@@ -250,7 +250,6 @@ async fn purge_reports_the_queue_it_rolled_back_after_a_failed_empty_save() {
     );
     assert_eq!(live.snapshot().await.intervention_queue.len(), 1);
 
-    std::fs::remove_dir(flat_queue_path(channel_id)).unwrap();
     let emptied = live.try_purge_queue(flat, true).await.unwrap();
     assert_eq!(
         (emptied.drained, emptied.queue_len_after),

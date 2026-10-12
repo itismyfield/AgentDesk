@@ -9,7 +9,7 @@ impl<B: BindingEvents> Sources<B> {
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
         deriver: &mut UnitDeriver,
-        owed: &mut VecDeque<Derived>,
+        owed: &mut impl Owe,
     ) -> Result<(), WriterAlarm> {
         self.resume_at(writer, deriver, owed, SystemTime::now())
     }
@@ -18,7 +18,7 @@ impl<B: BindingEvents> Sources<B> {
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
         deriver: &mut UnitDeriver,
-        owed: &mut VecDeque<Derived>,
+        owed: &mut impl Owe,
         wall_now: SystemTime,
     ) -> Result<(), WriterAlarm> {
         if self.reader_config.is_some() {
@@ -63,7 +63,7 @@ impl<B: BindingEvents> Sources<B> {
             let replay = writer.store().for_each_frame(&cursor.source, |frame| {
                 if let SpoolFrame::Record(record) = frame {
                     captured_any = true;
-                    self.owe(deriver, owed, &key, &record);
+                    self.owe(deriver, owed, &cursor.source, &record);
                 }
             });
             replay.map_err(halted("spool replay"))?;

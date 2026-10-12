@@ -803,7 +803,6 @@ mod soft_clear_notify_tests {
 /// transcript and the restored backlog, and never reports a clear.
 #[cfg(test)]
 mod clear_persist_failure_tests {
-    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -815,6 +814,7 @@ mod clear_persist_failure_tests {
     };
     use crate::services::discord::{DiscordSession, SharedData, make_shared_data_for_tests};
     use crate::services::provider::{CancelToken, ProviderKind};
+    use crate::services::turn_orchestrator::test_support::{fail_queue_saves, queue_save_faults};
     use crate::services::turn_orchestrator::{
         Intervention, InterventionMode, QueuePersistenceContext,
     };
@@ -878,25 +878,6 @@ mod clear_persist_failure_tests {
         assert!(enqueued.enqueued, "the backlog is queued and persisted");
     }
 
-    pub(super) fn queue_file(
-        root: &Path,
-        shared: &SharedData,
-        provider: &ProviderKind,
-        channel_id: ChannelId,
-    ) -> PathBuf {
-        root.join("runtime/discord_pending_queue")
-            .join(provider.as_str())
-            .join(&shared.token_hash)
-            .join(format!("{}.json", channel_id.get()))
-    }
-
-    /// An emptied queue is persisted by removing its file, so a directory in
-    /// that file's place makes the clear's persist fail.
-    pub(super) fn break_queue_persist(path: &Path) {
-        std::fs::remove_file(path).expect("persisted queue file");
-        std::fs::create_dir(path).expect("directory in the queue file's place");
-    }
-
     fn paused_runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -955,13 +936,21 @@ mod clear_persist_failure_tests {
             let shared = make_shared_data_for_tests();
             seed_session(&shared, channel_id).await;
             seed_backlog(&shared, &provider, channel_id).await;
-            break_queue_persist(&queue_file(root.path(), &shared, &provider, channel_id));
+            // Arm after the backlog save so checked preflight stays readable and the clear's save fails.
+            fail_queue_saves(channel_id, 1);
+            let armed_faults = queue_save_faults(channel_id, false);
 
             let result = clear(&shared, &provider, channel_id).await;
 
             assert!(
                 result.is_err(),
                 "a clear whose queue persist failed must not return the success the caller replies with"
+            );
+            assert_eq!(armed_faults, 1, "one fault is armed after the backlog save");
+            assert_eq!(
+                queue_save_faults(channel_id, true),
+                0,
+                "the clear's save consumes the armed fault"
             );
             assert_eq!(queue_len(&shared, channel_id).await, 1, "the failed persist restores the backlog");
             assert_eq!(
@@ -1005,8 +994,8 @@ mod clear_persist_failure_tests {
             crate::services::discord::increment_global_active(&shared, "other channel turn");
             crate::services::discord::increment_global_active(&shared, "cleared turn");
             seed_backlog(&shared, &provider, channel_id).await;
-            let queue_path = queue_file(root.path(), &shared, &provider, channel_id);
-            break_queue_persist(&queue_path);
+            fail_queue_saves(channel_id, 1);
+            let armed_faults = queue_save_faults(channel_id, false);
 
             let starts = Arc::new(AtomicUsize::new(0));
             let hook_starts = starts.clone();
@@ -1071,15 +1060,20 @@ mod clear_persist_failure_tests {
                 result.is_err(),
                 "the failed clear is not reported as cleared"
             );
+            assert_eq!(armed_faults, 1, "one fault is armed after the backlog save");
+            assert_eq!(
+                queue_save_faults(channel_id, true),
+                0,
+                "the clear's save consumes the fault before the finalizer runs"
+            );
             assert_eq!(
                 global_active(&shared),
                 1,
                 "the released turn is counted down exactly once"
             );
 
-            // Storage recovers; the released turn's late finalizer finds no anchor
+            // The one-shot fault is consumed; the late finalizer finds no anchor
             // and its re-kick coalesces with the one the clear armed.
-            std::fs::remove_dir(&queue_path).expect("storage recovers");
             let finish =
                 crate::services::discord::mailbox_finish_turn(&shared, &provider, channel_id).await;
             assert!(
@@ -1269,8 +1263,8 @@ mod clear_persist_failure_tests {
             ));
             seed_session(&shared, channel_id).await;
             seed_backlog(&shared, &provider, channel_id).await;
-            let queue_path = queue_file(root.path(), &shared, &provider, channel_id);
-            break_queue_persist(&queue_path);
+            fail_queue_saves(channel_id, 1);
+            let armed_faults = queue_save_faults(channel_id, false);
             let http = Arc::new(serenity::Http::new(""));
 
             // `/clear` and `!clear` both call this entry.
@@ -1287,12 +1281,17 @@ mod clear_persist_failure_tests {
                 failed.is_err(),
                 "the failed clear is propagated to its caller"
             );
+            assert_eq!(armed_faults, 1, "one fault is armed after the backlog save");
+            assert_eq!(
+                queue_save_faults(channel_id, true),
+                0,
+                "the failed clear consumes the fault before the successful retry"
+            );
             assert!(
                 boundary_rows(&pool, channel_id).await.is_empty(),
                 "a failed clear leaves the transcript history of the kept session"
             );
 
-            std::fs::remove_dir(&queue_path).expect("storage recovers");
             let persisted = clear_channel_session_state(
                 &http,
                 &shared,

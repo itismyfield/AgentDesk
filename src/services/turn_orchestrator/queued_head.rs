@@ -121,6 +121,56 @@ pub(super) fn parse_snapshot(
             snapshot.version
         ));
     }
+    if let Some(head) = &snapshot.meta.head_injection {
+        let first = snapshot
+            .items
+            .first()
+            .ok_or("reserved snapshot has no head")?;
+        for item in [first, &head.original] {
+            if item.message_id == 0
+                || item.author_id == 0
+                || item.channel_id.is_none_or(|channel| channel == 0)
+                || item.source_message_ids.contains(&0)
+                || item
+                    .source_text_segments
+                    .iter()
+                    .any(|segment| segment.message_id == 0)
+            {
+                return Err("reserved snapshot has an invalid zero identity".into());
+            }
+        }
+        let identity = |item: &PendingQueueItem| QueueIdentity {
+            primary: item.message_id,
+            queued_generation: item.queued_generation,
+            sources: (if item.source_message_ids.is_empty() {
+                vec![item.message_id]
+            } else {
+                item.source_message_ids.clone()
+            })
+            .into_iter()
+            .map(|message_id| SourceIdentity {
+                message_id,
+                queued_generation: item
+                    .source_message_queued_generations
+                    .iter()
+                    .find(|owner| owner.message_id == message_id)
+                    .map_or(item.queued_generation, |owner| owner.queued_generation),
+            })
+            .collect(),
+        };
+        if identity(first) != head.identity || identity(&head.original) != head.identity {
+            return Err("reserved snapshot source identity differs from its original".into());
+        }
+        let channel = first.channel_id.ok_or("reserved snapshot has no channel")?;
+        let item = super::pending_queue_persistence::pending_queue_item_to_intervention(
+            first.clone(),
+            std::time::SystemTime::now(),
+            Instant::now(),
+        );
+        if !is_head(head, &item, ChannelId::new(channel)) {
+            return Err("reserved snapshot payload differs from its original".into());
+        }
+    }
     Ok((snapshot.items, Some(snapshot.meta)))
 }
 
@@ -174,6 +224,7 @@ pub(super) struct HeadLedger {
     adopted: Option<(ProviderKind, String)>,
     pub(super) meta: SnapshotMeta,
     lease: Option<Arc<HeadLease>>,
+    persisted_meta: Option<serde_json::Value>,
 }
 
 /// Reads this namespace's head and terminal record before the first write; a snapshot the reader
@@ -197,9 +248,52 @@ pub(super) fn adopt(
     let path = pending_queue_file_path(provider, token_hash, channel_id)
         .ok_or_else(|| format!("pending queue root unavailable for channel {channel_id}"))?;
     ledger.meta = read_snapshot_meta(&path)?.unwrap_or_default();
+    ledger.persisted_meta = meta_value(&ledger.meta);
     ledger.lease = None;
     ledger.adopted = Some(key);
     reap(ledger);
+    Ok(())
+}
+
+fn meta_value(meta: &SnapshotMeta) -> Option<serde_json::Value> {
+    meta.is_set()
+        .then(|| serde_json::to_value(meta).expect("snapshot metadata serializes"))
+}
+
+pub(super) fn record_write(state: &mut ChannelMailboxState) {
+    state.queued_head.persisted_meta = meta_value(&state.queued_head.meta);
+}
+
+fn validate_disk(
+    state: &mut ChannelMailboxState,
+    channel: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> Result<(), String> {
+    adopt(state, channel, persistence)?;
+    let path = pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel)
+        .ok_or("pending queue root unavailable")?;
+    let meta = read_snapshot_meta(&path)?.unwrap_or_default();
+    if meta_value(&meta) != state.queued_head.persisted_meta {
+        return Err(format!(
+            "channel {channel} snapshot metadata changed outside its owner"
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn refuse_destructive(
+    state: &mut ChannelMailboxState,
+    channel: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> Result<(), String> {
+    validate_disk(state, channel, persistence)?;
+    reap(&mut state.queued_head);
+    if let Some(head) = &state.queued_head.meta.head_injection {
+        return Err(format!(
+            "channel {channel} queued head is {:?}; clear/purge refused",
+            head.phase
+        ));
+    }
     Ok(())
 }
 
@@ -223,9 +317,15 @@ fn set_phase(ledger: &mut HeadLedger, phase: HeadPhase) {
 }
 
 fn is_head(head: &PersistedHeadInjection, item: &Intervention, channel_id: ChannelId) -> bool {
-    let same = |a: &PendingQueueItem, b: &PendingQueueItem| {
-        serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
+    let payload = |item: &PendingQueueItem| {
+        let mut item = item.clone();
+        // Restoring queue age may fill absent source clocks; clocks are not frozen payload.
+        for source in &mut item.source_message_queued_generations {
+            source.enqueued_at_epoch_us = None;
+        }
+        serde_json::to_value(item).ok()
     };
+    let same = |a: &PendingQueueItem, b: &PendingQueueItem| payload(a) == payload(b);
     QueueIdentity::of(item) == head.identity
         && same(&canonical_item(item, channel_id), &head.original)
 }
@@ -237,7 +337,7 @@ pub(super) fn prepare_write(
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
 ) -> Result<(), String> {
-    adopt(state, channel_id, persistence)?;
+    validate_disk(state, channel_id, persistence)?;
     reap(&mut state.queued_head);
     strip_submitted_sources(state, channel_id);
     let Some(head) = state.queued_head.meta.head_injection.as_ref() else {
@@ -321,7 +421,7 @@ pub(super) fn withhold_take(
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
 ) -> Option<TakeNextSoftResult> {
-    let error = adopt(state, channel_id, persistence).err();
+    let error = validate_disk(state, channel_id, persistence).err();
     reap(&mut state.queued_head);
     if error.is_none() && state.queued_head.meta.head_injection.is_none() {
         return None;
@@ -337,7 +437,7 @@ pub(super) fn blocks_claims(
     channel_id: ChannelId,
     persistence: Option<&QueuePersistenceContext>,
 ) -> bool {
-    if persistence.is_some_and(|p| adopt(state, channel_id, p).is_err()) {
+    if persistence.is_some_and(|p| validate_disk(state, channel_id, p).is_err()) {
         return true;
     }
     reap(&mut state.queued_head);
@@ -439,7 +539,8 @@ mod claim {
         };
         let segments = item.source_text_segments();
         let lead = item.text.trim_start();
-        !item.author_is_bot
+        item.mode == InterventionMode::Soft
+            && !item.author_is_bot
             && source.message_id == id
             && source.queued_generation == item.queued_generation
             && source.preserve_on_cancel
@@ -705,3 +806,7 @@ mod claim {
 #[cfg(test)]
 #[path = "queued_head_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "queued_head_s2a_tests.rs"]
+mod s2a_tests;

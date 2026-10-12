@@ -2,6 +2,7 @@
 //! `o_era`, the delivery ledger, and the raw spool with cursors. Damage halts; it never re-inits.
 
 pub mod cleanup_witness;
+pub(crate) mod codex_provenance;
 mod durable;
 pub mod ledger;
 mod operator_resume;
@@ -337,6 +338,12 @@ impl ChannelStore {
     /// The I/O error that made the store refuse writes, if any.
     pub fn io_failure(&self) -> Option<io::ErrorKind> {
         self.failed
+    }
+
+    /// Small segments let a test see GC keep or drop a source's older records.
+    #[cfg(test)]
+    pub(crate) fn set_segment_max_for_tests(&mut self, max: u64) {
+        self.segment_max = max;
     }
 
     /// Delivery entries only; GC and operator approvals require their dedicated guarded writers.
