@@ -2122,6 +2122,10 @@ services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2c_sel
 services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2c_selected_steering_is_an_explicit_hold
 services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2c_unknown_selected_session_cannot_fall_back_to_legacy
 services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2c_warm_owner_preserves_cancellation_after_payload_and_after_enter
+services::claude_tui::host_input::guarded_submission::executor_tests::cg_b3_ambiguous_queued_ui_retains_typed_hold_without_another_enter_or_retry
+services::claude_tui::host_input::guarded_submission::executor_tests::cg_b3_busy_steering_queues_literal_and_folded_frames_through_the_real_entry
+services::claude_tui::host_input::guarded_submission::executor_tests::cg_b3_busy_to_idle_keeps_the_composer_permit_and_one_enter
+services::claude_tui::host_input::guarded_submission::executor_tests::cg_b3_codex_production_submission_keeps_busy_veto_after_payload
 services::claude_tui::host_input::tests::a_mounted_dialog_is_never_ready_even_after_clear
 services::claude_tui::host_input::tests::a_send_that_may_have_landed_is_indeterminate_and_nothing_follows
 services::claude_tui::host_input::tests::blind_truncated_or_failed_reads_are_never_ready
@@ -11876,6 +11880,9 @@ services::tui_input::rows_tests::tracked::the_ledger_refuses_reused_unknown_or_u
 services::tui_input::submission::tests::byte_bound_and_terminal_controls_are_checked_before_payload
 services::tui_input::submission::tests::cancellation_during_capture_preserves_payload_effect_before_any_late_refusal
 services::tui_input::submission::tests::cancellation_keeps_counts_and_stops_later_callbacks
+services::tui_input::submission::tests::cg_b3_idle_and_codex_keep_the_post_payload_busy_veto
+services::tui_input::submission::tests::cg_b3_only_claude_steering_admits_busy_at_both_submission_boundaries
+services::tui_input::submission::tests::cg_b3_steering_never_relaxes_exact_draft_or_modal_checks
 services::tui_input::submission::tests::enter_failure_cannot_erase_confirmed_payload_mutations
 services::tui_input::submission::tests::late_guard_keeps_payload_effect_indeterminate_and_enter_unsent
 services::tui_input::submission::tests::pre_guard_refuses_without_callbacks

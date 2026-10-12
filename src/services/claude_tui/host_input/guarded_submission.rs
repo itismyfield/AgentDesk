@@ -10,7 +10,7 @@ use crate::services::tui_input::actor::gate::claude_guarded::{
 };
 use crate::services::tui_input::actor::gate::{PaneVerdict, judge_pane, submission_busy};
 use crate::services::tui_input::actor::pane::MAX_PROMPT_BYTES;
-use crate::services::tui_input::submission::Refusal;
+use crate::services::tui_input::submission::{Refusal, SubmitContext};
 use crate::services::tui_input::submission_tmux::{SubmissionTmux, guarded::EffectOutcome};
 use crate::services::tui_o::shadow::ShadowProvider;
 use std::rc::Rc;
@@ -43,6 +43,16 @@ pub(crate) fn run(
     gate: &dyn MutationGate,
     prompt: &str,
     cancel: Option<&CancelToken>,
+) -> InputRun {
+    run_with_context(target, gate, prompt, cancel, SubmitContext::Idle)
+}
+
+fn run_with_context(
+    target: &InputTarget,
+    gate: &dyn MutationGate,
+    prompt: &str,
+    cancel: Option<&CancelToken>,
+    context: SubmitContext,
 ) -> InputRun {
     let session = match target.tmux_session() {
         Ok(s) => s,
@@ -82,10 +92,11 @@ pub(crate) fn run(
             if composer_lock::admit_composer_write(session, || pane.capture_draft()).is_err() {
                 return refused(Refusal::NotReady);
             }
-            let evidence = match DraftEvidence::observe(&frame, payload, &permit, &pane, gate) {
-                Ok(e) => e,
-                Err(r) => return InputRun::Refused(r),
-            };
+            let evidence =
+                match DraftEvidence::observe(&frame, payload, &permit, &pane, gate, context) {
+                    Ok(e) => e,
+                    Err(r) => return InputRun::Refused(r),
+                };
             if cancel_requested(cancel) {
                 return InputRun::Cancelled { confirmed: 0 };
             }
@@ -134,11 +145,15 @@ pub(crate) fn run(
             if cancel_requested(cancel) {
                 return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
             }
+            let receipt = (context == SubmitContext::ClaudeSteering)
+                .then(|| super::SteeringReceipt::before(session))
+                .flatten();
             let Some(after) = pane.capture_draft() else {
                 return hold(confirmed, Refusal::CaptureUnavailable);
             };
             let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&after);
-            if submission_busy(ShadowProvider::Claude, &plain)
+            if (submission_busy(ShadowProvider::Claude, &plain)
+                && !context.permits_busy(ShadowProvider::Claude))
                 || !own_claude_guarded_draft(&after, evidence)
             {
                 return hold(confirmed, Refusal::OwnDraft);
@@ -171,7 +186,16 @@ pub(crate) fn run(
             if cancel_requested(cancel) {
                 return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
             }
-            if !passive_ready(&after) {
+            let accepted = if context == SubmitContext::ClaudeSteering {
+                crate::services::tui_input::actor::gate::submission_admits(
+                    ShadowProvider::Claude,
+                    &after,
+                    context,
+                ) && receipt.is_some_and(|receipt| receipt.confirmed(session, &frame))
+            } else {
+                passive_ready(&after)
+            };
+            if !accepted {
                 return hold(confirmed, Refusal::Confirmation);
             }
             InputRun::Applied
@@ -206,6 +230,7 @@ fn passive_ready(capture: &str) -> bool {
 struct Request {
     target: InputTarget,
     gate: Rc<dyn MutationGate>,
+    steering: bool,
 }
 
 fn request(_session: &str) -> Option<Rc<Request>> {
@@ -230,20 +255,36 @@ pub(crate) fn selected(
     prompt: &str,
     cancel: Option<&CancelToken>,
 ) -> Option<InputRun> {
+    selected_with_context(session, prompt, cancel, SubmitContext::Idle)
+}
+
+fn selected_with_context(
+    session: &str,
+    prompt: &str,
+    cancel: Option<&CancelToken>,
+    context: SubmitContext,
+) -> Option<InputRun> {
     let request = request(session)?;
     if let Some(refusal) = selection_refusal(session) {
         return Some(refusal);
     }
     guarded_outcome::begin();
-    let run = run(&request.target, &*request.gate, prompt, cancel);
+    let run = match context {
+        SubmitContext::Idle => run(&request.target, &*request.gate, prompt, cancel),
+        SubmitContext::ClaudeSteering => {
+            run_with_context(&request.target, &*request.gate, prompt, cancel, context)
+        }
+    };
     guarded_outcome::finish(&run);
     #[cfg(test)]
     test_support::remember(&run);
     Some(run)
 }
 
-pub(crate) fn steering_selected(session: &str) -> Option<InputRun> {
-    request(session)?;
+pub(crate) fn steering_selected(session: &str, prompt: &str) -> Option<InputRun> {
+    if request(session)?.steering {
+        return selected_with_context(session, prompt, None, SubmitContext::ClaudeSteering);
+    }
     let run = refused(Refusal::NotReady);
     #[cfg(test)]
     test_support::remember(&run);
@@ -292,6 +333,22 @@ pub(crate) mod test_support {
         gate: Rc<dyn MutationGate>,
         run: impl FnOnce() -> R,
     ) -> (R, Option<InputRun>) {
+        with_request_mode(session, gate, false, run)
+    }
+    #[cfg(unix)]
+    pub(crate) fn with_steering_request<R>(
+        session: &str,
+        gate: Rc<dyn MutationGate>,
+        run: impl FnOnce() -> R,
+    ) -> (R, Option<InputRun>) {
+        with_request_mode(session, gate, true, run)
+    }
+    fn with_request_mode<R>(
+        session: &str,
+        gate: Rc<dyn MutationGate>,
+        steering: bool,
+        run: impl FnOnce() -> R,
+    ) -> (R, Option<InputRun>) {
         struct Restore(Option<Rc<Request>>, Option<InputRun>);
         impl Drop for Restore {
             fn drop(&mut self) {
@@ -303,6 +360,7 @@ pub(crate) mod test_support {
             r.replace(Some(Rc::new(Request {
                 target: InputTarget::legacy_tmux(session),
                 gate,
+                steering,
             })))
         });
         let result = RESULT.with(|r| r.replace(None));

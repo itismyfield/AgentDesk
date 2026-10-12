@@ -633,7 +633,7 @@ pub(crate) fn steering_snapshot_decision(
 }
 
 pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
-    if let Some(run) = host_input::guarded_submission::steering_selected(session_name) {
+    if let Some(run) = host_input::guarded_submission::steering_selected(session_name, prompt) {
         return SubmissionError::from_run(run).map_err(SubmissionError::into_legacy);
     }
     let actions = plan_prompt_submit(prompt)?;

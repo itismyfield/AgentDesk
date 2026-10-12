@@ -103,9 +103,34 @@ pub(crate) fn renderer(
     own: &str,
     after: &str,
 ) -> String {
+    renderer_at_row(f, name, frame, before, own, after, 1)
+}
+
+fn steering_renderer(
+    f: &Fixture,
+    name: &str,
+    frame: &str,
+    before: &str,
+    own: &str,
+    after: &str,
+) -> String {
+    renderer_at_row(f, name, frame, before, own, after, 33)
+}
+
+fn renderer_at_row(
+    f: &Fixture,
+    name: &str,
+    frame: &str,
+    before: &str,
+    own: &str,
+    after: &str,
+    row: usize,
+) -> String {
     let root = f.root.path().join(name);
     std::fs::create_dir(&root).unwrap();
+    let row = row.to_string();
     for (file, content) in [
+        ("row", row.as_str()),
         ("expected", frame),
         ("before", before),
         ("own", own),
@@ -116,12 +141,12 @@ pub(crate) fn renderer(
     let script = f.root.path().join("executor-renderer.py");
     std::fs::write(
         &script,
-        r#"import os, pathlib, select, sys, tty
+        r#"import json, os, pathlib, select, sys, tty
 tty.setraw(0)
 root = pathlib.Path(sys.argv[1])
 def render(name):
     text = (root / name).read_text()
-    os.write(1, ('\x1b[?2004h\x1b[2J\x1b[H' + text.replace('\n', '\r\n')).encode())
+    os.write(1, ('\x1b[?2004h\x1b[2J' + '\x1b[' + (root / 'row').read_text() + ';1H' + text.replace('\n', '\r\n')).encode())
 render('before')
 (root / 'ready').write_text('ready')
 expected = (root / 'expected').read_bytes()
@@ -150,6 +175,30 @@ while True:
         if byte == 13:
             with (root / 'enters').open('ab') as out:
                 out.write(b'x')
+            mode_path = root / 'steering-mode'
+            if mode_path.exists():
+                mode = mode_path.read_text()
+                body = (root / 'frame').read_text()
+                receipt = root / 'transcript.jsonl'
+                if mode == 'replace':
+                    receipt.rename(root / 'retired.jsonl')
+                    receipt.write_text('')
+                if mode != 'missing':
+                    record = {'type': 'queue-operation', 'operation': 'enqueue', 'sessionId': root.name, 'content': body if mode != 'foreign' else body + ' foreign'}
+                    with receipt.open('a') as out:
+                        out.write(json.dumps(record) + ('' if mode == 'partial' else '\n'))
+                    if mode in ('removed', 'consumed'):
+                        with receipt.open('a') as out:
+                            out.write(json.dumps({'type': 'queue-operation', 'operation': 'remove', 'sessionId': root.name, 'content': body}) + '\n')
+                if mode == 'tail':
+                    with receipt.open('a') as out:
+                        out.write(json.dumps({'type': 'queue-operation', 'operation': 'remove', 'sessionId': root.name, 'content': body}))
+                attachment = {'type': 'attachment', 'sessionId': root.name, 'attachment': {'type': 'queued_command', 'commandMode': 'prompt', 'prompt': body}}
+                if mode not in ('removed', 'tail'):
+                    with receipt.open('a') as out:
+                        out.write(json.dumps(attachment) + '\n')
+                    with (root / 'attachments.jsonl').open('a') as out:
+                        out.write(json.dumps(attachment) + '\n')
             render('after')
     pending = b''
 "#,
@@ -1349,6 +1398,365 @@ fn cg_b2c_selected_steering_is_an_explicit_hold() {
             .unwrap_err()
             .starts_with("claude tui guarded submission held:")
     );
+}
+
+fn steering_source(f: &Fixture, name: &str, mode: &str) -> PathBuf {
+    let root = f.root.path().join(name);
+    let path = root.join("transcript.jsonl");
+    std::fs::write(&path, "").unwrap();
+    std::fs::write(root.join("steering-mode"), mode).unwrap();
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        name,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(name.to_string()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    assert_eq!(
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(name)
+            .unwrap()
+            .output_path,
+        path.display().to_string()
+    );
+    path
+}
+
+fn steering_entry(
+    fence: Arc<Fence>,
+    name: &str,
+    frame: &str,
+) -> (
+    crate::services::tui_steering::SteeringOutcome,
+    Option<InputRun>,
+) {
+    steering_entry_with_gate(fence, name, frame, Rc::new(LegacyTmuxGate))
+}
+
+fn steering_entry_with_gate(
+    fence: Arc<Fence>,
+    name: &str,
+    frame: &str,
+    gate: Rc<dyn MutationGate>,
+) -> (
+    crate::services::tui_steering::SteeringOutcome,
+    Option<InputRun>,
+) {
+    use crate::services::provider_hosting::{ProviderSessionDriver, ProviderSessionSelection};
+    let selection = ProviderSessionSelection {
+        provider_id: "claude".into(),
+        requested_tui_hosting: true,
+        driver: ProviderSessionDriver::TuiHosting,
+        fallback_reason: None,
+    };
+    with_scope(Some(fence), || {
+        test_support::with_steering_request(name, gate, || {
+            crate::services::tui_steering::inject_with_bounded_retry(
+                &crate::services::provider::ProviderKind::Claude,
+                &selection,
+                name,
+                frame,
+            )
+        })
+    })
+}
+
+#[test]
+fn cg_b3_busy_steering_queues_literal_and_folded_frames_through_the_real_entry() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    install_shim(&f);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    control(&f);
+    for (name, frame, body, kind) in [
+        (
+            "b3-literal",
+            "steer  a 😀".to_string(),
+            "steer  a 😀".to_string(),
+            "literal",
+        ),
+        (
+            "b3-folded",
+            "😀".repeat(401),
+            "[Pasted text #7]".to_string(),
+            "paste",
+        ),
+        (
+            "b3-consumed",
+            "consumed".to_string(),
+            "consumed".to_string(),
+            "literal",
+        ),
+    ] {
+        steering_renderer(
+            &f,
+            name,
+            &frame,
+            &format!("✳ Architecting…\n{}", screen("")),
+            &format!("✳ Architecting…\n{}", screen(&body)),
+            &format!("✳ Architecting…\nMessage queued\n{}", screen("")),
+        );
+        let source = steering_source(
+            &f,
+            name,
+            if name == "b3-consumed" {
+                "consumed"
+            } else {
+                "enqueue"
+            },
+        );
+        let fence = Arc::new(Fence::default());
+        let (outcome, run) = steering_entry(Arc::clone(&fence), name, &frame);
+        assert_eq!(
+            outcome,
+            crate::services::tui_steering::SteeringOutcome::Injected,
+            "typed={run:?}, actual payloads={}, actual enters={}",
+            count(&f, name, "payloads"),
+            count(&f, name, "enters"),
+        );
+        assert_eq!(run, Some(InputRun::Applied));
+        assert_eq!(fence.calls.load(Ordering::SeqCst), 1);
+        assert_receipt(&f, name, &frame, kind, 1);
+        assert_eq!(
+            std::fs::read(f.root.path().join("exec-enters"))
+                .unwrap()
+                .len(),
+            1
+        );
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(source)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records[0]["type"], "queue-operation");
+        assert_eq!(records[0]["operation"], "enqueue");
+        assert_eq!(records[0]["content"], frame);
+        let attachment = records.iter().find(|r| r["type"] == "attachment").unwrap();
+        assert_eq!(attachment["attachment"]["type"], "queued_command");
+        assert_eq!(attachment["attachment"]["prompt"], frame);
+    }
+}
+
+#[test]
+fn cg_b3_ambiguous_queued_ui_retains_typed_hold_without_another_enter_or_retry() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    install_shim(&f);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    control(&f);
+    for mode in [
+        "missing", "foreign", "stale", "partial", "replace", "draft", "removed", "tail",
+    ] {
+        let name = format!("b3-{mode}");
+        let after = screen(if mode == "draft" { "own" } else { "" });
+        steering_renderer(
+            &f,
+            &name,
+            "own",
+            &format!("✳ Architecting…\n{}", screen("")),
+            &format!("✳ Architecting…\n{}", screen("own")),
+            &format!("✳ Architecting…\nMessage queued\n{after}"),
+        );
+        let source = steering_source(
+            &f,
+            &name,
+            match mode {
+                "stale" => "missing",
+                "draft" => "enqueue",
+                other => other,
+            },
+        );
+        if mode == "stale" {
+            std::fs::write(&source, format!("{}\n", serde_json::json!({
+                "type":"queue-operation", "operation":"enqueue", "sessionId":name, "content":"own"
+            }))).unwrap();
+        }
+        let fence = Arc::new(Fence::default());
+        let (outcome, run) = steering_entry(Arc::clone(&fence), &name, "own");
+        assert!(
+            matches!(
+                outcome,
+                crate::services::tui_steering::SteeringOutcome::Failed(_)
+            ),
+            "{mode}: outcome={outcome:?}, typed={run:?}, payloads={}, enters={}",
+            count(&f, &name, "payloads"),
+            count(&f, &name, "enters")
+        );
+        assert!(
+            matches!(run, Some(InputRun::Indeterminate { confirmed: 2, .. })),
+            "{mode}: {run:?}"
+        );
+        assert_receipt(&f, &name, "own", "literal", 1);
+        let captures = std::fs::read(f.root.path().join("exec-captures")).unwrap();
+        let (again, stopped) =
+            with_scope(Some(Arc::clone(&fence) as Arc<dyn SubmissionFence>), || {
+                test_support::with_steering_request(&name, Rc::new(LegacyTmuxGate), || {
+                    input::inject_steering_prompt(&name, "own")
+                })
+            });
+        assert!(
+            again
+                .unwrap_err()
+                .starts_with("claude tui guarded submission held:")
+        );
+        assert_eq!(stopped, run);
+        let (idle, _) = entry(&f, Entry::Fresh, &name, "next", Arc::clone(&fence));
+        assert!(idle.is_err());
+        let cleanups = AtomicUsize::new(0);
+        assert!(
+            input::with_composer_cleanup_lock(&name, || {
+                cleanups.fetch_add(1, Ordering::SeqCst);
+            })
+            .is_none()
+        );
+        assert_eq!(cleanups.load(Ordering::SeqCst), 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let warm = crate::services::claude_tui::guarded_outcome::warm_owned(|| {
+            crate::services::claude_tui::hosting::try_claude_tui_warm_followup(
+                "next-warm".into(),
+                source.clone(),
+                source.display().to_string(),
+                true,
+                f.root.path(),
+                "own",
+                tx,
+                None,
+                &crate::services::claude_tui::hosting::FollowupHost::legacy_tmux(&name),
+                None,
+            )
+        });
+        assert!(matches!(
+            warm,
+            crate::services::claude_tui::guarded_outcome::OwnedWarmOutcome::Stopped(
+                InputRun::Indeterminate { confirmed: 2, .. }
+            )
+        ));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(fence.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            std::fs::read(f.root.path().join("exec-captures")).unwrap(),
+            captures
+        );
+        assert_eq!(
+            std::fs::read(f.root.path().join("exec-enters"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_receipt(&f, &name, "own", "literal", 1);
+    }
+}
+
+#[test]
+fn cg_b3_busy_to_idle_keeps_the_composer_permit_and_one_enter() {
+    struct LateGate {
+        calls: std::cell::Cell<usize>,
+        blocked: Arc<AtomicBool>,
+    }
+    impl MutationGate for LateGate {
+        fn admit(&self, session: &str) -> Result<(), InputRefusal> {
+            LegacyTmuxGate.admit(session)?;
+            self.calls.set(self.calls.get() + 1);
+            if self.calls.get() == 5 {
+                let session = session.to_string();
+                self.blocked.store(std::thread::spawn(move || {
+                    (0..2).all(|_| crate::services::claude_tui::composer_lock::try_with_composer_mutation_lock(
+                        &session, || (),
+                    ).is_none())
+                }).join().unwrap(), Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    install_shim(&f);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    control(&f);
+    let name = "b3-busy-to-idle";
+    steering_renderer(
+        &f,
+        name,
+        "own",
+        &format!("✳ Architecting…\n{}", screen("")),
+        &screen("own"),
+        &screen(""),
+    );
+    steering_source(&f, name, "enqueue");
+    let blocked = Arc::new(AtomicBool::new(false));
+    let fence = Arc::new(Fence {
+        lock_probe: Some((name.to_string(), Arc::clone(&blocked))),
+        ..Fence::default()
+    });
+    let late_blocked = Arc::new(AtomicBool::new(false));
+    let (outcome, typed) = steering_entry_with_gate(
+        fence,
+        name,
+        "own",
+        Rc::new(LateGate {
+            calls: std::cell::Cell::new(0),
+            blocked: Arc::clone(&late_blocked),
+        }),
+    );
+    assert_eq!(
+        outcome,
+        crate::services::tui_steering::SteeringOutcome::Injected
+    );
+    assert_eq!(typed, Some(InputRun::Applied));
+    assert!(blocked.load(Ordering::SeqCst));
+    assert!(
+        late_blocked.load(Ordering::SeqCst),
+        "other writers remain excluded after payload"
+    );
+    assert_receipt(&f, name, "own", "literal", 1);
+}
+
+#[test]
+fn cg_b3_codex_production_submission_keeps_busy_veto_after_payload() {
+    let f = Fixture::new();
+    install_shim(&f);
+    let before = include_str!("../../../../../tests/fixtures/tui_input/codex-idle-dim.ansi");
+    let own = "• Working (1s • esc to interrupt)\n  bypass permissions\n› own\n\n  gpt-5.5 xhigh · Fast off · /fixture/workspace · Context 100% left";
+    let name = "b3-codex-busy";
+    renderer(
+        &f,
+        name,
+        "own",
+        &format!("  bypass permissions\n{before}"),
+        own,
+        own,
+    );
+    use crate::services::codex_tui::{host_input as codex_host, input as codex_input};
+    let plan = [
+        codex_input::TuiInputAction::Literal("own".into()),
+        codex_input::TuiInputAction::Enter,
+    ];
+    let run = codex_host::run_prompt_submission_legacy(name, &plan, Some(before), None);
+    assert!(matches!(
+        run.run,
+        codex_host::InputRun::Indeterminate { confirmed: 1, .. }
+    ));
+    assert!(run.composer_mutated);
+    assert!(!run.enter_attempted);
+    assert_receipt(&f, name, "own", "literal", 0);
+    let after = f.tmux(&["capture-pane", "-p", "-t", &format!("={name}:")]);
+    assert!(crate::services::tui_input::actor::gate::own_draft(
+        ShadowProvider::Codex,
+        &after,
+        "own",
+        true
+    ));
+    assert!(submission_busy(ShadowProvider::Codex, &after));
 }
 
 #[test]
