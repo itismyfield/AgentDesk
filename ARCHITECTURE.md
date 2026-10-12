@@ -2530,6 +2530,10 @@ src/
 │   │   └── tests_pg.rs
 │   ├── tui_input/
 │   │   ├── actor/
+│   │   │   ├── gate/
+│   │   │   │   ├── claude_guarded/
+│   │   │   │   │   └── acceptance_tests.rs
+│   │   │   │   └── claude_guarded.rs
 │   │   │   ├── pane/
 │   │   │   │   ├── ownership.rs
 │   │   │   │   └── ownership_tests.rs
@@ -2541,6 +2545,11 @@ src/
 │   │   │   ├── resume_actor_tests.rs
 │   │   │   ├── token.rs
 │   │   │   └── witness.rs
+│   │   ├── submission_tmux/
+│   │   │   ├── guarded/
+│   │   │   │   ├── protocol_tests.rs
+│   │   │   │   └── transport_tests.rs
+│   │   │   └── guarded.rs
 │   │   ├── actor.rs
 │   │   ├── actor_tests.rs
 │   │   ├── attempt.rs
