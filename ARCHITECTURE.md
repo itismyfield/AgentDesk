@@ -953,6 +953,12 @@ src/
 │   │   │   ├── recovery/
 │   │   │   │   ├── live_agent_recovery/
 │   │   │   │   │   └── judged_finish_fence_tests.rs
+│   │   │   │   ├── self_watchdog/
+│   │   │   │   │   ├── policy/
+│   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   ├── driver.rs
+│   │   │   │   │   ├── policy.rs
+│   │   │   │   │   └── tests.rs
 │   │   │   │   ├── stop_judgement/
 │   │   │   │   │   └── judged_finish_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
@@ -2291,6 +2297,8 @@ src/
 │   │   ├── repo_resolver.rs
 │   │   ├── runner.rs
 │   │   └── worktree_resolver.rs
+│   ├── hang_forensics/
+│   │   └── tests.rs
 │   ├── health_diagnostics/
 │   │   └── session_state.rs
 │   ├── imsg_reply/
