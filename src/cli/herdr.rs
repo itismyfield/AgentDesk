@@ -1,10 +1,13 @@
-//! `agentdesk herdr`: this node's Herdr-hosted executions, read only, and a retire that only reads
-//! the pane before its nonce compare-and-set. It never kills, closes or writes a pane.
+//! `agentdesk herdr`: this node's Herdr-hosted executions: a read-only status, a retire that only
+//! reads the pane before its nonce compare-and-set, and a terminate the local server performs.
 
 use clap::{Args, Subcommand};
+use serde_json::{Value, json};
 
 #[derive(Args)]
-#[command(about = "Herdr-hosted executions on this node: status, and retire of an ended one")]
+#[command(
+    about = "Herdr-hosted executions on this node: status, retire of an ended one, and terminate"
+)]
 pub(crate) struct HerdrArgs {
     #[command(subcommand)]
     command: HerdrCommand,
@@ -20,16 +23,56 @@ pub(crate) enum HerdrCommand {
         /// Discord channel id of the execution
         channel: u64,
     },
+    /// Ask the local server to close one execution's pane and retire it; needs the live switch
+    Terminate {
+        /// Session key of the execution's row
+        #[arg(long)]
+        session_key: String,
+        /// Execution nonce the row must still record
+        #[arg(long)]
+        execution_nonce: String,
+        /// Why it is terminated, kept in the server's result log
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 pub(crate) fn run(args: HerdrArgs) -> Result<(), String> {
+    let command = match args.command {
+        HerdrCommand::Terminate {
+            session_key,
+            execution_nonce,
+            reason,
+        } => {
+            let body = json!({"session_key": session_key, "execution_nonce": execution_nonce, "reason": reason});
+            return terminate(&super::client::api_base(), &body);
+        }
+        command => command,
+    };
     #[cfg(unix)]
-    return node::run(args.command);
+    return node::run(command);
     #[cfg(not(unix))]
     {
-        let _ = args.command;
+        let _ = command;
         Err("agentdesk herdr runs only on unix".into())
     }
+}
+
+/// One request to the local server; only its 200 with `result` `retired` is success.
+fn terminate(base: &str, body: &Value) -> Result<(), String> {
+    let (status, reply) = super::client::post_json_local_at(base, "/api/herdr/terminate", body)
+        .map_err(|error| format!("herdr terminate: no answer from {base}: {error:?}"))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&reply).unwrap_or_else(|_| reply.to_string())
+    );
+    if status == 200 && reply["result"] == "retired" {
+        return Ok(());
+    }
+    Err(format!(
+        "herdr terminate: HTTP {status}, result {}",
+        reply["result"]
+    ))
 }
 
 #[cfg(unix)]
@@ -99,6 +142,7 @@ mod node {
                     Ok(retired) => Ok(retired_text(channel, &retired)),
                     Err(refusal) => Err(format!("herdr retire {channel} refused: {refusal:?}")),
                 },
+                HerdrCommand::Terminate { .. } => Err("herdr terminate goes to the server".into()),
             };
             pool.close().await;
             println!("{}", result?);
@@ -323,3 +367,7 @@ use node::{RetireRefusal, Retired, retire, retire_on_reading, status};
 #[cfg(test)]
 #[path = "herdr_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "herdr_terminate_tests.rs"]
+mod terminate_tests;
