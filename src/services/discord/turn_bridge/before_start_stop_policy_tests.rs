@@ -1,6 +1,5 @@
-//! The policy close commits on its captured mailbox actor in one step: the exact receipt clear,
-//! then the release, one debit, the remint fence and the witness. Every other outcome leaves the
-//! turn held with its delivered receipt, its +1 and the queued successor input as they were.
+//! The policy close commits in one captured mailbox step: clear, release, debit, fence, witness.
+//! Any other outcome keeps the turn held with its receipt row, its +1 and the queued input.
 use super::*;
 use crate::services::discord::turn_finalizer::{PolicyCloseIntent, PolicyCloseOutcome};
 use crate::services::turn_orchestrator::policy_close::{
@@ -283,9 +282,8 @@ async fn p10_fin_ack_pre_commit_unconfirmed() {
     assert_released(&close, &queued, "first commit").await;
 }
 
-/// A commit whose ACK alone is lost has released exactly once; asking again on the same actor
-/// confirms it from that actor's witness, with no second debit or event, and a different
-/// episode's key is never confirmed by it.
+/// A commit whose ACK alone is lost released once; the same actor's witness confirms a re-ask with
+/// no second debit or event, and never confirms another episode's key.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_ack_post_commit_exact_witness() {
     let close = Close::open(5_340_974, |_| {}).await;
@@ -776,9 +774,8 @@ fn queue_now<T>(
     work
 }
 
-/// The actual mailbox actor serializes the close against an exact guarded finish: queued behind
-/// the close, the finish finds the slot already free; queued first, it releases the turn and the
-/// close then claims nothing and clears nothing.
+/// The mailbox actor serializes the close against an exact guarded finish: behind the close the
+/// finish finds the slot free; ahead of it the finish releases and the close claims nothing.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_actor_serialization() {
     for close_first in [true, false] {
@@ -902,9 +899,8 @@ async fn p10_fin_ordinary_identity_clear_preserves_receipt() {
     assert!(close.bytes().is_none(), "the policy step clears it");
 }
 
-/// The input fence refuses the close as a typed refusal, before any clear or release: a closing
-/// gate, a permit of another channel, and a population that cannot be written. On an open
-/// protected gate the clear itself stops at the row lock its population scope already holds.
+/// The input fence refuses the close by type before any clear: closing gate, foreign permit, broken
+/// population. On an open protected gate the clear stops at the lock its own scope holds.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_input_fence_typed_refusals() {
     use crate::services::discord::input_runtime::fence::{self, Failure, Gate, Mode};
@@ -963,9 +959,8 @@ async fn p10_fin_input_fence_typed_refusals() {
     }
 }
 
-/// Each axis of the exact episode is checked on its own: a cutoff before the turn started, a
-/// different nonce, token, interrupt generation, message, process generation, receipt
-/// generation, birth pin or save generation each commits nothing; the exact close commits.
+/// Each exact-episode axis alone (cutoff, nonce, token, interrupt, message, process, receipt and
+/// save generation, birth pin) commits nothing when it differs; the exact close commits.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_strict_boundaries() {
     type Tamper = fn(&Close, &InflightTurnState, std::time::Instant, &mut PolicyCloseIntent);

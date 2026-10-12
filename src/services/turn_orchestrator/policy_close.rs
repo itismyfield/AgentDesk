@@ -1,6 +1,5 @@
-//! The mailbox half of a before-start policy close: one actor step claims the exact episode,
-//! clears its acked receipt without waiting on a row lock, then releases, debits, fences and
-//! witnesses that episode before the actor reads its next message.
+//! The mailbox half of a before-start policy close: one actor step claims the exact episode, clears
+//! its receipt without waiting, then releases, debits, fences and witnesses before reading on.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};

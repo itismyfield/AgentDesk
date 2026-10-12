@@ -653,9 +653,8 @@ async fn herdr_cold_stop_settles_only_with_a_before_start_proof() {
     }
 }
 
-/// With settlement off, as in every non-test build, the actual bridge exit of a proof-carrying
-/// cold stop never reaches the policy close: no receipt step, no submission, no mailbox step. The
-/// ordinary exit frees the slot and the count as it always did, the positive control.
+/// Settlement off, as in non-test builds: a proof-carrying cold stop never reaches policy close,
+/// while the ordinary exit still frees the slot and the count as the positive control.
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_off_bridge_exit_never_submits_a_policy_close() {
