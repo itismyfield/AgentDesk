@@ -439,11 +439,8 @@ async fn p10_fin_lock_busy_snapshot_remains_responsive() {
     })));
     let started = std::time::Instant::now();
     let outcome = close.submit(close.intent(acked.clone())).await;
-    let snapshot = snapshot
-        .borrow_mut()
-        .take()
-        .expect("queued behind the close")
-        .await;
+    let snapshot = snapshot.borrow_mut().take();
+    let snapshot = snapshot.expect("queued behind the close").await;
     let elapsed = started.elapsed();
     step::observe(None);
     release_tx.send(()).unwrap();
@@ -814,7 +811,8 @@ async fn p10_fin_actor_serialization() {
         let bytes = close.bytes();
         let outcome = close.submit(intent).await;
         step::observe(None);
-        let finished = competitor.borrow_mut().take().unwrap().await;
+        let finished = competitor.borrow_mut().take();
+        let finished = finished.unwrap().await;
         if close_first {
             assert!(
                 matches!(outcome, PolicyCloseOutcome::Settled),
