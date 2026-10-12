@@ -338,15 +338,19 @@ class Census(unittest.TestCase):
         fence_admit = "runtime::fence::effect::admit(&deps.shared.provider,channel.get())"
         self.assertEqual(helper.count(policy), 1)
         self.assertEqual(helper.count(fence_admit), 1)
+        self.assertEqual(helper.count("letpermit="), 1)
         self.assertIn(
-            ")->Result<Option<runtime::fence::Permit>,Error>{" + policy + fence_admit + ".map_err(",
+            ")->Result<Option<runtime::fence::Permit>,Error>{letpermit=" + fence_admit + ".map_err(",
             helper,
         )
+        self.assertIn(")?;" + policy + "Ok(permit)}", helper)
         self.assertIn("usesuper::super::intake_gate::ledgeraslive;", root)
         caller = "letpermit=live::legacy_effect(deps,request.channel_id).await?;"
         self.assertEqual(root.count(caller), 1)
         admit = root.index(caller)
-        run = root.index("effect::run(permit,", admit)
+        run_call = "effect::run(permit,"
+        self.assertEqual(root.count(run_call), 1)
+        run = root.index(run_call, admit)
         body = root.index("handle_text_message_admitted", run)
         redirect = root.index("adk_thread::redirect_dispatch(", body)
         self.assertLess(admit, run)

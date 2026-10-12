@@ -27,7 +27,14 @@ fn c2_off_client_lookup_does_not_register_open_or_create_input_effects() {
 
 #[tokio::test]
 async fn c2_prebind_preadopt_dirty_and_weak_mailbox_share_the_existing_order() {
-    let rig = Rig::new(6_325_202);
+    let channel = if crate::services::discord::input_runtime::supervisor::mutant(
+        "c2b_client_fixture_reuses_fence_ids",
+    ) {
+        6_325_202
+    } else {
+        963_259_820_001
+    };
+    let rig = Rig::new(channel);
     let mut supervisor = rig.supervisor(Request::Ledger, vec![]);
     let overflow = supervisor.pending_overflow();
     assert!(matches!(
@@ -86,7 +93,14 @@ async fn c2_prebind_preadopt_dirty_and_weak_mailbox_share_the_existing_order() {
 
 #[tokio::test]
 async fn c2_mailbox_full_closed_reply_loss_and_cancellation_keep_catchup_obligations() {
-    let rig = Rig::new(6_325_203);
+    let channel = if crate::services::discord::input_runtime::supervisor::mutant(
+        "c2b_client_fixture_reuses_fence_ids",
+    ) {
+        6_325_203
+    } else {
+        963_259_820_002
+    };
+    let rig = Rig::new(channel);
     let mut supervisor = rig.supervisor(Request::Ledger, vec![]);
     let overflow = supervisor.pending_overflow();
     let (sender, mut receiver) = mpsc::channel(1);
@@ -168,7 +182,14 @@ fn prepared(channel: u64) -> crate::services::discord::input_runtime::intake::Pr
 
 #[tokio::test]
 async fn c2_apply_from_real_scan_keeps_receipt_distinct_from_failed_settlement_and_retry() {
-    let rig = Rig::new(6_325_204);
+    let channel = if crate::services::discord::input_runtime::supervisor::mutant(
+        "c2b_client_fixture_reuses_fence_ids",
+    ) {
+        6_325_204
+    } else {
+        963_259_820_003
+    };
+    let rig = Rig::new(channel);
     let mut supervisor = rig.supervisor(Request::Ledger, vec![]);
     assert_eq!(supervisor.boot().await, Landing::Admitted);
     let before_receipt = supervisor
@@ -284,7 +305,14 @@ async fn c2_apply_from_real_scan_keeps_receipt_distinct_from_failed_settlement_a
 
 #[tokio::test]
 async fn c2_external_reply_loss_retains_original_and_does_not_cancel_the_received_loan() {
-    let rig = Rig::new(6_325_205);
+    let channel = if crate::services::discord::input_runtime::supervisor::mutant(
+        "c2b_client_fixture_reuses_fence_ids",
+    ) {
+        6_325_205
+    } else {
+        963_259_820_004
+    };
+    let rig = Rig::new(channel);
     let mut supervisor = rig.supervisor(Request::Ledger, vec![]);
     assert_eq!(supervisor.boot().await, Landing::Admitted);
     let before_receipt = supervisor

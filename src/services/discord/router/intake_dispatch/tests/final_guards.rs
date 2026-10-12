@@ -41,6 +41,7 @@ async fn c2b_protected_final_admission_never_returns_false_local_or_nonlocal_suc
     );
     let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
     let _health = test_health::Clear::new(&gate);
+    let _closing = gate.close().unwrap();
     let mut refused = Vec::new();
     for admission in [
         old_local,
@@ -91,6 +92,7 @@ async fn c2b_protected_live_dispatch_does_not_checkpoint_or_consume_the_original
     let channel = ChannelId::new(6_325_723);
     let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
     let _health = test_health::Clear::new(&gate);
+    let _closing = gate.close().unwrap();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let http = closed_http();
     let deps = deps(&http, &shared);
@@ -134,6 +136,7 @@ async fn c2b_protected_cached_attachment_permit_does_not_write_history() {
     let channel = ChannelId::new(6_325_725);
     let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
     let _health = test_health::Clear::new(&gate);
+    let _closing = gate.close().unwrap();
     let shared = crate::services::discord::make_shared_data_for_tests();
     shared.core.lock().await.sessions.insert(
         channel,
@@ -215,6 +218,7 @@ async fn c2b_protected_skill_refuses_both_local_permit_and_unadmitted_dispatch()
     let channel = ChannelId::new(6_325_727);
     let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
     let _health = test_health::Clear::new(&gate);
+    let _closing = gate.close().unwrap();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let http = closed_http();
     let deps = deps(&http, &shared);

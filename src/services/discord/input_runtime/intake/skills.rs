@@ -258,7 +258,7 @@ pub(in crate::services::discord) async fn hold_text_skill(
     Ok(true)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod c2b_skill_tests {
     use super::*;
     use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;

@@ -6,7 +6,15 @@ use runtime::intake::{Classification, Origin, SourceDraft, StagedAttachment};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-/// Legacy effects require confirmed absence of protection on every real destination.
+fn derived_targets_enabled() -> bool {
+    #[cfg(test)]
+    if runtime::supervisor::mutant("c2b_mixed_reads_use_any_protected") {
+        return runtime::fence::any_protected();
+    }
+    runtime::fence::boot_skip(runtime::fence::BootTarget::Unknown)
+}
+
+/// Ledger guards refuse destinations whose Legacy fence is closed.
 pub(in crate::services::discord) async fn legacy_allowed(
     shared: &Arc<SharedData>,
     http: &Arc<Http>,
@@ -17,17 +25,28 @@ pub(in crate::services::discord) async fn legacy_allowed(
     if runtime::supervisor::mutant("c2b_skip_final_legacy_checks") {
         return Ok(());
     }
-    if !runtime::fence::any_protected() {
-        return Ok(());
-    }
     let unprotected = |channel: ChannelId| {
-        if runtime::fence::channel_gate(channel.get()).is_some() {
+        if runtime::fence::channel_gate(channel.get()).is_some_and(|gate| {
+            let held = gate.mode() != runtime::fence::Mode::LegacyOpen;
+            #[cfg(test)]
+            let held = if runtime::supervisor::mutant("c2b_final_guard_ignores_mode") {
+                true
+            } else if runtime::supervisor::mutant("c2b_final_guard_only_legacy_open") {
+                !held
+            } else {
+                held
+            };
+            held
+        }) {
             Err::<(), Error>("input source remains pending; ledger admission is required".into())
         } else {
             Ok(())
         }
     };
     unprotected(channel)?;
+    if !derived_targets_enabled() {
+        return Ok(());
+    }
     let actual = channel.to_channel(http).await?;
     if let Channel::Guild(actual) = actual {
         if matches!(
@@ -131,7 +150,9 @@ pub(in crate::services::discord) async fn hold_live(
     if runtime::supervisor::mutant("c2b_bypass_live_gate") {
         return Ok(false);
     }
-    if !runtime::fence::any_protected() {
+    if runtime::fence::channel_gate(message.channel_id.get()).is_none()
+        && !derived_targets_enabled()
+    {
         return Ok(false);
     }
     let message_kind = match message.kind {
@@ -268,9 +289,14 @@ pub(in crate::services::discord) async fn legacy_effect(
     deps: &crate::services::discord::router::message_handler::IntakeDeps<'_>,
     channel: ChannelId,
 ) -> Result<Option<runtime::fence::Permit>, Error> {
+    #[cfg(test)]
+    if runtime::supervisor::mutant("c2b_final_policy_before_raw_fence") {
+        legacy_allowed(deps.shared, deps.http, &deps.shared.provider, channel).await?;
+    }
+    let permit = runtime::fence::effect::admit(&deps.shared.provider, channel.get())
+        .map_err(|failure| -> Error { format!("input admission refused: {failure:?}").into() })?;
     legacy_allowed(deps.shared, deps.http, &deps.shared.provider, channel).await?;
-    runtime::fence::effect::admit(&deps.shared.provider, channel.get())
-        .map_err(|failure| format!("input admission refused: {failure:?}").into())
+    Ok(permit)
 }
 
 pub(in crate::services::discord) async fn try_text_reply(
@@ -286,7 +312,7 @@ pub(in crate::services::discord) async fn try_text_reply(
         .await)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "ledger_io_tests.rs"]
 mod io_tests;
 
