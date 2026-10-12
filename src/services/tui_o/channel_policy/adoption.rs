@@ -3,7 +3,7 @@
 //! adoption, never a delivery.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -63,6 +63,8 @@ pub(crate) struct BodyClaimed {
 pub(crate) struct Candidate {
     state: Arc<Mutex<Adoption>>,
     sends: Arc<LegacySends>,
+    /// Immutable boot origin, shared by every clone, distinct from ordinary Deferred retries.
+    late_origin: bool,
     /// Test builds: set when a claim released a pending adoption, cleared once a sink saw a body.
     #[cfg(test)]
     bodiless: Arc<std::sync::atomic::AtomicBool>,
@@ -73,9 +75,33 @@ impl Candidate {
         Self {
             state: Arc::new(Mutex::new(state)),
             sends: Arc::default(),
+            late_origin: false,
             #[cfg(test)]
             bodiless: Arc::default(),
         }
+    }
+
+    pub(crate) fn reserved_late() -> Self {
+        Self {
+            late_origin: true,
+            ..Self::new(Adoption::Deferred)
+        }
+    }
+
+    pub(crate) fn late_adopt_origin(&self) -> bool {
+        self.late_origin
+    }
+
+    pub(crate) fn late_cleanup_guard(
+        &self,
+        channel: u64,
+        runtime_root: Option<PathBuf>,
+    ) -> Option<LateReservationGuard> {
+        self.late_origin.then(|| LateReservationGuard {
+            candidate: self.clone(),
+            channel,
+            runtime_root,
+        })
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, Adoption> {
@@ -175,6 +201,31 @@ impl Candidate {
         }
         *state = Adoption::Committed;
         true
+    }
+}
+
+/// Owned by the sole claimed host before its future is spawned.
+pub(crate) struct LateReservationGuard {
+    candidate: Candidate,
+    channel: u64,
+    runtime_root: Option<PathBuf>,
+}
+
+impl Drop for LateReservationGuard {
+    fn drop(&mut self) {
+        let mut state = self.candidate.lock();
+        if !matches!(*state, Adoption::Pending | Adoption::Deferred) {
+            return;
+        }
+        let settled = self
+            .runtime_root
+            .as_deref()
+            .and_then(OStore::existing)
+            .map_or(Adoption::Released, |store| {
+                crate::services::tui_o::writer::activation::settled(&store, self.channel)
+            });
+        *state = settled;
+        tracing::info!(channel = self.channel, adoption = ?*state, "[tui_o] late reservation settled after host exit");
     }
 }
 

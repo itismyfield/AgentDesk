@@ -1,5 +1,5 @@
 //! Channel ownership uses the immutable boot policy and, for a selected channel, this process's
-//! adoption of it; a delegated channel is owned only while its home gate takes intake here.
+//! adoption of it; delegated output ownership survives its home closing intake.
 //! Uncertain identities withhold the body.
 //! This is an ownership fact, never delivery evidence; evidence readers must not consult it.
 
@@ -74,18 +74,39 @@ fn owned_kind(channel: u64) -> Option<RuntimeHandoffKind> {
 fn owned_in(snapshot: &BootChannels, channel: u64) -> Option<RuntimeHandoffKind> {
     let kind = snapshot.kind(channel);
     let hosted = channel_policy::owns_output(true, snapshot.channels(), channel, kind);
-    adoption(snapshot, channel).filter(|c| hosted && c.peek().owned())?;
+    output_candidate(snapshot, channel).filter(|c| hosted && c.peek().owned())?;
     kind
 }
 
-/// This process's adoption of `channel`: the O home's, or for a delegated channel its home or
-/// standby adoption, only while the channel's home gate takes intake here.
-fn adoption(snapshot: &BootChannels, channel: u64) -> Option<&Candidate> {
+/// The host's actual candidate: standby participates only with a registered local home.
+/// Input closure never returns Committed/Held output to Legacy.
+fn output_candidate(snapshot: &BootChannels, channel: u64) -> Option<&Candidate> {
+    snapshot
+        .candidate(channel)
+        .or_else(|| delegated(channel).and_then(|_| snapshot.standby(channel)))
+}
+
+/// A reserved delegated host still needs Legacy to execute its first input and bind a source.
+fn late_legacy_input(provider: &str, channel: u64) -> bool {
+    if !writer_enabled() || !provider.trim().eq_ignore_ascii_case("claude") {
+        return false;
+    }
     let Some(home) = delegated(channel) else {
-        return snapshot.candidate(channel);
+        return false;
     };
-    let adoption = snapshot.candidate(channel).or(snapshot.standby(channel));
-    adoption.filter(|_| home.intake_open())
+    test_override::with_channels(|snapshot| {
+        let Some(snapshot) = snapshot else {
+            return false;
+        };
+        let Some(candidate) = output_candidate(snapshot, channel) else {
+            return false;
+        };
+        home.while_intake_open(|| {
+            snapshot.kind(channel) == Some(RuntimeHandoffKind::ClaudeTui)
+                && candidate.late_adopt_origin()
+                && candidate.peek() == channel_policy::Adoption::Deferred
+        }) == Some(true)
+    })
 }
 
 /// The home gate of a channel this process takes part in as a delegated home.

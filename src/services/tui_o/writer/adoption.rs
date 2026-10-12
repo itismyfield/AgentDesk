@@ -42,6 +42,10 @@ pub trait LegacyView: Send + Sync + 'static {
     /// Whether a rehydrate pass has listed tmux in this process, so every live pane has a cursor.
     fn started(&self) -> bool;
     fn cursor(&self, tmux: &str) -> LegacyCursor;
+    /// Source lookup used by late adoption, including its locked final recheck.
+    fn late_cursor(&self, _tmux: &str) -> Result<LegacyCursor, String> {
+        Err("host has no nonblocking late source lookup".into())
+    }
     /// Legacy's delivered frontier within `eof`; `None` while its delivery record is not authority.
     fn frontier(&self, channel: u64, tmux: &str, eof: u64) -> Option<u64>;
     fn tail_running(&self, tmux: &str) -> bool;
@@ -88,6 +92,8 @@ pub enum Hold {
     Cursor { tmux: String, path: PathBuf },
     /// A bind is pending or the log moved; any later log entry may clear it.
     Binding,
+    /// No valid source has been bound yet.
+    NoSource,
     /// Legacy's delivered frontier has not reached the cursor on a record end.
     Delivery {
         read: ReadVersion,
@@ -121,7 +127,7 @@ impl Refused {
                 LegacyCursor::Unbound => false,
                 LegacyCursor::NoPane => true,
             },
-            Hold::Binding => false,
+            Hold::Binding | Hold::NoSource => false,
             Hold::Delivery {
                 read,
                 tmux,
@@ -249,7 +255,7 @@ pub(crate) fn logged(events: &[BindingEvent]) -> Result<(Vec<&SourceId>, Vec<&So
         ));
     }
     if bound.is_empty() {
-        return Err(Refused::new(Hold::Final, "no source is bound"));
+        return Err(Refused::new(Hold::NoSource, "no source is bound"));
     }
     named.retain(|source| !bound.contains(source));
     Ok((bound, named))
@@ -455,6 +461,8 @@ pub struct Snapshot {
     /// The first record past Legacy's delivered frontier that is not quiet.
     undelivered: Option<u64>,
     frontier: u64,
+    /// The nonblocking cursor observation a late pin must still hold at publication.
+    late: Option<LegacyCursor>,
 }
 
 /// Where a pin starts the current source.
@@ -476,6 +484,20 @@ pub fn pin(
     pin_at(legacy, events, channel, At::Cursor)
 }
 
+/// Late adoption never takes the stalled EOF handoff.
+pub fn pin_late(
+    legacy: &dyn LegacyView,
+    events: &[BindingEvent],
+    channel: u64,
+) -> Result<Snapshot, Refused> {
+    pin_at_mode(legacy, events, channel, At::Cursor, true).map_err(|refused| match &refused.hold {
+        Hold::Cursor { .. } | Hold::OpenTurn(_) | Hold::Delivery { .. } => {
+            Refused::retry(refused.to_string())
+        }
+        _ => refused,
+    })
+}
+
 /// As `pin`, starting the current source where `at` says. The frontier is checked before the turn,
 /// so an open turn either pin reports already has a frontier on a record within its start.
 pub fn pin_at(
@@ -483,6 +505,16 @@ pub fn pin_at(
     events: &[BindingEvent],
     channel: u64,
     at: At,
+) -> Result<Snapshot, Refused> {
+    pin_at_mode(legacy, events, channel, at, false)
+}
+
+fn pin_at_mode(
+    legacy: &dyn LegacyView,
+    events: &[BindingEvent],
+    channel: u64,
+    at: At,
+    late: bool,
 ) -> Result<Snapshot, Refused> {
     #[cfg(test)]
     super::activation::test_hook::run(channel, super::activation::test_hook::Step::Snapshot)
@@ -503,7 +535,13 @@ pub fn pin_at(
         let (tmux, path) = (tmux.clone(), current.path.clone());
         Refused::new(Hold::Cursor { tmux, path }, detail)
     };
-    let cursor = match legacy.cursor(&tmux) {
+    let observed = if late {
+        legacy.late_cursor(&tmux).map_err(Refused::retry)?
+    } else {
+        legacy.cursor(&tmux)
+    };
+    let origin = late.then(|| observed.clone());
+    let cursor = match observed {
         LegacyCursor::Bound { path, offset } if path == current.path => Some(offset),
         LegacyCursor::Bound { path, .. } => {
             return Err(waiting(format!("Legacy reads {} instead", path.display())));
@@ -523,6 +561,11 @@ pub fn pin_at(
         }
     };
     let frontier = legacy.frontier(channel, &tmux, start);
+    if late && frontier != Some(start) {
+        return Err(Refused::retry(format!(
+            "Legacy frontier {frontier:?} does not cover EOF {start}"
+        )));
+    }
     let not_authority = || Refused::new(Hold::Final, "the delivery record is not authoritative");
     let frontier = frontier.ok_or_else(not_authority)?;
     let mut turns = Turns::new(frontier);
@@ -547,6 +590,9 @@ pub fn pin_at(
     }
     if turns.open {
         return Err(open());
+    }
+    if late && turns.undelivered.is_some() {
+        return Err(Refused::retry("Legacy still owes records before O's start"));
     }
     let mut pinned = vec![head];
     // Only the newest past sources within budget that still exist are pinned; a later bind of any
@@ -585,6 +631,7 @@ pub fn pin_at(
         named: named.into_iter().cloned().collect(),
         undelivered: turns.undelivered,
         frontier,
+        late: origin,
     })
 }
 
@@ -688,6 +735,16 @@ impl Snapshot {
             .split_first()
             .ok_or(Refused::retry("nothing is pinned"))?;
         current.unchanged().map_err(Refused::retry)?;
+        if let Some(expected) = self.late.as_ref() {
+            let observed = legacy.late_cursor(&self.tmux).map_err(Refused::retry)?;
+            if &observed != expected
+                || legacy.frontier(channel, &self.tmux, current.len) != Some(current.len)
+            {
+                return Err(Refused::retry(
+                    "Legacy cursor or frontier changed after late pin",
+                ));
+            }
+        }
         if !past_stall && legacy.tail_running(&self.tmux) {
             return Err(Refused::retry("a Legacy response tail is running"));
         }
@@ -774,3 +831,7 @@ impl LegacyView for NoLegacy {
 #[cfg(test)]
 #[path = "adoption_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "late_pin_tests.rs"]
+mod late_pin_tests;

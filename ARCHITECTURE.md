@@ -95,6 +95,7 @@ src/
 │   ├── agent_channels.rs
 │   ├── cluster_role.rs
 │   ├── disk_write.rs
+│   ├── late_live_reload_tests.rs
 │   ├── peer_filter.rs
 │   ├── readers_live_reload_tests.rs
 │   ├── runtime_profile.rs
@@ -1191,6 +1192,7 @@ src/
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── o_writer_io.rs
+│   │   │   ├── o_writer_late_tmux_tests.rs
 │   │   │   ├── o_writer_legacy.rs
 │   │   │   ├── o_writer_repost_io.rs
 │   │   │   ├── o_writer_repost_io_tests.rs
@@ -2555,6 +2557,7 @@ src/
 │   │   │   ├── adoption/
 │   │   │   │   └── body_check.rs
 │   │   │   ├── adoption.rs
+│   │   │   ├── late_reservation_tests.rs
 │   │   │   └── tests.rs
 │   │   ├── cutover/
 │   │   │   ├── channel_gate/
@@ -2661,6 +2664,12 @@ src/
 │   │   │   ├── host_renumber_tests.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── input_facts.rs
+│   │   │   ├── late_adopt.rs
+│   │   │   ├── late_adopt_binding_tests.rs
+│   │   │   ├── late_adopt_cleanup_tests.rs
+│   │   │   ├── late_adopt_delegated_tests.rs
+│   │   │   ├── late_adopt_host_tests.rs
+│   │   │   ├── late_pin_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_resume_actor_tests.rs
 │   │   │   ├── operator_resume_delivery_tests.rs
