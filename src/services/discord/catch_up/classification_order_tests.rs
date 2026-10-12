@@ -19,7 +19,7 @@ use super::{
     CatchUpDeps, CatchUpDiscordApi, CatchUpMessageView, ChannelId, MessageId, ProviderKind,
     RuntimeChannelBindingStatus, catch_up_intervention_text, catch_up_source_generation,
     classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
-    run_catch_up_sweep, too_old_is_actionable,
+    collect_catch_up_retry_pending_channels, run_catch_up_sweep, too_old_is_actionable,
 };
 use crate::services::discord::health::UtilityBotUserIdResolution;
 use crate::services::turn_orchestrator::{
@@ -1012,10 +1012,7 @@ async fn unavailable_identity_retry_cap_never_settles_ambiguous_trigger() {
         "PM triage: preserve me while identity lookup is down",
     );
 
-    // One initial arm plus exactly the configured number of carried retries
-    // exhausts the tight retry chain. The cap clears the in-memory arm/backoff;
-    // it must never convert uncertainty into a settled checkpoint. A later
-    // periodic catch-up therefore starts again from the same durable cursor.
+    // Exhausting retries holds the uncertain origin for periodic sweeps without settling it.
     for _ in 0..=CATCH_UP_RETRY_DEFERRED_REARM_LIMIT {
         let pending_retry_channels = shared
             .catch_up_retry_pending
@@ -1034,10 +1031,13 @@ async fn unavailable_identity_retry_cap_never_settles_ambiguous_trigger() {
         .await;
     }
 
-    assert!(
-        !shared.catch_up_retry_pending.contains_key(&channel_id),
-        "the bounded retry chain must stop after its configured budget"
-    );
+    let hold = *shared
+        .catch_up_retry_pending
+        .get(&channel_id)
+        .expect("exhausted hold");
+    assert!(hold.is_exhausted_hold());
+    assert_eq!(hold.checkpoint, initial_checkpoint);
+    assert!(collect_catch_up_retry_pending_channels(&shared).is_empty());
     assert!(
         shared
             .last_message_ids

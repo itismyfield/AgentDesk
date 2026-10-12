@@ -201,6 +201,8 @@ src/
 │   ├── dispatched_sessions.rs
 │   ├── fixture_target.rs
 │   ├── idempotency.rs
+│   ├── imsg_reply.rs
+│   ├── imsg_reply_tests.rs
 │   ├── intake_delivery_required_migrations.rs
 │   ├── intake_outbox.rs
 │   ├── intake_outbox_delivery_proof.rs
@@ -826,6 +828,7 @@ src/
 │   │   │   ├── frontier_sweep_tests.rs
 │   │   │   ├── handled_command.rs
 │   │   │   ├── handled_command_tests.rs
+│   │   │   ├── held_range.rs
 │   │   │   ├── injected_catch_up_tests.rs
 │   │   │   ├── merged_alias_tests.rs
 │   │   │   ├── phase2.rs

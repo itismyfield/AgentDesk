@@ -1073,11 +1073,12 @@ async fn t11_exhausted_budget_is_not_reset_by_the_barrier_arm() {
         [deferred, deferred],
         "both phases hit the budget"
     );
-    assert_eq!(
-        fx.pending(channel_id),
-        None,
-        "no fresh retry after exhaustion"
-    );
+    let hold = fx
+        .pending(channel_id)
+        .expect("exhausted origin remains held");
+    assert!(hold.is_exhausted_hold());
+    assert_eq!(hold.checkpoint, checkpoint.get());
+    assert!(super::collect_catch_up_retry_pending_channels(&fx.shared).is_empty());
     let expected = (Some(checkpoint.get()), Some(checkpoint.get()));
     assert_eq!(fx.surfaces(channel_id), expected);
 }
@@ -1108,11 +1109,13 @@ async fn t11b_exhausted_barrier_after_a_settled_predecessor_is_not_logged_as_ret
 
     assert_phase1_read(&api, after(checkpoint), &[a, m]);
     assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
-    assert_eq!(
-        fx.pending(channel_id),
-        None,
-        "the spent budget arms nothing"
-    );
+    let hold = fx
+        .pending(channel_id)
+        .expect("exhausted origin remains held");
+    assert!(hold.is_exhausted_hold());
+    assert_eq!(hold.checkpoint, a.get());
+    assert_eq!(hold.armed_at, last_budget.armed_at);
+    assert!(super::collect_catch_up_retry_pending_channels(&fx.shared).is_empty());
     let exhausted = format!("retry exhausted at barrier {m} for channel {channel_id}");
     assert!(logs.contains(&exhausted), "{logs}");
     assert!(!logs.contains("retry retained at barrier"), "{logs}");
@@ -1172,3 +1175,1517 @@ mod merged_alias_tests;
 
 #[path = "phase2_age_tests.rs"]
 mod phase2_age_tests;
+
+pub(super) mod exhausted_recovery_tests {
+    use super::super::super::clock::CatchUpClock;
+    use super::super::too_old_drop_pg_tests::{StoredDeadLetter, stored_dead_letters};
+    use super::*;
+    use crate::services::turn_orchestrator::{
+        QueuePersistenceContext, load_channel_pending_queue_checked,
+    };
+
+    struct RecoveryClock(Mutex<(chrono::DateTime<chrono::Utc>, Instant)>);
+
+    impl RecoveryClock {
+        fn new() -> Self {
+            Self(Mutex::new((chrono::Utc::now(), Instant::now())))
+        }
+
+        fn advance(&self, secs: u64) {
+            let mut pair = self.0.lock().unwrap();
+            pair.0 += chrono::Duration::seconds(i64::try_from(secs).unwrap());
+            pair.1 += Duration::from_secs(secs);
+        }
+
+        fn message_id(&self, sequence: u64, age_secs: i64) -> MessageId {
+            let wall = self.sample().0 - chrono::Duration::seconds(age_secs);
+            let discord_ms = u64::try_from(wall.timestamp_millis() - 1_420_070_400_000).unwrap();
+            MessageId::new((discord_ms << 22) | sequence)
+        }
+    }
+
+    impl CatchUpClock for RecoveryClock {
+        fn sample(&self) -> (chrono::DateTime<chrono::Utc>, Instant) {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    struct RecordingApi {
+        strict: StrictApi,
+        outcomes: Mutex<Vec<(u64, bool, bool)>>,
+        dead_letters: Mutex<Vec<crate::db::relay_dead_letter::RelayDeadLetterRecord>>,
+        entry_barrier: Option<Arc<tokio::sync::Barrier>>,
+        blocked_fetch: Option<(usize, Arc<tokio::sync::Notify>)>,
+        resumable_fetch: Option<(usize, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+        utility_ids: Option<(UtilityBotUserIdResolution, UtilityBotUserIdResolution)>,
+        first_binding_unknown: std::sync::atomic::AtomicBool,
+        fail_after_cursor: Option<u64>,
+        failed_fetches: Mutex<Vec<CatchUpFetchRequest>>,
+        dlq_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    }
+
+    impl RecordingApi {
+        fn new(strict: StrictApi) -> Self {
+            Self {
+                strict,
+                outcomes: Mutex::new(Vec::new()),
+                dead_letters: Mutex::new(Vec::new()),
+                entry_barrier: None,
+                blocked_fetch: None,
+                resumable_fetch: None,
+                utility_ids: None,
+                first_binding_unknown: std::sync::atomic::AtomicBool::new(false),
+                fail_after_cursor: None,
+                failed_fetches: Mutex::new(Vec::new()),
+                dlq_tasks: Mutex::new(Vec::new()),
+            }
+        }
+
+        async fn flush_dead_letters(&self) {
+            let tasks = std::mem::take(&mut *self.dlq_tasks.lock().unwrap());
+            for task in tasks {
+                task.await.expect("detached DLQ writer completes");
+            }
+        }
+
+        fn accepted(&self, message_id: MessageId) -> usize {
+            self.outcomes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, enqueued, failed)| *id == message_id.get() && *enqueued && !failed)
+                .count()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CatchUpDiscordApi for RecordingApi {
+        async fn current_user_id(&self) -> Result<Option<u64>, String> {
+            if let Some(barrier) = &self.entry_barrier {
+                barrier.wait().await;
+            }
+            self.strict.current_user_id().await
+        }
+
+        async fn resolve_runtime_channel_binding_status(
+            &self,
+            channel_id: ChannelId,
+        ) -> RuntimeChannelBindingStatus {
+            if self
+                .first_binding_unknown
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return RuntimeChannelBindingStatus::Unknown;
+            }
+            self.strict
+                .resolve_runtime_channel_binding_status(channel_id)
+                .await
+        }
+
+        async fn utility_bot_user_ids(
+            &self,
+            shared: &SharedData,
+        ) -> (UtilityBotUserIdResolution, UtilityBotUserIdResolution) {
+            if let Some(ids) = self.utility_ids {
+                ids
+            } else {
+                self.strict.utility_bot_user_ids(shared).await
+            }
+        }
+
+        async fn fetch_messages(
+            &self,
+            channel_id: ChannelId,
+            request: CatchUpFetchRequest,
+        ) -> Result<Vec<serenity::Message>, String> {
+            if self
+                .fail_after_cursor
+                .is_some_and(|cursor| request.cursor == Some(CatchUpFetchCursor::After(cursor)))
+            {
+                self.failed_fetches.lock().unwrap().push(request);
+                return Err("temporary held-gap fetch failure".to_owned());
+            }
+            if let Some((call, entered)) = &self.blocked_fetch
+                && self.strict.fetch_log().len() == *call
+            {
+                entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            if let Some((call, entered, resume)) = &self.resumable_fetch
+                && self.strict.fetch_log().len() == *call
+            {
+                entered.notify_one();
+                resume.notified().await;
+            }
+            self.strict.fetch_messages(channel_id, request).await
+        }
+
+        async fn cleanup_recovered_catch_up_hourglass(
+            &self,
+            shared: &Arc<SharedData>,
+            channel_id: ChannelId,
+            message_id: MessageId,
+        ) {
+            self.strict
+                .cleanup_recovered_catch_up_hourglass(shared, channel_id, message_id)
+                .await;
+        }
+
+        async fn enqueue_intervention(
+            &self,
+            shared: &Arc<SharedData>,
+            provider: &ProviderKind,
+            channel_id: ChannelId,
+            intervention: Intervention,
+            observed: ClaimObservation,
+        ) -> MailboxEnqueueOutcome {
+            let message_id = intervention.message_id.get();
+            let outcome = self
+                .strict
+                .enqueue_intervention(shared, provider, channel_id, intervention, observed)
+                .await;
+            self.outcomes.lock().unwrap().push((
+                message_id,
+                outcome.enqueued,
+                outcome.persistence_error.is_some(),
+            ));
+            outcome
+        }
+
+        fn record_too_old_dead_letter(
+            &self,
+            pool: Option<&sqlx::PgPool>,
+            record: crate::db::relay_dead_letter::RelayDeadLetterRecord,
+        ) -> Option<tokio::task::JoinHandle<()>> {
+            self.dead_letters.lock().unwrap().push(record.clone());
+            if let Some(task) = crate::db::relay_dead_letter::record_detached(pool, record) {
+                self.dlq_tasks.lock().unwrap().push(task);
+            }
+            None
+        }
+    }
+
+    fn api(
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+        checkpoint: MessageId,
+        messages: &[MessageId],
+        phase2: bool,
+        isolate: bool,
+    ) -> RecordingApi {
+        let mut strict = StrictApi::new(shared);
+        if phase2 {
+            strict = strict.with_history(channel_id, vec![own_reply(channel_id, checkpoint)]);
+        }
+        for message_id in messages {
+            strict = strict.arriving_at(
+                usize::from(phase2 && isolate),
+                human(channel_id, *message_id),
+            );
+        }
+        RecordingApi::new(strict)
+    }
+
+    fn sources(items: &[Intervention]) -> Vec<MessageId> {
+        items
+            .iter()
+            .flat_map(|item| item.source_message_ids.iter().copied())
+            .collect()
+    }
+
+    async fn periodic_sweep(
+        api: &RecordingApi,
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        clock: &RecoveryClock,
+    ) {
+        let pending = super::super::super::collect_catch_up_retry_pending_channels(shared);
+        let deps = CatchUpDeps::new(api, shared, provider).with_clock(clock);
+        run_catch_up_sweep(deps.with_pending_retry_channels(&pending)).await;
+    }
+
+    async fn assert_exhausted_recovery(phase2: bool) {
+        let fx = Fixture::new().await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_200 + u64::from(phase2));
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        fx.seed_checkpoint(channel_id, a);
+        let queue_file = discord::runtime_store::discord_pending_queue_root()
+            .expect("queue root")
+            .join(fx.provider.as_str())
+            .join(&fx.shared.token_hash)
+            .join(format!("{}.json", channel_id.get()));
+        std::fs::create_dir_all(&queue_file).expect("directory blocks the durable queue file");
+        let logs = LogWriter::capture();
+        let mut messages = vec![b];
+        let mut origin = None;
+        for attempt in 1..=9 {
+            if attempt > 1 {
+                clock.advance(60);
+            }
+            if attempt == 8 {
+                messages.push(clock.message_id(3, 90));
+            } else if attempt == 9 {
+                messages.push(clock.message_id(4, 60));
+            }
+            let scan = api(&fx.shared, channel_id, a, &messages, phase2, true);
+            periodic_sweep(&scan, &fx.shared, &fx.provider, &clock).await;
+            assert_eq!(
+                *scan.outcomes.lock().unwrap(),
+                [(b.get(), false, true)],
+                "attempt {attempt} must actually fail B's durable enqueue"
+            );
+            assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+            assert!(
+                discord::mailbox_snapshot(&fx.shared, channel_id)
+                    .await
+                    .intervention_queue
+                    .is_empty()
+            );
+            if attempt <= 8 {
+                let pending = fx.pending(channel_id).expect("bounded retry remains armed");
+                assert_eq!(pending.deferred_rearms, attempt);
+                assert_eq!(pending.checkpoint, a.get());
+                assert_eq!(pending.fetch_failures, 0);
+                assert_eq!(pending.armed_at, *origin.get_or_insert(pending.armed_at));
+            }
+        }
+        clock.advance(60);
+        let before_repair = api(&fx.shared, channel_id, a, &messages, phase2, true);
+        periodic_sweep(&before_repair, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+        assert!(
+            before_repair.dead_letters.lock().unwrap().is_empty(),
+            "held B never ages into DLQ"
+        );
+        assert_eq!(
+            *before_repair.outcomes.lock().unwrap(),
+            [(b.get(), false, true)]
+        );
+        let hold = fx
+            .pending(channel_id)
+            .expect("exhausted B stays held until repaired");
+        assert!(
+            hold.deferred_rearms > 8,
+            "hold carries no fresh retry budget"
+        );
+        assert_eq!(hold.armed_at, origin.unwrap());
+        assert_eq!(hold.checkpoint, a.get());
+        assert_hold_excluded(&fx, channel_id);
+        let checkpoint_file = checkpoint_path(fx.root.path(), &fx.provider, channel_id);
+        let times = std::fs::FileTimes::new()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(11 * 60));
+        std::fs::File::open(&checkpoint_file)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        clock.advance(60);
+        let pruned = api(&fx.shared, channel_id, a, &messages, phase2, true);
+        periodic_sweep(&pruned, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(fx.surfaces(channel_id), (Some(a.get()), None));
+        assert_eq!(*pruned.outcomes.lock().unwrap(), [(b.get(), false, true)]);
+        assert!(pruned.dead_letters.lock().unwrap().is_empty());
+        assert!(fx.pending(channel_id).unwrap().deferred_rearms > 8);
+        assert!(
+            queue_file.is_dir(),
+            "failed writes preserve the broken path"
+        );
+        std::fs::remove_dir(&queue_file).expect("repair the enqueue persistence failure");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut first = api(&fx.shared, channel_id, a, &messages, phase2, false);
+        let mut second = api(&fx.shared, channel_id, a, &messages, phase2, false);
+        first.entry_barrier = Some(Arc::clone(&barrier));
+        second.entry_barrier = Some(barrier);
+        let rescan = periodic_sweep;
+        clock.advance(60);
+        tokio::join!(
+            rescan(&first, &fx.shared, &fx.provider, &clock),
+            rescan(&second, &fx.shared, &fx.provider, &clock)
+        );
+        let mut reread_b = false;
+        for scan in [&first, &second] {
+            if scan
+                .strict
+                .fetch_log()
+                .first()
+                .is_some_and(|(_, request, _)| *request == after(a))
+            {
+                assert_phase1_read(&scan.strict, after(a), &messages);
+                reread_b = true;
+            }
+        }
+        assert!(
+            reread_b,
+            "a real recovery fetch sees B behind the held cursor"
+        );
+        assert_eq!(first.accepted(b) + second.accepted(b), 1);
+        assert!(
+            fx.pending(channel_id).is_none(),
+            "a completed held scan releases its hold"
+        );
+        let snapshot = discord::mailbox_snapshot(&fx.shared, channel_id).await;
+        assert_eq!(sources(&snapshot.intervention_queue), messages);
+        let read_disk = || {
+            load_channel_pending_queue_checked(&fx.provider, &fx.shared.token_hash, channel_id)
+                .expect("durable queue reader succeeds")
+                .0
+        };
+        assert_eq!(sources(&read_disk()), messages);
+        assert_eq!(
+            sources(&read_disk()).iter().filter(|id| **id == b).count(),
+            1
+        );
+        let extra = api(&fx.shared, channel_id, a, &messages, phase2, false);
+        rescan(&extra, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(extra.accepted(b), 0);
+        assert_eq!(sources(&read_disk()), messages);
+
+        // A fresh actor restores the durable sources, with no retry state and a plain old cursor.
+        write_checkpoint(fx.root.path(), &fx.provider, channel_id, a.get());
+        let restarted = discord::make_shared_data_for_tests();
+        {
+            let mut settings = restarted.settings.write().await;
+            settings.owner_user_id = Some(OWNER_ID);
+            settings.allow_all_users = true;
+        }
+        assert!(restarted.catch_up_retry_pending.is_empty());
+        let persistence = QueuePersistenceContext::new(&fx.provider, &restarted.token_hash, None);
+        let hydrated = restarted
+            .mailbox(channel_id)
+            .hydrate_pending_queue_from_disk(persistence)
+            .await;
+        assert!(hydrated.persistence_error.is_none());
+        let restored = discord::mailbox_snapshot(&restarted, channel_id).await;
+        assert_eq!(sources(&restored.intervention_queue), messages);
+        let restart_scan = api(&restarted, channel_id, a, &messages, phase2, false);
+        rescan(&restart_scan, &restarted, &fx.provider, &clock).await;
+        assert_phase1_read(&restart_scan.strict, after(a), &messages);
+        assert_eq!(restart_scan.accepted(b), 0);
+        assert_eq!(sources(&read_disk()), messages);
+
+        let logs = logs.finish();
+        assert_eq!(
+            logs.lines()
+                .filter(|line| line.contains("giving up after 8 re-arm(s)"))
+                .count(),
+            1,
+            "repeated Deferred holds emit no new exhaustion warning"
+        );
+        let exhausted = logs
+            .lines()
+            .find(|line| line.contains("giving up after 8 re-arm(s)"))
+            .expect("the actual exhausted path emits its WARN");
+        assert!(exhausted.contains("repair the cause"), "{exhausted}");
+        assert!(exhausted.contains("next periodic sweep"), "{exhausted}");
+        assert!(exhausted.contains("in-process"), "{exhausted}");
+        assert!(exhausted.contains("restart"), "{exhausted}");
+        assert!(exhausted.contains("TooOld DLQ"), "{exhausted}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn phase1_exhausted_persistence_retry_recovers_once_after_full_rescan() {
+        assert_exhausted_recovery(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn phase2_exhausted_persistence_retry_recovers_once_after_full_rescan() {
+        assert_exhausted_recovery(true).await;
+    }
+
+    fn assert_hold_excluded(fx: &Fixture, channel_id: ChannelId) {
+        let hold = fx.pending(channel_id).expect("hold remains pending");
+        assert_eq!(hold.deferred_rearms, 9);
+        assert!(
+            !super::super::super::collect_catch_up_retry_pending_channels(&fx.shared)
+                .contains(&channel_id)
+        );
+        assert!(
+            super::super::super::take_catch_up_retry_checkpoint_after_queue_drain(
+                &fx.shared, channel_id, 0
+            )
+            .is_none()
+        );
+        assert_eq!(
+            fx.pending(channel_id),
+            Some(hold),
+            "queue drain cannot consume the hold"
+        );
+    }
+
+    async fn fail_actual_queue_writes(
+        fx: &Fixture,
+        clock: &RecoveryClock,
+        channel_id: ChannelId,
+        a: MessageId,
+        messages: &[MessageId],
+        phase2: bool,
+        attempts: u8,
+    ) -> std::path::PathBuf {
+        fx.seed_checkpoint(channel_id, a);
+        let path = discord::runtime_store::discord_pending_queue_root()
+            .unwrap()
+            .join(fx.provider.as_str())
+            .join(&fx.shared.token_hash)
+            .join(format!("{}.json", channel_id.get()));
+        std::fs::create_dir_all(&path).unwrap();
+        for attempt in 1..=attempts {
+            if attempt > 1 {
+                clock.advance(60);
+            }
+            let scan = api(&fx.shared, channel_id, a, messages, phase2, true);
+            periodic_sweep(&scan, &fx.shared, &fx.provider, clock).await;
+            assert_eq!(
+                *scan.outcomes.lock().unwrap(),
+                [(messages[0].get(), false, true)]
+            );
+            assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+            assert!(
+                discord::mailbox_snapshot(&fx.shared, channel_id)
+                    .await
+                    .intervention_queue
+                    .is_empty()
+            );
+            assert_eq!(fx.pending(channel_id).unwrap().deferred_rearms, attempt);
+        }
+        path
+    }
+
+    async fn exhaust_actual_failures(
+        fx: &Fixture,
+        clock: &RecoveryClock,
+        channel_id: ChannelId,
+        a: MessageId,
+        messages: &[MessageId],
+        phase2: bool,
+    ) -> std::path::PathBuf {
+        let path = fail_actual_queue_writes(fx, clock, channel_id, a, messages, phase2, 9).await;
+        assert_hold_excluded(fx, channel_id);
+        path
+    }
+
+    async fn dead_letter_count(pool: &sqlx::PgPool, message_id: MessageId) -> usize {
+        let key = message_id.to_string();
+        stored_dead_letters(pool)
+            .await
+            .into_iter()
+            .filter(|row| row.3.as_deref() == Some(key.as_str()))
+            .count()
+    }
+
+    async fn stored_dead_letter(pool: &sqlx::PgPool, message_id: MessageId) -> StoredDeadLetter {
+        let key = message_id.to_string();
+        stored_dead_letters(pool)
+            .await
+            .into_iter()
+            .find(|row| row.3.as_deref() == Some(key.as_str()))
+            .expect("read back the actual TooOld row")
+    }
+
+    async fn recovery_pg_fixture(
+        label: &str,
+    ) -> (
+        Fixture,
+        crate::dispatch::test_support::DispatchPostgresTestDb,
+        sqlx::PgPool,
+    ) {
+        let mut fx = Fixture::new().await;
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_catch_up_hold_ttl",
+            label,
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        fx.shared = discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        {
+            let mut settings = fx.shared.settings.write().await;
+            settings.owner_user_id = Some(OWNER_ID);
+            settings.allow_all_users = true;
+        }
+        (fx, db, pool)
+    }
+
+    pub(in super::super) async fn assert_hold_ttl_and_cancel_pg(phase2: bool) {
+        let (fx, db, pool) = recovery_pg_fixture("exhausted hold TTL and cancellation").await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_220 + u64::from(phase2));
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        exhaust_actual_failures(&fx, &clock, channel_id, a, &[b], phase2).await;
+        let origin = fx.pending(channel_id).unwrap().armed_at;
+        let logs = LogWriter::capture();
+        clock.advance(24 * 60 * 60 - 480 - 1);
+        let before = api(&fx.shared, channel_id, a, &[b], phase2, true);
+        periodic_sweep(&before, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(*before.outcomes.lock().unwrap(), [(b.get(), false, true)]);
+        assert!(before.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(dead_letter_count(&pool, b).await, 0);
+        assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+        assert_eq!(fx.pending(channel_id).unwrap().armed_at, origin);
+        assert_hold_excluded(&fx, channel_id);
+
+        clock.advance(1);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let mut parked = api(&fx.shared, channel_id, a, &[b], phase2, true);
+        parked.blocked_fetch = Some((usize::from(phase2), Arc::clone(&entered)));
+        let mut in_flight = Box::pin(periodic_sweep(&parked, &fx.shared, &fx.provider, &clock));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                _ = &mut in_flight => panic!("the held scan must park before classifying B"),
+                _ = entered.notified() => {}
+            }
+        })
+        .await
+        .expect("held scan obtains its fetch lease");
+        let held = fx.pending(channel_id).unwrap();
+        assert_eq!(held.deferred_rearms, 9);
+        assert!(
+            fx.shared
+                .catch_up_scan_in_progress
+                .contains_key(&channel_id)
+        );
+        let busy = api(&fx.shared, channel_id, a, &[b], phase2, true);
+        let handed_retry = CatchUpRetryState {
+            deferred_rearms: 8,
+            ..held
+        };
+        let handed = HashMap::from([(channel_id, handed_retry)]);
+        let deps = CatchUpDeps::new(&busy, &fx.shared, &fx.provider).with_clock(&clock);
+        run_catch_up_sweep(deps.with_retry_checkpoints(&handed)).await;
+        assert_eq!(
+            fx.shared
+                .catch_up_scan_in_progress
+                .get(&channel_id)
+                .map(|entry| *entry),
+            Some((true, Some(handed_retry))),
+            "the busy caller hands its stale retry to the owner"
+        );
+        assert!(
+            busy.strict.fetch_log().is_empty(),
+            "a leased channel is skipped in both phases"
+        );
+        assert!(busy.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+        assert_eq!(
+            fx.pending(channel_id),
+            Some(held),
+            "the busy scan cannot change the owner's hold"
+        );
+        assert!(
+            fx.shared
+                .catch_up_scan_in_progress
+                .contains_key(&channel_id)
+        );
+        drop(in_flight);
+        assert!(
+            !fx.shared
+                .catch_up_scan_in_progress
+                .contains_key(&channel_id)
+        );
+        assert_eq!(
+            fx.pending(channel_id),
+            Some(held),
+            "cancellation preserves the hold's cursor and original TTL"
+        );
+        assert_hold_excluded(&fx, channel_id);
+        assert_eq!(fx.pending(channel_id).unwrap().armed_at, origin);
+        assert_eq!(dead_letter_count(&pool, b).await, 0);
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut first = api(&fx.shared, channel_id, a, &[b], phase2, true);
+        let mut second = api(&fx.shared, channel_id, a, &[b], phase2, true);
+        first.entry_barrier = Some(Arc::clone(&barrier));
+        second.entry_barrier = Some(barrier);
+        tokio::join!(
+            periodic_sweep(&first, &fx.shared, &fx.provider, &clock),
+            periodic_sweep(&second, &fx.shared, &fx.provider, &clock),
+        );
+        first.flush_dead_letters().await;
+        second.flush_dead_letters().await;
+        assert_eq!(
+            first.dead_letters.lock().unwrap().len() + second.dead_letters.lock().unwrap().len(),
+            1
+        );
+        assert_eq!(dead_letter_count(&pool, b).await, 1);
+        let row = stored_dead_letter(&pool, b).await;
+        assert_eq!(
+            row,
+            (
+                crate::db::relay_dead_letter::KIND_CATCH_UP_TOO_OLD.to_owned(),
+                channel_id.to_string(),
+                Some(HUMAN_ID.to_string()),
+                Some(b.to_string()),
+                human(channel_id, b).content,
+                "exhausted catch-up hold expired at 24h TTL".to_owned(),
+            )
+        );
+        assert_eq!(fx.surfaces(channel_id), (Some(b.get()), Some(b.get())));
+        assert!(fx.pending(channel_id).is_none());
+        assert!(
+            discord::mailbox_snapshot(&fx.shared, channel_id)
+                .await
+                .intervention_queue
+                .is_empty()
+        );
+        assert_eq!(first.accepted(b) + second.accepted(b), 0);
+
+        clock.advance(1);
+        let after = api(&fx.shared, channel_id, a, &[b], phase2, true);
+        periodic_sweep(&after, &fx.shared, &fx.provider, &clock).await;
+        after.flush_dead_letters().await;
+        assert!(after.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(dead_letter_count(&pool, b).await, 1);
+        assert_eq!(fx.surfaces(channel_id), (Some(b.get()), Some(b.get())));
+        assert!(fx.pending(channel_id).is_none());
+        let late_drain = api(&fx.shared, channel_id, a, &[b], phase2, true);
+        let late_handed = HashMap::from([(channel_id, handed_retry)]);
+        let deps = CatchUpDeps::new(&late_drain, &fx.shared, &fx.provider).with_clock(&clock);
+        run_catch_up_sweep(deps.with_retry_checkpoints(&late_handed)).await;
+        late_drain.flush_dead_letters().await;
+        assert_eq!(
+            late_drain.accepted(b),
+            0,
+            "the late original eighth arm cannot resurrect TTL-retired B"
+        );
+        assert!(late_drain.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(dead_letter_count(&pool, b).await, 1);
+        assert_eq!(fx.surfaces(channel_id), (Some(b.get()), Some(b.get())));
+        assert!(fx.pending(channel_id).is_none());
+        assert!(logs.finish().contains("exhausted hold expired at 24h TTL"));
+        pool.close().await;
+        db.drop().await;
+    }
+
+    pub(in super::super) async fn assert_exhausted_recovery_sender_authorization_pg(phase2: bool) {
+        let (fx, db, pool) = recovery_pg_fixture("exhausted hold sender authorization").await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_260 + u64::from(phase2));
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        exhaust_actual_failures(&fx, &clock, channel_id, a, &[b], phase2).await;
+        {
+            let mut settings = fx.shared.settings.write().await;
+            settings.allow_all_users = false;
+            settings.allowed_user_ids.clear();
+        }
+        assert!(
+            !crate::services::discord::discord_io::author_authorized(&fx.shared, HUMAN_ID).await,
+            "B's sender loses authorization after the nine real persistence failures"
+        );
+        clock.advance(24 * 60 * 60 - 480);
+        for offset in 0..=1 {
+            clock.advance(offset);
+            let scan = api(&fx.shared, channel_id, a, &[b], phase2, true);
+            periodic_sweep(&scan, &fx.shared, &fx.provider, &clock).await;
+            scan.flush_dead_letters().await;
+            if offset == 0 {
+                assert!(
+                    scan.strict
+                        .fetch_log()
+                        .iter()
+                        .any(|(_, _, ids)| ids.contains(&b.get())),
+                    "the actual TTL sweep reads unauthorized B"
+                );
+            }
+            assert!(scan.outcomes.lock().unwrap().is_empty());
+            assert!(scan.dead_letters.lock().unwrap().is_empty());
+            assert_eq!(dead_letter_count(&pool, b).await, 0);
+            assert_eq!(scan.accepted(b), 0);
+            assert!(
+                discord::mailbox_snapshot(&fx.shared, channel_id)
+                    .await
+                    .intervention_queue
+                    .is_empty()
+            );
+        }
+        pool.close().await;
+        db.drop().await;
+    }
+
+    fn unresolved_dispatch_api(
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+        a: MessageId,
+        b: MessageId,
+        phase2: bool,
+    ) -> RecordingApi {
+        let mut strict = StrictApi::new(shared);
+        if phase2 {
+            strict = strict.with_history(channel_id, vec![own_reply(channel_id, a)]);
+        }
+        strict = strict.arriving_at(
+            usize::from(phase2),
+            discord_message(
+                channel_id,
+                b,
+                INFO_BOT_ID,
+                true,
+                "DISPATCH:6813-unresolved-announce",
+            ),
+        );
+        let mut api = RecordingApi::new(strict);
+        api.utility_ids = Some((
+            UtilityBotUserIdResolution::Unavailable,
+            UtilityBotUserIdResolution::Unconfigured,
+        ));
+        api
+    }
+
+    pub(in super::super) async fn assert_exhausted_recovery_unresolved_dispatch_ttl_pg(
+        phase2: bool,
+    ) {
+        let (fx, db, pool) =
+            recovery_pg_fixture("exhausted unresolved announce DISPATCH TTL").await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_300 + u64::from(phase2));
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        fx.seed_checkpoint(channel_id, a);
+        {
+            let mut settings = fx.shared.settings.write().await;
+            assert!(!settings.allowed_bot_ids.contains(&INFO_BOT_ID));
+            settings.allow_all_users = false;
+            settings.allowed_user_ids.clear();
+        }
+        let mut origin = None;
+        for attempt in 1..=9 {
+            if attempt > 1 {
+                clock.advance(60);
+            }
+            let scan = unresolved_dispatch_api(&fx.shared, channel_id, a, b, phase2);
+            periodic_sweep(&scan, &fx.shared, &fx.provider, &clock).await;
+            scan.flush_dead_letters().await;
+            assert!(
+                scan.strict
+                    .fetch_log()
+                    .iter()
+                    .any(|(_, _, ids)| ids.contains(&b.get()))
+            );
+            assert!(
+                scan.outcomes.lock().unwrap().is_empty(),
+                "identity uncertainty defers before enqueue"
+            );
+            assert!(scan.dead_letters.lock().unwrap().is_empty());
+            assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+            let pending = fx
+                .pending(channel_id)
+                .expect("ambiguous DISPATCH stays retryable");
+            assert_eq!(pending.deferred_rearms, attempt);
+            assert_eq!(pending.armed_at, *origin.get_or_insert(pending.armed_at));
+        }
+        assert_hold_excluded(&fx, channel_id);
+        assert_eq!(dead_letter_count(&pool, b).await, 0);
+        clock.advance(24 * 60 * 60 - 480 - 1);
+        let before = unresolved_dispatch_api(&fx.shared, channel_id, a, b, phase2);
+        periodic_sweep(&before, &fx.shared, &fx.provider, &clock).await;
+        assert!(
+            before
+                .strict
+                .fetch_log()
+                .iter()
+                .any(|(_, _, ids)| ids.contains(&b.get()))
+        );
+        assert!(before.outcomes.lock().unwrap().is_empty());
+        assert_hold_excluded(&fx, channel_id);
+        assert!(before.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(fx.pending(channel_id).unwrap().armed_at, origin.unwrap());
+        assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+        clock.advance(1);
+        let expired = unresolved_dispatch_api(&fx.shared, channel_id, a, b, phase2);
+        periodic_sweep(&expired, &fx.shared, &fx.provider, &clock).await;
+        expired.flush_dead_letters().await;
+        assert!(
+            expired
+                .strict
+                .fetch_log()
+                .iter()
+                .any(|(_, _, ids)| ids.contains(&b.get()))
+        );
+        assert_eq!(expired.dead_letters.lock().unwrap().len(), 1);
+        assert_eq!(dead_letter_count(&pool, b).await, 1);
+        let row = stored_dead_letter(&pool, b).await;
+        assert_eq!(
+            row,
+            (
+                crate::db::relay_dead_letter::KIND_CATCH_UP_TOO_OLD.to_owned(),
+                channel_id.to_string(),
+                Some(INFO_BOT_ID.to_string()),
+                Some(b.to_string()),
+                "DISPATCH:6813-unresolved-announce".to_owned(),
+                "exhausted catch-up hold expired at 24h TTL".to_owned(),
+            )
+        );
+        assert!(expired.outcomes.lock().unwrap().is_empty());
+        assert_eq!(fx.surfaces(channel_id), (Some(b.get()), Some(b.get())));
+        assert!(fx.pending(channel_id).is_none());
+        clock.advance(1);
+        let after = unresolved_dispatch_api(&fx.shared, channel_id, a, b, phase2);
+        periodic_sweep(&after, &fx.shared, &fx.provider, &clock).await;
+        after.flush_dead_letters().await;
+        assert!(after.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(after.accepted(b), 0);
+        assert_eq!(dead_letter_count(&pool, b).await, 1);
+        pool.close().await;
+        db.drop().await;
+    }
+
+    pub(in super::super) async fn assert_exhausted_recovery_fresh_dispatch_ttl_pg(phase2: bool) {
+        let (fx, db, pool) =
+            recovery_pg_fixture("exhausted hold does not authorize fresh DISPATCH").await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_320 + u64::from(phase2));
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        fx.seed_checkpoint(channel_id, a);
+        {
+            let mut settings = fx.shared.settings.write().await;
+            assert!(!settings.allowed_bot_ids.contains(&INFO_BOT_ID));
+            settings.allow_all_users = false;
+            settings.allowed_user_ids.clear();
+        }
+        for attempt in 1..=9 {
+            if attempt > 1 {
+                clock.advance(60);
+            }
+            let scan = unresolved_dispatch_api(&fx.shared, channel_id, a, b, phase2);
+            periodic_sweep(&scan, &fx.shared, &fx.provider, &clock).await;
+            assert!(scan.outcomes.lock().unwrap().is_empty());
+            assert_eq!(fx.pending(channel_id).unwrap().deferred_rearms, attempt);
+        }
+        let hold = fx.pending(channel_id).unwrap();
+        clock.advance(24 * 60 * 60 - 480);
+        let c = clock.message_id(3, 30);
+        // The next page exposes only fresh C, so the expired arm must not authorize it.
+        let fresh = unresolved_dispatch_api(&fx.shared, channel_id, a, c, phase2);
+        periodic_sweep(&fresh, &fx.shared, &fx.provider, &clock).await;
+        fresh.flush_dead_letters().await;
+        assert!(
+            fresh
+                .strict
+                .fetch_log()
+                .iter()
+                .any(|(_, _, ids)| ids.contains(&c.get()))
+        );
+        assert!(
+            fresh.outcomes.lock().unwrap().is_empty(),
+            "fresh unresolved C never reaches enqueue"
+        );
+        assert!(fresh.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(dead_letter_count(&pool, c).await, 0);
+        assert_eq!(dead_letter_count(&pool, b).await, 0);
+        assert_eq!(fx.pending(channel_id), Some(hold));
+        assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+        assert!(
+            discord::mailbox_snapshot(&fx.shared, channel_id)
+                .await
+                .intervention_queue
+                .is_empty()
+        );
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_recovery_hold_moves_to_accepted_b_before_deferred_c_without_renewing_ttl() {
+        let fx = Fixture::new().await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_240);
+        let (a, b, c) = (
+            clock.message_id(1, 600),
+            clock.message_id(2, 30),
+            clock.message_id(3, 20),
+        );
+        let path = exhaust_actual_failures(&fx, &clock, channel_id, a, &[b, c], false).await;
+        let origin = fx.pending(channel_id).unwrap().armed_at;
+        std::fs::remove_dir(path).expect("repair the real persistence failure");
+        clock.advance(60);
+        let mut scan = api(&fx.shared, channel_id, a, &[b, c], false, false);
+        scan.strict = scan.strict.with_hooks(c, &[Hook::Defer]);
+        periodic_sweep(&scan, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(
+            *scan.outcomes.lock().unwrap(),
+            [(b.get(), true, false), (c.get(), false, false)]
+        );
+        assert_eq!(fx.surfaces(channel_id), (Some(b.get()), Some(b.get())));
+        let hold = fx.pending(channel_id).expect("C's defer retains the hold");
+        assert_eq!(hold.checkpoint, b.get());
+        assert_eq!(hold.armed_at, origin);
+        assert_hold_excluded(&fx, channel_id);
+        clock.advance(60);
+        let recovered = api(&fx.shared, channel_id, a, &[b, c], false, false);
+        periodic_sweep(&recovered, &fx.shared, &fx.provider, &clock).await;
+        assert_phase1_read(&recovered.strict, after(b), &[c]);
+        assert_eq!(recovered.accepted(c), 1);
+        assert_eq!(recovered.accepted(b), 0);
+        assert!(fx.pending(channel_id).is_none());
+        assert_eq!(fx.surfaces(channel_id), (Some(c.get()), Some(c.get())));
+        let stored =
+            load_channel_pending_queue_checked(&fx.provider, &fx.shared.token_hash, channel_id)
+                .unwrap()
+                .0;
+        assert_eq!(sources(&stored), [b, c]);
+    }
+
+    async fn assert_drained_retry_handoff(phase2: bool) {
+        let fx = Fixture::new().await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_280 + u64::from(phase2));
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        let path = fail_actual_queue_writes(&fx, &clock, channel_id, a, &[b], phase2, 8).await;
+        let armed = fx.pending(channel_id).unwrap();
+        let drained = super::super::super::take_catch_up_retry_checkpoint_after_queue_drain(
+            &fx.shared, channel_id, 0,
+        )
+        .expect("the real drain consumes the bounded eighth arm");
+        assert_eq!(drained, armed);
+        assert_eq!(drained.deferred_rearms, 8);
+        assert!(fx.pending(channel_id).is_none());
+        assert_eq!(
+            fx.shared
+                .catch_up_scan_in_progress
+                .get(&channel_id)
+                .map(|entry| *entry),
+            Some((false, Some(drained))),
+            "drain atomically reserves the original arm"
+        );
+        clock.advance(240);
+        assert!(
+            clock
+                .sample()
+                .0
+                .signed_duration_since(*b.created_at())
+                .num_seconds()
+                > 600
+        );
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let mut owner = api(&fx.shared, channel_id, a, &[b], phase2, true);
+        owner.resumable_fetch = Some((0, Arc::clone(&entered), Arc::clone(&resume)));
+        let mut running = Box::pin(periodic_sweep(&owner, &fx.shared, &fx.provider, &clock));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                _ = &mut running => panic!("periodic owner must park before reading B"),
+                _ = entered.notified() => {}
+            }
+        })
+        .await
+        .expect("periodic owner acquires its channel lease");
+        assert_eq!(
+            fx.shared
+                .catch_up_scan_in_progress
+                .get(&channel_id)
+                .map(|entry| *entry),
+            Some((true, None)),
+            "the periodic owner inherits the reserved arm without explicit retry input"
+        );
+        let drain = api(&fx.shared, channel_id, a, &[b], phase2, true);
+        let handed = HashMap::from([(channel_id, drained)]);
+        let deps = CatchUpDeps::new(&drain, &fx.shared, &fx.provider).with_clock(&clock);
+        run_catch_up_sweep(deps.with_retry_checkpoints(&handed)).await;
+        assert!(drain.strict.fetch_log().is_empty());
+        assert_eq!(
+            fx.shared
+                .catch_up_scan_in_progress
+                .get(&channel_id)
+                .map(|entry| *entry),
+            Some((true, Some(drained))),
+            "the busy drain publishes its actual state8 handoff"
+        );
+        resume.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("owner resumes");
+        assert!(
+            owner
+                .strict
+                .fetch_log()
+                .iter()
+                .any(|(_, _, ids)| ids.contains(&b.get()))
+        );
+        assert_eq!(*owner.outcomes.lock().unwrap(), [(b.get(), false, true)]);
+        assert!(owner.dead_letters.lock().unwrap().is_empty());
+        assert!(drain.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+        let hold = fx
+            .pending(channel_id)
+            .expect("the handed eighth arm becomes an exhausted hold");
+        assert_eq!(hold.deferred_rearms, 9);
+        assert_eq!(hold.checkpoint, a.get());
+        assert_eq!(hold.armed_at, drained.armed_at);
+        assert_hold_excluded(&fx, channel_id);
+        assert!(
+            !fx.shared
+                .catch_up_scan_in_progress
+                .contains_key(&channel_id)
+        );
+        std::fs::remove_dir(path).expect("repair the actual durable enqueue path");
+        clock.advance(60);
+        let recovery = api(&fx.shared, channel_id, a, &[b], phase2, true);
+        periodic_sweep(&recovery, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(recovery.accepted(b), 1);
+        assert!(recovery.dead_letters.lock().unwrap().is_empty());
+        assert!(fx.pending(channel_id).is_none());
+        let stored =
+            load_channel_pending_queue_checked(&fx.provider, &fx.shared.token_hash, channel_id)
+                .expect("read the recovered durable queue")
+                .0;
+        assert_eq!(sources(&stored), [b]);
+        assert_eq!(fx.surfaces(channel_id), (Some(b.get()), Some(b.get())));
+        let again = api(&fx.shared, channel_id, a, &[b], phase2, true);
+        periodic_sweep(&again, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(again.accepted(b), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn phase1_exhausted_recovery_adopts_busy_drain_retry_before_age_and_budget() {
+        assert_drained_retry_handoff(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn phase2_exhausted_recovery_adopts_busy_drain_retry_before_age_and_budget() {
+        assert_drained_retry_handoff(true).await;
+    }
+
+    // A reply after B hides B from phase 2's unanswered slice, while phase 1 still owes B.
+    async fn assert_phase2_successor_cannot_release_unsettled_hold(active_successor: bool) {
+        let fx = Fixture::new().await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_290 + u64::from(active_successor));
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        let (r, successor_id) = (clock.message_id(3, 20), clock.message_id(4, 10));
+        fx.seed_checkpoint(channel_id, a);
+        if active_successor {
+            let token = Arc::new(crate::services::provider::CancelToken::new());
+            assert!(
+                discord::mailbox_try_start_turn(
+                    &fx.shared,
+                    channel_id,
+                    token,
+                    serenity::UserId::new(HUMAN_ID),
+                    successor_id,
+                )
+                .await
+            );
+        }
+        let successor = if active_successor {
+            human(channel_id, successor_id)
+        } else {
+            foreign_bot(channel_id, successor_id)
+        };
+        let queue_file = discord::runtime_store::discord_pending_queue_root()
+            .expect("queue root")
+            .join(fx.provider.as_str())
+            .join(&fx.shared.token_hash)
+            .join(format!("{}.json", channel_id.get()));
+        std::fs::create_dir_all(&queue_file).expect("directory blocks durable enqueue");
+        let build = || {
+            RecordingApi::new(StrictApi::new(&fx.shared).with_history(
+                channel_id,
+                vec![
+                    human(channel_id, b),
+                    own_reply(channel_id, r),
+                    successor.clone(),
+                ],
+            ))
+        };
+        let mut origin = None;
+        for attempt in 1..=9 {
+            if attempt > 1 {
+                clock.advance(60);
+            }
+            let scan = build();
+            periodic_sweep(&scan, &fx.shared, &fx.provider, &clock).await;
+            assert_phase1_read(&scan.strict, after(a), &[b, r, successor_id]);
+            let fetches = scan.strict.fetch_log();
+            assert_eq!(fetches.len(), 2, "the same sweep actually runs both phases");
+            assert_eq!(
+                fetches[1],
+                (
+                    channel_id,
+                    CatchUpFetchRequest::new(20),
+                    vec![successor_id.get(), r.get(), b.get()]
+                )
+            );
+            assert_eq!(*scan.outcomes.lock().unwrap(), [(b.get(), false, true)]);
+            assert!(scan.dead_letters.lock().unwrap().is_empty());
+            assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+            let snapshot = discord::mailbox_snapshot(&fx.shared, channel_id).await;
+            assert!(snapshot.intervention_queue.is_empty());
+            assert_eq!(
+                snapshot.active_user_message_id,
+                active_successor.then_some(successor_id)
+            );
+            let state = fx
+                .pending(channel_id)
+                .expect("B's retry survives its sweep");
+            assert_eq!(state.deferred_rearms, attempt);
+            assert_eq!(state.checkpoint, a.get());
+            assert_eq!(state.armed_at, *origin.get_or_insert(state.armed_at));
+        }
+        assert_hold_excluded(&fx, channel_id);
+        clock.advance(60);
+        std::fs::remove_dir(&queue_file).expect("repair the actual durable enqueue path");
+        let repaired = build();
+        periodic_sweep(&repaired, &fx.shared, &fx.provider, &clock).await;
+        assert_phase1_read(&repaired.strict, after(a), &[b, r, successor_id]);
+        assert_eq!(
+            repaired.accepted(b),
+            1,
+            "B is recovered after repair within 24h"
+        );
+        assert_eq!(*repaired.outcomes.lock().unwrap(), [(b.get(), true, false)]);
+        assert!(repaired.dead_letters.lock().unwrap().is_empty());
+        assert!(fx.pending(channel_id).is_none());
+        let (memory, disk) = fx.surfaces(channel_id);
+        assert_eq!(memory, disk);
+        assert!(memory.is_some_and(|checkpoint| checkpoint >= b.get()));
+        let stored = || {
+            load_channel_pending_queue_checked(&fx.provider, &fx.shared.token_hash, channel_id)
+                .expect("read the actual durable recovered queue")
+                .0
+        };
+        assert_eq!(sources(&stored()), [b]);
+        clock.advance(60);
+        let again = build();
+        periodic_sweep(&again, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(again.accepted(b), 0);
+        assert!(again.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(sources(&stored()), [b]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rv_phase2_unblocked_pass_releases_hold_kept_by_phase1() {
+        assert_phase2_successor_cannot_release_unsettled_hold(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_recovery_active_turn_after_later_reply_does_not_release_b_hold() {
+        assert_phase2_successor_cannot_release_unsettled_hold(true).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_recovery_empty_phase1_releases_after_phase2_durable_acceptance() {
+        let fx = Fixture::new().await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_292);
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        let path = exhaust_actual_failures(&fx, &clock, channel_id, a, &[b], false).await;
+        std::fs::remove_dir(path).expect("repair the actual durable enqueue path");
+        clock.advance(60);
+        let build = || {
+            RecordingApi::new(
+                StrictApi::new(&fx.shared)
+                    .with_history(channel_id, vec![own_reply(channel_id, a)])
+                    .arriving_at(1, human(channel_id, b)),
+            )
+        };
+        let repaired = build();
+        periodic_sweep(&repaired, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(
+            repaired.strict.fetch_log(),
+            [
+                (channel_id, after(a), vec![]),
+                (
+                    channel_id,
+                    CatchUpFetchRequest::new(20),
+                    vec![b.get(), a.get()]
+                ),
+            ]
+        );
+        assert_eq!(*repaired.outcomes.lock().unwrap(), [(b.get(), true, false)]);
+        assert_eq!(repaired.accepted(b), 1);
+        assert!(repaired.dead_letters.lock().unwrap().is_empty());
+        assert!(
+            fx.pending(channel_id).is_none(),
+            "phase 2 earns release with B's durable frontier"
+        );
+        assert_eq!(fx.surfaces(channel_id), (Some(b.get()), Some(b.get())));
+        let stored = || {
+            load_channel_pending_queue_checked(&fx.provider, &fx.shared.token_hash, channel_id)
+                .expect("read phase 2's durable B")
+                .0
+        };
+        assert_eq!(sources(&stored()), [b]);
+        clock.advance(60);
+        let again = build();
+        periodic_sweep(&again, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(again.accepted(b), 0);
+        assert!(again.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(sources(&stored()), [b]);
+    }
+    // A partial phase-2 frontier keeps C's original hold while B is already durable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_recovery_empty_phase1_phase2_partial_progress_keeps_c_origin() {
+        let fx = Fixture::new().await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_293);
+        let (a, b, c) = (
+            clock.message_id(1, 600),
+            clock.message_id(2, 30),
+            clock.message_id(3, 20),
+        );
+        let path = exhaust_actual_failures(&fx, &clock, channel_id, a, &[b, c], false).await;
+        let original = fx
+            .pending(channel_id)
+            .expect("nine actual failures retain the original hold");
+        std::fs::remove_dir(path).expect("repair the actual durable enqueue path");
+        clock.advance(60);
+        let partial = RecordingApi::new(
+            StrictApi::new(&fx.shared)
+                .with_history(channel_id, vec![own_reply(channel_id, a)])
+                .arriving_at(1, human(channel_id, b))
+                .arriving_at(1, human(channel_id, c))
+                .with_hooks(c, &[Hook::Defer]),
+        );
+        periodic_sweep(&partial, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(
+            partial.strict.fetch_log(),
+            [
+                (channel_id, after(a), vec![]),
+                (
+                    channel_id,
+                    CatchUpFetchRequest::new(20),
+                    vec![c.get(), b.get(), a.get()]
+                ),
+            ]
+        );
+        assert_eq!(
+            *partial.outcomes.lock().unwrap(),
+            [(b.get(), true, false), (c.get(), false, false)]
+        );
+        assert_eq!(partial.accepted(b), 1);
+        assert_eq!(partial.accepted(c), 0);
+        assert!(partial.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(fx.surfaces(channel_id), (Some(b.get()), Some(b.get())));
+        assert_eq!(
+            fx.pending(channel_id),
+            Some(CatchUpRetryState {
+                checkpoint: b.get(),
+                ..original
+            }),
+            "C inherits the original arm and exhausted budgets after B's durable progress"
+        );
+        assert_hold_excluded(&fx, channel_id);
+        let stored = || {
+            load_channel_pending_queue_checked(&fx.provider, &fx.shared.token_hash, channel_id)
+                .expect("read B and C from the actual durable queue")
+                .0
+        };
+        assert_eq!(sources(&stored()), [b]);
+        clock.advance(60);
+        let build = || {
+            RecordingApi::new(StrictApi::new(&fx.shared).with_history(
+                channel_id,
+                vec![
+                    own_reply(channel_id, a),
+                    human(channel_id, b),
+                    human(channel_id, c),
+                ],
+            ))
+        };
+        let recovered = build();
+        periodic_sweep(&recovered, &fx.shared, &fx.provider, &clock).await;
+        assert_phase1_read(&recovered.strict, after(b), &[c]);
+        assert_eq!(
+            *recovered.outcomes.lock().unwrap(),
+            [(c.get(), true, false)]
+        );
+        assert_eq!(recovered.accepted(c), 1);
+        assert_eq!(recovered.accepted(b), 0);
+        assert!(recovered.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(fx.surfaces(channel_id), (Some(c.get()), Some(c.get())));
+        assert!(fx.pending(channel_id).is_none());
+        assert_eq!(sources(&stored()), [b, c]);
+        clock.advance(60);
+        let again = build();
+        periodic_sweep(&again, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(again.accepted(b), 0);
+        assert_eq!(again.accepted(c), 0);
+        assert!(again.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(sources(&stored()), [b, c]);
+    }
+
+    // A failed held-gap read cannot let a later recent page prove progress over B.
+    async fn assert_failed_phase1_keeps_hold_without_phase2(binding_unknown: bool) {
+        let fx = Fixture::new().await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_294 + u64::from(binding_unknown));
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        let path = exhaust_actual_failures(&fx, &clock, channel_id, a, &[b], false).await;
+        let hold = fx
+            .pending(channel_id)
+            .expect("nine actual failures retain B");
+        assert_eq!(hold.deferred_rearms, 9);
+        assert_eq!(hold.checkpoint, a.get());
+        assert!(
+            clock.sample().1.duration_since(hold.armed_at) >= Duration::from_secs(480),
+            "the failure sequence crosses eight real periodic intervals"
+        );
+        std::fs::remove_dir(path).expect("C could now be accepted durably if phase 2 ran");
+        clock.advance(60);
+        let (reply, c) = (clock.message_id(3, 20), clock.message_id(4, 10));
+        assert!(a < b && b < reply && reply < c);
+        let mut scan = RecordingApi::new(StrictApi::new(&fx.shared).with_history(
+            channel_id,
+            vec![
+                human(channel_id, b),
+                own_reply(channel_id, reply),
+                human(channel_id, c),
+            ],
+        ));
+        if binding_unknown {
+            scan.first_binding_unknown
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            scan.fail_after_cursor = Some(a.get());
+        }
+        periodic_sweep(&scan, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(
+            *scan.failed_fetches.lock().unwrap(),
+            if binding_unknown {
+                vec![]
+            } else {
+                vec![after(a)]
+            },
+            "the fetch-error case actually attempts the held cursor"
+        );
+        assert!(
+            scan.strict.fetch_log().is_empty(),
+            "phase 2 performs zero actual recent fetches after the held gap was unread"
+        );
+        assert!(scan.outcomes.lock().unwrap().is_empty());
+        assert_eq!(scan.accepted(c), 0);
+        assert!(scan.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(
+            fx.pending(channel_id),
+            Some(hold),
+            "hold origin and budgets remain exact"
+        );
+        assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+        assert!(
+            discord::mailbox_snapshot(&fx.shared, channel_id)
+                .await
+                .intervention_queue
+                .is_empty()
+        );
+        assert_hold_excluded(&fx, channel_id);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_recovery_failed_phase1_fetch_preserves_unread_hold_gap() {
+        assert_failed_phase1_keeps_hold_without_phase2(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_recovery_unknown_phase1_binding_preserves_unread_hold_gap() {
+        assert_failed_phase1_keeps_hold_without_phase2(true).await;
+    }
+    // A full terminal-only After page cannot discharge a hold before the later B is read.
+    #[tokio::test(flavor = "current_thread")]
+    async fn exhausted_recovery_full_held_after_page_reads_through_its_upper_snapshot() {
+        let fx = Fixture::new().await;
+        let clock = RecoveryClock::new();
+        let channel_id = ChannelId::new(6_813_296);
+        let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
+        let (r, f) = (clock.message_id(3, 20), clock.message_id(4, 10));
+        let noise: Vec<_> = (0_u64..50)
+            .map(|index| clock.message_id(100 + index, 590 - i64::try_from(index).unwrap()))
+            .collect();
+        let d = *noise.last().unwrap();
+        assert!(a < noise[0] && d < b && b < r && r < f);
+        let path = exhaust_actual_failures(&fx, &clock, channel_id, a, &[b], true).await;
+        let original = fx
+            .pending(channel_id)
+            .expect("nine failures retain B's original hold");
+        clock.advance(60);
+        let mut history: Vec<_> = noise.iter().map(|id| own_reply(channel_id, *id)).collect();
+        history.extend([
+            human(channel_id, b),
+            own_reply(channel_id, r),
+            foreign_bot(channel_id, f),
+        ]);
+        let build = || {
+            RecordingApi::new(StrictApi::new(&fx.shared).with_history(channel_id, history.clone()))
+        };
+        let mut unread = build();
+        unread.fail_after_cursor = Some(d.get());
+        periodic_sweep(&unread, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(*unread.failed_fetches.lock().unwrap(), [after(d)]);
+        assert_eq!(
+            unread.strict.fetch_log(),
+            [
+                (
+                    channel_id,
+                    after(a),
+                    noise.iter().rev().map(|id| id.get()).collect()
+                ),
+                (channel_id, CatchUpFetchRequest::new(1), vec![f.get()]),
+            ]
+        );
+        assert!(unread.outcomes.lock().unwrap().is_empty());
+        assert!(unread.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(fx.pending(channel_id), Some(original));
+        assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+        clock.advance(60);
+        let blocked = build();
+        periodic_sweep(&blocked, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(
+            *blocked.outcomes.lock().unwrap(),
+            [(b.get(), false, true)],
+            "the held-range continuation actually reads and fails B's durable enqueue"
+        );
+        let first_page: Vec<_> = noise.iter().rev().map(|id| id.get()).collect();
+        let recent: Vec<_> = [f.get(), r.get(), b.get()]
+            .into_iter()
+            .chain(noise.iter().rev().map(|id| id.get()))
+            .take(20)
+            .collect();
+        assert_eq!(
+            blocked.strict.fetch_log(),
+            [
+                (channel_id, after(a), first_page),
+                (channel_id, CatchUpFetchRequest::new(1), vec![f.get()]),
+                (channel_id, after(d), vec![f.get(), r.get(), b.get()]),
+                (channel_id, CatchUpFetchRequest::new(20), recent),
+            ]
+        );
+        assert!(blocked.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(fx.surfaces(channel_id), (Some(d.get()), Some(d.get())));
+        assert_eq!(
+            fx.pending(channel_id),
+            Some(CatchUpRetryState {
+                checkpoint: d.get(),
+                ..original
+            }),
+            "terminal noise moves the cursor without releasing B or renewing its arm"
+        );
+        assert_hold_excluded(&fx, channel_id);
+        assert!(
+            discord::mailbox_snapshot(&fx.shared, channel_id)
+                .await
+                .intervention_queue
+                .is_empty()
+        );
+        std::fs::remove_dir(path).expect("repair B's actual durable enqueue path");
+        clock.advance(60);
+        let repaired = build();
+        periodic_sweep(&repaired, &fx.shared, &fx.provider, &clock).await;
+        assert_phase1_read(&repaired.strict, after(d), &[b, r, f]);
+        assert_eq!(
+            repaired.strict.fetch_log()[0],
+            (channel_id, after(d), vec![f.get(), r.get(), b.get()])
+        );
+        assert_eq!(*repaired.outcomes.lock().unwrap(), [(b.get(), true, false)]);
+        assert_eq!(repaired.accepted(b), 1);
+        assert!(repaired.dead_letters.lock().unwrap().is_empty());
+        assert!(fx.pending(channel_id).is_none());
+        assert_eq!(fx.surfaces(channel_id), (Some(f.get()), Some(f.get())));
+        let stored = || {
+            load_channel_pending_queue_checked(&fx.provider, &fx.shared.token_hash, channel_id)
+                .expect("read B from the actual durable queue")
+                .0
+        };
+        assert_eq!(sources(&stored()), [b]);
+        clock.advance(60);
+        let again = build();
+        periodic_sweep(&again, &fx.shared, &fx.provider, &clock).await;
+        assert_eq!(again.accepted(b), 0);
+        assert!(again.dead_letters.lock().unwrap().is_empty());
+        assert_eq!(sources(&stored()), [b]);
+    }
+}
