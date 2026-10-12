@@ -30,7 +30,7 @@ fn wait(mut ready: impl FnMut() -> bool) {
     }
 }
 
-fn screen(body: &str) -> String {
+pub(crate) fn screen(body: &str) -> String {
     format!(
         "{}\n❯\u{a0}{}\n{}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
         "─".repeat(160),
@@ -39,7 +39,7 @@ fn screen(body: &str) -> String {
     )
 }
 
-fn install_shim(f: &Fixture) {
+pub(crate) fn install_shim(f: &Fixture) {
     std::fs::write(
         f.root.path().join("tmux"),
         format!(
@@ -95,7 +95,14 @@ exec {real} -L {socket} -f /dev/null "$@"
     .unwrap();
 }
 
-fn renderer(f: &Fixture, name: &str, frame: &str, before: &str, own: &str, after: &str) -> String {
+pub(crate) fn renderer(
+    f: &Fixture,
+    name: &str,
+    frame: &str,
+    before: &str,
+    own: &str,
+    after: &str,
+) -> String {
     let root = f.root.path().join(name);
     std::fs::create_dir(&root).unwrap();
     for (file, content) in [
@@ -1096,5 +1103,331 @@ fn cg_b2b_last_pre_geometry_change_refuses_before_durable_fence() {
             .unwrap()
             .len(),
         0
+    );
+}
+
+#[test]
+fn cg_b2c_post_fence_cancel_reaches_warm_owner_as_typed_stop() {
+    use crate::services::claude_tui::hosting::FollowupHost;
+    use crate::services::claude_tui::hosting::{
+        ClaudeTuiWarmFollowupOutcome, try_claude_tui_warm_followup,
+    };
+    let f = Fixture::new();
+    install_shim(&f);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let name = "owner-fence-cancel";
+    renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    let transcript = f.root.path().join("owner.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n").unwrap();
+    let token = Arc::new(CancelToken::new());
+    let fence = Arc::new(Fence {
+        cancel: Some(Arc::clone(&token)),
+        ..Fence::default()
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (outcome, stopped) =
+        with_scope(Some(Arc::clone(&fence) as Arc<dyn SubmissionFence>), || {
+            test_support::with_request(name, Rc::new(LegacyTmuxGate), || {
+                crate::services::claude_tui::guarded_outcome::warm_owned(|| {
+                    try_claude_tui_warm_followup(
+                        "owner-session".into(),
+                        transcript.clone(),
+                        transcript.display().to_string(),
+                        true,
+                        f.root.path(),
+                        "own",
+                        tx,
+                        Some(token),
+                        &FollowupHost::legacy_tmux(name),
+                        None,
+                    )
+                })
+            })
+        });
+    assert!(matches!(
+        stopped,
+        Some(InputRun::Indeterminate { confirmed: 0, .. })
+    ));
+    assert_eq!(fence.calls.load(Ordering::SeqCst), 1);
+    assert!(f.received(name).is_empty());
+    assert!(rx.try_recv().is_err());
+    assert!(
+        !matches!(
+            outcome,
+            crate::services::claude_tui::guarded_outcome::OwnedWarmOutcome::Legacy(
+                ClaudeTuiWarmFollowupOutcome::Terminal(_)
+            )
+        ),
+        "post-fence hold must retain its typed owner disposition"
+    );
+}
+
+#[test]
+fn cg_b2c_post_fence_hold_compatibility_error_is_not_a_clean_cancel() {
+    let f = Fixture::new();
+    install_shim(&f);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let name = "mapping-fence-cancel";
+    renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    let token = Arc::new(CancelToken::new());
+    let fence = Arc::new(Fence {
+        cancel: Some(Arc::clone(&token)),
+        ..Fence::default()
+    });
+    let (result, stopped) = with_scope(Some(fence), || {
+        test_support::with_request(name, Rc::new(LegacyTmuxGate), || {
+            input::send_fresh_prompt(name, "own", Some(&token))
+        })
+    });
+    assert!(matches!(stopped, Some(InputRun::Indeterminate { .. })));
+    let error = result.unwrap_err();
+    assert!(!input::is_prompt_ready_cancelled_error(&error), "{error}");
+    assert!(
+        error.starts_with("claude tui guarded submission held:"),
+        "{error}"
+    );
+}
+
+#[test]
+fn cg_b2c_selected_followup_waits_for_busy_to_become_idle() {
+    let f = Fixture::new();
+    install_shim(&f);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let name = "wait-busy-idle";
+    let pane = renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    let busy = format!("{}\nThinking...\n  esc to interrupt\n", f.tmux(&["display-message", "-p", "-t", &pane, "#{session_id} #{window_id} #{pane_id} #{pane_width} #{pane_height} #{window-size} #{window_panes} #{pane_dead} #{pid} #{pane_pid} #{pane_in_mode} #{pane_input_off} #{session_attached} #{window_linked}"]));
+    std::fs::write(f.root.path().join("busy-capture"), busy).unwrap();
+    let shim = f.root.path().join("tmux");
+    let old = std::fs::read_to_string(&shim).unwrap();
+    let prefix = format!(
+        "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = capture-pane ] && [ -f {} ]; then cat {}; exit 0; fi\ndone\n",
+        quote(&f.root.path().join("busy-capture")),
+        quote(&f.root.path().join("busy-capture"))
+    );
+    std::fs::write(&shim, prefix + old.strip_prefix("#!/bin/sh\n").unwrap()).unwrap();
+    assert!(
+        f.tmux(&["capture-pane", "-p", "-t", &pane])
+            .contains("bypass permissions")
+    );
+    let path = f.root.path().join("busy-capture");
+    let worker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(180));
+        std::fs::remove_file(path).unwrap();
+    });
+    let (result, stopped) = entry(&f, Entry::Followup, name, "own", Arc::new(Fence::default()));
+    worker.join().unwrap();
+    assert_eq!(stopped, Some(InputRun::Applied), "{result:?}");
+    assert!(result.is_ok());
+    assert_receipt(&f, name, "own", "literal", 1);
+}
+
+#[test]
+fn cg_b2c_invalid_payload_action_is_not_silently_dropped() {
+    let payload = [
+        input::TuiInputAction::Literal("own".into()),
+        input::TuiInputAction::Escape,
+    ];
+    assert_eq!(
+        payload_frame(&payload),
+        Err(Refusal::InvalidPrompt),
+        "a non-text action must refuse the whole plan before the fence"
+    );
+}
+
+#[test]
+fn cg_b2c_unknown_selected_session_cannot_fall_back_to_legacy() {
+    let f = Fixture::new();
+    install_shim(&f);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    renderer(
+        &f,
+        "wrong-selected-session",
+        "own",
+        &screen(""),
+        &screen("own"),
+        &screen(""),
+    );
+    let (result, _) =
+        test_support::with_request("expected-selected-session", Rc::new(LegacyTmuxGate), || {
+            input::send_fresh_prompt("wrong-selected-session", "own", Some(&CancelToken::new()))
+        });
+    assert!(
+        result.is_err(),
+        "a selected identity mismatch must hold before all Legacy effects"
+    );
+    assert!(f.received("wrong-selected-session").is_empty());
+}
+
+#[test]
+fn cg_b2c_payload_hold_blocks_the_next_cleanup_under_the_same_lock() {
+    let f = Fixture::new();
+    install_shim(&f);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let name = "held-next-cleanup";
+    renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    let fence = Arc::new(Fence {
+        arm: Some((f.root.path().join("exec-mode"), "drop_payload")),
+        ..Fence::default()
+    });
+    let (result, stopped) = entry(&f, Entry::ProvenWarm, name, "own", Arc::clone(&fence));
+    assert!(result.is_err());
+    assert!(matches!(stopped, Some(InputRun::Indeterminate { .. })));
+    assert_receipt(&f, name, "own", "literal", 0);
+    let cleanups = AtomicUsize::new(0);
+    let cleanup =
+        input::with_composer_cleanup_lock(name, || cleanups.fetch_add(1, Ordering::SeqCst));
+    assert!(
+        cleanup.is_none(),
+        "a post-fence draft cannot use stranded draft cleanup"
+    );
+    assert_eq!(cleanups.load(Ordering::SeqCst), 0);
+    use crate::services::claude_tui::hosting::{FollowupHost, try_claude_tui_warm_followup};
+    let transcript = f.root.path().join(format!("{name}.jsonl"));
+    let captures = std::fs::read(f.root.path().join("exec-captures")).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let outcome = crate::services::claude_tui::guarded_outcome::warm_owned(|| {
+        try_claude_tui_warm_followup(
+            "next-warm".into(),
+            transcript.clone(),
+            transcript.display().to_string(),
+            true,
+            f.root.path(),
+            "own",
+            tx,
+            None,
+            &FollowupHost::legacy_tmux(name),
+            None,
+        )
+    });
+    assert!(
+        matches!(
+            outcome,
+            crate::services::claude_tui::guarded_outcome::OwnedWarmOutcome::Stopped(
+                InputRun::Indeterminate { .. }
+            )
+        ),
+        "next warm recovery must remain typed"
+    );
+    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        std::fs::read(f.root.path().join("exec-captures")).unwrap(),
+        captures,
+        "no warm recovery IO or resend"
+    );
+    let (again, _) = entry(&f, Entry::Fresh, name, "own", Arc::clone(&fence));
+    assert!(again.is_err());
+    assert_eq!(
+        fence.calls.load(Ordering::SeqCst),
+        1,
+        "no fresh retry or second fence"
+    );
+    assert_receipt(&f, name, "own", "literal", 0);
+}
+
+#[test]
+fn cg_b2c_selected_steering_is_an_explicit_hold() {
+    let (result, stopped) =
+        test_support::with_request("steering-held", Rc::new(LegacyTmuxGate), || {
+            input::inject_steering_prompt("steering-held", "own")
+        });
+    assert!(matches!(
+        stopped,
+        Some(InputRun::Refused(InputRefusal::Composer(Refusal::NotReady)))
+    ));
+    assert!(
+        result
+            .unwrap_err()
+            .starts_with("claude tui guarded submission held:")
+    );
+}
+
+#[test]
+fn cg_b2c_warm_owner_preserves_cancellation_after_payload_and_after_enter() {
+    use crate::services::claude_tui::hosting::{
+        ClaudeTuiWarmFollowupOutcome, FollowupHost, try_claude_tui_warm_followup,
+    };
+    let f = Fixture::new();
+    install_shim(&f);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut terminals = 0;
+    for after_enter in [false, true] {
+        let name = format!("owner-cancel-after-enter-{after_enter}");
+        renderer(&f, &name, "own", &screen(""), &screen("own"), &screen(""));
+        let transcript = f.root.path().join(format!("{name}.jsonl"));
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+        )
+        .unwrap();
+        let token = Arc::new(CancelToken::new());
+        let gate = Rc::new(CancellingGate {
+            at: if after_enter { usize::MAX } else { 5 },
+            calls: AtomicUsize::new(0),
+            token: Arc::clone(&token),
+        });
+        let worker = if after_enter {
+            let token = Arc::clone(&token);
+            let path = f.root.path().join(&name).join("enters");
+            Some(std::thread::spawn(move || {
+                wait(|| path.exists());
+                token.cancelled.store(true, Ordering::SeqCst);
+            }))
+        } else {
+            None
+        };
+        let fence = Arc::new(Fence::default());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (outcome, stopped) =
+            with_scope(Some(Arc::clone(&fence) as Arc<dyn SubmissionFence>), || {
+                test_support::with_request(&name, gate, || {
+                    crate::services::claude_tui::guarded_outcome::warm_owned(|| {
+                        try_claude_tui_warm_followup(
+                            "owner-session".into(),
+                            transcript.clone(),
+                            transcript.display().to_string(),
+                            true,
+                            f.root.path(),
+                            "own",
+                            tx,
+                            Some(token),
+                            &FollowupHost::legacy_tmux(&name),
+                            None,
+                        )
+                    })
+                })
+            });
+        if let Some(worker) = worker {
+            worker.join().unwrap();
+        }
+        let confirmed = if after_enter { 2 } else { 1 };
+        assert!(
+            matches!(stopped, Some(InputRun::Indeterminate { confirmed: actual, .. }) if actual == confirmed),
+            "{stopped:?}"
+        );
+        assert_receipt(&f, &name, "own", "literal", usize::from(after_enter));
+        assert_eq!(fence.calls.load(Ordering::SeqCst), 1);
+        assert!(rx.try_recv().is_err());
+        terminals += usize::from(matches!(
+            outcome,
+            crate::services::claude_tui::guarded_outcome::OwnedWarmOutcome::Legacy(
+                ClaudeTuiWarmFollowupOutcome::Terminal(_)
+            )
+        ));
+    }
+    assert_eq!(
+        terminals, 0,
+        "cancellations after payload and Enter must stay typed"
     );
 }

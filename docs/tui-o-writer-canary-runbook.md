@@ -249,6 +249,12 @@ the original piece once, then the output that followed. Run these on the O home,
   script refuses a source or a rollback target that does not record `o_ledger_operator_resume` as
   `true`. Fix forward instead, and never delete approval lines from the ledger to get past it.
 
+Enable re-post for a canary with both `tui_o.repost.enabled: true` and an explicit
+`tui_o.repost.channels: [<CHANNEL_ID>]` allowlist. An empty or missing `channels` list denies
+all re-post work; other hosted channels continue normal fresh original delivery. Validated reloads
+apply to the next grant and wire attempt, including a 429 retry, while an HTTP request whose first
+poll already left may finish.
+
 An enabled re-post turn reports retained uncertain backlog with
 `[tui_o] re-post backlog retained`: `channel`, `count`, and `pieces` contain the serial, unit key,
 piece index and reason, without the payload. The sidecar marks each serial before the log is
