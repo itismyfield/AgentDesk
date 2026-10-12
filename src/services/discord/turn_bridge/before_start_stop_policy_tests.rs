@@ -274,6 +274,18 @@ async fn p10_fin_ack_pre_commit_unconfirmed() {
         "{outcome:?}"
     );
     assert_held(&close, &before, &queued, "ack before commit").await;
+    // A captured actor that is gone takes nothing: the send fails as a typed stage.
+    let mut intent = close.intent(acked.clone());
+    intent.mailbox = step::closed_mailbox();
+    let outcome = close.submit(intent).await;
+    assert!(
+        matches!(
+            outcome,
+            PolicyCloseOutcome::Unconfirmed(PolicyStage::MailboxSend)
+        ),
+        "{outcome:?}"
+    );
+    assert_held(&close, &before, &queued, "closed mailbox").await;
     let outcome = close.submit(close.intent(acked)).await;
     assert!(
         matches!(outcome, PolicyCloseOutcome::Settled),
@@ -355,7 +367,7 @@ async fn p10_fin_clear_refusal_is_nonreleasing() {
         // The fresh row moves on disk after the ACK, written raw so no writer gate interferes.
         match (change, case) {
             (Some(change), _) => {
-                let mut fresh = acked;
+                let mut fresh = acked.clone();
                 change(&mut fresh);
                 std::fs::write(close.path(), serde_json::to_vec(&fresh).unwrap()).unwrap();
             }
@@ -383,6 +395,12 @@ async fn p10_fin_clear_refusal_is_nonreleasing() {
         assert_eq!(close.bytes(), bytes, "{case}: the row stays as it is");
         assert_eq!(close.active(), 2, "{case}");
         assert_eq!(close.queued().await, queued, "{case}");
+        // A refused close installed no witness: asking again is refused again, not a duplicate.
+        let again = close.submit(close.intent(acked)).await;
+        assert!(
+            matches!(&again, PolicyCloseOutcome::Retained(PolicyRetain::Clear(clear)) if *clear == expected),
+            "{case}: again {again:?}"
+        );
     }
     // The row before its notice ACK is never the clear's target.
     let close = Close::open(5_340_976, |_| {}).await;
@@ -973,7 +991,7 @@ async fn p10_fin_strict_boundaries() {
     }
     let early = std::time::Instant::now();
     let close = Close::open(5_341_000, |_| {}).await;
-    // A live twin with the same nonce; every token has its own interrupt generation too.
+    // A live twin with the same nonce; the token axis carries its interrupt generation too.
     let twin = CancelToken::from_persisted_turn_nonce(close.row.turn_nonce.clone());
     let axes = Axes {
         early,
@@ -989,7 +1007,8 @@ async fn p10_fin_strict_boundaries() {
             i.request.turn_nonce = "other-nonce".into()
         }),
         ("token", |_, _, axes, i| {
-            i.request.actor = Arc::downgrade(&axes.twin)
+            i.request.actor = Arc::downgrade(&axes.twin);
+            i.request.interrupt_generation = axes.twin.claude_interrupt_generation();
         }),
         ("interrupt generation", |_, _, _, i| {
             i.request.interrupt_generation += 1
@@ -1028,6 +1047,15 @@ async fn p10_fin_strict_boundaries() {
         );
         assert_held(&close, &bytes, &queued, case).await;
     }
+    // A cutoff equal to the slot's own start instant is not before it.
+    let mut intent = close.intent(acked.clone());
+    intent.request.observed_before = step::started().expect("the step compared a start");
+    let outcome = close.submit(intent).await;
+    assert!(
+        matches!(outcome, PolicyCloseOutcome::Superseded),
+        "equal cutoff: {outcome:?}"
+    );
+    assert_held(&close, &bytes, &queued, "equal cutoff").await;
     let outcome = close.submit(close.intent(acked)).await;
     assert!(
         matches!(outcome, PolicyCloseOutcome::Settled),

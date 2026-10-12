@@ -143,10 +143,18 @@ fn close(
     if request.witnessed(state.policy_witness.as_ref()) {
         return PolicyMailboxOutcome::Duplicate;
     }
+    #[cfg(test)]
+    test_hooks::note_started(state.turn_started_instant);
     at("before_claim");
     if !request.claims(state, channel_id) {
         return PolicyMailboxOutcome::Superseded;
     }
+    // Built before the clear, so after it the guard only moves this value into the state.
+    let witness = PolicyWitness {
+        user_message_id: request.user_message_id,
+        turn_nonce: request.turn_nonce.clone(),
+        actor: request.actor.clone(),
+    };
     at("before_clear");
     let cleared = request.receipt.try_clear();
     if cleared != PolicyClear::Cleared {
@@ -157,6 +165,7 @@ fn close(
         state: &mut *state,
         removed: &mut *removed,
         request,
+        witness: Some(witness),
         held: None,
         detached: false,
         debited: false,
@@ -195,6 +204,7 @@ struct Commit<'a> {
     state: &'a mut ChannelMailboxState,
     removed: &'a mut Option<Arc<CancelToken>>,
     request: &'a PolicyCloseRequest,
+    witness: Option<PolicyWitness>,
     held: Option<Instant>,
     detached: bool,
     debited: bool,
@@ -227,11 +237,9 @@ impl Commit<'_> {
     }
 
     fn witness(&mut self) {
-        self.state.policy_witness = Some(PolicyWitness {
-            user_message_id: self.request.user_message_id,
-            turn_nonce: self.request.turn_nonce.clone(),
-            actor: self.request.actor.clone(),
-        });
+        if let Some(witness) = self.witness.take() {
+            self.state.policy_witness = Some(witness);
+        }
     }
 }
 
@@ -252,12 +260,28 @@ fn at(_stage: &'static str) {
 
 #[cfg(test)]
 pub(crate) mod test_hooks {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
+    use std::time::Instant;
 
     type Observer = Box<dyn FnMut(&'static str)>;
 
     thread_local! {
         static OBSERVER: RefCell<Option<Observer>> = const { RefCell::new(None) };
+        static STARTED: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+
+    /// The slot's start instant the last close on this thread compared its cutoff with.
+    pub(crate) fn started() -> Option<Instant> {
+        STARTED.get()
+    }
+
+    pub(super) fn note_started(started: Option<Instant>) {
+        STARTED.set(started);
+    }
+
+    /// A captured handle whose actor is gone, so every send to it fails.
+    pub(crate) fn closed_mailbox() -> super::super::ChannelMailboxHandle {
+        super::super::mailbox_unreachable_tests::closed_handle()
     }
 
     /// Sees, and may panic at, every stage a close reaches on this thread.
