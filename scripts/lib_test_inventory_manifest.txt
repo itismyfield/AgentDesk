@@ -4450,6 +4450,10 @@ services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_gar
 services::discord::inflight::removal::custody_notice_tests::anchorless_turns_started_in_the_same_second_are_two_rows_pg
 services::discord::inflight::removal::custody_notice_tests::custody_without_a_tui_direct_turn_enqueues_nothing_pg
 services::discord::inflight::removal::custody_notice_tests::earlier_build_turns_sharing_a_start_time_are_two_rows_pg
+services::discord::inflight::removal::custody_notice_tests::n3bc_custody_with_protection_zero_keeps_existing_enqueue_pg
+services::discord::inflight::removal::custody_notice_tests::n3bc_old_custody_episodes_hold_all_modes_and_keep_siblings_pg
+services::discord::inflight::removal::custody_notice_tests::n3bc_pending_notify_is_held_and_unprotected_bot_readdresses_pg
+services::discord::inflight::removal::custody_notice_tests::n3bc_protection_after_enqueue_keeps_the_pending_notify_bot_pg
 services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_starts_the_notice_pass_pg
 services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
@@ -7611,6 +7615,12 @@ services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_re
 services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_restart_retries_original_snapshot
 services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_unknown_schema_and_changed_snapshot_survive
 services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_valid_json_corruption_is_not_acknowledged
+services::discord::terminal_ui_obligation::input_fence_tests::sweep_holds_every_protected_shape_and_processes_legacy_siblings_pg
+services::discord::terminal_ui_obligation::input_fence_tests::sweep_rechecks_protection_after_core_resolve_lock_pg
+services::discord::terminal_ui_obligation::input_fence_tests::sweep_rechecks_protection_after_http_response_success_and_error_pg
+services::discord::terminal_ui_obligation::input_fence_tests::sweep_rechecks_protection_after_real_rate_limit_wait_pg
+services::discord::terminal_ui_obligation::input_fence_tests::sweep_unknown_channel_holds_while_legacy_sibling_runs_pg
+services::discord::terminal_ui_obligation::input_fence_tests::sweep_with_no_input_protection_keeps_existing_processing_pg
 services::discord::terminal_ui_obligation::tests::a_card_with_no_channel_context_is_dropped_only_for_a_legacy_row_pg
 services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
 services::discord::terminal_ui_obligation::tests::obligation_store_round_trips_lists_and_clears

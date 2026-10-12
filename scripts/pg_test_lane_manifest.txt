@@ -204,6 +204,7 @@ src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
 src/services/discord/terminal_delivery_custody/pg_tests.rs
 src/services/discord/terminal_ui_obligation.rs
+src/services/discord/terminal_ui_obligation/input_fence_tests.rs
 src/services/discord/tmux_reaper/host_guard_tests.rs
 src/services/discord/tmux_watcher/herdr_entry_host_tests.rs
 src/services/discord/tmux_watcher/inherited_fixture_tests.rs
@@ -517,6 +518,7 @@ services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
 services::discord::terminal_delivery_custody::pg_tests
+services::discord::terminal_ui_obligation::input_fence_tests
 services::discord::terminal_ui_obligation::tests
 services::discord::tmux::tmux_watcher::path_b_record::tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
@@ -1522,6 +1524,10 @@ services::discord::inflight::removal::custody_notice_tests::an_episode_is_one_ro
 services::discord::inflight::removal::custody_notice_tests::anchorless_turns_started_in_the_same_second_are_two_rows_pg
 services::discord::inflight::removal::custody_notice_tests::custody_without_a_tui_direct_turn_enqueues_nothing_pg
 services::discord::inflight::removal::custody_notice_tests::earlier_build_turns_sharing_a_start_time_are_two_rows_pg
+services::discord::inflight::removal::custody_notice_tests::n3bc_custody_with_protection_zero_keeps_existing_enqueue_pg
+services::discord::inflight::removal::custody_notice_tests::n3bc_old_custody_episodes_hold_all_modes_and_keep_siblings_pg
+services::discord::inflight::removal::custody_notice_tests::n3bc_pending_notify_is_held_and_unprotected_bot_readdresses_pg
+services::discord::inflight::removal::custody_notice_tests::n3bc_protection_after_enqueue_keeps_the_pending_notify_bot_pg
 services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_starts_the_notice_pass_pg
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg
@@ -1816,6 +1822,12 @@ services::discord::task_notification_delivery::tests::unknown_reference_repair_a
 services::discord::task_notification_delivery::tests::watcher_fallback_turn_key_resumes_sink_primary_key_without_second_row_pg
 services::discord::task_notification_delivery::tests::watcher_primary_key_blocks_late_sink_frame_alias_without_second_row_pg
 services::discord::terminal_delivery_custody::pg_tests::foreign_terminal_custody_pg_failure_restart_and_exact_dedupe
+services::discord::terminal_ui_obligation::input_fence_tests::sweep_holds_every_protected_shape_and_processes_legacy_siblings_pg
+services::discord::terminal_ui_obligation::input_fence_tests::sweep_rechecks_protection_after_core_resolve_lock_pg
+services::discord::terminal_ui_obligation::input_fence_tests::sweep_rechecks_protection_after_http_response_success_and_error_pg
+services::discord::terminal_ui_obligation::input_fence_tests::sweep_rechecks_protection_after_real_rate_limit_wait_pg
+services::discord::terminal_ui_obligation::input_fence_tests::sweep_unknown_channel_holds_while_legacy_sibling_runs_pg
+services::discord::terminal_ui_obligation::input_fence_tests::sweep_with_no_input_protection_keeps_existing_processing_pg
 services::discord::terminal_ui_obligation::tests::a_card_with_no_channel_context_is_dropped_only_for_a_legacy_row_pg
 services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
 services::discord::tmux::tmux_watcher::path_b_record::tests::a_pinned_record_never_borrows_a_later_thread_dispatch_pg
