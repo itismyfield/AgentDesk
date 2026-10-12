@@ -657,6 +657,7 @@ src/
 │   │   ├── busy_inject.rs
 │   │   ├── busy_inject_tests.rs
 │   │   ├── composer_lock.rs
+│   │   ├── guarded_outcome.rs
 │   │   ├── hook_bundle.rs
 │   │   ├── hook_output_guard.rs
 │   │   ├── hook_output_guard_tests.rs

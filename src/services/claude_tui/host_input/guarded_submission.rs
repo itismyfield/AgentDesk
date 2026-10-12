@@ -3,7 +3,7 @@
 #[cfg(test)]
 use super::LegacyTmuxGate;
 use super::{InputRefusal, InputRun, InputTarget, MutationGate, StopCause};
-use crate::services::claude_tui::{composer_lock, input, submission_fence};
+use crate::services::claude_tui::{composer_lock, guarded_outcome, input, submission_fence};
 use crate::services::provider::{CancelToken, cancel_requested};
 use crate::services::tui_input::actor::gate::claude_guarded::{
     DraftEvidence, claude_should_fold, own_claude_guarded_draft,
@@ -48,6 +48,9 @@ pub(crate) fn run(
         Ok(s) => s,
         Err(r) => return InputRun::Refused(r),
     };
+    if let Some(held) = guarded_outcome::held(session) {
+        return held;
+    }
     let actions = match input::plan_prompt_submit(prompt) {
         Ok(a) => a,
         Err(_) => return refused(Refusal::InvalidPrompt),
@@ -55,15 +58,10 @@ pub(crate) fn run(
     let Some((input::TuiInputAction::Enter, payload)) = actions.split_last() else {
         return refused(Refusal::InvalidPrompt);
     };
-    let frame: String = payload
-        .iter()
-        .filter_map(|a| match a {
-            input::TuiInputAction::Literal(s) | input::TuiInputAction::PasteBuffer(s) => {
-                Some(s.as_str())
-            }
-            _ => None,
-        })
-        .collect();
+    let frame = match payload_frame(payload) {
+        Ok(frame) => frame,
+        Err(reason) => return refused(reason),
+    };
     if frame.len() > MAX_PROMPT_BYTES {
         return refused(Refusal::InvalidPrompt);
     }
@@ -73,40 +71,78 @@ pub(crate) fn run(
     let folded = folded_payload(&frame);
     let payload = folded.as_ref().map_or(payload, |p| &p[..]);
     composer_lock::try_with_composer_permit(session, |permit| {
-        if let Err(r) = gate.admit(session) {
-            return InputRun::Refused(r);
-        }
-        let pane = match SubmissionTmux.pin_guarded(session) {
-            Ok(p) => p,
-            Err(r) => return InputRun::Refused(r),
-        };
-        if composer_lock::admit_composer_write(session, || pane.capture_draft()).is_err() {
-            return refused(Refusal::NotReady);
-        }
-        let evidence = match DraftEvidence::observe(&frame, payload, &permit, &pane, gate) {
-            Ok(e) => e,
-            Err(r) => return InputRun::Refused(r),
-        };
-        if cancel_requested(cancel) {
-            return InputRun::Cancelled { confirmed: 0 };
-        }
-        if let Err(r) = gate.admit(session) {
-            return InputRun::Refused(r);
-        }
-        if !pane.geometry_matches() {
-            return refused(Refusal::GeometryChanged);
-        }
-        if cancel_requested(cancel) {
-            return InputRun::Cancelled { confirmed: 0 };
-        }
-        if submission_fence::before_first_payload().is_err() {
-            return refused(Refusal::SubmissionFence);
-        }
-        crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-            "claude", session, prompt,
-        );
-        let mut confirmed = 0;
-        for action in payload {
+        let stopped = (|| {
+            if let Err(r) = gate.admit(session) {
+                return InputRun::Refused(r);
+            }
+            let pane = match SubmissionTmux.pin_guarded(session) {
+                Ok(p) => p,
+                Err(r) => return InputRun::Refused(r),
+            };
+            if composer_lock::admit_composer_write(session, || pane.capture_draft()).is_err() {
+                return refused(Refusal::NotReady);
+            }
+            let evidence = match DraftEvidence::observe(&frame, payload, &permit, &pane, gate) {
+                Ok(e) => e,
+                Err(r) => return InputRun::Refused(r),
+            };
+            if cancel_requested(cancel) {
+                return InputRun::Cancelled { confirmed: 0 };
+            }
+            if let Err(r) = gate.admit(session) {
+                return InputRun::Refused(r);
+            }
+            if !pane.geometry_matches() {
+                return refused(Refusal::GeometryChanged);
+            }
+            if cancel_requested(cancel) {
+                return InputRun::Cancelled { confirmed: 0 };
+            }
+            if submission_fence::before_first_payload().is_err() {
+                return refused(Refusal::SubmissionFence);
+            }
+            crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+                "claude", session, prompt,
+            );
+            let mut confirmed = 0;
+            for action in payload {
+                if cancel_requested(cancel) {
+                    return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
+                }
+                if let Err(r) = gate.admit(session) {
+                    return InputRun::Indeterminate {
+                        confirmed,
+                        cause: StopCause::Refused(r),
+                    };
+                }
+                if cancel_requested(cancel) {
+                    return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
+                }
+                match pane.payload(action) {
+                    EffectOutcome::Applied => confirmed += 1,
+                    EffectOutcome::Held => return hold(confirmed, Refusal::GeometryChanged),
+                    EffectOutcome::Unknown(e) => return unknown(confirmed, e),
+                }
+            }
+            std::thread::sleep(
+                if matches!(payload.last(), Some(input::TuiInputAction::PasteBuffer(_))) {
+                    input::POST_PASTE_BUFFER_SETTLE
+                } else {
+                    input::POST_LITERAL_SETTLE
+                },
+            );
+            if cancel_requested(cancel) {
+                return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
+            }
+            let Some(after) = pane.capture_draft() else {
+                return hold(confirmed, Refusal::CaptureUnavailable);
+            };
+            let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&after);
+            if submission_busy(ShadowProvider::Claude, &plain)
+                || !own_claude_guarded_draft(&after, evidence)
+            {
+                return hold(confirmed, Refusal::OwnDraft);
+            }
             if cancel_requested(cancel) {
                 return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
             }
@@ -119,65 +155,43 @@ pub(crate) fn run(
             if cancel_requested(cancel) {
                 return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
             }
-            match pane.payload(action) {
+            let observer = pane.observer();
+            match pane.enter() {
                 EffectOutcome::Applied => confirmed += 1,
                 EffectOutcome::Held => return hold(confirmed, Refusal::GeometryChanged),
                 EffectOutcome::Unknown(e) => return unknown(confirmed, e),
             }
-        }
-        std::thread::sleep(
-            if matches!(payload.last(), Some(input::TuiInputAction::PasteBuffer(_))) {
-                input::POST_PASTE_BUFFER_SETTLE
-            } else {
-                input::POST_LITERAL_SETTLE
-            },
-        );
-        if cancel_requested(cancel) {
-            return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
-        }
-        let Some(after) = pane.capture_draft() else {
-            return hold(confirmed, Refusal::CaptureUnavailable);
-        };
-        let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&after);
-        if submission_busy(ShadowProvider::Claude, &plain)
-            || !own_claude_guarded_draft(&after, evidence)
-        {
-            return hold(confirmed, Refusal::OwnDraft);
-        }
-        if cancel_requested(cancel) {
-            return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
-        }
-        if let Err(r) = gate.admit(session) {
-            return InputRun::Indeterminate {
-                confirmed,
-                cause: StopCause::Refused(r),
+            std::thread::sleep(input::POST_LITERAL_SETTLE);
+            if cancel_requested(cancel) {
+                return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
+            }
+            let Some(after) = observer.capture_draft() else {
+                return hold(confirmed, Refusal::CaptureUnavailable);
             };
-        }
-        if cancel_requested(cancel) {
-            return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
-        }
-        let observer = pane.observer();
-        match pane.enter() {
-            EffectOutcome::Applied => confirmed += 1,
-            EffectOutcome::Held => return hold(confirmed, Refusal::GeometryChanged),
-            EffectOutcome::Unknown(e) => return unknown(confirmed, e),
-        }
-        std::thread::sleep(input::POST_LITERAL_SETTLE);
-        if cancel_requested(cancel) {
-            return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
-        }
-        let Some(after) = observer.capture_draft() else {
-            return hold(confirmed, Refusal::CaptureUnavailable);
-        };
-        if cancel_requested(cancel) {
-            return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
-        }
-        if !passive_ready(&after) {
-            return hold(confirmed, Refusal::Confirmation);
-        }
-        InputRun::Applied
+            if cancel_requested(cancel) {
+                return unknown(confirmed, input::PROMPT_READY_CANCELLED_ERROR.into());
+            }
+            if !passive_ready(&after) {
+                return hold(confirmed, Refusal::Confirmation);
+            }
+            InputRun::Applied
+        })();
+        guarded_outcome::retain(session, &stopped);
+        stopped
     })
     .unwrap_or_else(|| refused(Refusal::WriterContended))
+}
+
+fn payload_frame(payload: &[input::TuiInputAction]) -> Result<String, Refusal> {
+    payload
+        .iter()
+        .map(|action| match action {
+            input::TuiInputAction::Literal(text) | input::TuiInputAction::PasteBuffer(text) => {
+                Ok(text.as_str())
+            }
+            _ => Err(Refusal::InvalidPrompt),
+        })
+        .collect()
 }
 
 fn passive_ready(capture: &str) -> bool {
@@ -205,13 +219,24 @@ fn request(_session: &str) -> Option<Rc<Request>> {
     }
 }
 
+pub(crate) fn selection_refusal(session: &str) -> Option<InputRun> {
+    let request = request(session)?;
+    (request.target.tmux_session().ok() != Some(session))
+        .then_some(InputRun::Refused(InputRefusal::IdentityMismatch))
+}
+
 pub(crate) fn selected(
     session: &str,
     prompt: &str,
     cancel: Option<&CancelToken>,
 ) -> Option<InputRun> {
     let request = request(session)?;
+    if let Some(refusal) = selection_refusal(session) {
+        return Some(refusal);
+    }
+    guarded_outcome::begin();
     let run = run(&request.target, &*request.gate, prompt, cancel);
+    guarded_outcome::finish(&run);
     #[cfg(test)]
     test_support::remember(&run);
     Some(run)
@@ -256,13 +281,8 @@ pub(crate) mod test_support {
         static REQUEST: RefCell<Option<Rc<Request>>> = const { RefCell::new(None) };
         static RESULT: RefCell<Option<InputRun>> = const { RefCell::new(None) };
     }
-    pub(super) fn request(session: &str) -> Option<Rc<Request>> {
-        REQUEST.with(|r| {
-            r.borrow()
-                .as_ref()
-                .filter(|r| r.target.tmux_session().ok() == Some(session))
-                .cloned()
-        })
+    pub(super) fn request(_session: &str) -> Option<Rc<Request>> {
+        REQUEST.with(|r| r.borrow().as_ref().cloned())
     }
     pub(super) fn remember(run: &InputRun) {
         RESULT.with(|r| *r.borrow_mut() = Some(run.clone()));
@@ -293,4 +313,4 @@ pub(crate) mod test_support {
 }
 
 #[cfg(test)]
-mod executor_tests;
+pub(crate) mod executor_tests;

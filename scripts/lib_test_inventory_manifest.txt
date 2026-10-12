@@ -1763,6 +1763,7 @@ services::claude::claude_tui_session_resolution_tests::stranded_followup_user_dr
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_quiescent_draft_can_recreate_hosted_tui
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_with_prompt_marker_and_draft_reaches_recovery
 services::claude::claude_tui_session_resolution_tests::warm_followup_continues_after_prompt_draft_clear
+services::claude::guarded_owner_tests::cg_b2c_fresh_finalize_preserves_the_typed_post_fence_stop
 services::claude::herdr_turn::coldstop_input_tests::coldstop_claude_closed_never_begins_input_or_mutation
 services::claude::herdr_turn::provider_terminal_tests::a_compact_summary_neither_starts_nor_splits_a_herdr_claude_turn
 services::claude::herdr_turn::provider_terminal_tests::a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal
@@ -2113,6 +2114,14 @@ services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2b_rea
 services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2b_real_literal_532_533_799_800_softwrap_has_no_capacity_veto
 services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2b_resize_in_fence_keeps_payload_zero_and_post_fence_hold_monotone
 services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2b_selected_steering_holds_before_fence_without_legacy_fallback
+services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2c_invalid_payload_action_is_not_silently_dropped
+services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2c_payload_hold_blocks_the_next_cleanup_under_the_same_lock
+services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2c_post_fence_cancel_reaches_warm_owner_as_typed_stop
+services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2c_post_fence_hold_compatibility_error_is_not_a_clean_cancel
+services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2c_selected_followup_waits_for_busy_to_become_idle
+services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2c_selected_steering_is_an_explicit_hold
+services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2c_unknown_selected_session_cannot_fall_back_to_legacy
+services::claude_tui::host_input::guarded_submission::executor_tests::cg_b2c_warm_owner_preserves_cancellation_after_payload_and_after_enter
 services::claude_tui::host_input::tests::a_mounted_dialog_is_never_ready_even_after_clear
 services::claude_tui::host_input::tests::a_send_that_may_have_landed_is_indeterminate_and_nothing_follows
 services::claude_tui::host_input::tests::blind_truncated_or_failed_reads_are_never_ready
@@ -6679,6 +6688,8 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e1
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e3_an_unclear_send_is_never_sent_again_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::the_switch_alone_decides_whether_a_configured_turn_reaches_the_herdr_executor
+services::discord::router::message_handler::provider_dispatch::submission_tests::cg_b2c_headless_bridge_holds_guarded_stop_and_pending_cancel
+services::discord::router::message_handler::provider_dispatch::submission_tests::cg_b2c_intake_bridge_holds_guarded_stop_and_pending_cancel
 services::discord::router::message_handler::provider_dispatch::submission_tests::headless_creator_installs_waiting_and_holds_a_refused_prompt
 services::discord::router::message_handler::provider_dispatch::submission_tests::intake_creator_installs_waiting_and_holds_a_refused_prompt
 services::discord::router::message_handler::provider_dispatch::tests::agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation
@@ -11832,6 +11843,7 @@ services::tui_input::submission_tmux::guarded::transport_tests::cg_b2b_payload_f
 services::tui_input::submission_tmux::guarded::transport_tests::cg_b2b_payload_literal_quotes_and_bracketed_paste_preserve_frame
 services::tui_input::submission_tmux::guarded::transport_tests::cg_b2b_payload_unknown_ack_is_not_retried_and_owned_buffer_is_cleaned
 services::tui_input::submission_tmux::guarded::transport_tests::cg_b2b_unknown_buffer_load_cleans_only_its_uuid_and_never_sends
+services::tui_input::submission_tmux::guarded::transport_tests::cg_b2c_attach_requires_this_driver_even_with_another_client
 services::tui_input::transition_fixture_tests::a_tracked_handback_key_keeps_the_next_move_legacy
 services::tui_input::transition_fixture_tests::bounded_retry_resumes_transient_failure_and_holds_permanent_failure
 services::tui_input::transition_fixture_tests::deletion_boundaries_restart_keep_one_owner_and_order
