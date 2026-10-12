@@ -64,6 +64,13 @@ class SkipPromotionTests(unittest.TestCase):
                          'promotion remains test-only: src/still_test.rs')
         self.assertEqual(self.path.read_text(), self.original)
 
+    def test_addition_stays_next_to_its_directory_without_removing_existing_pins(self):
+        (self.root / 'src/new_tests.rs').write_text('fn fixture() {}\n')
+        self.assertIsNone(self.outcome(('src/promoted.rs',)))
+        source = self.path.read_text()
+        self.assertLess(source.index('"src/new_tests.rs"'), source.index('"src/fixture_tests.rs"'))
+        self.assertIn('"src/still_test.rs"', source)
+
 
 class N4DInstallerDormancyTests(unittest.TestCase):
     INSTALLER = 'src/services/discord/watchers/lifecycle/o_only_install.rs'

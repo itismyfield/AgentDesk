@@ -137,9 +137,13 @@ def sync_skips(root, promoted_paths=()):
             raise RuntimeError("promotion pin is ambiguous: " + rel)
     for name, paths in (("PINNED_BASENAME_TEST_FILES", basename), ("PINNED_RESOLVER_TEST_ONLY_FILES", resolved)):
         measured = {p.relative_to(root).as_posix() for p in paths}
-        end = source.index("\n    }\n)", source.index(name + " ="))
-        additions = "".join('\n        "' + p + '",' for p in sorted(measured - pin.PINNED_TEST_ONLY_MODULE_FILES))
-        source = source[:end] + additions + source[end:]
+        for rel in sorted(measured - pin.PINNED_TEST_ONLY_MODULE_FILES):
+            start = source.index(name + " =")
+            end = source.index("\n    }\n)", start)
+            directory = re.escape(Path(rel).parent.as_posix() + '/')
+            sibling = re.search(r'\n[ \t]*"' + directory + r'[^"/]+",', source[start:end])
+            at = start + sibling.start() if sibling else end
+            source = source[:at] + '\n        "' + rel + '",' + source[at:]
     path.write_text(source)
 
 

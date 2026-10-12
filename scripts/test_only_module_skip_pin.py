@@ -200,6 +200,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs",
         "src/services/discord/tui_prompt_relay/claude_idle_tail_host_tests.rs",
         "src/services/claude/c1_teardown_tests.rs",
+        "src/services/codex/actual_submit_tests.rs",
         "src/services/codex/c1_teardown_tests.rs",
         "src/services/codex/startup_update_tests.rs",
         "src/services/codex_tui/input/tests/startup_update_tests.rs",
@@ -655,7 +656,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs",
-        "src/services/codex/actual_submit_tests.rs",
     }
 )
 
