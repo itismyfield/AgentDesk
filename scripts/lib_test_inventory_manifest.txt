@@ -12328,6 +12328,10 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::a_rotation_applie
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_successor_record_without_rotation_fields_holds_to_the_current_length_and_waits_for_evidence
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_tail_without_its_newline_keeps_a_proven_old_source_read_until_it_ends
 services::tui_o::writer::tests::actor::rotation::retire_tests::an_old_source_is_not_retired_without_provider_evidence_however_long_it_stays_quiet
+services::tui_o::writer::tests::actor::rotation::retire_tests::legacy_hop_retry_tests::legacy_hop_retry_holds_checkpoint_delivers_tails_and_recovers_once_per_outage
+services::tui_o::writer::tests::actor::rotation::retire_tests::legacy_hop_retry_tests::legacy_hop_retry_readable_history_without_a_matching_hop_does_not_block
+services::tui_o::writer::tests::actor::rotation::retire_tests::legacy_hop_retry_tests::legacy_hop_retry_tail_after_durable_proof_invalidates_previous_eof
+services::tui_o::writer::tests::actor::rotation::retire_tests::legacy_hop_retry_tests::legacy_hop_retry_without_legacy_successors_does_not_read_extra_history
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1a_active_missing_checks_retained_fd_before_cleanup
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1a_append_at_quiet_boundary_keeps_reader_active
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1a_capture_none_keeps_barrier_and_halts
