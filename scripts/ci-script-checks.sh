@@ -225,7 +225,7 @@ if run_check guards "Writer namespace Windows exact-target runner fixtures (#567
 fi
 
 if run_check guards "Postgres migration checksum guard"; then
-"$PYTHON" scripts/check_postgres_migration_checksums.py
+"$PYTHON" scripts/check_postgres_migration_checksums.py --require-base
 "$PYTHON" -m unittest tests.test_postgres_migration_checksum_guard
 fi
 
@@ -507,6 +507,11 @@ if run_check contracts "PostgreSQL test-lane membership gate (#4979, enforced)";
 "$PYTHON" scripts/check_pg_test_lane_membership.py --write-pg-db-paths
 git diff --exit-code HEAD -- .github/workflows/ci-pr.yml
 "$PYTHON" -m unittest tests.test_check_pg_test_lane_membership
+fi
+
+if run_check contracts "Shared CI shell lexer tests"; then
+# The test-target and PG lane gates read workflow shell through this one lexer.
+"$PYTHON" -m unittest tests.test_ci_shell_lex
 fi
 
 if run_check contracts "New production file comment-ratio gate"; then

@@ -1,0 +1,3 @@
+# exact-test-id (helper-module: exact module path) | mode | #issue | expires=YYYY-MM-DD | reason; sorted.
+# Modes: intentional-nonrequired, model-unresolved, platform-unavailable, helper-module; stale rows fail.
+services::discord::router::message_handler::provider_dispatch::producer_error_test_support | helper-module | #5340 | expires=2027-10-12 | hands the turn-bridge cold-error tests intake's own producer_error frame; it holds no test of its own

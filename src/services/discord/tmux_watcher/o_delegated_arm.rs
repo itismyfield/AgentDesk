@@ -112,6 +112,93 @@ pub(super) struct RetiredTerminal<'a, 'b> {
 }
 
 impl RetiredTerminal<'_, '_> {
+    // Confirmed source changes end this incarnation; busy authority and failed reads stay retryable.
+    fn permanently_invalid(&self) -> bool {
+        use crate::services::cluster::stream_relay::SourceFileIdentity;
+        use crate::services::tmux_common as tc;
+        use crate::services::tui_prompt_dedupe as binding;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let ctx = self.context;
+        tc::try_with_tmux_source_authority(ctx.tmux_session_name, |_| {
+            let stamp = self.authority.source_stamp?;
+            let _registry = crate::services::discord::tmux_watcher_registry::lock_tmux_watcher_registry();
+            let handle = ctx.shared.tmux_watchers.get(&ctx.channel_id)?;
+            if handle.tmux_session_name != ctx.tmux_session_name
+                || handle.output_path != ctx.output_path
+                || !Arc::ptr_eq(&handle.cancel, self.controls.cancel)
+                || !ctx.shared.tmux_watchers.watcher_reservation_matches(
+                    ctx.tmux_session_name, ctx.channel_id, self.controls.cancel,
+                )
+            {
+                return Some(true);
+            }
+            drop(handle);
+            let expected = ctx.retired_binding.as_ref()?;
+            let mut current = binding::try_peek_tmux_runtime_binding(ctx.tmux_session_name).ok()?;
+            if let Some(binding) = current.as_mut() {
+                binding.last_offset = 0;
+                binding.relay_last_offset = None;
+            }
+            if current != *expected {
+                return Some(true);
+            }
+            let witness = crate::services::discord::delivery_lease_cell::source_epoch_observer::read_source_epoch_witness(ctx.tmux_session_name);
+            if witness.generation.is_some_and(|generation| {
+                Some(generation) != stamp.witness.generation
+            }) || witness.spawn_nonce_hash.is_some_and(|nonce| {
+                Some(nonce) != stamp.witness.spawn_nonce_hash
+            })
+            {
+                return Some(true);
+            }
+            if self.authority.reset_incarnation
+                != ctx.shared.relay_frontier_token(ctx.channel_id).reset_incarnation
+            {
+                return Some(true);
+            }
+            let owner = std::fs::read_to_string(tc::tmux_owner_path(ctx.tmux_session_name)).ok()?;
+            if !owner.trim().is_empty() && owner.trim() != tc::current_tmux_owner_marker() {
+                return Some(true);
+            }
+            if tc::read_tmux_channel_binding(ctx.tmux_session_name)
+                .is_some_and(|channel| channel != ctx.channel_id.get())
+                || tc::resolve_tmux_runtime_kind_marker(ctx.tmux_session_name).is_some_and(|kind| {
+                    kind != if *ctx.watcher_provider == ProviderKind::Claude {
+                        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+                    } else {
+                        crate::services::agent_protocol::RuntimeHandoffKind::CodexTui
+                    }
+                })
+            {
+                return Some(true);
+            }
+            let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK)
+                .open(ctx.output_path).ok()?;
+            let metadata = file.metadata().ok()?;
+            if !metadata.is_file() {
+                return Some(true);
+            }
+            if *ctx.watcher_provider == ProviderKind::Claude
+                && ctx.output_path != tc::session_temp_path(ctx.tmux_session_name, "jsonl")
+            {
+                use crate::services::claude_tui::source_verify::{observe_transcript, OpenedTranscript, FirstRecord};
+                if let Ok(OpenedTranscript::Opened { first: FirstRecord::Session(id), .. }) =
+                    observe_transcript(std::path::Path::new(&format!("/dev/fd/{}", file.as_raw_fd())))
+                    && current.as_ref().and_then(|binding| binding.session_id.as_deref()) != Some(id.as_str())
+                {
+                    return Some(true);
+                }
+            }
+            let identity = match SourceFileIdentity::from_open_file(&file) {
+                SourceFileIdentity::Unavailable => return None,
+                identity => identity,
+            };
+            Some(identity != self.authority.source_file
+                || metadata.len() < *self.parser.current_offset)
+        }).flatten().unwrap_or(false)
+    }
+
     fn range(&self) -> (u64, u64) {
         (
             self.turn.turn_data_start_offset,
@@ -303,6 +390,7 @@ pub(super) async fn dispatch_retired_terminal(
                 .is_some_and(|handle| Arc::ptr_eq(&handle.cancel, arm.controls.cancel))
         };
         if !still_current
+            || arm.permanently_invalid()
             || arm.controls.pause_epoch.load(Ordering::Acquire) != arm.epoch
             || arm
                 .controls

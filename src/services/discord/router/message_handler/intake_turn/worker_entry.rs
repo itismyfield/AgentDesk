@@ -44,24 +44,18 @@ pub(crate) struct IntakeRequest {
     pub preserve_on_cancel: bool,
 }
 
-/// Worker-callable entry point for executing an intake turn. Phase 2-pre.3
-/// of intake-node-routing: this is the public surface a worker node will
-/// invoke after claiming an `intake_outbox` row from its target queue. Pass
-/// the runtime primitives the worker has (`Arc<Http>`, `Arc<SharedData>`,
-/// bot token) plus the deserialized message payload; the function constructs
-/// `IntakeDeps` with `cache: None` and `ctx_for_chained_dispatch: None`
-/// (workers have no live gateway shard) and delegates to the existing
-/// intake body.
-///
-/// Leader producers use `router::intake_dispatch`; a claimed worker bypasses
-/// admission so it cannot recursively create another outbox row.
+/// Claimed workers check canonical admission without routing another delivery row.
+/// Only their execution outcome may settle the original delivery.
 pub(crate) async fn execute_intake_turn_core(
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,
     token: &str,
     request: IntakeRequest,
     uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<IntakeExecution, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(stopped) = worker_replay_admission(shared, &request).await {
+        return Ok(stopped);
+    }
     super::handle_text_message(
         &IntakeDeps {
             http,
@@ -79,6 +73,39 @@ pub(crate) async fn execute_intake_turn_core(
         None,
     )
     .await
+}
+
+/// A claimed delivery keeps its existing durable payload when canonical admission cannot start it.
+async fn worker_replay_admission(
+    shared: &Arc<SharedData>,
+    request: &IntakeRequest,
+) -> Option<IntakeExecution> {
+    use crate::services::discord::router::intake_dispatch::replay_admission::{
+        self as admission, ReplayAdmissionContext, ReplayPreflight,
+    };
+    let channel = request.channel_id.get().to_string();
+    if request.intake_outbox_id.is_none() || admission::dormant_start(&channel).is_some() {
+        return None;
+    }
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return Some(IntakeExecution::Deferred);
+    };
+    let input = admission::discord_input(
+        shared.provider.as_str(),
+        request.channel_id.get(),
+        request.user_msg_id.get(),
+        request.source_message_ids.iter().map(|source| source.get()),
+        &request.user_text,
+    );
+    let instance =
+        crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+    let ctx = ReplayAdmissionContext::production(pool, &instance, admission::incarnation())
+        .for_channel(&channel);
+    match admission::preflight_source(&ctx, &input).await {
+        ReplayPreflight::Admit(_) | ReplayPreflight::LegacyUnprotected => None,
+        ReplayPreflight::ConsumeProtected(_) => Some(IntakeExecution::ConsumedProtected),
+        ReplayPreflight::Defer(_) => Some(IntakeExecution::Deferred),
+    }
 }
 
 /// How long an exact retry waits for the stale turn to release its channel before it gives up.

@@ -177,6 +177,7 @@ pub(crate) struct IntakeRouterContext<'a> {
     /// Ownership and delivery always continue to use `channel_id`.
     pub policy_channel_id: &'a str,
     pub user_msg_id: &'a str,
+    pub replay_source_message_ids: Option<&'a [String]>,
     pub request_owner_id: &'a str,
     pub request_owner_name: Option<&'a str>,
     pub user_text: &'a str,
@@ -216,6 +217,7 @@ pub(super) fn build_payload_for_insert(
         ),
         channel_id: ctx.channel_id.to_string(),
         user_msg_id: ctx.user_msg_id.to_string(),
+        replay_source_message_ids: ctx.replay_source_message_ids.map(<[String]>::to_vec),
         request_owner_id: ctx.request_owner_id.to_string(),
         request_owner_name: ctx.request_owner_name.map(str::to_string),
         user_text: ctx.user_text.to_string(),

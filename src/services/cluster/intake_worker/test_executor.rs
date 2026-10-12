@@ -9,17 +9,18 @@ thread_local! {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Checkpoint {
+pub(crate) enum Checkpoint {
     /// The claim picked its row and has not confirmed it yet.
     ClaimSelected,
     AfterClaim,
     PreAccept,
+    Spawned,
     FinalDb,
     FinalDbDone,
 }
 type CheckpointHook = Box<dyn FnMut(Checkpoint) -> futures::future::BoxFuture<'static, ()>>;
-pub(super) struct Hook;
-pub(super) fn hook(callback: CheckpointHook) -> Hook {
+pub(crate) struct Hook;
+pub(crate) fn hook(callback: CheckpointHook) -> Hook {
     CHECKPOINT.with(|slot| {
         assert!(slot.borrow().is_none());
         *slot.borrow_mut() = Some(callback);
@@ -73,7 +74,7 @@ pub(crate) async fn execute_intake_turn_core(
     token: &str,
     request: IntakeRequest,
     uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<crate::services::discord::IntakeExecution, Box<dyn std::error::Error + Send + Sync>> {
     let recorded = RUNS.with(|runs| {
         let mut runs = runs.borrow_mut();
         runs.as_mut()
@@ -83,7 +84,7 @@ pub(crate) async fn execute_intake_turn_core(
         if FAIL.with(|fail| *fail.borrow()) {
             return Err(std::io::Error::other("C1 executor fixture failure").into());
         }
-        return Ok(());
+        return Ok(crate::services::discord::IntakeExecution::Executed);
     }
     crate::services::discord::execute_intake_turn_core(http, shared, token, request, uploads).await
 }

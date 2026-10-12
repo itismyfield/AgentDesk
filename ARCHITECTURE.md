@@ -973,10 +973,13 @@ src/
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   └── inject_tests.rs
 │   │   │   ├── watcher_respawn/
+│   │   │   │   ├── absence_state.rs
 │   │   │   │   ├── claude_original_tests.rs
 │   │   │   │   ├── idle_relay_absence.rs
 │   │   │   │   ├── input_fence_tests.rs
-│   │   │   │   └── live_bridge_guard.rs
+│   │   │   │   ├── live_bridge_guard.rs
+│   │   │   │   ├── o_only_retry.rs
+│   │   │   │   └── o_only_retry_tests.rs
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── legacy_supervision.rs
 │   │   │   ├── liveness_authority.rs
@@ -1296,6 +1299,7 @@ src/
 │   │   │   │   ├── ready_without_output_tests.rs
 │   │   │   │   ├── replay_hold.rs
 │   │   │   │   ├── replay_hold_tests.rs
+│   │   │   │   ├── scoped_policy_receipt_tests.rs
 │   │   │   │   └── scoped_restore.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
@@ -1424,6 +1428,8 @@ src/
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
+│   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   └── producer_error_test_support.rs
 │   │   │   │   ├── tui_followup/
 │   │   │   │   │   └── codex_observation.rs
 │   │   │   │   ├── attachments.rs
@@ -1914,6 +1920,7 @@ src/
 │   │   │   │   ├── claude_stop_delivery.rs
 │   │   │   │   ├── claude_stop_pane_tests.rs
 │   │   │   │   ├── codex_stop_delivery.rs
+│   │   │   │   ├── codex_stop_delivery_cut_tests.rs
 │   │   │   │   ├── codex_stop_delivery_home_stop_tests.rs
 │   │   │   │   ├── codex_stop_delivery_tests.rs
 │   │   │   │   ├── interrupt_policy.rs
@@ -1929,6 +1936,8 @@ src/
 │   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs
 │   │   │   ├── before_start_stop.rs
+│   │   │   ├── before_start_stop_clear_order_tests.rs
+│   │   │   ├── before_start_stop_disk_gate_tests.rs
 │   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
@@ -1944,6 +1953,7 @@ src/
 │   │   │   ├── context_window.rs
 │   │   │   ├── current_message_anchor.rs
 │   │   │   ├── early_tui_completion.rs
+│   │   │   ├── entry_abort_cold_error_tests.rs
 │   │   │   ├── entry_abort_mailbox_tests.rs
 │   │   │   ├── finalize_epilogue.rs
 │   │   │   ├── followup_requeue.rs
@@ -2047,12 +2057,18 @@ src/
 │   │   │   │   ├── claude_restore.rs
 │   │   │   │   ├── liveness.rs
 │   │   │   │   ├── liveness_tests.rs
+│   │   │   │   ├── n4d2_boundary_tests.rs
+│   │   │   │   ├── n4d2_entry_test.rs
+│   │   │   │   ├── n4d2_o_writer_test.rs
+│   │   │   │   ├── n4d2_restore_tests.rs
 │   │   │   │   ├── o_only_install.rs
 │   │   │   │   ├── o_only_install_tests.rs
+│   │   │   │   ├── o_only_restore.rs
 │   │   │   │   ├── output_policy.rs
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
 │   │   │   │   ├── restore.rs
+│   │   │   │   ├── restore_mapping.rs
 │   │   │   │   ├── restore_support.rs
 │   │   │   │   ├── restore_tests.rs
 │   │   │   │   ├── tests.rs
@@ -2515,6 +2531,10 @@ src/
 │   │   └── tests_pg.rs
 │   ├── tui_input/
 │   │   ├── actor/
+│   │   │   ├── gate/
+│   │   │   │   ├── claude_guarded/
+│   │   │   │   │   └── acceptance_tests.rs
+│   │   │   │   └── claude_guarded.rs
 │   │   │   ├── pane/
 │   │   │   │   ├── ownership.rs
 │   │   │   │   └── ownership_tests.rs
@@ -2526,6 +2546,11 @@ src/
 │   │   │   ├── resume_actor_tests.rs
 │   │   │   ├── token.rs
 │   │   │   └── witness.rs
+│   │   ├── submission_tmux/
+│   │   │   ├── guarded/
+│   │   │   │   ├── protocol_tests.rs
+│   │   │   │   └── transport_tests.rs
+│   │   │   └── guarded.rs
 │   │   ├── actor.rs
 │   │   ├── actor_tests.rs
 │   │   ├── attempt.rs
@@ -2597,7 +2622,9 @@ src/
 │   │   │   └── unit_plan.rs
 │   │   ├── store/
 │   │   │   ├── codex_provenance/
-│   │   │   │   └── mutation.rs
+│   │   │   │   ├── mutation.rs
+│   │   │   │   ├── submit_floor.rs
+│   │   │   │   └── submit_floor_tests.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── codex_provenance.rs
 │   │   │   ├── codex_provenance_tests.rs
@@ -2684,6 +2711,7 @@ src/
 │   │   │   ├── rotation_unsettled_resume_tests.rs
 │   │   │   ├── rotation_unsettled_tests.rs
 │   │   │   ├── round_trip.rs
+│   │   │   ├── s2a_actor_tests.rs
 │   │   │   ├── source_identity_tests.rs
 │   │   │   ├── stall_handoff_tests.rs
 │   │   │   ├── stall_tests.rs

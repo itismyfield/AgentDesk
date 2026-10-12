@@ -10,6 +10,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 type Calls = Arc<Mutex<Vec<(Method, String, String)>>>;
 
+#[derive(Clone, Copy)]
+enum ReactionReply {
+    Success,
+    NotFound { kind: u8, parent: Option<u64> },
+}
+
 struct Mock {
     http: Arc<Http>,
     calls: Calls,
@@ -25,6 +31,10 @@ impl Drop for Mock {
 
 impl Mock {
     async fn new(channel: u64, failures: usize) -> Self {
+        Self::with_reactions(channel, failures, ReactionReply::Success).await
+    }
+
+    async fn with_reactions(channel: u64, failures: usize, reactions: ReactionReply) -> Self {
         let calls = Calls::default();
         let fail = Arc::new(AtomicUsize::new(failures));
         let (recorded, pending) = (calls.clone(), fail.clone());
@@ -37,7 +47,36 @@ impl Mock {
                     String::from_utf8_lossy(&body).into_owned(),
                 ));
                 if method != Method::POST {
-                    return StatusCode::NO_CONTENT.into_response();
+                    match reactions {
+                        ReactionReply::Success => return StatusCode::NO_CONTENT.into_response(),
+                        ReactionReply::NotFound { kind, parent } => {
+                            if method == Method::GET
+                                && uri.path().ends_with(&format!("/channels/{channel}"))
+                            {
+                                return Json(serde_json::json!({
+                                    "id":channel.to_string(), "type":kind,
+                                    "name":"notice-source", "guild_id":"42000", "position":0,
+                                    "permission_overwrites":[], "nsfw":false,
+                                    "parent_id":parent.map(|id| id.to_string()),
+                                    "thread_metadata":{"archived":false, "auto_archive_duration":60,
+                                        "archive_timestamp":"2026-10-12T00:00:00Z", "locked":false}
+                                }))
+                                .into_response();
+                            }
+                            if method == Method::PUT
+                                && parent.is_some_and(|id| {
+                                    uri.path().contains(&format!("/channels/{id}/messages/"))
+                                })
+                            {
+                                return StatusCode::NO_CONTENT.into_response();
+                            }
+                            return (
+                                StatusCode::NOT_FOUND,
+                                Json(serde_json::json!({"code":10008,"message":"Unknown Message"})),
+                            )
+                                .into_response();
+                        }
+                    }
                 }
                 if pending
                     .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
@@ -139,6 +178,119 @@ async fn b_notice_reactions_use_original_source_and_http_failures() {
             "/channels/{channel}/messages/940000006326924/reactions/"
         ))
     }));
+}
+
+#[tokio::test]
+async fn b_notice_non_thread_reaction_failure_gets_channel_without_retry() {
+    let channel = 6_326_929;
+    let message = 940_000_006_326_930;
+    let mock = Mock::with_reactions(
+        channel,
+        0,
+        ReactionReply::NotFound {
+            kind: 0,
+            parent: None,
+        },
+    )
+    .await;
+    let notice = DiscordNotice::new(mock.http.clone(), channel);
+
+    assert!(notice.set(channel, message, '✅', true).await.is_err());
+
+    let calls = mock.calls.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        2,
+        "non-thread failure must not send a second PUT"
+    );
+    assert_eq!(calls[0].0, Method::PUT);
+    assert!(calls[0].1.contains(&format!(
+        "/channels/{channel}/messages/{message}/reactions/"
+    )));
+    assert_eq!(calls[1].0, Method::GET);
+    assert!(calls[1].1.ends_with(&format!("/channels/{channel}")));
+}
+
+#[tokio::test]
+async fn b_notice_thread_reaction_failure_retries_parent_channel() {
+    let channel = 6_326_931;
+    let parent = 6_326_932;
+    let message = 940_000_006_326_933;
+    let mock = Mock::with_reactions(
+        channel,
+        0,
+        ReactionReply::NotFound {
+            kind: 11,
+            parent: Some(parent),
+        },
+    )
+    .await;
+    let notice = DiscordNotice::new(mock.http.clone(), channel);
+
+    assert!(
+        notice.set(channel, message, '✅', true).await.is_ok(),
+        "a thread reaction must recover through its parent after PUT 404"
+    );
+
+    let calls = mock.calls.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        3,
+        "thread failure must send exactly one parent PUT"
+    );
+    assert_eq!(calls[0].0, Method::PUT);
+    assert!(calls[0].1.contains(&format!(
+        "/channels/{channel}/messages/{message}/reactions/"
+    )));
+    assert_eq!(calls[1].0, Method::GET);
+    assert!(calls[1].1.ends_with(&format!("/channels/{channel}")));
+    assert_eq!(calls[2].0, Method::PUT);
+    assert!(
+        calls[2]
+            .1
+            .contains(&format!("/channels/{parent}/messages/{message}/reactions/"))
+    );
+}
+
+#[tokio::test]
+async fn b_notice_category_parent_does_not_retry_non_thread_reaction() {
+    let channel = 6_326_934;
+    let category = 6_326_935;
+    let message = 940_000_006_326_936;
+    let mock = Mock::with_reactions(
+        channel,
+        0,
+        ReactionReply::NotFound {
+            kind: 0,
+            parent: Some(category),
+        },
+    )
+    .await;
+    let notice = DiscordNotice::new(mock.http.clone(), channel);
+
+    assert!(
+        notice.set(channel, message, '✅', true).await.is_err(),
+        "a category parent must not recover a non-thread reaction"
+    );
+
+    let calls = mock.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2, "a category parent must not cause a retry");
+    assert_eq!(calls[0].0, Method::PUT);
+    assert!(calls[0].1.contains(&format!(
+        "/channels/{channel}/messages/{message}/reactions/"
+    )));
+    assert_eq!(calls[1].0, Method::GET);
+    assert!(calls[1].1.ends_with(&format!("/channels/{channel}")));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|(method, path, _)| {
+                *method == Method::PUT && path.contains(&format!("/channels/{category}/messages/"))
+            })
+            .count(),
+        0,
+        "no category-target PUT is allowed"
+    );
 }
 
 #[tokio::test]
