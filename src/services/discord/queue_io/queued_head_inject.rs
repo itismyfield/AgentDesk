@@ -1,7 +1,27 @@
 use super::super::{health, mailbox_snapshot, router, session_runtime};
+use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::QueueIdentity;
 use poise::serenity_prelude::ChannelId;
+
+pub(in crate::services::discord) type BindingKey = (
+    RuntimeHandoffKind,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+pub(in crate::services::discord) fn binding_key(session: &str) -> Option<BindingKey> {
+    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)?;
+    Some((
+        binding.runtime_kind,
+        binding.output_path,
+        binding.relay_output_path,
+        binding.input_fifo_path,
+        binding.session_id,
+    ))
+}
 
 pub(in crate::services::discord) fn persistence_failed(error: String) -> health::InjectAttempt {
     tracing::warn!(%error, "queued busy injection persistence failed");

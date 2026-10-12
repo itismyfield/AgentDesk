@@ -429,6 +429,71 @@ async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_i
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn s2b_actual_router_kickoff_opens_both_gates_for_the_same_durable_head_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fixture = Fixture::new(6_813_422, "all").await;
+    let enabled = inject_hook::forced(fixture.channel.get()).unwrap();
+    inject_hook::clear(fixture.channel.get());
+    let before = fixture.queue().await;
+    let before_bytes = fixture.bytes();
+    let before_queue = format!("{before:?}");
+    for global_open in [false, true] {
+        if global_open {
+            inject_hook::set(fixture.channel.get(), enabled.0, enabled.1.clone());
+        }
+        fixture.kick().await;
+        assert_eq!(fixture.pane.tmux_calls(), 0, "global_open={global_open}");
+        assert_eq!(fixture.bytes(), before_bytes);
+        assert_eq!(format!("{:?}", fixture.queue().await), before_queue);
+        fixture.assert_holder_kept().await;
+    }
+
+    let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+    assert!(router::queued_head_inject_covers(fixture.channel, None));
+    fixture.kick().await;
+    assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
+    assert!(fixture.pane.transcript_recorded_the_paste());
+    let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+    let (header, text) = buffer.split_once('\n').unwrap();
+    assert_eq!(text, before[0].text);
+    assert!(header.starts_with(&format!(
+        "[📱 discord:{}:{} · 200 · ",
+        fixture.channel, before[0].message_id
+    )));
+    assert!(!buffer.contains("distinct tail B"));
+    let transcript = std::fs::read_to_string(fixture.pane.path("transcript.jsonl")).unwrap();
+    let acknowledged: Vec<Value> = transcript
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|record: &Value| record["type"] == "queue-operation")
+        .collect();
+    assert_eq!(acknowledged.len(), 1);
+    assert_eq!(acknowledged[0]["content"], buffer);
+    let after = fixture.queue().await;
+    assert_eq!(after.len(), 1);
+    assert_eq!(format!("{:?}", after[0]), format!("{:?}", before[1]));
+    let disk = fixture.disk();
+    assert!(disk["head_injection"].is_null());
+    let terminal = disk["terminal_identities"].as_array().unwrap();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0]["primary"], before[0].message_id.get());
+    assert_eq!(
+        terminal[0]["queued_generation"],
+        before[0].queued_generation
+    );
+    assert_eq!(terminal[0]["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        terminal[0]["sources"][0]["message_id"],
+        before[0].message_id.get()
+    );
+    assert_eq!(
+        terminal[0]["sources"][0]["queued_generation"],
+        before[0].queued_generation
+    );
+    fixture.assert_holder_kept().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn s2b_actual_router_kickoff_not_sent_preserves_the_original_head_without_handback_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let fixture = Fixture::new(6_813_404, "all").await;
@@ -865,7 +930,7 @@ async fn s2b_actor_rechecks_both_gates_and_the_admitted_channel_before_reserving
         let _other_gate =
             wrong_channel.then(|| router::busy_inject_support::open_gate(channel + 1));
         let admitted_channel = ChannelId::new(channel + u64::from(wrong_channel));
-        let gate = router::busy_inject_support::OpenGate::queued_gate;
+        let gate = router::queued_head_inject_covers;
         assert_eq!(gate(admitted_channel, None), list_open);
         let before = fixture.bytes();
         let queue = format!("{:?}", fixture.queue().await);

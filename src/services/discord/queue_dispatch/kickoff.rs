@@ -50,13 +50,8 @@ async fn kickoff_admitted_queue_channel(
         return IdleQueueKickoffChannelOutcome::default();
     }
 
-    #[cfg(test)]
-    let queued_gate = Some(
-        router::busy_inject_support::OpenGate::queued_gate
-            as fn(ChannelId, Option<ChannelId>) -> bool,
-    );
-    #[cfg(not(test))]
-    let queued_gate = None; // Production facade awaits router/mod.rs ownership clearance.
+    let queued_gate =
+        Some(router::queued_head_inject_covers as fn(ChannelId, Option<ChannelId>) -> bool);
     if queue_io::queued_head_inject::try_busy(deps, provider, channel_id, queued_gate).await {
         return IdleQueueKickoffChannelOutcome::default();
     }

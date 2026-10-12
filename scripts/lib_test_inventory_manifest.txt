@@ -5568,6 +5568,7 @@ services::discord::queue_io::queued_head_inject::tests::s2b_actor_rechecks_both_
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_its_identity_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_keeps_each_gate_independently_off_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_not_sent_preserves_the_original_head_without_handback_pg
+services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_opens_both_gates_for_the_same_durable_head_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_unconfirmed_preserves_head_and_tail_across_restart_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_an_acknowledged_paste_can_settle_after_the_transcript_becomes_idle_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_cancelled_kickoff_caller_leaves_the_reserved_owner_to_finish_pg

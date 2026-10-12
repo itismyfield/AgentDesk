@@ -16,7 +16,9 @@ use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{InflightTurnState, TurnSource};
 use crate::services::discord::inject_disposition::{self, InjectionOutcome, SourceGuard};
 use crate::services::discord::input_runtime::fence;
-use crate::services::discord::queue_io::queued_head_inject::persistence_failed;
+use crate::services::discord::queue_io::queued_head_inject::{
+    BindingKey, binding_key, persistence_failed,
+};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
     ActiveTurnKind, ChannelMailboxSnapshot, ExpectedClaim, HANDBACK_NOT_WRITTEN, HeadOutcome,
@@ -205,25 +207,6 @@ struct Target {
     input: Option<fence::Permit>,
     row: Option<RowKey>,
     binding: Option<BindingKey>,
-}
-
-type BindingKey = (
-    RuntimeHandoffKind,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
-
-fn binding_key(session: &str) -> Option<BindingKey> {
-    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)?;
-    Some((
-        binding.runtime_kind,
-        binding.output_path,
-        binding.relay_output_path,
-        binding.input_fifo_path,
-        binding.session_id,
-    ))
 }
 
 async fn observe(

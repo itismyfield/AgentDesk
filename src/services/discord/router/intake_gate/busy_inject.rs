@@ -81,13 +81,6 @@ pub(in crate::services::discord) fn covers(channel: ChannelId, parent: Option<Ch
     !herdr(Some(channel.get())) && !parent.is_some_and(|id| herdr(Some(id.get())))
 }
 
-#[cfg(test)]
-impl test_support::OpenGate {
-    pub(crate) fn queued_gate(channel: ChannelId, parent: Option<ChannelId>) -> bool {
-        covers(channel, parent)
-    }
-}
-
 /// Whether a thread may take a message its gated parent passed on; a parent injection that owns
 /// or ended it blocks the promotion, and an allowed one records the thread's intake.
 pub(super) fn thread_may_take(
