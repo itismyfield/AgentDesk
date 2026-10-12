@@ -13,6 +13,7 @@ import importlib.util
 import io
 import locale
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1592,6 +1593,52 @@ class PgIncludeRestoration(unittest.TestCase):
                 return text.replace(old, new) if old else text
             with self.subTest(old=old, new=new):
                 self.assertEqual(self.kinds(recipe=None, edit=edit), unresolved if old else [])
+
+
+class ShellBoundaryEnforcement(unittest.TestCase):
+    """The enforced gate judges every cargo test the shell would run: continued lines as
+    one command, and a cargo the lexer could not bound as unparsed."""
+
+    def enforce(self, block: tuple[str, ...], just_lines: tuple[str, ...] = (GOOD_COMMAND,)):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = build_fixture_repo(root, GOOD_COMMAND, just_text="fixture:\n" + "".join(
+                f"    {line}\n" for line in just_lines))
+            write_generated_filter(root)
+            # A plain first step keeps the extraction floor met when the block holds no command.
+            workflow.write_text(f"jobs:\n  lane:\n    steps:\n      - run: {GOOD_COMMAND}\n"
+                                "      - run: |\n" + "".join(
+                f"          {line}\n" for line in block), encoding="utf-8")
+            allow = root / "allowlist.txt"
+            allow.write_text("", encoding="utf-8")
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                rc = integrity.main(["--repo-root", str(root), "--workflow", str(workflow),
+                                     "--allowlist", str(allow), "--enforce"])
+        return rc, [(Path(source).name, kind) for source, kind in re.findall(
+            r"^ERROR (\S+?):\d+: \[([\w-]+)\]", stdout.getvalue(), re.M)]
+
+    def test_every_cargo_the_shell_runs_is_judged(self) -> None:
+        zero = (1, [("ci-fixture.yml", "zero-match")])
+        unparsed = (1, [("ci-fixture.yml", "cargo-command-unparsed")])
+        for block, verdict in (
+                (("cargo test --lib -- \\", "  definitely_missing_filter"), zero),
+                (("car\\", "go test --lib missing"), zero),
+                (("cat <<EOF; cargo test --lib missing", "hello", "EOF"), unparsed),
+                (("unset x", "echo ${x:-$(cargo test --lib missing)}"), unparsed),
+                (("false && cargo test --lib missing",), unparsed),
+                (("cargo test --lib missing \\",), unparsed),
+                (("echo cargo test --lib missing",), (0, [])),
+                ((f"{GOOD_COMMAND} \\", "  --nocapture"), (0, [])),
+                ((f"{GOOD_COMMAND} \\", "", "cargo test --lib missing_alone"), zero)):
+            with self.subTest(block=block):
+                self.assertEqual(self.enforce(block), verdict)
+
+    def test_a_recipe_continues_its_line_and_keeps_the_canonical_chain(self) -> None:
+        pg = f'source {integrity.NON_PG_FILTER_REL} && cargo test --lib -- "${{PG_INCLUDE_ARGS[@]}}"'
+        self.assertEqual(self.enforce((GOOD_COMMAND,), (pg, GOOD_COMMAND)), (0, []))
+        self.assertEqual(self.enforce((GOOD_COMMAND,), ("cargo test --lib \\", "  missing_filter")),
+                         (1, [("justfile", "zero-match")]))
 
 
 class ParserContract(unittest.TestCase):

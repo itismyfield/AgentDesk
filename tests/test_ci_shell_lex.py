@@ -115,11 +115,23 @@ class UnprovenBoundaries(unittest.TestCase):
                 self.assertEqual(lex.scan_shell(text).issues, ())
 
 
+    def test_a_cargo_the_lexer_could_not_bound_may_run(self) -> None:
+        for text in ("cat <<EOF; cargo test --lib x", "echo ${x:-$(cargo test --lib x)}",
+                     "cat <<EOF && cargo test"):
+            with self.subTest(text=text):
+                self.assertTrue(lex.may_execute_cargo(lex.scan_shell(text)))
+        for text in ("python - <<'PY'", "echo ${x:-$(date)}", "cargo test --lib x",
+                     "echo ${x:-cargo-deny}"):
+            with self.subTest(text=text):
+                self.assertFalse(lex.may_execute_cargo(lex.scan_shell(text)))
+
+
 class ShellWords(unittest.TestCase):
     def test_only_plain_words_are_read_as_array_values(self) -> None:
         self.assertEqual(lex.shell_words("\n  --skip a#b  # note\n  --skip 'c d'\n"),
                          ("--skip", "a#b", "--skip", "c d"))
-        for text in ("--skip a; --skip b", "--skip 'open", "--skip a >log", "--skip <(a)"):
+        for text in ("--skip a; --skip b", "--skip 'open", "--skip a >log", "--skip <(a)",
+                     "--skip $X", '--skip "${X:-a}"'):
             with self.subTest(text=text):
                 self.assertIsNone(lex.shell_words(text))
 

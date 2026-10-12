@@ -8,6 +8,7 @@ callers decide what an issue means for their verdict, and must fail closed on it
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 # Longest first, so `&&` is never read as two `&`; `(`/`)` also close case patterns.
@@ -17,6 +18,7 @@ REDIRECT_OPS = ("&>>", "&>", "<<<", "<>", "<&", ">&", ">>", ">|", "<", ">")
 OPEN_ISSUES = frozenset({"unclosed-context", "unsupported-heredoc", "ambiguous-boundary"})
 _META = " \t\n;&|()<>"
 _NAME = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+_CARGO = re.compile(r"(?<![\w./-])cargo(?![\w./-])")
 
 
 @dataclass(frozen=True)
@@ -267,7 +269,7 @@ class _Lexer:
 
     def braced(self, start: int) -> int:
         """`${…}` up to its matching brace; a command inside it is not followed."""
-        index, braces = start + 2, 1
+        index, braces, nested = start + 2, 1, False
         while index < self.end and braces:
             char = self.text[index]
             if char == "\\":
@@ -277,10 +279,13 @@ class _Lexer:
                 if index < 0:
                     return self.closed(start, -1)
             elif self.text.startswith(("$(", "`"), index):
-                self.issue("unsupported-expansion", start, index)
+                nested = True
             braces += {"{": 1, "}": -1}.get(char, 0)
             index += 1
-        return self.closed(start, index if not braces else -1)
+        stop = self.closed(start, index if not braces else -1)
+        if nested:
+            self.issue("unsupported-expansion", start, stop)
+        return stop
 
     def backtick(self, start: int, depth: int) -> int:
         index, escaped = start + 1, False
@@ -329,10 +334,21 @@ def simple_commands(scan: ShellScan) -> list[list[ShellToken]]:
     return [command for command in commands if command]
 
 
+def may_execute_cargo(scan: ShellScan) -> bool:
+    """Whether cargo may run where the lexer proved no boundary: an issue beside a lexed
+    `cargo test`, or a `cargo` word inside a span the lexer could not read."""
+    values = [token.value for token in scan.tokens if token.kind == "WORD"]
+    return bool(scan.issues) and (
+        any(values[index:index + 2] == ["cargo", "test"] for index in range(len(values)))
+        or any(_CARGO.search(scan.comment_masked[issue.start:issue.end])
+               for issue in scan.issues))
+
+
 def shell_words(text: str) -> tuple[str, ...] | None:
-    """The outer words of ``text`` when it holds only words, comments and newlines."""
+    """The outer words of ``text`` when it holds only static words, comments and newlines."""
     scan = scan_shell(text)
-    if scan.issues or any(token.kind in ("OP", "REDIR") for token in scan.tokens):
+    if scan.issues or any(token.kind in ("OP", "REDIR") or token.dynamic
+                          for token in scan.tokens):
         return None
     return tuple(token.value for token in scan.tokens
                  if token.kind == "WORD" and not token.depth)

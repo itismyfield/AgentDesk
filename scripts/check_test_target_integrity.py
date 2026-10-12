@@ -941,10 +941,8 @@ def _unproven_cargo(scan) -> bool:
     """Whether a lexed line may run a cargo test outside the one command it extracts:
     in a second command, a substitution, or past a boundary the lexer cannot prove."""
     commands, ops = _chained_commands(scan)
-    words = [token.value or "" for token in scan.tokens if token.kind == "WORD"]
-    pairs = any(words[index:index + 2] == ["cargo", "test"] for index in range(len(words)))
     nested = [token.value for token in scan.tokens if token.depth]
-    return (bool(scan.issues) and pairs) \
+    return _lex().may_execute_cargo(scan) \
         or any(nested[index:index + 2] == ["cargo", "test"] for index in range(len(nested))) \
         or ((ops or len(commands) > 1) and any(
             _direct_cargo_test(values, values) is not None
@@ -1034,7 +1032,10 @@ def _parse_command_line(line: str, *, yaml_run_scalar: bool = False,
     try:
         words = shlex.split(code)
     except ValueError:
-        return [] if _unproven_cargo(scan) else None
+        # Unsplittable words leave even a lone direct cargo test unextracted.
+        values = [token.value for token in scan.tokens if token.kind == "WORD"]
+        lone = any(values[index:index + 2] == ["cargo", "test"] for index in range(len(values)))
+        return [] if lone or _unproven_cargo(scan) else None
     syntax = _syntax_words(code)
     aligned = len(syntax) == len(words)
     # Quoted text never ends a command; unaligned words leave the syntax unproven.
@@ -1053,6 +1054,28 @@ def _parse_command_line(line: str, *, yaml_run_scalar: bool = False,
     return cargo
 
 
+def _continued(text: str) -> bool:
+    """Whether a shell line ends in an unescaped backslash that joins the next line to it."""
+    code = text[:_shell_comment_start(text)]
+    return (len(code) - len(code.rstrip("\\"))) % 2 == 1
+
+
+def _record_command(source: Path, lineno: int, text: str,
+                    commands: list[tuple[int, list[str], str]],
+                    diagnostics: list[str] | None, refused: list[int] | None,
+                    yaml_run_scalar: bool = False) -> None:
+    """Parse one logical shell line and file it as a command, a refusal or neither."""
+    line_diagnostics: list[str] = []
+    words = _parse_command_line(text, yaml_run_scalar=yaml_run_scalar,
+                                diagnostics=line_diagnostics)
+    if diagnostics is not None:
+        diagnostics.extend(f"{source}:{lineno}: {detail}" for detail in line_diagnostics)
+    if words:
+        commands.append((lineno, words, " ".join(words)))
+    elif words == [] and refused is not None:
+        refused.append(lineno)
+
+
 def extract_commands(workflow: Path, diagnostics: list[str] | None = None,
                      shells: list[list[tuple[int, str]]] | None = None,
                      refused: list[int] | None = None) \
@@ -1061,45 +1084,48 @@ def extract_commands(workflow: Path, diagnostics: list[str] | None = None,
 
     ``shells`` collects each run scalar's (line, shell text) pairs: one shell each.
     ``refused`` collects lines whose direct cargo test is joined to another command.
+    Block lines a trailing backslash continues are parsed as one command at its first line.
     """
     commands: list[tuple[int, list[str], str]] = []
     block_indent: int | None = None
+    content_indent: int | None = None
     shell: list[tuple[int, str]] = []
+    pending: tuple[int, str] | None = None
     for lineno, line in enumerate(workflow.read_text("utf-8").splitlines(), 1):
         indent = len(line) - len(line.lstrip())
         if block_indent is not None and line.strip() and indent <= block_indent:
             block_indent = None
         match = re.match(r"^\s*(?:-\s*)?run:\s*(.*)$", line)
-        scalar = None
-        yaml_scalar = False
+        if pending is not None and (match or block_indent is None or not line.strip()):
+            # A blank line or the block's end finishes a continued command as it stands.
+            _record_command(workflow, pending[0], pending[1].removesuffix("\\")
+                            if not line.strip() else pending[1], commands, diagnostics, refused)
+            pending = None
         if match:
             value = match.group(1).strip()
             shell = []
             if shells is not None:
                 shells.append(shell)
             if value in {"|", "|-", "|+", ">", ">-", ">+"}:
-                block_indent = indent
+                block_indent, content_indent = indent, None
                 continue
-            scalar, yaml_scalar = value, True
-        elif block_indent is not None and indent > block_indent:
-            scalar = line.strip()
-        if scalar is None:
+            shell.append((lineno, _shell_text(value, True)))
+            _record_command(workflow, lineno, value, commands, diagnostics, refused, True)
             continue
+        if block_indent is None or indent <= block_indent:
+            continue
+        content_indent = indent if content_indent is None else content_indent
         # Block lines keep their YAML indentation, which shows what a compound command holds.
-        shell.append((lineno, _shell_text(scalar, yaml_scalar) if match else line.rstrip()))
-        line_diagnostics: list[str] = []
-        words = _parse_command_line(
-            scalar, yaml_run_scalar=yaml_scalar,
-            diagnostics=line_diagnostics,
-        )
-        if diagnostics is not None:
-            diagnostics.extend(
-                f"{workflow}:{lineno}: {detail}" for detail in line_diagnostics
-            )
-        if words:
-            commands.append((lineno, words, " ".join(words)))
-        elif words == [] and refused is not None:
-            refused.append(lineno)
+        shell.append((lineno, line.rstrip()))
+        first, text = (pending[0], pending[1][:-1] + line[min(indent, content_indent):]) \
+            if pending is not None else (lineno, line.strip())
+        pending = None
+        if _continued(text):
+            pending = (first, text)
+        else:
+            _record_command(workflow, first, text, commands, diagnostics, refused)
+    if pending is not None:
+        _record_command(workflow, *pending, commands, diagnostics, refused)
     return commands
 
 
@@ -1112,10 +1138,15 @@ def extract_justfile_commands(justfile: Path,
 
     ``shells`` collects every recipe line alone: just runs each in a new shell.
     ``refused`` collects lines whose direct cargo test is joined to another command.
+    Recipe lines a trailing backslash continues are parsed as one command at its first line.
     """
     commands: list[tuple[int, list[str], str]] = []
     in_recipe = False
+    pending: tuple[int, str] | None = None
     for lineno, line in enumerate(justfile.read_text("utf-8").splitlines(), 1):
+        if pending is not None and not (in_recipe and line[:1].isspace() and line.strip()):
+            _record_command(justfile, *pending, commands, diagnostics, refused)
+            pending = None
         if line and not line[0].isspace():
             in_recipe = bool(RECIPE_HEADER.match(line))
             continue
@@ -1123,16 +1154,15 @@ def extract_justfile_commands(justfile: Path,
             continue
         if shells is not None:
             shells.append([(lineno, line.strip())])
-        line_diagnostics: list[str] = []
-        words = _parse_command_line(line, diagnostics=line_diagnostics)
-        if diagnostics is not None:
-            diagnostics.extend(
-                f"{justfile}:{lineno}: {detail}" for detail in line_diagnostics
-            )
-        if words:
-            commands.append((lineno, words, " ".join(words)))
-        elif words == [] and refused is not None:
-            refused.append(lineno)
+        first, text = (pending[0], pending[1][:-1] + line.strip()) \
+            if pending is not None else (lineno, line.strip())
+        pending = None
+        if _continued(text):
+            pending = (first, text)
+        else:
+            _record_command(justfile, first, text, commands, diagnostics, refused)
+    if pending is not None:
+        _record_command(justfile, *pending, commands, diagnostics, refused)
     return commands
 
 
