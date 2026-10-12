@@ -619,6 +619,16 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/session_relay_sink/o_retired_terminal_legacy_fixture_tests.rs",
         "src/services/discord/session_relay_sink/o_retired_terminal_source_tests.rs",
         "src/server/routes/agents_turn_deliver/pg_tests.rs",
+        "src/cli/herdr_terminate_tests.rs",
+        "src/server/routes/herdr_terminate_tests.rs",
+        "src/services/discord/herdr_terminate_exit_tests.rs",
+        "src/services/discord/herdr_terminate_route_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs",
+        "src/services/session_host/herdr_terminate_real_tests.rs",
+        "src/server/routes/herdr_legacy_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs",
     }
 )
 
