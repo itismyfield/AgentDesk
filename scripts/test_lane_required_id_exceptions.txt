@@ -1,0 +1,2 @@
+# exact-test-id (helper-module: exact module path) | mode | #issue | expires=YYYY-MM-DD | reason; sorted.
+# Modes: intentional-nonrequired, model-unresolved, platform-unavailable, helper-module; stale rows fail.
