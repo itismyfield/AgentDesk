@@ -824,26 +824,16 @@ impl<I: HostIo> Hosted<'_, I> {
         let readers = crate::services::tui_o::channel_policy::boot()
             .filter(|boot| boot.dormant_channels().contains(&channel))
             .map(|_| ReaderConfig { dormant: true });
+        let spawn =
+            || actor::spawn_projecting(&config, readers, writer, self.provider, bindings, watches);
         let (submission, spawned) = if self.provider == ShadowProvider::Codex {
             let (submission, receiver) = actor::codex_submission::Port::new(self.claim.generation);
             (
                 Some(submission),
-                actor::codex_submission::spawning(receiver, || {
-                    actor::spawn_projecting(
-                        &config,
-                        readers,
-                        writer,
-                        self.provider,
-                        bindings,
-                        watches,
-                    )
-                }),
+                actor::codex_submission::spawning(receiver, spawn),
             )
         } else {
-            (
-                None,
-                actor::spawn_projecting(&config, readers, writer, self.provider, bindings, watches),
-            )
+            (None, spawn())
         };
         let actor = spawned?;
         let watched = (resumed.clone(), unsettled, owed, self.stopping.clone());
