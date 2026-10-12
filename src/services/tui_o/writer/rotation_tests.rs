@@ -466,6 +466,8 @@ async fn an_old_tail_the_full_spool_refuses_behind_an_announced_unit_stops_the_c
     halt(stop, task).await;
 }
 
+#[path = "fork_mask_tests.rs"]
+mod fork_mask_tests;
 #[path = "fork_tests.rs"]
 mod fork_tests;
 #[path = "recovery_tests.rs"]

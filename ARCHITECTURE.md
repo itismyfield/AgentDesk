@@ -955,6 +955,14 @@ src/
 │   │   │   ├── recovery/
 │   │   │   │   ├── live_agent_recovery/
 │   │   │   │   │   └── judged_finish_fence_tests.rs
+│   │   │   │   ├── self_watchdog/
+│   │   │   │   │   ├── policy/
+│   │   │   │   │   │   └── tests/
+│   │   │   │   │   │       └── mod.rs
+│   │   │   │   │   ├── tests/
+│   │   │   │   │   │   └── mod.rs
+│   │   │   │   │   ├── driver.rs
+│   │   │   │   │   └── policy.rs
 │   │   │   │   ├── stop_judgement/
 │   │   │   │   │   └── judged_finish_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
@@ -2308,6 +2316,9 @@ src/
 │   │   ├── repo_resolver.rs
 │   │   ├── runner.rs
 │   │   └── worktree_resolver.rs
+│   ├── hang_forensics/
+│   │   └── tests/
+│   │       └── mod.rs
 │   ├── health_diagnostics/
 │   │   └── session_state.rs
 │   ├── imsg_reply/
@@ -2708,6 +2719,8 @@ src/
 │   │   │   ├── deliver_home_tests.rs
 │   │   │   ├── drain_projection_tests.rs
 │   │   │   ├── fork_lineage.rs
+│   │   │   ├── fork_lineage_tests.rs
+│   │   │   ├── fork_mask_tests.rs
 │   │   │   ├── fork_tests.rs
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
@@ -2828,6 +2841,8 @@ src/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
 │   │   ├── pending_queue_persistence/
+│   │   │   ├── queue_exit_debt.rs
+│   │   │   ├── queue_exit_debt_tests.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs
 │   │   ├── registry_purge/

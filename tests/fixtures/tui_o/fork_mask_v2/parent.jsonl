@@ -1,0 +1,2 @@
+{"message":{"content":"fixture prefix"},"type":"user","uuid":"z"}
+{"apiBlockIndex":0,"message":{"content":[{"text":"fixture shared","type":"text"}],"id":"r"},"type":"assistant","uuid":"u-r"}

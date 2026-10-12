@@ -36,6 +36,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/services/discord/queue_io/queued_head_inject_tests.rs",
         "src/services/turn_orchestrator/overflow_s2b_tests.rs",
+        "src/services/turn_orchestrator/pending_queue_persistence/queue_exit_debt_tests.rs",
         "src/services/turn_orchestrator/pending_queue_persistence/queued_recovery_tests.rs",
         "src/services/turn_orchestrator/queued_head_s2a_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_recovery_s2a_tests.rs",
@@ -565,6 +566,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_input/rows_tests.rs",
         "src/services/tui_o/writer/switch_tests.rs",
         "src/services/tui_o/writer/retire_tests.rs",
+        "src/services/tui_o/writer/fork_lineage_tests.rs",
+        "src/services/tui_o/writer/fork_mask_tests.rs",
         "src/services/tui_o/writer/legacy_hop_retry_tests.rs",
         "src/services/tui_o/writer/fork_tests.rs",
         "src/services/tui_o/writer/host_tests.rs",
@@ -760,6 +763,9 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/router/message_handler/provider_dispatch/producer_error_test_support.rs",
         "src/services/discord/watchers/lifecycle/n4d2_entry_test.rs",
         "src/services/discord/watchers/lifecycle/n4d2_o_writer_test.rs",
+        "src/services/discord/health/recovery/self_watchdog/policy/tests/mod.rs",
+        "src/services/discord/health/recovery/self_watchdog/tests/mod.rs",
+        "src/services/hang_forensics/tests/mod.rs",
     }
 )
 
