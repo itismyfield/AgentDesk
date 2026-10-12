@@ -514,6 +514,11 @@ if run_check contracts "Shared CI shell lexer tests"; then
 "$PYTHON" -m unittest tests.test_ci_shell_lex
 fi
 
+if run_check contracts "D4-B acceptance manifest (#5340)"; then
+"$PYTHON" scripts/check_herdr_s3_d4b_manifest.py
+"$PYTHON" -m unittest tests.test_herdr_s3_d4b_manifest
+fi
+
 if run_check contracts "New production file comment-ratio gate"; then
 # The 999-line blind spot: hotfile_ratchet only stops an ALREADY-huge file from
 # re-expanding, and both giant-file gates begin at 1,000 lines, so no gate

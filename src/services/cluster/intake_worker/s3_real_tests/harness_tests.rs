@@ -356,6 +356,10 @@ struct DiscordState {
     seen: Mutex<Vec<Seen>>,
     running: AtomicUsize,
     most_running: AtomicUsize,
+    /// Messages accepted in an earlier generation: history shows them, `posts` never counts them.
+    kept: Vec<(u64, SeenMessage)>,
+    /// Where each accepted message is also written, for the next generation's Discord to keep.
+    file: Option<PathBuf>,
 }
 
 /// A fake Discord that keeps each request's lifecycle and can hold requests open.
@@ -374,6 +378,39 @@ impl Default for Discord {
 }
 
 impl Discord {
+    /// A Discord that keeps what earlier generations accepted into `file` and adds to it.
+    pub(super) fn kept_in(file: &Path) -> Self {
+        let opened = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file);
+        drop(opened.unwrap());
+        let text = std::fs::read_to_string(file).unwrap();
+        let kept = text.lines().map(|line| {
+            let line: serde_json::Value = serde_json::from_str(line).unwrap();
+            let message = SeenMessage {
+                id: line["id"].as_u64().unwrap(),
+                author_id: line["author_id"].as_u64().unwrap(),
+                content: line["content"].as_str().unwrap().to_string(),
+            };
+            (line["channel"].as_u64().unwrap(), message)
+        });
+        let state = DiscordState {
+            kept: kept.collect(),
+            file: Some(file.to_path_buf()),
+            ..DiscordState::default()
+        };
+        Self {
+            state: Arc::new(state),
+            ..Self::default()
+        }
+    }
+
+    /// What earlier generations accepted.
+    pub(super) fn kept(&self) -> Vec<SeenMessage> {
+        self.state.kept.iter().map(|(_, m)| m.clone()).collect()
+    }
+
     /// Requests started from now wait until [`Discord::release`].
     pub(super) fn hold(&self) {
         self.valve.send_replace(false);
@@ -479,14 +516,19 @@ impl DiscordPort for Discord {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_micros() as u64;
-                let last = created.last().map_or(0, |(_, m)| m.id);
-                let id = micros.max(last + 1);
+                let last = created.iter().chain(&state.kept).map(|(_, m)| m.id).max();
+                let id = micros.max(last.unwrap_or(0) + 1);
                 let message = SeenMessage {
                     id,
                     author_id: BOT,
                     content: content.clone(),
                 };
                 created.push((channel, message.clone()));
+                if let Some(file) = &state.file {
+                    let line = serde_json::json!({"channel": channel, "id": id,
+                        "author_id": BOT, "content": content});
+                    append(file, format!("{line}\n").as_bytes());
+                }
                 message
             };
             locked(&state.seen).push(Seen::Accepted(content));
@@ -501,8 +543,7 @@ impl DiscordPort for Discord {
         after: u64,
     ) -> impl Future<Output = Result<Vec<SeenMessage>, String>> + Send {
         let created = locked(&self.state.created);
-        let page = created
-            .iter()
+        let page = (self.state.kept.iter().chain(created.iter()))
             .filter(|(c, m)| *c == channel && m.id > after);
         std::future::ready(Ok(page.map(|(_, m)| m.clone()).collect()))
     }
@@ -642,15 +683,24 @@ pub(super) fn worker_restored() -> Arc<AtomicBool> {
 
 impl Booted {
     pub(super) async fn boot(env: &Env) -> Self {
-        Self::boot_with(env, |id| {
-            let readiness = host::process_readiness();
-            ChannelHomePort::new(id, readiness, worker_restored())
-        })
-        .await
+        Self::boot_on(env, Discord::default()).await
+    }
+
+    /// As [`Booted::boot`], posting to `discord`.
+    pub(super) async fn boot_on(env: &Env, discord: Discord) -> Self {
+        let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
+        Self::boot_with_on(env, reads, discord).await
     }
 
     /// As [`Booted::boot`], with the drain reading through `reads`.
     pub(super) async fn boot_with<R>(env: &Env, reads: impl Fn(u64) -> R) -> Self
+    where
+        R: DrainPort + Send + Sync + 'static,
+    {
+        Self::boot_with_on(env, reads, Discord::default()).await
+    }
+
+    async fn boot_with_on<R>(env: &Env, reads: impl Fn(u64) -> R, discord: Discord) -> Self
     where
         R: DrainPort + Send + Sync + 'static,
     {
@@ -681,7 +731,7 @@ impl Booted {
         let source = source_id_for("s1", &transcript).unwrap();
         let host = Arc::new(S3Host {
             inner: TestHost::new([(C, source)]),
-            discord: Arc::default(),
+            discord: Arc::new(discord),
             lease: Lease::default(),
         });
         let owned = channel_home_boot::delegated_boot_ownership(|_| true);
