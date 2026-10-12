@@ -1054,21 +1054,19 @@ mod s1a {
             ["effect persisted but answer lost"]
         );
         let row = f.row("uncertain-refusal").await;
-        assert!(matches!(row.admission.as_str(), "admitting" | "unknown"));
         assert_eq!(
-            row.resolution, "open",
-            "effect uncertainty is not proved refusal"
+            (row.admission.as_str(), row.resolution.as_str()),
+            ("unknown", "open"),
+            "a settled effect uncertainty is unknown, not proved refusal"
         );
         assert!(row.closed_at.is_none());
         let retry = f.call(true, uncertain).await;
         assert_eq!(retry.0, StatusCode::ACCEPTED, "{}", retry.1);
+        assert_eq!(retry.1["error"], "admission_unknown");
         assert_eq!(
-            retry.1["error"],
-            if row.admission == "unknown" {
-                "admission_unknown"
-            } else {
-                "admission_pending"
-            }
+            queue_texts(&f.shared, f.channel).await,
+            ["effect persisted but answer lost"],
+            "the unknown retry adds no second effect"
         );
         f.assert_calls(2);
         assert_eq!(f.counts().await, (2, 0));
@@ -1256,6 +1254,12 @@ mod s1a {
             );
         }
         let before = f.row("automatic-pending").await;
+        // The stand-in episode is withdrawn so the parked delivery can bind its own before release.
+        sqlx::query("UPDATE imsg_reply_obligations SET episode_key=NULL WHERE origin_id=$1")
+            .bind("automatic-pending")
+            .execute(&f.peer)
+            .await
+            .unwrap();
         release.notify_one();
         assert_eq!(task.await.unwrap().0, StatusCode::OK);
         assert_eq!(
@@ -1273,8 +1277,9 @@ mod s1a {
     async fn s1a_settlement_failure_keeps_admitting_without_success_or_redelivery() {
         let f = Fixture::create(8_624_514).await;
         f.busy();
-        // Reject only UPDATE: delivery must occur once, while failed settlement cannot invent success.
-        sqlx::raw_sql("CREATE FUNCTION s1a_fail_settlement() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 's1a settlement fault'; END $$; CREATE TRIGGER s1a_settlement_fault BEFORE UPDATE ON imsg_reply_obligations FOR EACH ROW EXECUTE FUNCTION s1a_fail_settlement()")
+        // Reject only the settlement UPDATE: delivery binds and occurs once, while failed settlement
+        // cannot invent success.
+        sqlx::raw_sql("CREATE FUNCTION s1a_fail_settlement() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 's1a settlement fault'; END $$; CREATE TRIGGER s1a_settlement_fault BEFORE UPDATE ON imsg_reply_obligations FOR EACH ROW WHEN (NEW.admission IS DISTINCT FROM OLD.admission) EXECUTE FUNCTION s1a_fail_settlement()")
             .execute(&f.pool).await.unwrap();
         let body = input(Some("settlement-failure"), "delivered once", 200);
         let response = f.call(true, body.clone()).await;
@@ -1292,5 +1297,412 @@ mod s1a {
         f.assert_calls(1);
         assert_eq!(f.counts().await, (1, 0));
         f.close().await;
+    }
+
+    /// S1b: each delivery binds the admitted GUID before its own effect and carries the contract.
+    mod s1b {
+        use poise::serenity_prelude::ChannelId;
+
+        use super::*;
+        use crate::db::imsg_reply::bind_consumed;
+        use crate::services::discord::health::{end_turn, start_without_gateway};
+        use crate::services::imsg_reply::ReplyObligation;
+        use crate::services::turn_orchestrator::Intervention;
+
+        fn contract(f: &Fixture, origin: &str) -> String {
+            ReplyObligation::new(f.pool.clone(), origin).contract()
+        }
+
+        /// The composer folds the framed paste: header, contract, blank line, then `text`.
+        fn fold_contract(f: &Fixture, pane: &InjectPane, origin: &str, text: &str) {
+            let breaks = 3 + contract(f, origin).matches('\n').count();
+            pane.fold_paste(breaks + text.matches('\n').count());
+        }
+
+        async fn queue(f: &Fixture) -> Vec<Intervention> {
+            let mailboxes = f.shared.queue_fixture_parts().0;
+            let channel = ChannelId::new(f.channel);
+            mailboxes
+                .handle(channel)
+                .snapshot()
+                .await
+                .intervention_queue
+        }
+
+        fn busy_episode(f: &Fixture, pane: &InjectPane) -> String {
+            let (started, offset) = pane.row_start();
+            let offset = offset.expect("a TUI-direct row carries its start offset");
+            let session = pane.session();
+            format!("busy:claude:{}:{session}:0:{started}:{offset}:-", f.channel)
+        }
+
+        async fn clear_fault(f: &Fixture) {
+            let drop = sqlx::raw_sql("DROP TRIGGER s1b_fault ON imsg_reply_obligations");
+            drop.execute(&f.pool).await.unwrap();
+        }
+
+        async fn fallback(f: &Fixture, origin: &str, episode: &str) -> Option<Uuid> {
+            let claim = ClaimAction {
+                id: Uuid::new_v4(),
+                origin_id: origin,
+                purpose: Purpose::Fallback,
+                action_key: "terminal-v1",
+                reply_episode_key: Some(episode),
+            };
+            claim_action(&f.peer, &claim).await.unwrap()
+        }
+
+        /// Records the end of `episode` the way the terminal observer will: by its exact key.
+        async fn episode_ended(f: &Fixture, episode: &str) -> u64 {
+            sqlx::query(
+                "UPDATE imsg_reply_obligations SET terminal_seen_at = NOW()
+                 WHERE episode_key = $1 AND resolution = 'open'",
+            )
+            .bind(episode)
+            .execute(&f.peer)
+            .await
+            .unwrap()
+            .rows_affected()
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn p1_2_a_busy_contract_transcript() {
+            let f = Fixture::create(8_624_521).await;
+            let pane = InjectPane::new(f.channel, "external");
+            let guid = "p:0/BUSY-A";
+            fold_contract(&f, &pane, guid, "status?");
+            let answer = f.call(true, input(Some(guid), "status?", 200)).await;
+            assert_eq!(answer.0, StatusCode::OK, "{}", answer.1);
+            assert_eq!(answer.1["delivery"], "injected", "{}", answer.1);
+            let nonce = pane.nonce().expect("the pasted frame names its nonce");
+            let framed = format!(
+                "[📱 imessage · 200 · {nonce}]\n{}\n\nstatus?",
+                contract(&f, guid)
+            );
+            assert_eq!(pane.records(), [framed]);
+            assert!(pane.records()[0].contains("imsg_reply.py --origin 'p:0/BUSY-A' --final"));
+            let row = f.row(guid).await;
+            assert_eq!(row.episode_key, Some(busy_episode(&f, &pane)));
+            assert_eq!(row.inject_nonce, Some(nonce));
+            assert_eq!(row.admission_kind.as_deref(), Some("injected"));
+            assert!(row.queued_message_id.is_none());
+            drop(pane);
+            f.close().await;
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn p1_2_b_same_text_distinct_guids_queued() {
+            let f = Fixture::create(8_624_522).await;
+            f.busy();
+            let guids = ["p:0/SAME-1", "p:0/SAME-2"];
+            for guid in guids {
+                let answer = f.call(true, input(Some(guid), "same words", 200)).await;
+                assert_eq!(answer.0, StatusCode::OK, "{}", answer.1);
+                assert_eq!(answer.1["delivery"], "queued", "{}", answer.1);
+            }
+            let queued = queue(&f).await;
+            let seen: Vec<_> = queued
+                .iter()
+                .map(|item| (item.text.clone(), item.reply_context.clone()))
+                .collect();
+            let expected = guids.map(|guid| ("same words".to_string(), Some(contract(&f, guid))));
+            assert_eq!(seen, expected);
+            for (item, guid) in queued.iter().zip(guids) {
+                let row = f.row(guid).await;
+                let queued_id = item.message_id.get().to_string();
+                assert_eq!(
+                    (row.queued_message_id, row.episode_key),
+                    (Some(queued_id), None)
+                );
+            }
+            f.close().await;
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn p1_2_c_queue_restart_contract_roundtrip() {
+            let f = Fixture::create(8_624_523).await;
+            f.busy();
+            let guid = "p:0/RESTART";
+            let answer = f.call(true, input(Some(guid), "after restart", 200)).await;
+            assert_eq!(answer.1["delivery"], "queued", "{}", answer.1);
+            let token_hash = f.shared.queue_fixture_parts().1.to_string();
+            let load = crate::services::turn_orchestrator::load_pending_queues;
+            let (restored, _) = load(&ProviderKind::Claude, &token_hash);
+            let restored = &restored[&ChannelId::new(f.channel)];
+            let seen: Vec<_> = restored
+                .iter()
+                .map(|item| (item.text.as_str(), item.reply_context.clone()))
+                .collect();
+            assert_eq!(seen, [("after restart", Some(contract(&f, guid)))]);
+            let queued_id = f.row(guid).await.queued_message_id;
+            assert_eq!(queued_id, Some(restored[0].message_id.get().to_string()));
+            f.close().await;
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn p1_2_e_binding_failure_zero_pane_effect() {
+            let f = Fixture::create(8_624_524).await;
+            let pane = InjectPane::new(f.channel, "external");
+            fold_contract(&f, &pane, "bind-after", "status?");
+            sqlx::raw_sql("CREATE FUNCTION s1b_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 's1b fault'; END $$; CREATE TRIGGER s1b_fault BEFORE UPDATE ON imsg_reply_obligations FOR EACH ROW WHEN (NEW.episode_key IS NOT NULL AND OLD.episode_key IS NULL) EXECUTE FUNCTION s1b_fault()")
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let failed = f
+                .call(true, input(Some("bind-fault"), "status?", 200))
+                .await;
+            assert_eq!(failed.0, StatusCode::SERVICE_UNAVAILABLE, "{}", failed.1);
+            assert_eq!(
+                (&failed.1["error"], &failed.1["detail"]),
+                (&json!("queue_refused"), &json!("reply_unbound"))
+            );
+            assert!(
+                pane.keys().is_empty(),
+                "no paste or Enter without a binding"
+            );
+            assert!(
+                pane.read("buffer").is_none(),
+                "nothing was loaded for the pane"
+            );
+            assert!(queue_texts(&f.shared, f.channel).await.is_empty());
+            let row = f.row("bind-fault").await;
+            assert_eq!(
+                (row.admission.as_str(), row.resolution.as_str()),
+                ("unknown", "open")
+            );
+            assert_eq!((row.episode_key, row.inject_nonce), (None, None));
+            clear_fault(&f).await;
+            // The unbound owner's reservation is gone, so the next admitted input reaches the pane.
+            let next = f
+                .call(true, input(Some("bind-after"), "status?", 200))
+                .await;
+            assert_eq!(next.1["delivery"], "injected", "{}", next.1);
+            drop(pane);
+            f.close().await;
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn p1_2_f_unconfirmed_durable_nonce() {
+            let f = Fixture::create(8_624_525).await;
+            let pane = InjectPane::new(f.channel, "external");
+            pane.set("fail_paste", "");
+            let answer = f
+                .call(true, input(Some("p:0/UNSURE"), "status?", 200))
+                .await;
+            assert_eq!(answer.1["delivery"], "unconfirmed", "{}", answer.1);
+            let row = f.row("p:0/UNSURE").await;
+            assert_eq!(row.episode_key, Some(busy_episode(&f, &pane)));
+            assert_eq!(row.inject_nonce, pane.nonce());
+            assert!(row.inject_nonce.is_some());
+            assert_eq!(row.delivery_confirmed, Some(false));
+            drop(pane);
+            f.close().await;
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn s1b_started_identity_before_provider_effect() {
+            let f = Fixture::create(8_624_526).await;
+            let _starts = start_without_gateway(f.channel);
+            let guid = "p:0/START";
+            let answer = f.call(true, input(Some(guid), "status?", 200)).await;
+            assert_eq!(answer.1["delivery"], "started", "{}", answer.1);
+            let turn = answer.1["turn_id"].as_str().unwrap();
+            let message = turn.rsplit(':').next().unwrap();
+            let episode = format!("turn:claude:{}:{message}", f.channel);
+            let seen = inject_hook::StartSeen {
+                episode: Some(episode.clone()),
+                contract: Some(contract(&f, guid)),
+            };
+            assert_eq!(inject_hook::starts_seen(f.channel), [seen.clone()]);
+            assert_eq!(f.row(guid).await.episode_key, Some(episode));
+            end_turn(&f.shared, f.channel).await;
+            let off = f
+                .call(false, input(Some("p:0/START-OFF"), "status?", 200))
+                .await;
+            assert_eq!(off.1["delivery"], "started", "{}", off.1);
+            let unmarked = inject_hook::StartSeen {
+                episode: None,
+                contract: None,
+            };
+            assert_eq!(inject_hook::starts_seen(f.channel), [seen, unmarked]);
+            assert_eq!(f.counts().await, (1, 0));
+            f.close().await;
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn s1b_reserved_start_conflict_clears_candidate() {
+            let f = Fixture::create(8_624_527).await;
+            let _starts = start_without_gateway(f.channel);
+            let first = f.call(true, input(Some("p:0/HOLDER"), "first", 200)).await;
+            assert_eq!(first.1["delivery"], "started", "{}", first.1);
+            let guid = "p:0/LATER";
+            let later = f.call(true, input(Some(guid), "later", 200)).await;
+            assert_eq!(later.1["delivery"], "queued", "{}", later.1);
+            assert_eq!(later.1["reason"], "turn_active", "{}", later.1);
+            let seen = inject_hook::starts_seen(f.channel);
+            let refused = seen[1].episode.as_deref().unwrap();
+            assert!(refused.starts_with(&format!("turn:claude:{}:", f.channel)));
+            let queued = queue(&f).await;
+            assert_eq!(queued[0].reply_context, Some(contract(&f, guid)));
+            let row = f.row(guid).await;
+            let queued_id = queued[0].message_id.get().to_string();
+            assert_eq!(
+                (row.episode_key, row.queued_message_id),
+                (None, Some(queued_id))
+            );
+            assert_eq!(row.admission_kind.as_deref(), Some("queued"));
+            f.close().await;
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn s1b_unidentified_busy_episode_queues_safely() {
+            let f = Fixture::create(8_624_528).await;
+            let pane = InjectPane::new(f.channel, "external");
+            pane.unname_turn();
+            let guid = "p:0/UNNAMED";
+            let answer = f.call(true, input(Some(guid), "status?", 200)).await;
+            assert_eq!(answer.0, StatusCode::OK, "{}", answer.1);
+            assert_eq!(
+                (&answer.1["delivery"], &answer.1["inject_veto"]),
+                (&json!("queued"), &json!("episode_unidentified"))
+            );
+            assert!(pane.keys().is_empty());
+            assert!(pane.read("buffer").is_none());
+            let queued = queue(&f).await;
+            assert_eq!(queued[0].reply_context, Some(contract(&f, guid)));
+            let row = f.row(guid).await;
+            let queued_id = queued[0].message_id.get().to_string();
+            assert_eq!(
+                (row.episode_key, row.queued_message_id),
+                (None, Some(queued_id))
+            );
+            drop(pane);
+            f.close().await;
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn s1b_off_preserves_existing_stash_path() {
+            let f = Fixture::create(8_624_529).await;
+            let draft = "  사람 초안 첫 줄\n\n  둘째 줄";
+            let mut off = InjectPane::new(f.channel, "external");
+            off.stash(draft, true);
+            let guid = "p:0/STASH";
+            let answer = f.call(false, input(Some(guid), "status?", 200)).await;
+            assert_eq!(answer.1["delivery"], "injected", "{}", answer.1);
+            let nonce = off.nonce().unwrap();
+            let legacy = format!("[📱 imessage · 200 · {nonce}]\nstatus?");
+            assert_eq!(off.read("buffer"), Some(legacy.clone()));
+            assert_eq!(off.records(), [legacy]);
+            assert_eq!(off.applied(), ["C-s", "paste", "Enter"]);
+            assert_eq!(off.read("composer").as_deref(), Some(draft));
+            assert_eq!(f.counts().await, (0, 0));
+            // ON, the contract's multi-line frame never renders flat, so the draft stays and the
+            // input waits in the queue: the stashed bytes above belong to the OFF path alone.
+            let on_channel = f.channel + 100;
+            f.add_agent("s1b-on-stash", on_channel).await;
+            let mut on = InjectPane::new(on_channel, "external");
+            on.stash(draft, true);
+            let body = input(Some(guid), "status?", 200);
+            let answer = call(&f.app, "s1b-on-stash", true, f.probe(), body).await;
+            assert_eq!(
+                (&answer.1["reason"], &answer.1["inject_veto"]),
+                (&json!("handed_back"), &json!("draft"))
+            );
+            assert!(on.applied().is_empty());
+            assert_eq!(on.read("composer").as_deref(), Some(draft));
+            assert_eq!(queue_texts(&f.shared, on_channel).await, ["status?"]);
+            drop((off, on));
+            f.close().await;
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn s1b_effect_free_after_preflight_stays_unknown() {
+            let f = Fixture::create(8_624_530).await;
+            f.busy();
+            sqlx::raw_sql("CREATE FUNCTION s1b_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 's1b fault'; END $$; CREATE TRIGGER s1b_fault BEFORE UPDATE ON imsg_reply_obligations FOR EACH ROW WHEN (NEW.queued_message_id IS NOT NULL AND OLD.queued_message_id IS NULL) EXECUTE FUNCTION s1b_fault()")
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let body = input(Some("effect-free"), "status?", 200);
+            let failed = f.call(true, body.clone()).await;
+            assert_eq!(failed.0, StatusCode::SERVICE_UNAVAILABLE, "{}", failed.1);
+            assert_eq!(failed.1["detail"], "reply_unbound", "{}", failed.1);
+            let row = f.row("effect-free").await;
+            assert_eq!(
+                (row.admission.as_str(), row.resolution.as_str()),
+                ("unknown", "open")
+            );
+            assert!(row.closed_at.is_none());
+            let retry = f.call(true, body).await;
+            assert_eq!(retry.0, StatusCode::ACCEPTED, "{}", retry.1);
+            assert_eq!(retry.1["error"], "admission_unknown");
+            assert!(queue_texts(&f.shared, f.channel).await.is_empty());
+            f.assert_calls(1);
+            // With the settlement unwritable too, the row stays admitting and still never redelivers.
+            sqlx::raw_sql("CREATE FUNCTION s1b_any_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 's1b any fault'; END $$; CREATE TRIGGER s1b_any_fault BEFORE UPDATE ON imsg_reply_obligations FOR EACH ROW EXECUTE FUNCTION s1b_any_fault()")
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let body = input(Some("effect-free-unsettled"), "status?", 200);
+            let failed = f.call(true, body.clone()).await;
+            assert_eq!(failed.0, StatusCode::SERVICE_UNAVAILABLE, "{}", failed.1);
+            assert_eq!(f.row("effect-free-unsettled").await.admission, "admitting");
+            let retry = f.call(true, body).await;
+            assert_eq!(retry.1["error"], "admission_pending", "{}", retry.1);
+            assert!(queue_texts(&f.shared, f.channel).await.is_empty());
+            f.assert_calls(2);
+            f.close().await;
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn handback_episode_isolation() {
+            let f = Fixture::create(8_624_531).await;
+            let pane = InjectPane::new(f.channel, "external");
+            let joined = "p:0/JOINED";
+            fold_contract(&f, &pane, joined, "status?");
+            let answer = f.call(true, input(Some(joined), "status?", 200)).await;
+            assert_eq!(answer.1["delivery"], "injected", "{}", answer.1);
+            let e0 = f.row(joined).await.episode_key.unwrap();
+            pane.set("attach", "1");
+            let guid = "p:0/HANDED";
+            let answer = f.call(true, input(Some(guid), "status?", 200)).await;
+            assert_eq!(answer.1["reason"], "handed_back", "{}", answer.1);
+            let queued = queue(&f).await;
+            assert_eq!(queued.len(), 1);
+            assert_eq!(
+                queued[0].text, "status?",
+                "the queue entry keeps the person's text"
+            );
+            assert_eq!(queued[0].reply_context, Some(contract(&f, guid)));
+            let q = queued[0].message_id.get().to_string();
+            let row = f.row(guid).await;
+            assert_eq!(
+                (
+                    row.episode_key,
+                    row.queued_message_id.clone(),
+                    row.terminal_seen_at
+                ),
+                (None, Some(q.clone()), None)
+            );
+            assert!(row.inject_nonce.is_some(), "the nonce stays for diagnosis");
+            // E0 ends late: only the GUID still in it may fall back on that end.
+            assert_eq!(episode_ended(&f, &e0).await, 1);
+            assert!(fallback(&f, guid, &e0).await.is_none());
+            assert!(fallback(&f, joined, &e0).await.is_some());
+            // The local turn that actually claims Q names E1; only E1's own end counts.
+            let e1 = format!("turn:claude:{}:{q}", f.channel);
+            let channel = f.channel.to_string();
+            assert_eq!(bind_consumed(&f.peer, &channel, &q, &e1).await.unwrap(), 1);
+            let row = f.row(guid).await;
+            assert_eq!(
+                (row.episode_key.as_deref(), row.terminal_seen_at),
+                (Some(e1.as_str()), None)
+            );
+            assert!(fallback(&f, guid, &e1).await.is_none());
+            assert_eq!(episode_ended(&f, &e1).await, 1);
+            assert!(fallback(&f, guid, &e1).await.is_some());
+            drop(pane);
+            f.close().await;
+        }
     }
 }
