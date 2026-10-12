@@ -4320,6 +4320,7 @@ services::discord::inflight::host_recovery_guard::tests::host_kind_marker_maps_w
 services::discord::inflight::host_recovery_guard::tests::inflight_row_host_evidence_reaches_the_guard_verdict
 services::discord::inflight::managed_submission::tests::a_composer_change_after_readiness_fails_before_the_fence
 services::discord::inflight::managed_submission::tests::a_refused_fence_write_holds_every_payload_and_late_input
+services::discord::inflight::managed_submission::tests::cg_b2c_guarded_owner_rearms_pending_after_an_applied_input
 services::discord::inflight::managed_submission::tests::legacy_and_unmanaged_routes_stay_unknown
 services::discord::inflight::managed_submission::tests::row_writes_never_lower_promote_or_transfer_the_submission_record
 services::discord::inflight::managed_submission::tests::the_first_host_payload_already_sees_may_have_submitted_at_every_cut

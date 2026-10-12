@@ -189,7 +189,10 @@ impl ManagedSubmission {
 impl Owner for Attempt {
     fn started(&self) {
         let mut state = self.guarded.lock().unwrap_or_else(PoisonError::into_inner);
-        if matches!(*state, GuardedState::Dormant) {
+        if matches!(
+            *state,
+            GuardedState::Dormant | GuardedState::Finished(InputRun::Applied)
+        ) {
             *state = GuardedState::Running;
         }
     }
