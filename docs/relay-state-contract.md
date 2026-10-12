@@ -1469,6 +1469,42 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   clause — an unpaired active token with no progress evidence must not block the queue
   — needs the anchor and route lanes together and is closed by neither alone (#5946).
 
+## Appendix: TUI O unseen resume boundary
+
+This is the current O writer contract, checked against main `538af4dbd`. R5-2 (`47901f438`)
+allows an in-session resume into a first-seen session to be adopted at its SessionStart; it
+does not establish a resume byte boundary (`src/services/claude_tui/source_verify.rs:361–390`).
+The [operator procedure](tui-o-writer-canary-runbook.md#9-resolve-an-unseen-resume-boundary)
+records a boundary in the existing O ledger; it adds no relay owner or delivery authority.
+
+| Contract | Current code evidence |
+|---|---|
+| First-seen source: no stored cursor or rotation link; a Resume without a verified parent starts Pending and raises `BoundaryPending`. An earlier unread binding also forces Pending. | `src/services/tui_o/writer/rotation.rs:592–604`; `src/services/tui_o/writer/past_bind.rs:29–39` |
+| Pending spools history and new rows but derives no delivery work. It is not a completed delivery or a discarded source. | `src/services/tui_o/store/rotation.rs:23–29`; `src/services/tui_o/writer/rotation/owe.rs:37–42` |
+| An operator selects the first owed position by byte offset or unique UUID, naming one Pending source by spool key or path. A numeric offset is checked only as a line start (newline-aligned EOF and an incomplete trailing line pass); a UUID must match exactly one complete JSON line. Neither proves the resume boundary. Validation and the durable append share the existing ledger lock, also held by recovery. | `src/cli/o.rs:48–83`; `src/services/tui_o/store/rotation.rs:211–285`; `src/services/tui_o/store/ledger.rs:564–568` |
+| `BoundaryResolved` records `from` and `excluded_range: 0..from`; only the next writer start applies Pending → `Owed { from }` and replays retained records. | `src/services/tui_o/store/rotation.rs:142–157`, `:185–199`, `:242–249`; `src/services/tui_o/writer/rotation/readers.rs:31–34`, `:63–69` |
+| The historical prefix `[0, from)` is excluded; records starting at or after `from` remain owed, subject to the existing parent mask. | `src/services/tui_o/store/ledger.rs:75–82`; `src/services/tui_o/writer/rotation/owe.rs:37–42` |
+| Pending is not collectible; both the writer collector and the direct store GC path refuse it. | `src/services/tui_o/writer/rotation.rs:880–889`; `src/services/tui_o/store/rotation.rs:135–140`; `src/services/tui_o/store/spool.rs:588–596` |
+| `tui_o:boundary_pending:<channel>` makes health at least degraded: the boundary is unresolved and output withheld, without proving loss or duplication. Unresolved Pending is alarmed again on writer start. | `src/services/tui_o/alarm.rs:215`, `:260–277`; `src/services/discord/health/snapshot.rs:1080–1086`; `src/services/tui_o/writer/rotation/readers.rs:55–61` |
+
+Unseen-resume byte boundaries and existing resume Pending states have no automatic resolution
+policy. Hook publication time, elapsed time and EOF are not exact resume-position evidence.
+Automatic boundary work may resume only with a provider signal proving the exact resume byte
+position or a separately verified boundary contract. This does not remove the existing verified
+parent-lineage classification (`src/services/tui_o/writer/rotation/owe.rs:44–60`).
+
+Acceptance evidence below is the existing test source, not a new test execution:
+
+- `an_adopted_resume_holds_its_rows_until_an_operator_resolves`
+  (`src/services/tui_o/writer/reclaim_tests.rs:373`, assertions `:393–416`) drives the adopted
+  resume into Pending, checks one alarm, no posts and a retained spool, then selects the end of
+  history and starts another writer; only the new `b out` is posted.
+- `successful_operator_append_survives_recovery_tail_truncation`
+  (`src/services/tui_o/store/ledger_lock_tests.rs:44`, assertions `:74–91`) overlaps recovery
+  with the operator append and verifies that a successful resolution survives the next recovery.
+
+[U] BoundaryPending has no alarm-clear hook; same-process health reconciliation remains an operational follow-up (`src/services/tui_o/alarm.rs:129–164`, `:317–333`; `src/services/tui_o/writer/mod.rs:179–188`).
+
 ## How to add a new invariant
 
 1. Document it here with the same structure (definition, producer,

@@ -27,6 +27,7 @@ async fn seed(pool: &PgPool, channel: &str, msg: &str, home_epoch: Option<i64>) 
         attachment_refs: serde_json::json!([]),
         channel_id: channel.into(),
         user_msg_id: msg.into(),
+        replay_source_message_ids: None,
         request_owner_id: "100".into(),
         request_owner_name: None,
         user_text: "hello".into(),
