@@ -44,6 +44,8 @@ pub(crate) fn mutant(name: &str) -> bool {
 }
 pub(crate) mod drive;
 pub(crate) mod reserve;
+#[path = "runtime.rs"]
+pub(crate) mod runtime;
 
 /// Retries per boot for a held stage; an exhausted stage stays held until the next boot.
 pub(crate) const BUDGET: u32 = 8;
@@ -428,6 +430,8 @@ pub(crate) struct Supervisor<P: Ports> {
     movement: Option<Move>,
     sent: BTreeSet<(Option<u64>, &'static str)>,
     admitted: bool,
+    adopted: bool,
+    pending_notices: BTreeMap<(Option<u64>, &'static str), &'static str>,
     order: AdmissionOrder,
     admission_gen: u64,
     closed: bool,
@@ -470,6 +474,8 @@ impl<P: Ports> Supervisor<P> {
             movement: None,
             sent: BTreeSet::new(),
             admitted: false,
+            adopted: false,
+            pending_notices: BTreeMap::new(),
             order,
             admission_gen: 1,
             closed: false,
@@ -536,7 +542,10 @@ impl<P: Ports> Supervisor<P> {
     async fn input_command(&mut self, command: SupervisorCmd, receipt_open: bool) {
         use crate::services::tui_input::rows::receipt_identity::Responsibility;
         match command {
-            SupervisorCmd::Clear => {}
+            SupervisorCmd::Clear | SupervisorCmd::Wake { .. } => {}
+            SupervisorCmd::Adopt { channel, ack } => {
+                let _ = ack.send(self.adopt_task(channel));
+            }
             SupervisorCmd::Close { ack } => {
                 self.closed = true;
                 self.invalidate_order();
@@ -970,15 +979,6 @@ impl<P: Ports> Supervisor<P> {
         match outcome {
             Ok(Outcome::Legacy) => Ok(self.returned(Landing::HandedBack)),
             _ => Err(held("handback_held")),
-        }
-    }
-
-    /// One Notice per cause and key in a supervisor's life; a failed send stays unsent.
-    async fn notify(&mut self, key: Option<u64>, reason: &'static str) {
-        let episode = (key, reconcile::topic(reason));
-        if !self.sent.contains(&episode) && self.ports.notice(reconcile::notice(key, reason)).await
-        {
-            self.sent.insert(episode);
         }
     }
 }
