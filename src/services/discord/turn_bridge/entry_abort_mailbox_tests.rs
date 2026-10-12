@@ -631,7 +631,8 @@ async fn herdr_cold_stop_settles_only_with_a_before_start_proof() {
             ("before_receipt", None),
             ("after_receipt", Some(true)),
             ("after_notice_ack", Some(false)),
-            ("before_finalize", Some(false)),
+            ("before_policy_clear", Some(false)),
+            ("before_finalize", None),
         ];
         assert_eq!(
             steps,

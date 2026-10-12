@@ -830,6 +830,9 @@ impl Close {
 #[path = "before_start_stop_disk_gate_tests.rs"]
 mod disk_gate;
 
+#[path = "before_start_stop_clear_order_tests.rs"]
+mod clear_order;
+
 /// A notice that records being polled and otherwise shows the notice.
 async fn recorded(
     polled: &std::sync::atomic::AtomicBool,
@@ -911,7 +914,7 @@ async fn coldstop_notice_ack_only_after_delivery() {
     let finalized_on = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let seen = finalized_on.clone();
     test_hooks::observe(Some(Box::new(move |step, _| {
-        if step == "before_finalize" {
+        if step == "before_policy_clear" {
             let durable =
                 discord::inflight::load_inflight_state_read_only(&ProviderKind::Claude, 922);
             let receipt = durable.and_then(|row| row.herdr_before_start_stop).unwrap();
@@ -926,7 +929,7 @@ async fn coldstop_notice_ack_only_after_delivery() {
     let settled = close.consume(async { Ok(fallback) }).await;
     test_hooks::observe(None);
     assert!(settled);
-    assert_eq!(*finalized_on.borrow(), [true], "acked before finalize");
+    assert_eq!(*finalized_on.borrow(), [true], "acked before the clear");
     assert_eq!(test_hooks::submitted(), submitted + 1);
     assert!(close.durable().is_none());
 }
@@ -1066,6 +1069,7 @@ async fn coldstop_policy_clear_requires_exact_acked_snapshot() {
 }
 
 const CRASH_PHASE: &str = "ADK_COLDSTOP_B_PHASE";
+const CRASH_STEP: &str = "ADK_COLDSTOP_B_STEP";
 const CRASH_ROOT: &str = "ADK_COLDSTOP_B_ROOT";
 const CRASH_CHANNEL: u64 = 1_479_671_301_387_210_000;
 
@@ -1093,20 +1097,29 @@ fn run_crash_phase(phase: &str, marker: &str, env: &[(&str, &std::ffi::OsStr)]) 
     pid
 }
 
-/// A close dying after its receipt, notice ack or just before finalize is finished by the next
-/// restart, led by the receipt alone (no Herdr marker): the row goes, the stop shows once in total.
+/// A close dying after its receipt, notice ack or just before its clear is finished by the next
+/// restart, led by the receipt alone (no Herdr marker); one dying after the clear leaves nothing.
+/// Either way the row goes and the stop shows once in total.
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_restart_finishes_a_close_that_crashed_midway() {
     if let Ok(phase) = std::env::var(CRASH_PHASE) {
         return crash_phase(&phase).await;
     }
-    for step in ["after_receipt", "after_notice_ack", "before_finalize"] {
+    for step in [
+        "after_receipt",
+        "after_notice_ack",
+        "before_policy_clear",
+        "before_finalize",
+    ] {
         let root = tempfile::tempdir().unwrap();
         let close = [
             (CRASH_ROOT, root.path().as_os_str()),
             (test_hooks::STOP_AT, std::ffi::OsStr::new(step)),
         ];
-        let restore = [(CRASH_ROOT, root.path().as_os_str())];
+        let restore = [
+            (CRASH_ROOT, root.path().as_os_str()),
+            (CRASH_STEP, std::ffi::OsStr::new(step)),
+        ];
         let closed = run_crash_phase("CLOSE", "COLDSTOP_B_STOP", &close);
         let restored = run_crash_phase("RESTORE", "COLDSTOP_B_PHASE RESTORE", &restore);
         assert_ne!(closed, restored);
@@ -1159,10 +1172,15 @@ async fn crash_phase(phase: &str) {
     writable.provider = ProviderKind::Claude;
     writable.restart.current_generation = generation;
     let row =
-        discord::inflight::load_inflight_state_read_only(&ProviderKind::Claude, CRASH_CHANNEL)
-            .expect("the crashed close left its row");
-    let receipt = row.herdr_before_start_stop.expect("with its receipt");
-    assert!(receipt.supported() && receipt.admitted_generation() < generation);
+        discord::inflight::load_inflight_state_read_only(&ProviderKind::Claude, CRASH_CHANNEL);
+    // A close that cleared its receipt before dying leaves restart nothing to finish.
+    if std::env::var(CRASH_STEP).as_deref() == Ok("before_finalize") {
+        assert!(row.is_none(), "the receipt cleared before the crash");
+    } else {
+        let row = row.expect("the crashed close left its row");
+        let receipt = row.herdr_before_start_stop.expect("with its receipt");
+        assert!(receipt.supported() && receipt.admitted_generation() < generation);
+    }
     let recorder =
         crate::services::discord::recovery_engine::o_cut_recorder::start(CRASH_CHANNEL).await;
     crate::services::discord::recovery_engine::restore_inflight_turns(

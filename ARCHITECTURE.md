@@ -1911,6 +1911,7 @@ src/
 │   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs
 │   │   │   ├── before_start_stop.rs
+│   │   │   ├── before_start_stop_clear_order_tests.rs
 │   │   │   ├── before_start_stop_disk_gate_tests.rs
 │   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs

@@ -8825,6 +8825,8 @@ services::discord::tui_task_card::tests::parses_tool_use_id_and_derives_kind_fro
 services::discord::tui_task_card::tests::single_subagent_completion_card_previews_not_dumps
 services::discord::tui_task_card::tests::task_card_clamps_many_short_headings_under_discord_limit
 services::discord::tui_task_card::tests::task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822
+services::discord::turn_bridge::before_start_stop::tests::clear_order::coldstop_policy_clear_precedes_release_and_frees_the_successor
+services::discord::turn_bridge::before_start_stop::tests::clear_order::coldstop_policy_clear_refused_releases_nothing
 services::discord::turn_bridge::before_start_stop::tests::coldstop_bridge_shows_the_stop_only_on_its_own_body
 services::discord::turn_bridge::before_start_stop::tests::coldstop_closed_drops_callback_and_own_start_is_negative_evidence
 services::discord::turn_bridge::before_start_stop::tests::coldstop_exit_exceptions_precede_busy_input_probe

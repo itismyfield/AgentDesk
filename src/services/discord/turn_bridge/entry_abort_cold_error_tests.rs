@@ -322,14 +322,16 @@ async fn cold_launch_error_reaches_bridge_policy_close_both_providers() {
         let (signal, holds) = turn.bridge(error.clone()).await;
         test_hooks::observe(None);
         let case = format!("{provider:?}: {error}");
-        // The receipt goes Pending then Delivered on a row that already carries the frame's error.
+        // The receipt goes Pending then Delivered on a row carrying the frame's error, and is
+        // cleared before the finalize releases the turn.
         assert_eq!(
             *steps.borrow(),
             [
                 ("before_receipt", None, true),
                 ("after_receipt", Some(true), true),
                 ("after_notice_ack", Some(false), true),
-                ("before_finalize", Some(false), true),
+                ("before_policy_clear", Some(false), true),
+                ("before_finalize", None, false),
             ],
             "{case}"
         );

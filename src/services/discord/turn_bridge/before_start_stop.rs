@@ -144,14 +144,19 @@ async fn consume(
         clear_inflight: false,
         ..FinalizeContext::bridge()
     };
+    // The exact receipt clears while this actor still holds the mailbox, so a successor never
+    // starts over it; a refused clear releases nothing and leaves the row for restart.
+    #[cfg(test)]
+    test_hooks::boundary("before_policy_clear", &acked);
+    if !crate::services::discord::inflight::receipt_mutant("policy-clear")
+        && acked.clear_before_start_policy_receipt(generation)
+            != crate::services::discord::inflight::GuardedClearOutcome::Cleared
+    {
+        return false;
+    }
     #[cfg(test)]
     test_hooks::boundary("before_finalize", &admitted);
-    let finalized = submit_policy_terminal(shared, fin, key, context, snapshot).await;
-    if finalized && !crate::services::discord::inflight::receipt_mutant("policy-clear") {
-        return acked.clear_before_start_policy_receipt(generation)
-            == crate::services::discord::inflight::GuardedClearOutcome::Cleared;
-    }
-    finalized
+    submit_policy_terminal(shared, fin, key, context, snapshot).await
 }
 
 /// The close's one terminal submission; tests count calls at the finalizer API itself.
