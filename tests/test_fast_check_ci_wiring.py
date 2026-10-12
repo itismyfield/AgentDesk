@@ -20,7 +20,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "64b1bb5cb7dab5ccff35b7aa72c76db0d729b1e02390e8af12cc8a37ff8e57a5"
+    "a92a0553be96164462dc3a10306285e7427cb66b93cf610c2970de2510ed89d9"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Job-level condition of every required-context mirror and its source line.
@@ -603,7 +603,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         writer = targets["steps"][len(setup)]
         self.assertEqual(writer["name"], "Writer namespace exact Windows targets")
         self.assertEqual(writer["if"], "runner.os == 'Windows'")
-        self.assertEqual(writer["timeout-minutes"], 30)
+        self.assertEqual(writer["timeout-minutes"], 45)
         self.assertEqual(writer["shell"], "bash")
         for job_id in ("check_fast_cross_os", "check_fast_cross_os_targets"):
             # A job-level continue-on-error reports failure to the mirror as success.

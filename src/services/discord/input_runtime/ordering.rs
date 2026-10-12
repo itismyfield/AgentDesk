@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 static NEXT_HANDBACK: AtomicU64 = AtomicU64::new(1);
+#[cfg(test)]
+static HANDBACK_CALLBACKS: AtomicU64 = AtomicU64::new(0);
 static BARRIERS: Mutex<BTreeMap<(String, u64), HandbackEntry>> = Mutex::new(BTreeMap::new());
 
 /// Exhaustion refuses for good and is never the namespace verdict, so a producer stays armed.
@@ -62,6 +64,7 @@ pub(crate) struct PendingSource {
     pub(crate) sources: Vec<u64>,
     pub(crate) dirty_generation: u64,
     pub(crate) overflow: PendingOverflow,
+    exhausted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -120,12 +123,26 @@ pub(crate) struct HandbackExecution<T> {
 }
 
 impl AdmissionOrder {
-    pub(crate) fn new(provider: ProviderKind, channel: u64, epoch: u64, frontier: u64) -> Self {
-        Self {
+    pub(crate) fn new(
+        provider: ProviderKind,
+        channel: u64,
+        epoch: u64,
+        frontier: u64,
+    ) -> Result<Self, Failure> {
+        let owner = NEXT_OWNER
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                #[cfg(test)]
+                if mutant("reuse_owner_generation") {
+                    return Some(value.wrapping_add(1));
+                }
+                value.checked_add(1)
+            })
+            .map_err(|_| EXHAUSTED)?;
+        Ok(Self {
             stamp: Stamp {
                 provider: provider.clone(),
                 channel,
-                owner: NEXT_OWNER.fetch_add(1, Ordering::Relaxed),
+                owner,
                 epoch,
                 scan: 0,
                 dirty: 0,
@@ -138,7 +155,15 @@ impl AdmissionOrder {
             overflow: PendingOverflow::new(provider, channel),
             verified_overflow: 0,
             exhausted: false,
-        }
+        })
+    }
+
+    pub(crate) fn exhausted(&self) -> bool {
+        self.exhausted || self.overflow.generation() == u64::MAX
+    }
+
+    pub(crate) fn exhaust(&mut self) {
+        self.exhausted = true;
     }
 
     pub(crate) fn invalidate(&mut self, epoch: u64) {
@@ -171,6 +196,7 @@ impl AdmissionOrder {
             sources: self.pending.iter().copied().collect(),
             dirty_generation: self.stamp.dirty,
             overflow: self.overflow.clone(),
+            exhausted: self.exhausted(),
         }
     }
 
@@ -218,6 +244,7 @@ impl AdmissionOrder {
             sources,
             dirty_generation: self.stamp.dirty,
             overflow: self.overflow.clone(),
+            exhausted: self.exhausted(),
         }
     }
 
@@ -433,6 +460,21 @@ pub(crate) fn order_barrier(provider: &ProviderKind, channel: u64) -> bool {
         })
 }
 
+#[cfg(test)]
+pub(crate) fn handback_count_for_test() -> usize {
+    BARRIERS.lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
+#[cfg(test)]
+pub(crate) fn handback_callback_count_for_test() -> u64 {
+    HANDBACK_CALLBACKS.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+pub(crate) fn note_handback_callback_for_test() {
+    HANDBACK_CALLBACKS.fetch_add(1, Ordering::AcqRel);
+}
+
 /// Runs a Gate protection change under the handback serializer, so it lands only between callbacks.
 pub(in crate::services::discord::input_runtime) fn serialized<T>(change: impl FnOnce() -> T) -> T {
     let _entries = match BARRIERS.try_lock() {
@@ -471,6 +513,12 @@ pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
     if foreign && !late {
         return Err(Failure::StalePermit);
     }
+    let exhausted = snapshot.exhausted || snapshot.overflow.generation() == u64::MAX;
+    #[cfg(test)]
+    let exhausted = exhausted && !mutant("drop_exhausted_snapshot_refusal");
+    if exhausted {
+        return Err(EXHAUSTED);
+    }
     let mut entries = BARRIERS.lock().unwrap_or_else(|e| e.into_inner());
     let key = (provider.as_str().to_owned(), channel);
     if let Some(entry) = entries.get(&key) {
@@ -492,7 +540,16 @@ pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
             return Err(Failure::StalePermit);
         }
     }
-    // A failed allocation leaves a gap in the numbering but never reuses a generation.
+    #[cfg(test)]
+    let late_owner = mutant("owner_allocation_after_release");
+    #[cfg(not(test))]
+    let late_owner = false;
+    let order = if late_owner {
+        None
+    } else {
+        Some(AdmissionOrder::new(provider.clone(), channel, 0, 0)?)
+    };
+    // Both fallible allocations precede release; failures leave gaps but never reuse an ID.
     let handback = NEXT_HANDBACK
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
             #[cfg(test)]
@@ -506,7 +563,11 @@ pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
     if foreign && late {
         return Err(Failure::StalePermit);
     }
-    let mut order = AdmissionOrder::new(provider, channel, release.epoch(), 0);
+    let mut order = match order {
+        Some(order) => order,
+        None => AdmissionOrder::new(provider, channel, release.epoch(), 0)?,
+    };
+    order.stamp.epoch = release.epoch();
     order.pending.extend(&snapshot.sources);
     order.stamp.dirty = snapshot.dirty_generation;
     order.overflow = snapshot.overflow.clone();
@@ -531,6 +592,7 @@ pub(in crate::services::discord::input_runtime) fn install_handback_snapshot(
 fn with_handback<T>(
     provider: &ProviderKind,
     channel: u64,
+    #[cfg(test)] port: &str,
     rearm: bool,
     action: impl FnOnce(&mut AdmissionOrder, u64) -> Result<T, Failure>,
 ) -> Result<T, Failure> {
@@ -544,7 +606,8 @@ fn with_handback<T>(
     }
     let current = entry.release.current();
     #[cfg(test)]
-    let current = current || mutant("drop_current_gate");
+    let current =
+        current || mutant("drop_current_gate") || mutant(&format!("drop_current_gate_on_{port}"));
     if entry.order.stamp.provider != *provider || !current {
         return Err(Failure::StalePermit);
     }
@@ -564,18 +627,28 @@ pub(crate) fn handback_pending(
     if !discord_sources(sources) {
         return Err(Failure::StalePermit);
     }
-    with_handback(provider, channel, true, |order, _| {
-        order.admit_pending(sources)
-    })
+    with_handback(
+        provider,
+        channel,
+        #[cfg(test)]
+        "pending",
+        true,
+        |order, _| order.admit_pending(sources),
+    )
 }
 
 pub(crate) fn handback_fetch_ticket(
     provider: &ProviderKind,
     channel: u64,
 ) -> Result<FetchTicket, Failure> {
-    with_handback(provider, channel, true, |order, epoch| {
-        order.fetch_ticket(epoch)
-    })
+    with_handback(
+        provider,
+        channel,
+        #[cfg(test)]
+        "ticket",
+        true,
+        |order, epoch| order.fetch_ticket(epoch),
+    )
 }
 
 pub(crate) fn handback_begin_scan(
@@ -585,9 +658,14 @@ pub(crate) fn handback_begin_scan(
     complete_fetch: bool,
 ) -> Result<ScanCapability, Failure> {
     let (provider, channel) = (ticket.stamp.provider.clone(), ticket.stamp.channel);
-    with_handback(&provider, channel, true, |order, epoch| {
-        order.begin_scan(ticket, epoch, sources, horizon, complete_fetch)
-    })
+    with_handback(
+        &provider,
+        channel,
+        #[cfg(test)]
+        "begin",
+        true,
+        |order, epoch| order.begin_scan(ticket, epoch, sources, horizon, complete_fetch),
+    )
 }
 
 /// Observation only: it changes nothing and lends no authority to run outside the serializer.
@@ -598,6 +676,8 @@ pub(crate) fn handback_permits_sources(
     with_handback(
         &cap.ticket.stamp.provider,
         cap.ticket.stamp.channel,
+        #[cfg(test)]
+        "permits",
         false,
         |order, epoch| order.permits_sources(cap, epoch, sources),
     )
@@ -613,38 +693,47 @@ pub(crate) fn handback_commit_from_scan<T>(
     commit: impl FnOnce() -> Result<T, Failure>,
 ) -> Result<HandbackExecution<T>, Failure> {
     let (provider, channel) = (cap.ticket.stamp.provider.clone(), cap.ticket.stamp.channel);
-    with_handback(&provider, channel, true, |order, epoch| {
-        order.permits_sources(&cap, epoch, sources)?;
-        let outcome = commit();
-        // permits_sources refuses an empty range, so the head exists.
-        let settlement = match &outcome {
-            Ok(_) => order.settle_sources(&mut cap, epoch, sources),
-            Err(_) => order.defer(&cap, epoch, sources[0]),
-        };
-        let settled = outcome.is_ok() && settlement.is_ok();
-        let retain = !settled;
+    with_handback(
+        &provider,
+        channel,
         #[cfg(test)]
-        let retain = retain && !mutant("drop_retry_sources_after_execution");
-        if retain {
-            order.pending(sources);
-        }
-        #[cfg(test)]
-        let outcome = match mutant("overwrite_persistence_with_deferral_error") {
-            true if outcome.is_err() => settlement.and(outcome),
-            _ => outcome,
-        };
-        #[cfg(test)]
-        if mutant("collapse_executed_result_to_error") {
-            settlement?;
-        }
-        #[cfg(test)]
-        let settled = settled || mutant("return_capability_after_failed_settlement");
-        Ok(HandbackExecution {
-            outcome,
-            settlement,
-            next: settled.then_some(cap),
-        })
-    })
+        "commit",
+        true,
+        |order, epoch| {
+            order.permits_sources(&cap, epoch, sources)?;
+            #[cfg(test)]
+            note_handback_callback_for_test();
+            let outcome = commit();
+            // permits_sources refuses an empty range, so the head exists.
+            let settlement = match &outcome {
+                Ok(_) => order.settle_sources(&mut cap, epoch, sources),
+                Err(_) => order.defer(&cap, epoch, sources[0]),
+            };
+            let settled = outcome.is_ok() && settlement.is_ok();
+            let retain = !settled;
+            #[cfg(test)]
+            let retain = retain && !mutant("drop_retry_sources_after_execution");
+            if retain {
+                order.pending(sources);
+            }
+            #[cfg(test)]
+            let outcome = match mutant("overwrite_persistence_with_deferral_error") {
+                true if outcome.is_err() => settlement.and(outcome),
+                _ => outcome,
+            };
+            #[cfg(test)]
+            if mutant("collapse_executed_result_to_error") {
+                settlement?;
+            }
+            #[cfg(test)]
+            let settled = settled || mutant("return_capability_after_failed_settlement");
+            Ok(HandbackExecution {
+                outcome,
+                settlement,
+                next: settled.then_some(cap),
+            })
+        },
+    )
 }
 
 pub(crate) fn handback_settle_sources(
@@ -652,16 +741,25 @@ pub(crate) fn handback_settle_sources(
     sources: &[u64],
 ) -> Result<ScanCapability, Failure> {
     let (provider, channel) = (cap.ticket.stamp.provider.clone(), cap.ticket.stamp.channel);
-    with_handback(&provider, channel, true, |order, epoch| {
-        order.settle_sources(&mut cap, epoch, sources)?;
-        Ok(cap)
-    })
+    with_handback(
+        &provider,
+        channel,
+        #[cfg(test)]
+        "settle",
+        true,
+        |order, epoch| {
+            order.settle_sources(&mut cap, epoch, sources)?;
+            Ok(cap)
+        },
+    )
 }
 
 pub(crate) fn handback_defer(cap: &ScanCapability, source: u64) -> Result<(), Failure> {
     with_handback(
         &cap.ticket.stamp.provider,
         cap.ticket.stamp.channel,
+        #[cfg(test)]
+        "defer",
         true,
         |order, epoch| order.defer(cap, epoch, source),
     )
@@ -675,9 +773,14 @@ pub(crate) fn handback_complete(cap: ScanCapability) -> Result<ValidatedOrderCap
         return Err(Failure::StalePermit);
     }
     let (provider, channel) = (cap.ticket.stamp.provider.clone(), cap.ticket.stamp.channel);
-    with_handback(&provider, channel, true, |order, epoch| {
-        order.complete(cap, epoch)
-    })
+    with_handback(
+        &provider,
+        channel,
+        #[cfg(test)]
+        "complete",
+        true,
+        |order, epoch| order.complete(cap, epoch),
+    )
 }
 
 /// A missing entry or a stale release is refused, never reported as an already settled no-op.

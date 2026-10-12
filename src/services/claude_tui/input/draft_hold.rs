@@ -19,6 +19,8 @@ pub(super) fn admit_automatic_write(
     session_name: &str,
     readiness: PromptReadinessKind,
 ) -> Result<(), String> {
+    super::guarded_outcome::held_result(session_name)
+        .map_err(super::SubmissionError::into_legacy)?;
     let capture = || host_input::observe_draft(session_name);
     admit_composer_write(session_name, capture)
         .map_err(|_| held_error(readiness, "draft_recovery_hold"))
@@ -77,6 +79,8 @@ pub(crate) fn stranded_draft_is_ours(
     session_name: &str,
     readiness: PromptReadinessKind,
 ) -> Result<bool, String> {
+    super::guarded_outcome::held_result(session_name)
+        .map_err(super::SubmissionError::into_legacy)?;
     let capture = host_input::observe_draft(session_name);
     match capture.as_deref().map(composer_owner) {
         Some(ComposerOwner::Empty) => Ok(false),

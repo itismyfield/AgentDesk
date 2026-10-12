@@ -360,6 +360,7 @@ jobs:
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/placeholder_sweeper/abandon_guard.rs'
               - 'src/services/discord/placeholder_sweeper/retirement_tests.rs'
+              - 'src/services/discord/queue_io/queued_head_inject_tests.rs'
               - 'src/services/discord/recovery_engine/herdr_before_start_restart_tests.rs'
               - 'src/services/discord/recovery_engine/host_reconcile_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs'
@@ -409,6 +410,7 @@ jobs:
               - 'src/services/discord/task_notification_delivery/tests.rs'
               - 'src/services/discord/terminal_delivery_custody/pg_tests.rs'
               - 'src/services/discord/terminal_ui_obligation.rs'
+              - 'src/services/discord/terminal_ui_obligation/input_fence_tests.rs'
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
               - 'src/services/discord/tmux_watcher/herdr_entry_host_tests.rs'
               - 'src/services/discord/tmux_watcher/inherited_fixture_tests.rs'
@@ -488,6 +490,9 @@ jobs:
               - 'src/services/tui_o/exact_pg_tests.rs'
               - 'src/services/tui_o/exact_submission.rs'
               - 'src/services/tui_o/repost/admission_tests.rs'
+              - 'src/services/tui_o/repost/allowlist_host_tests.rs'
+              - 'src/services/tui_o/repost/allowlist_runner_tests.rs'
+              - 'src/services/tui_o/repost/allowlist_writer_tests.rs'
               - 'src/services/tui_o/repost/backlog_tests.rs'
               - 'src/services/tui_o/repost/runner_activation_tests.rs'
               - 'src/services/tui_o/repost/runner_tests.rs'
@@ -793,6 +798,7 @@ jobs:
               - 'src/services/discord/placeholder_live_events/**'
               - 'src/services/discord/placeholder_sweeper/**'
               - 'src/services/discord/queue_io.rs'
+              - 'src/services/discord/queue_io/**'
               - 'src/services/discord/queue_park_ledger.rs'
               - 'src/services/discord/queue_park_ledger/**'
               - 'src/services/discord/recovery_engine.rs'
@@ -1126,7 +1132,8 @@ jobs:
 
       - name: Writer namespace exact Windows targets
         if: runner.os == 'Windows'
-        timeout-minutes: 30
+        # Healthy runs took 16-27 min on 2026-10-12 and two PRs were cut at 30.
+        timeout-minutes: 45
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -2249,7 +2256,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=64b1bb5cb7dab5ccff35b7aa72c76db0d729b1e02390e8af12cc8a37ff8e57a5
+          expected=a92a0553be96164462dc3a10306285e7427cb66b93cf610c2970de2510ed89d9
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2482,7 +2489,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=64b1bb5cb7dab5ccff35b7aa72c76db0d729b1e02390e8af12cc8a37ff8e57a5
+          expected=a92a0553be96164462dc3a10306285e7427cb66b93cf610c2970de2510ed89d9
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

@@ -444,15 +444,12 @@ pub(super) fn blocks_claims(
     state.queued_head.meta.head_injection.is_some()
 }
 
-#[cfg(test)]
 pub(super) use claim::step;
+pub(crate) use claim::{HeadMsg, HeadOutcome, HeadSettle, QueuedHeadClaim};
 #[cfg(test)]
-pub(crate) use claim::{
-    HeadMsg, HeadOutcome, HeadSettle, HeadTicket, QueuedHeadClaim, downgrade_channel_snapshot,
-};
+pub(crate) use claim::{HeadTicket, downgrade_channel_snapshot};
 
-/// The claim and settlement the busy-TUI executor will drive; not wired to an executor yet.
-#[cfg(test)]
+/// The claim and settlement driven by the busy-TUI executor.
 mod claim {
     use super::*;
 
@@ -462,7 +459,17 @@ mod claim {
     pub(crate) struct HeadTicket {
         lease: Arc<HeadLease>,
         identity: QueueIdentity,
+        item: Box<Intervention>,
     }
+
+    impl HeadTicket {
+        pub(crate) fn item(&self) -> &Intervention {
+            &self.item
+        }
+    }
+
+    type HeadChannelGate = fn(ChannelId, Option<ChannelId>) -> bool;
+    type HeadAdmission = (ChannelId, Option<ChannelId>, HeadChannelGate);
 
     pub(crate) enum QueuedHeadClaim {
         Reserved(HeadTicket),
@@ -494,6 +501,7 @@ mod claim {
         Claim {
             expected: QueueIdentity,
             persistence: QueuePersistenceContext,
+            admission: Option<HeadAdmission>,
             reply: oneshot::Sender<QueuedHeadClaim>,
         },
         Settle {
@@ -564,8 +572,23 @@ mod claim {
             HeadMsg::Claim {
                 expected,
                 persistence,
+                admission,
                 reply,
             } => {
+                let enabled = match admission {
+                    Some((channel, parent, gate)) => channel == channel_id
+                        && crate::services::discord::health::InjectOrigin::queued_head_gate_enabled(
+                            &persistence.provider,
+                            channel,
+                            parent,
+                            gate,
+                        ),
+                    None => cfg!(test),
+                };
+                if !enabled {
+                    let _ = reply.send(QueuedHeadClaim::NotEligible);
+                    return;
+                }
                 state.last_persistence = Some(persistence.clone());
                 let _ = reply.send(claim(state, channel_id, &expected, &persistence));
             }
@@ -608,9 +631,10 @@ mod claim {
             return QueuedHeadClaim::PersistenceFailed(error);
         }
         let (provider, token_hash) = (&persistence.provider, persistence.token_hash.as_str());
-        let marker = super::super::load_channel_pending_dispatch_marker_checked(
-            provider, token_hash, channel_id,
-        );
+        let marker =
+            super::super::pending_queue_persistence::load_channel_pending_dispatch_marker_checked(
+                provider, token_hash, channel_id,
+            );
         let marker_held = match marker {
             Ok(marker) => marker.is_some(),
             Err(error) => return QueuedHeadClaim::PersistenceFailed(error),
@@ -628,6 +652,7 @@ mod claim {
         if !eligible(head) {
             return QueuedHeadClaim::NotEligible;
         }
+        let item = Box::new(head.clone());
         let original = canonical_item(head, channel_id);
         let lease = Arc::new(HeadLease);
         let ledger = &mut state.queued_head;
@@ -643,7 +668,11 @@ mod claim {
             state.queued_head.lease = None;
             return QueuedHeadClaim::PersistenceFailed(error);
         }
-        QueuedHeadClaim::Reserved(HeadTicket { lease, identity })
+        QueuedHeadClaim::Reserved(HeadTicket {
+            lease,
+            identity,
+            item,
+        })
     }
 
     /// Moves the ticket's head on. A write that may have landed after a paste could have started
@@ -718,15 +747,38 @@ mod claim {
     }
 
     impl ChannelMailboxHandle {
+        #[cfg(test)]
         pub(crate) async fn claim_queued_head(
             &self,
             expected: QueueIdentity,
             persistence: QueuePersistenceContext,
         ) -> QueuedHeadClaim {
+            self.request_head_claim(expected, persistence, None).await
+        }
+
+        pub(crate) async fn claim_queued_head_if_enabled(
+            &self,
+            expected: QueueIdentity,
+            persistence: QueuePersistenceContext,
+            channel: ChannelId,
+            parent: Option<ChannelId>,
+            gate: HeadChannelGate,
+        ) -> QueuedHeadClaim {
+            self.request_head_claim(expected, persistence, Some((channel, parent, gate)))
+                .await
+        }
+
+        async fn request_head_claim(
+            &self,
+            expected: QueueIdentity,
+            persistence: QueuePersistenceContext,
+            admission: Option<HeadAdmission>,
+        ) -> QueuedHeadClaim {
             self.request(|reply| {
                 head_msg(HeadMsg::Claim {
                     expected,
                     persistence,
+                    admission,
                     reply,
                 })
             })
@@ -755,6 +807,7 @@ mod claim {
 
     /// Offline, gate off: rewrites a V1 snapshot as the legacy array an older binary reads, refused
     /// while a head is held, a marker stands or a submitted source is not `replay_safe`.
+    #[cfg(test)]
     pub(crate) fn downgrade_channel_snapshot(
         provider: &ProviderKind,
         token_hash: &str,

@@ -300,7 +300,13 @@ fn hm1_external_producer_census_is_zero() {
             "src/services/discord/input_runtime/supervisor.rs",
             "the one SubmitExternal consumer",
         ),
+        (
+            "src/services/discord/input_runtime/intake/source.rs",
+            "slash origin receipt key from external::source; never submits",
+        ),
     ];
+    // Files classified for key derivation only may hold no other part of the surface.
+    let key_only = ["src/services/discord/input_runtime/intake/source.rs"];
     let mut seen = std::collections::BTreeSet::new();
     for (path, text) in production_sources() {
         if surface.is_match(&text) {
@@ -308,6 +314,15 @@ fn hm1_external_producer_census_is_zero() {
                 allowed.iter().any(|(file, _)| *file == path),
                 "unclassified external producer in {path}"
             );
+            if key_only.contains(&path.as_str()) {
+                for found in surface.find_iter(&text) {
+                    assert_eq!(
+                        found.as_str(),
+                        "external::source",
+                        "{path} beyond key derivation"
+                    );
+                }
+            }
             seen.insert(path);
         }
     }
