@@ -544,6 +544,31 @@ class NewRequiredIdTests(unittest.TestCase):
         )
         self.assertEqual(result, 0, output)
 
+    def test_nested_parent_path_maps_the_new_lib_id_to_a_required_job(self) -> None:
+        def nested(repo: Repo) -> None:
+            repo.lib_tail = "pub mod host;\n"
+            repo.files["src/host.rs"] = (
+                '#[path = "host/nested/loader.rs"]\npub mod loader;\n'
+            )
+            repo.files["src/host/nested/loader.rs"] = (
+                '#[path = "../../repost/rehearsal.rs"]\npub mod rehearsal;\n'
+            )
+            repo.files["src/repost/rehearsal.rs"] = (
+                "#[cfg(test)]\nmod tests {\n    #[test]\n    fn new_case() {}\n}\n"
+            )
+            repo.extra_ids = {"host::loader::rehearsal::tests::new_case"}
+
+        result, output = Repo().delta(nested)
+        self.assertEqual(new_findings(output, "new-id-target-unresolved"), [], output)
+        self.assertIn("added=1 mapped=1 excepted=0", output)
+        self.assertRegex(
+            output,
+            r"host::loader::rehearsal::tests::new_case -> sweep .* / mirror "
+            r'sweep_required_context / context "sweep_required_context" / '
+            r"no path gate",
+        )
+        self.assertEqual(result, 0, output)
+
     def test_mirror_needs_mismatch_leaves_the_id_context_unproven(self) -> None:
         def unproven(repo: Repo) -> None:
             add_required(repo)

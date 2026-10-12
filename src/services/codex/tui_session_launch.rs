@@ -3,30 +3,229 @@
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 
-/// Prepare durable launch evidence and the Codex Direct TUI launch script.
 #[cfg(unix)]
-pub(super) fn prepare_codex_tui_launch_script(
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CodexTuiLaunchRefused {
+    SourceModeInvalid(&'static str),
+    HooksUnavailable,
+    CliMissing,
+    UnsupportedOptions,
+    UnprovedPane,
+    ResumeUnavailable,
+    PreparationUnavailable(String),
+    HerdrNotAdmitted,
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for CodexTuiLaunchRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceModeInvalid(reason) => write!(f, "CodexTuiNotAttempted:{reason}"),
+            Self::PreparationUnavailable(reason) => write!(f, "CodexTuiNotAttempted:{reason}"),
+            Self::HerdrNotAdmitted => {
+                f.write_str(crate::services::herdr_launch::HERDR_NOT_ADMITTED)
+            }
+            other => write!(f, "CodexTuiNotAttempted:{other:?}"),
+        }
+    }
+}
+
+/// Read-only eligibility, reused immediately before each pane effect.
+#[cfg(unix)]
+pub(crate) fn tui_preflight(
+    tmux: &str,
+    channel: Option<u64>,
+    options: &CodexLaunchOptions,
+    resume_root: Option<&std::path::Path>,
+) -> Result<&'static str, CodexTuiLaunchRefused> {
+    let policy = crate::services::codex_tui::canary::launch_policy(tmux, channel)
+        .map_err(CodexTuiLaunchRefused::SourceModeInvalid)?;
+    if policy != "verified" {
+        return Ok(policy);
+    }
+    if direct_tui_material_fallback_reason(options).is_some() {
+        return Err(CodexTuiLaunchRefused::UnsupportedOptions);
+    }
+    if let Some(root) = resume_root {
+        use crate::services::codex_tui::session::source_observation::{
+            CodexHookSourceClaim, CodexRolloutSource, verify_codex_hook_source,
+        };
+        let id = options
+            .resume_session_id
+            .as_deref()
+            .filter(|id| exact_codex_resume_id(id))
+            .ok_or(CodexTuiLaunchRefused::ResumeUnavailable)?;
+        verify_codex_hook_source(
+            root,
+            &CodexHookSourceClaim {
+                session_id: id,
+                transcript_path: None,
+                expected_source: CodexRolloutSource::Cli,
+            },
+        )
+        .map_err(|_| CodexTuiLaunchRefused::ResumeUnavailable)?;
+    }
+    let hooks = codex_direct_tui_hook_overrides_enabled();
+    if (!hooks && resume_root.is_none()) || (hooks && current_hook_endpoint().is_none()) {
+        return Err(CodexTuiLaunchRefused::HooksUnavailable);
+    }
+    let resolution = resolve_codex_binary();
+    let binary = resolution
+        .resolved_path
+        .as_deref()
+        .ok_or(CodexTuiLaunchRefused::CliMissing)?;
+    if hooks && !codex_resume_supports_hook_trust_bypass(binary, &resolution) {
+        return Err(CodexTuiLaunchRefused::HooksUnavailable);
+    }
+    Ok(policy)
+}
+
+#[cfg(unix)]
+fn exact_codex_resume_id(id: &str) -> bool {
+    uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.hyphenated().to_string() == id)
+}
+
+#[cfg(unix)]
+fn codex_tui_home(
+    overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
+) -> (Option<PathBuf>, bool) {
+    let pinned = overlay.env.get("CODEX_HOME").map(PathBuf::from);
+    let unpinned = pinned.is_none() && !overlay.unset.contains("CODEX_HOME");
+    let home = match pinned {
+        Some(home) => Some(home),
+        None if unpinned => crate::services::codex_tui::rollout_tail::default_codex_home(),
+        None => dirs::home_dir().map(|home| home.join(".codex")),
+    };
+    (home, unpinned)
+}
+
+#[cfg(unix)]
+pub(super) fn prepare_codex_tui_incarnation(
+    tmux: &str,
+    channel: Option<u64>,
+    options: &CodexLaunchOptions,
+    overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
+    resume_root: Option<&std::path::Path>,
+) -> Result<PreparedIncarnation, CodexTuiLaunchRefused> {
+    if crate::services::herdr_launch::herdr_configured_for_tui_launch(channel) {
+        return Err(CodexTuiLaunchRefused::HerdrNotAdmitted);
+    }
+    let policy = tui_preflight(tmux, channel, options, resume_root)?;
+    use sha2::{Digest, Sha256};
+    let digest = format!("sha256:{:x}", Sha256::digest(options.prompt.as_bytes()));
+    PreparedIncarnation::prepare_pinned(
+        "codex",
+        tmux,
+        channel,
+        options.resume_session_id.as_deref(),
+        options.resume_session_id.is_some(),
+        codex_tui_home(overlay).0.map(|home| home.join("sessions")),
+        (Some(digest), Some(policy.to_owned())),
+    )
+    .map_err(CodexTuiLaunchRefused::PreparationUnavailable)
+}
+
+/// Verified panes cannot use legacy warm input; prepare only the new incarnation.
+#[cfg(unix)]
+pub(super) fn preflight_codex_tui_turn(
+    tmux: &str,
+    channel: Option<u64>,
+    options: &CodexLaunchOptions,
+    selection: &crate::services::codex_tui::session::CodexTuiSessionSelection,
+    existing: (bool, bool),
+    overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
+) -> Result<(Option<PreparedIncarnation>, Option<PathBuf>), CodexTuiLaunchRefused> {
+    let exact = selection.candidate_count == 1
+        && selection.resume
+        && selection.requested_session_id == selection.selected_session_id
+        && options.resume_session_id.as_deref() == selection.resume_session_id()
+        && selection
+            .resume_session_id()
+            .is_some_and(exact_codex_resume_id);
+    let resume_root = exact
+        .then(|| codex_tui_home(overlay).0.map(|home| home.join("sessions")))
+        .flatten();
+    let policy = tui_preflight(tmux, channel, options, resume_root.as_deref())?;
+    if policy != "verified" {
+        return Ok((None, resume_root));
+    }
+    if !existing.1 && selection.requested_session_id.is_some() && resume_root.is_none() {
+        return Err(CodexTuiLaunchRefused::ResumeUnavailable);
+    }
+    if existing.0 && !existing.1 && resume_root.is_none() {
+        return Err(CodexTuiLaunchRefused::UnprovedPane);
+    }
+    let prepared =
+        prepare_codex_tui_incarnation(tmux, channel, options, overlay, resume_root.as_deref())?;
+    #[cfg(test)]
+    BEFORE_PANE_EFFECT.with_borrow_mut(|slot| {
+        if let Some(effect) = slot.take() {
+            effect();
+        }
+    });
+    Ok((Some(prepared), resume_root))
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    pub(super) static BEFORE_PANE_EFFECT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn prepare_codex_tui_launch_script(
+    tmux: &str,
+    session_id: Option<&str>,
+    prompt: &str,
+    options: &CodexLaunchOptions,
+    report: (Option<u64>, Option<ProviderKind>),
+    warm: bool,
+    overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
+) -> Result<CodexTuiLaunchScript, String> {
+    let resume_root = options
+        .resume_session_id
+        .as_deref()
+        .filter(|id| exact_codex_resume_id(id))
+        .and_then(|_| codex_tui_home(overlay).0.map(|home| home.join("sessions")));
+    let prepared =
+        prepare_codex_tui_incarnation(tmux, report.0, options, overlay, resume_root.as_deref())
+            .map_err(|error| error.to_string())?;
+    publish_codex_tui_launch_script(
+        tmux,
+        session_id,
+        prompt,
+        options,
+        report,
+        warm,
+        (overlay, prepared),
+    )
+}
+
+/// Publish markers and script after the driver completes its cleanup.
+#[cfg(unix)]
+pub(super) fn publish_codex_tui_launch_script(
     tmux_session_name: &str,
     session_id: Option<&str>,
     prompt: &str,
     launch_options: &CodexLaunchOptions,
-    report_channel_id: Option<u64>,
-    report_provider: Option<ProviderKind>,
+    report: (Option<u64>, Option<ProviderKind>),
     warm_followup_enabled: bool,
-    auth_overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
+    launch: (
+        &crate::services::provider_auth_profile::ProviderAuthOverlay,
+        PreparedIncarnation,
+    ),
 ) -> Result<CodexTuiLaunchScript, String> {
+    let (report_channel_id, report_provider) = report;
     use crate::services::herdr_launch::{HERDR_NOT_ADMITTED, herdr_configured_for_tui_launch};
     // Refused before any launch I/O; a Herdr channel never gets a tmux session.
     if herdr_configured_for_tui_launch(report_channel_id) {
         return Err(HERDR_NOT_ADMITTED.to_string());
     }
-    let policy =
-        crate::services::codex_tui::canary::launch_policy(tmux_session_name, report_channel_id)?;
-    use sha2::{Digest, Sha256};
-    let digest = format!(
-        "sha256:{:x}",
-        Sha256::digest(launch_options.prompt.as_bytes())
-    );
+    let (auth_overlay, prepared) = launch;
+    let policy = prepared
+        .context
+        .source_policy
+        .as_deref()
+        .ok_or("missing launch policy")?;
     write_tmux_owner_marker(tmux_session_name)?;
     crate::services::tmux_common::write_tmux_runtime_kind_marker(
         tmux_session_name,
@@ -36,29 +235,7 @@ pub(super) fn prepare_codex_tui_launch_script(
 
     let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
     // The auth profile decides the child's home; an unpinned one is exported only with hooks.
-    let pinned_home = auth_overlay.env.get("CODEX_HOME").map(PathBuf::from);
-    let unpinned = pinned_home.is_none() && !auth_overlay.unset.contains("CODEX_HOME");
-    let codex_home = match pinned_home {
-        Some(home) => Some(home),
-        None if unpinned => crate::services::codex_tui::rollout_tail::default_codex_home(),
-        None => dirs::home_dir().map(|home| home.join(".codex")),
-    };
-    let prepared = match PreparedIncarnation::prepare_pinned(
-        "codex",
-        tmux_session_name,
-        report_channel_id,
-        launch_options.resume_session_id.as_deref(),
-        launch_options.resume_session_id.is_some(),
-        codex_home.as_ref().map(|home| home.join("sessions")),
-        (Some(digest), Some(policy.to_owned())),
-    ) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            let _ = std::fs::remove_file(&owner_path);
-            let _ = std::fs::remove_file(&script_path);
-            return Err(error);
-        }
-    };
+    let (codex_home, unpinned) = codex_tui_home(auth_overlay);
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
         .resolved_path
@@ -77,7 +254,8 @@ pub(super) fn prepare_codex_tui_launch_script(
         shell_escape(policy)
     ));
     let mut args = build_codex_tui_args(launch_options);
-    let hooks_injected = codex_direct_tui_hook_overrides_enabled()
+    let hooks_enabled = codex_direct_tui_hook_overrides_enabled();
+    let hooks_injected = hooks_enabled
         && {
             let capability = crate::services::claude_tui::hook_bundle::codex_hook_capability(
                 crate::services::claude_tui::hook_bundle::probe_codex_cli_version_with_path(
@@ -103,13 +281,27 @@ pub(super) fn prepare_codex_tui_launch_script(
                 )
             })
         };
+    if policy == "verified"
+        && !hooks_injected
+        && (hooks_enabled
+            || !launch_options
+                .resume_session_id
+                .as_deref()
+                .is_some_and(exact_codex_resume_id))
+    {
+        return Err(CodexTuiLaunchRefused::HooksUnavailable.to_string());
+    }
     if !hooks_injected {
         tracing::info!(
             tmux_session_name,
             "Codex direct TUI session hook overrides not injected; using rollout transcript tail for relay"
         );
-    } else if unpinned && let Some(home) = &codex_home {
-        // Hook sources are verified under the recorded root, so the child must not inherit another.
+    }
+    if unpinned
+        && (hooks_injected || policy == "verified")
+        && let Some(home) = &codex_home
+    {
+        // Verified sources must use the recorded home, including resumes without hooks.
         env_lines.push_str(&format!(
             "export CODEX_HOME={}\n",
             shell_escape(&home.to_string_lossy())
@@ -471,6 +663,189 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
 mod tests {
     use super::*;
     #[test]
+    fn exact_verified_resume_with_hooks_off_requires_unique_file_proof_and_pins_the_child_home() {
+        use crate::config::TestEnvVarGuard as Guard;
+        use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
+        use crate::services::codex_tui::session::resolve_codex_tui_session;
+        use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context};
+        use std::os::unix::fs::PermissionsExt;
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (root, _env) = binding_context::tests::fixture_after_shared_test_env_lock();
+        let _tmux = binding_context::tests::fake_tmux(root.path());
+        let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+        let home = root.path().join("codex-home");
+        let sessions = home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let _home = Guard::set_path_after_shared_test_env_lock("CODEX_HOME", &home);
+        let id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let native = sessions.join(format!("rollout-{id}.jsonl"));
+        let header = serde_json::json!({"type":"session_meta", "timestamp":chrono::Utc::now().to_rfc3339(),
+            "payload":{"id":id, "timestamp":chrono::Utc::now().to_rfc3339(), "cwd":root.path(), "source":"cli", "originator":"codex_cli_rs"}});
+        std::fs::write(&native, format!("{header}\n")).unwrap();
+        let before = std::fs::read(&native).unwrap();
+        let cli = root.path().join("codex");
+        std::fs::write(&cli, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.157.1'; elif [ \"$1 $2\" = 'resume --help' ]; then echo unsupported; else printf 'home=%s\\n' \"$CODEX_HOME\"; printf 'arg=%s\\n' \"$@\"; fi\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _cli = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &cli);
+        let _hooks = Guard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
+            std::ffi::OsStr::new("0"),
+        );
+        let selection = resolve_codex_tui_session(Some(&id), root.path(), None, false);
+        assert_eq!(selection.candidate_count, 1);
+        let options =
+            CodexLaunchOptions::new("new resume prompt").with_resume_session_id(Some(&id));
+        let overlay = crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
+            ProviderKind::Codex,
+        );
+        SOURCE_MODE_TEST.with(|m| m.set(Some(CodexSourceMode::Verified)));
+        let (prepared, resume_root) = preflight_codex_tui_turn(
+            CANARY_TMUX,
+            Some(CANARY_CHANNEL),
+            &options,
+            &selection,
+            (true, false),
+            &overlay,
+        )
+        .unwrap();
+        let prepared = prepared.unwrap();
+        assert_eq!(resume_root, Some(sessions.clone()));
+        assert_eq!(
+            prepared.context.expected_native_session_id.as_deref(),
+            Some(id.as_str())
+        );
+        assert_eq!(prepared.context.launch_mode, "resume");
+        assert!(
+            binding_context::codex_context_candidate(&prepared.context, &prepared.context, None)
+                .is_err(),
+            "unused prepared evidence grants no current binding"
+        );
+        let script = publish_codex_tui_launch_script(
+            CANARY_TMUX,
+            Some(&id),
+            "new resume prompt",
+            &options,
+            (Some(CANARY_CHANNEL), None),
+            false,
+            (&overlay, prepared),
+        )
+        .unwrap();
+        let output = std::process::Command::new("/bin/bash")
+            .arg(&script.script_path)
+            .env("CODEX_HOME", root.path().join("foreign-home"))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains(&format!("home={}\n", home.display())));
+        assert!(stdout.contains(&format!("arg={id}\n")));
+        assert!(!stdout.contains("--dangerously-bypass-hook-trust"));
+        assert_eq!(std::fs::read(&native).unwrap(), before);
+        let duplicate = sessions.join("duplicate");
+        std::fs::create_dir(&duplicate).unwrap();
+        std::fs::write(duplicate.join(format!("rollout-{id}.jsonl")), &before).unwrap();
+        assert!(matches!(
+            tui_preflight(CANARY_TMUX, Some(CANARY_CHANNEL), &options, Some(&sessions)),
+            Err(CodexTuiLaunchRefused::ResumeUnavailable)
+        ));
+        let mut ambiguous = selection.clone();
+        ambiguous.candidate_count = 2;
+        assert!(
+            preflight_codex_tui_turn(
+                CANARY_TMUX,
+                Some(CANARY_CHANNEL),
+                &options,
+                &ambiguous,
+                (true, false),
+                &overlay
+            )
+            .is_err()
+        );
+        let mismatch = CodexLaunchOptions::new("unused").with_resume_session_id(Some("not-a-uuid"));
+        assert!(
+            preflight_codex_tui_turn(
+                CANARY_TMUX,
+                Some(CANARY_CHANNEL),
+                &mismatch,
+                &selection,
+                (true, false),
+                &overlay
+            )
+            .is_err()
+        );
+        SOURCE_MODE_TEST.with(|m| m.set(None));
+        dedupe::reset_state_for_tests();
+    }
+    #[test]
+    fn verified_launch_archives_the_exact_context_without_prompt_or_binding_authority() {
+        use crate::config::TestEnvVarGuard as Guard;
+        use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
+        use crate::services::tui_prompt_dedupe::binding_context;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let (root, _env) = binding_context::tests::fixture_after_shared_test_env_lock();
+        let _tmux = binding_context::tests::fake_tmux(root.path());
+        let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+        let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+            "http://127.0.0.1:9".into(),
+        );
+        let binary = root.path().join("codex");
+        std::fs::write(&binary, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.157.1'; else echo '--dangerously-bypass-hook-trust'; fi\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _bin = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &binary);
+        let _hooks = Guard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
+            std::ffi::OsStr::new("1"),
+        );
+        SOURCE_MODE_TEST.with(|m| m.set(Some(CodexSourceMode::Verified)));
+        let script = prepare_codex_tui_launch_script(
+            CANARY_TMUX,
+            None,
+            "secret raw prompt",
+            &CodexLaunchOptions::new("secret raw prompt"),
+            (Some(CANARY_CHANNEL), None),
+            false,
+            &crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
+                ProviderKind::Codex,
+            ),
+        )
+        .unwrap();
+        SOURCE_MODE_TEST.with(|m| m.set(None));
+        let p = script.prepared;
+        let archive = root
+            .path()
+            .join("runtime/binding_evidence/codex")
+            .join(format!("{}.json", p.context.execution_nonce));
+        assert!(
+            archive.is_file(),
+            "verified launch must durably archive before publication"
+        );
+        let canonical_meta = std::fs::metadata(&p.path).unwrap();
+        let archive_meta = std::fs::metadata(&archive).unwrap();
+        assert_eq!(
+            (canonical_meta.dev(), canonical_meta.ino()),
+            (archive_meta.dev(), archive_meta.ino())
+        );
+        let bytes = std::fs::read(&archive).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("secret raw prompt"));
+        assert_eq!(
+            serde_json::from_slice::<binding_context::BindingContext>(&bytes).unwrap(),
+            p.context
+        );
+        std::fs::remove_file(&p.path).unwrap();
+        assert_eq!(
+            std::fs::read(&archive).unwrap(),
+            bytes,
+            "old binary canonical sweep leaves archive intact"
+        );
+        assert!(binding_context::execution_context("codex", &p.context.execution_nonce).is_err());
+        assert!(binding_context::input_context("codex", &p.context.execution_nonce).is_none());
+    }
+    #[test]
     fn actual_launch_pins_verified_only_for_exact_canary_and_keeps_policy_after_rollback() {
         use crate::config::TestEnvVarGuard as Guard;
         use crate::services::codex_tui::canary::{self, CANARY_CHANNEL, CANARY_TMUX};
@@ -485,6 +860,12 @@ mod tests {
         }
         let _mode = SourceModeRestore(SOURCE_MODE_TEST.with(|slot| slot.get()));
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+            "http://127.0.0.1:9".into(),
+        );
         let _state = dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -492,7 +873,7 @@ mod tests {
         let _tmux = binding_context::tests::fake_tmux(root.path());
         let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
         let binary = root.path().join("codex");
-        std::fs::write(&binary, "#!/bin/bash\necho 'codex-cli 0.157.1'\n").unwrap();
+        std::fs::write(&binary, "#!/bin/bash\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.157.1'; else echo '--dangerously-bypass-hook-trust'; fi\n").unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         let _bin = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &binary);
         let _hooks = Guard::set_value_after_shared_test_env_lock(
@@ -526,13 +907,18 @@ mod tests {
                     CodexSourceMode::Shadow => "shadow",
                     _ => "legacy",
                 };
+                let _verified_hooks = (expected == "verified").then(|| {
+                    Guard::set_value_after_shared_test_env_lock(
+                        "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
+                        std::ffi::OsStr::new("1"),
+                    )
+                });
                 let script = prepare_codex_tui_launch_script(
                     tmux,
                     None,
                     "actual first prompt",
                     &CodexLaunchOptions::new("actual first prompt"),
-                    channel,
-                    None,
+                    (channel, None),
                     false,
                     &crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
                         ProviderKind::Codex,
@@ -608,15 +994,14 @@ mod tests {
                 None,
                 "unused",
                 &CodexLaunchOptions::new("actual argv"),
-                None,
-                None,
+                (None, None),
                 false,
                 &crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
                     ProviderKind::Codex,
                 ),
             );
             SOURCE_MODE_TEST.with(|m| m.set(None));
-            assert_eq!(result.err().as_deref(), Some(reason));
+            assert_eq!(result.err(), Some(format!("CodexTuiNotAttempted:{reason}")));
             assert!(!std::path::Path::new(&tmux_owner_path("source-mode-held")).exists());
             assert!(
                 !std::path::Path::new(&crate::services::tmux_common::session_temp_path(
@@ -649,8 +1034,7 @@ mod tests {
                     None,
                     "",
                     &options,
-                    None,
-                    None,
+                    (None, None),
                     false,
                     &crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
                         ProviderKind::Codex,
@@ -678,8 +1062,7 @@ mod tests {
             None,
             "",
             &CodexLaunchOptions::new(""),
-            Some(51),
-            None,
+            (Some(51), None),
             false,
             &crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
                 ProviderKind::Codex,
@@ -785,7 +1168,13 @@ mod tests {
                     let tmux = format!("codex-home-{}-{profile}", flag.unwrap_or("unset"));
                     let options = CodexLaunchOptions::new("actual argv\n한글");
                     let script = prepare_codex_tui_launch_script(
-                        &tmux, None, "", &options, None, None, false, &overlay,
+                        &tmux,
+                        None,
+                        "",
+                        &options,
+                        (None, None),
+                        false,
+                        &overlay,
                     )
                     .unwrap();
                     assert_eq!(

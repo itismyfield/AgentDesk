@@ -148,6 +148,8 @@ where
     B: BindingEvents,
 {
     let run = || {
+        #[cfg(test)]
+        let commands = codex_submission::take_spawn_receiver();
         let projections = (unsettled, owing);
         tokio::spawn(run_publishing(
             writer,
@@ -155,8 +157,9 @@ where
             bindings,
             (stop, resumed),
             projections,
-            None,
-            readers,
+            (None, readers),
+            #[cfg(test)]
+            commands,
         ))
     };
     config.enabled.then(run)
@@ -223,7 +226,8 @@ where
         bindings,
         (stop, resumed),
         projections,
-        None,
+        (None, None),
+        #[cfg(test)]
         None,
     )
     .await
@@ -236,8 +240,8 @@ async fn run_publishing<P, L, A, B>(
     bindings: Arc<B>,
     (mut stop, resumed): (watch::Receiver<bool>, watch::Sender<bool>),
     (unsettled, owing): (Unsettled, Owing),
-    utc: Option<chrono::DateTime<chrono::Utc>>,
-    readers: Option<ReaderConfig>,
+    (utc, readers): (Option<chrono::DateTime<chrono::Utc>>, Option<ReaderConfig>),
+    #[cfg(test)] mut commands: Option<codex_submission::Receiver>,
 ) -> Option<StopCause>
 where
     P: DiscordPort,
@@ -308,6 +312,19 @@ where
                 owing.published.send_replace(actor.undelivered(asked));
             }
         }
+        #[cfg(test)]
+        if let Some(commands) = &mut commands {
+            tokio::select! {
+                request = commands.next() => {
+                    if let Some(request) = request {
+                        commands.apply(&mut actor.writer, request);
+                    } else { break; }
+                }
+                () = tokio::time::sleep(POLL_INTERVAL) => {}
+                changed = stop.changed() => if changed.is_err() { break },
+            }
+            continue;
+        }
         tokio::select! {
             () = tokio::time::sleep(POLL_INTERVAL) => {}
             changed = stop.changed() => if changed.is_err() { break },
@@ -336,10 +353,179 @@ where
         bindings,
         (stop, watch::channel(false).0),
         (watch::channel(None).0, Owing::default()),
-        Some(utc),
+        (Some(utc), None),
+        #[cfg(test)]
         None,
     )
     .await
+}
+
+#[cfg(test)]
+pub(crate) mod codex_submission {
+    use super::*;
+    use crate::services::tui_o::store::StoreError;
+    use crate::services::tui_o::store::codex_provenance::submit_floor::{
+        DurableClosedEpisode, SubmitFloor,
+    };
+    use crate::services::tui_prompt_dedupe::codex_verified::provenance::CodexEpisodeSpan;
+    use tokio::sync::{mpsc, oneshot};
+
+    #[derive(Clone, Debug)]
+    pub(crate) struct Port {
+        generation: u64,
+        run: Arc<()>,
+        send: mpsc::Sender<Request>,
+    }
+
+    pub(crate) struct Receiver {
+        generation: u64,
+        run: Arc<()>,
+        receive: mpsc::Receiver<Request>,
+    }
+
+    pub(crate) enum Operation {
+        Prepare(SubmitFloor),
+        Close(Box<CodexEpisodeSpan>),
+    }
+
+    pub(crate) struct Request {
+        run: Arc<()>,
+        operation: Operation,
+        reply: oneshot::Sender<Result<Reply, StoreError>>,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct Reply {
+        generation: u64,
+        run: Arc<()>,
+        closed: Option<Closed>,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct Closed {
+        run: Arc<()>,
+        durable: DurableClosedEpisode,
+    }
+
+    impl Closed {
+        pub(crate) fn span(&self) -> &CodexEpisodeSpan {
+            self.durable.span()
+        }
+    }
+
+    impl Port {
+        pub(crate) fn new(generation: u64) -> (Self, Receiver) {
+            let run = Arc::new(());
+            let (send, receive) = mpsc::channel(4);
+            let receiver = Receiver {
+                generation,
+                run: Arc::clone(&run),
+                receive,
+            };
+            (
+                Self {
+                    generation,
+                    run,
+                    send,
+                },
+                receiver,
+            )
+        }
+
+        pub(crate) fn same_run(&self, other: &Self) -> bool {
+            Arc::ptr_eq(&self.run, &other.run)
+        }
+
+        pub(crate) async fn request(&self, operation: Operation) -> Result<Reply, String> {
+            let (reply, receive) = oneshot::channel();
+            self.send
+                .send(Request {
+                    run: Arc::clone(&self.run),
+                    operation,
+                    reply,
+                })
+                .await
+                .map_err(|_| "actor ended".to_owned())?;
+            receive
+                .await
+                .map_err(|_| "actor reply unavailable".to_owned())?
+                .map_err(|error| format!("{error:?}"))
+        }
+
+        pub(crate) fn take_closed(&self, reply: Reply) -> Result<Closed, &'static str> {
+            if self.generation != reply.generation || !Arc::ptr_eq(&self.run, &reply.run) {
+                return Err("stale_actor_reply");
+            }
+            let closed = reply.closed.ok_or("episode_not_closed")?;
+            if !Arc::ptr_eq(&self.run, &closed.run) {
+                return Err("stale_actor_reply");
+            }
+            Ok(closed)
+        }
+    }
+
+    impl Receiver {
+        pub(super) async fn next(&mut self) -> Option<Request> {
+            self.receive.recv().await
+        }
+
+        pub(super) fn apply<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+            &self,
+            writer: &mut ChannelWriter<P, L, A>,
+            request: Request,
+        ) {
+            let result = if !Arc::ptr_eq(&self.run, &request.run) {
+                Err(StoreError::Rejected("foreign actor command".into()))
+            } else {
+                match request.operation {
+                    Operation::Prepare(floor) => {
+                        writer.store().prepare_codex_floor(floor).map(|()| None)
+                    }
+                    Operation::Close(span) => writer.store().close_codex_episode(*span).map(Some),
+                }
+            };
+            if writer.store().io_failure().is_some() {
+                writer.stop(WriterAlarm::Halted {
+                    detail: "Codex provenance publication failed".into(),
+                });
+            }
+            let closed = result.map(|closed| {
+                closed.map(|durable| Closed {
+                    run: Arc::clone(&self.run),
+                    durable,
+                })
+            });
+            let reply = closed.map(|closed| Reply {
+                generation: self.generation,
+                run: Arc::clone(&self.run),
+                closed,
+            });
+            let _ = request.reply.send(reply);
+        }
+    }
+
+    thread_local! {
+        static SPAWN: std::cell::RefCell<Option<Receiver>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(crate) fn spawning<T>(receiver: Receiver, spawn: impl FnOnce() -> T) -> T {
+        struct Scope;
+        impl Drop for Scope {
+            fn drop(&mut self) {
+                SPAWN.with(|slot| slot.borrow_mut().take());
+            }
+        }
+        SPAWN.with(|slot| {
+            assert!(slot.borrow().is_none());
+            *slot.borrow_mut() = Some(receiver);
+        });
+        let _scope = Scope;
+        spawn()
+    }
+
+    pub(super) fn take_spawn_receiver() -> Option<Receiver> {
+        SPAWN.with(|slot| slot.borrow_mut().take())
+    }
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {

@@ -599,6 +599,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/gates_m1_spool_tests.rs",
         "src/services/codex_tui/rollout_tail/provenance_tests.rs",
         "src/services/tui_o/store/codex_provenance_tests.rs",
+        "src/services/tui_o/store/codex_provenance/submit_floor_tests.rs",
+        "src/services/tui_o/writer/s2a_actor_tests.rs",
         "src/services/tui_o/writer/owed_tests.rs",
         "src/services/tui_o/writer/verified_delivery_tests.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/admission_tests.rs",
@@ -630,6 +632,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/cli/o_tests.rs",
         "src/services/tui_o/repost/runner_activation_tests.rs",
         "src/services/tui_o/repost/runtime_host_activation_tests.rs",
+        "src/services/tui_o/repost/backlog_tests.rs",
+        "src/services/tui_o/repost/rollback_rehearsal_tests.rs",
         "src/services/tui_o/repost/writer_activation_tests.rs",
         "src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs",
@@ -661,6 +665,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/tui_o/store/codex_provenance/submit_floor.rs",
         "src/services/discord/turn_bridge/replay_policy.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
         "src/services/discord/queue_io/cancel_reclaim_support_test.rs",
