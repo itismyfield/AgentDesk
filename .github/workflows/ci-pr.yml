@@ -361,6 +361,7 @@ jobs:
               - 'src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs'
+              - 'src/services/discord/recovery_engine/restore_inflight/scoped_policy_receipt_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/scoped_restore.rs'
               - 'src/services/discord/recovery_engine/routing_orphan_tests.rs'
               - 'src/services/discord/relay_recovery/tests/host_deferred.rs'
