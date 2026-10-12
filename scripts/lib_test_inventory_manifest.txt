@@ -4825,6 +4825,7 @@ services::discord::input_runtime::supervisor::receipt::tests::g1a_torn_retry_acc
 services::discord::input_runtime::supervisor::runtime::dormant_tests::b_runtime_adapter_has_zero_production_starts
 services::discord::input_runtime::supervisor::runtime::drive::tests::b_runtime_drive_actual_pane_keeps_wal_attempt_and_epoch_at_both_spawns
 services::discord::input_runtime::supervisor::runtime::notice::tests::b_failed_notice_remains_pending_http
+services::discord::input_runtime::supervisor::runtime::notice::tests::b_notice_category_parent_does_not_retry_non_thread_reaction
 services::discord::input_runtime::supervisor::runtime::notice::tests::b_notice_network_failure_is_not_delivery
 services::discord::input_runtime::supervisor::runtime::notice::tests::b_notice_non_thread_reaction_failure_gets_channel_without_retry
 services::discord::input_runtime::supervisor::runtime::notice::tests::b_notice_reactions_use_original_source_and_http_failures

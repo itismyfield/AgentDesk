@@ -13,7 +13,7 @@ type Calls = Arc<Mutex<Vec<(Method, String, String)>>>;
 #[derive(Clone, Copy)]
 enum ReactionReply {
     Success,
-    NotFound { parent: Option<u64> },
+    NotFound { kind: u8, parent: Option<u64> },
 }
 
 struct Mock {
@@ -49,12 +49,12 @@ impl Mock {
                 if method != Method::POST {
                     match reactions {
                         ReactionReply::Success => return StatusCode::NO_CONTENT.into_response(),
-                        ReactionReply::NotFound { parent } => {
+                        ReactionReply::NotFound { kind, parent } => {
                             if method == Method::GET
                                 && uri.path().ends_with(&format!("/channels/{channel}"))
                             {
                                 return Json(serde_json::json!({
-                                    "id":channel.to_string(), "type":if parent.is_some() { 11 } else { 0 },
+                                    "id":channel.to_string(), "type":kind,
                                     "name":"notice-source", "guild_id":"42000", "position":0,
                                     "permission_overwrites":[], "nsfw":false,
                                     "parent_id":parent.map(|id| id.to_string()),
@@ -184,7 +184,15 @@ async fn b_notice_reactions_use_original_source_and_http_failures() {
 async fn b_notice_non_thread_reaction_failure_gets_channel_without_retry() {
     let channel = 6_326_929;
     let message = 940_000_006_326_930;
-    let mock = Mock::with_reactions(channel, 0, ReactionReply::NotFound { parent: None }).await;
+    let mock = Mock::with_reactions(
+        channel,
+        0,
+        ReactionReply::NotFound {
+            kind: 0,
+            parent: None,
+        },
+    )
+    .await;
     let notice = DiscordNotice::new(mock.http.clone(), channel);
 
     assert!(notice.set(channel, message, '✅', true).await.is_err());
@@ -212,6 +220,7 @@ async fn b_notice_thread_reaction_failure_retries_parent_channel() {
         channel,
         0,
         ReactionReply::NotFound {
+            kind: 11,
             parent: Some(parent),
         },
     )
@@ -240,6 +249,47 @@ async fn b_notice_thread_reaction_failure_retries_parent_channel() {
         calls[2]
             .1
             .contains(&format!("/channels/{parent}/messages/{message}/reactions/"))
+    );
+}
+
+#[tokio::test]
+async fn b_notice_category_parent_does_not_retry_non_thread_reaction() {
+    let channel = 6_326_934;
+    let category = 6_326_935;
+    let message = 940_000_006_326_936;
+    let mock = Mock::with_reactions(
+        channel,
+        0,
+        ReactionReply::NotFound {
+            kind: 0,
+            parent: Some(category),
+        },
+    )
+    .await;
+    let notice = DiscordNotice::new(mock.http.clone(), channel);
+
+    assert!(
+        notice.set(channel, message, '✅', true).await.is_err(),
+        "a category parent must not recover a non-thread reaction"
+    );
+
+    let calls = mock.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2, "a category parent must not cause a retry");
+    assert_eq!(calls[0].0, Method::PUT);
+    assert!(calls[0].1.contains(&format!(
+        "/channels/{channel}/messages/{message}/reactions/"
+    )));
+    assert_eq!(calls[1].0, Method::GET);
+    assert!(calls[1].1.ends_with(&format!("/channels/{channel}")));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|(method, path, _)| {
+                *method == Method::PUT && path.contains(&format!("/channels/{category}/messages/"))
+            })
+            .count(),
+        0,
+        "no category-target PUT is allowed"
     );
 }
 
