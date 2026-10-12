@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "3467f1446dedf3af0cbfe30b0624f2d85cea0e5a",
+  "measured_at_sha": "1ae3d3ae8497de012bf332dc875067795a5121c4",
   "records": [
     {
       "root": "migrations/postgres",
@@ -30591,7 +30591,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "UNRESOLVED",
-      "fingerprint": "sha256:b1ccd0443e28ca1519dac78d093770cc0f42ec1f409585968cb9b23d99af7a91"
+      "fingerprint": "sha256:bd76822907157e80845975a7b9c29ce6e7eeae11a4996c9037641502a10c7c0d"
     },
     {
       "root": "src",
@@ -30735,7 +30735,7 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "UNRESOLVED",
-      "fingerprint": "sha256:5bb5ac0365a5b10baa2e860020ba2fa6e4f931cb74a159d7a200e6e28654cb65"
+      "fingerprint": "sha256:d73f8c6fc9b476ad10b68c086a55f606a379413363a0d5326c79120234ea8e1b"
     },
     {
       "root": "src",
@@ -30780,7 +30780,7 @@
       "api": "sqlx::raw_sql",
       "symbol": "raw_sql",
       "classification": "UNRESOLVED",
-      "fingerprint": "sha256:57dcdabd8b4e76721f557feea10a920c742a723274a9acc6017e531faaeeebb6"
+      "fingerprint": "sha256:709ddc627342ad79473ed734ee8f5c3921e7be08b9b10bc40b1e773f1b2844a3"
     },
     {
       "root": "src",
