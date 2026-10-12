@@ -29,6 +29,7 @@ fn s3_node_child() {
             "th7_recheck" => drain_pg::recheck_node(&env).await,
             "th7_unknown" => drain_pg::unknown_node(&env).await,
             "th7_release" => drain_pg::release_node(&env).await,
+            "th7_running_post" => drain_pg::running_post_node(&env).await,
             "th8_holder" => route_pg::holder_node(&env).await,
             "th8_gateway" => route_pg::gateway_node(&env).await,
             "th8_branches" => route_pg::branches_node(&env).await,
