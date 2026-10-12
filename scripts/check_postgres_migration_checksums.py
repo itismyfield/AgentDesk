@@ -252,11 +252,24 @@ def load_base_manifest_from_git(
     root: Path,
     base_ref: str,
     manifest_relpath: str,
+    require_base: bool = False,
 ) -> tuple[dict[str, Migration] | None, list[str], set[str] | None]:
     if not base_ref:
+        if require_base:
+            return None, ["empty base ref does not resolve to a commit"], None
         return None, [], None
     show_ref = f"{base_ref}:{manifest_relpath}"
     try:
+        base_commit = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if base_commit.returncode != 0:
+            if require_base:
+                return None, [f"{base_ref} does not resolve to a commit"], None
+            return None, [], None
         # The base tip can gain migrations after this branch forks. Only files
         # present at the merge-base can have been deleted by this branch.
         merge_base = subprocess.run(
@@ -316,6 +329,7 @@ def check_migrations(
     allowlist_path: Path,
     base_ref: str,
     base_manifest_path: Path | None,
+    require_base: bool = False,
 ) -> tuple[list[str], list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -336,12 +350,18 @@ def check_migrations(
         base_manifest, base_errors = load_manifest(base_manifest_path, str(base_manifest_path))
         errors.extend(base_errors)
     else:
+        manifest_relpath = manifest_path.relative_to(root).as_posix()
         base_manifest, base_errors, base_migration_paths = load_base_manifest_from_git(
             root,
             base_ref,
-            manifest_path.relative_to(root).as_posix(),
+            manifest_relpath,
+            require_base=require_base,
         )
         errors.extend(base_errors)
+        if base_ref and base_manifest is None and not base_errors:
+            warnings.append(
+                f"{base_ref}:{manifest_relpath} unavailable; enforcing current checksum manifest only"
+            )
     if errors:
         return errors, warnings, allowed
 
@@ -434,8 +454,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help=(
             "git ref used to detect baseline edits and merge-base deletions; "
-            "empty string disables git baseline check"
+            "empty string disables git baseline check unless --require-base is set"
         ),
+    )
+    parser.add_argument(
+        "--require-base",
+        action="store_true",
+        help="fail if the git base ref does not resolve to a commit (for CI guards)",
     )
     parser.add_argument(
         "--base-manifest",
@@ -485,6 +510,7 @@ def main(argv: list[str] | None = None) -> int:
             allowlist_path=allowlist_path,
             base_ref=base_ref,
             base_manifest_path=args.base_manifest,
+            require_base=args.require_base,
         )
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

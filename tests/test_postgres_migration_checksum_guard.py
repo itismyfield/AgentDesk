@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -195,13 +196,16 @@ class PostgresMigrationChecksumGuardGitTest(unittest.TestCase):
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
         self.git("switch", "feature")
 
-    def run_guard(self, *, root=None, base_ref=None):
+    def run_guard(self, *, root=None, base_ref=None, require_base=False):
         env = os.environ.copy()
         env.pop("AGENTDESK_MIGRATION_GUARD_BASE_REF", None)
         if base_ref is not None:
             env["AGENTDESK_MIGRATION_GUARD_BASE_REF"] = base_ref
+        command = [sys.executable, str(SCRIPT_PATH), "--root", str(root or self.root)]
+        if require_base:
+            command.append("--require-base")
         return subprocess.run(
-            [sys.executable, str(SCRIPT_PATH), "--root", str(root or self.root)],
+            command,
             env=env,
             check=False,
             capture_output=True,
@@ -278,6 +282,62 @@ class PostgresMigrationChecksumGuardGitTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("merge-base", result.stderr)
 
+    def single_ref_shallow_checkout(self):
+        checkout = Path(self.temp_dir.name) / "single-ref-checkout"
+        checkout.mkdir()
+        self.git("init", root=checkout)
+        self.git(
+            "fetch",
+            "--no-tags",
+            "--depth=1",
+            self.root.as_uri(),
+            "+feature:refs/remotes/pull/1/merge",
+            root=checkout,
+        )
+        self.git("checkout", "--detach", "refs/remotes/pull/1/merge", root=checkout)
+        self.assertEqual(
+            self.git("rev-parse", "--is-shallow-repository", root=checkout), "true"
+        )
+        self.assertEqual(
+            self.git("for-each-ref", "--format=%(refname)", root=checkout),
+            "refs/remotes/pull/1/merge",
+        )
+        return checkout
+
+    def test_single_ref_shallow_checkout_without_base_ref_warns_like_release(self):
+        checkout = self.single_ref_shallow_checkout()
+
+        result = self.run_guard(root=checkout)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "WARNING: origin/main:migrations/postgres/immutable-checksums.json "
+            "unavailable; enforcing current checksum manifest only",
+            result.stderr,
+        )
+        self.assertIn("1 migrations protected", result.stdout)
+
+    def test_single_ref_shallow_checkout_without_base_ref_fails_when_required(self):
+        checkout = self.single_ref_shallow_checkout()
+
+        result = self.run_guard(root=checkout, require_base=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("origin/main does not resolve to a commit", result.stderr)
+        self.assertNotIn("enforcing current checksum manifest only", result.stderr)
+        self.assertNotIn("guard passed", result.stdout)
+
+    def test_single_ref_shallow_release_fallback_still_rejects_checksum_drift(self):
+        checkout = self.single_ref_shallow_checkout()
+        (checkout / "migrations/postgres/0001_initial_schema.sql").write_bytes(self.changed)
+
+        result = self.run_guard(root=checkout)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("enforcing current checksum manifest only", result.stderr)
+        self.assertIn("checksum drift without repair allowlist", result.stderr)
+        self.assertNotIn("guard passed", result.stdout)
+
     def test_base_tip_equal_to_merge_base_passes(self):
         self.assertEqual(self.git("merge-base", "HEAD", "origin/main"), self.base_commit)
         self.assertEqual(self.git("rev-parse", "origin/main"), self.base_commit)
@@ -337,11 +397,11 @@ class PostgresMigrationChecksumGuardGitTest(unittest.TestCase):
         self.assertIn("base drift repair allowlisted by #2919", result.stdout)
 
     def test_missing_base_ref_fails_closed(self):
-        result = self.run_guard(base_ref="missing/base")
+        result = self.run_guard(base_ref="missing/base", require_base=True)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("merge-base", result.stderr)
-        self.assertIn("missing/base", result.stderr)
+        self.assertIn("missing/base does not resolve to a commit", result.stderr)
+        self.assertNotIn("guard passed", result.stdout)
 
     def test_missing_base_manifest_fails_closed(self):
         self.git("switch", "main")
@@ -355,6 +415,23 @@ class PostgresMigrationChecksumGuardGitTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot verify the migration baseline", result.stderr)
         self.assertNotIn("guard passed", result.stdout)
+
+
+class PostgresMigrationChecksumGuardInvocationTest(unittest.TestCase):
+    def test_ci_guards_require_git_baseline(self):
+        script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
+        marker = 'if run_check guards "Postgres migration checksum guard"; then\n'
+        self.assertIn(marker, script)
+        block = script.split(marker, 1)[1].split("\nfi", 1)[0]
+        invocations = [
+            shlex.split(line)
+            for line in block.splitlines()
+            if "scripts/check_postgres_migration_checksums.py" in line
+        ]
+        self.assertEqual(
+            invocations,
+            [["$PYTHON", "scripts/check_postgres_migration_checksums.py", "--require-base"]],
+        )
 
 
 if __name__ == "__main__":
