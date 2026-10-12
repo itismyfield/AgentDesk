@@ -181,7 +181,7 @@ fn adopt(
 
 /// After a failed write the store as it now reads decides: an init that recovers commits, no
 /// trace of the channel releases it, and anything else holds it.
-fn settled(store: &OStore, channel: u64) -> Adoption {
+pub(crate) fn settled(store: &OStore, channel: u64) -> Adoption {
     let recovered = match store.read_era() {
         Ok(Some(era)) => match store.open_channel(&era, channel) {
             Ok(Some(opened)) => Some(opened.init().channel == channel),

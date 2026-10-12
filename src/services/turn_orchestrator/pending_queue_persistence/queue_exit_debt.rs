@@ -1,0 +1,351 @@
+//! Queue-exit events not yet acknowledged, kept in the channel's canonical queue snapshot so an
+//! item a claim removed can be reported again after a restart. Nothing here applies or acks one.
+
+use super::PendingQueueItem;
+#[cfg(test)]
+use super::{
+    ChannelId, ChannelMailboxState, Instant, Intervention, Path, PendingQueueSourceTextSegment,
+    ProviderKind, QueuePersistenceContext, SystemTime, fs, parse_snapshot, pending_queue_file_path,
+    pending_queue_item_from_intervention, pending_queue_item_to_intervention, pending_queue_root,
+    persist_queue,
+};
+#[cfg(test)]
+use crate::services::turn_orchestrator::{
+    QueueExitEvent, QueueExitKind,
+    queued_head::{SnapshotMeta, meta_value, record_write},
+};
+
+/// One removed intervention whose exit feedback is still owed, under the event id minted when it
+/// left the queue; the provider, token and channel are the file's namespace.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct QueueExitDebt {
+    pub(crate) event_id: String,
+    pub(crate) episode: String,
+    pub(crate) kind: QueueExitDebtKind,
+    pub(crate) intervention: PendingQueueItem,
+    pub(crate) state: QueueExitDebtState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum QueueExitDebtKind {
+    Cancelled,
+    Expired,
+    Superseded,
+    Overflow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum QueueExitDebtState {
+    Unacked,
+}
+
+/// Refuses debts no reader could attribute: a blank id or episode, a payload without a message
+/// or channel, or an event id recorded twice.
+pub(in crate::services::turn_orchestrator) fn check_queue_exit_debts(
+    debts: &[QueueExitDebt],
+) -> Result<(), String> {
+    for (index, debt) in debts.iter().enumerate() {
+        let item = &debt.intervention;
+        if debt.event_id.trim().is_empty()
+            || debt.episode.trim().is_empty()
+            || item.message_id == 0
+            || item.channel_id.is_none_or(|channel| channel == 0)
+        {
+            return Err("queue-exit debt has a blank event id, episode or identity".into());
+        }
+        if debts[..index].iter().any(|d| d.event_id == debt.event_id) {
+            return Err(format!(
+                "queue-exit debt {} is recorded twice",
+                debt.event_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+impl From<QueueExitKind> for QueueExitDebtKind {
+    fn from(kind: QueueExitKind) -> Self {
+        match kind {
+            QueueExitKind::Cancelled => Self::Cancelled,
+            QueueExitKind::Expired => Self::Expired,
+            QueueExitKind::Superseded => Self::Superseded,
+            QueueExitKind::Overflow => Self::Overflow,
+        }
+    }
+}
+
+#[cfg(test)]
+impl QueueExitDebt {
+    /// The debt for `event`, minting its event id; called once, by the transition that removed it.
+    pub(crate) fn new(episode: &str, event: &QueueExitEvent, channel_id: ChannelId) -> Self {
+        let source = &event.intervention;
+        let mut intervention = pending_queue_item_from_intervention(
+            source,
+            channel_id,
+            None,
+            SystemTime::now(),
+            Instant::now(),
+        );
+        // Every segment as held, not only a split one, so the restored payload is the original.
+        let segments = source.source_text_segments.iter();
+        intervention.source_text_segments = (segments)
+            .map(|segment| PendingQueueSourceTextSegment {
+                message_id: segment.message_id.get(),
+                text: segment.text.clone(),
+            })
+            .collect();
+        Self {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            episode: episode.to_string(),
+            kind: event.kind.into(),
+            intervention,
+            state: QueueExitDebtState::Unacked,
+        }
+    }
+
+    /// The event this debt reports, rebuilt from the stored payload.
+    pub(crate) fn event(&self) -> QueueExitEvent {
+        let intervention = pending_queue_item_to_intervention(
+            self.intervention.clone(),
+            SystemTime::now(),
+            Instant::now(),
+        );
+        let kind = match self.kind {
+            QueueExitDebtKind::Cancelled => QueueExitKind::Cancelled,
+            QueueExitDebtKind::Expired => QueueExitKind::Expired,
+            QueueExitDebtKind::Superseded => QueueExitKind::Superseded,
+            QueueExitDebtKind::Overflow => QueueExitKind::Overflow,
+        };
+        QueueExitEvent { intervention, kind }
+    }
+}
+
+/// The debts in one queue file: none for a missing file or legacy array, an error for a file that
+/// cannot be read or parsed or a debt whose payload names another channel.
+#[cfg(test)]
+fn read_file_debts(path: &Path, channel_id: ChannelId) -> Result<Vec<QueueExitDebt>, String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
+    let (_, meta) =
+        parse_snapshot(&content).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let debts = meta.map(|meta| meta.queue_exit_debts).unwrap_or_default();
+    let foreign = debts
+        .iter()
+        .find(|debt| debt.intervention.channel_id != Some(channel_id.get()));
+    if let Some(debt) = foreign {
+        return Err(format!(
+            "queue-exit debt {} in {} names another channel",
+            debt.event_id,
+            path.display()
+        ));
+    }
+    Ok(debts)
+}
+
+/// One channel's unacknowledged debts; only a missing file reads as none.
+#[cfg(test)]
+pub(crate) fn read_queue_exit_debts_checked(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+) -> Result<Vec<QueueExitDebt>, String> {
+    let path = pending_queue_file_path(provider, token_hash, channel_id)
+        .ok_or_else(|| format!("pending queue root unavailable for channel {channel_id}"))?;
+    read_file_debts(&path, channel_id)
+}
+
+/// A scan that met errors: the debts it could read, and what it could not.
+#[cfg(test)]
+pub(crate) struct DebtScanError {
+    pub(crate) found: Vec<(ChannelId, Vec<QueueExitDebt>)>,
+    pub(crate) errors: Vec<String>,
+}
+
+/// Every channel of the namespace holding a debt, an emptied queue included; a listing, entry or
+/// file that cannot be read is an error, never an absent debt.
+#[cfg(test)]
+pub(crate) fn scan_queue_exit_debts_checked(
+    provider: &ProviderKind,
+    token_hash: &str,
+) -> Result<Vec<(ChannelId, Vec<QueueExitDebt>)>, DebtScanError> {
+    let failed = |error: String| DebtScanError {
+        found: Vec::new(),
+        errors: vec![error],
+    };
+    let root =
+        pending_queue_root().ok_or_else(|| failed("pending queue root unavailable".into()))?;
+    let dir = root.join(provider.as_str()).join(token_hash);
+    match fs::read_dir(&dir) {
+        Ok(entries) => scan_entries(entries.map(|entry| entry.map(|entry| entry.path()))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(failed(format!("read_dir {}: {error}", dir.display()))),
+    }
+}
+
+#[cfg(test)]
+fn scan_entries(
+    entries: impl Iterator<Item = std::io::Result<std::path::PathBuf>>,
+) -> Result<Vec<(ChannelId, Vec<QueueExitDebt>)>, DebtScanError> {
+    let (mut found, mut errors) = (Vec::new(), Vec::new());
+    for entry in entries {
+        let path = match entry {
+            Ok(path) => path,
+            Err(error) => {
+                errors.push(format!("scan entry: {error}"));
+                continue;
+            }
+        };
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let stem = path.file_stem().and_then(|stem| stem.to_str());
+        let Some(channel) = stem
+            .and_then(|stem| stem.parse::<u64>().ok())
+            .filter(|id| *id != 0)
+        else {
+            continue;
+        };
+        let channel = ChannelId::new(channel);
+        match read_file_debts(&path, channel) {
+            Ok(debts) if debts.is_empty() => {}
+            Ok(debts) => found.push((channel, debts)),
+            Err(error) => errors.push(error),
+        }
+    }
+    found.sort_by_key(|(channel, _)| channel.get());
+    if errors.is_empty() {
+        Ok(found)
+    } else {
+        Err(DebtScanError { found, errors })
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) enum QueueExitCommitError {
+    /// The file still holds the previous queue; memory was restored to it.
+    NotCommitted(String),
+    /// The file holds neither snapshot or cannot be read; memory was restored and the owner's
+    /// later writes are refused until the file is adopted again.
+    Indeterminate(String),
+}
+
+/// Writes the queue a claim left and one debt per removed item as a single snapshot. A failed
+/// write is settled by re-reading the file, so a published debt is kept and never rolled back.
+#[cfg(test)]
+pub(crate) fn commit_queue_exit(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+    remaining: Vec<Intervention>,
+    debts: Vec<QueueExitDebt>,
+) -> Result<(), QueueExitCommitError> {
+    let previous_queue = std::mem::replace(&mut state.intervention_queue, remaining);
+    let previous_meta = state.queued_head.meta.clone();
+    state.queued_head.meta.queue_exit_debts.extend(debts);
+    let restore = |state: &mut ChannelMailboxState| {
+        state.intervention_queue = previous_queue.clone();
+        state.queued_head.meta = previous_meta.clone();
+    };
+    let written = check_queue_exit_debts(&state.queued_head.meta.queue_exit_debts)
+        .map_err(QueueExitCommitError::NotCommitted)
+        .and_then(|()| {
+            persist_queue(state, channel_id, persistence)
+                .map_err(QueueExitCommitError::Indeterminate)
+        });
+    let error = match written {
+        Ok(()) => return Ok(()),
+        Err(QueueExitCommitError::NotCommitted(error)) => {
+            restore(state);
+            return Err(QueueExitCommitError::NotCommitted(error));
+        }
+        Err(QueueExitCommitError::Indeterminate(error)) => error,
+    };
+    let new = (
+        identities(&state.intervention_queue),
+        meta_value(&state.queued_head.meta),
+    );
+    let old = (
+        identities(&previous_queue),
+        state.queued_head.persisted_meta.clone(),
+    );
+    match read_back(persistence, channel_id) {
+        Ok(disk) if disk == new => {
+            tracing::warn!(channel_id = channel_id.get(), %error, "queue exit commit was published");
+            record_write(state);
+            Ok(())
+        }
+        Ok(disk) if disk == old => {
+            restore(state);
+            Err(QueueExitCommitError::NotCommitted(error))
+        }
+        outcome => {
+            restore(state);
+            let found = outcome.err().unwrap_or_else(|| "neither snapshot".into());
+            Err(QueueExitCommitError::Indeterminate(format!(
+                "{error}; file holds {found}"
+            )))
+        }
+    }
+}
+
+#[cfg(test)]
+type QueueIdentities = Vec<(u64, u64, Vec<u64>)>;
+
+#[cfg(test)]
+fn identities(queue: &[Intervention]) -> QueueIdentities {
+    let row = |item: &Intervention| {
+        let sources = item.source_message_ids.iter().map(|id| id.get());
+        let sources: Vec<u64> = sources.collect();
+        let primary = item.message_id.get();
+        let sources = if sources.is_empty() {
+            vec![primary]
+        } else {
+            sources
+        };
+        (primary, item.queued_generation, sources)
+    };
+    queue.iter().map(row).collect()
+}
+
+/// The queue identities and set metadata now on disk.
+#[cfg(test)]
+fn read_back(
+    persistence: &QueuePersistenceContext,
+    channel_id: ChannelId,
+) -> Result<(QueueIdentities, Option<serde_json::Value>), String> {
+    let (provider, token_hash) = (&persistence.provider, &persistence.token_hash);
+    let path = pending_queue_file_path(provider, token_hash, channel_id)
+        .ok_or("pending queue root unavailable")?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), None));
+        }
+        Err(error) => return Err(format!("unreadable {}: {error}", path.display())),
+    };
+    let (items, meta) = parse_snapshot(&content)?;
+    let row = |item: PendingQueueItem| {
+        let primary = item.message_id;
+        let mut sources = item.source_message_ids;
+        if sources.is_empty() {
+            sources.push(primary);
+        }
+        (primary, item.queued_generation, sources)
+    };
+    let meta = meta.filter(SnapshotMeta::is_set);
+    Ok((
+        items.into_iter().map(row).collect(),
+        meta.as_ref().and_then(meta_value),
+    ))
+}
+
+#[cfg(test)]
+#[path = "queue_exit_debt_tests.rs"]
+mod tests;

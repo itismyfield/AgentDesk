@@ -78,6 +78,7 @@ fn route_parsed(provider: &str, channel: impl FnOnce() -> Option<u64>) -> Intake
         }
         Some(channel) => match super::owned_kind(channel) {
             Some(kind) => judge(provider, channel, kind),
+            None if super::late_legacy_input(provider, channel) => IntakeRoute::Unselected,
             None if super::delegated(channel).is_some() => IntakeRoute::Hold(format!(
                 "O channel {channel} is delegated and its home does not take intake here"
             )),

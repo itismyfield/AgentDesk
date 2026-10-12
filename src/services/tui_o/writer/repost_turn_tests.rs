@@ -34,7 +34,10 @@ use crate::services::tui_o::store::ledger::PieceRecord;
 
 fn switch(enabled: bool) -> RepostSwitch {
     let boot = TuiOConfig {
-        repost: RepostConfig { enabled },
+        repost: RepostConfig {
+            enabled,
+            channels: [CHANNEL].into_iter().collect(),
+        },
         ..TuiOConfig::default()
     };
     RepostSwitch::new(Some(&boot), watch::channel(None).1)
@@ -418,7 +421,7 @@ async fn f6_t07_all_writer_guards_block_auto_pg() {
     let key = admitted(&pool, "f6-t07", "piece").await;
     let harness = Harness::new();
     let on = switch(true);
-    let effective = on.live();
+    let effective = on.live_for(CHANNEL);
     let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
     for case in 0..4 {
         harness.gate.acquired();
@@ -471,7 +474,7 @@ async fn f6_t09_open_prepared_blocks_every_sender_pg() {
     writer.set_live(true);
     let io = Io::over(&harness.port);
     let on = switch(true);
-    writer.bind_switch(on.live());
+    writer.bind_switch(on.live_for(CHANNEL));
     let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
     let intent = evidence(&pool, &key).await;
     let admitted = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
@@ -608,7 +611,7 @@ async fn f6_a_dropped_writer_never_lets_its_repost_send_again_pg() {
     let io = Io::over(&harness.port);
     io.throttle_first.store(true, Ordering::SeqCst);
     let on = switch(true);
-    writer.bind_switch(on.live());
+    writer.bind_switch(on.live_for(CHANNEL));
     let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
     let intent = evidence(&pool, &key).await;
     let admitted = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
@@ -635,7 +638,9 @@ async fn f6_a_dropped_writer_never_lets_its_repost_send_again_pg() {
 }
 
 fn config(enabled: bool) -> Arc<crate::config::Config> {
-    let yaml = format!("server:\n  port: 8791\ntui_o:\n  repost:\n    enabled: {enabled}\n");
+    let yaml = format!(
+        "server:\n  port: 8791\ntui_o:\n  repost:\n    enabled: {enabled}\n    channels: [{CHANNEL}]\n"
+    );
     Arc::new(serde_yaml::from_str(&yaml).unwrap())
 }
 
@@ -667,3 +672,30 @@ async fn f6_a_live_reload_switches_the_next_turn_without_a_restart() {
 
 #[path = "../repost/writer_activation_tests.rs"]
 mod activation;
+
+#[tokio::test]
+async fn d4b_old_config_without_channels_denies_real_channel_turn() {
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let io = Io::over(&harness.port);
+    let old: crate::config::Config =
+        serde_yaml::from_str("server:\n  port: 8791\ntui_o:\n  repost:\n    enabled: true\n")
+            .unwrap();
+    let mut hook = turn(
+        &harness,
+        unreachable(),
+        RepostSwitch::new(old.tui_o.as_ref(), watch::channel(None).1),
+        &io,
+    );
+    let mut writer = harness.writer();
+    hook.turn(&mut writer).await;
+    assert!(
+        !sidecar(&harness).exists(),
+        "missing selector must create no re-post sidecar"
+    );
+    assert_eq!(io.reads.load(Ordering::SeqCst), 0);
+    assert_eq!(io.wire(), 0);
+}
+
+#[path = "../repost/allowlist_writer_tests.rs"]
+mod allowlist;
