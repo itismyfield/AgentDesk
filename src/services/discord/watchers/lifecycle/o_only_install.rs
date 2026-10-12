@@ -57,6 +57,7 @@ struct SourceSnapshot {
     marker: Option<(std::path::PathBuf, Option<String>)>,
     file: SourceFileIdentity,
     witness: SourceWitness,
+    generation_mtime_ns: i64,
 }
 
 // Nonblocking open reaches the descriptor type check even when a FIFO replaced the source.
@@ -106,6 +107,11 @@ fn source(
 ) -> Result<(SourceSnapshot, u64), OOnlyInstallReason> {
     use OOnlyInstallReason::*;
     let name = authority.session();
+    let generation_mtime_ns = read_generation_file_mtime_ns(name);
+    let witness = read_source_epoch_witness(name);
+    if generation_mtime_ns == 0 || witness.generation.is_none() {
+        return Err(SourceUnavailable);
+    }
     let kind = match request.provider {
         ProviderKind::Codex => RuntimeHandoffKind::CodexTui,
         ProviderKind::Claude => RuntimeHandoffKind::ClaudeTui,
@@ -332,7 +338,8 @@ fn source(
             proof,
             marker: marker.map(|m| (m.rollout_path, m.session_id)),
             file,
-            witness: read_source_epoch_witness(name),
+            witness,
+            generation_mtime_ns,
         },
         metadata.len(),
     ))

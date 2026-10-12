@@ -1053,7 +1053,7 @@ if not declared:
 # not a mutation this suite can be expected to kill -- but it is the one line
 # a reviewer must read before trusting the check.
 external = {"--lib", "--skip", "--test-threads", "--exact", "--all-targets",
-            "--all-features", "--manifest-path", "--list", "--show-stats"}
+            "--all-features", "--manifest-path", "--list", "--show-stats", "--version"}
 used = set(re.findall(r"--[a-z][a-z0-9-]*", region))
 unknown = sorted(used - declared - external)
 if unknown:

@@ -40,12 +40,15 @@ thread_local! {
 /// Verified owed delivery stays off until P5; Legacy and Shadow channels never reach it.
 pub(crate) fn owed_delivery_ready(channel: u64) -> bool {
     #[cfg(test)]
-    return READY.with(|ready| ready.borrow().contains(&channel));
-    #[cfg(not(test))]
-    {
-        let _ = channel;
-        false
+    if READY.with(|ready| ready.borrow().contains(&channel)) {
+        return true;
     }
+    production_default_owed_readiness(channel)
+}
+
+fn production_default_owed_readiness(channel: u64) -> bool {
+    let _ = channel;
+    false
 }
 
 /// The record for `origin`'s exact episode; a missing, foreign or not-ready one is Unknown.

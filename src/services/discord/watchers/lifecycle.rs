@@ -95,22 +95,34 @@ pub(in crate::services::discord) use self::claims::{
     thread_follow_up_parent_channel_id, thread_follow_up_parent_from_live,
 };
 
-#[cfg(test)]
 #[path = "lifecycle/o_only_install.rs"]
 mod o_only_install;
 #[cfg(test)]
 pub(in crate::services::discord) use o_only_install::tests::InstallFixture;
 #[cfg(test)]
+pub(in crate::services::discord) use o_only_install::tests::pause_host as n4d2_pause_install_after_host;
 pub use o_only_install::{
     OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
 };
 
+#[path = "lifecycle/o_only_restore.rs"]
+mod o_only_restore;
+pub use o_only_restore::{RetiredOWatcherRestore, restore_retired_o_watchers};
+
+#[cfg(test)]
+#[path = "lifecycle/n4d2_boundary_tests.rs"]
+mod n4d2_boundary_tests;
+#[cfg(test)]
+#[path = "lifecycle/n4d2_entry_test.rs"]
+pub(in crate::services::discord) mod n4d2_entry_support;
+
 #[path = "lifecycle/restore.rs"]
 mod restore;
-pub(super) use self::restore::*;
-pub(in crate::services::discord) use self::restore::{
-    restore_tmux_watchers, session_belongs_to_current_runtime,
-};
+pub(in crate::services::discord) use self::restore::restore_tmux_watchers;
+#[path = "lifecycle/restore_mapping.rs"]
+mod restore_mapping;
+use self::restore_mapping::add_configured_channel_bindings;
+pub(in crate::services::discord) use self::restore_mapping::session_belongs_to_current_runtime;
 
 #[path = "lifecycle/restore_tests.rs"]
 mod restore_tests;

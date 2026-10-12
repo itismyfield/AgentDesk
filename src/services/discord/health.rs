@@ -69,6 +69,14 @@ mod turn_deliver;
 mod unpaired_active_token;
 pub(in crate::services::discord) mod watcher_respawn;
 pub(in crate::services::discord) use watcher_respawn::reclaim_watcherless_session_bound_relay;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use watcher_respawn::{
+    lock_watcher_absence_for_test, n4d2_absence, n4d2_arm_absence, retry_pending_watcher_respawn,
+};
+#[cfg(unix)]
+pub(in crate::services::discord) use watcher_respawn::{
+    record_retired_o_install_outcome, retired_o_install_due,
+};
 
 // `HeadlessAgentTurnReservation` has no external referent today (callers
 // destructure the reserve/start tuple); kept re-exported for the reserve→start
@@ -105,6 +113,7 @@ pub(crate) use turn_deliver::inject_tests::{
     InjectPane, claim_kinded, end_turn, inject_hook, queue_texts, register_inject_runtime,
     send_meanwhile, start_without_gateway,
 };
+pub(crate) use turn_deliver::preflight_human_input;
 pub use turn_deliver::{
     ExternalHold, HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
     external_turn_hold_for_start,
@@ -113,6 +122,7 @@ pub(crate) use turn_deliver::{InjectAttempt, InjectOrigin, SOURCE_OWNED, inject_
 #[cfg(test)]
 pub(crate) use turn_deliver::{
     inflight_rows_for_tests, register_bot_auth_for_tests, seed_external_turn_row_for_tests,
+    set_human_input_auth_for_tests,
 };
 // #5147: re-exported as a module (not as loose constants) so a consumer reads
 // `self_watchdog::TCP_TIMEOUT` — a name that says which timeout — rather than a
@@ -450,7 +460,6 @@ impl HealthRegistry {
                 .all(|entry| entry.role == ProviderRuntimeRole::Standby)
     }
 
-    #[cfg(test)]
     pub(in crate::services::discord) async fn provider_entries_guard(
         &self,
     ) -> tokio::sync::MutexGuard<'_, Vec<ProviderEntry>> {

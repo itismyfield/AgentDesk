@@ -13,6 +13,7 @@ import importlib.util
 import io
 import locale
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1320,6 +1321,16 @@ class TestIdOracleContract(unittest.TestCase):
         self.assertIsNotNone(skips)
         self.assertIn("_pg", skips)
 
+    def test_a_skip_value_keeps_a_hash_inside_its_word(self) -> None:
+        # The array reads like the shell does: only a `#` opening a word is a comment.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / integrity.NON_PG_FILTER_REL
+            path.parent.mkdir(parents=True)
+            path.write_text("NON_PG_SKIP_ARGS=(\n  --skip a#b  # note\n  --skip 'c d'\n)\n",
+                            encoding="utf-8")
+            self.assertEqual(integrity.PackageTestIds(Path(tmp)).non_pg_skip_filters(),
+                             ("a#b", "c d"))
+
     def test_default_selection_follows_cargo_test_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1412,6 +1423,19 @@ class KnownArrayProvenance(unittest.TestCase):
                 ((("true ||# note", source, pg),), pg_unsourced),
                 ((("echo |# note", source, non_pg),), unsourced),
                 ((("echo x#&&", source, pg),), pg_unsourced),
+                # An escaped operator is word data, so the `#` after it is literal.
+                ((("false && echo ok\\;#tag &&", source, pg),), pg_unsourced),
+                ((("false && echo ok\\|#tag &&", source, pg),), pg_unsourced),
+                ((("false && echo ok\\&#tag &&", source, pg),), pg_unsourced),
+                ((("false && echo ok\\\\;# note &&", source, pg),), []),
+                ((("echo ok;# note", source, pg),), []),
+                # Operators inside a substitution never leave the outer line open.
+                ((("x=$(true &&", "false)", source, pg),), []),
+                ((('echo "$(echo `date`)"', source, pg),), []),
+                ((("echo `echo \\`date\\``", source, pg),), pg_unsourced),
+                ((("while read -r x; do :; done < <(true)", source, pg),), []),
+                # Past an unclosed quote, the use may be data rather than a command.
+                (((source, "echo 'open", pg),), pg_unsourced),
                 # Quoted or escaped, `;`, `|` and `&&` are argument text, not a second command.
                 (((source, f"{non_pg} --logfile 'ci;pg.log'"),), []),
                 (((source, f"{non_pg} --logfile ci\\;pg.log"),), []),
@@ -1571,6 +1595,52 @@ class PgIncludeRestoration(unittest.TestCase):
                 self.assertEqual(self.kinds(recipe=None, edit=edit), unresolved if old else [])
 
 
+class ShellBoundaryEnforcement(unittest.TestCase):
+    """The enforced gate judges every cargo test the shell would run: continued lines as
+    one command, and a cargo the lexer could not bound as unparsed."""
+
+    def enforce(self, block: tuple[str, ...], just_lines: tuple[str, ...] = (GOOD_COMMAND,)):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = build_fixture_repo(root, GOOD_COMMAND, just_text="fixture:\n" + "".join(
+                f"    {line}\n" for line in just_lines))
+            write_generated_filter(root)
+            # A plain first step keeps the extraction floor met when the block holds no command.
+            workflow.write_text(f"jobs:\n  lane:\n    steps:\n      - run: {GOOD_COMMAND}\n"
+                                "      - run: |\n" + "".join(
+                f"          {line}\n" for line in block), encoding="utf-8")
+            allow = root / "allowlist.txt"
+            allow.write_text("", encoding="utf-8")
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                rc = integrity.main(["--repo-root", str(root), "--workflow", str(workflow),
+                                     "--allowlist", str(allow), "--enforce"])
+        return rc, [(Path(source).name, kind) for source, kind in re.findall(
+            r"^ERROR (\S+?):\d+: \[([\w-]+)\]", stdout.getvalue(), re.M)]
+
+    def test_every_cargo_the_shell_runs_is_judged(self) -> None:
+        zero = (1, [("ci-fixture.yml", "zero-match")])
+        unparsed = (1, [("ci-fixture.yml", "cargo-command-unparsed")])
+        for block, verdict in (
+                (("cargo test --lib -- \\", "  definitely_missing_filter"), zero),
+                (("car\\", "go test --lib missing"), zero),
+                (("cat <<EOF; cargo test --lib missing", "hello", "EOF"), unparsed),
+                (("unset x", "echo ${x:-$(cargo test --lib missing)}"), unparsed),
+                (("false && cargo test --lib missing",), unparsed),
+                (("cargo test --lib missing \\",), unparsed),
+                (("echo cargo test --lib missing",), (0, [])),
+                ((f"{GOOD_COMMAND} \\", "  --nocapture"), (0, [])),
+                ((f"{GOOD_COMMAND} \\", "", "cargo test --lib missing_alone"), zero)):
+            with self.subTest(block=block):
+                self.assertEqual(self.enforce(block), verdict)
+
+    def test_a_recipe_continues_its_line_and_keeps_the_canonical_chain(self) -> None:
+        pg = f'source {integrity.NON_PG_FILTER_REL} && cargo test --lib -- "${{PG_INCLUDE_ARGS[@]}}"'
+        self.assertEqual(self.enforce((GOOD_COMMAND,), (pg, GOOD_COMMAND)), (0, []))
+        self.assertEqual(self.enforce((GOOD_COMMAND,), ("cargo test --lib \\", "  missing_filter")),
+                         (1, [("justfile", "zero-match")]))
+
+
 class ParserContract(unittest.TestCase):
     def test_all_targets_and_unfiltered_commands_are_skipped(self) -> None:
         for command in (
@@ -1651,7 +1721,32 @@ class ParserContract(unittest.TestCase):
                 # Only a `#` opening a word starts a comment; inside one it is literal.
                 ("cargo test --lib high_risk_recovery#tag; cargo test --lib missing", unparsed),
                 ("cargo test --lib high_risk_recovery#tag", ["zero-match"]),
-                (f"{GOOD_COMMAND} # note; cargo test --lib missing", [])):
+                (f"{GOOD_COMMAND} # note; cargo test --lib missing", []),
+                # A closed substitution, or an escaped operator, leaves its word open.
+                (f"{GOOD_COMMAND} --logfile foo$(true)#tag; cargo test --lib missing", unparsed),
+                (f"{GOOD_COMMAND} --logfile foo$((1+2))#tag; cargo test --lib missing", unparsed),
+                (f"{GOOD_COMMAND} --logfile foo$(echo $(true))#tag; cargo test --lib missing",
+                 unparsed),
+                (f"{GOOD_COMMAND} --logfile x\\;#tag; cargo test --lib missing", unparsed),
+                (f"{GOOD_COMMAND} --logfile x\\;#tag", []),
+                (f"{GOOD_COMMAND} --logfile x\\\\;# cargo test --lib missing", unparsed),
+                ("cargo test --lib high_risk_recovery:: -- --logfile foo$(true)#tag", []),
+                # Quoted `#` and operators are data, not a comment or a second command.
+                (f"{GOOD_COMMAND} --logfile 'x#; || y'", []),
+                (f"{GOOD_COMMAND} --logfile x'#tag'", []),
+                # A direct cargo test in a later command, a substitution or past an
+                # unsupported boundary cannot be judged.
+                ("echo ok; cargo test --lib missing", unparsed),
+                (f"({GOOD_COMMAND})", unparsed),
+                (f"{{ {GOOD_COMMAND}; }}", unparsed),
+                (f"if true; then {GOOD_COMMAND}; fi", unparsed),
+                (f"echo $(cargo test --lib missing) && {GOOD_COMMAND}", unparsed),
+                (f"{GOOD_COMMAND} --logfile \"$(cargo test --lib missing)\"", unparsed),
+                (f"{GOOD_COMMAND} --logfile `cargo test --lib missing`", unparsed),
+                (f"{GOOD_COMMAND} < <(echo x)", unparsed),
+                (f"{GOOD_COMMAND} <<EOF", unparsed),
+                (f"{GOOD_COMMAND} --logfile 'unclosed", unparsed),
+                ("echo cargo test --lib missing; true", [])):
             with self.subTest(command=command):
                 self.assertEqual([v.kind for v in run_fixture(command)], kinds)
         just_text = f"fixture:\n    {GOOD_COMMAND} && cargo test --lib does_not_exist\n"
@@ -1670,6 +1765,16 @@ class ParserContract(unittest.TestCase):
                 with self.subTest(command=command):
                     self.assertEqual([(Path(v.workflow).name, v.kind)
                                       for v in run_fixture(command)], kinds)
+
+    def test_the_observer_refuses_a_cargo_line_it_cannot_bound(self) -> None:
+        # Observation reads the same words: a joined line is an error, never a shorter command.
+        self.assertEqual(integrity._command_lines(f"run: {GOOD_COMMAND}  # note"),
+                         [GOOD_COMMAND.split()])
+        for line in ("cargo test --lib high_risk_recovery#tag; cargo test --lib missing",
+                     f"{GOOD_COMMAND} --logfile foo$(true)#tag; cargo test --lib missing",
+                     f"{GOOD_COMMAND} --logfile \"$(cargo test --lib missing)\""):
+            with self.subTest(line=line), self.assertRaisesRegex(RuntimeError, "could not parse"):
+                integrity._command_lines(line)
 
     def test_recognized_unsupported_env_string_split_is_inconclusive(self) -> None:
         diagnostics: list[str] = []

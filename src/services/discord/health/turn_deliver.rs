@@ -90,6 +90,28 @@ pub(crate) fn author_allowed_for_human_input(
         && (owner_user_id == Some(author_id) || allowed_user_ids.contains(&author_id))
 }
 
+/// Applies the existing remote-author rule before reply-obligation admission.
+pub(crate) async fn preflight_human_input(
+    registry: &HealthRegistry,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    author_id: u64,
+) -> Result<(), HumanInputError> {
+    let shared = resolve_direct_meeting_shared(registry, channel_id, provider)
+        .await
+        .map_err(HumanInputError::RuntimeUnavailable)?;
+    let settings = shared.settings.read().await;
+    if author_allowed_for_human_input(
+        settings.owner_user_id,
+        &settings.allowed_user_ids,
+        author_id,
+    ) {
+        Ok(())
+    } else {
+        Err(HumanInputError::AuthorNotAllowed)
+    }
+}
+
 enum StartAttempt {
     Started(String),
     Busy,
@@ -528,6 +550,20 @@ pub(crate) async fn register_bot_auth_for_tests(
         settings.allowed_channel_ids = vec![channel_id];
     }
     registry.register(provider.to_string(), shared).await;
+}
+
+/// Changes fixture authorization without opening the runtime settings lock to route tests.
+#[cfg(test)]
+pub(crate) async fn set_human_input_auth_for_tests(
+    shared: &SharedData,
+    owner_user_id: Option<u64>,
+    allowed_user_ids: Vec<u64>,
+    allow_all_users: bool,
+) {
+    let mut settings = shared.settings.write().await;
+    settings.owner_user_id = owner_user_id;
+    settings.allowed_user_ids = allowed_user_ids;
+    settings.allow_all_users = allow_all_users;
 }
 
 /// Persists the durable row of a TUI-direct turn that never claimed the mailbox.

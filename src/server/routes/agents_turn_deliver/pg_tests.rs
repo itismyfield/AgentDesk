@@ -511,3 +511,786 @@ async fn target_and_author_gates_run_at_the_route_boundary_pg() {
         );
     }
 }
+
+#[cfg(unix)]
+mod s1a {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use axum::Router;
+    use axum::http::StatusCode;
+    use serde_json::{Value, json};
+    use sqlx::PgPool;
+    use tokio::sync::{Barrier, Notify, mpsc};
+    use tokio::task::JoinHandle;
+    use uuid::Uuid;
+
+    use super::super::{ADMISSION_ENABLED_FOR_TEST, DELIVERY_PROBE_FOR_TEST, DeliveryProbe};
+    use super::{Arc, TestPostgresDb, deliver, router};
+    use crate::db::imsg_reply::{
+        AckOutcome, ActionAck, ClaimAction, Obligation, Purpose, ack_action, claim_action,
+        read_obligation,
+    };
+    use crate::services::discord::SharedData;
+    use crate::services::discord::health::{
+        HealthRegistry, InjectPane, inject_hook, queue_texts, register_inject_runtime,
+        seed_external_turn_row_for_tests, set_human_input_auth_for_tests,
+    };
+    use crate::services::provider::ProviderKind;
+
+    type Answer = (StatusCode, Value);
+
+    struct Fixture {
+        db: TestPostgresDb,
+        pool: PgPool,
+        peer: PgPool,
+        app: Router,
+        peer_app: Router,
+        shared: Arc<SharedData>,
+        channel: u64,
+        calls: Arc<AtomicUsize>,
+        _root: crate::config::TestRuntimeRootGuard,
+    }
+
+    impl Fixture {
+        async fn create(channel: u64) -> Self {
+            let root = crate::config::TestRuntimeRootGuard::new();
+            let db = TestPostgresDb::create().await;
+            let pool = db.connect_and_migrate().await;
+            let peer = db.connect_and_migrate().await;
+            let tables: (bool, bool) = sqlx::query_as(
+                "SELECT to_regclass('imsg_reply_obligations') IS NOT NULL,
+                        to_regclass('imsg_reply_actions') IS NOT NULL",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(tables, (true, true), "the real S0 migration must execute");
+            crate::db::agents::insert_agent_channels_for_tests(
+                &pool,
+                "s1a-agent",
+                Some(&channel.to_string()),
+                None,
+            )
+            .await;
+            let registry = Arc::new(HealthRegistry::new());
+            let shared =
+                register_inject_runtime(&registry, &[channel, channel + 100], Some(pool.clone()))
+                    .await;
+            let app = router(Some(pool.clone()), Some(registry.clone()));
+            let peer_app = router(Some(peer.clone()), Some(registry));
+            Self {
+                db,
+                pool,
+                peer,
+                app,
+                peer_app,
+                shared,
+                channel,
+                calls: Arc::new(AtomicUsize::new(0)),
+                _root: root,
+            }
+        }
+
+        fn probe(&self) -> DeliveryProbe {
+            DeliveryProbe {
+                calls: self.calls.clone(),
+                ..Default::default()
+            }
+        }
+
+        fn busy(&self) {
+            seed_external_turn_row_for_tests(&ProviderKind::Claude, self.channel);
+        }
+
+        async fn call(&self, enabled: bool, body: Value) -> Answer {
+            call(&self.app, "s1a-agent", enabled, self.probe(), body).await
+        }
+
+        async fn row(&self, origin: &str) -> Obligation {
+            read_obligation(&self.peer, origin).await.unwrap().unwrap()
+        }
+
+        async fn counts(&self) -> (i64, i64) {
+            sqlx::query_as(
+                "SELECT (SELECT COUNT(*) FROM imsg_reply_obligations),
+                        (SELECT COUNT(*) FROM imsg_reply_actions)",
+            )
+            .fetch_one(&self.peer)
+            .await
+            .unwrap()
+        }
+
+        fn assert_calls(&self, count: usize) {
+            assert_eq!(
+                self.calls.load(Ordering::SeqCst),
+                count,
+                "actual delivery polls"
+            );
+        }
+
+        async fn add_agent(&self, agent: &str, channel: u64) {
+            crate::db::agents::insert_agent_channels_for_tests(
+                &self.pool,
+                agent,
+                Some(&channel.to_string()),
+                None,
+            )
+            .await;
+        }
+
+        async fn close(self) {
+            drop(self.app);
+            drop(self.peer_app);
+            self.pool.close().await;
+            self.peer.close().await;
+            self.db.drop().await;
+        }
+    }
+
+    fn input(origin: Option<&str>, text: &str, author: u64) -> Value {
+        json!({
+            "text": text, "author_discord_user_id": author.to_string(),
+            "source": "imessage", "origin_id": origin,
+        })
+    }
+
+    async fn call(
+        app: &Router,
+        agent: &str,
+        enabled: bool,
+        probe: DeliveryProbe,
+        body: Value,
+    ) -> Answer {
+        let body = body.to_string();
+        ADMISSION_ENABLED_FOR_TEST
+            .scope(
+                enabled,
+                DELIVERY_PROBE_FOR_TEST.scope(probe, deliver(app, agent, &body)),
+            )
+            .await
+    }
+
+    async fn parked(f: &Fixture, origin: &str) -> (JoinHandle<Answer>, Arc<Notify>) {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let probe = DeliveryProbe {
+            calls: f.calls.clone(),
+            entered: Some(entered.clone()),
+            release: Some(release.clone()),
+        };
+        let (app, body) = (f.app.clone(), input(Some(origin), "status?", 200));
+        let task = tokio::spawn(async move { call(&app, "s1a-agent", true, probe, body).await });
+        tokio::time::timeout(Duration::from_secs(10), entered.notified())
+            .await
+            .expect("authorized admission must reach the parked delivery");
+        assert_eq!(f.row(origin).await.admission, "admitting");
+        (task, release)
+    }
+
+    fn claim<'a>(origin: &'a str, purpose: Purpose, key: &'a str) -> ClaimAction<'a> {
+        ClaimAction {
+            id: Uuid::new_v4(),
+            origin_id: origin,
+            purpose,
+            action_key: key,
+            reply_episode_key: Some("early-episode"),
+        }
+    }
+
+    async fn final_ack(f: &Fixture, origin: &str) -> Uuid {
+        let id = claim_action(&f.peer, &claim(origin, Purpose::Final, "early-final"))
+            .await
+            .unwrap()
+            .expect("Final must claim an admitting obligation");
+        assert!(
+            ack_action(
+                &f.peer,
+                &ActionAck {
+                    origin_id: origin,
+                    id,
+                    outcome: AckOutcome::Sent,
+                    receipt: Some(json!({"message_id": "early-final-receipt"})),
+                },
+            )
+            .await
+            .unwrap(),
+            "Final ACK must settle before delivery finishes"
+        );
+        id
+    }
+
+    async fn make_automatic_eligible(pool: &PgPool, origin: &str) {
+        sqlx::query(
+            "UPDATE imsg_reply_obligations SET admission_kind='started',
+                 delivery_confirmed=TRUE, episode_key='early-episode', terminal_seen_at=NOW(),
+                 opened_at=NOW()-INTERVAL '24 hours', expires_at=NOW()
+             WHERE origin_id=$1",
+        )
+        .bind(origin)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn s1a_off_delivery_byte_equivalence() {
+        let f = Fixture::create(8_624_501).await;
+        f.busy();
+        assert!(!crate::services::imsg_reply::parse_enabled(None));
+        assert!(!crate::services::imsg_reply::parse_enabled(Some("off")));
+        let (status, mut body) = f.call(false, input(None, "  legacy\ninput  ", 200)).await;
+        assert_eq!(status, StatusCode::OK, "OFF legacy route response: {body}");
+        let turn = body["turn_id"].as_str().unwrap();
+        assert!(turn.starts_with(&format!("discord:{}:", f.channel)));
+        body["turn_id"] = json!("legacy-turn");
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::OK,
+                json!({
+                    "ok": true, "delivery": "queued", "turn_id": "legacy-turn",
+                    "channel_id": f.channel.to_string(), "reason": "external_turn_active",
+                })
+            )
+        );
+        assert_eq!(queue_texts(&f.shared, f.channel).await, ["legacy\ninput"]);
+        let queued = f
+            .shared
+            .queue_fixture_parts()
+            .0
+            .handle(poise::serenity_prelude::ChannelId::new(f.channel))
+            .snapshot()
+            .await;
+        assert!(queued.intervention_queue[0].reply_context.is_none());
+        assert_eq!(f.counts().await, (0, 0));
+        let default_body = input(None, "default legacy input", 200).to_string();
+        let default_route = deliver(&f.app, "s1a-agent", &default_body).await;
+        assert_eq!(
+            default_route.0,
+            StatusCode::OK,
+            "unscoped default route: {}",
+            default_route.1
+        );
+        assert_eq!(f.counts().await, (0, 0));
+
+        let pane_channel = f.channel + 100;
+        f.add_agent("s1a-off-pane", pane_channel).await;
+        let pane = InjectPane::new(pane_channel, "external");
+        pane.fold_paste(2);
+        let (status, body) = call(
+            &f.app,
+            "s1a-off-pane",
+            false,
+            f.probe(),
+            input(None, "  pane\nbytes  ", 200),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["delivery"], "injected", "{body}");
+        let buffer = pane.read("buffer").expect("legacy pane bytes");
+        let (header, text) = buffer.split_once('\n').unwrap();
+        assert_eq!(text, "pane\nbytes");
+        assert!(header.starts_with("[📱 imessage · 200 · ") && header.ends_with(']'));
+        assert!(pane.transcript_recorded_the_paste());
+        assert_eq!(f.counts().await, (0, 0));
+
+        let mut external = input(None, "external is unchanged", 200);
+        external["source"] = json!("external");
+        assert_eq!(f.call(true, external).await.0, StatusCode::OK);
+        assert_eq!(f.counts().await, (0, 0));
+        let positive = f
+            .call(
+                true,
+                input(Some("off-positive"), "authorized positive", 200),
+            )
+            .await;
+        assert_eq!(positive.0, StatusCode::OK, "{}", positive.1);
+        assert_eq!(
+            f.counts().await,
+            (1, 0),
+            "ON control reaches real admission SQL"
+        );
+        drop(pane);
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn s1a_author_before_origin_insert() {
+        let f = Fixture::create(8_624_502).await;
+        f.busy();
+        let denied = f
+            .call(true, input(Some("denied-author"), "status?", 300))
+            .await;
+        assert_eq!(
+            denied,
+            (
+                StatusCode::FORBIDDEN,
+                json!({"ok": false, "error": "author_not_allowed"})
+            )
+        );
+        assert_eq!(
+            f.counts().await,
+            (0, 0),
+            "authorization must precede INSERT"
+        );
+        f.assert_calls(0);
+        set_human_input_auth_for_tests(&f.shared, None, vec![200], true).await;
+        assert_eq!(
+            f.call(true, input(Some("ownerless"), "status?", 200))
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(f.counts().await, (0, 0));
+        set_human_input_auth_for_tests(&f.shared, Some(100), vec![200], true).await;
+        let allowed = f
+            .call(true, input(Some("allowed-author"), "status?", 200))
+            .await;
+        assert_eq!(allowed.0, StatusCode::OK, "{}", allowed.1);
+        assert_eq!(
+            f.counts().await,
+            (1, 0),
+            "same ON route must insert for an allowed author"
+        );
+        assert_eq!(queue_texts(&f.shared, f.channel).await, ["status?"]);
+        f.assert_calls(1);
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn s1a_origin_required_and_collision() {
+        let f = Fixture::create(8_624_503).await;
+        f.busy();
+        for origin in [None, Some(""), Some("   ")] {
+            let response = f.call(true, input(origin, "status?", 200)).await;
+            assert_eq!(
+                response.0,
+                StatusCode::BAD_REQUEST,
+                "missing GUID: {}",
+                response.1
+            );
+        }
+        let long = "g".repeat(257);
+        assert_eq!(
+            f.call(true, input(Some(&long), "status?", 200)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(f.counts().await, (0, 0));
+        f.assert_calls(0);
+        let original = f
+            .call(true, input(Some("MiXeD-GUID"), "  status?\n", 200))
+            .await;
+        assert_eq!(original.0, StatusCode::OK, "{}", original.1);
+        let mut normalized = input(Some("MiXeD-GUID"), "status?", 200);
+        normalized["source"] = json!(" imessage ");
+        assert_eq!(
+            f.call(true, normalized).await,
+            original,
+            "actual trimmed delivery bytes determine the hash"
+        );
+        let conflict = f
+            .call(true, input(Some("MiXeD-GUID"), "different text", 200))
+            .await;
+        assert_eq!(conflict.0, StatusCode::CONFLICT, "{}", conflict.1);
+        assert_eq!(conflict.1["error"], "origin_conflict");
+        f.assert_calls(1);
+        let different_case = f
+            .call(true, input(Some("mixed-guid"), "case distinct", 200))
+            .await;
+        assert_eq!(different_case.0, StatusCode::OK, "{}", different_case.1);
+        assert_eq!(f.row("MiXeD-GUID").await.origin_id, "MiXeD-GUID");
+        assert_eq!(f.counts().await, (2, 0));
+        f.assert_calls(2);
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn s1a_same_guid_concurrent_single_effect() {
+        let f = Fixture::create(8_624_504).await;
+        f.busy();
+        let barrier = Arc::new(Barrier::new(3));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut tasks = Vec::new();
+        for app in [f.app.clone(), f.peer_app.clone()] {
+            let (barrier, tx) = (barrier.clone(), tx.clone());
+            let probe = DeliveryProbe {
+                calls: f.calls.clone(),
+                entered: Some(entered.clone()),
+                release: Some(release.clone()),
+            };
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let answer = call(
+                    &app,
+                    "s1a-agent",
+                    true,
+                    probe,
+                    input(Some("concurrent"), "status?", 200),
+                )
+                .await;
+                tx.send(answer).await.unwrap();
+            }));
+        }
+        drop(tx);
+        barrier.wait().await;
+        tokio::time::timeout(Duration::from_secs(10), entered.notified())
+            .await
+            .expect("one INSERT owner enters delivery");
+        let pending = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await;
+        let calls = f.calls.load(Ordering::SeqCst);
+        release.notify_waiters();
+        assert_eq!(calls, 1, "ON CONFLICT loser must not poll delivery");
+        let pending = pending
+            .expect("duplicate returns while delivery is parked")
+            .unwrap();
+        assert_eq!(pending.0, StatusCode::ACCEPTED, "{}", pending.1);
+        assert_eq!(pending.1["error"], "admission_pending");
+        let accepted = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(accepted.0, StatusCode::OK, "{}", accepted.1);
+        assert_eq!(
+            f.call(true, input(Some("concurrent"), "status?", 200))
+                .await,
+            accepted
+        );
+        assert_eq!(f.counts().await, (1, 0));
+        assert_eq!(queue_texts(&f.shared, f.channel).await, ["status?"]);
+        f.assert_calls(1);
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn s1a_admitting_retry_never_redelivers() {
+        let f = Fixture::create(8_624_505).await;
+        f.busy();
+        let (task, release) = parked(&f, "retry-pending").await;
+        let retry = call(
+            &f.peer_app,
+            "s1a-agent",
+            true,
+            f.probe(),
+            input(Some("retry-pending"), "status?", 200),
+        )
+        .await;
+        release.notify_one();
+        let accepted = task.await.unwrap();
+        assert_eq!(retry.0, StatusCode::ACCEPTED, "{}", retry.1);
+        assert_eq!(retry.1["error"], "admission_pending");
+        assert_eq!(accepted.0, StatusCode::OK, "{}", accepted.1);
+        assert_eq!(queue_texts(&f.shared, f.channel).await, ["status?"]);
+        f.assert_calls(1);
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn s1a_unconfirmed_is_admitted_once() {
+        let f = Fixture::create(8_624_506).await;
+        let pane = InjectPane::new(f.channel, "external");
+        pane.set("fail_paste", "");
+        let body = input(Some("unconfirmed"), "status?", 200);
+        let original = f.call(true, body.clone()).await;
+        assert_eq!(original.0, StatusCode::OK, "{}", original.1);
+        assert_eq!(original.1["delivery"], "unconfirmed");
+        let row = f.row("unconfirmed").await;
+        assert_eq!(row.admission, "admitted");
+        assert_eq!(row.admission_kind.as_deref(), Some("unconfirmed"));
+        assert_eq!(row.delivery_confirmed, Some(false));
+        let tmux_calls = pane.tmux_calls();
+        assert!(tmux_calls > 0, "the actual pane path must execute");
+        assert_eq!(f.call(true, body).await, original);
+        assert_eq!(pane.tmux_calls(), tmux_calls);
+        f.assert_calls(1);
+        assert_eq!(f.counts().await, (1, 0));
+        drop(pane);
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn s1a_refusal_requires_no_effect_proof() {
+        let f = Fixture::create(8_624_507).await;
+        let known = input(Some("known-refusal"), "status?", 200);
+        let (task, release) = parked(&f, "known-refusal").await;
+        set_human_input_auth_for_tests(&f.shared, Some(100), Vec::new(), false).await;
+        release.notify_one();
+        let refused = task.await.unwrap();
+        assert_eq!(refused.0, StatusCode::FORBIDDEN, "{}", refused.1);
+        let row = f.row("known-refusal").await;
+        assert_eq!(
+            (row.admission.as_str(), row.resolution.as_str()),
+            ("refused", "closed")
+        );
+        assert!(row.closed_at.is_some());
+        assert!(queue_texts(&f.shared, f.channel).await.is_empty());
+        set_human_input_auth_for_tests(&f.shared, Some(100), vec![200], false).await;
+        assert_eq!(f.call(true, known).await, refused);
+        f.assert_calls(1);
+
+        let pane = InjectPane::new(f.channel, "external");
+        pane.set("attach", "1");
+        inject_hook::fault_handback(f.channel, inject_hook::HandbackFault::AnswerLost);
+        let uncertain = input(
+            Some("uncertain-refusal"),
+            "effect persisted but answer lost",
+            200,
+        );
+        let response = f.call(true, uncertain.clone()).await;
+        assert_eq!(
+            response.0,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{}",
+            response.1
+        );
+        assert_eq!(response.1["error"], "queue_refused");
+        assert_eq!(
+            queue_texts(&f.shared, f.channel).await,
+            ["effect persisted but answer lost"]
+        );
+        let row = f.row("uncertain-refusal").await;
+        assert!(matches!(row.admission.as_str(), "admitting" | "unknown"));
+        assert_eq!(
+            row.resolution, "open",
+            "effect uncertainty is not proved refusal"
+        );
+        assert!(row.closed_at.is_none());
+        let retry = f.call(true, uncertain).await;
+        assert_eq!(retry.0, StatusCode::ACCEPTED, "{}", retry.1);
+        assert_eq!(
+            retry.1["error"],
+            if row.admission == "unknown" {
+                "admission_unknown"
+            } else {
+                "admission_pending"
+            }
+        );
+        f.assert_calls(2);
+        assert_eq!(f.counts().await, (2, 0));
+        drop(pane);
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn s1a_pg_failure_no_effect() {
+        let f = Fixture::create(8_624_508).await;
+        f.busy();
+        assert_eq!(
+            f.call(true, input(Some("insert-positive"), "positive", 200))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        // Reject only INSERT so the live authorized route proves storage failure precedes delivery.
+        sqlx::raw_sql("CREATE FUNCTION s1a_fail_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 's1a INSERT fault'; END $$; CREATE TRIGGER s1a_insert_fault BEFORE INSERT ON imsg_reply_obligations FOR EACH ROW EXECUTE FUNCTION s1a_fail_insert()")
+            .execute(&f.pool).await.unwrap();
+        let failed = f
+            .call(true, input(Some("insert-failure"), "must not deliver", 200))
+            .await;
+        assert_eq!(failed.0, StatusCode::SERVICE_UNAVAILABLE, "{}", failed.1);
+        assert!(
+            read_obligation(&f.peer, "insert-failure")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        f.assert_calls(1);
+        assert_eq!(queue_texts(&f.shared, f.channel).await, ["positive"]);
+        assert_eq!(f.counts().await, (1, 0));
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn s1a_origin_identity_isolation() {
+        let f = Fixture::create(8_624_509).await;
+        f.busy();
+        for (origin, column, value) in [
+            ("identity-agent", "agent_id", "other-agent"),
+            ("identity-channel", "channel_id", "999"),
+            ("identity-person", "person_id", "300"),
+        ] {
+            let body = input(Some(origin), origin, 200);
+            assert_eq!(f.call(true, body.clone()).await.0, StatusCode::OK);
+            let original_hash = f.row(origin).await.request_hash;
+            let update = match column {
+                "agent_id" => "UPDATE imsg_reply_obligations SET agent_id=$2 WHERE origin_id=$1",
+                "channel_id" => {
+                    "UPDATE imsg_reply_obligations SET channel_id=$2 WHERE origin_id=$1"
+                }
+                _ => {
+                    "UPDATE imsg_reply_obligations SET person_id=$2::text::bigint WHERE origin_id=$1"
+                }
+            };
+            sqlx::query(update)
+                .bind(origin)
+                .bind(value)
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                f.row(origin).await.request_hash,
+                original_hash,
+                "identity guard is tested independently of hash"
+            );
+            let rejected = f.call(true, body).await;
+            assert_eq!(
+                rejected.0,
+                StatusCode::CONFLICT,
+                "same hash, different {column}: {}",
+                rejected.1
+            );
+            assert_eq!(rejected.1["error"], "origin_conflict");
+        }
+        f.assert_calls(3);
+        assert_eq!(f.counts().await, (3, 0));
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn p1_3_a_admitting_early_final_ack() {
+        let f = Fixture::create(8_624_510).await;
+        f.busy();
+        let (task, release) = parked(&f, "early-final").await;
+        final_ack(&f, "early-final").await;
+        let row = f.row("early-final").await;
+        release.notify_one();
+        assert_eq!(task.await.unwrap().0, StatusCode::OK);
+        assert_eq!(
+            (row.admission.as_str(), row.resolution.as_str()),
+            ("admitting", "replied")
+        );
+        assert!(row.active_send_action.is_none());
+        f.assert_calls(1);
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn p1_3_b_late_settlement_keeps_replied() {
+        let f = Fixture::create(8_624_511).await;
+        f.busy();
+        let (task, release) = parked(&f, "late-settlement").await;
+        let id = final_ack(&f, "late-settlement").await;
+        let closed_at = f.row("late-settlement").await.closed_at;
+        release.notify_one();
+        let delivered = task.await.unwrap();
+        assert_eq!(delivered.0, StatusCode::OK, "{}", delivered.1);
+        let row = f.row("late-settlement").await;
+        assert_eq!(
+            (row.admission.as_str(), row.resolution.as_str()),
+            ("admitted", "replied")
+        );
+        assert_eq!(row.closed_at, closed_at);
+        assert!(row.active_send_action.is_none());
+        let action = crate::db::imsg_reply::read_action(&f.peer, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(action.status, "sent");
+        assert_eq!(
+            action.receipt,
+            Some(json!({"message_id": "early-final-receipt"}))
+        );
+        f.assert_calls(1);
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn p1_3_c_replied_restart_not_fallback_candidate() {
+        let f = Fixture::create(8_624_512).await;
+        f.busy();
+        let (task, release) = parked(&f, "restart-replied").await;
+        final_ack(&f, "restart-replied").await;
+        release.notify_one();
+        assert_eq!(task.await.unwrap().0, StatusCode::OK);
+        make_automatic_eligible(&f.peer, "restart-replied").await;
+        f.pool.close().await;
+        f.peer.close().await;
+        let restarted = f.db.connect_and_migrate().await;
+        assert_eq!(
+            read_obligation(&restarted, "restart-replied")
+                .await
+                .unwrap()
+                .unwrap()
+                .resolution,
+            "replied"
+        );
+        let candidates: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM imsg_reply_obligations WHERE origin_id='restart-replied' AND resolution='open' AND expires_at<=NOW()")
+            .fetch_one(&restarted).await.unwrap();
+        assert_eq!(
+            candidates, 0,
+            "restart reads must not revive an already replied origin"
+        );
+        for purpose in [Purpose::Fallback, Purpose::Expiry] {
+            assert!(
+                claim_action(&restarted, &claim("restart-replied", purpose, "restart"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM imsg_reply_obligations), (SELECT COUNT(*) FROM imsg_reply_actions)")
+            .fetch_one(&restarted).await.unwrap();
+        assert_eq!(counts, (1, 1));
+        f.assert_calls(1);
+        restarted.close().await;
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn p1_3_d_admitting_blocks_automatic_claims() {
+        let f = Fixture::create(8_624_513).await;
+        f.busy();
+        let (task, release) = parked(&f, "automatic-pending").await;
+        make_automatic_eligible(&f.peer, "automatic-pending").await;
+        let mut claimed = Vec::new();
+        for purpose in [Purpose::Fallback, Purpose::Expiry] {
+            claimed.push(
+                claim_action(&f.peer, &claim("automatic-pending", purpose, "pending"))
+                    .await
+                    .unwrap(),
+            );
+        }
+        let before = f.row("automatic-pending").await;
+        release.notify_one();
+        assert_eq!(task.await.unwrap().0, StatusCode::OK);
+        assert_eq!(
+            claimed,
+            [None, None],
+            "admitting gate must independently exclude automatic sends"
+        );
+        assert!(before.active_send_action.is_none());
+        assert_eq!(f.counts().await, (1, 0));
+        f.assert_calls(1);
+        f.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn s1a_settlement_failure_keeps_admitting_without_success_or_redelivery() {
+        let f = Fixture::create(8_624_514).await;
+        f.busy();
+        // Reject only UPDATE: delivery must occur once, while failed settlement cannot invent success.
+        sqlx::raw_sql("CREATE FUNCTION s1a_fail_settlement() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 's1a settlement fault'; END $$; CREATE TRIGGER s1a_settlement_fault BEFORE UPDATE ON imsg_reply_obligations FOR EACH ROW EXECUTE FUNCTION s1a_fail_settlement()")
+            .execute(&f.pool).await.unwrap();
+        let body = input(Some("settlement-failure"), "delivered once", 200);
+        let response = f.call(true, body.clone()).await;
+        assert_eq!(
+            response.0,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{}",
+            response.1
+        );
+        assert_eq!(f.row("settlement-failure").await.admission, "admitting");
+        assert_eq!(queue_texts(&f.shared, f.channel).await, ["delivered once"]);
+        let retry = f.call(true, body).await;
+        assert_eq!(retry.0, StatusCode::ACCEPTED, "{}", retry.1);
+        assert_eq!(retry.1["error"], "admission_pending");
+        f.assert_calls(1);
+        assert_eq!(f.counts().await, (1, 0));
+        f.close().await;
+    }
+}
