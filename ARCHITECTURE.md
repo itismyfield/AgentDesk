@@ -2705,6 +2705,7 @@ src/
 │   │   │   ├── host_renumber_tests.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── input_facts.rs
+│   │   │   ├── legacy_hop_retry_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_resume_actor_tests.rs
 │   │   │   ├── operator_resume_delivery_tests.rs
