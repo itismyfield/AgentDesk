@@ -124,9 +124,10 @@ impl Lab {
     }
 
     /// Attach an 80×24 client from a pane of a second private server.
+    /// The target is quoted because zsh, the default shell on macOS, expands a bare `=name`.
     fn attach_small_client(&self, name: &str) {
         let attach = format!(
-            "env -u TMUX '{}' -L {} -f /dev/null attach -t ={name}",
+            "env -u TMUX '{}' -L {} -f /dev/null attach -t '={name}'",
             self.real.display(),
             self.socket
         );
