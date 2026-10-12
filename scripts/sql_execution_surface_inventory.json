@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "ad1007b0686187ff15667f73ecd085dc77eec2ca",
+  "measured_at_sha": "afd5c384ebc25336b3acd0b57c36209577da8020",
   "records": [
     {
       "root": "migrations/postgres",
@@ -40429,6 +40429,15 @@
       "symbol": "query_scalar",
       "classification": "UNRESOLVED",
       "fingerprint": "sha256:a5e1442f78b9a9081ea857b67a2c90a43c279f40b24c9d5a25005e99bd46881f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/tui_o/repost/projection.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:68297efc8d72bff15a2491ce66ab29f19468e3fa18b128006ccd4499eba3f738"
     },
     {
       "root": "src",
