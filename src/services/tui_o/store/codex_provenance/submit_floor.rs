@@ -1,5 +1,6 @@
 //! Dormant submit coordinates; reading a floor never grants input or delivery permission.
 
+use super::known_fields;
 use super::{CodexEpisodeSpan, CodexProvenance, ExecutionProofRef, TurnEpisodeRef, whole};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::same_file;
@@ -55,19 +56,6 @@ fn strict_context<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Binding
         return Err(serde::de::Error::custom("unknown prepared context field"));
     }
     Ok(context)
-}
-
-pub(super) fn known_fields(read: &serde_json::Value, model: &serde_json::Value) -> bool {
-    use serde_json::Value::{Array, Object};
-    match (read, model) {
-        (Object(read), Object(model)) => read.iter().all(|(key, value)| {
-            model
-                .get(key)
-                .is_some_and(|expected| known_fields(value, expected))
-        }),
-        (Array(read), Array(model)) => read.iter().zip(model).all(|(a, b)| known_fields(a, b)),
-        _ => true,
-    }
 }
 
 fn hash(value: &str) -> bool {

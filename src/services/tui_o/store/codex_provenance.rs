@@ -77,7 +77,22 @@ impl ChannelStore {
 
     pub(crate) fn read_codex_schema1(&self) -> Sidecar {
         let channel = self.init.channel;
-        match durable::read_json::<CodexProvenance>(&self.dir.join(CODEX_PROVENANCE_FILE)) {
+        let decoded =
+            durable::read_json::<serde_json::Value>(&self.dir.join(CODEX_PROVENANCE_FILE))
+                .and_then(|value| {
+                    value
+                        .map(|value| {
+                            let read: CodexProvenance = serde_json::from_value(value.clone())?;
+                            if !known_fields(&value, &serde_json::to_value(&read)?) {
+                                return Err(super::StoreError::Rejected(
+                                    "unknown Codex provenance field".into(),
+                                ));
+                            }
+                            Ok(read)
+                        })
+                        .transpose()
+                });
+        match decoded {
             Ok(None) => Sidecar::Missing,
             Ok(Some(read)) if read.schema != SCHEMA || read.channel != channel => {
                 Sidecar::Unavailable("codex_provenance_identity")
@@ -168,3 +183,16 @@ fn valid(channel: u64, next: &CodexProvenance) -> bool {
 #[cfg(all(test, unix))]
 #[path = "codex_provenance_tests.rs"]
 mod tests;
+
+pub(super) fn known_fields(read: &serde_json::Value, model: &serde_json::Value) -> bool {
+    use serde_json::Value::{Array, Object};
+    match (read, model) {
+        (Object(read), Object(model)) => read.iter().all(|(key, value)| {
+            model
+                .get(key)
+                .is_some_and(|expected| known_fields(value, expected))
+        }),
+        (Array(read), Array(model)) => read.iter().zip(model).all(|(a, b)| known_fields(a, b)),
+        _ => true,
+    }
+}

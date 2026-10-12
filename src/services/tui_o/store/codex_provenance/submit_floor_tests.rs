@@ -593,3 +593,37 @@ fn s2b1a_real_parent_sync_failure_prevents_prepare_and_close_ack() {
         ));
     }
 }
+
+#[test]
+fn s2b1b_p2_strict_schema1_reader_rejects_nested_unknown_fields_without_writes() {
+    let fixture = Fixture::new();
+    let old = old_evidence(&fixture.floor);
+    let known = serde_json::to_value(&old).unwrap();
+    std::fs::write(fixture.path(), serde_json::to_vec(&known).unwrap()).unwrap();
+    assert!(matches!(
+        fixture.store.read_codex_schema1(),
+        Sidecar::Present(_)
+    ));
+    for pointer in [
+        "/spans/0/execution",
+        "/spans/0/episode",
+        "/spans/0/execution/source",
+        "/denies/0/execution",
+        "/denies/0/episode",
+    ] {
+        let mut value = known.clone();
+        value.pointer_mut(pointer).unwrap()["future"] = true.into();
+        std::fs::write(fixture.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        let before = tree(fixture.root.path());
+        assert!(
+            matches!(fixture.store.read_codex_schema1(), Sidecar::Unavailable(_)),
+            "nested unknown field at {pointer} must be rejected"
+        );
+        assert_eq!(tree(fixture.root.path()), before);
+    }
+    std::fs::write(fixture.path(), serde_json::to_vec(&known).unwrap()).unwrap();
+    assert!(matches!(
+        fixture.store.read_codex_schema1(),
+        Sidecar::Present(_)
+    ));
+}

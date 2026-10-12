@@ -45,7 +45,7 @@ impl ChannelStore {
             let raw =
                 durable::read_json::<serde_json::Value>(&self.dir.join(CODEX_PROVENANCE_FILE))?
                     .ok_or_else(|| StoreError::Rejected("Codex provenance changed".into()))?;
-            if !super::submit_floor::known_fields(&raw, &serde_json::to_value(&read.0)?) {
+            if !super::known_fields(&raw, &serde_json::to_value(&read.0)?) {
                 return Err(StoreError::Rejected(
                     "unknown Codex provenance field".into(),
                 ));

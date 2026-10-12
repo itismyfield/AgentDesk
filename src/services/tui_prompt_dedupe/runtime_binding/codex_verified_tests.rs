@@ -1962,3 +1962,48 @@ fn canary_hold_diagnostic_preserves_expired_state_when_launch_context_is_unavail
         before_nonce
     );
 }
+
+#[test]
+fn s2b1b_p2_snapshot_rejects_a_valid_successor_incarnation() {
+    let mut h = Fixture::new("fresh", None);
+    h.header(ID, false);
+    h.send("session-start", ID, Value::Null, None);
+    let capture = |tmux: &str| {
+        crate::services::tmux_common::with_tmux_source_authority(tmux, |authority| {
+            codex_verified::VerifiedSourceSnapshot::capture(authority).unwrap()
+        })
+    };
+    let a = capture(&h.context.tmux_session);
+    let mut next = h.context.clone();
+    next.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+    next.created_at = chrono::Utc::now();
+    let prepared = PreparedIncarnation::create(next.clone()).unwrap();
+    h.context = next;
+    h.canonical = prepared.path;
+    fs::write(
+        crate::services::tmux_common::session_temp_path(&h.context.tmux_session, "spawn_nonce"),
+        &h.context.execution_nonce,
+    )
+    .unwrap();
+    codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Allowed);
+    h.header(CHILD, false);
+    h.send("session-start", CHILD, Value::Null, None);
+    let b = capture(&h.context.tmux_session);
+    assert_ne!(a.context().execution_nonce, b.context().execution_nonce);
+    assert_ne!(a.execution(), b.execution());
+    let recheck = |snapshot: &codex_verified::VerifiedSourceSnapshot| {
+        crate::services::tmux_common::with_tmux_source_authority(
+            &h.context.tmux_session,
+            |authority| snapshot.recheck(authority),
+        )
+    };
+    assert!(
+        recheck(&b).is_ok(),
+        "successor B must independently be valid"
+    );
+    assert!(
+        recheck(&a).is_err(),
+        "valid current evidence cannot replace captured A evidence"
+    );
+    assert!(recheck(&b).is_ok());
+}
