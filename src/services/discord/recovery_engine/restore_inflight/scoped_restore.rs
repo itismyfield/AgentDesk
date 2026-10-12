@@ -1,11 +1,16 @@
 use super::*;
 
 #[cfg(all(test, unix))]
+use super::herdr_before_start_restart::{BeforeStartRestart, BeforeStartRestartReport};
+#[cfg(all(test, unix))]
 use crate::services::agent_protocol::NativeTerminalKind;
 #[cfg(all(test, unix))]
-use crate::services::cluster::channel_home_port::scoped_restore::{
-    InflightObservation, RestoreContext, RestoreScope, RestoreStatus, RestoreWitness,
-    mutant as scoped_mutant,
+use crate::services::cluster::channel_home_port::{
+    RestoreFailure,
+    scoped_restore::{
+        InflightObservation, RestoreContext, RestoreScope, RestoreStatus, RestoreWitness,
+        mutant as scoped_mutant,
+    },
 };
 
 #[cfg(all(test, unix))]
@@ -33,11 +38,22 @@ fn check_restore_context(context: &RestoreContext, provider: &ProviderKind) -> R
     Ok(())
 }
 
+/// What the canonical row's own bytes say about a before-start policy receipt.
 #[cfg(all(test, unix))]
-fn snapshot_episode(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawReceipt {
+    Absent,
+    Present,
+    /// Unreadable bytes are never taken as absence.
+    Indeterminate,
+}
+
+/// The exact episode and its raw receipt presence, both read under one canonical row lock.
+#[cfg(all(test, unix))]
+fn snapshot_receipt(
     provider: &ProviderKind,
     expected: &inflight::InflightTurnState,
-) -> Result<inflight::InflightTurnState, String> {
+) -> Result<(inflight::InflightTurnState, RawReceipt), String> {
     let pin = inflight::InflightEpisodePin::from_state(expected);
     let guard = inflight::lock_inflight_episode(provider, expected.channel_id, &pin)
         .map_err(|error| format!("retryable: inflight episode unavailable: {error:?}"))?;
@@ -45,7 +61,24 @@ fn snapshot_episode(
     if state.runtime_kind_unknown_on_disk || state.version > inflight::inflight_state_version() {
         return Err("unsupported inflight format/runtime".into());
     }
-    Ok(state)
+    let raw = match inflight::inflight_runtime_root().map(|root| {
+        std::fs::read(inflight::inflight_state_path(
+            &root,
+            provider,
+            expected.channel_id,
+        ))
+    }) {
+        Some(Ok(bytes))
+            if state.herdr_before_start_stop.is_some()
+                || inflight::raw_before_start_receipt(&String::from_utf8_lossy(&bytes)) =>
+        {
+            RawReceipt::Present
+        }
+        Some(Ok(_)) => RawReceipt::Absent,
+        _ => RawReceipt::Indeterminate,
+    };
+    drop(guard);
+    Ok((state, raw))
 }
 
 #[cfg(all(test, unix))]
@@ -53,31 +86,109 @@ fn verify_snapshot(
     provider: &ProviderKind,
     snapshot: &inflight::InflightTurnState,
 ) -> Result<(), String> {
-    let fresh = snapshot_episode(provider, snapshot)?;
-    if serde_json::to_value(&fresh).map_err(|e| e.to_string())?
-        != serde_json::to_value(snapshot).map_err(|e| e.to_string())?
+    verify_receipt(provider, snapshot, None)
+}
+
+/// Like [`verify_snapshot`], and also requires the same raw receipt presence when given.
+#[cfg(all(test, unix))]
+fn verify_receipt(
+    provider: &ProviderKind,
+    snapshot: &inflight::InflightTurnState,
+    raw: Option<RawReceipt>,
+) -> Result<(), String> {
+    let (fresh, fresh_raw) = snapshot_receipt(provider, snapshot)?;
+    if raw.is_some_and(|raw| raw != fresh_raw)
+        || serde_json::to_value(&fresh).map_err(|e| e.to_string())?
+            != serde_json::to_value(snapshot).map_err(|e| e.to_string())?
     {
         return Err("retryable: inflight progress changed during restore".into());
     }
     Ok(())
 }
 
+/// A receipt in the raw row takes the row off every actor, replay, native and provider path.
+#[cfg(all(test, unix))]
+fn policy_receipt(raw: RawReceipt, state: &inflight::InflightTurnState) -> bool {
+    let unreadable = !state
+        .herdr_before_start_stop
+        .as_ref()
+        .is_some_and(|receipt| receipt.supported());
+    raw != RawReceipt::Absent
+        && !scoped_mutant("b3b3-receipt-first")
+        && !(unreadable && scoped_mutant("b3b3-raw-as-absent"))
+}
+
+/// Only a prior process's readable receipt with verified replay authority may be settled.
+#[cfg(all(test, unix))]
+fn classify_policy(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+    raw: RawReceipt,
+    lookup: &replay_hold::ReplayLookup,
+) -> Result<BeforeStartRestart, RestoreFailure> {
+    if raw == RawReceipt::Indeterminate {
+        return Err(RestoreFailure::retryable(
+            "policy receipt presence is indeterminate",
+        ));
+    }
+    if let replay_hold::ReplayLookup::Unverified { reason, .. } = lookup
+        && !scoped_mutant("b3b3-unverified-as-verified")
+    {
+        return Err(RestoreFailure::retryable(reason));
+    }
+    // The decoder holds a receipt of this process's generation even without an actor.
+    match super::herdr_before_start_restart::decode(shared, provider, state) {
+        Some(BeforeStartRestart::Held(why)) => Err(RestoreFailure::Rejected(why.into())),
+        Some(settle) => Ok(settle),
+        None => Err(RestoreFailure::Rejected(
+            "a receipt this binary cannot read".into(),
+        )),
+    }
+}
+
+/// Settled only on the guarded clear of the exact row; any retained step stays held.
+#[cfg(all(test, unix))]
+fn policy_observation(report: BeforeStartRestartReport) -> InflightObservation {
+    match report {
+        BeforeStartRestartReport::Settled if scoped_mutant("b3b3-policy-native") => {
+            InflightObservation::Settled {
+                kind: NativeTerminalKind::Aborted,
+            }
+        }
+        BeforeStartRestartReport::Retained(_) if scoped_mutant("b3b3-clear-is-success") => {
+            InflightObservation::PolicyReceiptSettled
+        }
+        BeforeStartRestartReport::Settled => InflightObservation::PolicyReceiptSettled,
+        BeforeStartRestartReport::Retained(why) => InflightObservation::PolicyReceiptHeld {
+            reason: RestoreFailure::retryable(why),
+        },
+    }
+}
+
 #[cfg(all(test, unix))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RestoreEffect {
-    OutputOnly,
-    Provider,
+    PolicySettlement,
+    NativeTerminalSettlement,
+    ReplayDebtDelivery,
+    ProviderExecution,
+    NoEffect,
 }
 
+/// A receipt-free row keeps its existing class; anything unclassified admits no effect.
 #[cfg(all(test, unix))]
 fn restore_effect(
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
-) -> Option<RestoreEffect> {
-    if state.replay_rerun_blocked()
-        || super::herdr_admitted_restart::admitted(provider, state).is_some()
-    {
-        Some(RestoreEffect::OutputOnly)
+    policy: bool,
+) -> RestoreEffect {
+    if policy || scoped_mutant("b3b3-n-as-policy") {
+        RestoreEffect::PolicySettlement
+    } else if state.replay_rerun_blocked() {
+        RestoreEffect::ReplayDebtDelivery
+    } else if super::herdr_admitted_restart::admitted(provider, state).is_some() {
+        RestoreEffect::NativeTerminalSettlement
     } else if herdr_turn_held(provider, state)
         || state.rebind_origin
         || recovery_terminal_delivery_already_committed(state)
@@ -85,9 +196,9 @@ fn restore_effect(
         || !state.full_response.is_empty()
         || state.request_owner_user_id == 0
     {
-        None
+        RestoreEffect::NoEffect
     } else {
-        Some(RestoreEffect::Provider)
+        RestoreEffect::ProviderExecution
     }
 }
 
@@ -122,7 +233,7 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
     let Some(expected) = probe.states.into_iter().next() else {
         return Ok(installed(None, InflightObservation::Empty));
     };
-    let snapshot = snapshot_episode(provider, &expected)?;
+    let (snapshot, raw) = snapshot_receipt(provider, &expected)?;
     let mut state = snapshot.clone();
     if state.runtime_kind_unknown_on_disk || state.version > inflight::inflight_state_version() {
         return Err("unsupported inflight format/runtime".into());
@@ -130,13 +241,25 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
     b3a2_tests::pause("install-hydrate").await;
     let lookup =
         replay_hold::hydrate_replay_hold_checked(shared.pg_pool.as_ref(), &mut state).await;
-    if let replay_hold::ReplayLookup::Unverified { reason, .. } = lookup
+    let receipt = policy_receipt(raw, &state);
+    if let replay_hold::ReplayLookup::Unverified { reason, .. } = &lookup
+        && !receipt
         && !scoped_mutant("receipt-complete")
     {
-        return Err(reason);
+        return Err(reason.clone());
     }
-    verify_snapshot(provider, &snapshot)?;
+    verify_receipt(provider, &snapshot, Some(raw))?;
     check_restore_context(context, provider)?;
+    // A receipt row installs no actor and consults no other owner; only resume may settle it.
+    if receipt && !scoped_mutant("b3b3-actor-first") {
+        let reason = classify_policy(shared, provider, &state, raw, &lookup)
+            .err()
+            .unwrap_or_else(|| RestoreFailure::retryable("policy receipt awaits recovery"));
+        return Ok(installed(
+            Some(state),
+            InflightObservation::PolicyReceiptHeld { reason },
+        ));
+    }
     let intake = if state.replay_rerun_blocked() {
         None
     } else {
@@ -353,18 +476,37 @@ pub(in crate::services::discord) async fn resume_inflight_scoped(
     let Some(expected) = &installed.state else {
         return Ok(InflightObservation::Empty);
     };
-    let snapshot = snapshot_episode(provider, expected)?;
+    let (snapshot, raw) = snapshot_receipt(provider, expected)?;
     let mut state = snapshot.clone();
     b3a2_tests::pause("resume-hydrate").await;
-    if let replay_hold::ReplayLookup::Unverified { reason, .. } =
-        replay_hold::hydrate_replay_hold_checked(Some(pool), &mut state).await
+    let lookup = replay_hold::hydrate_replay_hold_checked(Some(pool), &mut state).await;
+    let receipt = policy_receipt(raw, &state);
+    if let replay_hold::ReplayLookup::Unverified { reason, .. } = &lookup
+        && !receipt
     {
-        return Err(reason);
+        return Err(reason.clone());
     }
     b3a2_tests::pause("resume-receipt").await;
-    verify_snapshot(provider, &snapshot)?;
+    verify_receipt(provider, &snapshot, Some(raw))?;
     check_restore_context(context, provider)?;
-    if !state.replay_rerun_blocked() {
+    let mut policy = None;
+    if receipt {
+        // Settlement takes only a receipt that installation held without an actor.
+        let held = installed.actor.is_none()
+            && matches!(
+                installed.observation,
+                InflightObservation::PolicyReceiptHeld { .. }
+            );
+        match classify_policy(shared, provider, &state, raw, &lookup) {
+            Ok(settle) if held => policy = Some(settle),
+            Ok(_) => {
+                return Ok(InflightObservation::PolicyReceiptHeld {
+                    reason: RestoreFailure::Rejected("receipt follows an actor".into()),
+                });
+            }
+            Err(reason) => return Ok(InflightObservation::PolicyReceiptHeld { reason }),
+        }
+    } else if !state.replay_rerun_blocked() {
         let intake = crate::services::agent_recovery::channel_recovery_intake(
             provider,
             &state.channel_id.to_string(),
@@ -387,12 +529,13 @@ pub(in crate::services::discord) async fn resume_inflight_scoped(
         .await
         .map_err(|e| format!("home lookup failed: {e:?}"))?
         .ok_or("home identity absent")?;
-    verify_snapshot(provider, &snapshot)?;
+    verify_receipt(provider, &snapshot, Some(raw))?;
     check_restore_context(context, provider)?;
-    if !context.scope.matches(&home) {
+    if !context.scope.matches(&home) && !scoped_mutant("b3b3-home-stale") {
         return Err("home identity changed after receipt lookup".into());
     }
-    let Some(effect) = restore_effect(provider, &state) else {
+    let effect = restore_effect(provider, &state, policy.is_some());
+    if effect == RestoreEffect::NoEffect {
         return Ok(if herdr_turn_held(provider, &state) {
             InflightObservation::HerdrHeld
         } else {
@@ -400,13 +543,12 @@ pub(in crate::services::discord) async fn resume_inflight_scoped(
                 "completion evidence or recovery effect classification unavailable".into(),
             )
         });
-    };
+    }
+    // Settlement and existing output need only recovery admission; a provider run needs a command.
+    let recovery = effect != RestoreEffect::ProviderExecution
+        && !(effect == RestoreEffect::PolicySettlement && scoped_mutant("b3b3-policy-command"));
     let permit = gate
-        .admit_at_epoch(
-            provider.as_str(),
-            context.scope.epoch,
-            effect == RestoreEffect::OutputOnly,
-        )
+        .admit_at_epoch(provider.as_str(), context.scope.epoch, recovery)
         .ok_or("home execution admission refused")?;
     if installed
         .effects_started
@@ -415,6 +557,11 @@ pub(in crate::services::discord) async fn resume_inflight_scoped(
         return Err("inflight effects already started for this installation".into());
     }
     channel_home::command_scope(Some(permit), async {
+        // A policy receipt settles before any handoff, replay, native or provider path.
+        if effect == RestoreEffect::PolicySettlement {
+            let settle = policy.unwrap_or(BeforeStartRestart::Held("no policy receipt to settle"));
+            return Ok(policy_observation(settle.settle(http, shared, &state).await));
+        }
         if installed.activated {
             let proof = installed.actor.clone().ok_or("installed actor proof absent")?;
             match checked_handoff(shared, provider, &state, proof, false).await {
@@ -473,7 +620,7 @@ pub(in crate::services::discord) async fn resume_inflight_scoped(
                 }
             });
         }
-        if effect != RestoreEffect::Provider {
+        if effect != RestoreEffect::ProviderExecution {
             return Ok(InflightObservation::Deferred("output-only recovery retained the row".into()));
         }
         // An actor this installation merely observed retains its existing driver.
@@ -1297,12 +1444,12 @@ mod b3a2_tests {
     use crate::services::cluster::channel_home;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    struct Barrier {
+    pub(super) struct Barrier {
         stage: &'static str,
-        entered: tokio::sync::Notify,
-        release: tokio::sync::Notify,
+        pub(super) entered: tokio::sync::Notify,
+        pub(super) release: tokio::sync::Notify,
     }
-    tokio::task_local! { static BARRIER: Arc<Barrier>; }
+    tokio::task_local! { pub(super) static BARRIER: Arc<Barrier>; }
     pub(super) async fn pause(stage: &str) {
         if let Ok(barrier) = BARRIER.try_with(Clone::clone)
             && stage == barrier.stage
@@ -1311,7 +1458,7 @@ mod b3a2_tests {
             barrier.release.notified().await;
         }
     }
-    fn barrier(stage: &'static str) -> Arc<Barrier> {
+    pub(super) fn barrier(stage: &'static str) -> Arc<Barrier> {
         Arc::new(Barrier {
             stage,
             entered: tokio::sync::Notify::new(),
@@ -1756,3 +1903,7 @@ mod b3a2_tests {
         db.drop().await;
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "scoped_policy_receipt_tests.rs"]
+mod policy_receipt_tests;
