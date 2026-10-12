@@ -8,6 +8,8 @@ use crate::services::claude_tui::host_input::InputTransport;
 use crate::services::platform::binary_resolver::runtime_command;
 use crate::services::session_host::{HostKey, tmux_key_name};
 
+pub(crate) mod guarded;
+
 pub(crate) struct SubmissionTmux;
 
 impl SubmissionTmux {
@@ -110,6 +112,10 @@ impl InputTransport for SubmissionTmux {
 
     fn capture(&mut self, session: &str, scroll_back: i32) -> Option<String> {
         self.capture_raw(session, scroll_back)
+    }
+
+    fn capture_draft(&mut self, session: &str) -> Option<String> {
+        self.capture_raw(session, -80)
     }
 
     fn pane_alive(&mut self, session: &str) -> bool {

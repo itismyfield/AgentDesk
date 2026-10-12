@@ -523,7 +523,8 @@ INSERT INTO intake_outbox (
     merge_consecutive, reply_to_user_message, defer_watcher_resume,
     wait_for_completion, preserve_on_cancel, agent_id, provider,
     owner_instance_id, owner_generation, admission_kind, idempotency_key,
-    status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs
+    status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs,
+    replay_source_message_ids
 ) VALUES (
     $1, $2, $3,
     $4, $5, $6, $7,
@@ -531,7 +532,7 @@ INSERT INTO intake_outbox (
     $13, $14, $15,
     $16, $17, $18, $19,
     $20, $21, $22, $23,
-    $24, $25, $26, $27, $28
+    $24, $25, $26, $27, $28, $29
 )
 RETURNING id
 "#;
@@ -600,6 +601,7 @@ pub(crate) async fn insert_admission_savepoint(
         .bind(None::<i64>)
         .bind(&payload.execution_requirements)
         .bind(&payload.attachment_refs)
+        .bind(payload.replay_source_message_ids.as_deref())
         .fetch_one(&mut **tx)
         .await;
 
@@ -1066,6 +1068,7 @@ mod tests {
             required_labels: json!([]),
             channel_id: channel.to_string(),
             user_msg_id: msg.to_string(),
+            replay_source_message_ids: None,
             request_owner_id: "user-1".to_string(),
             request_owner_name: Some("Tester".to_string()),
             user_text: "hello".to_string(),

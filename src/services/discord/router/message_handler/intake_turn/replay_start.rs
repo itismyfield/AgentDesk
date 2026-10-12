@@ -20,7 +20,7 @@ pub(super) struct StartRequest<'a> {
 }
 
 /// A start and whether it is fresh, or the turn's result once a refused start is settled.
-type Checked = Result<(ReplayStart, bool), Result<(), Error>>;
+type Checked = Result<(ReplayStart, bool), Result<IntakeExecution, Error>>;
 
 /// Runs `admit`, settling a refused start with `stop`; boxed inside this plain function so the
 /// check's store futures never sit in the intake turn's poll frame.
@@ -128,7 +128,7 @@ async fn stop(
     inflight: &InflightTurnState,
     cancel_token: &Arc<CancelToken>,
     stop: StartStop,
-) -> Result<(), Error> {
+) -> Result<IntakeExecution, Error> {
     let defer = crate::services::discord::live_bridge::defer_unstarted_turn;
     let (requeue, reason) = match &stop {
         StartStop::Consumed => (false, "replay_start_consumed"),
@@ -141,8 +141,17 @@ async fn stop(
             (true, "replay_start_deferred")
         }
     };
+    let outcome = if requeue {
+        IntakeExecution::Deferred
+    } else {
+        IntakeExecution::ConsumedProtected
+    };
+    if inflight.intake_outbox_id().is_some() {
+        defer(shared, provider, inflight, cancel_token, false, reason).await;
+        return Ok(outcome);
+    }
     if defer(shared, provider, inflight, cancel_token, requeue, reason).await || !requeue {
-        return Ok(());
+        return Ok(outcome);
     }
     Err(format!(
         "replay start deferred; channel {} refused the requeue",

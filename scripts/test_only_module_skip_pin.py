@@ -34,6 +34,9 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/tui_input/actor/gate/claude_guarded/acceptance_tests.rs",
+        "src/services/tui_input/submission_tmux/guarded/protocol_tests.rs",
+        "src/services/tui_input/submission_tmux/guarded/transport_tests.rs",
         "src/services/discord/input_runtime/runtime/dormant_tests.rs",
         "src/services/discord/input_runtime/runtime/drive_tests.rs",
         "src/services/discord/input_runtime/runtime/notice_tests.rs",
@@ -71,6 +74,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/inflight/replay_projection_tests.rs",
         "src/services/discord/inflight/receipt_boundary_tests.rs",
         "src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs",
+        "src/services/discord/recovery_engine/restore_inflight/scoped_policy_receipt_tests.rs",
         "src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs",
         "src/services/dispatches/outbox_queue_replay_tests.rs",
         "src/services/tui_o/exact_episode_tests.rs",
@@ -170,6 +174,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/codex_tui/rollout_tail/child_binding_tests.rs",
         "src/services/discord/tui_prompt_relay/rehydration/child_binding_tests.rs",
         "src/config/writer_channels_tests.rs",
+        "src/config/readers_live_reload_tests.rs",
+        "src/services/tui_o/writer/readers_host_tests.rs",
         "src/server/routes/pipeline_stage_save_tests.rs",
         "src/services/pipeline_routes/stage_validation_tests.rs",
         "src/services/tui_o/channel_policy/tests.rs",
@@ -628,6 +634,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/session_relay_sink/o_retired_terminal_race_tests.rs",
         "src/services/discord/session_relay_sink/o_retired_terminal_legacy_fixture_tests.rs",
         "src/services/discord/session_relay_sink/o_retired_terminal_source_tests.rs",
+        "src/services/discord/health/watcher_respawn/o_only_retry_tests.rs",
+        "src/services/discord/watchers/lifecycle/n4d2_boundary_tests.rs",
+        "src/services/discord/watchers/lifecycle/n4d2_restore_tests.rs",
         "src/server/routes/agents_turn_deliver/pg_tests.rs",
         "src/cli/herdr_terminate_tests.rs",
         "src/server/routes/herdr_terminate_tests.rs",
@@ -717,11 +726,12 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/runtime_bootstrap/boot_retirement/cohort.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/completion.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/publication.rs",
-        "src/services/discord/watchers/lifecycle/o_only_install.rs",
         "src/services/discord/inflight/o_seed_observation.rs",
         "src/services/discord/tmux_watcher/turn_stream_collector/observations.rs",
         "src/services/discord/inflight/o_seed_observation/terminal_barrier_test.rs",
         "src/services/discord/inflight/o_seed_observation/initial_parse_barrier_test.rs",
+        "src/services/discord/watchers/lifecycle/n4d2_entry_test.rs",
+        "src/services/discord/watchers/lifecycle/n4d2_o_writer_test.rs",
     }
 )
 
