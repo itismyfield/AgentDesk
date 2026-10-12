@@ -1,7 +1,7 @@
 # Herdr host runbook (P9)
 
-Herdr 로 띄운 Claude 채널(P9 대상: adk-dash-cc)의 운영 절차다. 모든 절차는 pane 을 죽이거나 닫지 않는다.
-pane kill·close 는 P11 범위다.
+Herdr 로 띄운 Claude 채널(P9 대상: adk-dash-cc)의 운영 절차다. 5a절 강제 종료만 pane 하나를 닫는다.
+나머지 절차는 pane 을 죽이거나 닫지 않는다.
 
 ## 1. 전용 서버
 
@@ -83,6 +83,27 @@ pane kill·close 는 P11 범위다.
   - `NoLocalEndpoint`: 이 노드에 등록된 endpoint 가 없다.
 - 일시적인 읽기 실패는 retire 근거가 아니다. 증명하지 못하면 row 는 그대로(Hold)이고, 이 상태를 "tmux 원복 완료" 로 보지 않는다.
 - input hold 만 따로 지우는 명령은 없다.
+
+## 5a. 실행 강제 종료(`agentdesk herdr terminate`)
+
+- 이 노드의 서버가 실행 하나의 pane 을 닫고, 끝난 것을 읽은 뒤 row 를 Retired 로 바꾸고 hold 와 진행 턴을 정리한다.
+- 스위치 `runtime.herdr_terminate_enabled: true`(live reload)일 때만 동작한다. 꺼져 있으면 모든 요청이 `disabled`(409)이고 DB·Herdr 를 읽지 않는다.
+- 명령: `agentdesk herdr terminate --session-key <key> --execution-nonce <nonce> --reason <사유>`. key·nonce 는 `agentdesk herdr status` 로 확인한다.
+  - CLI 는 `AGENTDESK_API_URL`(없으면 설정 포트)의 loopback 주소로 POST 한 번만 보낸다. redirect 를 따르지 않고 재시도하지 않는다. 응답은 120초까지 기다린다.
+  - 서버는 loopback peer 이고 `Origin` 헤더가 없는 요청만 받는다.
+  - `server.auth_token` 이 있으면(모드 T) 그 Bearer 가 필요하다. 없으면(모드 N) loopback 이면 된다. reverse proxy 뒤에서는 peer 가 loopback 으로 보이므로 모드 T 가 필수다.
+- 결과(`result`)와 종료 코드. exit 0 은 `retired`(200) 하나뿐이다.
+  - 409: `disabled`, `refused`(row·nonce·소유·endpoint 가 다르거나 이미 Retired), `gate_refused`, `not_sent`, `confirmation_required`. 모두 close 를 보내기 전이나 Herdr 가 거절한 경우라 pane 은 그대로이고 row·hold·턴도 그대로다.
+  - 409 `provider_survived_close`: pane 은 닫혔는데 기록된 provider 가 살아 있다. row 는 바꾸지 않았다.
+  - 500 `indeterminate`: close 뒤의 결과를 확정하지 못했다. pane 은 닫혔을 수 있다. close 뒤 endpoint 설정이 사라진 경우도 여기이며, 그때 row·hold 는 그대로라 endpoint 를 되돌린 뒤 같은 key·nonce 로 다시 실행한다.
+  - 서버는 실행마다 결과 로그 한 줄(target `agentdesk::herdr_terminate`, session_key·nonce·사유·결과)을 남긴다. CLI 연결이 끊겨도 서버 쪽 실행은 끝까지 가므로 이 로그로 결과를 확인한다.
+- `confirmation_required`: worktree group 부모 workspace 의 마지막 pane 이다. 서비스는 확인을 주지 않고 workspace·group close 로 넓히지 않는다. herdr 에서 사람이 정리한 뒤 5절 retire 를 쓴다.
+- 같은 채널에 `herdr retire` 를 동시에 실행하지 않는다.
+- 종료 중 들어온 메시지는 큐에서 기다렸다가 정산 뒤 한 번 시작한다. 시작되지 않았으면 다시 보낸다.
+- 실패 뒤 복구(시험으로 확인한 명령만):
+  - close 뒤 프로세스가 끝나 결과가 없으면 같은 key·nonce 로 다시 실행한다. pane 이 이미 없으면 close 없이 은퇴한다.
+  - row 는 Retired 인데 input hold 가 남았으면 `agentdesk herdr retire <channel>` 이 그 nonce 의 hold 만 지운다.
+  - 수동 retire 가 끼어들어 `indeterminate`(`retire CAS stale`)가 나고 턴이 남았으면 `agentdesk turn-lease inspect` 로 본 lease 를 `agentdesk turn-lease release` 로 푼다.
 
 ## 6. 되돌리기(pane kill 0)
 

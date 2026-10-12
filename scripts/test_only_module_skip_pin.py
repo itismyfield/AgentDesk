@@ -34,6 +34,14 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/input_runtime/runtime/dormant_tests.rs",
+        "src/services/discord/input_runtime/runtime/drive_tests.rs",
+        "src/services/discord/input_runtime/runtime/notice_tests.rs",
+        "src/services/discord/input_runtime/runtime/ports_tests.rs",
+        "src/services/discord/input_runtime/supervisor/g2b_entry_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs",
         "src/services/turn_orchestrator/queued_head_s2a_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_recovery_s2a_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs",
@@ -44,6 +52,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/deferred_pg_tests.rs",
         "src/services/tui_o/writer/unpinned_past_tests.rs",
         "src/db/o_channel_activation_fence_tests.rs",
+        "src/db/imsg_reply_tests.rs",
         "src/services/tui_o/n1_observation/sink_tests.rs",
         "src/services/tui_o/n1_observation_tests.rs",
         "src/db/replay_disposition_tests.rs",
@@ -622,6 +631,16 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/session_relay_sink/o_retired_terminal_legacy_fixture_tests.rs",
         "src/services/discord/session_relay_sink/o_retired_terminal_source_tests.rs",
         "src/server/routes/agents_turn_deliver/pg_tests.rs",
+        "src/cli/herdr_terminate_tests.rs",
+        "src/server/routes/herdr_terminate_tests.rs",
+        "src/services/discord/herdr_terminate_exit_tests.rs",
+        "src/services/discord/herdr_terminate_route_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs",
+        "src/services/session_host/herdr_terminate_real_tests.rs",
+        "src/server/routes/herdr_legacy_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs",
     }
 )
 
@@ -629,8 +648,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
         "src/services/discord/turn_bridge/replay_policy.rs",
-        "src/services/discord/input_runtime/offer.rs",
-        "src/services/tui_input/actor/pane/ownership.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
         "src/services/discord/queue_io/cancel_reclaim_support_test.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests/autoheal.rs",
@@ -672,12 +689,9 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/session_relay_sink/fixtures/o_writer.rs",
         "src/services/discord/session_relay_sink/tests/stream_frame_fixtures.rs",
         "src/services/discord/tui_prompt_relay/local_model_queue_wake_e2e.rs",
-        "src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs",
-        "src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/catch_up_pagination_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/consumed_command_guard_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/discord_mock.rs",
-        "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/mod.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/queue_recovery_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs",
