@@ -18,6 +18,10 @@ use super::{
 };
 use serenity::model::id::{ChannelId, MessageId, UserId};
 
+// Dormant until the latch writer and the queue consumers switch over together.
+#[cfg(test)]
+mod policy;
+
 pub(in crate::services::discord) const MAX_BUSY_RETRY_COUNT: u32 = 6;
 pub(in crate::services::discord) const MAX_BUSY_RETRY_ELAPSED: Duration =
     Duration::from_secs(5 * 60);

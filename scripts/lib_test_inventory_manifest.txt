@@ -3181,6 +3181,13 @@ services::discord::answer_flush_barrier::tests::waiter_times_out_when_flush_neve
 services::discord::answer_flush_barrier::tests::waiter_unblocks_when_flush_ends
 services::discord::bot_role::tests::utility_bot_role_aliases_round_trip_and_are_unique
 services::discord::bot_role::tests::utility_bot_role_metadata_is_exhaustive
+services::discord::busy_followup_retry_store::policy::tests::a_latched_cap_survives_time_and_later_charges
+services::discord::busy_followup_retry_store::policy::tests::an_unreadable_source_holds_the_queue_until_it_reads_as_parked
+services::discord::busy_followup_retry_store::policy::tests::checked_restore_keeps_legacy_meaning_and_refuses_what_it_cannot_read
+services::discord::busy_followup_retry_store::policy::tests::draft_release_clears_count_cost_and_latch_but_keeps_the_notice
+services::discord::busy_followup_retry_store::policy::tests::legacy_writer_bytes_and_reader_results_are_unchanged
+services::discord::busy_followup_retry_store::policy::tests::queue_wait_costs_nothing_and_only_real_attempts_reach_the_cap
+services::discord::busy_followup_retry_store::policy::tests::source_precedence_and_queue_selection_follow_the_written_tables
 services::discord::busy_followup_retry_store::tests::b2_busy_off_delta_zero_and_frozen_sweep_preserves_population
 services::discord::busy_followup_retry_store::tests::c1b_retry_requeues_all_sources_and_updates_binding_after_closing
 services::discord::busy_followup_retry_store::tests::c1b_retry_root_admits_protected_open_without_scheduler_writes
