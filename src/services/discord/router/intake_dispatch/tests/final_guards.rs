@@ -4,8 +4,10 @@ use crate::services::discord::router::message_handler;
 use crate::services::discord::{DiscordSession, HistoryItem, HistoryType};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn isolated_config(env: &ScopedIntakeTestEnv) -> crate::config::TestEnvVarGuard {
-    let config = env._root.path().join("isolated-intake-config.yml");
+fn isolated_config() -> crate::config::TestEnvVarGuard {
+    let config = crate::config::runtime_root()
+        .unwrap()
+        .join("isolated-intake-config.yml");
     std::fs::write(&config, "server: {}\n").unwrap();
     crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_CONFIG", &config)
 }
@@ -21,8 +23,12 @@ fn closed_http() -> Arc<serenity::Http> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn c2b_protected_final_admission_never_returns_false_local_or_nonlocal_success() {
-    let env = ScopedIntakeTestEnv::with_mode("disabled");
-    let _config = isolated_config(&env);
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _mode = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "ADK_INTAKE_ROUTING_MODE",
+        std::ffi::OsStr::new("disabled"),
+    );
+    let _config = isolated_config();
     let channel = ChannelId::new(6_325_721);
     let shared = crate::services::discord::make_shared_data_for_tests();
     let http = closed_http();
@@ -76,8 +82,12 @@ async fn c2b_protected_final_admission_never_returns_false_local_or_nonlocal_suc
 
 #[tokio::test(flavor = "current_thread")]
 async fn c2b_protected_live_dispatch_does_not_checkpoint_or_consume_the_original() {
-    let env = ScopedIntakeTestEnv::enforce();
-    let _config = isolated_config(&env);
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _mode = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "ADK_INTAKE_ROUTING_MODE",
+        std::ffi::OsStr::new("enforce"),
+    );
+    let _config = isolated_config();
     let channel = ChannelId::new(6_325_723);
     let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
     let _health = test_health::Clear::new(&gate);
@@ -115,8 +125,12 @@ async fn c2b_protected_live_dispatch_does_not_checkpoint_or_consume_the_original
 
 #[tokio::test(flavor = "current_thread")]
 async fn c2b_protected_cached_attachment_permit_does_not_write_history() {
-    let env = ScopedIntakeTestEnv::with_mode("disabled");
-    let _config = isolated_config(&env);
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _mode = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "ADK_INTAKE_ROUTING_MODE",
+        std::ffi::OsStr::new("disabled"),
+    );
+    let _config = isolated_config();
     let channel = ChannelId::new(6_325_725);
     let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
     let _health = test_health::Clear::new(&gate);
@@ -192,8 +206,12 @@ async fn c2b_protected_cached_attachment_permit_does_not_write_history() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn c2b_protected_skill_refuses_both_local_permit_and_unadmitted_dispatch() {
-    let env = ScopedIntakeTestEnv::with_mode("disabled");
-    let _config = isolated_config(&env);
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _mode = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "ADK_INTAKE_ROUTING_MODE",
+        std::ffi::OsStr::new("disabled"),
+    );
+    let _config = isolated_config();
     let channel = ChannelId::new(6_325_727);
     let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
     let _health = test_health::Clear::new(&gate);
