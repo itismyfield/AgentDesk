@@ -246,7 +246,7 @@ where
     A: AlarmSink,
     B: BindingEvents,
 {
-    let writer = writer.with_repost_stop(stop.clone());
+    let mut writer = writer.with_repost_stop(stop.clone());
     let deriver = UnitDeriver::new(writer.channel(), provider);
     let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings));
     if let Some(readers) = readers {
@@ -254,11 +254,27 @@ where
     }
     let owed = VecDeque::new();
     let ready = admission::owed_delivery_ready(writer.channel())
-        || (provider == ShadowProvider::Codex
+        || (commands.is_some()
+            && provider == ShadowProvider::Codex
             && writer.channel() == crate::services::codex_tui::canary::CANARY_CHANNEL
-            && crate::services::tui_prompt_dedupe::codex_verified_requires_proof(
-                crate::services::codex_tui::canary::CANARY_TMUX,
-            ));
+            && crate::services::tui_prompt_dedupe::codex_verified_channel_requires_proof(
+                writer.channel(),
+            )
+            && {
+                let channel = writer.channel();
+                let mut cursors = writer
+                    .store()
+                    .cursors()
+                    .filter(|cursor| !cursor.retired)
+                    .peekable();
+                cursors.peek().is_some()
+                    && cursors.all(|cursor| {
+                        crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
+                            channel,
+                            &cursor.source,
+                        )
+                    })
+            });
     let verified = ready.then(|| super::owed::OwedLog::new(writer.channel(), provider));
     let mut actor = Actor {
         writer,
@@ -773,7 +789,20 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     /// Verified sources are restored apart from delivery permission, which each piece proves.
     fn sources_allowed(&mut self) -> bool {
-        self.verified.is_some() || self.delivery_allowed()
+        if self.verified.is_none() {
+            return self.delivery_allowed();
+        }
+        let channel = self.writer.channel();
+        self.writer
+            .store()
+            .cursors()
+            .filter(|cursor| !cursor.retired)
+            .all(|cursor| {
+                crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
+                    channel,
+                    &cursor.source,
+                )
+            })
     }
 
     async fn deliver_owed(&mut self) {
