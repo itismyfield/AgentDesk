@@ -74,11 +74,12 @@ fn claude_block(record: &Value) -> Option<RecordFact> {
         return Some(blocked("assistant row without exactly one content block"));
     };
     // Locally synthesized rows such as API errors have no block index; the row uuid keys them.
-    let synthetic = record.get("isApiErrorMessage") == Some(&Value::Bool(true))
-        || str_at(message, "model") == Some("<synthetic>");
+    let api_error = record.get("isApiErrorMessage") == Some(&Value::Bool(true));
+    let synthetic = api_error || str_at(message, "model") == Some("<synthetic>");
+    let resumed = synthetic && !api_error;
     let (kind, content) = match str_at(block, "type") {
         Some("thinking" | "redacted_thinking") => return None,
-        Some("text") => (UnitKind::Body, claude_text(synthetic, block)),
+        Some("text") => (UnitKind::Body, claude_text(resumed, block)),
         Some("tool_use") => (UnitKind::Tool, tool_call(block, &["input"])),
         other => return Some(blocked(&format!("unsupported assistant block {other:?}"))),
     };
@@ -91,10 +92,11 @@ fn claude_block(record: &Value) -> Option<RecordFact> {
     Some(RecordFact::Unit(native_key, kind, content))
 }
 
-/// A cold resume writes a synthetic row holding only TUI chrome; Legacy strips it, so it is not posted.
-fn claude_text(synthetic: bool, block: &Value) -> UnitContent {
+/// A cold resume writes a synthetic non-error row holding only TUI chrome; Legacy strips it, so it
+/// is not posted. API error rows always post.
+fn claude_text(resumed: bool, block: &Value) -> UnitContent {
     let text = str_at(block, "text").unwrap_or("");
-    if synthetic && is_standalone_tui_response_chrome(text) {
+    if resumed && is_standalone_tui_response_chrome(text) {
         return UnitContent::Excluded("claude_synthetic_resume_chrome");
     }
     payload(text)
@@ -256,8 +258,8 @@ mod tests {
         json!({"type": "event_msg", "payload": payload})
     }
 
-    /// Only a synthetic row that is nothing but resume chrome is excluded; errors, chrome followed
-    /// by an answer and model text quoting the phrase still post, all under their usual keys.
+    /// Only a synthetic non-error row that is nothing but resume chrome is excluded; API errors
+    /// (even chrome-worded), chrome followed by an answer and model text still post under their keys.
     #[test]
     fn claude_synthetic_resume_chrome_alone_is_excluded() {
         use super::{RecordFact, UnitContent, classify};
@@ -272,13 +274,25 @@ mod tests {
                 "apiBlockIndex": index, "message": {"id": "m1", "model": model,
                 "content": [{"type": "text", "text": text}]}})
         };
-        let mut error = row("err", true, "API Error: 500");
-        error["isApiErrorMessage"] = true.into();
+        let api_error = |uuid: &str, text: &str| {
+            let mut error = row(uuid, true, text);
+            error["isApiErrorMessage"] = true.into();
+            error
+        };
         let payload = |text: &str| UnitContent::Payload(text.into());
         let excluded = UnitContent::Excluded("claude_synthetic_resume_chrome");
         let cases = [
             (row("s", true, " No response requested.\n"), "s", excluded),
-            (error, "err", payload("API Error: 500")),
+            (
+                api_error("err", "API Error: 500"),
+                "err",
+                payload("API Error: 500"),
+            ),
+            (
+                api_error("err-chrome", "No response requested."),
+                "err-chrome",
+                payload("No response requested."),
+            ),
             (
                 row("more", true, "No response requested. But here is more."),
                 "more",
