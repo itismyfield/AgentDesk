@@ -1000,9 +1000,8 @@ def _cargo_commands(
             value = re.sub(
                 r"[\"']?\$\{PG_INCLUDE_ARGS\[@\]\}[\"']?", included, value
             )
-        start = value.find("cargo test")
-        if start >= 0:
-            commands.append(value[start:])
+        if "cargo test" in value:
+            commands.append(_direct_cargo_command(value))
 
     def flush() -> None:
         if pending:
@@ -1046,23 +1045,51 @@ def _cargo_commands(
     return commands
 
 
-def _lane_filter(coverage, command: str):
-    """``coverage.cargo_test_filter`` on a command whose words the shell lexer reads alike."""
+# Programs that run their trailing words as the command, as the CTI extractor admits.
+_WRAPPER_SCRIPTS = frozenset({"scripts/ci-timeout.py", "scripts/run_test_lane.py"})
+_CARGO_WRAPPERS = frozenset({"env", "nice", "python", "python3"}) | _WRAPPER_SCRIPTS
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _direct_cargo_command(command: str) -> str:
+    """``command`` from its `cargo test` on, once the whole command is proven to run it
+    directly with static words; else a cargo-command-unparsed ValueError."""
     start = command.find("cargo test")
-    if start >= 0:
-        lex = shell_lexer()
-        scan = lex.scan_shell(command[start:])
-        try:
-            same = shlex.split(command[start:], comments=True) == [
-                token.value for token in scan.tokens if token.kind == "WORD"]
-        except ValueError:
-            same = False
-        # A joined, nested, redirected or truncated command is a different lane.
-        if not same or scan.issues or len(lex.simple_commands(scan)) != 1 \
-                or any(token.depth or token.kind != "WORD" for token in scan.tokens):
-            raise ValueError(
-                f"cargo-command-unparsed: {command[start:]!r} crosses a shell boundary "
-                "this gate cannot prove, so the lane filter it selects is unknown")
+    scan = shell_lexer().scan_shell(command)
+    tokens = list(scan.tokens)
+    if [token.value for token in tokens[:2]] == ["source", NON_PG_FILTER_REL.as_posix()] \
+            and tokens[2:3] and tokens[2].raw == "&&":
+        tokens = tokens[3:]
+    at = next((index for index, token in enumerate(tokens) if token.start == start), -1)
+    prefix = [token.value or "" for token in tokens[:max(at, 0)]]
+    # Before cargo only assignments and wrappers, with their options and values, may run.
+    wrapped = all(word in _CARGO_WRAPPERS or bool(_ASSIGNMENT.match(word)) or index > 0 and (
+        word.startswith("-") or word.isdigit() or prefix[index - 1].startswith("-"))
+        for index, word in enumerate(prefix))
+    # An interpreter may run only a wrapper script, and env may not split a string into code.
+    hijacked = any(word in ("python", "python3") and "".join(prefix[index + 1:index + 2])
+                   not in _WRAPPER_SCRIPTS or word.startswith(("-S", "--split-string"))
+                   for index, word in enumerate(prefix))
+    arrays = {f"${{{name}[@]}}" for name in KNOWN_ARRAYS}
+    try:
+        lane_words = shlex.split(command[start:], comments=True)
+    except ValueError:
+        lane_words = None
+    # A joined, nested, redirected, run-time valued or truncated command is another lane.
+    if scan.issues or at < 0 or not wrapped or hijacked \
+            or any(token.kind != "WORD" or token.depth for token in tokens) \
+            or any(token.dynamic and token.value not in arrays for token in tokens) \
+            or lane_words != [token.value for token in tokens[at:]]:
+        raise ValueError(
+            f"cargo-command-unparsed: {command!r} crosses a shell boundary or "
+            "run-time value this gate cannot prove, so the lane filter it selects is unknown")
+    return command[start:]
+
+
+def _lane_filter(coverage, command: str):
+    """``coverage.cargo_test_filter`` on a command proven to run its cargo test directly."""
+    if "cargo test" in command:
+        _direct_cargo_command(command)
     return coverage.cargo_test_filter(command)
 
 

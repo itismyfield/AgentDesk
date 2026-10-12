@@ -1711,10 +1711,35 @@ class CommentMarkerMutations(BypassFixtureCase):
         self.assertEqual(membership._strip_comments("run: echo ok\\\\;# note"),
                          "run: echo ok\\\\;")
 
+    def test_a_lane_is_read_only_from_a_cargo_test_the_whole_command_runs(self) -> None:
+        coverage = membership._load_coverage_module(self.root)
+        for command in (self.SWEEP, f"env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        f"python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --lane sweep --max-summaries 4 --skip _pg"
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        f'source {membership.NON_PG_FILTER_REL} && cargo test --lib -- '
+                        '"${PG_INCLUDE_ARGS[@]}" --nocapture'):
+            with self.subTest(command=command):
+                self.assertIsNotNone(membership._lane_filter(coverage, command))
+        for command in ("echo cargo test --lib x", "false && cargo test --lib x",
+                        'cargo test --lib -- "$FILTER"', "MODE=x echo cargo test --lib x",
+                        'source "$F" && cargo test --lib x', "cargo test --lib x 2>&1",
+                        # Options whose value runs in place of the cargo test.
+                        "python3 -c pass cargo test --lib x", "python3 -m pytest cargo test --lib x",
+                        "env -S echo cargo test --lib x", "env --split-string=echo cargo test --lib x"):
+            with self.subTest(command=command), \
+                    self.assertRaisesRegex(ValueError, "cargo-command-unparsed"):
+                membership._lane_filter(coverage, command)
+
     def test_a_cargo_command_past_an_unproven_boundary_fails_the_gate(self) -> None:
         # Its lane filter would be read from a shorter or joined command, so it is an error.
         for command in (f"{self.SWEEP} --logfile foo$(true)#tag; cargo test --lib db::service",
-                        f"{self.SWEEP} --logfile x#tag"):
+                        f"{self.SWEEP} --logfile x#tag",
+                        # A prefix that keeps the cargo test from running as its command.
+                        "echo cargo test --lib db::service",
+                        f"false && {self.SWEEP}",
+                        # A run-time filter: empty here, so it selects every test.
+                        '|\n          FILTER=""\n          cargo test --lib -- "$FILTER" --nocapture'):
             with self.subTest(command=command):
                 self.write_sweep(f"  sweep:\n    steps:\n      - run: {command}\n")
                 stderr = io.StringIO()
