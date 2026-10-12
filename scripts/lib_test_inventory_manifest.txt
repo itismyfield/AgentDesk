@@ -6975,6 +6975,15 @@ services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_probe_requires_complete_read_and_backfill
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_readers_preserve_foreign_files_and_mailboxes
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b3a1_scoped_probe_excludes_stale_planned_restart
+services::discord::runtime_bootstrap::queued_placeholders::tests::n3bc_tests::boot_teardown_outcomes_and_normal_queue_policy_are_distinct
+services::discord::runtime_bootstrap::queued_placeholders::tests::n3bc_tests::install_lock_wait_rechecks_before_snapshot_and_preserves_sibling
+services::discord::runtime_bootstrap::queued_placeholders::tests::n3bc_tests::install_snapshot_rechecks_all_candidate_shapes_without_persist
+services::discord::runtime_bootstrap::queued_placeholders::tests::n3bc_tests::stale_cleanup_delete_boundary_holds_http_and_controller
+services::discord::runtime_bootstrap::queued_placeholders::tests::n3bc_tests::stale_cleanup_error_response_after_protection_keeps_controller
+services::discord::runtime_bootstrap::queued_placeholders::tests::n3bc_tests::stale_cleanup_lock_wait_holds_rekey_and_idle_delete
+services::discord::runtime_bootstrap::queued_placeholders::tests::n3bc_tests::stale_cleanup_snapshot_rechecks_before_rekey
+services::discord::runtime_bootstrap::queued_placeholders::tests::n3bc_tests::stale_cleanup_success_response_after_protection_keeps_controller
+services::discord::runtime_bootstrap::queued_placeholders::tests::n3bc_tests::stale_cleanup_unprotected_success_and_error_keep_existing_detach_policy
 services::discord::runtime_bootstrap::queued_placeholders::tests::recovery_consumer_routes_uninstalled_candidates_to_cleanup
 services::discord::runtime_bootstrap::queued_placeholders::tests::restore_and_cleanup_leave_a_protected_channel
 services::discord::runtime_bootstrap::queued_placeholders::tests::restore_rows_and_cleanup_preserve_current_owners

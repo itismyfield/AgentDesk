@@ -658,6 +658,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs",
+        "src/services/discord/runtime_bootstrap/queued_placeholders/tests/n3bc_tests.rs",
     }
 )
 
