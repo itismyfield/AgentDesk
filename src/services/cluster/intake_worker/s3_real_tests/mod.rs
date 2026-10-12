@@ -31,6 +31,7 @@ fn s3_node_child() {
             "th7_release" => drain_pg::release_node(&env).await,
             "th7_running_post" => drain_pg::running_post_node(&env).await,
             "th7_posts_unreadable" => drain_pg::posts_unreadable_node(&env).await,
+            "th7_unsealed" => drain_pg::unsealed_node(&env).await,
             "th7_prepared_seed" => drain_pg::prepared_seed_node(&env).await,
             "th7_prepared" => drain_pg::prepared_node(&env).await,
             "th8_holder" => route_pg::holder_node(&env).await,
