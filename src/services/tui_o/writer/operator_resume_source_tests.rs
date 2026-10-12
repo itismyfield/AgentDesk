@@ -15,7 +15,7 @@ fn operator_resume_verified_source_hold_preserves_approval_cursor_and_post_count
         crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
-    let context = durable_canary_without_launch_files(root.path());
+    let (context, canonical, retained) = durable_canary_without_launch_files(root.path());
     let (harness, path, source) = switched_over_on(CANARY_CHANNEL, b"");
     let mut channel = harness.channel();
     let mut key = unit("approved");
@@ -45,7 +45,8 @@ fn operator_resume_verified_source_hold_preserves_approval_cursor_and_post_count
     harness.gate.acquired();
     for source_only in [false, true] {
         if source_only {
-            PreparedIncarnation::create(context.clone()).unwrap();
+            std::fs::hard_link(&retained, &canonical).unwrap();
+            crate::services::discord::runtime_store::fsync_parent_dir(&canonical).unwrap();
             publish_nonce(&context);
             dedupe::register_tmux_channel(CANARY_TMUX, CANARY_CHANNEL);
             dedupe::set_codex_delivery_permission_for_tests(

@@ -150,6 +150,8 @@ struct Live {
     unsettled: watch::Receiver<Option<usize>>,
     owed: OwedView,
     stopping: watch::Receiver<bool>,
+    #[cfg(test)]
+    submission: Option<actor::codex_submission::Port>,
 }
 
 /// The actor's published owed view and the demand that requests a store read.
@@ -210,6 +212,8 @@ impl Readiness {
             unsettled,
             owed,
             stopping,
+            #[cfg(test)]
+            submission: None,
         };
         locked(&self.live).insert(channel, live);
     }
@@ -240,6 +244,36 @@ impl Readiness {
     pub fn undelivered(&self, channel: u64) -> Option<OwedView> {
         let live = locked(&self.live);
         Some(live.get(&channel)?.owed.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn submission(&self, channel: u64) -> Option<actor::codex_submission::Port> {
+        locked(&self.live).get(&channel)?.submission.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_closed_reply<T>(
+        &self,
+        channel: u64,
+        reply: actor::codex_submission::Reply,
+        issue: impl FnOnce(&actor::codex_submission::Closed) -> T,
+    ) -> Result<T, &'static str> {
+        let live = locked(&self.live);
+        let live = live.get(&channel).ok_or("actor_unavailable")?;
+        if *live.stopping.borrow()
+            || live.resumed.has_changed().is_err()
+            || !self.is_ready(channel)
+            || !*live.resumed.borrow()
+            || !owned_now(channel, &live.gate)
+        {
+            return Err("actor_unavailable");
+        }
+        let closed = live
+            .submission
+            .as_ref()
+            .ok_or("actor_unavailable")?
+            .take_closed(reply)?;
+        Ok(issue(&closed))
     }
 
     /// Hosts `owed` for `channel` as a running actor would publish it, with no actor behind it.
@@ -793,13 +827,24 @@ impl<I: HostIo> Hosted<'_, I> {
         let readers = crate::services::tui_o::channel_policy::boot()
             .filter(|boot| boot.dormant_channels().contains(&channel))
             .map(|_| ReaderConfig { dormant: true });
+        #[cfg(not(test))]
         let spawned =
             actor::spawn_projecting(&config, readers, writer, self.provider, bindings, watches);
+        #[cfg(test)]
+        let (submission, receiver) = actor::codex_submission::Port::new(self.claim.generation);
+        #[cfg(test)]
+        let spawned = actor::codex_submission::spawning(receiver, || {
+            actor::spawn_projecting(&config, readers, writer, self.provider, bindings, watches)
+        });
         let actor = spawned?;
         let watched = (resumed.clone(), unsettled, owed, self.stopping.clone());
         self.claim
             .readiness
             .track(channel, Arc::clone(gate), watched);
+        #[cfg(test)]
+        if let Some(live) = locked(&self.claim.readiness.live).get_mut(&channel) {
+            live.submission = Some(submission);
+        }
         let on_resumed = || {
             if attempt > 0 {
                 self.alarms.resume_pending(channel, false);

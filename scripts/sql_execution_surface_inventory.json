@@ -40388,6 +40388,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/tui_o/repost/backlog_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:a5e1442f78b9a9081ea857b67a2c90a43c279f40b24c9d5a25005e99bd46881f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/tui_o/repost/runner.rs",
       "api": "sqlx::query",
       "symbol": "query",
