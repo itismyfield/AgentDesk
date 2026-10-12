@@ -35,6 +35,7 @@ mod mailbox_unreachable_tests;
 pub(crate) use mailbox_observation::MailboxObservationFailure;
 mod overflow;
 mod pending_queue_persistence;
+pub(crate) mod policy_close;
 mod queue_cancellation;
 mod queue_enqueue;
 mod queued_head;
@@ -1411,6 +1412,12 @@ enum ChannelMailboxMsg {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<FinishTurnResult>,
     },
+    /// A before-start policy close: one step claims the exact episode, clears its receipt and
+    /// releases it (see `policy_close.rs`).
+    PolicyClose {
+        request: Box<policy_close::PolicyCloseRequest>,
+        reply: oneshot::Sender<policy_close::PolicyMailboxOutcome>,
+    },
     HardStop {
         reply: oneshot::Sender<FinishTurnResult>,
     },
@@ -1604,6 +1611,8 @@ struct ChannelMailboxState {
     turn_started_instant: Option<Instant>,
     /// Which persisted episode a recovery re-mint may still re-open.
     remint_fence: remint_fence::FenceCell,
+    /// The latest policy close this actor committed; see `policy_close.rs`.
+    policy_witness: Option<policy_close::PolicyWitness>,
     /// The queue snapshot's head reservation and submitted sources; see `queued_head.rs`.
     queued_head: queued_head::HeadLedger,
 }
@@ -2539,6 +2548,9 @@ fn input_mailbox_step(
                     persistence_error: None,
                 });
             }
+        }
+        ChannelMailboxMsg::PolicyClose { request, reply } => {
+            let _ = reply.send(policy_close::step(&mut state, channel_id, *request));
         }
         ChannelMailboxMsg::HardStop { reply } => {
             let persistence = state.last_persistence.clone();

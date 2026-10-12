@@ -1,25 +1,27 @@
-//! The policy close clears its exact receipt before anything is released, so a successor never
-//! starts over a receipt row; a clear refused there releases nothing.
+//! The policy close's mailbox step clears its exact receipt before anything is released, so a
+//! successor never starts over a receipt row; a clear refused there releases nothing.
 use super::*;
+use crate::services::turn_orchestrator::policy_close::test_hooks as step;
 
-/// What `consume` held when it reached its clear: the active count and the durable receipt.
+/// What the close's mailbox step held when it reached its clear: the active count, the durable
+/// receipt and whether its actor still held the slot.
 type AtClear = std::rc::Rc<std::cell::RefCell<Vec<(usize, Option<bool>)>>>;
 
-/// Observes the clear's boundary; `bump` first saves the same episode's row again there.
+/// Observes the step's clear boundary; `bump` first saves the same episode's row again there.
 fn at_clear(close: &Close, bump: bool) -> AtClear {
     let seen = AtClear::default();
-    let (slot, shared) = (seen.clone(), close.shared.clone());
-    test_hooks::observe(Some(Box::new(move |step, row: &InflightTurnState| {
-        if step != "before_policy_clear" {
+    let (slot, shared, row) = (seen.clone(), close.shared.clone(), close.row.clone());
+    step::observe(Some(Box::new(move |stage| {
+        if stage != "before_clear" {
             return;
-        }
-        if bump {
-            let mut again = row.clone();
-            again.save_generation += 1;
-            discord::inflight::save_inflight_state(&again).unwrap();
         }
         let durable =
             discord::inflight::load_inflight_state_read_only(&ProviderKind::Claude, row.channel_id);
+        if bump {
+            let mut again = durable.clone().unwrap();
+            again.save_generation += 1;
+            discord::inflight::save_inflight_state(&again).unwrap();
+        }
         let pending = durable
             .and_then(|row| row.herdr_before_start_stop)
             .map(|receipt| receipt.notice_pending());
@@ -37,7 +39,7 @@ async fn coldstop_policy_clear_precedes_release_and_frees_the_successor() {
     let seen = at_clear(&close, false);
     let submitted = test_hooks::submitted();
     let settled = close.consume(shown()).await;
-    test_hooks::observe(None);
+    step::observe(None);
     assert!(settled);
     assert_eq!(*seen.borrow(), [(1, Some(false))], "cleared before release");
     assert_eq!(test_hooks::submitted(), submitted + 1);
@@ -65,18 +67,28 @@ async fn coldstop_policy_clear_precedes_release_and_frees_the_successor() {
     assert_eq!(close.durable().unwrap().turn_nonce, row.turn_nonce);
 }
 
-/// A same-episode save between the ack and the clear moves the row on, so the exact clear refuses;
-/// the turn then stays held with its acked receipt, nothing is submitted, and restart finishes it.
+/// A same-episode save between the ack and the step's clear moves the row on, so the exact clear
+/// refuses inside the step; the one submitted close then releases nothing, announces nothing and
+/// leaves the turn held with its acked receipt for restart to finish.
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_policy_clear_refused_releases_nothing() {
     let close = Close::open(929, |_| {}).await;
     let seen = at_clear(&close, true);
     let submitted = test_hooks::submitted();
+    let mut events =
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+            &close.shared,
+        );
     let settled = close.consume(shown()).await;
-    test_hooks::observe(None);
+    step::observe(None);
     assert!(!settled);
     assert_eq!(*seen.borrow(), [(1, Some(false))]);
-    assert_eq!(test_hooks::submitted(), submitted, "nothing submitted");
+    assert_eq!(
+        test_hooks::submitted(),
+        submitted + 1,
+        "the policy close is submitted"
+    );
+    assert!(events.try_recv().is_err(), "no release event");
     assert!(close.held().await, "nothing released");
     assert_eq!(
         close.receipt_pending(),

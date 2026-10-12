@@ -1,5 +1,6 @@
 //! In-process policy close of a sealed before-start proof: a durable receipt first, then the stop
-//! notice and its ack, then finalize. A crash after the receipt leaves restart to finish the close.
+//! notice and its ack, then one policy submission whose mailbox step clears the receipt and
+//! releases the turn. A crash after the receipt leaves restart to finish the close.
 use crate::services::discord::SharedData;
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
 use crate::services::discord::gateway::TurnGateway;
@@ -7,10 +8,12 @@ use crate::services::discord::inflight::InflightTurnState;
 #[cfg(unix)]
 use crate::services::discord::recovery_engine::herdr_admitted_restart::ADMITTED_ABORT_NOTICE;
 use crate::services::discord::turn_finalizer::{
-    FinalizeContext, FinalizeOutcome, SyntheticClaimSnapshot, TerminalEvent, TurnFinalizer, TurnKey,
+    PolicyCloseIntent, PolicyCloseOutcome, SyntheticClaimSnapshot, TurnFinalizer, TurnKey,
 };
 use crate::services::provider::CancelToken;
 use crate::services::provider::herdr_before_start::{BeforeStartProof, ExitDecision};
+use crate::services::turn_orchestrator::ChannelMailboxHandle;
+use crate::services::turn_orchestrator::policy_close::PolicyCloseRequest;
 use poise::serenity_prelude::{ChannelId, MessageId};
 use std::sync::Arc;
 
@@ -132,54 +135,58 @@ async fn consume(
     };
     #[cfg(test)]
     test_hooks::boundary("after_notice_ack", &admitted);
-    let key = TurnKey::new(
-        channel,
-        row.effective_finalizer_turn_id(),
-        shared.restart.current_generation,
-    )
-    .with_episode_nonce(row.turn_nonce.as_deref());
-    let mut snapshot = SyntheticClaimSnapshot::from_row(row);
-    snapshot.recovery_actor = Some(Arc::downgrade(actor));
-    let context = FinalizeContext {
-        clear_inflight: false,
-        ..FinalizeContext::bridge()
-    };
-    // The exact receipt clears while this actor still holds the mailbox, so a successor never
-    // starts over it; a refused clear releases nothing and leaves the row for restart.
-    #[cfg(test)]
-    test_hooks::boundary("before_policy_clear", &acked);
-    if !crate::services::discord::inflight::receipt_mutant("policy-clear")
-        && acked.clear_before_start_policy_receipt(generation)
-            != crate::services::discord::inflight::GuardedClearOutcome::Cleared
-    {
+    let Some(intent) = policy_intent(shared, actor, row, proof, mailbox, acked) else {
         return false;
-    }
+    };
     #[cfg(test)]
-    test_hooks::boundary("before_finalize", &admitted);
-    submit_policy_terminal(shared, fin, key, context, snapshot).await
-}
-
-/// The close's one terminal submission; tests count calls at the finalizer API itself.
-async fn submit_policy_terminal(
-    shared: &Arc<SharedData>,
-    fin: &TurnFinalizer,
-    key: TurnKey,
-    context: FinalizeContext,
-    snapshot: SyntheticClaimSnapshot,
-) -> bool {
+    test_hooks::boundary("before_submit", &admitted);
     #[cfg(test)]
     test_hooks::submitting();
-    let provider = shared.provider.clone();
-    let event = TerminalEvent::Cancel;
-    let submitted = fin.submit_terminal_with_claim_snapshot(
+    let outcome = fin.submit_policy_close(intent, shared.clone()).await;
+    #[cfg(test)]
+    test_hooks::boundary("after_submit", &admitted);
+    matches!(
+        outcome,
+        PolicyCloseOutcome::Settled | PolicyCloseOutcome::DuplicateConfirmed
+    )
+}
+
+/// The typed close of the row the notice ACK returned. The captured actor's own step clears its
+/// receipt and only then releases the turn, so a successor never starts over it.
+fn policy_intent(
+    shared: &Arc<SharedData>,
+    actor: &Arc<CancelToken>,
+    row: &InflightTurnState,
+    proof: &BeforeStartProof,
+    mailbox: ChannelMailboxHandle,
+    acked: InflightTurnState,
+) -> Option<PolicyCloseIntent> {
+    let generation = shared.restart.current_generation;
+    let channel = ChannelId::new(row.channel_id);
+    let key = TurnKey::new(channel, row.effective_finalizer_turn_id(), generation)
+        .with_episode_nonce(row.turn_nonce.as_deref());
+    let user_message_id = (key.user_msg_id != 0).then(|| MessageId::new(key.user_msg_id))?;
+    let request = PolicyCloseRequest {
+        actor: Arc::downgrade(actor),
+        user_message_id,
+        turn_nonce: proof.turn_nonce.clone(),
+        interrupt_generation: proof.generation,
+        observed_before: std::time::Instant::now(),
+        receipt: acked.into_policy_receipt(generation),
+        active: shared.restart.global_active.clone(),
+        persistence: crate::services::discord::queue_persistence_context(
+            shared,
+            &shared.provider,
+            channel,
+        ),
+    };
+    Some(PolicyCloseIntent {
         key,
-        provider,
-        event,
-        context,
-        Some(snapshot),
-        shared.clone(),
-    );
-    matches!(submitted.await, FinalizeOutcome::Finalized { .. })
+        provider: shared.provider.clone(),
+        mailbox,
+        request,
+        snapshot: SyntheticClaimSnapshot::from_row(row),
+    })
 }
 
 #[cfg(test)]
@@ -187,7 +194,7 @@ async fn submit_policy_terminal(
 #[path = "before_start_stop_tests.rs"]
 pub(in crate::services::discord::turn_bridge) mod tests;
 
-/// Test seams at each step of `consume`: a per-thread observer, a terminal-submit count, and a
+/// Test seams at each step of `consume`: a per-thread observer, a policy-submit count, and a
 /// child-process stop named by `STOP_AT`.
 #[cfg(test)]
 pub(in crate::services::discord) mod test_hooks {
@@ -208,13 +215,13 @@ pub(in crate::services::discord) mod test_hooks {
         OBSERVER.with(|slot| *slot.borrow_mut() = observer);
     }
 
-    /// Terminal submissions `consume` made on this thread.
+    /// Policy submissions `consume` made on this thread.
     #[cfg(unix)]
     pub(in crate::services::discord) fn submitted() -> usize {
         SUBMITTED.with(Cell::get)
     }
 
-    /// Counts one call to the finalizer's submit API, right before it is made.
+    /// Counts one call to the finalizer's policy submit API, right before it is made.
     pub(super) fn submitting() {
         SUBMITTED.with(|count| count.set(count.get() + 1));
     }
