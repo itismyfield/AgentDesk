@@ -26,7 +26,7 @@ use crate::services::cluster::intake_routing_config::{
 };
 use crate::services::tui_o::cutover::test_override;
 use crate::services::tui_o::ownership::OwnershipGate;
-use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_for};
+use crate::services::tui_o::shadow::{ShadowProvider, SourceId, binding_reader::source_id_for};
 use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::adoption::LegacyView;
 use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents, BindingRecord};
@@ -618,21 +618,19 @@ impl EventLog {
         locked(&self.events)[0].clone()
     }
 
-    /// Stores `record` as the next seq, then publishes it, so a notified reader finds it.
+    /// Stores `record` as the next seq and publishes it under the same lock, so a notified reader
+    /// finds it and the notice never moves back.
     pub(super) fn commit(&self, record: BindingRecord) -> u64 {
-        let seq = {
-            let mut events = locked(&self.events);
-            let first = events[0].clone();
-            let seq = events.last().unwrap().seq + 1;
-            let committed_at = chrono::Utc::now();
-            events.push(BindingEvent {
-                seq,
-                record,
-                committed_at,
-                ..first
-            });
-            seq
-        };
+        let mut events = locked(&self.events);
+        let first = events[0].clone();
+        let seq = events.last().unwrap().seq + 1;
+        let committed_at = chrono::Utc::now();
+        events.push(BindingEvent {
+            seq,
+            record,
+            committed_at,
+            ..first
+        });
         self.notice.send_replace(seq);
         seq
     }
@@ -658,6 +656,33 @@ impl BindingEvents for EventLog {
     fn subscribe(&self, _: u64) -> watch::Receiver<u64> {
         self.notice.subscribe()
     }
+}
+
+#[test]
+fn racing_commits_publish_the_latest_seq_and_every_event() {
+    let source = SourceId {
+        session_id: "s1".into(),
+        path: PathBuf::from("/s1.jsonl"),
+        dev: 1,
+        ino: 1,
+    };
+    let startup = TestHost::new([(C, source)]).bindings(C, ShadowProvider::Claude);
+    let log = EventLog::new(startup.binding_events_since(C, 0).unwrap());
+    let rejected = |detail: &str| BindingRecord::Rejected {
+        detail: detail.into(),
+    };
+    std::thread::scope(|scope| {
+        scope.spawn(|| log.commit(rejected("a")));
+        scope.spawn(|| log.commit(rejected("b")));
+    });
+    assert_eq!(
+        *log.subscribe(C).borrow(),
+        3,
+        "the notice names the last commit"
+    );
+    let read = log.binding_events_since(C, 0).unwrap();
+    let seqs: Vec<_> = read.iter().map(|event| event.seq).collect();
+    assert_eq!(seqs, [1, 2, 3]);
 }
 
 /// The real writer host's gateway IO with the recording Discord in place of [`TestHost`]'s.

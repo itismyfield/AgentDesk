@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::harness::*;
+use crate::db::o_channel_activation;
 use crate::db::o_channel_homes::{self, HomeState};
 use crate::services::cluster::channel_home::{HomeIntake, HomeOwnership};
 use crate::services::cluster::channel_home_drain::{DrainPort, Owed, ResetRefused};
@@ -16,7 +17,10 @@ use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
-use crate::services::tui_o::store::{ChannelStore, InitSource, Initialized, OStore, StoreConfig};
+use crate::services::tui_o::store::rotation::{BOUNDARY_FILE, Boundary, Rotation};
+use crate::services::tui_o::store::{
+    ChannelStore, InitSource, Initialized, OStore, STORE_DIR_NAME, StoreConfig,
+};
 use crate::services::tui_o::writer::binding::{
     BindingCause, BindingEvidence, BindingRecord, BindingTarget,
 };
@@ -666,16 +670,33 @@ pub(super) async fn binding_node(env: &Env) {
         "nothing posted before it resolved"
     );
     assert!(!node.halted());
+    assert_eq!(
+        checkpoint(&node),
+        Some(1),
+        "the pending bind is not applied"
+    );
     // The file comes first: the source id reads its metadata.
     std::fs::write(&path, row("n1", "bound-new")).unwrap();
     let source = source_id_for("s2", &path).unwrap();
     let resolved = BindingRecord::Resolved {
         resolves_seq: 2,
-        source,
+        source: source.clone(),
     };
     assert_eq!(log.commit(resolved), 3);
     node.until_posts(&["base", "bound-new"]).await;
     until_async("the bound row is delivered", WITHIN, clear).await;
+    assert_eq!(
+        checkpoint(&node),
+        Some(3),
+        "the bind and its resolution are applied"
+    );
+    let link = rotation(&node)
+        .link(&source)
+        .cloned()
+        .expect("the bound source's link");
+    assert_eq!(link.boundary, Boundary::Owed { from: 0 });
+    let rows = o_channel_activation::activation_rows(&node.pool, &C.to_string(), MINI).await;
+    assert_eq!(rows.unwrap().open_intake, 0);
     until_left(&node).await;
     let posted = node.discord().history_after(C, 0).await.unwrap();
     let bound: Vec<_> = posted.iter().filter(|m| m.content == "bound-new").collect();
@@ -697,8 +718,22 @@ pub(super) async fn binding_node(env: &Env) {
         6,
         "base and bound-new, each once, none dropped: {seen:?}"
     );
+    none_dropped(&node);
     assert!(!node.halted());
     node.stop().await;
+}
+
+/// The applied binding seq as the store holds it, read without opening the live actor's channel.
+fn checkpoint(node: &Booted) -> Option<u64> {
+    let store = OStore::existing(&node.root).expect("the node's store");
+    store.peek_binding_checkpoint(C).unwrap()
+}
+
+/// The channel's boundary file read as bytes; opening the channel would sweep and recover it.
+fn rotation(node: &Booted) -> Rotation {
+    let path = node.root.join(STORE_DIR_NAME).join(C.to_string());
+    let bytes = std::fs::read(path.join(BOUNDARY_FILE)).unwrap();
+    serde_json::from_slice(&bytes).unwrap()
 }
 
 /// Reads through the real port, adding one transcript row the first time the drain counts running
