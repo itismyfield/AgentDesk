@@ -11,7 +11,9 @@ fn sandbox() -> tempfile::TempDir {
 }
 
 fn snapshot(channel: u64) -> ordering::PendingSource {
-    ordering::AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0).pending_snapshot()
+    ordering::AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0)
+        .unwrap()
+        .pending_snapshot()
 }
 
 fn health(closing: &Closing) -> Option<String> {
@@ -138,7 +140,7 @@ fn g1a_handback_settle_rechecks_current_capability_and_retains_barrier_on_refusa
     let channel = 6_325_714;
     let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
     closing.begin_handback().unwrap();
-    let mut producer = ordering::AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0);
+    let mut producer = ordering::AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0).unwrap();
     for key in 1..=7 {
         producer.pending(&[key]);
     }
@@ -191,7 +193,7 @@ fn g1a_a_later_handback_rejects_the_previous_complete_capability() {
 #[test]
 fn g1a_unrelated_order_cannot_issue_a_post_release_settle_capability() {
     let channel = 6_325_716;
-    let mut original = ordering::AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0);
+    let mut original = ordering::AdmissionOrder::new(ProviderKind::Claude, channel, 7, 0).unwrap();
     original.pending(&[11]);
     let snapshot = original.pending_snapshot();
     let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
@@ -200,7 +202,7 @@ fn g1a_unrelated_order_cannot_issue_a_post_release_settle_capability() {
         .release_after_handback_with_pending(&snapshot)
         .unwrap();
     drop(original);
-    let mut other = ordering::AdmissionOrder::new(ProviderKind::Claude, channel, 2, 0);
+    let mut other = ordering::AdmissionOrder::new(ProviderKind::Claude, channel, 2, 0).unwrap();
     let ticket = other.fetch_ticket(2).unwrap();
     let cap = other.begin_scan(ticket, 2, vec![], 0, true).unwrap();
     let cap = other.complete(cap, 2).unwrap();

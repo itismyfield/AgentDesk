@@ -1,7 +1,8 @@
 //! T-H7: the holder's real O actor publishes what it owes, the real drain port reads it, the real
 //! boot watch drains and the PG leave lands only after the tail went out; the gateway reclaims.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -12,7 +13,13 @@ use crate::services::cluster::channel_home_drain::{DrainPort, Owed, ResetRefused
 use crate::services::cluster::channel_home_port::ChannelHomePort;
 use crate::services::cluster::intake_router_hook::IntakeRouterDecision;
 use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
-use crate::services::tui_o::writer::host;
+use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
+use crate::services::tui_o::store::ledger::PieceOutcome;
+use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
+use crate::services::tui_o::writer::deliver::{self, ChannelWriter, Step};
+use crate::services::tui_o::writer::host::test_io::Alarms;
+use crate::services::tui_o::writer::host::{self, HostIo};
+use crate::services::tui_o::writer::pieces::{Derived, PieceWork};
 
 const WITHIN: Duration = Duration::from_secs(60);
 /// Two drain rounds of the boot watch (`RENEW_EVERY` apart) and a margin.
@@ -203,6 +210,109 @@ pub(super) async fn last_post_node(env: &Env) {
     assert!(ended, "{seen:?}");
     assert_eq!(node.discord().posts(), ["base", "last"]);
     assert_eq!(tail_epochs(&node, "last"), [Some(epoch)]);
+    node.stop().await;
+}
+
+/// T-H7 POST guard alone: a counted POST still running keeps the row draining while the actor's
+/// fresh projection owes nothing, and the row leaves only after that request ended.
+#[tokio::test(flavor = "current_thread")]
+async fn th7_running_post_blocks_leave_with_projection_zero_pg() {
+    let (scene, _) = reclaim_while("th7_running_post", Duration::from_secs(180)).await;
+    scene.drop_db().await;
+}
+
+/// A second real writer of `C` on its own store root, posting through the home's gate.
+fn second_writer(
+    root: &Path,
+    node: &Booted,
+    discord: Arc<Discord>,
+) -> (OStore, ChannelWriter<Discord, Lease, Alarms>) {
+    std::fs::create_dir_all(root).unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root);
+    let store = store.unwrap().expect("store enabled");
+    let at = chrono::Utc::now();
+    let init = |channel| {
+        let build_digest = "s3".to_string();
+        let (sources, initial_anchor) = (Vec::new(), 100);
+        Ok(Initialized {
+            channel,
+            sources,
+            initial_anchor,
+            build_digest,
+            at,
+        })
+    };
+    let era = store.begin_era(&[C], at, init).unwrap();
+    let channel = store.open_channel(&era, C).unwrap().expect("era channel");
+    let gate = node.gate().expect("registered").gate();
+    let alarms = node.host.alarms();
+    let writer = ChannelWriter::new(channel, gate, discord, Lease::default(), alarms);
+    (store, writer)
+}
+
+// Independent guard evidence: a second writer of the holder's channel posts; not single-actor E2E.
+pub(super) async fn running_post_node(env: &Env) {
+    let (node, epoch) = holder_with_baseline(env).await;
+    let gate = node.gate().expect("registered");
+    let HomeOwnership::Owned {
+        home_epoch,
+        gate_epoch,
+        ..
+    } = gate.ownership()
+    else {
+        panic!("the lease holds the home");
+    };
+    assert_eq!(home_epoch, epoch);
+    let discord = Arc::new(Discord::default());
+    discord.hold();
+    let root = env.dir.join("second-writer");
+    let (_store, mut writer) = second_writer(&root, &node, Arc::clone(&discord));
+    let unit = UnitKey {
+        channel_id: C,
+        provider: ShadowProvider::Claude,
+        native_key: "second".into(),
+        kind: UnitKind::Body,
+    };
+    let piece = Derived::Piece(PieceWork {
+        unit_key: unit.clone(),
+        index: 0,
+        payload: "held".into(),
+    });
+    let delivering = tokio::spawn(async move { (writer.deliver(&piece).await, writer) });
+    let counted = || deliver::posts_in_flight(C) == Some(1);
+    until("the second writer's POST counts", WITHIN, counted).await;
+    let clear = || async { node.owed().await == Some(Owed::default()) };
+    until_async("the actor's fresh projection owes nothing", WITHIN, clear).await;
+    assert_eq!(deliver::posts_in_flight(C), Some(1), "still running");
+    signal(&env.dir, "owed_seen");
+    wait_signal(&env.dir, "reclaim_begun", WITHIN).await;
+    until("the drain's final close", WITHIN, || {
+        gate.final_closed(epoch)
+    })
+    .await;
+    tokio::time::sleep(TWO_ROUNDS).await;
+    let (blocker, running) = (node.drain_blocker(), deliver::posts_in_flight(C));
+    assert_eq!(
+        node.state().await,
+        Some(HomeState::Reclaiming),
+        "the row left while the POST ran: blocker {blocker:?}, in flight {running:?}"
+    );
+    assert_eq!(blocker.as_deref(), Some("posts_in_flight"));
+    assert_eq!(running, Some(1));
+    assert_eq!(discord.posts(), Vec::<String>::new());
+    discord.release();
+    let (step, mut writer) = delivering.await.unwrap();
+    assert_eq!(step, Step::Done);
+    until_left(&node).await;
+    assert_eq!(discord.posts(), ["held"]);
+    let (_, record) = writer.store().ledger().latest_piece(&unit, 0).unwrap();
+    assert_eq!(record.epoch, gate_epoch, "admitted at the held gate epoch");
+    assert!(matches!(record.outcome, Some(PieceOutcome::Posted(_))));
+    assert_eq!(
+        node.discord().posts(),
+        ["base"],
+        "the actor posted nothing more"
+    );
     node.stop().await;
 }
 

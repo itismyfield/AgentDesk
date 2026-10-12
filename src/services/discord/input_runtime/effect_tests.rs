@@ -272,65 +272,72 @@ fn c1_worker_panic_restores_capability_and_blocking_backstop() {
         });
 }
 
-#[tokio::test]
-async fn c1_detached_panic_preserves_payload_and_effectful_drop_off_and_protected() {
+#[test]
+fn c1_detached_panic_preserves_payload_and_effectful_drop_off_and_protected() {
     let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
-    let root = tempfile::tempdir().unwrap();
-    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "AGENTDESK_ROOT_DIR",
-        root.path(),
-    );
-    struct Dispose {
-        channel: u64,
-        path: std::path::PathBuf,
-        protected: bool,
-    }
-    impl Drop for Dispose {
-        fn drop(&mut self) {
-            assert_eq!(current().is_some(), self.protected);
-            if self.protected {
-                assert_eq!(super::super::require_worker(), Ok(()));
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_ROOT_DIR",
+                root.path(),
+            );
+            struct Dispose {
+                channel: u64,
+                path: std::path::PathBuf,
+                protected: bool,
             }
-            super::super::write(&ProviderKind::Claude, self.channel, || {
-                std::fs::write(&self.path, b"panic cleanup").map_err(|error| error.to_string())
-            })
-            .unwrap();
-        }
-    }
-    for protected in [false, true] {
-        let channel = if protected { 6_325_429 } else { 6_325_428 };
-        let gate = protected.then(|| Gate::protect(ProviderKind::Claude, channel).unwrap());
-        let _health = gate.as_ref().map(super::super::test_health::Clear::new);
-        let permit = gate.as_ref().map(|gate| gate.admit().unwrap());
-        let path = root.path().join(channel.to_string());
-        let dispose = Dispose {
-            channel,
-            path: path.clone(),
-            protected,
-        };
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(detached(permit, async move {
-            let _dispose = dispose;
-            entered_tx.send(()).unwrap();
-            release_rx.await.unwrap();
-            std::panic::panic_any(6325_u64);
-        }));
-        entered_rx.await.unwrap();
-        let closing = gate.as_ref().map(|gate| gate.close().unwrap());
-        if let Some(closing) = &closing {
-            assert!(futures::FutureExt::now_or_never(closing.drain()).is_none());
-        }
-        release_tx.send(()).unwrap();
-        let error = task.await.unwrap_err();
-        assert!(error.is_panic());
-        assert_eq!(*error.into_panic().downcast::<u64>().unwrap(), 6325);
-        assert_eq!(std::fs::read(path).unwrap(), b"panic cleanup");
-        if let Some(closing) = closing {
-            closing.drain().await;
-        }
-        assert!(current().is_none());
-    }
+            impl Drop for Dispose {
+                fn drop(&mut self) {
+                    assert_eq!(current().is_some(), self.protected);
+                    if self.protected {
+                        assert_eq!(super::super::require_worker(), Ok(()));
+                    }
+                    super::super::write(&ProviderKind::Claude, self.channel, || {
+                        std::fs::write(&self.path, b"panic cleanup")
+                            .map_err(|error| error.to_string())
+                    })
+                    .unwrap();
+                }
+            }
+            for protected in [false, true] {
+                let channel = if protected { 6_325_429 } else { 6_325_428 };
+                let gate = protected.then(|| Gate::protect(ProviderKind::Claude, channel).unwrap());
+                let _health = gate.as_ref().map(super::super::test_health::Clear::new);
+                let permit = gate.as_ref().map(|gate| gate.admit().unwrap());
+                let path = root.path().join(channel.to_string());
+                let dispose = Dispose {
+                    channel,
+                    path: path.clone(),
+                    protected,
+                };
+                let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+                let task = tokio::spawn(detached(permit, async move {
+                    let _dispose = dispose;
+                    entered_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                    std::panic::panic_any(6325_u64);
+                }));
+                entered_rx.await.unwrap();
+                let closing = gate.as_ref().map(|gate| gate.close().unwrap());
+                if let Some(closing) = &closing {
+                    assert!(futures::FutureExt::now_or_never(closing.drain()).is_none());
+                }
+                release_tx.send(()).unwrap();
+                let error = task.await.unwrap_err();
+                assert!(error.is_panic());
+                assert_eq!(*error.into_panic().downcast::<u64>().unwrap(), 6325);
+                assert_eq!(std::fs::read(path).unwrap(), b"panic cleanup");
+                if let Some(closing) = closing {
+                    closing.drain().await;
+                }
+                assert!(current().is_none());
+            }
+        });
 }
 
 #[test]
@@ -435,32 +442,38 @@ fn c1_shutdown_disposes_queued_and_rejected_cleanup_with_preclose_effect() {
     }
 }
 
-#[tokio::test]
-async fn c1_async_accessory_worker_consumes_preclose_permit_and_keeps_scheduler_backstop() {
+#[test]
+fn c1_async_accessory_worker_consumes_preclose_permit_and_keeps_scheduler_backstop() {
     let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
-    let root = tempfile::tempdir().unwrap();
-    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "AGENTDESK_ROOT_DIR",
-        root.path(),
-    );
-    let channel = 6_325_405;
-    let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
-    let _health = super::super::test_health::Clear::new(&gate);
-    scope(Some(gate.admit().unwrap()), async {
-        let _closing = gate.close().unwrap();
-        assert!(super::super::write(&ProviderKind::Claude, channel, || Ok(())).is_err());
-        let path = root.path().join("written");
-        let saved = path.clone();
-        io(move || {
-            super::super::write(&ProviderKind::Claude, channel, || {
-                std::fs::write(path, b"existing effect").map_err(|e| e.to_string())
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_ROOT_DIR",
+                root.path(),
+            );
+            let channel = 6_325_405;
+            let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+            let _health = super::super::test_health::Clear::new(&gate);
+            scope(Some(gate.admit().unwrap()), async {
+                let _closing = gate.close().unwrap();
+                assert!(super::super::write(&ProviderKind::Claude, channel, || Ok(())).is_err());
+                let path = root.path().join("written");
+                let saved = path.clone();
+                io(move || {
+                    super::super::write(&ProviderKind::Claude, channel, || {
+                        std::fs::write(path, b"existing effect").map_err(|e| e.to_string())
+                    })
+                })
+                .await
+                .unwrap();
+                assert_eq!(std::fs::read(saved).unwrap(), b"existing effect");
             })
-        })
-        .await
-        .unwrap();
-        assert_eq!(std::fs::read(saved).unwrap(), b"existing effect");
-    })
-    .await;
+            .await;
+        });
 }
 
 #[tokio::test]
