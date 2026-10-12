@@ -35,6 +35,7 @@ fn s3_node_child() {
             "th8_moves" => route_pg::moves_node(&env).await,
             "th8_select_moves" => route_pg::select_moves_node(&env).await,
             "th8_candidate" => route_pg::candidate_node(&env).await,
+            "th8_home_recheck" => route_pg::home_recheck_node(&env).await,
             "th9_holder" => force_pg::holder_node(&env).await,
             "th9_consumer" => force_pg::consumer_node(&env).await,
             other => panic!("unknown S3 scenario {other}"),
