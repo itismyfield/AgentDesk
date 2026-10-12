@@ -546,6 +546,7 @@ const HOLD_CASES: usize = 3;
 
 /// A held turn's input hold names its canonical execution nonce, the key the executor checks; a
 /// restart keeps that hold as it was, and no hold is ever keyed by the inflight turn nonce.
+#[cfg(test)]
 #[tokio::test(flavor = "current_thread")]
 async fn restart_preserves_execution_nonce_input_hold_pg() {
     use crate::services::claude::herdr_turn::{hold, input_holds, not_held};
