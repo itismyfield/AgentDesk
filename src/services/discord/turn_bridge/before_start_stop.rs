@@ -155,7 +155,7 @@ async fn consume(
     };
     // The turn stays held with its acked receipt for restart; the reason names the stopping step.
     tracing::warn!(
-        channel = row.channel_id,
+        channel_id = row.channel_id,
         ?reason,
         "before-start policy close left its turn held"
     );
