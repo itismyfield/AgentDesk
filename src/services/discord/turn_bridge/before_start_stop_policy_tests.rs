@@ -443,7 +443,8 @@ async fn p10_fin_lock_busy_snapshot_remains_responsive() {
     let snapshot = snapshot.expect("queued behind the close").await;
     let elapsed = started.elapsed();
     step::observe(None);
-    release_tx.send(()).unwrap();
+    // The holder may already have let go on its own deadline if the clear waited for it.
+    let _ = release_tx.send(());
     holder.join().unwrap();
     assert!(
         elapsed < deadline,
@@ -961,21 +962,30 @@ async fn p10_fin_input_fence_typed_refusals() {
 /// save generation, birth pin) commits nothing when it differs; the exact close commits.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_strict_boundaries() {
-    type Tamper = fn(&Close, &InflightTurnState, std::time::Instant, &mut PolicyCloseIntent);
+    type Tamper = fn(&Close, &InflightTurnState, &Axes, &mut PolicyCloseIntent);
+    struct Axes {
+        early: std::time::Instant,
+        twin: Arc<CancelToken>,
+    }
     let early = std::time::Instant::now();
     let close = Close::open(5_341_000, |_| {}).await;
+    // A live twin with the same nonce; every token has its own interrupt generation too.
+    let twin = CancelToken::from_persisted_turn_nonce(close.row.turn_nonce.clone());
+    let axes = Axes {
+        early,
+        twin: Arc::new(twin),
+    };
     let queued = close.other_turn_and_queue().await;
     let acked = close.acked().await;
     let tampers: [(&str, Tamper); 9] = [
-        ("cutoff before start", |_, _, early, i| {
-            i.request.observed_before = early
+        ("cutoff before start", |_, _, axes, i| {
+            i.request.observed_before = axes.early
         }),
         ("nonce", |_, _, _, i| {
             i.request.turn_nonce = "other-nonce".into()
         }),
-        ("token", |close, _, _, i| {
-            let twin = CancelToken::from_persisted_turn_nonce(close.row.turn_nonce.clone());
-            i.request.actor = Arc::downgrade(&Arc::new(twin));
+        ("token", |_, _, axes, i| {
+            i.request.actor = Arc::downgrade(&axes.twin)
         }),
         ("interrupt generation", |_, _, _, i| {
             i.request.interrupt_generation += 1
@@ -1002,7 +1012,7 @@ async fn p10_fin_strict_boundaries() {
     let bytes = close.bytes();
     for (case, tamper) in tampers {
         let mut intent = close.intent(acked.clone());
-        tamper(&close, &acked, early, &mut intent);
+        tamper(&close, &acked, &axes, &mut intent);
         let outcome = close.submit(intent).await;
         assert!(
             matches!(
