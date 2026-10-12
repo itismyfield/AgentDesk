@@ -28,7 +28,7 @@ def message(identity, channel="123", author="456"):
 
 
 @contextmanager
-def server(replies):
+def server(replies, headers=None):
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -38,6 +38,8 @@ def server(replies):
             self.send_response(status)
             if status == 302:
                 self.send_header("Location", "/must-not-follow")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(payload if isinstance(payload, bytes) else json.dumps(payload).encode())
 
@@ -72,6 +74,22 @@ class DiscordContracts(unittest.TestCase):
             "/api/v10/channels/123/messages?limit=100&before=500",
             "/api/v10/channels/123/messages?limit=100&before=200",
             "/api/v10/channels/123/messages/200"])
+
+    def test_empty_history_requires_independent_visibility_evidence(self):
+        scope = {**SCOPE, "individual_ids": []}
+        result, _ = self.collect_replies([(200, [])], scope)
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["reasons"], ["discord_visibility_unverified"])
+        forged = {**result, "complete": True, "reasons": []}
+        self.assertFalse(history_valid(forged, scope))
+
+    def test_valid_individual_lookup_proves_empty_history_visibility(self):
+        result, _ = self.collect_replies([(200, []), (200, message(200))])
+        self.assertTrue(history_valid(result, SCOPE))
+        self.assertEqual(result["messages"], [])
+        result, _ = self.collect_replies([(200, [message(200)]), (200, [])],
+                                         {**SCOPE, "individual_ids": []})
+        self.assertTrue(history_valid(result, {**SCOPE, "individual_ids": []}))
 
     def test_short_page_requires_terminal_boundary_or_empty_page(self):
         result, _ = self.collect_replies([(200, [message(200)]), (429, {})])
@@ -120,6 +138,35 @@ class DiscordContracts(unittest.TestCase):
 
 
 class PGContracts(unittest.TestCase):
+    def test_uri_uses_explicit_dbname_and_pins_connection_options(self):
+        from urllib.parse import parse_qs, urlsplit
+        scope = json.loads(CONTRACT.read_text())["scope"]
+        uri = "postgresql://fixture@127.0.0.1:65431/expected_db?options=unsafe&connect_timeout=60"
+        with patch.dict(os.environ, {"N1_FIXTURE_DSN": uri, "PGPASSWORD": "fixture-secret"}), patch(
+                "n1_canary.evidence.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, '{"intake_outbox":[],"turn_lifecycle_events":[]}', "")) as run:
+            pg_select("N1_FIXTURE_DSN", scope)
+        args, kwargs = run.call_args
+        self.assertIn("--dbname", args[0])
+        target = urlsplit(args[0][args[0].index("--dbname") + 1])
+        self.assertEqual((target.hostname, target.port, target.path), ("127.0.0.1", 65431, "/expected_db"))
+        self.assertEqual(parse_qs(target.query)["options"], ["-c default_transaction_read_only=on -c statement_timeout=10000"])
+        self.assertEqual(parse_qs(target.query)["connect_timeout"], ["5"])
+        self.assertNotIn("fixture-secret", " ".join(args[0]))
+        self.assertEqual(kwargs["env"]["PGPASSWORD"], "fixture-secret")
+
+    def test_password_and_ambiguous_dsn_are_rejected_before_psql(self):
+        scope = json.loads(CONTRACT.read_text())["scope"]
+        for dsn in ("postgresql://user:secret@127.0.0.1/db", "postgresql:///db?password=secret",
+                    "postgresql:///db?service=other", "postgresql:///db#fragment",
+                    "host=127.0.0.1 password=secret", "https://127.0.0.1/db"):
+            with self.subTest(dsn=dsn), patch.dict(os.environ, {"N1_FIXTURE_DSN": dsn}), patch(
+                    "n1_canary.evidence.subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 0, '{"intake_outbox":[],"turn_lifecycle_events":[]}', "")) as run:
+                with self.assertRaisesRegex(Unknown, "pg_dsn_invalid"):
+                    pg_select("N1_FIXTURE_DSN", scope)
+                run.assert_not_called()
+
     def test_select_only_query_and_readonly_connection_are_executed(self):
         scope = json.loads(CONTRACT.read_text())["scope"]
         expected = {"intake_outbox": [], "turn_lifecycle_events": []}
@@ -130,12 +177,12 @@ class PGContracts(unittest.TestCase):
         args, kwargs = run.call_args
         self.assertEqual(args[0][0], "psql")
         self.assertIn("-X", args[0])
-        self.assertNotIn("fixture-secret", args[0])
+        self.assertIn("--dbname", args[0])
         self.assertEqual(kwargs["input"], PG_SELECT)
         self.assertTrue(PG_SELECT.startswith("SELECT "))
         self.assertNotRegex(PG_SELECT.upper(), r"\b(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|COPY|CALL)\b")
         self.assertEqual(kwargs["env"]["PGOPTIONS"], "-c default_transaction_read_only=on -c statement_timeout=10000")
-        self.assertEqual(kwargs["env"]["PGDATABASE"], "fixture-secret")
+        self.assertNotEqual(kwargs["env"].get("PGDATABASE"), "fixture-secret")
 
     def test_failure_parse_error_missing_dsn_are_unknown(self):
         scope = json.loads(CONTRACT.read_text())["scope"]
@@ -157,6 +204,31 @@ class CLIFixture(unittest.TestCase):
     save = fixture_helpers.Fixture.save
     cli = fixture_helpers.Fixture.cli
 
+    def test_truncated_http_body_reaches_cli_unknown(self):
+        cases = [({"Content-Length": "100"}, b"[]"),
+                 ({"Transfer-Encoding": "chunked"}, b"2\r\n[]\r\n")]
+        for headers, body in cases:
+            with self.subTest(headers=headers):
+                with server([(200, body)], headers) as (base, _):
+                    output = self.cli("--discord-base-url", base)
+                self.assertIn("discord_incomplete", output["reasons"])
+                self.assertIn("discord_response_unavailable", output["reasons"])
+
+    def test_empty_live_history_without_visibility_reaches_cli_unknown(self):
+        self.manifest["discord"]["individual_ids"] = []
+        self.save()
+        with server([(200, [])]) as (base, requests):
+            output = self.cli("--discord-base-url", base)
+        self.assertEqual(len(requests), 1)
+        self.assertIn("discord_incomplete", output["reasons"])
+        self.assertIn("discord_visibility_unverified", output["reasons"])
+
+    def test_empty_history_fixture_without_visibility_is_unknown(self):
+        self.manifest["discord"]["individual_ids"] = []
+        self.values["discord"]["individual"] = {}
+        self.save()
+        self.assertIn("discord_incomplete", self.cli()["reasons"])
+
     def test_discord_loopback_failure_reaches_cli_unknown(self):
         with server([(429, {})]) as (base, requests):
             output = self.cli("--discord-base-url", base)
@@ -177,6 +249,13 @@ class CLIFixture(unittest.TestCase):
 
 
 class EffectBoundary(unittest.TestCase):
+    def test_uri_fixture_executes_in_required_guards_recipe(self):
+        self.assertTrue((ROOT / "tests/run_n1_canary_pg_fixture.py").is_file())
+        self.assertTrue((ROOT / "tests/test_n1_canary_pg.py").is_file())
+        source = (ROOT / "tests/run_n1_canary_pg_fixture.py").read_text()
+        self.assertIn('"tests.test_n1_canary_pg"', source)
+        self.assertIn('"tests/run_n1_canary_mutations.py"', source)
+
     def test_production_has_only_audited_io(self):
         self.assertTrue(ENTRY.is_file(), "required CLI entry is missing")
         for path in [ENTRY, *PACKAGE.glob("*.py")]:
@@ -200,7 +279,8 @@ class EffectBoundary(unittest.TestCase):
         script = (ROOT / "scripts/ci-script-checks.sh").read_text()
         expected = ('if run_check guards "N1 canary oracle input contracts"; then\n'
                     '"$PYTHON" -m unittest tests.test_n1_canary_oracle tests.test_n1_canary_collection\n'
-                    '"$PYTHON" tests/run_n1_canary_mutations.py\nfi')
+                    '"$PYTHON" tests/run_n1_canary_mutations.py\n'
+                    '"$PYTHON" tests/run_n1_canary_pg_fixture.py tests.test_n1_canary_pg\nfi')
         self.assertTrue(expected in script, "oracle tests must execute in the guards shard")
 
 

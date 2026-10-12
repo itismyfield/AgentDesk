@@ -251,6 +251,7 @@ fi
 if run_check guards "N1 canary oracle input contracts"; then
 "$PYTHON" -m unittest tests.test_n1_canary_oracle tests.test_n1_canary_collection
 "$PYTHON" tests/run_n1_canary_mutations.py
+"$PYTHON" tests/run_n1_canary_pg_fixture.py tests.test_n1_canary_pg
 fi
 
 if run_check guards "N1 native oracle contracts"; then

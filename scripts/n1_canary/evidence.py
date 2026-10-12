@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import subprocess
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from . import Unknown, loads
 from .manifest import RUNTIME, digest, shape, uint
@@ -9,6 +10,7 @@ from .manifest import RUNTIME, digest, shape, uint
 JSONL = {"transcript", "bindings", "log", "o_ledger"}
 COUNTERS = ("closed_events", "aborted_events", "unknown_outcome_events", "create_attempt",
             "create_committed", "attempt", "succeeded_post", "succeeded_patch", "failed_or_uncertain")
+PG_OPTIONS = "-c default_transaction_read_only=on -c statement_timeout=10000"
 PG_SELECT = """SELECT json_build_object(
  'intake_outbox', (SELECT coalesce(json_agg(t), '[]'::json) FROM
  (SELECT id, channel_id, user_msg_id, turn_kind, status, created_at, completed_at
@@ -21,13 +23,32 @@ PG_SELECT = """SELECT json_build_object(
  ORDER BY created_at, turn_id) t));"""
 
 
+def pg_connection(dsn):
+    # Passwords use PGPASSWORD; URI options cannot weaken the SELECT connection limits.
+    try:
+        url = urlsplit(dsn)
+        if url.scheme in {"postgres", "postgresql"}:
+            pairs = parse_qsl(url.query.replace("+", "%2B"), keep_blank_values=True, strict_parsing=True)
+            if url.password is not None or url.fragment or any(
+                    key in {"password", "passfile", "service", "servicefile"} for key, _ in pairs):
+                raise Unknown("pg_dsn_invalid")
+            pairs = [(key, value) for key, value in pairs if key not in {"options", "connect_timeout"}]
+            pairs.extend((("options", PG_OPTIONS), ("connect_timeout", "5")))
+            return urlunsplit(url._replace(query=urlencode(pairs, quote_via=quote)))
+        if url.scheme or "=" in dsn or "://" in dsn:
+            raise Unknown("pg_dsn_invalid")
+        name = dsn.replace("\\", "\\\\").replace("'", "\\'")
+        return f"dbname='{name}' options='{PG_OPTIONS}' connect_timeout=5"
+    except ValueError:
+        raise Unknown("pg_dsn_invalid") from None
+
+
 def pg_select(env_name, scope):
     dsn = os.environ.get(env_name)
     if not dsn:
         raise Unknown("pg_unavailable")
-    env = {**os.environ, "PGDATABASE": dsn, "PGCONNECT_TIMEOUT": "5",
-           "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=10000"}
-    args = ["psql", "-X", "-w", "-qAt", "-v", "ON_ERROR_STOP=1",
+    env = {**os.environ, "PGCONNECT_TIMEOUT": "5", "PGOPTIONS": PG_OPTIONS}
+    args = ["psql", "--dbname", pg_connection(dsn), "-X", "-w", "-qAt", "-v", "ON_ERROR_STOP=1",
             "-v", f"channel={scope['channel_id']}", "-v", f"start={scope['start_at']}",
             "-v", f"end={scope['end_at']}"]
     try:

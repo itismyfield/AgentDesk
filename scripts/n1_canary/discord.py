@@ -1,6 +1,7 @@
 """GET-only Discord collection; incomplete pages never establish absence."""
 import ipaddress
 import os
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -37,7 +38,7 @@ def getter(base_url, token_env):
                 return loads(response.read())
         except HTTPError as error:
             raise Unknown("discord_rate_limited" if error.code == 429 else "discord_http_error") from None
-        except (OSError, ValueError, URLError):
+        except (OSError, ValueError, URLError, HTTPException):
             raise Unknown("discord_response_unavailable") from None
     return get
 
@@ -75,10 +76,17 @@ def collect(scope, get):
                 if not message_valid(message, channel) or message["id"] != identity:
                     raise Unknown("discord_individual_invalid")
                 result["individual"][identity] = message
+        if not visibility_proven(result):
+            raise Unknown("discord_visibility_unverified")
         result["complete"] = True
     except Unknown as error:
         result["reasons"].append(str(error))
     return result
+
+
+def visibility_proven(value):
+    # An empty page closes pagination; a successful message lookup establishes visibility.
+    return bool(value.get("messages") or value.get("individual"))
 
 
 def boundaries_valid(value, scope):
@@ -117,4 +125,5 @@ def history_valid(value, scope):
                     for m in value["messages"])
             and isinstance(value.get("individual"), dict) and set(value["individual"]) == set(scope["individual_ids"])
             and all(message_valid(m, scope["channel_ids"][0]) and m["id"] == identity
-                    for identity, m in value["individual"].items()))
+                    for identity, m in value["individual"].items())
+            and visibility_proven(value))

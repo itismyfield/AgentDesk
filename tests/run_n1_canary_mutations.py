@@ -1,5 +1,6 @@
 """Execute guard-removal mutants in copies, and prove worktree bytes stay unchanged."""
 import hashlib
+import os
 from pathlib import Path
 import shutil
 import re
@@ -11,6 +12,26 @@ ROOT = Path(__file__).resolve().parents[1]
 PROD = [ROOT / "scripts/n1_turn_canary_oracle.py", ROOT / "scripts/ci-script-checks.sh",
         *sorted((ROOT / "scripts/n1_canary").glob("*.*"))]
 MUTANTS = [
+    ("http-truncation-uncaught", "discord.py", "URLError, HTTPException", "URLError",
+     "tests.test_n1_canary_collection.CLIFixture.test_truncated_http_body_reaches_cli_unknown"),
+    ("remove-pg-ci-fixture", "ci-script-checks.sh", '"$PYTHON" tests/run_n1_canary_pg_fixture.py tests.test_n1_canary_pg', "true",
+     "tests.test_n1_canary_collection.EffectBoundary.test_ci_registration_is_in_a_required_shard"),
+    ("empty-collection-as-visible", "discord.py", "if not visibility_proven(result):", "if False:",
+     "tests.test_n1_canary_collection.DiscordContracts.test_empty_history_requires_independent_visibility_evidence"),
+    ("empty-fixture-as-visible", "discord.py", "and visibility_proven(value)", "and True",
+     "tests.test_n1_canary_collection.CLIFixture.test_empty_history_fixture_without_visibility_is_unknown"),
+    ("uri-as-pgdatabase", "evidence.py",
+     'env = {**os.environ, "PGCONNECT_TIMEOUT": "5", "PGOPTIONS": PG_OPTIONS}',
+     'env = {**os.environ, "PGDATABASE": dsn, "PGCONNECT_TIMEOUT": "5", "PGOPTIONS": PG_OPTIONS}',
+     "tests.test_n1_canary_pg.URIConnection.test_uri_reaches_expected_database_and_enforces_readonly"
+     if os.environ.get("AGENTDESK_REQUIRE_PG") == "1" else
+     "tests.test_n1_canary_collection.PGContracts.test_uri_uses_explicit_dbname_and_pins_connection_options"),
+    ("uri-options-override", "evidence.py",
+     'pairs = [(key, value) for key, value in pairs if key not in {"options", "connect_timeout"}]',
+     'return dsn',
+     "tests.test_n1_canary_pg.URIConnection.test_uri_reaches_expected_database_and_enforces_readonly"
+     if os.environ.get("AGENTDESK_REQUIRE_PG") == "1" else
+     "tests.test_n1_canary_collection.PGContracts.test_uri_uses_explicit_dbname_and_pins_connection_options"),
     ("unavailable-to-zero", "evidence.py", "return summary, {}, reasons\n",
      "summary.update(dropped_events=0, open_placeholder_attempts=0)\n            return summary, {}, reasons\n",
      "tests.test_n1_canary_oracle.Fixture.test_unavailable_is_not_zero"),
@@ -63,7 +84,7 @@ def main():
             shutil.copy2(ROOT / "scripts/ci-script-checks.sh", dest / "scripts/ci-script-checks.sh")
             (dest / "tests").mkdir()
             (dest / "tests/__init__.py").write_text("")
-            for name in ("test_n1_canary_oracle.py", "test_n1_canary_collection.py"):
+            for name in ("test_n1_canary_oracle.py", "test_n1_canary_collection.py", "test_n1_canary_pg.py"):
                 shutil.copy2(ROOT / "tests" / name, dest / "tests" / name)
             shutil.copytree(ROOT / "tests/fixtures/n1_canary_o1", dest / "tests/fixtures/n1_canary_o1")
             path = dest / "scripts" / filename if filename in ("n1_turn_canary_oracle.py", "ci-script-checks.sh") else dest / "scripts/n1_canary" / filename
@@ -71,6 +92,8 @@ def main():
             if before not in source:
                 raise AssertionError(f"mutant location missing: {label}")
             path.write_text(source.replace(before, after, 1))
+            if label == "uri-as-pgdatabase":
+                path.write_text(path.read_text().replace('"--dbname", pg_connection(dsn), ', '', 1))
             run = subprocess.run([sys.executable, "-m", "unittest", "-v", test], cwd=dest,
                                  capture_output=True, text=True, timeout=30)
             assertion_red = (run.returncode == 1 and "FAIL:" in run.stderr and "AssertionError" in run.stderr
