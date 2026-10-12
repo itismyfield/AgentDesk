@@ -1120,7 +1120,8 @@ jobs:
 
       - name: Writer namespace exact Windows targets
         if: runner.os == 'Windows'
-        timeout-minutes: 30
+        # Healthy runs took 16-27 min on 2026-10-12 and two PRs were cut at 30.
+        timeout-minutes: 45
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -2223,7 +2224,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=713459343783731b3a38d23259809855ff8e29aa22bbe493dd038e8b2dc21f43
+          expected=972a796d719e4361d1a117e3aeffd51b7f939fdf6778c1fcc1ea8f9c91eee739
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2456,7 +2457,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=713459343783731b3a38d23259809855ff8e29aa22bbe493dd038e8b2dc21f43
+          expected=972a796d719e4361d1a117e3aeffd51b7f939fdf6778c1fcc1ea8f9c91eee739
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
