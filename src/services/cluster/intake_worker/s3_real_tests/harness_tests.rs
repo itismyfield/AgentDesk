@@ -1,10 +1,11 @@
 //! Two simulated nodes over one PG. Each node is a child test process with its own runtime root,
 //! home-gate registry, writer readiness and Discord recorder; the parent owns the database.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -28,7 +29,8 @@ use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_for};
 use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::adoption::LegacyView;
-use crate::services::tui_o::writer::host::test_io::{Alarms, Startup, TestHost};
+use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents, BindingRecord};
+use crate::services::tui_o::writer::host::test_io::{Alarms, TestHost};
 use crate::services::tui_o::writer::host::{self, Custody, HostIo, HostParts};
 use crate::services::tui_o::writer::{
     DeliveryLease, DiscordPort, PostOutcome, SeenMessage, WriterAlarm,
@@ -592,18 +594,85 @@ impl DeliveryLease for Lease {
     }
 }
 
+/// A channel's binding event log, one per host: [`TestHost`]'s Startup bind as seq 1, then what
+/// a scenario commits.
+pub(super) struct EventLog {
+    events: Mutex<Vec<BindingEvent>>,
+    notice: watch::Sender<u64>,
+    /// The highest seq any read returned.
+    served: AtomicU64,
+}
+
+impl EventLog {
+    fn new(events: Vec<BindingEvent>) -> Self {
+        let latest = events.last().map_or(0, |event| event.seq);
+        Self {
+            events: Mutex::new(events),
+            notice: watch::channel(latest).0,
+            served: AtomicU64::new(0),
+        }
+    }
+
+    /// Seq 1, whose channel, provider and pane every committed event carries.
+    pub(super) fn first(&self) -> BindingEvent {
+        locked(&self.events)[0].clone()
+    }
+
+    /// Stores `record` as the next seq, then publishes it, so a notified reader finds it.
+    pub(super) fn commit(&self, record: BindingRecord) -> u64 {
+        let seq = {
+            let mut events = locked(&self.events);
+            let first = events[0].clone();
+            let seq = events.last().unwrap().seq + 1;
+            let committed_at = chrono::Utc::now();
+            events.push(BindingEvent {
+                seq,
+                record,
+                committed_at,
+                ..first
+            });
+            seq
+        };
+        self.notice.send_replace(seq);
+        seq
+    }
+
+    pub(super) fn served(&self) -> u64 {
+        self.served.load(Ordering::SeqCst)
+    }
+}
+
+impl BindingEvents for EventLog {
+    fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
+        let events = locked(&self.events);
+        let due = events
+            .iter()
+            .filter(|e| e.channel_id == channel && e.seq > after);
+        let due: Vec<_> = due.cloned().collect();
+        if let Some(last) = due.last() {
+            self.served.fetch_max(last.seq, Ordering::SeqCst);
+        }
+        Ok(due)
+    }
+
+    fn subscribe(&self, _: u64) -> watch::Receiver<u64> {
+        self.notice.subscribe()
+    }
+}
+
 /// The real writer host's gateway IO with the recording Discord in place of [`TestHost`]'s.
 pub(super) struct S3Host {
     inner: Arc<TestHost>,
     pub(super) discord: Arc<Discord>,
     pub(super) lease: Lease,
+    logs: Mutex<BTreeMap<u64, Arc<EventLog>>>,
 }
 
 impl HostIo for S3Host {
     type Port = Discord;
     type Lease = Lease;
     type Alarms = Alarms;
-    type Bindings = Startup;
+    type Bindings = EventLog;
 
     fn port(&self) -> impl Future<Output = Arc<Discord>> + Send {
         std::future::ready(Arc::clone(&self.discord))
@@ -617,8 +686,16 @@ impl HostIo for S3Host {
         self.inner.alarms()
     }
 
-    fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Startup> {
-        self.inner.bindings(channel, provider)
+    /// Every caller, the host and the actor alike, gets the channel's one log.
+    fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<EventLog> {
+        let mut logs = locked(&self.logs);
+        let log = logs.entry(channel).or_insert_with(|| {
+            let startup = self.inner.bindings(channel, provider);
+            Arc::new(EventLog::new(
+                startup.binding_events_since(channel, 0).unwrap(),
+            ))
+        });
+        Arc::clone(log)
     }
 
     fn activation_facts(
@@ -762,6 +839,7 @@ impl Booted {
             inner: TestHost::new([(C, source)]),
             discord: Arc::new(discord),
             lease: Lease::default(),
+            logs: Mutex::default(),
         });
         let owned = channel_home_boot::delegated_boot_ownership(|_| true);
         let io = Arc::clone(&host);
