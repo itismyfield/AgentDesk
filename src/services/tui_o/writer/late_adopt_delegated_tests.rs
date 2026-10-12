@@ -99,6 +99,7 @@ pub(super) async fn pending(pool: &PgPool, epoch: i64) -> i64 {
             attachment_refs: serde_json::json!([]),
             channel_id: CHANNEL.to_string(),
             user_msg_id: "6325".into(),
+            replay_source_message_ids: None,
             request_owner_id: "100".into(),
             request_owner_name: None,
             user_text: "first late-adopt input".into(),
