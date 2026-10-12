@@ -71,6 +71,30 @@ pub(crate) fn try_with_composer_mutation_lock<R>(
     None
 }
 
+/// A private, non-sendable witness exists only while the actual composer lock is held.
+pub(crate) struct ComposerPermit<'a> {
+    session: &'a str,
+    _local: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl ComposerPermit<'_> {
+    pub(crate) fn session(&self) -> &str {
+        self.session
+    }
+}
+
+pub(crate) fn try_with_composer_permit<R>(
+    session: &str,
+    operation: impl for<'a> FnOnce(ComposerPermit<'a>) -> R,
+) -> Option<R> {
+    try_with_composer_mutation_lock(session, || {
+        operation(ComposerPermit {
+            session,
+            _local: std::marker::PhantomData,
+        })
+    })
+}
+
 /// Why a pane's composer is protected; in memory only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DraftGuard {
