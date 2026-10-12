@@ -560,7 +560,8 @@ fn handback_refuses_a_debt_bearing_snapshot_without_rewriting_it() {
     };
     let input = json!({"author_id": 9, "message_id": 113, "text": "handed back", "channel_id": channel.get()});
     let handed = crate::services::turn_orchestrator::input_handback::enqueue(&destination, &input);
-    assert!(handed.is_err(), "{handed:?}");
+    let error = handed.unwrap_err().to_string();
+    assert!(error.contains("expected a sequence"), "{error}");
     assert_eq!(bytes(channel), before);
     assert_eq!(read(channel), [value(&debt)]);
 }
