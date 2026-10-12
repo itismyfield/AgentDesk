@@ -151,6 +151,7 @@ pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards_
     let mut deleted = 0usize;
     let mut failed = 0usize;
     let mut preserved = 0usize;
+    let mut detach_held = 0usize;
     for (channel_id, user_msg_id, placeholder_msg_id) in stale_cards {
         let (channel_id, placeholder_msg_id) = (*channel_id, *placeholder_msg_id);
         // A protected channel's card waits for its move or handback.
@@ -160,7 +161,7 @@ pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards_
         }
         // Candidates include late/conflicting restores whose owners may still queue.
         // The departing hint deprioritizes an owner; it does not exclude one.
-        let teardown = match queued_card_gate::release_or_rekey(
+        let teardown = match queued_card_gate::release_or_rekey_at_boot(
             shared,
             channel_id,
             placeholder_msg_id,
@@ -168,13 +169,24 @@ pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards_
         )
         .await
         {
-            QueuedCardDisposition::Preserved { .. } => {
+            None | Some(QueuedCardDisposition::Preserved { .. }) => {
                 preserved += 1;
                 continue;
             }
-            QueuedCardDisposition::Released(teardown) => teardown,
+            Some(QueuedCardDisposition::Released(teardown)) => teardown,
         };
-        match queued_card_gate::teardown_via_deleter(shared, deleter, teardown).await {
+        let result = match queued_card_gate::teardown_at_boot(shared, deleter, teardown).await {
+            queued_card_gate::BootTeardownOutcome::Held => {
+                preserved += 1;
+                continue;
+            }
+            queued_card_gate::BootTeardownOutcome::DetachHeld(result) => {
+                detach_held += 1;
+                result
+            }
+            queued_card_gate::BootTeardownOutcome::Finished(result) => result,
+        };
+        match result {
             Ok(_) => {
                 deleted += 1;
                 tracing::debug!(
@@ -195,7 +207,7 @@ pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards_
     }
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
-        "  [{ts}] 🧹 STALE-PLACEHOLDER: deleted {deleted}/{} stale 📬 card(s) on bootstrap (failed {failed}, preserved {preserved})",
+        "  [{ts}] 🧹 STALE-PLACEHOLDER: deleted {deleted}/{} stale 📬 card(s) on bootstrap (failed {failed}, preserved {preserved}, controller detach held {detach_held})",
         stale_cards.len(),
     );
 }
@@ -242,7 +254,17 @@ pub(in crate::services::discord) async fn install_restored_queued_placeholders(
         }
         let lock = shared.queued_placeholders_persist_lock(channel);
         let _guard = lock.lock_owned().await;
+        if boot_skip(BootTarget::Channel(&shared.provider, channel.get())) {
+            continue;
+        }
+        #[cfg(test)]
+        tests::n3bc_tests::snapshot_attempt(channel);
         let snapshot = mailbox_snapshot(shared, channel).await;
+        #[cfg(test)]
+        queued_card_gate::boot_test_boundary(channel, "install_snapshot");
+        if boot_skip(BootTarget::Channel(&shared.provider, channel.get())) {
+            continue;
+        }
         let queued = queued_message_ids(&snapshot);
         for (owner, card) in rows {
             let current = shared
@@ -268,6 +290,8 @@ pub(in crate::services::discord) async fn install_restored_queued_placeholders(
             }
         }
         // Also prune stale-only/conflict-only snapshots. Save remains best-effort.
+        #[cfg(test)]
+        queued_card_gate::boot_test_boundary(channel, "install_persist");
         queued_placeholders_store::persist_channel_from_map(
             &shared.queued.queued_placeholders,
             &shared.provider,
