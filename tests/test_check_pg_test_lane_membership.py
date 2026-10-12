@@ -1749,6 +1749,8 @@ class CommentMarkerMutations(BypassFixtureCase):
                         f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
                         "python3 scripts/run_test_lane.py --lane s --log x"
                         f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        f"python3 scripts/run_test_lane.py -- {self.SWEEP}",
+                        f"python3 scripts/run_test_lane.py --lane s --max-summaries 0 -- {self.SWEEP}",
                         "cargo.exe test --lib x"):
             with self.subTest(command=command), \
                     self.assertRaisesRegex(ValueError, "cargo-command-unparsed"):
@@ -1775,9 +1777,10 @@ class CommentMarkerMutations(BypassFixtureCase):
                         # A block line's quotes are the shell's: this runs a program named so.
                         '|\n          "cargo test --lib db::service"',
                         # run_test_lane.py exits on these before it runs any command.
-                        "python3 scripts/run_test_lane.py -- cargo test --lib db::service",
-                        "python3 scripts/run_test_lane.py --lane sweep --max-summaries 0 -- "
+                        "python3 scripts/run_test_lane.py -- env -u AGENTDESK_ROOT_DIR "
                         "cargo test --lib db::service",
+                        "python3 scripts/run_test_lane.py --lane sweep --max-summaries 0 -- "
+                        "env -u AGENTDESK_ROOT_DIR cargo test --lib db::service",
                         "cargo.exe test --lib db::service"):
             with self.subTest(command=command):
                 self.write_sweep(f"  sweep:\n    steps:\n      - run: {command}\n")
