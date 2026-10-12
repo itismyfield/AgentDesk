@@ -90,6 +90,7 @@ impl PreparedSource {
     pub fn key(&self) -> u64 {
         self.key
     }
+
     pub fn identity(&self) -> &ReceiptIdentity {
         &self.identity
     }

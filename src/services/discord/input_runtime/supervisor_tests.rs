@@ -83,6 +83,14 @@ struct World {
     mapping_checks: AtomicUsize,
     source_policy: Mutex<Option<super::super::intake::Classification>>,
     source_policy_inputs: Mutex<Vec<serde_json::Value>>,
+    source_policy_keys: Mutex<Vec<u64>>,
+    source_policy_by_key: Mutex<std::collections::BTreeMap<u64, bool>>,
+    source_policy_wait: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     freeze_failed: AtomicBool,
     log: Mutex<Vec<&'static str>>,
     clears: Mutex<Vec<(Instant, Vec<String>)>>,
@@ -330,6 +338,11 @@ impl Ports for Fake {
             .lock()
             .unwrap()
             .push(source.input().clone());
+        self.world
+            .source_policy_keys
+            .lock()
+            .unwrap()
+            .push(source.key());
         let policy = self
             .world
             .source_policy
@@ -342,7 +355,24 @@ impl Ports for Fake {
                     super::super::intake::Retry::Unknown,
                 )
                 && super::mutant("c2_offer_unknown_policy"));
-        Box::pin(async move { permitted })
+        let permitted = self
+            .world
+            .source_policy_by_key
+            .lock()
+            .unwrap()
+            .get(&source.key())
+            .copied()
+            .unwrap_or(permitted);
+        let wait = self.world.source_policy_wait.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some((entered, resume)) = wait {
+                let _ = entered.send(());
+                if resume.await.is_err() {
+                    return false;
+                }
+            }
+            permitted
+        })
     }
     fn mapping(&self) -> mapping::Probe {
         self.world.mapping_checks.fetch_add(1, Ordering::SeqCst);

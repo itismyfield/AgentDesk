@@ -86,7 +86,10 @@ async fn g1b_snapshot_conflict_holds_aliases_and_actor() {
         let mut supervisor = admitted(&rig, &[]).await;
         let ledger = supervisor.slot().get().unwrap();
         let identity = ReceiptIdentity::new(41, vec![41, 42], 7, rig.channel, rig.channel);
-        let input = json!({"text":"input 41","receipt_identity":identity.unwrap()});
+        let mut input = json!({"text":"input 41","source_message_ids":[41,42],"receipt_identity":identity.unwrap()});
+        if mutant("c2b_g1b_control_omits_source_ids") {
+            input.as_object_mut().unwrap().remove("source_message_ids");
+        }
         let received = Entry::Received { key: 41, input };
         let received_seq = ledger.append_entry(&received, &[]).unwrap();
         if conflict {

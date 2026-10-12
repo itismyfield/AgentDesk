@@ -730,8 +730,14 @@ impl<P: Ports> Supervisor<P> {
             super::source::Source::new(key, identity, row.input.clone(), vec![]).ok()
         });
         // Policy IO runs before the WAL loan; a changed policy keeps the accepted row intact.
-        let permitted = match material {
-            Some(source) => self.ports.source_policy(&source).await,
+        let approval = material
+            .as_ref()
+            .zip(row.received_seq)
+            .map(|(source, seq)| {
+                actor::PolicyOffer::new(source.key(), source.identity().clone(), seq)
+            });
+        let permitted = match material.as_ref() {
+            Some(source) => self.ports.source_policy(source).await,
             None => false,
         };
         #[cfg(test)]
@@ -742,8 +748,23 @@ impl<P: Ports> Supervisor<P> {
                 .hold(drive, cause("source_policy_not_target"), now)
                 .await;
         }
+        let overflow = self.pending_overflow();
+        let generation = overflow.generation();
+        let ready = self.admission_open() && self.order.offer_ready() && approval.is_some();
+        #[cfg(test)]
+        let ready = ready || super::mutant("c2b_skip_policy_order_recheck");
+        if !ready {
+            drive.life.restore(instance);
+            return;
+        }
         let guard = self.guard();
         let stepped = loan(&mut self.slot, move |lease| {
+            let unchanged = overflow.generation() == generation;
+            #[cfg(test)]
+            let unchanged = unchanged || super::mutant("c2b_skip_policy_order_recheck");
+            if !unchanged {
+                return (instance, Err(held("pending_changed")));
+            }
             // A late edge stops the actor before it can submit; the row keeps its responsibility.
             if let Err(cause) = guard.check("offer") {
                 return (instance, Err(cause));
@@ -760,9 +781,12 @@ impl<P: Ports> Supervisor<P> {
             let actor = built.actor.as_mut().expect("actor built before the step");
             let fact = instance.fact.as_ref();
             // The actor's tmux and file IO is blocking, so it runs only on this worker.
-            let step = lease
-                .get()
-                .and_then(|ledger| futures::executor::block_on(actor.step(ledger, fact, now)));
+            let step = lease.get().and_then(|ledger| match approval.as_ref() {
+                Some(approval) => {
+                    futures::executor::block_on(actor.step_for_source(ledger, fact, now, approval))
+                }
+                None => Ok(Step::Wait("source_policy_changed")),
+            });
             lease.needs_reopen |= step.is_err();
             (instance, Ok(step))
         })

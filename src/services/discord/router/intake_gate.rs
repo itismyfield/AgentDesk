@@ -10,6 +10,7 @@ mod busy_duplicate_notice;
 pub(super) mod busy_inject;
 mod component_events;
 mod gate;
+pub(in crate::services::discord) mod ledger;
 mod queue_effects;
 mod stale_turn;
 
@@ -655,6 +656,7 @@ pub(in crate::services::discord) async fn handle_event(
                         &ctx.http,
                         channel_id,
                         &new_message.content,
+                        &data.provider,
                     )
                     .await
             {
@@ -744,6 +746,7 @@ pub(in crate::services::discord) async fn handle_event(
             if !is_allowed_bot && !check_auth(user_id, user_name, &data.shared, &data.token).await {
                 return Ok(());
             }
+
             let author_excluded_from_cancel_preservation =
                 live_sender_excluded_from_human_preservation(
                     &settings_snapshot.allowed_bot_ids,

@@ -37,6 +37,7 @@ const REAL: u64 = 1_300_000_000_000_000_000;
 // The next submit signals `entered` and waits on `latch`; a dropped pane signals `dropped`.
 #[derive(Default)]
 struct Screen {
+    captures: AtomicUsize,
     busy: AtomicBool,
     draft: AtomicBool,
     refuse: AtomicBool,
@@ -66,6 +67,7 @@ impl Drop for TestPane {
 
 impl Pane for TestPane {
     fn capture(&mut self) -> Result<String, String> {
+        self.0.captures.fetch_add(1, Ordering::SeqCst);
         assert!(!self.0.panic.load(Ordering::SeqCst), "the pane worker died");
         if fence::require_worker().is_err() {
             self.0.off_worker.fetch_add(1, Ordering::SeqCst);
@@ -602,6 +604,305 @@ async fn held_readiness_closes_the_gate_once_and_reopens_it_once_on_recovery() {
     assert_eq!((counts.opens, counts.holds), (2, 1));
     assert_eq!(rig.gate.mode(), Mode::LedgerOpen);
     assert!(!rig.health().contains(&line));
+    assert!(driven.release());
+}
+
+#[tokio::test]
+async fn c2b_policy_approval_stays_bound_when_tracked_close_changes_the_offer_head() {
+    use crate::services::discord::input_runtime::supervisor::receipt::Receipt;
+    use crate::services::tui_input::actor::{token, witness};
+    use crate::services::tui_input::attempt::{
+        AttemptMeta, Effect, Tracking, WitnessKind, fresh_token,
+    };
+    use crate::services::tui_input::rows::AttemptEvidence;
+    use crate::services::tui_o::shadow::SourceBinding;
+    let rig = Rig::new(6_328_401);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let binding = SourceBinding {
+        channel_id: rig.channel,
+        provider: ShadowProvider::Claude,
+        source: a.clone(),
+    };
+    let mut supervisor = admitted(&rig, &[41, 42]).await;
+    let ledger = supervisor.slot().get().unwrap();
+    let anchor = std::fs::metadata(&a.path).unwrap().len();
+    let token = fresh_token();
+    let frame = token::render(&token, "input 41");
+    let profile = token::profile(ShadowProvider::Claude);
+    let meta = AttemptMeta {
+        generation: 1,
+        token: token.clone(),
+        frame_digest: token::digest(profile, &frame).unwrap(),
+        frame_profile: Some(profile.into()),
+        execution_nonce: "n1".into(),
+        source: a.clone(),
+        anchor,
+        effect: Effect::Intent,
+        incarnation: None,
+        queue_end: None,
+    };
+    let evidence = AttemptEvidence {
+        binding: binding.clone(),
+        execution_nonce: "n1".into(),
+        eof: anchor,
+        rendered_prompt: frame.clone(),
+        source_ids: vec![41],
+        record_end: None,
+        native_turn_id: None,
+    };
+    ledger
+        .append_tracked(
+            41,
+            RowState::Injecting,
+            Some(evidence),
+            &Tracking {
+                attempt: Some(meta),
+                ..Tracking::default()
+            },
+        )
+        .unwrap();
+    ledger
+        .append_entry(
+            &Entry::Transition {
+                key: 41,
+                state: RowState::AwaitTurn,
+                attempt: None,
+            },
+            &[],
+        )
+        .unwrap();
+    user(&a.path, &frame);
+    turn_end(&a);
+    let seen = witness::scan_tracked(&binding, &ledger.rows().unwrap()).unwrap();
+    assert!(seen.complete && seen.foreign == 0 && seen.altered.is_empty());
+    assert_eq!(
+        seen.closed,
+        [(41, false)],
+        "the registered turn has a matched close before the pass"
+    );
+    assert_eq!(seen.witnesses.len(), 1);
+    let (key, observed) = seen.witnesses.into_iter().next().unwrap();
+    assert_eq!(
+        (key, observed.kind, observed.token.as_str()),
+        (41, WitnessKind::User, token.as_str())
+    );
+    ledger.append_witness(key, observed).unwrap();
+    assert_eq!(
+        ledger.rows().unwrap().row(41).unwrap().state,
+        RowState::Running
+    );
+    let before_b = ledger.rows().unwrap().row(42).unwrap().clone();
+    let identity_b = ledger.rows().unwrap().receipt_identity(42).unwrap();
+    rig.world
+        .source_policy_by_key
+        .lock()
+        .unwrap()
+        .extend([(41, true), (42, false)]);
+    let screen = Arc::new(Screen::default());
+    *screen.record.lock().unwrap() = Some(a.path.clone());
+    let mut driven = Driven::start(supervisor, &screen).await;
+    let after = driven.supervisor.slot().get().unwrap().rows().unwrap();
+    assert_eq!(
+        after.row(41).unwrap().state,
+        RowState::Done(DoneReason::Completed)
+    );
+    assert_eq!(
+        driven.sent(),
+        0,
+        "A's policy approval cannot offer the newly selected B"
+    );
+    assert_eq!(after.row(42), Some(&before_b));
+    assert_eq!(after.receipt_identity(42), Some(identity_b));
+    assert_eq!(*rig.world.source_policy_keys.lock().unwrap(), [41]);
+    driven.idle(1).await;
+    assert_eq!(
+        *rig.world.source_policy_keys.lock().unwrap(),
+        [41, 42],
+        "the next tick checks B's own policy"
+    );
+    assert_eq!(driven.sent(), 0);
+    assert_eq!(state(&rig, 42), RowState::Received);
+    rig.world
+        .source_policy_by_key
+        .lock()
+        .unwrap()
+        .insert(42, true);
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(SupervisorCmd::FetchTicket { reply }, true)
+        .await;
+    let ticket = response.await.unwrap().unwrap();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(
+            SupervisorCmd::BeginScan {
+                ticket,
+                sources: vec![41, 42],
+                horizon: 42,
+                complete_fetch: true,
+                reply,
+            },
+            true,
+        )
+        .await;
+    let mut capability = response.await.unwrap().unwrap();
+    for key in [41, 42] {
+        let rows = driven.supervisor.slot().get().unwrap().rows().unwrap();
+        let source = super::super::source::Source::new(
+            key,
+            rows.receipt_identity(key).unwrap(),
+            rows.row(key).unwrap().input.clone(),
+            vec![],
+        )
+        .unwrap();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        driven
+            .supervisor
+            .input_command(
+                SupervisorCmd::CommitFromScan {
+                    source: Box::new(source),
+                    capability,
+                    reply,
+                },
+                true,
+            )
+            .await;
+        let committed = response.await.unwrap();
+        assert!(matches!(committed.receipt, Receipt::DuplicateQueued(_)));
+        assert_eq!(committed.settlement, Ok(()));
+        capability = committed.capability;
+    }
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(SupervisorCmd::CompleteScan { capability, reply }, true)
+        .await;
+    assert!(response.await.unwrap().is_ok());
+    driven.idle(2).await;
+    assert_eq!(
+        driven.sent(),
+        1,
+        "B's own approval and settled scan allow its offer"
+    );
+    assert_eq!(driven.drive.counts.builds, 1);
+    assert!(driven.release());
+}
+
+#[tokio::test]
+async fn c2b_cancelled_pending_during_policy_wait_blocks_offer_until_actual_rescan() {
+    use crate::services::discord::input_runtime::supervisor::command::FinalDisposition;
+    let rig = Rig::new(6_328_402);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let screen = Arc::new(Screen::default());
+    screen.busy.store(true, Ordering::SeqCst);
+    *screen.record.lock().unwrap() = Some(a.path.clone());
+    let mut driven = Driven::start(admitted(&rig, &[41]).await, &screen).await;
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    let client = driven.supervisor.bind_intake(sender).unwrap();
+    driven.supervisor.adopt_task(rig.channel).unwrap();
+    driven.supervisor.publish_intake();
+    assert!(driven.supervisor.admission_open());
+    assert!(driven.supervisor.order.offer_ready());
+    let overflow = driven.supervisor.pending_overflow();
+    let generation = overflow.generation();
+    let before = driven.supervisor.slot().get().unwrap().rows().unwrap();
+    let captures = screen.captures.load(Ordering::SeqCst);
+    let builds = driven.drive.counts.builds;
+    assert_eq!(builds, 1);
+    assert!(before.row(41).unwrap().attempt.is_none());
+    let (entered, inside) = tokio::sync::oneshot::channel();
+    let (resume, continuation) = tokio::sync::oneshot::channel();
+    *rig.world.source_policy_wait.lock().unwrap() = Some((entered, continuation));
+    screen.busy.store(false, Ordering::SeqCst);
+    let cancel = async {
+        inside.await.unwrap();
+        let mut pending = Box::pin(client.pending(vec![42]));
+        let command = tokio::select! {
+            command = receiver.recv() => command.unwrap(),
+            result = &mut pending => panic!("the actual PendingSource reply is not yet produced: {result:?}"),
+        };
+        assert!(
+            matches!(&command, SupervisorCmd::PendingSource { sources, .. } if sources == &[42])
+        );
+        drop(pending);
+        assert_eq!(
+            overflow.generation(),
+            generation + 1,
+            "cancellation dirties the same supervisor overflow inside policy IO"
+        );
+        resume.send(()).unwrap();
+        command
+    };
+    let ((), pending) = tokio::join!(driven.idle(1), cancel);
+    assert_eq!(
+        driven.sent(),
+        0,
+        "policy approval cannot reuse readiness from before the await"
+    );
+    assert_eq!(
+        driven.supervisor.slot().get().unwrap().rows().unwrap(),
+        before
+    );
+    assert_eq!(screen.captures.load(Ordering::SeqCst), captures);
+    assert_eq!(driven.drive.counts.builds, builds);
+    assert!(!driven.supervisor.slot.loaned());
+    assert!(!driven.supervisor.order.offer_ready());
+    driven.supervisor.input_command(pending, true).await;
+    assert_eq!(driven.supervisor.pending_snapshot().sources, [42]);
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(SupervisorCmd::FetchTicket { reply }, true)
+        .await;
+    let ticket = response.await.unwrap().unwrap();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(
+            SupervisorCmd::BeginScan {
+                ticket,
+                sources: vec![42],
+                horizon: 42,
+                complete_fetch: true,
+                reply,
+            },
+            true,
+        )
+        .await;
+    let capability = response.await.unwrap().unwrap();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(
+            SupervisorCmd::SettleFromScan {
+                source: 42,
+                disposition: FinalDisposition::NonTarget,
+                capability,
+                reply,
+            },
+            true,
+        )
+        .await;
+    let capability = response.await.unwrap().unwrap();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(SupervisorCmd::CompleteScan { capability, reply }, true)
+        .await;
+    assert!(response.await.unwrap().is_ok());
+    assert!(driven.supervisor.order.offer_ready());
+    assert!(driven.supervisor.pending_snapshot().sources.is_empty());
+    driven.idle(2).await;
+    assert_eq!(
+        driven.sent(),
+        1,
+        "the existing actor proceeds after the actual current scan"
+    );
+    assert_eq!(driven.drive.counts.builds, builds);
     assert!(driven.release());
 }
 

@@ -775,46 +775,68 @@ async fn c2_actual_serve_publishes_existing_client_only_after_adopt_and_final_vi
             ])
             .is_ok()
     );
-    let ready = tokio::time::timeout(Duration::from_secs(10), async {
-        while !matches!(
-            lookup(rig.registry, &ProviderKind::Claude, rig.channel),
-            Access::Ready(_)
-        ) {
+    let boot = tokio::time::timeout(Duration::from_secs(10), async {
+        while rig.gate.mode() != Mode::LedgerOpen {
             tokio::task::yield_now().await;
         }
     })
     .await;
-    if ready.is_err() {
+    if boot.is_err() {
         run.abort();
         let _ = (&mut run).await;
     }
-    assert!(
-        ready.is_ok(),
-        "actual serve must publish the existing client after Adopt and final views"
+    boot.expect(
+        "fixture: serve reaches LedgerOpen; timeout is not ready-publication mutant evidence",
     );
-    assert!(matches!(
+    let identity = ReceiptIdentity::new(41, vec![41], 7, rig.channel, rig.channel).unwrap();
+    let sender = commands.clone();
+    let (reply, response) = oneshot::channel();
+    let rpc = tokio::time::timeout(Duration::from_secs(10), async move {
+        let sent = sender
+            .send(SupervisorCmd::LookupResponsibility { identity, reply })
+            .await;
+        (sent, response.await)
+    })
+    .await;
+    if rpc.is_err() {
+        run.abort();
+        let _ = (&mut run).await;
+    }
+    let (sent, responsibility) = rpc
+        .expect("fixture: raw lookup completes; timeout is not ready-publication mutant evidence");
+    let ready_same_arc = matches!(
         lookup(rig.registry, &ProviderKind::Claude, rig.channel),
         Access::Ready(ref published) if Arc::ptr_eq(published, &client)
-    ));
-    eventually(|| rig.gate.mode() == Mode::LedgerOpen).await;
+    );
     let pending = client.pending(vec![41]).await;
+    let closed = client.close().await;
+    let screen_empty = screen.sent.lock().unwrap().is_empty();
+    drop(client);
+    drop(commands);
+    let (supervisor, returned) = run.await.unwrap();
+    let admission_closed = !supervisor.admission_open();
+    let sources = supervisor.pending_snapshot().sources;
+    let released = supervisor.release();
+
+    sent.expect("fixture: the original command sender reaches the running supervisor");
+    let responsibility = responsibility.expect("fixture: the raw lookup receives an actual reply");
+    assert!(
+        matches!(responsibility, Responsibility::Known { key: 41, .. }),
+        "fixture: boot and the original mailbox independently resolve the durable row"
+    );
+    assert!(
+        ready_same_arc,
+        "actual serve publishes the same client immediately after completed boot and raw RPC"
+    );
     assert!(
         pending.is_ok(),
         "the published client uses the live mailbox"
     );
     assert_eq!(pending.unwrap().sources, vec![41]);
-    let identity = ReceiptIdentity::new(41, vec![41], 7, rig.channel, rig.channel).unwrap();
-    assert!(matches!(
-        client.lookup_responsibility(identity).await,
-        Ok(Responsibility::Known { key: 41, .. })
-    ));
-    assert!(client.close().await.is_ok());
-    assert!(screen.sent.lock().unwrap().is_empty());
-    drop(client);
-    drop(commands);
-    let (supervisor, returned) = run.await.unwrap();
+    assert!(closed.is_ok());
+    assert!(screen_empty);
     assert!(!returned);
-    assert!(!supervisor.admission_open());
-    assert_eq!(supervisor.pending_snapshot().sources, vec![41]);
-    assert!(supervisor.release());
+    assert!(admission_closed);
+    assert_eq!(sources, vec![41]);
+    assert!(released);
 }

@@ -4879,6 +4879,9 @@ services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_p
 services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_reject_unresolved_resources_without_effects
 services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_sources_are_read_only_and_unreadable_is_not_empty
 services::discord::input_runtime::supervisor::runtime::ports::tests::c2_runtime_source_policy_reads_current_author_provider_routing_and_holds_unknown_voice
+services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_fresh_thread_parent_route_blocks_changed_foreign_target_and_http_errors
+services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_policy_revocation_during_route_lookup_never_approves_stale_authority
+services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_source_disposition_uses_live_commands_skill_origins_and_missing_kind
 services::discord::input_runtime::supervisor::runtime::ports::tests::g1b_off_entrypoint_preserves_legacy_trace_pg
 services::discord::input_runtime::supervisor::tests::a_cause_leaves_health_once_rechecked_while_an_unsettled_clear_stays
 services::discord::input_runtime::supervisor::tests::abandoned_clear_loan_pins_the_slot_poisons_the_channel_and_keeps_the_worker_write
@@ -4897,6 +4900,8 @@ services::discord::input_runtime::supervisor::tests::drive_entry::c2_closed_ack_
 services::discord::input_runtime::supervisor::tests::drive_entry::c2_policy_before_receipt_defers_unknown_external_and_retries_same_origin
 services::discord::input_runtime::supervisor::tests::drive_entry::c2_policy_before_receipt_defers_unknown_scan_without_ack_or_source_loss
 services::discord::input_runtime::supervisor::tests::drive_entry::c2_policy_change_after_receipt_keeps_identity_and_blocks_offer_until_rechecked
+services::discord::input_runtime::supervisor::tests::drive_entry::c2b_cancelled_pending_during_policy_wait_blocks_offer_until_actual_rescan
+services::discord::input_runtime::supervisor::tests::drive_entry::c2b_policy_approval_stays_bound_when_tracked_close_changes_the_offer_head
 services::discord::input_runtime::supervisor::tests::drive_entry::clear_retry_budget_is_eight_and_exhaustion_stays_held
 services::discord::input_runtime::supervisor::tests::drive_entry::each_binding_change_rebuilds_facts_and_one_actor_and_old_idle_never_submits
 services::discord::input_runtime::supervisor::tests::drive_entry::failed_row_notice_keeps_health_and_retries_until_the_row_is_settled
@@ -6455,6 +6460,10 @@ services::discord::router::intake_dispatch::replay_admission_tests::prepare_comm
 services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
 services::discord::router::intake_dispatch::tests::dispatched_open_route_never_uses_stale_local_recovery_pg
 services::discord::router::intake_dispatch::tests::distinct_open_route_requeues_queued_successor_pg
+services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_cached_attachment_permit_does_not_write_history
+services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_final_admission_never_returns_false_local_or_nonlocal_success
+services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_live_dispatch_does_not_checkpoint_or_consume_the_original
+services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_skill_refuses_both_local_permit_and_unadmitted_dispatch
 services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_direct_execution_body_has_no_external_producer_callsites
 services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_enforce_without_postgres_blocks_owner_unknown
 services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_before_finish
@@ -10064,6 +10073,7 @@ services::discord::voice_barge_in::channel_state::tests::playback_finishes_only_
 services::discord::voice_barge_in::routing::tests::foreground_timeout_above_minimum_is_preserved
 services::discord::voice_barge_in::routing::tests::foreground_timeout_below_minimum_is_clamped_up
 services::discord::voice_barge_in::routing::tests::foreground_timeout_zero_falls_back_to_default
+services::discord::voice_barge_in::runtime_lifecycle::target_policy_tests::c2b_voice_targets_are_fresh_fallible_and_keep_consumer_routes_distinct
 services::discord::voice_barge_in::tests::aborted_foreground_future_clears_inflight_so_next_utterance_is_not_barge_in
 services::discord::voice_barge_in::tests::active_barge_in_mailbox_channel_prefers_routed_background_turn
 services::discord::voice_barge_in::tests::agent_voice_channel_route_falls_back_to_first_text_channel

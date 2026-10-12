@@ -251,6 +251,9 @@ mod intake_outbox_state_builder_tests {
     }
 }
 
+use super::super::intake_gate::ledger as live;
+use crate::services::discord::input_runtime::fence::effect;
+
 pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     preserve_on_cancel: bool,
@@ -259,9 +262,7 @@ pub(super) async fn handle_text_message(
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<IntakeExecution, Error> {
-    use crate::services::discord::input_runtime::fence::effect;
-    let permit = effect::admit(&deps.shared.provider, request.channel_id.get())
-        .map_err(|failure| format!("input admission refused: {failure:?}"))?;
+    let permit = live::legacy_effect(deps, request.channel_id).await?;
     if permit.is_none() && effect::current().is_none() {
         return Box::pin(handle_text_message_admitted(
             deps,
@@ -338,6 +339,7 @@ async fn handle_text_message_admitted(
     let request_owner_name = request_owner_name_owned.as_str();
     let user_text = user_text_owned.as_str();
     let original_channel_id = channel_id;
+    live::legacy_allowed(shared, http, &shared.provider, channel_id).await?;
     let stored_voice_announcement =
         crate::voice::announce_meta::global_store().take_with_acceptance(user_msg_id);
     let has_stored_voice_announcement = stored_voice_announcement.is_some();
@@ -452,12 +454,7 @@ async fn handle_text_message_admitted(
     if voice_route_outcome.bypasses_normal_turn() {
         return Ok(IntakeExecution::Executed);
     }
-    if !is_voice_announcement
-        && shared
-            .voice_barge_in
-            .try_handle_voice_channel_text_reply(http, channel_id, user_text)
-            .await
-    {
+    if !is_voice_announcement && live::try_text_reply(shared, http, channel_id, user_text).await? {
         return Ok(IntakeExecution::Executed);
     }
     let is_dm_channel = matches!(
