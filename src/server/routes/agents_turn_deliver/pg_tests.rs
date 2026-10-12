@@ -1336,17 +1336,9 @@ mod s1a {
             format!("busy:claude:{}:{session}:0:{started}:{offset}:-", f.channel)
         }
 
-        async fn fault(f: &Fixture, name: &str, when: &str) {
-            let sql = format!(
-                "CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION '{name}'; END $$; \
-                 CREATE TRIGGER {name} BEFORE UPDATE ON imsg_reply_obligations FOR EACH ROW WHEN ({when}) EXECUTE FUNCTION {name}()"
-            );
-            sqlx::raw_sql(&sql).execute(&f.pool).await.unwrap();
-        }
-
-        async fn clear_fault(f: &Fixture, name: &str) {
-            let sql = format!("DROP TRIGGER {name} ON imsg_reply_obligations");
-            sqlx::raw_sql(&sql).execute(&f.pool).await.unwrap();
+        async fn clear_fault(f: &Fixture) {
+            let drop = sqlx::raw_sql("DROP TRIGGER s1b_fault ON imsg_reply_obligations");
+            drop.execute(&f.pool).await.unwrap();
         }
 
         async fn fallback(f: &Fixture, origin: &str, episode: &str) -> Option<Uuid> {
@@ -1362,10 +1354,15 @@ mod s1a {
 
         /// Records the end of `episode` the way the terminal observer will: by its exact key.
         async fn episode_ended(f: &Fixture, episode: &str) -> u64 {
-            let sql = "UPDATE imsg_reply_obligations SET terminal_seen_at = NOW()
-                       WHERE episode_key = $1 AND resolution = 'open'";
-            let ended = sqlx::query(sql).bind(episode).execute(&f.peer).await;
-            ended.unwrap().rows_affected()
+            sqlx::query(
+                "UPDATE imsg_reply_obligations SET terminal_seen_at = NOW()
+                 WHERE episode_key = $1 AND resolution = 'open'",
+            )
+            .bind(episode)
+            .execute(&f.peer)
+            .await
+            .unwrap()
+            .rows_affected()
         }
 
         #[tokio::test(flavor = "current_thread")]
@@ -1447,8 +1444,10 @@ mod s1a {
             let f = Fixture::create(8_624_524).await;
             let pane = InjectPane::new(f.channel, "external");
             fold_contract(&f, &pane, "bind-after", "status?");
-            let bind = "NEW.episode_key IS NOT NULL AND OLD.episode_key IS NULL";
-            fault(&f, "s1b_bind_fault", bind).await;
+            sqlx::raw_sql("CREATE FUNCTION s1b_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 's1b fault'; END $$; CREATE TRIGGER s1b_fault BEFORE UPDATE ON imsg_reply_obligations FOR EACH ROW WHEN (NEW.episode_key IS NOT NULL AND OLD.episode_key IS NULL) EXECUTE FUNCTION s1b_fault()")
+                .execute(&f.pool)
+                .await
+                .unwrap();
             let failed = f
                 .call(true, input(Some("bind-fault"), "status?", 200))
                 .await;
@@ -1472,7 +1471,7 @@ mod s1a {
                 ("unknown", "open")
             );
             assert_eq!((row.episode_key, row.inject_nonce), (None, None));
-            clear_fault(&f, "s1b_bind_fault").await;
+            clear_fault(&f).await;
             // The unbound owner's reservation is gone, so the next admitted input reaches the pane.
             let next = f
                 .call(true, input(Some("bind-after"), "status?", 200))
@@ -1620,8 +1619,10 @@ mod s1a {
         async fn s1b_effect_free_after_preflight_stays_unknown() {
             let f = Fixture::create(8_624_530).await;
             f.busy();
-            let queued = "NEW.queued_message_id IS NOT NULL AND OLD.queued_message_id IS NULL";
-            fault(&f, "s1b_queue_fault", queued).await;
+            sqlx::raw_sql("CREATE FUNCTION s1b_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 's1b fault'; END $$; CREATE TRIGGER s1b_fault BEFORE UPDATE ON imsg_reply_obligations FOR EACH ROW WHEN (NEW.queued_message_id IS NOT NULL AND OLD.queued_message_id IS NULL) EXECUTE FUNCTION s1b_fault()")
+                .execute(&f.pool)
+                .await
+                .unwrap();
             let body = input(Some("effect-free"), "status?", 200);
             let failed = f.call(true, body.clone()).await;
             assert_eq!(failed.0, StatusCode::SERVICE_UNAVAILABLE, "{}", failed.1);
@@ -1638,7 +1639,10 @@ mod s1a {
             assert!(queue_texts(&f.shared, f.channel).await.is_empty());
             f.assert_calls(1);
             // With the settlement unwritable too, the row stays admitting and still never redelivers.
-            fault(&f, "s1b_settle_fault", "TRUE").await;
+            sqlx::raw_sql("CREATE FUNCTION s1b_any_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 's1b any fault'; END $$; CREATE TRIGGER s1b_any_fault BEFORE UPDATE ON imsg_reply_obligations FOR EACH ROW EXECUTE FUNCTION s1b_any_fault()")
+                .execute(&f.pool)
+                .await
+                .unwrap();
             let body = input(Some("effect-free-unsettled"), "status?", 200);
             let failed = f.call(true, body.clone()).await;
             assert_eq!(failed.0, StatusCode::SERVICE_UNAVAILABLE, "{}", failed.1);

@@ -186,33 +186,26 @@ pub(crate) async fn settle_admission(
     Ok(changed.rows_affected() == 1)
 }
 
-/// Runs one guarded update and reports success only for exactly one committed row.
-async fn update_one(pool: &PgPool, sql: &str, binds: &[Option<&str>]) -> Result<bool, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let mut query = sqlx::query(sql);
-    for bind in binds {
-        query = query.bind(*bind);
-    }
-    if query.execute(&mut *tx).await?.rows_affected() != 1 {
-        tx.rollback().await?;
-        return Ok(false);
-    }
-    tx.commit().await?;
-    Ok(true)
-}
-
 /// Before a start or busy paste: the delivering admission names its episode candidate, once.
+/// Each guarded UPDATE autocommits, so `true` means exactly one committed row.
 pub(crate) async fn bind_episode(
     pool: &PgPool,
     origin_id: &str,
     episode: &str,
     nonce: Option<&str>,
 ) -> Result<bool, sqlx::Error> {
-    let sql = "UPDATE imsg_reply_obligations SET episode_key = $2,
-                   inject_nonce = COALESCE($3, inject_nonce)
-               WHERE origin_id = $1 AND admission = 'admitting'
-                 AND episode_key IS NULL AND queued_message_id IS NULL";
-    update_one(pool, sql, &[Some(origin_id), Some(episode), nonce]).await
+    let changed = sqlx::query(
+        "UPDATE imsg_reply_obligations SET episode_key = $2,
+             inject_nonce = COALESCE($3, inject_nonce)
+         WHERE origin_id = $1 AND admission = 'admitting'
+           AND episode_key IS NULL AND queued_message_id IS NULL",
+    )
+    .bind(origin_id)
+    .bind(episode)
+    .bind(nonce)
+    .execute(pool)
+    .await?;
+    Ok(changed.rows_affected() == 1)
 }
 
 /// Before a queue write: the delivering admission names the queue entry it becomes.
@@ -221,10 +214,16 @@ pub(crate) async fn bind_queued(
     origin_id: &str,
     queued_message_id: &str,
 ) -> Result<bool, sqlx::Error> {
-    let sql = "UPDATE imsg_reply_obligations SET queued_message_id = $2
-               WHERE origin_id = $1 AND admission = 'admitting'
-                 AND episode_key IS NULL AND queued_message_id IS NULL";
-    update_one(pool, sql, &[Some(origin_id), Some(queued_message_id)]).await
+    let changed = sqlx::query(
+        "UPDATE imsg_reply_obligations SET queued_message_id = $2
+         WHERE origin_id = $1 AND admission = 'admitting'
+           AND episode_key IS NULL AND queued_message_id IS NULL",
+    )
+    .bind(origin_id)
+    .bind(queued_message_id)
+    .execute(pool)
+    .await?;
+    Ok(changed.rows_affected() == 1)
 }
 
 /// A start refused before any effect gives its candidate up, so no turn ever claims it.
@@ -233,10 +232,16 @@ pub(crate) async fn release_episode(
     origin_id: &str,
     episode: &str,
 ) -> Result<bool, sqlx::Error> {
-    let sql = "UPDATE imsg_reply_obligations SET episode_key = NULL
-               WHERE origin_id = $1 AND admission = 'admitting' AND episode_key = $2
-                 AND inject_nonce IS NULL AND terminal_seen_at IS NULL";
-    update_one(pool, sql, &[Some(origin_id), Some(episode)]).await
+    let changed = sqlx::query(
+        "UPDATE imsg_reply_obligations SET episode_key = NULL
+         WHERE origin_id = $1 AND admission = 'admitting' AND episode_key = $2
+           AND inject_nonce IS NULL AND terminal_seen_at IS NULL",
+    )
+    .bind(origin_id)
+    .bind(episode)
+    .execute(pool)
+    .await?;
+    Ok(changed.rows_affected() == 1)
 }
 
 /// A paste the pane refused leaves its busy episode: the GUID waits as queue entry `queued`, and
@@ -247,17 +252,19 @@ pub(crate) async fn hand_back_busy(
     (episode, nonce): (&str, &str),
     queued_message_id: &str,
 ) -> Result<bool, sqlx::Error> {
-    let sql = "UPDATE imsg_reply_obligations SET episode_key = NULL,
-                   queued_message_id = $4, terminal_seen_at = NULL
-               WHERE origin_id = $1 AND admission = 'admitting'
-                 AND episode_key = $2 AND inject_nonce = $3 AND queued_message_id IS NULL";
-    let binds = [
-        Some(origin_id),
-        Some(episode),
-        Some(nonce),
-        Some(queued_message_id),
-    ];
-    update_one(pool, sql, &binds).await
+    let changed = sqlx::query(
+        "UPDATE imsg_reply_obligations SET episode_key = NULL,
+             queued_message_id = $4, terminal_seen_at = NULL
+         WHERE origin_id = $1 AND admission = 'admitting'
+           AND episode_key = $2 AND inject_nonce = $3 AND queued_message_id IS NULL",
+    )
+    .bind(origin_id)
+    .bind(episode)
+    .bind(nonce)
+    .bind(queued_message_id)
+    .execute(pool)
+    .await?;
+    Ok(changed.rows_affected() == 1)
 }
 
 /// When a local turn actually claims queue entry `queued`, its GUIDs join that turn's episode.
