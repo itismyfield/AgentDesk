@@ -2445,11 +2445,10 @@ mod tests {
         let steering_entry = module_src
             .find("pub(crate) fn inject_steering_prompt(")
             .expect("Codex steering entry point exists");
-        let warm_followup_entry = module_src[steering_entry..]
-            .find("pub(crate) fn submit_codex_followup_prompt(")
-            .map(|offset| steering_entry + offset)
-            .expect("warm-followup entry follows steering entry");
-        let steering_body = &module_src[steering_entry..warm_followup_entry];
+        let steering_body = module_src[steering_entry..]
+            .split_once("\n}\n")
+            .expect("steering entry has an explicit function boundary")
+            .0;
 
         assert!(steering_body.contains("submit_codex_followup_prompt_under_lock("));
         assert!(!steering_body.contains("run_actions_with_executor("));
