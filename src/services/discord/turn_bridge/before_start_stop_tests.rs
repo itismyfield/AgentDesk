@@ -1097,9 +1097,8 @@ fn run_crash_phase(phase: &str, marker: &str, env: &[(&str, &std::ffi::OsStr)]) 
     pid
 }
 
-/// A close dying after its receipt, notice ack or just before its clear is finished by the next
-/// restart, led by the receipt alone (no Herdr marker); one dying after the clear leaves nothing.
-/// Either way the row goes and the stop shows once in total.
+/// A close dying before its clear is finished by the next restart from the receipt alone (no Herdr
+/// marker); one dying after it leaves nothing. Either way the stop shows once in total.
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_restart_finishes_a_close_that_crashed_midway() {
     if let Ok(phase) = std::env::var(CRASH_PHASE) {
