@@ -2520,9 +2520,11 @@ services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_each_
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_last_post_blocks_cas_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_post_close_recheck_finds_tail_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_releasing_tail_posts_before_release_pg
+services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_running_post_blocks_leave_with_projection_zero_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_tail_posts_before_leave_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_unknown_is_not_empty_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_orphan_holds_every_consumer_pg
+services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_accepts_rechecks_home_after_ready_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_both_select_branches_make_progress_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_candidate_is_not_home_authority_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_home_moves_before_accept_pg
