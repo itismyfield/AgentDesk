@@ -1,0 +1,4 @@
+{"source_id":@SOURCE@,"start_offset":0,"identity_version":2}
+r 0 66 {"message":{"content":"fixture prefix"},"type":"user","uuid":"z"}
+r 66 422 {"message":{"content":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},"type":"user","uuid":"fresh"}
+r 422 547 {"apiBlockIndex":0,"message":{"content":[{"text":"fixture shared","type":"text"}],"id":"r"},"type":"assistant","uuid":"u-r"}

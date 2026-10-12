@@ -12155,6 +12155,10 @@ services::tui_o::writer::owed::tests::verified::reevaluation_reports_each_sideca
 services::tui_o::writer::owed::tests::verified::the_actor_posts_permitted_episodes_holds_unknown_ones_and_waits_behind_unattributed_work
 services::tui_o::writer::owed::tests::verified::with_the_readiness_gate_off_a_valid_permit_and_span_post_nothing
 services::tui_o::writer::renumbered::tests::two_stored_variants_of_one_file_refuse_every_dev_including_their_own
+services::tui_o::writer::rotation::fork_lineage::tests::all_identities_and_each_announced_or_sealed_alternative_need_range_evidence
+services::tui_o::writer::rotation::fork_lineage::tests::every_byte_split_preserves_offsets_and_never_promotes_an_incomplete_tail
+services::tui_o::writer::rotation::fork_lineage::tests::repeated_ids_use_maximum_parent_start_and_include_the_exact_boundary
+services::tui_o::writer::rotation::fork_lineage::tests::warm_scanner_rechecks_identity_length_absence_and_scan_cap_without_more_bytes
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
 services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_from_history_rather_than_trusted
 services::tui_o::writer::tests::a_gateway_return_ends_the_pause_in_process_health
@@ -12350,6 +12354,14 @@ services::tui_o::writer::tests::actor::rotation::an_old_tail_the_full_spool_refu
 services::tui_o::writer::tests::actor::rotation::an_old_tail_the_full_spool_refuses_still_goes_before_the_new_source
 services::tui_o::writer::tests::actor::rotation::an_unknown_bind_holds_back_even_a_fresh_source
 services::tui_o::writer::tests::actor::rotation::each_old_source_retires_only_after_its_own_successor_records_something
+services::tui_o::writer::tests::actor::rotation::fork_mask_tests::baseline_v2_disk_fixture_reconstructs_parent_positions_without_new_fields
+services::tui_o::writer::tests::actor::rotation::fork_mask_tests::changed_prefix_halts_a_retired_parent_even_when_lineage_can_still_mask
+services::tui_o::writer::tests::actor::rotation::fork_mask_tests::excluded_parent_consumed_prefix_still_decides_a_new_fork
+services::tui_o::writer::tests::actor::rotation::fork_mask_tests::parent_spool_gc_preserves_reconstructed_mask_evidence
+services::tui_o::writer::tests::actor::rotation::fork_mask_tests::pending_parent_resolved_past_row_rebuilds_child_debt_once
+services::tui_o::writer::tests::actor::rotation::fork_mask_tests::posted_parent_rows_are_masked_live_and_on_resume_at_the_exact_boundary
+services::tui_o::writer::tests::actor::rotation::fork_mask_tests::repeated_parent_identity_after_owed_start_masks_the_child_copy
+services::tui_o::writer::tests::actor::rotation::fork_mask_tests::warm_parent_cache_is_discarded_after_replacement_truncation_or_removal
 services::tui_o::writer::tests::actor::rotation::fork_tests::a_fork_decides_the_same_whether_or_not_the_writer_restarts_after_its_retired_parent_is_replaced
 services::tui_o::writer::tests::actor::rotation::fork_tests::a_fork_decides_the_same_whether_or_not_the_writer_restarts_while_its_parent_advances
 services::tui_o::writer::tests::actor::rotation::fork_tests::a_fork_is_owed_from_its_first_new_row_whatever_its_timestamps_say
