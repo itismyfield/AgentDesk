@@ -495,6 +495,7 @@ jobs:
               - 'src/services/tui_o/repost/allowlist_runner_tests.rs'
               - 'src/services/tui_o/repost/allowlist_writer_tests.rs'
               - 'src/services/tui_o/repost/backlog_tests.rs'
+              - 'src/services/tui_o/repost/projection_tests.rs'
               - 'src/services/tui_o/repost/runner_activation_tests.rs'
               - 'src/services/tui_o/repost/runner_tests.rs'
               - 'src/services/tui_o/repost/runtime_host_activation_tests.rs'

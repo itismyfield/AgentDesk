@@ -20,6 +20,7 @@ use crate::services::cluster::channel_home;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::repost::admission::OriginalGate;
 use crate::services::tui_o::repost::dispatch::{DispatchPermit, RepostWriter};
+use crate::services::tui_o::repost::projection::ReceiptOverlay;
 use crate::services::tui_o::repost::runner::{RepostHook, TurnWriter};
 use crate::services::tui_o::repost::send::{DispatchReport, WireOutcome};
 use crate::services::tui_o::shadow::SourceId;
@@ -221,6 +222,8 @@ pub struct ChannelWriter<P, L, A> {
     repost_live: RepostLive,
     repost_switch: Mutex<Option<RepostCheck>>,
     repost_stops: Vec<watch::Receiver<bool>>,
+    /// Shared receipts read at start; a receipted rejection or approval reads as settled.
+    receipts: ReceiptOverlay,
 }
 
 /// Whether a re-post request may still leave: re-post on and the writer neither stopped nor gone.
@@ -243,6 +246,18 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         lease: L,
         alarms: A,
     ) -> Self {
+        Self::with_receipts(store, gate, port, lease, alarms, ReceiptOverlay::Disabled)
+    }
+
+    /// As [`Self::new`], judging the recovered refusals with the shared receipts read before start.
+    pub(crate) fn with_receipts(
+        store: ChannelStore,
+        gate: Arc<OwnershipGate>,
+        port: Arc<P>,
+        lease: L,
+        alarms: A,
+        receipts: ReceiptOverlay,
+    ) -> Self {
         let channel = store.init().channel;
         let (stopped, paused) = (None, false);
         let herdr = crate::config::session_hosts::herdr_endpoint(channel).is_some();
@@ -264,10 +279,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             repost_live: RepostLive::default(),
             repost_switch: Mutex::new(None),
             repost_stops: Vec::new(),
+            receipts,
         };
         let ledger = writer.store.ledger();
         seed_last_posted(channel, ledger);
-        let refused = ledger.blocked();
+        let refused = writer.receipts.blocked(ledger);
         if let Some(detail) = ledger.violation().map(str::to_string) {
             writer.stop(WriterAlarm::LedgerViolation { detail });
         } else if let Some((serial, status)) = refused {
@@ -435,7 +451,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         if ledger.excluded(&piece.unit_key).is_some() {
             return Step::Done;
         }
-        let (piece, approved) = match ledger.disposition(&piece.unit_key, piece.index) {
+        let disposition = self
+            .receipts
+            .disposition(ledger, &piece.unit_key, piece.index);
+        let (piece, approved) = match disposition {
             PieceDisposition::Blocked { serial, status } => {
                 tracing::warn!(channel = self.channel, serial, status, unit_key = ?piece.unit_key,
                     "[tui_o] latest rejected piece needs operator approval");

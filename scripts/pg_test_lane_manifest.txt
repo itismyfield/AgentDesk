@@ -288,6 +288,7 @@ src/services/tui_o/repost/allowlist_host_tests.rs
 src/services/tui_o/repost/allowlist_runner_tests.rs
 src/services/tui_o/repost/allowlist_writer_tests.rs
 src/services/tui_o/repost/backlog_tests.rs
+src/services/tui_o/repost/projection_tests.rs
 src/services/tui_o/repost/runner_activation_tests.rs
 src/services/tui_o/repost/runner_tests.rs
 src/services/tui_o/repost/runtime_host_activation_tests.rs
@@ -610,6 +611,7 @@ services::tui_o::repost::runner::activation_tests::backlog_tests
 services::tui_o::repost::runner_tests
 services::tui_o::writer::tests::actor::host_start::deferred::pg
 services::tui_o::writer::tests::actor::host_start::late_delegated
+services::tui_o::writer::tests::actor::host_start::receipt_projection
 services::tui_o::writer::tests::actor::repost_turn
 services::tui_o::writer::tests::actor::repost_turn::activation
 services::tui_o::writer::tests::actor::repost_turn::allowlist
@@ -2258,6 +2260,7 @@ services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_de
 services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_foreign_body_gate_and_host_share_candidate
 services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_home_body_before_first_decision_preserves_reservation
 services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_off_foreign_standby_legacy_body_releases_before_host_can_adopt
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipt_overlay_judges_the_recovered_writer_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_actor_stop_during_429_wait_prevents_retry_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_actor_stop_receiver_reaches_a_running_repost_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_channel_turn_binds_switch_before_real_repost_pg
