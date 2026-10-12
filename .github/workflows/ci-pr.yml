@@ -223,6 +223,7 @@ jobs:
               - 'src/db/dispatches/delivery_events.rs'
               - 'src/db/dispatches/outbox/delivery.rs'
               - 'src/db/idempotency.rs'
+              - 'src/db/imsg_reply_tests.rs'
               - 'src/db/intake_outbox.rs'
               - 'src/db/intake_outbox_delivery_proof.rs'
               - 'src/db/intake_outbox_dispatch_stamp/tests.rs'

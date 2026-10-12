@@ -305,6 +305,58 @@ fn scanner_confirms_the_full_frame_and_rejects_same_nonce_contamination() {
 }
 
 #[test]
+fn scanner_rejects_nontext_blocks_without_changing_text_or_nonce_receipts() {
+    let expected = text();
+    let text_block = serde_json::json!({"type": "text", "text": expected});
+    let mut cases = vec![
+        (serde_json::json!(expected), true),
+        (serde_json::json!([text_block]), true),
+        (
+            serde_json::json!(
+                expected
+                    .lines()
+                    .map(|line| serde_json::json!({"type": "text", "text": line}))
+                    .collect::<Vec<_>>()
+            ),
+            true,
+        ),
+    ];
+    for extra in [
+        serde_json::json!({"type": "image", "source": {"type": "base64", "data": "AA=="}}),
+        serde_json::json!({"type": "tool_result", "content": "person input"}),
+        serde_json::json!({"type": "unknown"}),
+        serde_json::Value::Null,
+    ] {
+        cases.push((serde_json::json!([text_block, extra]), false));
+        cases.push((serde_json::json!([extra, text_block]), false));
+    }
+    for (content, exact) in cases {
+        for record in [
+            serde_json::json!({"type": "user", "message": {"content": content}}),
+            serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": content}),
+            serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": content}}),
+        ] {
+            let fake = Fake::new();
+            let offset = fs::metadata(&fake.transcript).unwrap().len();
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(&fake.transcript)
+                .unwrap();
+            writeln!(file, "{}", real(record.clone())).unwrap();
+            assert_eq!(
+                transcript_submission(&fake.transcript, offset, NONCE, Some(&expected)),
+                Some(exact),
+                "{record}"
+            );
+            assert!(
+                transcript_carries(&fake.transcript, offset, NONCE),
+                "{record}"
+            );
+        }
+    }
+}
+
+#[test]
 fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
     let expected = text();
     let fake = Fake::new();
