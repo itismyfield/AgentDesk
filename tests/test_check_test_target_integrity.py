@@ -364,6 +364,24 @@ class MutationProof(unittest.TestCase):
 class PathRedirection(unittest.TestCase):
     """#[path = "..."] mod declarations must resolve (review blocker #2)."""
 
+    def test_parent_redirect_site_matches_the_changed_repo_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src" / "nested").mkdir(parents=True)
+            lib = root / "src" / "lib.rs"
+            lib.write_text('#[path = "nested/owner.rs"] mod owner;\n', encoding="utf-8")
+            (root / "src" / "nested" / "owner.rs").write_text(
+                '#[cfg(test)] #[path = "../redirected.rs"] mod tests;\n', encoding="utf-8",
+            )
+            (root / "src" / "redirected.rs").write_text(
+                "#[test] fn registered_case() {}\n", encoding="utf-8",
+            )
+            inventory = integrity.collect_static_tests(lib, root)
+            self.assertEqual(inventory.tests, {
+                "owner::tests::registered_case": "src/redirected.rs:1",
+            })
+            self.assertEqual(inventory.module_errors, {})
+
     def test_redirected_module_is_not_a_false_positive(self) -> None:
         # #5008 item 18 / #5081: prove descent, not just the mod declaration
         # or a hand-written manifest claiming that the child contains a test.
