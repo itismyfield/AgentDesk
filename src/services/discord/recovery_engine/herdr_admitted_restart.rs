@@ -98,6 +98,10 @@ impl AdmittedRestartTerminal {
         state: &inflight::InflightTurnState,
     ) -> AdmittedRestartReport {
         let (provider, channel_id) = (&self.provider, self.channel);
+        // A restart that kept the prior process's actor would leave this settlement unmade.
+        if mutant("restart_in_process") {
+            return kept(state, "a live actor owns the channel");
+        }
         if state.restart_mode.is_some() && !mutant("restart_admitted_restart_mode_settled") {
             return kept(state, "planned restart owns the row");
         }
@@ -262,6 +266,35 @@ pub(in crate::services::discord) mod test_hooks {
 
     /// The crash rig's stop: the process ends with the ack durable and the row not yet cleared.
     pub(in crate::services::discord) const STOP_AFTER_ACK: &str = "ADK_RESTART_KIND_STOP_AFTER_ACK";
+
+    type Kind = Option<crate::services::agent_protocol::NativeTerminalKind>;
+    type PersistStop = Box<dyn FnOnce(Kind) + Send>;
+    static AFTER_ADMITTED_PERSIST: std::sync::Mutex<Vec<(u64, PersistStop)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    /// The crash rig's stop right after an admission made `channel`'s terminal kind durable.
+    pub(in crate::services::discord) fn stop_after_admitted_persist(
+        channel: u64,
+        stop: PersistStop,
+    ) {
+        let mut stops = AFTER_ADMITTED_PERSIST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        stops.push((channel, stop));
+    }
+
+    pub(in crate::services::discord) fn after_admitted_persist(channel: u64, kind: Kind) {
+        let stop = {
+            let mut stops = AFTER_ADMITTED_PERSIST
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let at = stops.iter().position(|(owner, _)| *owner == channel);
+            at.map(|at| stops.remove(at).1)
+        };
+        if let Some(stop) = stop {
+            stop(kind);
+        }
+    }
 
     pub(super) fn stop_after_ack(row: &crate::services::discord::inflight::InflightTurnState) {
         if std::env::var_os(STOP_AFTER_ACK).is_some() {
