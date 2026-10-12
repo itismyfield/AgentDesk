@@ -46,6 +46,9 @@
     {"id": "H7-G", "profile": "now", "piece": 2, "status": "implemented",
      "tests": ["services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_running_post_blocks_leave_with_projection_zero_pg"],
      "what": "a counted POST alone keeps the row draining while the projection is zero"},
+    {"id": "H7-G-unreadable", "profile": "now", "piece": 2, "status": "implemented",
+     "tests": ["services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_unreadable_post_count_blocks_leave_pg"],
+     "what": "an unreadable POST count keeps the row draining until it reads zero"},
     {"id": "H7-O", "profile": "now", "piece": 3, "status": "pending", "tests": [],
      "what": "optional: delivery is still admitted during the first responsibility check"},
     {"id": "H8-G", "profile": "now", "piece": 1, "status": "implemented",
@@ -61,6 +64,7 @@
     {"name": "unsealed_as_zero", "cases": ["H7-U"], "at": "writer/actor.rs undelivered() unsealed"},
     {"name": "binding_pending_as_zero", "cases": ["H7-B"], "at": "writer/actor.rs undelivered() binding_pending"},
     {"name": "drain_ignores_running_posts", "cases": ["H7-G"], "at": "cluster/channel_home_drain.rs posts_in_flight match"},
+    {"name": "posts_unreadable_as_zero", "cases": ["H7-G-unreadable"], "at": "cluster/channel_home_drain.rs posts_in_flight None arm"},
     {"name": "accepts_ignores_home", "cases": ["H8-G"], "at": "writer/host.rs Readiness::accepts owned"},
     {"name": "orphan_read_opens_gate", "cases": ["H6-5", "H9-D"], "at": "cluster/channel_home_boot.rs orphaned read"},
     {"name": "skip_post_abort_join", "cases": ["H9-W"], "at": "writer/deliver.rs timeout abort/join"}
