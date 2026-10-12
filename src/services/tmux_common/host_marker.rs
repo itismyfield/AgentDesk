@@ -39,6 +39,11 @@ pub(crate) fn record_tmux_host_marker(session_name: &str) {
     }
 }
 
+/// Drops the marker of a launch whose session is confirmed gone; an absent marker is fine.
+pub(crate) fn remove_tmux_host_marker(session_name: &str) {
+    let _ = std::fs::remove_file(session_temp_path(session_name, HOST_KIND_TEMP_EXT));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

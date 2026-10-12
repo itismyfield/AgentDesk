@@ -3,6 +3,36 @@
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 
+/// Columns and rows of a guarded Claude session: a full composer stays inside the captured screen.
+#[cfg(unix)]
+const CLAUDE_GUARDED_SIZE: (u16, u16) = (160, 40);
+
+/// Launch evidence left by an earlier guarded launch is cleared only once tmux confirms that
+/// session is gone; a live or unprobeable session keeps it and refuses the relaunch.
+#[cfg(unix)]
+fn refuse_over_unconfirmed_session(tmux_session_name: &str) -> Result<(), String> {
+    use crate::services::platform::tmux::{SessionPresence, session_presence};
+    use crate::services::tmux_common::{self as tc, host_marker};
+    let path = |ext| tc::session_temp_path(tmux_session_name, ext);
+    let files = [
+        tmux_owner_path(tmux_session_name),
+        path(tc::TMUX_RUNTIME_KIND_TEMP_EXT),
+        path(tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT),
+    ];
+    let host = host_marker::read_host_kind_marker(tmux_session_name);
+    let held = files.iter().any(|file| std::path::Path::new(file).exists())
+        || host != host_marker::HostKindMarker::Absent;
+    if !held {
+        return Ok(());
+    }
+    match session_presence(tmux_session_name) {
+        SessionPresence::Missing => Ok(()),
+        presence => Err(format!(
+            "tmux session {tmux_session_name} keeps its launch evidence: presence {presence:?}"
+        )),
+    }
+}
+
 /// Prepare durable launch evidence before creating the hosted tmux session.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
@@ -23,6 +53,11 @@ pub(super) fn prepare_and_create_claude_tui_session(
     if herdr_configured_for_tui_launch(channel_id) {
         return Err(HERDR_NOT_ADMITTED.to_string());
     }
+    // Only boot-allowlisted channels open at the guarded geometry; every other launch is unchanged.
+    let guarded = crate::config::session_hosts::claude_guarded(channel_id);
+    if guarded {
+        refuse_over_unconfirmed_session(tmux_session_name)?;
+    }
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     write_tmux_owner_marker(tmux_session_name)?;
     crate::services::tmux_common::write_tmux_runtime_kind_marker(
@@ -31,6 +66,7 @@ pub(super) fn prepare_and_create_claude_tui_session(
     )?;
     let owner_path = tmux_owner_path(tmux_session_name);
     let mut prepared_session_files = None;
+    let mut sized_cleanup = None;
     let launch_result = (|| -> Result<(_, PreparedIncarnation), String> {
         let prepared = PreparedIncarnation::prepare(
             "claude",
@@ -67,23 +103,51 @@ pub(super) fn prepare_and_create_claude_tui_session(
         );
         std::fs::write(&launch_script_path, script)
             .map_err(|error| format!("update Claude TUI launch script: {error}"))?;
-        let result = crate::services::platform::tmux::create_session(
-            tmux_session_name,
-            Some(working_dir),
-            &format!(
-                "bash {}",
-                shell_escape(&launch_script_path.display().to_string())
-            ),
-        )?;
+        let command = format!(
+            "bash {}",
+            shell_escape(&launch_script_path.display().to_string())
+        );
+        let result = if guarded {
+            let (cols, rows) = CLAUDE_GUARDED_SIZE;
+            crate::services::platform::tmux::create_session_sized(
+                tmux_session_name,
+                Some(working_dir),
+                &command,
+                cols,
+                rows,
+            )
+            .map_err(|failure| {
+                sized_cleanup = Some(failure.cleanup);
+                failure.message
+            })?
+        } else {
+            crate::services::platform::tmux::create_session(
+                tmux_session_name,
+                Some(working_dir),
+                &command,
+            )?
+        };
         Ok((result, prepared))
     })();
     let (tmux_result, incarnation) = match launch_result {
         Ok(result) => result,
         Err(error) => {
+            use crate::services::platform::tmux::SizedCleanup;
+            // A guarded session that may still run keeps every piece of its ownership evidence.
+            if sized_cleanup == Some(SizedCleanup::Unconfirmed) {
+                return Err(error);
+            }
             if let Some(files) = prepared_session_files.as_ref() {
                 files.cleanup_best_effort();
             }
             let _ = std::fs::remove_file(&owner_path);
+            // A guarded session confirmed gone leaves no kind or host marker behind either.
+            if sized_cleanup == Some(SizedCleanup::Removed) {
+                use crate::services::tmux_common::{self as tc, host_marker};
+                let kind = tc::session_temp_path(tmux_session_name, tc::TMUX_RUNTIME_KIND_TEMP_EXT);
+                let _ = std::fs::remove_file(kind);
+                host_marker::remove_tmux_host_marker(tmux_session_name);
+            }
             return Err(error);
         }
     };
@@ -556,3 +620,7 @@ mod herdr_env_tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "tui_session_launch_geometry_tests.rs"]
+mod guarded_geometry_tests;

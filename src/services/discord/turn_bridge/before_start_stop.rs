@@ -127,9 +127,9 @@ async fn consume(
         return false;
     }
     let sent = notice.await;
-    if admitted.ack_before_start_notice(&sent).await.is_none() {
+    let Some(acked) = admitted.ack_before_start_notice(&sent).await else {
         return false;
-    }
+    };
     #[cfg(test)]
     test_hooks::boundary("after_notice_ack", &admitted);
     let key = TurnKey::new(
@@ -141,23 +141,28 @@ async fn consume(
     let mut snapshot = SyntheticClaimSnapshot::from_row(row);
     snapshot.recovery_actor = Some(Arc::downgrade(actor));
     let context = FinalizeContext {
-        clear_inflight: true,
+        clear_inflight: false,
         ..FinalizeContext::bridge()
     };
     #[cfg(test)]
     test_hooks::boundary("before_finalize", &admitted);
-    matches!(
+    let finalized = matches!(
         fin.submit_terminal_with_claim_snapshot(
             key,
             shared.provider.clone(),
             TerminalEvent::Cancel,
             context,
             Some(snapshot),
-            shared.clone()
+            shared.clone(),
         )
         .await,
         FinalizeOutcome::Finalized { .. }
-    )
+    );
+    if finalized && !crate::services::discord::inflight::receipt_mutant("policy-clear") {
+        return acked.clear_before_start_policy_receipt(generation)
+            == crate::services::discord::inflight::GuardedClearOutcome::Cleared;
+    }
+    finalized
 }
 
 #[cfg(test)]

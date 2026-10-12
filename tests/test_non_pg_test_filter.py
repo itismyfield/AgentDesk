@@ -101,6 +101,26 @@ run_non_pg_filter_replay
                 self.assertEqual(result.stdout, "")
                 self.assertIn("PG_INCLUDE_SHARD must be 0 or 1", result.stderr)
 
+    def test_static_pg_restoration_is_what_bash_sources(self) -> None:
+        """The integrity gate judges, per shard, the PG arguments Bash really builds."""
+        spec = importlib.util.spec_from_file_location(
+            "non_pg_filter_integrity", ROOT / "scripts/check_test_target_integrity.py")
+        assert spec and spec.loader
+        integrity = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = integrity
+        spec.loader.exec_module(integrity)
+        restored = integrity.PackageTestIds(ROOT).pg_include_selections()
+        self.assertIsInstance(restored, dict)
+        for shard in ("", "0", "1"):
+            env = {key: value for key, value in os.environ.items() if key != "PG_INCLUDE_SHARD"}
+            if shard:
+                env["PG_INCLUDE_SHARD"] = shard
+            result = subprocess.run(
+                ["bash", "-c", 'source "$1" && printf "%s\\n" "${PG_INCLUDE_ARGS[@]}"',
+                 "bash", str(FILTER)], check=True, capture_output=True, text=True, env=env)
+            with self.subTest(shard=shard):
+                self.assertEqual(restored[shard], tuple(result.stdout.splitlines()))
+
     def test_main_pg_shards_run_each_test_postgres_command_once(self) -> None:
         """Main's two PG jobs together run what one test-postgres run does, once each."""
         job = yaml.safe_load((ROOT / ".github/workflows/ci-main.yml").read_text("utf-8"))["jobs"]["postgres"]

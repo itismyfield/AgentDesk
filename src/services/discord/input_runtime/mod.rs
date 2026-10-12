@@ -5,16 +5,16 @@ pub(crate) mod clear;
 pub(crate) mod effects;
 #[allow(dead_code)]
 pub(crate) mod fence;
-#[cfg(test)]
 pub(crate) mod offer;
 #[allow(dead_code)]
 pub(crate) mod reconcile;
 #[allow(dead_code)]
 pub(crate) mod supervisor;
+pub(crate) use supervisor::runtime;
 
 /// Fence, clear and supervisor holds; an unused supervisor registry adds nothing to the fence's.
 pub(crate) fn health_reasons() -> Vec<String> {
-    reasons_with(&supervisor::REGISTRY)
+    reasons_with(runtime::registry())
 }
 
 fn reasons_with(registry: &supervisor::Registry) -> Vec<String> {

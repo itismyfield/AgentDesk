@@ -26,6 +26,10 @@ pub(in crate::services::discord) mod discord_mock;
 #[cfg(unix)]
 #[path = "herdr_terminate_e2e_tests.rs"]
 mod herdr_terminate_e2e;
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "herdr_terminate_o_e2e_tests.rs"]
+mod herdr_terminate_o_e2e;
 #[path = "n1a_turn_mode_tests.rs"]
 mod n1a_turn_mode;
 #[path = "prompt_identity_e2e_tests.rs"]
@@ -41,6 +45,11 @@ mod stale_resume_retry_e2e;
 mod stop_command_catch_up_e2e;
 #[cfg(unix)]
 mod thread_guard_host_e2e;
+// The literal test gate keeps the source censuses from reading this file as production.
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "herdr_terminate_route_e2e_tests.rs"]
+mod herdr_terminate_route_e2e;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -344,12 +353,15 @@ impl RelayE2eHarness {
         }
     }
 
-    /// The Discord-API injection path: production `FullEvent` intake, run to completion.
+    /// The Discord-API injection path: production `FullEvent` intake, run to completion on
+    /// its own task so the test thread never polls the debug-sized intake future.
     pub(super) async fn deliver_user_message(&self, id: u64, text: &str) -> Result<(), Error> {
-        let event = serenity::FullEvent::Message {
-            new_message: user_message(id, text),
-        };
-        router::handle_event(&self.ctx, &event, &self.data).await
+        let mut intake = AbortOnDrop(Some(self.spawn_user_message(id, text)));
+        match intake.0.as_mut().expect("intake task").await {
+            Ok(result) => result,
+            Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+            Err(join) => panic!("intake task for {id} ended without a result: {join}"),
+        }
     }
 
     /// Production intake of any inbound message, run on its own task.
@@ -367,7 +379,8 @@ impl RelayE2eHarness {
         self.mock.add_thread(thread, CHANNEL_ID);
     }
 
-    /// [`Self::deliver_user_message`] on its own task, for scenarios that act while it runs.
+    /// Production intake of a user message on its own task, for scenarios that act
+    /// while it runs; [`Self::deliver_user_message`] awaits it.
     pub(super) fn spawn_user_message(
         &self,
         id: u64,
@@ -840,5 +853,34 @@ mod headless_turn_provider_tests {
             assert_eq!(harness.placeholder_posts(), 0);
             assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
         }
+    }
+}
+
+/// A debug intake future polled inline overflows the 2 MiB test thread, so what a
+/// scenario awaits for intake stays under this budget.
+mod test_thread_stack_budget {
+    use super::*;
+
+    const TEST_THREAD_INTAKE_BUDGET: usize = 1024;
+
+    /// Size of the future `make` returns; the closure is never called, so no harness boots.
+    fn future_size<Fut>(
+        _make: impl FnOnce(&'static RelayE2eHarness, &'static serenity::FullEvent) -> Fut,
+    ) -> usize {
+        std::mem::size_of::<Fut>()
+    }
+
+    #[test]
+    fn deliver_user_message_keeps_intake_off_the_test_thread_stack() {
+        let intake = future_size(|h, event| router::handle_event(&h.ctx, event, &h.data));
+        let delivered = future_size(|h, _| h.deliver_user_message(1, "status?"));
+        assert!(
+            intake > TEST_THREAD_INTAKE_BUDGET,
+            "probe must see intake: {intake}"
+        );
+        assert!(
+            delivered <= TEST_THREAD_INTAKE_BUDGET,
+            "deliver_user_message future is {delivered} bytes; intake ({intake}) must run on its own task"
+        );
     }
 }

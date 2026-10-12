@@ -286,8 +286,9 @@ def _block_scalar_style(value: str) -> str | None:
 def _strip_line_comment(line: str) -> str:
     """Cut one line at its first real comment, honouring quoted ``#``.
 
-    A ``#`` opens a comment only at the start of a line or after whitespace,
-    and never inside a quoted scalar. That rule holds in YAML and in the POSIX
+    A ``#`` opens a comment only at the start of a line or after whitespace
+    (in shell also after ``;``, ``&`` or ``|``), and never inside a quoted
+    scalar. That rule holds in YAML and in the POSIX
     shell that runs a ``run:`` body alike, which is why one scanner serves
     both: ``run: echo "a # b"`` keeps its ``#``, and a ``#`` line inside a
     ``run: |`` block is dropped because the shell would drop it too.
@@ -304,7 +305,7 @@ def _strip_line_comment(line: str) -> str:
         if quote is None:
             if char in "'\"":
                 quote = char
-            elif char == "#" and (index == 0 or line[index - 1] in " \t"):
+            elif char == "#" and (index == 0 or line[index - 1] in " \t;&|"):
                 return line[:index].rstrip()
         elif char == quote:
             if quote == "'" and line[index + 1:index + 2] == "'":
@@ -321,6 +322,11 @@ def _strip_line_comment(line: str) -> str:
 def _strip_comments(text: str) -> str:
     """``text`` with comments removed and every line's indentation preserved."""
     return "\n".join(_strip_line_comment(line) for line in text.splitlines())
+
+
+def strip_shell_comments(text: str) -> str:
+    """Public form of :func:`_strip_comments` for the test-target integrity gate."""
+    return _strip_comments(text)
 
 
 @lru_cache(maxsize=128)
@@ -1440,6 +1446,48 @@ _ARRAY_READ = re.compile(
     rf"\$\{{[!#]?(?:{'|'.join(KNOWN_ARRAYS)})\b[^}}\n]*\}}|{_ARRAY_USE.pattern}"
 )
 _ARRAY_NAME = re.compile(rf"\b({'|'.join(KNOWN_ARRAYS)})\b")
+# Quoted spans (an unterminated one runs to the end) and escapes hold no shell syntax.
+_QUOTED = re.compile(r"'[^']*(?:'|\Z)|\"(?:\\.|[^\"\\])*(?:\"|\Z)|\\.", re.S)
+_SHELL_WORD = re.compile(r"[;&|()]+|[^\s;&|()]+")
+# Words opening a compound command, group or loop; a closer counts only in command position.
+_OPENERS = frozenset({"if", "case", "for", "select", "while", "until", "{"})
+_CLOSERS = frozenset({"fi", "esac", "done", "}"})
+
+
+def _quoted_blank(shell: str) -> str:
+    """``shell`` with quoted and escaped text blanked at its own width, newlines kept."""
+    return _QUOTED.sub(lambda span: re.sub(r"[^\n]", " ", span.group()), shell)
+
+
+def _at_top_level(shell: str, offset: int) -> bool:
+    """Whether the word at ``offset`` runs as the shell's own command, not quoted, heredoc
+    data, a continued line or inside a compound, function or subshell: a fail-closed count."""
+    syntax = _quoted_blank(shell)
+    newline = shell.rfind("\n", 0, offset)
+    # An odd run of backslashes ending the previous line makes this word an argument there.
+    continued = newline > 0 and (newline - len(shell[:newline].rstrip("\\"))) % 2
+    # Code left ending in `&&`, `||` or a pipe makes this word its conditional or piped
+    # part; an odd backtick count leaves it inside a command substitution.
+    pending = syntax[:max(newline, 0)].rstrip().endswith(("&&", "|", "|&"))
+    if continued or pending or syntax[:offset].count("`") % 2 \
+            or syntax[offset:offset + 1].isspace() \
+            or re.search(r"(?<!<)<<(?!<)", syntax[:offset]):
+        return False
+    depth = 0
+    for line in syntax[:offset].split("\n"):
+        words = _SHELL_WORD.findall(line)
+        for index, word in enumerate(words):
+            if word in _OPENERS:
+                depth += 1
+            elif word in _CLOSERS and (index == 0 or words[index - 1][-1] in ";&|("):
+                depth -= 1
+        # An open `(`/`$(` nests; only a line led by `)` closes one, unlike a case pattern.
+        opened = line.count("(") - line.count(")")
+        if opened > 0 or line.lstrip().startswith(")"):
+            depth += opened
+        if depth < 0:
+            return False
+    return depth == 0
 
 
 def known_array_use(line: str) -> tuple[int, tuple[str, ...]] | None:
@@ -1460,10 +1508,12 @@ def known_array_source_problem(shell: str) -> tuple[str, int] | None:
     # A source indented past the shell's outermost lines sits inside a compound command.
     outer = min((len(line) - len(line.lstrip()) for line in shell.split("\n") if line.strip()),
                 default=0)
+    # A quoted `;` or `|` is data, not a break in the source's `&&` chain.
+    syntax = _quoted_blank(shell)
     covering = [
         source for source in _CANONICAL_SOURCE.finditer(shell)
-        if len(source.group(1)) == outer
-        and (not source.group().endswith("&&") or not _CHAIN_BREAK.search(shell, source.end()))
+        if len(source.group(1)) == outer and _at_top_level(shell, source.end(1))
+        and (not source.group().endswith("&&") or not _CHAIN_BREAK.search(syntax, source.end()))
     ]
     if not covering:
         return ("unsourced", -1)

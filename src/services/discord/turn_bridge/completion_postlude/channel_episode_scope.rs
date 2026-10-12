@@ -504,7 +504,16 @@ mod tests {
             )
         );
         assert!(headless_claim.contains("Ok((transition, cancel_token))"));
-        assert!(recovery.contains("mailbox_recovery_kickoff(\n            shared,\n            channel_id,\n            cancel_token.clone(),"));
+        let recovery_tokens: String = recovery.split_whitespace().collect();
+        assert_eq!(
+            recovery_tokens.matches("mailbox_recovery_kickoff(").count(),
+            1
+        );
+        assert!(recovery_tokens.contains(concat!(
+            "mailbox_recovery_kickoff(",
+            "shared,channel_id,cancel_token.clone(),",
+            "kickoff_identity.request_owner,kickoff_identity.user_message_id,)",
+        )));
         assert_eq!(
             tui_direct
                 .matches(concat!(

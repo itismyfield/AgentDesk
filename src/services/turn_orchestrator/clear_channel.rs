@@ -16,6 +16,12 @@ pub(super) fn clear_channel_state(
     persistence: QueuePersistenceContext,
 ) -> ClearChannelResult {
     state.last_persistence = Some(persistence.clone());
+    if let Err(error) = queued_head::refuse_destructive(state, channel_id, &persistence) {
+        return ClearChannelResult {
+            persistence_error: Some(error),
+            ..Default::default()
+        };
+    }
     let mut discarded_message_ids: Vec<MessageId> =
         state.active_user_message_id.into_iter().collect();
     let removed_token = release_active_turn_anchor(state, channel_id, Some(&persistence.provider));

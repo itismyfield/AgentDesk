@@ -324,6 +324,11 @@ async fn overdue_ready_is_observed_by_the_loop_at_strict_boundary_and_recurrence
         1,
         "the actor loop must produce the overdue alarm"
     );
+    let unavailable = harness.lease.unavailable.lock().unwrap().clone();
+    assert!(
+        unavailable.is_empty(),
+        "an overdue wait is not a terminal stop"
+    );
     assert!(matches!(
         &first[0],
         WriterAlarm::WaitingTooLong {

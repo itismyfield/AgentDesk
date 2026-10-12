@@ -1832,6 +1832,7 @@ fn herdr_items_have_no_production_caller() {
             "HostKindMarker",
             &[
                 MARKER,
+                CLAUDE_LAUNCH, // Guarded relaunch reads the marker only to keep a live session's evidence.
                 GUARD_ADAPTER,
                 CLEANUP_GATE,
                 RESOLVE,
@@ -1847,6 +1848,7 @@ fn herdr_items_have_no_production_caller() {
             "read_host_kind_marker",
             &[
                 MARKER,
+                CLAUDE_LAUNCH, // Guarded relaunch reads the marker only to keep a live session's evidence.
                 CLEANUP_GATE,
                 RESOLVE,
                 GUARD_ADAPTER,
@@ -3014,9 +3016,9 @@ fn close_owner_violations(sources: &BTreeMap<String, String>) -> Vec<String> {
                 "terminate_herdr_once",
                 &[("src/services/discord/herdr_terminate.rs", 1)],
             ),
-            ("pin_terminate", &[]),
-            ("pin_terminate_fenced", &[]),
-            ("send_close_pinned", &[]),
+            ("pin_terminate", &[(CLOSE_OWNER, 1)]),
+            ("pin_terminate_fenced", &[(CLOSE_OWNER, 1)]),
+            ("send_close_pinned", &[(CLOSE_OWNER, 1)]),
             (
                 "call_with_witness",
                 &[
@@ -3173,4 +3175,76 @@ fn m0_close_variant_alias_fixture() {
         !close_owner_violations(&sources).is_empty(),
         "reexport + glob"
     );
+}
+
+const TERMINATE_SERVICE: &str = "src/services/discord/herdr_terminate.rs";
+const TERMINATE_ROUTE: &str = "src/server/routes/herdr_terminate.rs";
+const HERDR_CLI: &str = "src/cli/herdr.rs";
+
+/// The operator terminate chain's production names, each reached from its one caller only.
+fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String> {
+    let mut violations = guarded_item_violations(
+        sources,
+        &[
+            ("terminate_registered_herdr", &[(TERMINATE_ROUTE, 1)]),
+            ("terminate_explicit_herdr", &[(TERMINATE_SERVICE, 1)]),
+            ("host_terminated", &[(TERMINATE_SERVICE, 1)]),
+            ("retire_pg", &[(HERDR_CLI, 1), (TERMINATE_SERVICE, 1)]),
+            (
+                "post_json_local_at",
+                &[(HERDR_CLI, 1), ("src/cli/client.rs", 0)],
+            ),
+        ],
+    );
+    // The variant is built by the service; the finalizer files only match on it.
+    violations.extend(guarded_variant_violations(
+        sources,
+        "TerminalEvent",
+        "HostTerminated",
+        &[
+            TERMINATE_SERVICE,
+            "src/services/discord/turn_finalizer.rs",
+            "src/services/discord/turn_finalizer/cleanup.rs",
+        ],
+    ));
+    // Each link of the chain is still made, exactly once: a lost call fails as an extra one does.
+    let files = scan_files(sources, &mut Vec::new());
+    let required: [(&str, &str); 4] = [
+        ("terminate_registered_herdr", TERMINATE_ROUTE),
+        ("terminate_explicit_herdr", TERMINATE_SERVICE),
+        ("host_terminated", TERMINATE_SERVICE),
+        ("post_json_local_at", HERDR_CLI),
+    ];
+    for (needle, owner) in required {
+        let uses = item_uses_by_file(&files, needle, &bindings(&files, needle));
+        let used = uses.get(owner).map_or(0, |(used, _)| *used);
+        if used != 1 {
+            violations.push(format!("{owner}: {needle} used x{used}, not exactly once"));
+        }
+    }
+    let built = regex::Regex::new(r"\bTerminalEvent\s*::\s*HostTerminated\b").unwrap();
+    let built = files
+        .get(TERMINATE_SERVICE)
+        .map_or(0, |file| built.find_iter(&file.code).count());
+    if built != 1 {
+        violations.push(format!(
+            "{TERMINATE_SERVICE}: HostTerminated built x{built}, not exactly once"
+        ));
+    }
+    violations
+}
+
+#[test]
+fn act_terminate_entry_census() {
+    // The finalizer's terminated-host tests are gated `cfg(all(test, unix))`; that is test code.
+    let sources: BTreeMap<String, String> = production_sources()
+        .into_iter()
+        .map(|(path, text)| {
+            let text = text.replace("#[cfg(all(test, unix))]", "#[cfg(test)]");
+            (path, production_text(&text).0)
+        })
+        .collect();
+    let violations = terminate_entry_violations(&sources);
+    assert!(violations.is_empty(), "{violations:?}");
+    assert!(close_owner_violations(&sources).is_empty());
 }
