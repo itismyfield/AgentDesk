@@ -736,6 +736,9 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/router/message_handler/provider_dispatch/producer_error_test_support.rs",
         "src/services/discord/watchers/lifecycle/n4d2_entry_test.rs",
         "src/services/discord/watchers/lifecycle/n4d2_o_writer_test.rs",
+        "src/services/discord/health/recovery/self_watchdog/policy/tests/mod.rs",
+        "src/services/discord/health/recovery/self_watchdog/tests/mod.rs",
+        "src/services/hang_forensics/tests/mod.rs",
     }
 )
 

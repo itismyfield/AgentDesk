@@ -955,10 +955,12 @@ src/
 │   │   │   │   │   └── judged_finish_fence_tests.rs
 │   │   │   │   ├── self_watchdog/
 │   │   │   │   │   ├── policy/
-│   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   │   └── tests/
+│   │   │   │   │   │       └── mod.rs
+│   │   │   │   │   ├── tests/
+│   │   │   │   │   │   └── mod.rs
 │   │   │   │   │   ├── driver.rs
-│   │   │   │   │   ├── policy.rs
-│   │   │   │   │   └── tests.rs
+│   │   │   │   │   └── policy.rs
 │   │   │   │   ├── stop_judgement/
 │   │   │   │   │   └── judged_finish_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
@@ -2298,7 +2300,8 @@ src/
 │   │   ├── runner.rs
 │   │   └── worktree_resolver.rs
 │   ├── hang_forensics/
-│   │   └── tests.rs
+│   │   └── tests/
+│   │       └── mod.rs
 │   ├── health_diagnostics/
 │   │   └── session_state.rs
 │   ├── imsg_reply/

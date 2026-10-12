@@ -84,8 +84,8 @@ fn deadline_crossing(late_response: bool, blocked_dump: bool) {
     let (request_tx, request_rx) = mpsc::channel();
     let mut threads = Threads::default();
     // Stop an unused listener before joining if a regression skips the probe.
-    let server_stop = ServerStop::default();
-    let stopping = server_stop.0.clone();
+    let server_guard = TcpFixtureGuard::default();
+    let stopping = server_guard.0.clone();
     threads.0.push(std::thread::spawn(move || {
         let mut stream = loop {
             if stopping.load(Ordering::Relaxed) {
@@ -527,9 +527,9 @@ fn expired_deadline_reaches_exit_sink_without_probe_snapshot_or_dump() {
 }
 
 #[derive(Default)]
-struct ServerStop(Arc<AtomicBool>);
+struct TcpFixtureGuard(Arc<AtomicBool>);
 
-impl Drop for ServerStop {
+impl Drop for TcpFixtureGuard {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Relaxed);
     }
@@ -545,14 +545,16 @@ fn observe_mode_keeps_actual_probes_without_dump_exit_or_post_deadline_spin() {
     let addr = listener.local_addr().unwrap().to_string();
     let mut threads = Threads::default();
     // Release the server loop before joining if any assertion unwinds.
-    let server_stop = ServerStop::default();
-    let stopping = server_stop.0.clone();
+    let server_guard = TcpFixtureGuard::default();
+    let stopping = server_guard.0.clone();
     let requests = Arc::new(AtomicUsize::new(0));
     let request_count = requests.clone();
     threads.0.push(std::thread::spawn(move || {
         while !stopping.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // Accepted sockets can inherit the listener's nonblocking flag.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_millis(80)))
                         .unwrap();

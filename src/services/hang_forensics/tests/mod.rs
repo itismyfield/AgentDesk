@@ -767,7 +767,7 @@ fn arming_the_beacon_off_a_runtime_is_reported_not_fatal() {
 
 /// Returns the body of `[profile.release]` from the workspace manifest.
 fn release_profile_section() -> String {
-    let manifest = include_str!("../../../Cargo.toml");
+    let manifest = include_str!("../../../../Cargo.toml");
     let start = manifest
         .find("\n[profile.release]\n")
         .expect("Cargo.toml must define [profile.release]");
