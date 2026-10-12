@@ -1,6 +1,6 @@
 {
-  "manifest_version": 1,
-  "oracle_version": "0.1.0",
+  "manifest_version": 2,
+  "oracle_version": "0.2.0",
   "unknown_outcome_produced": false,
   "policies": {
     "event_schema": 2,
@@ -9,8 +9,9 @@
     "exclusion": "tool-panel-v1",
     "split": "discord-2000-v1",
     "payload_digest": "sha256-utf8-v1",
-    "ledger_schema": 1
+    "ledger_schema": 1,
+    "normalization": "native-record-except-timestamp-v1"
   },
   "provider_formats": {"codex": "codex-jsonl-v1", "claude": "claude-jsonl-v1"},
-  "pending_stages": ["o2", "o3"]
+  "pending_stages": ["o3"]
 }

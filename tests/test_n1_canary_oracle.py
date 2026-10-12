@@ -18,7 +18,8 @@ BOOT = "11111111-1111-4111-8111-111111111111"
 COUNTERS = {key: 0 for key in ("closed_events", "aborted_events", "unknown_outcome_events",
             "create_attempt", "create_committed", "attempt", "succeeded_post",
             "succeeded_patch", "failed_or_uncertain")}
-EXPECTED_REASONS = {"unknown_outcome_unproduced", "confirmation_boundary_unknown", "stages_pending:o2,o3"}
+EXPECTED_REASONS = {"unknown_outcome_unproduced", "confirmation_boundary_unknown", "stages_pending:o3",
+                    "native_origin_unverified", "native_sample_under_50"}
 
 
 def digest(data):
@@ -55,7 +56,10 @@ class Fixture(unittest.TestCase):
         identity = self.manifest["binding"]["identity"]
         self.values = {
             "executable": b"fixture executable, never run",
-            "transcript": b"{}\n",
+            "transcript": b'{"type":"session_meta","payload":{"id":"native-session"}}\n'
+                          b'{"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}\n'
+                          b'{"type":"response_item","payload":{"type":"message","role":"assistant","id":"b1","content":[{"type":"output_text","text":"fixture"}]}}\n'
+                          b'{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}\n',
             "baseline": snapshot(), "end_snapshot": snapshot(),
             "log": [{"event": "n1_mode_confirmed", "boot_id": BOOT, "channel_id": 123,
                      "provider": "codex", "seq": 1, "schema_version": 2, "observed_at_us": 20,
@@ -75,7 +79,8 @@ class Fixture(unittest.TestCase):
         exe_hash = digest(self.values["executable"])
         self.manifest["runtime"]["executable_sha256"] = exe_hash
         self.values["process_proof"] = dict(self.manifest["runtime"], executable_path="/proc/42/exe")
-        self.manifest["source_digests"] = {"prefix_sha256": digest(b""), "window_sha256": digest(b"{}\n")}
+        self.manifest["scope"].update(fiftieth_offset=len(self.values["transcript"]), closure_offset=len(self.values["transcript"]))
+        self.manifest["source_digests"] = {"prefix_sha256": digest(b""), "window_sha256": digest(self.values["transcript"])}
         if ENTRY.exists():
             self.manifest["oracle"]["bundle_sha256"] = bundle_digest()
         self.save()

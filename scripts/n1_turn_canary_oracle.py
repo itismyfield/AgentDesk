@@ -9,6 +9,7 @@ from n1_canary import Unknown, loads
 from n1_canary.discord import collect, getter, history_valid
 from n1_canary.evidence import input_checks, observation_checks, pg_select, pg_valid, read_files
 from n1_canary.manifest import digest, validate
+from n1_canary.turns import reconstruct
 
 
 class Parser(argparse.ArgumentParser):
@@ -25,7 +26,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     result = dict(schema_version=2, verdict="[U]", evidence_complete=False,
                   manifest_digest=None, observation={}, confirmation={}, evidence=[],
-                  reasons=["stages_pending:o2,o3"])
+                  turns={"completed_distinct": None, "completed_native_distinct": None},
+                  reasons=["stages_pending:o3"])
     manifest_path = Path(args.manifest)
     manifest = None
     try:
@@ -49,6 +51,16 @@ def main(argv=None):
         observation, confirmation, reasons = observation_checks(manifest, values)
         result.update(observation=observation, confirmation=confirmation)
         result["reasons"].extend(reasons)
+        try:
+            if "transcript" not in raw:
+                raise Unknown("native_evidence_unavailable")
+            native = reconstruct(raw["transcript"], manifest["scope"])
+            result["turns"] = native["turns"]
+            result["native_observations"] = native["observations"]
+            result["native_units"] = native["units"]
+            result["reasons"].extend(native["reasons"])
+        except Unknown as error:
+            result["reasons"].append(str(error))
         if args.pg_dsn_env:
             values["pg"] = pg_select(args.pg_dsn_env, manifest["scope"])
         if not pg_valid(values.get("pg")):
