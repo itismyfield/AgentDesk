@@ -165,6 +165,7 @@ async fn operator_resume_lease_wait_preserves_readiness_and_drain_owing() {
     let _wanting = demand.want();
     let task = spawn_projecting(
         &WriterConfig { enabled: true },
+        None,
         writer,
         ShadowProvider::Claude,
         bindings,
