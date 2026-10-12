@@ -517,7 +517,7 @@ def collect_static_tests(root: Path, repo_root: Path) -> StaticTestInventory:
                 name = tokens[index + 1]
                 if pending_test and name.kind == "ident":
                     test_id = "::".join(current_names + (name.value,))
-                    site = f"{os.path.normpath(source.relative_to(repo_root))}:{token.line}"
+                    site = f"{source.relative_to(repo_root)}:{token.line}"
                     previous = tests.get(test_id)
                     if previous is None:
                         tests[test_id] = site
@@ -534,7 +534,7 @@ def collect_static_tests(root: Path, repo_root: Path) -> StaticTestInventory:
                     cursor += 1
                 if cursor < len(tokens):
                     path_names = current_names + (name,)
-                    site = f"{os.path.normpath(source.relative_to(repo_root))}:{token.line}"
+                    site = f"{source.relative_to(repo_root)}:{token.line}"
                     if tokens[cursor].value == "{":
                         depth += 1
                         scopes.append((depth, name, current_dir / name))
