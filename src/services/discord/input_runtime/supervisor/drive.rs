@@ -9,7 +9,7 @@ use tokio::sync::{OwnedMutexGuard, mpsc};
 use crate::services::discord::input_runtime::supervisor::admission::Admission;
 pub(crate) use crate::services::discord::input_runtime::supervisor::command::SupervisorCmd;
 
-use super::{BUDGET, Cursor, Ports, Supervisor, clear_loan, held, loan};
+use super::{BUDGET, Cursor, Landing, Ports, Supervisor, clear_loan, held, loan};
 use crate::services::discord::input_runtime::clear::{self, ClearHost, Outcome, Unresolved};
 use crate::services::discord::input_runtime::fence::{self, Closing};
 use crate::services::discord::input_runtime::reconcile::{self, HoldCause};
@@ -345,6 +345,61 @@ async fn start_clear<H: ClearHost>(
 type Started<D> = (ChannelDrive<D>, Result<Vec<BindingEvent>, String>);
 
 impl<P: Ports> Supervisor<P> {
+    /// Holds the reservation before adoption and keeps a held task alive after its ACK.
+    pub(crate) async fn serve<D: DrivePorts>(
+        &mut self,
+        ports: D,
+        expected: &[crate::services::provider::ProviderKind],
+        mut views: tokio::sync::oneshot::Receiver<Vec<Arc<crate::services::discord::SharedData>>>,
+        mut commands: mpsc::Receiver<SupervisorCmd>,
+    ) -> bool {
+        self.prepare_handoff();
+        let mut final_views = None;
+        let mut waiting_views = true;
+        while !self.adopted || waiting_views {
+            tokio::select! {
+                supplied = &mut views, if waiting_views => {
+                    final_views = Some(supplied.unwrap_or_default());
+                    waiting_views = false;
+                }
+                command = commands.recv() => match command {
+                    Some(command @ SupervisorCmd::Adopt { .. }) => self.input_command(command, false).await,
+                    Some(SupervisorCmd::Wake { .. }) => {},
+                    Some(_) => {},
+                    None => return false,
+                }
+            }
+        }
+        let probe = self.ports.mapping();
+        let runtimes = final_views.unwrap_or_default();
+        let runtimes = if expected.contains(&self.config.provider) {
+            runtimes
+        } else {
+            Vec::new()
+        };
+        probe.adopt(expected, runtimes);
+        loop {
+            let landing = self.boot().await;
+            self.retry_notices().await;
+            match landing {
+                Landing::Admitted => {
+                    self.run(ports, commands).await;
+                    return false;
+                }
+                Landing::Legacy | Landing::HandedBack => return true,
+                Landing::Held(_) => {}
+            }
+            tokio::select! {
+                command = commands.recv() => match command {
+                    Some(SupervisorCmd::Wake { cause: _ }) => {},
+                    Some(command) => self.input_command(command, false).await,
+                    None => return false,
+                },
+                () = tokio::time::sleep(TICK) => {},
+            }
+        }
+    }
+
     /// S8: a drive over the whole binding log so far. Nothing opens before its first pass, and
     /// nothing starts before admission.
     pub(crate) fn start_drive<D: DrivePorts>(&mut self, ports: D) -> Option<Started<D>> {
@@ -398,6 +453,13 @@ impl<P: Ports> Supervisor<P> {
                 }
             };
             match command {
+                Some(SupervisorCmd::Wake { cause: _ }) => {
+                    woke = self
+                        .cursor
+                        .as_mut()
+                        .map_or(Ok(Vec::new()), |cursor| cursor.recover());
+                    continue;
+                }
                 Some(SupervisorCmd::Clear) => self.clear(&mut drive, Instant::now()).await,
                 Some(SupervisorCmd::Close { ack }) => {
                     self.gate(&mut drive, false);
@@ -463,6 +525,7 @@ impl<P: Ports> Supervisor<P> {
         woke: Result<Vec<BindingEvent>, String>,
         now: Instant,
     ) {
+        self.retry_notices().await;
         if woke.is_err() || woke.as_ref().is_ok_and(|events| !events.is_empty()) {
             self.invalidate_order();
         }
@@ -484,10 +547,18 @@ impl<P: Ports> Supervisor<P> {
         if (drive.clearing.as_ref())
             .is_some_and(|c| c.at.is_some_and(|at| now >= at || (c.reset && advanced)))
         {
+            if let Err(cause) = self.check_mapping(&drive.closing, "before_clear") {
+                self.gate(drive, false);
+                return self.registration.report(&cause, true);
+            }
             let outcome = match self.ports.clear().await {
                 Some((host, guard)) => clear_loan(&mut self.slot, host, guard).await,
                 None => None,
             };
+            if let Err(cause) = self.check_mapping(&drive.closing, "after_clear") {
+                self.gate(drive, false);
+                return self.registration.report(&cause, true);
+            }
             self.settle_clear(drive, outcome, now).await;
         }
         let rows = loan(&mut self.slot, |lease| lease.get()?.rows()).await;
@@ -600,6 +671,10 @@ impl<P: Ports> Supervisor<P> {
 
     /// A user clear while driving: submission stops at once and resumes only once it settles.
     pub(crate) async fn clear<D: DrivePorts>(&mut self, drive: &mut ChannelDrive<D>, now: Instant) {
+        if let Err(cause) = self.check_mapping(&drive.closing, "before_clear") {
+            self.gate(drive, false);
+            return self.registration.report(&cause, true);
+        }
         self.invalidate_order();
         drive.clearing = Some(Clearing::default());
         self.gate(drive, false);
@@ -607,6 +682,10 @@ impl<P: Ports> Supervisor<P> {
             Some((host, guard)) => start_clear(&mut self.slot, host, guard).await,
             None => None,
         };
+        if let Err(cause) = self.check_mapping(&drive.closing, "after_clear") {
+            self.gate(drive, false);
+            return self.registration.report(&cause, true);
+        }
         self.settle_clear(drive, outcome, now).await;
     }
 

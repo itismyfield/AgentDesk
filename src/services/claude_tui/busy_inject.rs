@@ -165,6 +165,7 @@ fn marker(nonce: &str) -> String {
 }
 
 /// Whether a complete transcript record after `offset` carries the nonce as human input.
+#[cfg(all(test, unix))]
 pub(crate) fn transcript_carries(path: &Path, offset: u64, nonce: &str) -> bool {
     transcript_submission(path, offset, nonce, None).is_some()
 }
@@ -193,29 +194,33 @@ pub(super) fn transcript_submission(
         // A line without its newline may still be mid-write.
         if line.ends_with(b"\n")
             && let Ok(record) = serde_json::from_slice::<serde_json::Value>(&line)
-            && let Some(text) = human_input_text(&record, expected.is_some())
+            && let Some((text, has_nontext)) = human_input_text(&record, expected.is_some())
             && text.contains(&marker)
         {
-            return Some(expected.is_none_or(|expected| text == expected));
+            return Some(expected.is_none_or(|expected| !has_nontext && text == expected));
         }
         line.clear();
     }
     None
 }
 
-/// Text of an enqueue, a queued command or a non-meta user prompt; other records never count.
-fn human_input_text(record: &serde_json::Value, prompt_only: bool) -> Option<String> {
-    let text_of = |value: &serde_json::Value| -> Option<String> {
+/// Text and non-text presence in an enqueue, queued command or non-meta user prompt.
+/// Extra non-text blocks prevent an exact frame receipt even when its text matches.
+fn human_input_text(record: &serde_json::Value, prompt_only: bool) -> Option<(String, bool)> {
+    let text_of = |value: &serde_json::Value| -> Option<(String, bool)> {
         match value {
-            serde_json::Value::String(text) => Some(text.clone()),
-            serde_json::Value::Array(blocks) => Some(
+            serde_json::Value::String(text) => Some((text.clone(), false)),
+            serde_json::Value::Array(blocks) => Some((
                 blocks
                     .iter()
                     .filter(|block| block.get("type").and_then(|t| t.as_str()) == Some("text"))
                     .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
                     .collect::<Vec<_>>()
                     .join("\n"),
-            ),
+                blocks
+                    .iter()
+                    .any(|block| block.get("type").and_then(|t| t.as_str()) != Some("text")),
+            )),
             _ => None,
         }
     };
@@ -559,10 +564,8 @@ fn agentdesk_prompt(rows: &[String]) -> bool {
 }
 
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.
-#[cfg(not(all(test, unix)))]
 pub(crate) const STASH_CHANNELS_ENV: &str = "ADK_BUSY_INJECT_STASH_CHANNELS";
 
-#[cfg(not(all(test, unix)))]
 fn stash_channels_configured() -> &'static [u64] {
     static CHANNELS: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
     let raw = || std::env::var(STASH_CHANNELS_ENV).ok();
@@ -595,14 +598,15 @@ pub(crate) fn inject_report(
     timing: &Timing,
 ) -> Report {
     #[cfg(all(test, unix))]
-    return inject_listed(
-        pane,
-        request,
-        channel,
-        &stash_tests::configured_channels(),
-        timing,
-    );
-    #[cfg(not(all(test, unix)))]
+    if !stash_tests::USE_PRODUCTION_CHANNELS.get() {
+        return inject_listed(
+            pane,
+            request,
+            channel,
+            &stash_tests::configured_channels(),
+            timing,
+        );
+    }
     inject_listed(pane, request, channel, stash_channels_configured(), timing)
 }
 

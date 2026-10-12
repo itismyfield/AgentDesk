@@ -1,6 +1,5 @@
-//! Explicit operator termination, dormant until an operator entry owns activation.
-// Test-only until the operator entry lands; writer gates still scan this file as production.
-#![cfg(test)]
+//! Explicit operator termination of one Herdr execution; the operator route is its only entry.
+use super::health::HealthRegistry;
 use super::turn_finalizer::cleanup::SyntheticClaimSnapshot;
 use super::turn_finalizer::{FinalizeContext, FinalizeOutcome, TerminalEvent, TurnKey};
 use super::{ChannelId, SharedData};
@@ -10,11 +9,13 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::claude::herdr_turn::{HoldRelease, release_hold};
 use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::session_host::TerminationFence;
 use crate::services::session_host::{HerdrTarget, herdr_endpoints};
 use crate::services::termination_audit::host_terminate::herdr_terminate::{
-    HerdrTerminateResult, OperatorTerminateWarrant, terminate_herdr_once,
+    HerdrTerminateResult, OperatorTerminateWarrant, TerminateRefusal, terminate_herdr_once,
 };
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, MailboxUnreachable};
+use futures::FutureExt;
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -24,11 +25,67 @@ pub(crate) struct OperatorTerminate {
 }
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TerminationResult {
+    /// The live switch is off; nothing was read or written.
+    Disabled,
     Refused(String),
     Close(HerdrTerminateResult),
     ProviderSurvivedClose,
     Indeterminate(String),
     Retired,
+}
+
+impl TerminationResult {
+    /// The result's name and detail, shared by the operator route's reply and the result log.
+    pub(crate) fn outcome(&self) -> (&'static str, String) {
+        use HerdrTerminateResult as Close;
+        match self {
+            Self::Disabled | Self::Close(Close::Refused(TerminateRefusal::Disabled)) => {
+                ("disabled", "terminate disabled".into())
+            }
+            Self::Refused(why) => ("refused", why.clone()),
+            Self::Close(Close::Refused(TerminateRefusal::Gate(gate))) => {
+                ("gate_refused", format!("{gate:?}"))
+            }
+            Self::Close(Close::NotSent(why)) => ("not_sent", why.clone()),
+            Self::Close(Close::ConfirmationRequired) => (
+                "confirmation_required",
+                "herdr asks for a confirmation the service never gives".into(),
+            ),
+            Self::Close(Close::Acknowledged) => {
+                ("indeterminate", "close acknowledged, run unfinished".into())
+            }
+            Self::Close(Close::Indeterminate(why)) | Self::Indeterminate(why) => {
+                ("indeterminate", why.clone())
+            }
+            Self::ProviderSurvivedClose => (
+                "provider_survived_close",
+                "the provider outlived the close".into(),
+            ),
+            Self::Retired => ("retired", "retired".into()),
+        }
+    }
+}
+
+/// The one live-switch read the operator route, its adapter and the service share.
+pub(crate) fn terminate_enabled() -> bool {
+    crate::config_live_reload::current()
+        .is_some_and(|config| config.runtime.herdr_terminate_enabled == Some(true))
+}
+
+/// Reopens the fence when the run ends before it could have sent its close, a panic included;
+/// once disarmed, the fence stays shut as the close may have reached Herdr.
+struct UnsentClose(Option<Arc<TerminationFence>>);
+impl UnsentClose {
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+impl Drop for UnsentClose {
+    fn drop(&mut self) {
+        if let Some(fence) = self.0.take() {
+            fence.reopen();
+        }
+    }
 }
 struct CapturedTurn {
     key: TurnKey,
@@ -76,9 +133,10 @@ async fn capture_turn(
     }))
 }
 async fn read_end(target: HerdrTarget, record: HostedExecution) -> Result<(), TerminationResult> {
-    let view = herdr_endpoints()
-        .view(&record)
-        .ok_or_else(|| TerminationResult::Refused("no local endpoint".into()))?;
+    // The close may have been applied, so a lost endpoint leaves the outcome open.
+    let view = herdr_endpoints().view(&record).ok_or_else(|| {
+        TerminationResult::Indeterminate("no local endpoint after the close".into())
+    })?;
     tokio::task::spawn_blocking(move || {
         let pane = view.read_execution();
         if !crate::cli::herdr::confirmed_ended(&record, &pane) {
@@ -111,7 +169,7 @@ async fn retire_confirmed(
 
 #[cfg(test)]
 type SettlementWindowProbe =
-    Box<dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>>;
+    Box<dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send>;
 #[cfg(test)]
 type ProbeSlot = std::cell::RefCell<Option<SettlementWindowProbe>>;
 #[cfg(test)]
@@ -119,6 +177,8 @@ thread_local! {
     static SETTLEMENT_WINDOW: ProbeSlot = const { std::cell::RefCell::new(None) };
     static AFTER_SETTLEMENT: ProbeSlot = const { std::cell::RefCell::new(None) };
     static AFTER_CAPTURE: ProbeSlot = const { std::cell::RefCell::new(None) };
+    static AFTER_FENCE: ProbeSlot = const { std::cell::RefCell::new(None) };
+    static AFTER_CLOSE: ProbeSlot = const { std::cell::RefCell::new(None) };
 }
 /// Runs once between the hold release and the captured-turn settlement on this thread.
 #[cfg(test)]
@@ -134,6 +194,16 @@ pub(crate) fn probe_after_settlement(probe: SettlementWindowProbe) {
 #[cfg(test)]
 pub(crate) fn probe_after_capture(probe: SettlementWindowProbe) {
     AFTER_CAPTURE.with(|slot| *slot.borrow_mut() = Some(probe));
+}
+/// Runs once right after the termination fence is taken, before any close.
+#[cfg(test)]
+pub(crate) fn probe_after_fence(probe: SettlementWindowProbe) {
+    AFTER_FENCE.with(|slot| *slot.borrow_mut() = Some(probe));
+}
+/// Runs once after the close returned, or after the pane read as already ended.
+#[cfg(test)]
+pub(crate) fn probe_after_close(probe: SettlementWindowProbe) {
+    AFTER_CLOSE.with(|slot| *slot.borrow_mut() = Some(probe));
 }
 #[cfg(test)]
 async fn run_probe(slot: &'static std::thread::LocalKey<ProbeSlot>) {
@@ -225,16 +295,14 @@ async fn confirm_captured_released(
         _ => Err("captured mailbox replaced"),
     }
 }
-/// No production entry calls this until the operator activation slice is approved.
+/// Its only production caller is [`terminate_registered_herdr`].
 pub(crate) async fn terminate_explicit_herdr(
     request: OperatorTerminate,
     shared: Arc<SharedData>,
     pool: &PgPool,
 ) -> TerminationResult {
-    if !crate::config_live_reload::current()
-        .is_some_and(|c| c.runtime.herdr_terminate_enabled == Some(true))
-    {
-        return TerminationResult::Refused("terminate disabled".into());
+    if !terminate_enabled() {
+        return TerminationResult::Disabled;
     }
     let lookup = load(pool, &request.session_key).await;
     let row = match lookup {
@@ -294,6 +362,9 @@ pub(crate) async fn terminate_explicit_herdr(
         Ok(fence) => Arc::new(fence),
         Err(e) => return TerminationResult::Refused(format!("{e:?}")),
     };
+    let unsent = UnsentClose(Some(fence.clone()));
+    #[cfg(test)]
+    run_probe(&AFTER_FENCE).await;
     if load(pool, &request.session_key).await.as_ref() != Ok(&row) {
         fence.reopen();
         return TerminationResult::Refused("row changed under fence".into());
@@ -306,7 +377,10 @@ pub(crate) async fn terminate_explicit_herdr(
             return TerminationResult::Refused(format!("termination provenance: {other:?}"));
         }
     }
-    let view = herdr_endpoints().view(record).unwrap();
+    let Some(view) = herdr_endpoints().view(record) else {
+        fence.reopen();
+        return TerminationResult::Refused("no local endpoint".into());
+    };
     let pane = match tokio::task::spawn_blocking(move || view.read_execution()).await {
         Ok(pane) => pane,
         Err(e) => {
@@ -314,6 +388,7 @@ pub(crate) async fn terminate_explicit_herdr(
             return TerminationResult::Indeterminate(e.to_string());
         }
     };
+    unsent.disarm();
     if !crate::cli::herdr::confirmed_ended(record, &pane) {
         // Blocking socket work remains outside the async executor; the fence stays owned here.
         let close_target = target.clone();
@@ -337,6 +412,8 @@ pub(crate) async fn terminate_explicit_herdr(
             return TerminationResult::Close(result);
         }
     }
+    #[cfg(test)]
+    run_probe(&AFTER_CLOSE).await;
     if let Err(result) = read_end(target, record.clone()).await {
         return result;
     }
@@ -358,6 +435,94 @@ async fn load(pool: &PgPool, key: &str) -> Result<HostedObservation, Termination
         HostedLookup::Missing => Err(TerminationResult::Refused("missing row".into())),
         HostedLookup::Conflict(e) => Err(TerminationResult::Refused(format!("conflict: {e:?}"))),
         HostedLookup::Unknown(e) => Err(TerminationResult::Refused(format!("unknown: {e}"))),
+    }
+}
+
+/// The operator route's entry. The switch is read before any IO; the service then runs on a
+/// detached task so a dropped request cannot stop it between its close and its settlement.
+pub(crate) async fn terminate_registered_herdr(
+    registry: &HealthRegistry,
+    pool: PgPool,
+    request: OperatorTerminate,
+    reason: String,
+) -> TerminationResult {
+    if !terminate_enabled() {
+        return TerminationResult::Disabled;
+    }
+    let logged = Logged {
+        key: request.session_key.clone(),
+        nonce: request.execution_nonce.clone(),
+        reason,
+        started: std::time::Instant::now(),
+    };
+    let shared = match runtime_of(registry, &pool, &request.session_key).await {
+        Ok(shared) => shared,
+        Err(result) => {
+            logged.write(&result);
+            return result;
+        }
+    };
+    let run = tokio::spawn(async move {
+        let service = terminate_explicit_herdr(request, shared, &pool);
+        let result = std::panic::AssertUnwindSafe(service)
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| TerminationResult::Indeterminate("terminate task panicked".into()));
+        logged.write(&result);
+        result
+    });
+    // Only a shutting-down runtime cancels the task, which then leaves no result log.
+    run.await
+        .unwrap_or_else(|_| TerminationResult::Indeterminate("terminate task cancelled".into()))
+}
+
+/// The runtime owning the row's channel; a refusal here took and wrote nothing.
+async fn runtime_of(
+    registry: &HealthRegistry,
+    pool: &PgPool,
+    session_key: &str,
+) -> Result<Arc<SharedData>, TerminationResult> {
+    let row = load(pool, session_key).await?;
+    let HostedRecord::Known(record) = &row.record else {
+        return Err(TerminationResult::Refused("unknown execution".into()));
+    };
+    let provider = ProviderKind::from_str(&record.owner.provider)
+        .ok_or_else(|| TerminationResult::Refused("unknown provider".into()))?;
+    let channel = record
+        .owner
+        .channel_id
+        .parse::<u64>()
+        .ok()
+        .filter(|c| *c != 0);
+    let channel = channel.ok_or_else(|| TerminationResult::Refused("unknown channel".into()))?;
+    registry
+        .shared_for_provider_on_channel(&provider, ChannelId::new(channel))
+        .await
+        .ok_or_else(|| TerminationResult::Refused("no runtime owns the channel".into()))
+}
+
+/// One result record per run, written where the run ends so a dropped request still leaves it.
+struct Logged {
+    key: String,
+    nonce: String,
+    reason: String,
+    started: std::time::Instant,
+}
+impl Logged {
+    fn write(&self, result: &TerminationResult) {
+        if *result == TerminationResult::Disabled {
+            return;
+        }
+        let (name, detail) = result.outcome();
+        let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let (session_key, execution_nonce, reason) = (&self.key, &self.nonce, &self.reason);
+        if *result == TerminationResult::Retired {
+            tracing::info!(target: "agentdesk::herdr_terminate", %session_key, %execution_nonce,
+                %reason, result = name, %detail, elapsed_ms, "herdr terminate finished");
+        } else {
+            tracing::warn!(target: "agentdesk::herdr_terminate", %session_key, %execution_nonce,
+                %reason, result = name, %detail, elapsed_ms, "herdr terminate finished");
+        }
     }
 }
 
@@ -530,6 +695,14 @@ pub(crate) mod test_turn {
 }
 
 #[cfg(test)]
+#[path = "herdr_terminate_route_tests.rs"]
+pub(crate) mod route_tests;
+
+#[cfg(test)]
+#[path = "herdr_terminate_exit_tests.rs"]
+mod exit_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serenity::model::id::{MessageId, UserId};
@@ -557,10 +730,7 @@ mod tests {
                     &pool,
                 )
                 .await;
-                assert_eq!(
-                    result,
-                    TerminationResult::Refused("terminate disabled".into())
-                );
+                assert_eq!(result, TerminationResult::Disabled);
                 pool.close().await;
             });
     }
