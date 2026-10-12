@@ -69,6 +69,76 @@ impl Closing {
         Ok(())
     }
 
+    /// Close checks the live Gate rather than the drive's readiness cache.
+    pub(crate) fn ensure_held_current(
+        &self,
+        provider: &ProviderKind,
+        channel: u64,
+    ) -> Result<(), Failure> {
+        let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        if super::super::supervisor::mutant("skip_close_current_held") {
+            return Ok(());
+        }
+        self.check_close_current(
+            &state,
+            provider,
+            channel,
+            &[Mode::Frozen, Mode::LedgerOpen, Mode::Held],
+        )?;
+        state.mode = Mode::Held;
+        drop(state);
+        self.report(Some(TRANSITION_HELD));
+        Ok(())
+    }
+
+    /// The final Held check and ACK share the Gate lock, after ledger work has completed.
+    pub(crate) fn with_held_current<T>(
+        &self,
+        provider: &ProviderKind,
+        channel: u64,
+        ack: impl FnOnce() -> T,
+    ) -> Result<T, Failure> {
+        let state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        if super::super::supervisor::mutant("skip_close_final_held") {
+            return Ok(ack());
+        }
+        self.check_close_current(&state, provider, channel, &[Mode::Held])?;
+        #[cfg(test)]
+        if super::super::supervisor::mutant("drop_close_ack_serialization") {
+            drop(state);
+            return Ok(ack());
+        }
+        Ok(ack())
+    }
+
+    fn check_close_current(
+        &self,
+        state: &super::State,
+        provider: &ProviderKind,
+        channel: u64,
+        from: &[Mode],
+    ) -> Result<(), Failure> {
+        if state.exhausted {
+            return Err(Failure::GenerationExhausted);
+        }
+        if provider != self.provider()
+            || channel != self.channel()
+            || !self.gate.protected.load(Ordering::Acquire)
+            || state.epoch != self.epoch.load(Ordering::Acquire)
+        {
+            return Err(Failure::StalePermit);
+        }
+        if state.effects != 0 {
+            return Err(Failure::Busy);
+        }
+        if !from.contains(&state.mode) {
+            return Err(Failure::Mode(state.mode));
+        }
+        Ok(())
+    }
+
     /// Grants the population guard for returning ledger rows to the Legacy queue.
     pub(crate) fn begin_handback(&self) -> Result<(), Failure> {
         self.shift(
@@ -110,6 +180,13 @@ impl Closing {
     // No permit can exist past the freeze, so these moves keep the epoch unchanged.
     fn shift(&self, from: &[Mode], to: Mode) -> Result<(), Failure> {
         let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        let exhausted = state.exhausted;
+        #[cfg(test)]
+        let exhausted =
+            exhausted && !super::super::supervisor::mutant("allow_shift_after_exhaustion");
+        if exhausted {
+            return Err(Failure::GenerationExhausted);
+        }
         if !self.gate.protected.load(Ordering::Acquire)
             || state.effects != 0
             || state.epoch != self.epoch.load(Ordering::Acquire)
