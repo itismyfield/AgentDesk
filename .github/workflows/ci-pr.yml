@@ -162,6 +162,7 @@ jobs:
               # line above is gone -- see the note above.
               - 'src/cli/dcserver.rs'
               - 'src/services/hang_forensics.rs'
+              - 'src/services/hang_forensics/**'
               - 'src/services/health_diagnostics.rs'
               - 'src/services/message_outbox.rs'
               # #5232 R3: these five, and `outbound/source_registry.rs` above
@@ -360,6 +361,7 @@ jobs:
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/placeholder_sweeper/abandon_guard.rs'
               - 'src/services/discord/placeholder_sweeper/retirement_tests.rs'
+              - 'src/services/discord/queue_io/queued_head_inject_tests.rs'
               - 'src/services/discord/recovery_engine/herdr_before_start_restart_tests.rs'
               - 'src/services/discord/recovery_engine/host_reconcile_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs'
@@ -409,6 +411,7 @@ jobs:
               - 'src/services/discord/task_notification_delivery/tests.rs'
               - 'src/services/discord/terminal_delivery_custody/pg_tests.rs'
               - 'src/services/discord/terminal_ui_obligation.rs'
+              - 'src/services/discord/terminal_ui_obligation/input_fence_tests.rs'
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
               - 'src/services/discord/tmux_watcher/herdr_entry_host_tests.rs'
               - 'src/services/discord/tmux_watcher/inherited_fixture_tests.rs'
@@ -488,17 +491,27 @@ jobs:
               - 'src/services/tui_o/exact_pg_tests.rs'
               - 'src/services/tui_o/exact_submission.rs'
               - 'src/services/tui_o/repost/admission_tests.rs'
+              - 'src/services/tui_o/repost/allowlist_host_tests.rs'
+              - 'src/services/tui_o/repost/allowlist_runner_tests.rs'
+              - 'src/services/tui_o/repost/allowlist_writer_tests.rs'
+              - 'src/services/tui_o/repost/backlog_tests.rs'
               - 'src/services/tui_o/repost/runner_activation_tests.rs'
               - 'src/services/tui_o/repost/runner_tests.rs'
               - 'src/services/tui_o/repost/runtime_host_activation_tests.rs'
               - 'src/services/tui_o/repost/writer_activation_tests.rs'
               - 'src/services/tui_o/writer/deferred_pg_tests.rs'
+              - 'src/services/tui_o/writer/late_adopt_delegated_tests.rs'
               - 'src/services/tui_o/writer/repost_turn_tests.rs'
               - 'src/services/turn_host_tests.rs'
               - 'src/services/turn_lifecycle.rs'
               - 'src/voice/announce_meta.rs'
               - 'src/voice/turn_link.rs'
               # END generated pg_db source paths
+              # Re-post production changes must run the shared-budget tests too.
+              - 'src/services/tui_o/repost/**'
+              - 'src/services/tui_o/writer/**'
+              - 'src/services/tui_o/store/ledger.rs'
+              - 'src/services/discord/outbound/o_writer*.rs'
               - '.github/workflows/**'
               - 'justfile'
               - 'Cargo.toml'
@@ -787,6 +800,7 @@ jobs:
               - 'src/services/discord/placeholder_live_events/**'
               - 'src/services/discord/placeholder_sweeper/**'
               - 'src/services/discord/queue_io.rs'
+              - 'src/services/discord/queue_io/**'
               - 'src/services/discord/queue_park_ledger.rs'
               - 'src/services/discord/queue_park_ledger/**'
               - 'src/services/discord/recovery_engine.rs'
@@ -1120,7 +1134,8 @@ jobs:
 
       - name: Writer namespace exact Windows targets
         if: runner.os == 'Windows'
-        timeout-minutes: 30
+        # Healthy runs took 16-27 min on 2026-10-12 and two PRs were cut at 30.
+        timeout-minutes: 45
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -1256,6 +1271,16 @@ jobs:
 
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
+
+      # Rollback rehearsal executes the runbook's literal rg command.
+      - name: Install ripgrep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+
+      - name: Require ripgrep
+        shell: bash
+        run: rg --version
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -1448,6 +1473,7 @@ jobs:
           # watchdog from silently regressing to a bare pass/fail probe — the
           # exact blind spot that stalled #4756, #4770 and #5147.
           cargo test --lib services::hang_forensics::tests -- --test-threads=1
+          cargo test --lib services::discord::health::recovery::self_watchdog -- --test-threads=1
           # The other half of the same guard: that every Postgres await on the
           # public /api/health path is still bracketed, so a kill line cannot
           # report db_in_flight=0 while the handler is stuck inside one.
@@ -1753,6 +1779,16 @@ jobs:
 
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
+
+      # Rollback rehearsal executes the runbook's literal rg command.
+      - name: Install ripgrep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+
+      - name: Require ripgrep
+        shell: bash
+        run: rg --version
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -2223,7 +2259,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=713459343783731b3a38d23259809855ff8e29aa22bbe493dd038e8b2dc21f43
+          expected=4c8a89bfc9f48fac3e8d32cdf6327317a865ffee77cef5923230040a14578e52
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2456,7 +2492,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=713459343783731b3a38d23259809855ff8e29aa22bbe493dd038e8b2dc21f43
+          expected=4c8a89bfc9f48fac3e8d32cdf6327317a865ffee77cef5923230040a14578e52
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

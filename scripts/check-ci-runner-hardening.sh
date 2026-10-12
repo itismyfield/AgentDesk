@@ -869,11 +869,12 @@ targets = {
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
     # The bounded Windows owner runner; broad runtime remains nightly.
-    "job_sha256" => "c8f9edc04ab62774a5c79006def01569c603c90286b2b903f9be728c0532434d",
+    # Re-pinned after raising the writer-namespace step budget from 30 to 45 minutes.
+    "job_sha256" => "315ad84a0f81d05183968a40b1be5b0c8d739be1fa111a47b0a2eb50798c3c34",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
-        "timeout_minutes" => 30,
+        "timeout_minutes" => 45,
         "if_condition" => "runner.os == 'Windows'",
       },
     },
@@ -923,7 +924,7 @@ targets = {
     # unchanged, and the exact commands below pin each source/use pair.
     # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
     # Re-pinned after raising the `just test-postgres` step budget from 40 to 60 minutes.
-    "job_sha256" => "0a4bf73e7cc453625d7e8fafb5fcc7d31b07db1793e0db4c24fd86cf7c9e74c1",
+    "job_sha256" => "058d450aa87871bdc002d7137def8f4500fe5f777bddc4ce4a7147c919716ad0",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
@@ -994,7 +995,7 @@ targets = {
     # from the PG manifest instead of hand-kept.
     # Re-pinned after adding the ensure-swap step ahead of the first cargo step.
     # Re-pinned for the two Codex legacy lock child summaries.
-    "job_sha256" => "ac5c10900533d6673911e5e6f9efabb2180792c5edc35762ad7ed31e2d2de2a0",
+    "job_sha256" => "0c861374748187c524880e21dab92cb028c0adb6e0658b773c59601e649851f7",
     "cargo_steps" => {
       "Library sweep (selection-set gated)" => {
         "commands" => [
@@ -1131,7 +1132,7 @@ targets = {
     # Pin the accepted-turn regressions and removal of the retired timeout test.
     # All remaining commands and execution settings retain their reviewed values.
     # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
-    "job_sha256" => "587bf998a8800dafebc80161eb3c1684d672f347b33bbb63cddba697b444449f",
+    "job_sha256" => "73362980d7fa0040f95fa5cb604d0c418c19ffd0f1dae88504623075aa1824c8",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [

@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 116
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 118
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -40,6 +40,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_OBSERVABILITY_QUALITY_RETENTION_DAYS` | `src/services/observability/retention.rs` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
 | `ADK_P10_3_MUTANT` | `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs`, `src/services/provider/cancel_token_claude_interrupt.rs` | Test-only effect mutations run against one binary; production always keeps every fence. |
 | `ADK_QUALITY_ALERT_DRILL_BASE` | `src/services/agent_quality/regression_alerts.rs` | Resolve the drill-down base URL (env override or fallback const). |
+| `ADK_QUEUED_HEAD_INJECT` | `src/services/discord/queue_io/queued_head_inject.rs` | `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off. |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_S3ACT_B1_MUTANT` | `src/services/discord/inflight/removal.rs` |  |
 | `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs`, `src/services/turn_orchestrator/installed_actor_handoff.rs` |  |
@@ -124,6 +125,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_REVIEW_MCP_ALLOWLIST` | `src/services/mcp_config.rs` |  |
 | `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/test_env/teardown_probe.rs`, `src/services/claude.rs`, `src/services/claude_tui/hook_relay/ordered_queue.rs`, `src/services/codex.rs`, `src/services/discord/runtime_store.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/discord/watchers/lifecycle/n4d2_entry_test.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs` | Canonical runtime root: $AGENTDESK_ROOT_DIR → ~/.adk/release All code that needs the AgentDesk root directory MUST call this function instead of reimplementing… |
 | `AGENTDESK_SCHEMA_AHEAD_HOLD` | `src/cli/dcserver_pg_bootstrap.rs` | Whether the launchd environment leaves the schema-ahead hold on (default on). |
+| `AGENTDESK_SELF_WATCHDOG_MODE` | `src/services/discord/health/recovery/self_watchdog.rs` |  |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs` | The rollout gate previously short-circuited a missing env var to `false`, so any environment without an explicit `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fe… |
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |

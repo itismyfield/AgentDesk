@@ -115,6 +115,12 @@ impl HostIo for GatewayHost {
         Arc::new(ChannelBindingLog::new(channel, provider))
     }
 
+    fn late_adopt_enabled(&self) -> bool {
+        crate::config_live_reload::current()
+            .map(|config| config.tui_o.as_ref().is_some_and(|o| o.writer.late_adopt))
+            .unwrap_or_else(|| self.boot.as_ref().is_some_and(|o| o.writer.late_adopt))
+    }
+
     /// Open intake, sessions of other nodes and node overrides.
     fn activation_facts(
         &self,

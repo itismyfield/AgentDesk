@@ -115,9 +115,9 @@ impl Runner {
         }
     }
 
-    /// Whether the effective switch is on now; off reads nothing else.
-    pub(crate) fn enabled(&mut self) -> bool {
-        self.switch.when_enabled(|_| ()).is_some()
+    /// Whether the channel is enabled now; denied channels read nothing else.
+    pub(crate) fn allowed(&mut self, channel: u64) -> bool {
+        self.switch.allowed(channel)
     }
 
     fn admitter(&mut self) -> Option<Admitter<'_>> {
@@ -164,7 +164,7 @@ impl Runner {
         proof_ids: &[u64],
         settled_at: Instant,
     ) -> Result<Tick, LedgerError> {
-        if self.switch.when_enabled(|_| ()).is_none() {
+        if !self.allowed(channel) {
             return Ok(Tick::Off);
         }
         if !scope_allowed(channel) {
@@ -244,7 +244,11 @@ impl Runner {
         intent: DispatchIntent<'_>,
     ) -> Result<Admission<W::Lease>, LedgerError> {
         let asked = Instant::now();
-        if self.switch.when_enabled(|_| ()).is_none() {
+        let channel = match &intent {
+            DispatchIntent::Auto(evidence) => evidence.scope().key.unit().channel_id,
+            DispatchIntent::OperatorResume { approved, .. } => approved.key.unit().channel_id,
+        };
+        if !self.allowed(channel) {
             // Off: the recovered admission index decides; an unknown one holds the piece.
             return Ok(match membership {
                 OriginalGate::Admitted => Admission::Parked,
@@ -287,6 +291,9 @@ impl Runner {
                 if let Err(reason) = check.current(&approval_id, &approved) {
                     return Ok(Admission::GuardRejected(GuardReason::Approval(reason)));
                 }
+                if !self.allowed(channel) {
+                    return Ok(Admission::Parked);
+                }
                 let (pool, holder) = (&self.pool, self.run.holder.as_str());
                 let Some(admitter) =
                     Admitter::when_on(&mut self.switch, pool, holder, self.sender_id)
@@ -305,6 +312,9 @@ impl Runner {
             }
         };
         // Row and attempt reads yield; current source policy must still permit consuming a slot.
+        if !self.allowed(channel) {
+            return Ok(Admission::Parked);
+        }
         if let Err(reason) = writer.guard() {
             return Ok(Admission::GuardRejected(GuardReason::Writer(reason)));
         }
@@ -413,14 +423,14 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
     }
 
     async fn run<W: TurnWriter>(&mut self, writer: &mut W) {
-        let on = self.runner.enabled();
+        let on = self.runner.allowed(self.channel);
         writer.set_live(on);
         if !on {
             // The next on period is a new activation.
             self.activated = false;
             return;
         }
-        writer.bind_switch(self.runner.switch.live());
+        writer.bind_switch(self.runner.switch.live_for(self.channel));
         if !scope_allowed(self.channel) || writer.guard().is_err() || !self.admit(writer).await {
             writer.set_live(false);
             return;
@@ -472,6 +482,9 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
     /// Finishes admissions a crash or an outage left pending, then admits each piece whose latest
     /// attempt is an uncertain original sent while on.
     async fn admit<W: TurnWriter>(&mut self, writer: &mut W) -> bool {
+        if !self.runner.allowed(self.channel) {
+            return false;
+        }
         let ledger = writer.ledger();
         let frontier = ledger.next_serial();
         let latest: BTreeMap<u64, PieceRecord> = (0..frontier)
@@ -494,6 +507,21 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
         let (Some(log), Some(admitter)) = (self.log.as_mut(), self.runner.admitter()) else {
             return false;
         };
+        let backlog = match super::admission::report_backlog(
+            log,
+            latest.iter().map(|(&serial, record)| (serial, record)),
+        ) {
+            Ok(backlog) => backlog,
+            Err(error) => {
+                tracing::warn!(channel = self.channel, %error, "[tui_o] re-post backlog report failed");
+                self.log = None;
+                return false;
+            }
+        };
+        if !backlog.is_empty() {
+            tracing::warn!(channel = self.channel, count = backlog.len(), pieces = ?backlog,
+                "[tui_o] re-post backlog retained");
+        }
         let resumed = admitter
             .resume_pending(log, |serial| latest.get(&serial))
             .await;
@@ -531,6 +559,9 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
 
     async fn original_gate(&mut self, serial: u64, record: PieceRecord) -> OriginalGate {
         let channel = self.channel;
+        if !self.runner.allowed(channel) {
+            return OriginalGate::Send;
+        }
         let Some(admitter) = self.runner.admitter() else {
             return OriginalGate::Send;
         };
@@ -538,6 +569,9 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
         let gate = keys.original(&record.unit_key, record.piece_index);
         if gate != OriginalGate::Send {
             return gate;
+        }
+        if !self.runner.allowed(channel) {
+            return OriginalGate::Unknown;
         }
         if !scope_allowed(channel) || ProvenanceEntry::intent(serial, &record, 0).is_none() {
             return gate;

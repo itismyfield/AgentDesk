@@ -12,7 +12,9 @@ use super::{
 };
 use crate::services::provider::ProviderKind;
 
+mod queue_exit_debt;
 mod queued_recovery;
+pub(super) use queue_exit_debt::{QueueExitDebt, check_queue_exit_debts};
 pub(crate) use queued_recovery::load_pending_queues_checked;
 
 const STALE_PENDING_QUEUE_TMP_AGE: Duration = Duration::from_secs(60);
@@ -876,6 +878,7 @@ pub(crate) fn load_pending_queues(
     HashMap<ChannelId, ChannelId>,
 ) {
     let loaded = load_pending_queues_checked(provider, token_hash);
+    queued_recovery::report_scan_errors(provider, &loaded.scan_errors);
     if !loaded.quarantined.is_empty() {
         tracing::warn!(
             provider = provider.as_str(),
@@ -894,6 +897,7 @@ pub(crate) struct PendingQueueRecovery {
     pub(crate) queues: HashMap<ChannelId, Vec<Intervention>>,
     pub(crate) overrides: HashMap<ChannelId, ChannelId>,
     pub(crate) quarantined: Vec<(ChannelId, String)>,
+    pub(crate) scan_errors: Vec<String>,
 }
 
 pub(crate) fn load_pending_dispatch_markers(

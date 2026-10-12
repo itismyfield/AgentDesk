@@ -123,6 +123,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::input_runtime::supervisor::runtime::ports::tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
   --skip services::discord::placeholder_sweeper::retirement_tests
+  --skip services::discord::queue_io::queued_head_inject::tests
   --skip services::discord::recovery_engine::herdr_before_start_restart::tests
   --skip services::discord::recovery_engine::host_reconcile::tests
   --skip services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
@@ -165,6 +166,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::session_idle_cleanup::tests
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   --skip services::discord::task_notification_delivery::tests
+  --skip services::discord::terminal_ui_obligation::input_fence_tests
   --skip services::discord::terminal_ui_obligation::tests
   --skip services::discord::tmux::tmux_watcher::path_b_record::tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
@@ -221,6 +223,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::tui_o::repost::runner::activation_tests
   --skip services::tui_o::repost::runner_tests
   --skip services::tui_o::writer::tests::actor::host_start::deferred::pg
+  --skip services::tui_o::writer::tests::actor::host_start::late_delegated
   --skip services::tui_o::writer::tests::actor::repost_turn
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
@@ -617,6 +620,10 @@ NON_PG_FILTER_REPLAY=(
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_cutoffs_do_not_panic_for_extreme_values
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_spawns_exactly_once_per_process
   services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_task_can_restart_after_task_death
+  services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_rehearsal_tests::tests::d4act3_literal_rg_finds_spaced_not_sent_tags
+  services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_rehearsal_tests::tests::d4act3_literal_rg_missing_binary_requires_install
+  services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_rehearsal_tests::tests::d4act3_literal_rg_read_failure_and_incomplete_text_refuse
+  services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_rehearsal_tests::tests::d4act3_rollback_scan_requires_wait_and_every_activated_ledger
   services::discord::runtime_bootstrap::o_writer_host::fence_tests::a_host_without_an_intake_fence_refuses_deferred_activation_facts
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_checked_reads_distinguish_absence_from_corruption
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_install_rolls_back_on_required_persistence_failure
@@ -864,6 +871,8 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::repost::runner_tests::f5_default_off_tick_executes_zero_pg_statements
   services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
+  services::tui_o::writer::tests::actor::repost_turn::allowlist::d4b_off_approved_piece_still_posts_once_through_actor
+  services::tui_o::writer::tests::actor::repost_turn::d4b_old_config_without_channels_denies_real_channel_turn
   services::tui_o::writer::tests::actor::repost_turn::f6_a_live_reload_switches_the_next_turn_without_a_restart
   services::tui_o::writer::tests::actor::repost_turn::f6_default_off_actor_turn_reads_nothing
   services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
@@ -995,6 +1004,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::input_runtime::supervisor::runtime::ports::tests
   services::discord::placeholder_sweeper::abandon_guard::tests
   services::discord::placeholder_sweeper::retirement_tests
+  services::discord::queue_io::queued_head_inject::tests
   services::discord::recovery_engine::herdr_before_start_restart::tests
   services::discord::recovery_engine::host_reconcile::tests
   services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
@@ -1037,6 +1047,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::session_idle_cleanup::tests
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   services::discord::task_notification_delivery::tests
+  services::discord::terminal_ui_obligation::input_fence_tests
   services::discord::terminal_ui_obligation::tests
   services::discord::tmux::tmux_watcher::path_b_record::tests
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
@@ -1093,6 +1104,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::tui_o::repost::runner::activation_tests
   services::tui_o::repost::runner_tests
   services::tui_o::writer::tests::actor::host_start::deferred::pg
+  services::tui_o::writer::tests::actor::host_start::late_delegated
   services::tui_o::writer::tests::actor::repost_turn
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests

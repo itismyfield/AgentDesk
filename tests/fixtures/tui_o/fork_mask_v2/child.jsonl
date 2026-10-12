@@ -1,0 +1,3 @@
+{"message":{"content":"fixture prefix"},"type":"user","uuid":"z"}
+{"message":{"content":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},"type":"user","uuid":"fresh"}
+{"apiBlockIndex":0,"message":{"content":[{"text":"fixture shared","type":"text"}],"id":"r"},"type":"assistant","uuid":"u-r"}

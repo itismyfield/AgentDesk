@@ -130,6 +130,10 @@ impl NativeSubmitFloor {
     pub(crate) fn canonical_source(&self) -> &SourceId {
         &self.canonical_source
     }
+
+    pub(crate) fn checkpoint(&self) -> (&SourceId, u64, &str) {
+        (&self.canonical_source, self.through, &self.prefix_hash)
+    }
 }
 
 fn verify_checkpoint(

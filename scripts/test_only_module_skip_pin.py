@@ -34,6 +34,13 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/queue_io/queued_head_inject_tests.rs",
+        "src/services/turn_orchestrator/overflow_s2b_tests.rs",
+        "src/services/turn_orchestrator/pending_queue_persistence/queue_exit_debt_tests.rs",
+        "src/services/turn_orchestrator/pending_queue_persistence/queued_recovery_tests.rs",
+        "src/services/turn_orchestrator/queued_head_s2a_tests.rs",
+        "src/services/discord/runtime_bootstrap/queued_recovery_s2a_tests.rs",
+        "src/services/claude_tui/host_input/guarded_submission/executor_tests.rs",
         "src/services/tui_input/actor/gate/claude_guarded/acceptance_tests.rs",
         "src/services/tui_input/submission_tmux/guarded/protocol_tests.rs",
         "src/services/tui_input/submission_tmux/guarded/transport_tests.rs",
@@ -47,8 +54,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs",
-        "src/services/turn_orchestrator/queued_head_s2a_tests.rs",
-        "src/services/discord/runtime_bootstrap/queued_recovery_s2a_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs",
         "src/services/discord/runtime_bootstrap/scoped_inflight_restore_tests.rs",
         "src/services/discord/runtime_bootstrap/scoped_restore_lane_tests.rs",
@@ -100,6 +105,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_direct_abort_marker/retirement_census_tests.rs",
         "src/services/discord/tui_direct_pending_start/retirement_recheck_tests.rs",
         "src/services/discord/inflight/removal/input_fence_reaper_tests.rs",
+        "src/services/discord/terminal_ui_obligation/input_fence_tests.rs",
         "src/services/discord/inflight/restart_mark_fence_tests.rs",
         "src/services/discord/inflight/restart_mark_tests.rs",
         "src/services/discord/health/watcher_respawn/input_fence_tests.rs",
@@ -372,6 +378,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/outbound/o_writer_repost_io_tests.rs",
         "src/db/o_piece_ledger_tests.rs",
         "src/services/tui_o/repost/admission_tests.rs",
+        "src/services/tui_o/repost/allowlist_host_tests.rs",
+        "src/services/tui_o/repost/allowlist_runner_tests.rs",
+        "src/services/tui_o/repost/allowlist_writer_tests.rs",
         "src/services/tui_o/repost/probe_tests.rs",
         "src/services/tui_o/repost/runner_tests.rs",
         "src/services/tui_o/writer/repost_turn_tests.rs",
@@ -557,8 +566,19 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_input/rows_tests.rs",
         "src/services/tui_o/writer/switch_tests.rs",
         "src/services/tui_o/writer/retire_tests.rs",
+        "src/services/tui_o/writer/fork_lineage_tests.rs",
+        "src/services/tui_o/writer/fork_mask_tests.rs",
+        "src/services/tui_o/writer/legacy_hop_retry_tests.rs",
         "src/services/tui_o/writer/fork_tests.rs",
         "src/services/tui_o/writer/host_tests.rs",
+        "src/config/late_live_reload_tests.rs",
+        "src/services/tui_o/channel_policy/late_reservation_tests.rs",
+        "src/services/tui_o/writer/late_pin_tests.rs",
+        "src/services/tui_o/writer/late_adopt_delegated_tests.rs",
+        "src/services/tui_o/writer/late_adopt_host_tests.rs",
+        "src/services/tui_o/writer/late_adopt_cleanup_tests.rs",
+        "src/services/tui_o/writer/late_adopt_binding_tests.rs",
+        "src/services/discord/outbound/o_writer_late_tmux_tests.rs",
         "src/services/tui_o/writer/host_renumber_tests.rs",
         "src/services/tui_o/writer/adoption_tests.rs",
         "src/services/tui_o/writer/deferred_tests.rs",
@@ -598,6 +618,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/gates_m1_spool_tests.rs",
         "src/services/codex_tui/rollout_tail/provenance_tests.rs",
         "src/services/tui_o/store/codex_provenance_tests.rs",
+        "src/services/tui_o/store/codex_provenance/submit_floor_tests.rs",
+        "src/services/tui_o/writer/s2a_actor_tests.rs",
         "src/services/tui_o/writer/owed_tests.rs",
         "src/services/tui_o/writer/verified_delivery_tests.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/admission_tests.rs",
@@ -629,6 +651,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/cli/o_tests.rs",
         "src/services/tui_o/repost/runner_activation_tests.rs",
         "src/services/tui_o/repost/runtime_host_activation_tests.rs",
+        "src/services/tui_o/repost/backlog_tests.rs",
+        "src/services/tui_o/repost/rollback_rehearsal_tests.rs",
         "src/services/tui_o/repost/writer_activation_tests.rs",
         "src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs",
@@ -654,12 +678,14 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs",
+        "src/services/discord/runtime_bootstrap/queued_placeholders/tests/n3bc_tests.rs",
     }
 )
 
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/tui_o/store/codex_provenance/submit_floor.rs",
         "src/services/discord/turn_bridge/replay_policy.rs",
         "src/services/discord/router/intake_dispatch/tests/final_guards.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
@@ -740,6 +766,9 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/router/message_handler/provider_dispatch/producer_error_test_support.rs",
         "src/services/discord/watchers/lifecycle/n4d2_entry_test.rs",
         "src/services/discord/watchers/lifecycle/n4d2_o_writer_test.rs",
+        "src/services/discord/health/recovery/self_watchdog/policy/tests/mod.rs",
+        "src/services/discord/health/recovery/self_watchdog/tests/mod.rs",
+        "src/services/hang_forensics/tests/mod.rs",
     }
 )
 

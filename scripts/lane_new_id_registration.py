@@ -551,6 +551,8 @@ def judge(repo_root: Path, base: str, coverage, parity, sources, pg_tests, skip_
         inventory = cti.collect_static_tests(cti.discover_targets(repo_root)["lib"], repo_root)
         for test_id, site in [*inventory.tests.items(),
                               *((d[0], d[2]) for d in inventory.duplicate_tests)]:
+            source, line = site.rsplit(":", 1)
+            site = f"{(repo_root / source).resolve().relative_to(repo_root.resolve()).as_posix()}:{line}"
             site_of.setdefault(test_id, site)
             sites.setdefault(site.rsplit(":", 1)[0], set()).add(test_id)
         stale = sorted(set(inventory.tests) ^ head_ids)

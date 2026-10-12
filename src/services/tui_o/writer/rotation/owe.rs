@@ -63,20 +63,23 @@ impl<B: BindingEvents> Sources<B> {
         }
     }
 
-    /// A row after a fork's start whose every identity the parent consumed is the parent's copy,
-    /// unless the parent is pending or undecided and so may never post it.
+    /// Masks only identities consumed within the parent's publishing responsibility.
+    /// Root/adopted parents retain their existing from-zero policy.
     fn masked(&self, link: &SourceLink, record: &CapturedRecord) -> bool {
         let Some(parent) = link.parent.as_ref() else {
             return false;
         };
         let parent_link = self.rotation.link(parent).map(|l| &l.boundary);
-        if !matches!(parent_link, None | Some(Boundary::Owed { .. })) {
-            return false;
-        }
+        let from = match parent_link {
+            None => 0,
+            Some(Boundary::Owed { from }) => *from,
+            _ => return false,
+        };
         let Some(lineage) = self.lineage.get(&source_key(parent)) else {
             return false;
         };
-        RowIds::of(self.provider, &record.line)
-            .is_some_and(|row| !row.is_empty() && lineage.class(&row) == Class::Inherited)
+        RowIds::of(self.provider, &record.line).is_some_and(|row| {
+            !row.is_empty() && lineage.class_from(&row, from) == Class::Inherited
+        })
     }
 }

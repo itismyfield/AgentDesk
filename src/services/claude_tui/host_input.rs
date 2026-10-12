@@ -413,7 +413,7 @@ pub(crate) enum InputRun {
     Cancelled {
         confirmed: usize,
     },
-    /// A send began and may have landed: later steps, Enter and retries stay unsent.
+    /// The submit fence was crossed or a send may have landed; no retry or cleanup follows.
     Indeterminate {
         confirmed: usize,
         cause: StopCause,
@@ -846,9 +846,6 @@ mod spy {
 
     pub(crate) struct SpyState {
         pub calls: Vec<String>,
-        pub pane_size: Option<(usize, usize)>,
-        /// Geometry read once a payload send happened, as when the pane resizes mid-submit.
-        pub pane_size_after_send: Option<Option<(usize, usize)>>,
         /// Answer for the n-th send (load, literal, paste or keys), counted from 0.
         pub fail_send: Option<(usize, Result<Output, String>)>,
         pub captures: VecDeque<Option<String>>,
@@ -870,8 +867,6 @@ mod spy {
         fn default() -> Self {
             Self {
                 calls: Vec::new(),
-                pane_size: Some((80, 24)),
-                pane_size_after_send: None,
                 fail_send: None,
                 captures: VecDeque::new(),
                 captures_after_send: None,
@@ -1072,27 +1067,11 @@ mod spy {
     /// Routes this thread's legacy input through a spy until dropped.
     pub(crate) struct SpyGuard(pub Rc<RefCell<SpyState>>);
 
-    thread_local! {
-        static INSTALLED: RefCell<Option<Rc<RefCell<SpyState>>>> = const { RefCell::new(None) };
-    }
-
-    /// Geometry of the installed spy, as the dormant guarded submission reads it.
-    pub(super) fn pane_size() -> Option<(usize, usize)> {
-        let state = INSTALLED.with(|slot| slot.borrow().clone())?;
-        let mut state = state.borrow_mut();
-        state.record("size".to_string());
-        match state.pane_size_after_send {
-            Some(after) if state.sends > 0 => after,
-            _ => state.pane_size,
-        }
-    }
-
     impl SpyGuard {
         pub(crate) fn install(state: SpyState) -> Self {
             let state = Rc::new(RefCell::new(state));
             let spy: Box<dyn InputTransport> = Box::new(Spy(state.clone()));
             INJECTED.with(|slot| *slot.borrow_mut() = Some(spy));
-            INSTALLED.with(|slot| *slot.borrow_mut() = Some(state.clone()));
             Self(state)
         }
 
@@ -1104,201 +1083,18 @@ mod spy {
     impl Drop for SpyGuard {
         fn drop(&mut self) {
             INJECTED.with(|slot| slot.borrow_mut().take());
-            INSTALLED.with(|slot| slot.borrow_mut().take());
         }
     }
 }
 
-/// Dormant guarded Claude submission: operating Claude prompts still go through `run_legacy`.
-/// Its pane geometry comes from the test spy; no production transport supplies one.
-#[cfg(test)]
-pub(crate) mod guarded_submission {
-    use super::*;
-    use crate::services::claude_tui::input::TuiInputAction;
-    use crate::services::tui_input::actor::gate::claude_guarded::claude_should_fold;
-
-    fn with_transport_using<R>(
-        default: &mut dyn InputTransport,
-        operation: impl FnOnce(&mut dyn InputTransport) -> R,
-    ) -> R {
-        #[cfg(test)]
-        if let Some(mut injected) = INJECTED.with(|slot| slot.borrow_mut().take()) {
-            let result = operation(injected.as_mut());
-            INJECTED.with(|slot| *slot.borrow_mut() = Some(injected));
-            return result;
-        }
-        operation(default)
-    }
-
-    // This test-only estimate must be replaced by geometry admission before guard activation.
-    fn claude_prompt_fits_pane(
-        frame: &str,
-        payload: &[TuiInputAction],
-        size: Option<(usize, usize)>,
-    ) -> bool {
-        use unicode_width::UnicodeWidthStr;
-        size.is_some_and(|(width, height)| {
-            let width = width.saturating_sub(4);
-            let rows = height.saturating_sub(10);
-            if width == 0 || rows == 0 {
-                return false;
-            }
-            let paste =
-                matches!(payload, [TuiInputAction::PasteBuffer(text)] if text.as_str() == frame);
-            if paste && claude_should_fold(frame) {
-                return true;
-            }
-            frame
-                .split('\n')
-                .try_fold(0usize, |total, line| {
-                    let cells = line.replace('\t', "    ").width();
-                    total.checked_add(cells.div_ceil(width).max(1))
-                })
-                .is_some_and(|needed| needed <= rows)
-        })
-    }
-
-    pub(crate) fn folded_payload(frame: &str) -> Option<[TuiInputAction; 1]> {
-        (!frame.contains('\n') && claude_should_fold(frame))
-            .then(|| [TuiInputAction::PasteBuffer(frame.to_string())])
-    }
-
-    /// Submits only a prompt plan; the caller holds the existing composer mutex throughout.
-    pub(crate) fn run_prompt_submission_legacy(
-        session_name: &str,
-        actions: &[TuiInputAction],
-        cancel_token: Option<&CancelToken>,
-    ) -> InputRun {
-        use crate::services::tui_input::submission::{
-            Refusal, Submission, run_prompt_submission_using,
-        };
-        use crate::services::tui_o::shadow::ShadowProvider;
-        let Some((TuiInputAction::Enter, payload)) = actions.split_last() else {
-            return InputRun::Refused(InputRefusal::Composer(Refusal::InvalidPrompt));
-        };
-        let mut frame = String::new();
-        for action in payload {
-            match action {
-                TuiInputAction::Literal(text) | TuiInputAction::PasteBuffer(text) => {
-                    frame.push_str(text)
-                }
-                _ => return InputRun::Refused(InputRefusal::Composer(Refusal::InvalidPrompt)),
-            }
-        }
-        // Paste a folded one-line frame whole, preserving its bytes across literal replanning.
-        let folded = folded_payload(&frame);
-        let payload = folded.as_ref().map_or(payload, |paste| &paste[..]);
-        with_transport_using(
-            &mut crate::services::tui_input::submission_tmux::SubmissionTmux,
-            |transport| {
-                let before = transport
-                    .capture_draft(session_name)
-                    .filter(|_| transport.pane_alive(session_name));
-                let transport = std::cell::RefCell::new(transport);
-                let target = InputTarget::legacy_tmux(session_name);
-                let size = std::cell::Cell::new(None);
-                run_prompt_submission_using(
-                    Submission {
-                        provider: ShadowProvider::Claude,
-                        frame: &frame,
-                        before: before.as_deref(),
-                        mutations: payload.len(),
-                    },
-                    cancel_token,
-                    || {
-                        let current_size = super::spy::pane_size();
-                        size.set(current_size);
-                        if cancel_requested(cancel_token) {
-                            return InputRun::Cancelled { confirmed: 0 };
-                        }
-                        if !claude_prompt_fits_pane(&frame, payload, current_size) {
-                            return InputRun::Refused(InputRefusal::Composer(
-                                Refusal::UnpredictableRender,
-                            ));
-                        }
-                        run_plan(
-                            &target,
-                            &LegacyTmuxGate,
-                            &mut **transport.borrow_mut(),
-                            payload,
-                            cancel_token,
-                        )
-                    },
-                    || {
-                        if matches!(payload.last(), Some(TuiInputAction::Literal(_))) {
-                            std::thread::sleep(POST_LITERAL_SETTLE);
-                        }
-                        let mut transport = transport.borrow_mut();
-                        if super::spy::pane_size() != size.get()
-                            || !transport.pane_alive(session_name)
-                        {
-                            return None;
-                        }
-                        transport.capture_draft(session_name)
-                    },
-                    || {
-                        run_plan(
-                            &target,
-                            &LegacyTmuxGate,
-                            &mut **transport.borrow_mut(),
-                            &[TuiInputAction::Enter],
-                            cancel_token,
-                        )
-                    },
-                )
-            },
-        )
-    }
-
-    /// Observes a guarded submit once, leaving every stranded draft untouched.
-    pub(crate) fn confirm_prompt_submission_passively(
-        session_name: &str,
-        cancel_token: Option<&CancelToken>,
-    ) -> Result<(), String> {
-        if cancel_requested(cancel_token) {
-            return Err(PROMPT_READY_CANCELLED_ERROR.to_string());
-        }
-        let capture = with_transport_using(
-            &mut crate::services::tui_input::submission_tmux::SubmissionTmux,
-            |transport| {
-                transport
-                    .capture_draft(session_name)
-                    .filter(|_| transport.pane_alive(session_name))
-            },
-        );
-        if cancel_requested(cancel_token) {
-            return Err(PROMPT_READY_CANCELLED_ERROR.to_string());
-        }
-        let Some(capture) = capture else {
-            return Err("claude tui input held after mutation: confirmation unavailable".into());
-        };
-        let verdict = crate::services::tui_input::actor::gate::judge_pane(
-            crate::services::tui_o::shadow::ShadowProvider::Claude,
-            &capture,
-        );
-        let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&capture);
-        if verdict == crate::services::tui_input::actor::gate::PaneVerdict::Modal
-            || !crate::services::tui_input::actor::gate::claude_composer_empty_when_present(
-                &capture,
-            )
-            || crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft(&plain)
-            || !(verdict == crate::services::tui_input::actor::gate::PaneVerdict::Ready
-                || crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&plain))
-        {
-            return Err("claude tui input held after mutation: confirmation ambiguous".into());
-        }
-        Ok(())
-    }
-}
+pub(crate) mod guarded_submission;
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
-    use super::guarded_submission::{
-        confirm_prompt_submission_passively, run_prompt_submission_legacy,
-    };
+    use super::guarded_submission::confirm_prompt_submission_passively;
     use super::spy::{Spy, SpyGuard, SpyState, exit};
     use super::*;
     use crate::services::claude_tui::input::{
@@ -1834,45 +1630,6 @@ mod tests {
     }
 
     #[test]
-    fn guarded_claude_helper_submits_folded_own_draft_and_keeps_late_refusal() {
-        let idle = include_str!("../../../tests/fixtures/tui_input/claude-2.1.293-idle.txt");
-        let own = "────────────────────\n❯ [Pasted text #8 +2 lines]\n────────────────────\n";
-        let frame = "[adk:source:1]\n한글\n[adk:end]";
-        for (after, sent) in [(own, true), ("foreign draft", false)] {
-            let spy = SpyGuard::install(SpyState {
-                captures: [idle, after].map(|s| Some(s.to_string())).into(),
-                ..SpyState::default()
-            });
-            let actions = crate::services::claude_tui::input::plan_prompt_submit(frame).unwrap();
-            let run = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
-                "guarded-claude-helper",
-                || run_prompt_submission_legacy("guarded-claude-helper", &actions, None),
-            );
-            assert_eq!(
-                spy.calls().iter().filter(|c| *c == "keys:Enter").count(),
-                usize::from(sent)
-            );
-            assert!(
-                !spy.calls()
-                    .iter()
-                    .any(|c| c == "keys:C-u" || c.starts_with("retire:"))
-            );
-            if sent {
-                assert_eq!(run, InputRun::Applied);
-            } else {
-                assert!(matches!(
-                    run,
-                    InputRun::Indeterminate {
-                        cause: StopCause::Refused(_),
-                        ..
-                    }
-                ));
-                assert!(!InputTarget::legacy_tmux("guarded-claude-helper").keys_may_follow(&run));
-            }
-        }
-    }
-
-    #[test]
     fn passive_claude_confirmation_never_retries_or_clears_a_draft() {
         let idle = include_str!("../../../tests/fixtures/tui_input/claude-2.1.293-idle.txt");
         for (capture, confirmed) in [
@@ -1959,33 +1716,6 @@ mod tests {
             if !cancel_after_capture {
                 assert!(calls.is_empty());
             }
-        }
-    }
-
-    #[test]
-    fn prompt_helper_refuses_unfoldable_overflow_with_typed_pre_effect_result() {
-        let rule = "─".repeat(80);
-        let empty = format!(
-            "⏺ Done.\n\n\n{rule}\n❯ \n{rule}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
-        );
-        // Neither folds (800 chars or fewer); at 76 cells a row they need 22 and 16 of 14 rows.
-        for prompt in ["가".repeat(800), format!("{}가", "가 ".repeat(399))] {
-            let actions = crate::services::claude_tui::input::plan_prompt_submit(&prompt).unwrap();
-            let mut setup = state(&[Some(&empty)]);
-            setup.pane_size = Some((80, 24));
-            let spy = SpyGuard::install(setup);
-            assert_eq!(
-                run_prompt_submission_legacy("claude-r4-helper-capacity", &actions, None),
-                InputRun::Refused(InputRefusal::Composer(
-                    crate::services::tui_input::submission::Refusal::UnpredictableRender,
-                )),
-                "{prompt}",
-            );
-            assert!(!spy.calls().iter().any(|call| call.starts_with("literal:")
-                || call.starts_with("load:")
-                || call.starts_with("paste:")
-                || call.starts_with("keys:")
-                || call.starts_with("retire:")),);
         }
     }
 }
