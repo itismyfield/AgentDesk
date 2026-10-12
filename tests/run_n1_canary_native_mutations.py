@@ -14,6 +14,9 @@ NATIVE = "tests.test_n1_canary_native.NativeContracts."
 SPLIT = "tests.test_n1_canary_native.SplitContracts."
 CLI = "tests.test_n1_canary_native_cli.NativeCLI."
 MUTANTS = [
+    ("codex-output-validation-removed", "native.py", 'codex_output(payload.get("output"))', 'pass', CLI + "test_codex_excluded_output_shapes_fail_closed_in_actual_cli"),
+    ("codex-arguments-validation-removed", "native.py", 'require(isinstance(payload.get(field), str))', 'pass', CLI + "test_codex_missing_arguments_fail_closed_in_actual_cli"),
+    ("claude-uuid-owner-ignored", "native.py", 'require(assistant_owners.get(value["key"], owner) == owner, "native_uuid_owner_conflict")', 'pass', CLI + "test_claude_tail_reobservation_cannot_create_a_new_native_turn"),
     ("logical-repeat-counted", "turns.py", 'if key in logical:\n            repeated += 1\n            continue', 'if key in logical:\n            repeated += 1', NATIVE + "test_hand_defined_turn_and_unit_sets_for_both_providers"),
     ("physical-repeat-kept", "turns.py", 'physical_repeated += 1\n            continue', 'physical_repeated += 1', NATIVE + "test_physical_and_logical_keys_are_separate"),
     ("logical-conflict-ignored", "turns.py", 'if key in logical and logical[key] != signature:', 'if False:', NATIVE + "test_same_id_changed_body_hidden_tool_outcome_or_record_order_is_unknown"),

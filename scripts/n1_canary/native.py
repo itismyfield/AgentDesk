@@ -46,6 +46,12 @@ def tool_payload(item, fields):
     return name
 
 
+def codex_output(value):
+    # Only text content items have a pinned output contract in this provider format.
+    if not isinstance(value, str):
+        text_parts(value, {"input_text"})
+
+
 def codex(row):
     kind = row.get("type")
     if kind == "turn.completed":
@@ -94,10 +100,20 @@ def codex(row):
         require(role in ("system", "developer"))
         text_parts(payload.get("content"), {"input_text", "text"})
         return fact()
-    if subtype in ("function_call", "custom_tool_call", "tool_search_call"):
-        return fact("units", items=[unit(payload.get("id"), "tool", tool_payload(payload, ("arguments", "input", "action")))])
-    if subtype in ("function_call_output", "custom_tool_call_output", "tool_search_output"):
-        require("output" in payload)
+    if subtype in ("function_call", "custom_tool_call"):
+        field = "arguments" if subtype == "function_call" else "input"
+        require(isinstance(payload.get(field), str))
+        require(isinstance(payload.get("name"), str) and text(payload.get("call_id")))
+        return fact("units", items=[unit(payload.get("id"), "tool", tool_payload(payload, (field,)))])
+    if subtype == "tool_search_call":
+        require(isinstance(payload.get("execution"), str) and "arguments" in payload)
+        return fact("units", items=[unit(payload.get("id"), "tool", tool_payload(payload, ("arguments",)))])
+    if subtype in ("function_call_output", "custom_tool_call_output"):
+        codex_output(payload.get("output"))
+        return fact("units", items=[unit(payload.get("call_id"), "tool_result", excluded="codex_tool_output")])
+    if subtype == "tool_search_output":
+        require(isinstance(payload.get("status"), str) and isinstance(payload.get("execution"), str)
+                and isinstance(payload.get("tools"), list) and all(isinstance(t, dict) for t in payload["tools"]))
         return fact("units", items=[unit(payload.get("call_id"), "tool_result", excluded="codex_tool_output")])
     if subtype == "reasoning":
         require(text(payload.get("id")) and any(k in payload for k in ("summary", "content", "encrypted_content")))
@@ -200,6 +216,7 @@ def parse(raw, scope):
     provider = scope["provider"]
     require(provider in ("codex", "claude"), "native_provider_unsupported")
     turns, current, last, offset, boundaries = [], None, None, 0, {0}
+    assistant_owners = {}
     try:
         for line in raw[:end].splitlines(keepends=True):
             start, offset = offset, offset + len(line)
@@ -235,6 +252,11 @@ def parse(raw, scope):
                     if provider == "codex":
                         require(value["key"] == last["native_turn_id"] and normalized(row) == last["records"][-1], "native_closer_conflict")
                 continue
+            if provider == "claude" and (action == "assistant" or opens):
+                owner = current["native_turn_id"]
+                require(assistant_owners.get(value["key"], owner) == owner, "native_uuid_owner_conflict")
+                if action == "assistant":
+                    assistant_owners.setdefault(value["key"], owner)
             current["records"].append(normalized(row))
             if action == "announce":
                 current["announced"].add(value["key"])
