@@ -12,7 +12,7 @@ subcommand starts the server.
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
 - Top-level commands: 58
-- Commands including nested subcommands: 109
+- Commands including nested subcommands: 110
 
 ## Global options
 
@@ -130,6 +130,7 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk herdr`](#agentdesk-herdr) | Herdr-hosted executions on this node: read-only status, and retire of an ended one |  |
 | [`agentdesk herdr status`](#agentdesk-herdr-status) | Each local Herdr row, its pane as read now and the held inputs; changes nothing |  |
 | [`agentdesk herdr retire`](#agentdesk-herdr-retire) | Retire a channel's execution once its pane is gone or only its shell is left |  |
+| [`agentdesk herdr terminate`](#agentdesk-herdr-terminate) | Ask the local server to close one execution's pane and retire it; needs the live switch |  |
 | [`agentdesk channel-home`](#agentdesk-channel-home) | Delegated channel homes: status, and the switched delegate, reclaim and force |  |
 | [`agentdesk channel-home status`](#agentdesk-channel-home-status) | Each home row and its open intake by routed epoch; changes nothing |  |
 | [`agentdesk channel-home delegate`](#agentdesk-channel-home-delegate) | Start releasing a gateway-owned channel from this node to `--to` |  |
@@ -1308,6 +1309,7 @@ Subcommands:
 
 - `status` — Each local Herdr row, its pane as read now and the held inputs; changes nothing
 - `retire` — Retire a channel's execution once its pane is gone or only its shell is left
+- `terminate` — Ask the local server to close one execution's pane and retire it; needs the live switch
 
 ### `agentdesk herdr status`
 
@@ -1324,6 +1326,18 @@ Usage: `agentdesk herdr retire <CHANNEL>`
 | Argument | Value | Default | Description |
 |---|---|---|---|
 | `<CHANNEL>` | `u64` |  | Discord channel id of the execution |
+
+### `agentdesk herdr terminate`
+
+Ask the local server to close one execution's pane and retire it; needs the live switch
+
+Usage: `agentdesk herdr terminate [OPTIONS]`
+
+| Argument | Value | Default | Description |
+|---|---|---|---|
+| `--session-key <SESSION_KEY>` (required) | `String` |  | Session key of the execution's row |
+| `--execution-nonce <EXECUTION_NONCE>` (required) | `String` |  | Execution nonce the row must still record |
+| `--reason <REASON>` (required) | `String` |  | Why it is terminated, kept in the server's result log |
 
 ## `agentdesk channel-home`
 

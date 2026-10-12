@@ -50,6 +50,10 @@ pub mod reviews;
 pub mod routines;
 #[cfg(test)]
 mod runtime_profile_tests;
+// The literal test gate keeps the source censuses from reading this file as production.
+#[cfg(test)]
+#[cfg(unix)]
+mod herdr_legacy_tests;
 pub mod scheduled_messages;
 pub(crate) mod session_activity;
 mod session_evidence;
@@ -62,6 +66,9 @@ pub mod state;
 pub mod stats;
 pub mod termination_events;
 mod turn_lease;
+// Herdr hosting exists only on unix; elsewhere the route is absent.
+#[cfg(unix)]
+mod herdr_terminate;
 pub(crate) mod voice_audio;
 pub(crate) mod voice_conductor;
 pub mod voice_config;

@@ -26,6 +26,10 @@ pub(in crate::services::discord) mod discord_mock;
 #[cfg(unix)]
 #[path = "herdr_terminate_e2e_tests.rs"]
 mod herdr_terminate_e2e;
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "herdr_terminate_o_e2e_tests.rs"]
+mod herdr_terminate_o_e2e;
 #[path = "n1a_turn_mode_tests.rs"]
 mod n1a_turn_mode;
 #[path = "prompt_identity_e2e_tests.rs"]
@@ -41,6 +45,11 @@ mod stale_resume_retry_e2e;
 mod stop_command_catch_up_e2e;
 #[cfg(unix)]
 mod thread_guard_host_e2e;
+// The literal test gate keeps the source censuses from reading this file as production.
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "herdr_terminate_route_e2e_tests.rs"]
+mod herdr_terminate_route_e2e;
 
 use std::path::PathBuf;
 use std::sync::Arc;
