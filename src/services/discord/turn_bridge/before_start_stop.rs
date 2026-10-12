@@ -146,23 +146,35 @@ async fn consume(
     };
     #[cfg(test)]
     test_hooks::boundary("before_finalize", &admitted);
-    let finalized = matches!(
-        fin.submit_terminal_with_claim_snapshot(
-            key,
-            shared.provider.clone(),
-            TerminalEvent::Cancel,
-            context,
-            Some(snapshot),
-            shared.clone(),
-        )
-        .await,
-        FinalizeOutcome::Finalized { .. }
-    );
+    let finalized = submit_policy_terminal(shared, fin, key, context, snapshot).await;
     if finalized && !crate::services::discord::inflight::receipt_mutant("policy-clear") {
         return acked.clear_before_start_policy_receipt(generation)
             == crate::services::discord::inflight::GuardedClearOutcome::Cleared;
     }
     finalized
+}
+
+/// The close's one terminal submission; tests count calls at the finalizer API itself.
+async fn submit_policy_terminal(
+    shared: &Arc<SharedData>,
+    fin: &TurnFinalizer,
+    key: TurnKey,
+    context: FinalizeContext,
+    snapshot: SyntheticClaimSnapshot,
+) -> bool {
+    #[cfg(test)]
+    test_hooks::submitting();
+    let provider = shared.provider.clone();
+    let event = TerminalEvent::Cancel;
+    let submitted = fin.submit_terminal_with_claim_snapshot(
+        key,
+        provider,
+        event,
+        context,
+        Some(snapshot),
+        shared.clone(),
+    );
+    matches!(submitted.await, FinalizeOutcome::Finalized { .. })
 }
 
 #[cfg(test)]
@@ -197,10 +209,12 @@ pub(in crate::services::discord) mod test_hooks {
         SUBMITTED.with(Cell::get)
     }
 
+    /// Counts one call to the finalizer's submit API, right before it is made.
+    pub(super) fn submitting() {
+        SUBMITTED.with(|count| count.set(count.get() + 1));
+    }
+
     pub(super) fn boundary(step: &'static str, row: &InflightTurnState) {
-        if step == "before_finalize" {
-            SUBMITTED.with(|count| count.set(count.get() + 1));
-        }
         if std::env::var(STOP_AT).ok().as_deref() == Some(step) {
             println!(
                 "COLDSTOP_B_STOP {step} channel={} pid={}",

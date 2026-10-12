@@ -8840,6 +8840,7 @@ services::discord::turn_bridge::before_start_stop::tests::coldstop_receipt_admis
 services::discord::turn_bridge::before_start_stop::tests::coldstop_receipt_precedes_notice_and_release
 services::discord::turn_bridge::before_start_stop::tests::coldstop_restart_finishes_a_close_that_crashed_midway
 services::discord::turn_bridge::before_start_stop::tests::coldstop_typed_untouched_not_indeterminate_and_late_exit_is_sealed
+services::discord::turn_bridge::before_start_stop::tests::disk_gate::coldstop_receipt_refuses_a_planned_restart_row_of_the_same_episode
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::a_pending_or_failing_refusal_notice_never_holds_the_unwind
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::c1_actual_spawn_bridge_retains_effect_until_future_disposal
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::cold_error::cold_error_does_not_clear_successor

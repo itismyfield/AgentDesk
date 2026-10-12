@@ -827,6 +827,9 @@ impl Close {
     }
 }
 
+#[path = "before_start_stop_disk_gate_tests.rs"]
+mod disk_gate;
+
 /// A notice that records being polled and otherwise shows the notice.
 async fn recorded(
     polled: &std::sync::atomic::AtomicBool,

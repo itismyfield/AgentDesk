@@ -33,6 +33,10 @@ const STORED: &str = "cut-stored-answer";
 
 static REACHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// Ends a cut child at its own boundary with what that boundary saw.
+type Exit = Box<dyn FnOnce() + Send>;
+static EXIT: Mutex<Option<(Cut, Exit)>> = Mutex::new(None);
+
 /// The delivery word the stop's own log uses for `delivery`.
 fn word(delivery: Result<HerdrDelivery, HerdrNotSent>) -> &'static str {
     let delivery = delivery.unwrap_or_else(HerdrDelivery::NotSent);
@@ -52,6 +56,23 @@ pub(in super::super) fn reached(cut: Cut, delivery: Option<Result<HerdrDelivery,
         }
     };
     REACHED.lock().unwrap().push(seen);
+    let exit = {
+        let mut slot = EXIT.lock().unwrap();
+        match slot.take() {
+            Some((at, exit)) if at == cut => Some(exit),
+            other => {
+                *slot = other;
+                None
+            }
+        }
+    };
+    // The child ends at the boundary itself, so nothing the stop does next is made durable.
+    let carry_on = crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant;
+    if let Some(exit) = exit
+        && !carry_on("cut_continues_after_boundary")
+    {
+        exit();
+    }
 }
 
 fn channel(n: u64) -> ChannelId {
@@ -139,14 +160,50 @@ fn observed_input(
     assert!(matches!(ran, InputRun::Ran(_)), "the input ran");
 }
 
+/// A marker only a child that ran past its boundary writes.
+fn ran_past(root: &Path, cut: &str) -> PathBuf {
+    root.join(format!("{cut}.after-boundary"))
+}
+
+/// What a held cut leaves for restart: its transcript then ends in a result no terminal admitted,
+/// which restart must never show; the row and source bytes as the cut left them.
+fn seal_held(case: &Case, root: &Path, cut: &str) {
+    let result = serde_json::json!({"type": "result", "subtype": "success", "result": TRANSCRIPT});
+    let mut source = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&case.path)
+        .unwrap();
+    std::io::Write::write_all(&mut source, format!("{result}\n").as_bytes()).unwrap();
+    let before = std::fs::read(row_path(case)).unwrap();
+    std::fs::write(root.join(format!("{cut}.before")), before).unwrap();
+    let source = std::fs::read(&case.path).unwrap();
+    std::fs::write(root.join(format!("{cut}.source-before")), source).unwrap();
+}
+
+type Stop = crate::services::provider::cancel_token_claude_interrupt::HerdrInterruptState;
+
+/// The stop's witness as its boundary sees it, then the cut's end.
+fn finish_stop(case: &Case, state: &Stop, mut seen: Value, root: &Path) -> ! {
+    let cut = seen["cut"].as_str().unwrap().to_owned();
+    seen["escapes"] = case.escapes().into();
+    seen["user_stop"] = state.user_stop.load(Ordering::Acquire).into();
+    seen["turn_start"] = state.turn_start.get().is_some().into();
+    seen["reached"] = serde_json::json!(*REACHED.lock().unwrap());
+    seal_held(case, root, &cut);
+    end_cut(root, &cut, &seen)
+}
+
 /// Runs cut `cut` of case `n` to its boundary and ends the process there.
 async fn persist_cut(cut: &str, n: u64, root: &Path, pool: &sqlx::PgPool) -> ! {
     use crate::services::claude_tui::host_input::{InputRun, StopCause};
     let _switch = Switch::on();
-    let case = Case::new(pool, root, ProviderKind::Claude, n).await;
+    // Leaked: the boundary's exit may run on the stop's writer thread and never returns.
+    let case: &'static Case = Box::leak(Box::new(
+        Case::new(pool, root, ProviderKind::Claude, n).await,
+    ));
     let _registry = case.rig.registry_on_this_thread();
     let state = case.token.herdr_interrupt_state().unwrap();
-    let mut row = turn_row(&case);
+    let mut row = turn_row(case);
     let mut seen = serde_json::json!({
         "cut": cut,
         "pid": std::process::id(),
@@ -157,11 +214,11 @@ async fn persist_cut(cut: &str, n: u64, root: &Path, pool: &sqlx::PgPool) -> ! {
     match cut {
         // A cold turn: no input observation has begun.
         "intent" => state.submission.lock().unwrap().submission = HerdrSubmission::Unsubmitted,
-        "sent" => observed_input(&case, InputRun::Applied, now),
+        "sent" => observed_input(case, InputRun::Applied, now),
         "indeterminate" => {
             let cause = StopCause::Send("no reply".into());
             observed_input(
-                &case,
+                case,
                 InputRun::Indeterminate {
                     confirmed: 1,
                     cause,
@@ -170,9 +227,19 @@ async fn persist_cut(cut: &str, n: u64, root: &Path, pool: &sqlx::PgPool) -> ! {
             );
             case.rig.leave_sends_unanswered(true);
         }
-        _ => admit_cut(cut, &case, &mut row, &mut seen, root).await,
+        _ => admit_cut(cut, case, &mut row, &mut seen, root).await,
     }
     inflight::save_inflight_state(&row).unwrap();
+    // The input observation as the stop finds it; the stop's writer holds its lock later.
+    let input = state.submission.lock().unwrap().submission;
+    seen["submission"] = format!("{input:?}").into();
+    let at = match cut {
+        "intent" => Cut::IntentRecorded,
+        _ => Cut::EscapeReturned,
+    };
+    let (sealed, held, dir) = (seen.clone(), state.clone(), root.to_path_buf());
+    let exit: Exit = Box::new(move || finish_stop(case, &held, sealed, &dir));
+    *EXIT.lock().unwrap() = Some((at, exit));
     let stop = herdr_command_stop(
         &case.shared,
         &case.provider,
@@ -181,25 +248,12 @@ async fn persist_cut(cut: &str, n: u64, root: &Path, pool: &sqlx::PgPool) -> ! {
         "/stop",
     );
     let stop = stop.await.observation();
-    let input = state.submission.lock().unwrap().submission;
-    seen["stop"] = format!("{}:{}", stop.intent, stop.delivery).into();
-    seen["escapes"] = case.escapes().into();
-    seen["submission"] = format!("{input:?}").into();
-    seen["user_stop"] = state.user_stop.load(Ordering::Acquire).into();
-    seen["turn_start"] = state.turn_start.get().is_some().into();
-    seen["reached"] = serde_json::json!(*REACHED.lock().unwrap());
-    // The transcript then ends in a result no terminal admitted; restart must never show it.
-    let result = serde_json::json!({"type": "result", "subtype": "success", "result": TRANSCRIPT});
-    let mut source = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&case.path)
-        .unwrap();
-    std::io::Write::write_all(&mut source, format!("{result}\n").as_bytes()).unwrap();
-    let before = std::fs::read(row_path(&case)).unwrap();
-    std::fs::write(root.join(format!("{cut}.before")), before).unwrap();
-    let source = std::fs::read(&case.path).unwrap();
-    std::fs::write(root.join(format!("{cut}.source-before")), source).unwrap();
-    end_cut(root, cut, &seen)
+    std::fs::write(
+        ran_past(root, cut),
+        format!("{}:{}", stop.intent, stop.delivery),
+    )
+    .unwrap();
+    finish_stop(case, &state, seen, root)
 }
 
 /// The own turn's transcript and the reader's typed terminal, admitted by the bridge's admission;
@@ -262,6 +316,7 @@ async fn admit_cut(
         .admit_tui_terminal_frame(&mut baseline, &expected, true, actor, "", frame)
         .await;
     // Only an admission that persisted nothing returns here; its witness names no boundary.
+    std::fs::write(ran_past(root, cut), "admission returned").unwrap();
     seen["admission"] = admitted.is_ok().into();
     seen["reached"] = serde_json::json!([]);
     end_cut(root, cut, seen)
@@ -357,10 +412,11 @@ async fn restart_real_cutpoints_reach_their_runtime_boundaries_pg() {
         let expect = |cut: &str, reached: Value| {
             let witness = &seen[CUTS.iter().position(|(name, _)| *name == cut).unwrap()];
             assert_eq!(witness["reached"], reached, "{cut}: {witness}");
+            let past = std::fs::read_to_string(ran_past(root.path(), cut));
+            assert!(past.is_err(), "{cut} ran past its boundary: {past:?}");
             witness.clone()
         };
         let intent = expect("intent", serde_json::json!(["intent_recorded"]));
-        assert_eq!(intent["stop"], "recorded:not_sent", "{intent}");
         assert_eq!(intent["escapes"], 0, "{intent}");
         assert_eq!(intent["submission"], "Unsubmitted", "{intent}");
         assert_eq!(intent["turn_start"], false, "{intent}");
@@ -371,7 +427,6 @@ async fn restart_real_cutpoints_reach_their_runtime_boundaries_pg() {
         ] {
             let returned = format!("escape_returned:{delivery}");
             let witness = expect(cut, serde_json::json!(["intent_recorded", returned]));
-            assert_eq!(witness["stop"], format!("recorded:{delivery}"), "{witness}");
             assert_eq!(witness["escapes"], 1, "{cut}: the socket took one Escape");
             assert_eq!(witness["submission"], input, "{witness}");
             assert_eq!(witness["turn_start"], true, "{witness}");
