@@ -762,6 +762,9 @@ pub(crate) fn install_wait_observer(channel: u64, hook: Box<dyn FnOnce() + Send>
 #[cfg(test)]
 pub(crate) mod test_health {
     use super::*;
+    pub(crate) fn population_unused() -> bool {
+        GATES.get().is_none()
+    }
     static OWNERS: std::sync::LazyLock<
         Mutex<std::collections::HashMap<u64, std::thread::ThreadId>>,
     > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));

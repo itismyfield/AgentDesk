@@ -150,7 +150,6 @@ src/services/discord/inflight/rebind_reap/tests.rs
 src/services/discord/inflight/receipt_boundary_tests.rs
 src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_restart_tests.rs
-src/services/discord/input_runtime/effect_tests.rs
 src/services/discord/input_runtime/runtime/ports_tests.rs
 src/services/discord/mod.rs
 src/services/discord/placeholder_sweeper/abandon_guard.rs
@@ -452,7 +451,6 @@ services::discord::inflight::rebind_reap::tests
 services::discord::inflight::receipt_boundary_tests
 services::discord::inflight::removal::custody_notice_tests
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
-services::discord::input_runtime::fence::effect::tests::g1b_off
 services::discord::input_runtime::supervisor::runtime::ports::tests
 services::discord::placeholder_sweeper::abandon_guard::tests
 services::discord::placeholder_sweeper::retirement_tests
@@ -1494,8 +1492,8 @@ services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_star
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::an_admitted_ack_outlives_a_stop_before_cleanup_pg
-services::discord::input_runtime::fence::effect::tests::g1b_off::g1b_off_entrypoint_preserves_legacy_trace_pg
 services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_freeze_clear_move_fail_closed_pg
+services::discord::input_runtime::supervisor::runtime::ports::tests::g1b_off_entrypoint_preserves_legacy_trace_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::s3act_b3b_placeholder_stops_before_mailbox_finish_pg

@@ -356,7 +356,6 @@ jobs:
               - 'src/services/discord/inflight/receipt_boundary_tests.rs'
               - 'src/services/discord/inflight/removal/custody_notice_tests.rs'
               - 'src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_restart_tests.rs'
-              - 'src/services/discord/input_runtime/effect_tests.rs'
               - 'src/services/discord/input_runtime/runtime/ports_tests.rs'
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/placeholder_sweeper/abandon_guard.rs'

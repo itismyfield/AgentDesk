@@ -4715,7 +4715,6 @@ services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_before_fi
 services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_during_poll_holds_effect_until_worker_cleanup
 services::discord::input_runtime::fence::effect::tests::c1b_run_cancel_pending_returns_pool_thread_and_cleans_on_worker
 services::discord::input_runtime::fence::effect::tests::c1b_same_identity_stale_epoch_is_not_replaced_by_root_admission
-services::discord::input_runtime::fence::effect::tests::g1b_off::g1b_off_entrypoint_preserves_legacy_trace_pg
 services::discord::input_runtime::fence::modes::g1b_tests::g1b_close_final_ack_rechecks_after_handback_restore
 services::discord::input_runtime::fence::modes::g1b_tests::g1b_close_held_ack_is_current_and_serialized
 services::discord::input_runtime::fence::modes::g1b_tests::g1b_close_rejects_every_invalid_current_gate
@@ -4844,6 +4843,7 @@ services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_p
 services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_freeze_failure_preserves_legacy_and_closing
 services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_reject_unresolved_resources_without_effects
 services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_sources_are_read_only_and_unreadable_is_not_empty
+services::discord::input_runtime::supervisor::runtime::ports::tests::g1b_off_entrypoint_preserves_legacy_trace_pg
 services::discord::input_runtime::supervisor::tests::a_cause_leaves_health_once_rechecked_while_an_unsettled_clear_stays
 services::discord::input_runtime::supervisor::tests::abandoned_clear_loan_pins_the_slot_poisons_the_channel_and_keeps_the_worker_write
 services::discord::input_runtime::supervisor::tests::baseline_and_wakes_apply_each_event_once_in_seq_order
