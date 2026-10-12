@@ -1718,7 +1718,8 @@ class CommentMarkerMutations(BypassFixtureCase):
                         "python3 scripts/run_test_lane.py --lane sweep --max-summaries 4 --skip _pg"
                         f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
                         f'source {membership.NON_PG_FILTER_REL} && cargo test --lib -- '
-                        '"${PG_INCLUDE_ARGS[@]}" --nocapture'):
+                        '"${PG_INCLUDE_ARGS[@]}" --nocapture',
+                        f"env -- {self.SWEEP}", f"nice -n 5 {self.SWEEP}"):
             with self.subTest(command=command):
                 self.assertIsNotNone(membership._lane_filter(coverage, command))
         for command in ("echo cargo test --lib x", "false && cargo test --lib x",
@@ -1726,7 +1727,11 @@ class CommentMarkerMutations(BypassFixtureCase):
                         'source "$F" && cargo test --lib x', "cargo test --lib x 2>&1",
                         # Options whose value runs in place of the cargo test.
                         "python3 -c pass cargo test --lib x", "python3 -m pytest cargo test --lib x",
-                        "env -S echo cargo test --lib x", "env --split-string=echo cargo test --lib x"):
+                        "python3 scripts/other.py cargo test --lib x",
+                        "env -S echo cargo test --lib x", "env --split-string=echo cargo test --lib x",
+                        # A wrapper option that swallows `--` or takes an unproven value.
+                        "env -u -- cargo test --lib x", "nice -n echo cargo test --lib x",
+                        "python3 scripts/run_test_lane.py --lane sweep cargo test --lib x"):
             with self.subTest(command=command), \
                     self.assertRaisesRegex(ValueError, "cargo-command-unparsed"):
                 membership._lane_filter(coverage, command)
@@ -1739,7 +1744,12 @@ class CommentMarkerMutations(BypassFixtureCase):
                         "echo cargo test --lib db::service",
                         f"false && {self.SWEEP}",
                         # A run-time filter: empty here, so it selects every test.
-                        '|\n          FILTER=""\n          cargo test --lib -- "$FILTER" --nocapture'):
+                        '|\n          FILTER=""\n          cargo test --lib -- "$FILTER" --nocapture',
+                        # A wrapper whose command, past its options, is not cargo.
+                        "env -- echo cargo test --lib db::service",
+                        "nice -- echo cargo test --lib db::service",
+                        "env -i echo cargo test --lib db::service",
+                        "python3 scripts/run_test_lane.py --lane sweep -- echo cargo test --lib db::service"):
             with self.subTest(command=command):
                 self.write_sweep(f"  sweep:\n    steps:\n      - run: {command}\n")
                 stderr = io.StringIO()
@@ -1747,6 +1757,22 @@ class CommentMarkerMutations(BypassFixtureCase):
                     verdict = membership.main(["--repo-root", str(self.root), "--write-snapshots"])
                 self.assertEqual(verdict, 2)
                 self.assertIn("cargo-command-unparsed", stderr.getvalue())
+
+    def test_a_cargo_test_is_found_however_its_words_are_spaced(self) -> None:
+        def gate(sweep):
+            self.write_sweep(f"  sweep:\n    steps:\n      - run: {sweep}\n")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+                verdict = membership.main(["--repo-root", str(self.root), "--write-snapshots"])
+            return verdict, [line for line in stderr.getvalue().splitlines() if "rule5" in line]
+        single = gate(self.SWEEP)
+        self.assertEqual(single[0], 1)
+        self.assertIn("[rule5] names 1 test(s)", "\n".join(single[1]))
+        for sweep in (self.SWEEP.replace("cargo test", "cargo  test"),
+                      self.SWEEP.replace("cargo test", "cargo\ttest"),
+                      f"env -- {self.SWEEP}"):
+            with self.subTest(sweep=sweep):
+                self.assertEqual(gate(sweep), single)
 
     def test_a_quoted_hash_on_the_service_line_keeps_the_service(self) -> None:
         # The counterexample to cutting at every `#`: the service start here
