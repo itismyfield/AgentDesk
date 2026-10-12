@@ -5849,6 +5849,7 @@ services::discord::recovery_engine::herdr_before_start_restart::tests::decode_ta
 services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b_all_raw_receipt_precedes_rebind_pg
 services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b_all_receipt_precedes_replay_debt_pg
 services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b_receipt_off_stays_held_no_effect_pg
+services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b_receipt_replay_conflict_is_held_pg
 services::discord::recovery_engine::herdr_before_start_restart::tests::the_restart_scan_keeps_every_held_receipt_silent_and_untouched
 services::discord::recovery_engine::herdr_before_start_restart::tests::the_restart_scan_settles_a_marked_receipt_before_the_marker_hold
 services::discord::recovery_engine::herdr_reader::tests::the_restart_pass_reads_nothing_without_a_local_endpoint
@@ -6050,6 +6051,13 @@ services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_resume_hydrate_releases_lock_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_resume_snapshot_change_is_preserved_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_uncertain_output_is_preserved_without_admission_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests::s3act_b3b3_g1_current_generation_receipt_is_held_without_actor_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests::s3act_b3b3_g2_unverified_replay_authority_holds_the_receipt_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests::s3act_b3b3_g3_receipt_free_rows_keep_their_class_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests::s3act_b3b3_t12_prior_receipt_settles_by_recovery_permit_only_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests::s3act_b3b3_t12_receipt_restart_cannot_settle_stays_held_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests::s3act_b3b3_t13_receipt_off_is_held_scoped_without_effects_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests::s3act_b3b3_t34_receipt_conflicts_are_held_scoped_pg
 services::discord::recovery_engine::restore_inflight::tests::generic_recovery_consumes_restart_before_runtime_ready_and_persists_runtime_stamp
 services::discord::recovery_engine::restore_inflight::tests::restore_claude_tui_without_runtime_output_uses_tmux_fallback_path
 services::discord::recovery_engine::restore_inflight::tests::restore_clear_and_recovery_marker_sites_are_lexically_pinned

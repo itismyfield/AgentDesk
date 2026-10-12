@@ -74,6 +74,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/inflight/replay_projection_tests.rs",
         "src/services/discord/inflight/receipt_boundary_tests.rs",
         "src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs",
+        "src/services/discord/recovery_engine/restore_inflight/scoped_policy_receipt_tests.rs",
         "src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs",
         "src/services/dispatches/outbox_queue_replay_tests.rs",
         "src/services/tui_o/exact_episode_tests.rs",
