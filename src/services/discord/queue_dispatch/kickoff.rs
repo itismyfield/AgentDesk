@@ -50,6 +50,11 @@ async fn kickoff_admitted_queue_channel(
         return IdleQueueKickoffChannelOutcome::default();
     }
 
+    let queued_gate =
+        Some(router::queued_head_inject_covers as fn(ChannelId, Option<ChannelId>) -> bool);
+    if queue_io::queued_head_inject::try_busy(deps, provider, channel_id, queued_gate).await {
+        return IdleQueueKickoffChannelOutcome::default();
+    }
     let fresh_snapshot = mailbox_snapshot(shared, channel_id).await;
     if !idle_queue_channel_has_kickable_backlog(shared, provider, channel_id, &fresh_snapshot).await
     {

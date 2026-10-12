@@ -1273,6 +1273,8 @@ src/
 │   │   │   ├── cancel_reclaim_support_test.rs
 │   │   │   ├── idle_queue_tests.rs
 │   │   │   ├── ledger_settlement_tests.rs
+│   │   │   ├── queued_head_inject.rs
+│   │   │   ├── queued_head_inject_tests.rs
 │   │   │   ├── transport.rs
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
@@ -2800,7 +2802,8 @@ src/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
 │   │   ├── pending_queue_persistence/
-│   │   │   └── queued_recovery.rs
+│   │   │   ├── queued_recovery.rs
+│   │   │   └── queued_recovery_tests.rs
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs
 │   │   ├── active_source_dedup.rs
@@ -2826,6 +2829,7 @@ src/
 │   │   ├── mailbox_observation.rs
 │   │   ├── mailbox_unreachable_tests.rs
 │   │   ├── overflow.rs
+│   │   ├── overflow_s2b_tests.rs
 │   │   ├── pending_queue_persistence.rs
 │   │   ├── queue_cancellation.rs
 │   │   ├── queue_enqueue.rs

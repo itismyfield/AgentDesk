@@ -876,6 +876,7 @@ pub(crate) fn load_pending_queues(
     HashMap<ChannelId, ChannelId>,
 ) {
     let loaded = load_pending_queues_checked(provider, token_hash);
+    queued_recovery::report_scan_errors(provider, &loaded.scan_errors);
     if !loaded.quarantined.is_empty() {
         tracing::warn!(
             provider = provider.as_str(),
@@ -894,6 +895,7 @@ pub(crate) struct PendingQueueRecovery {
     pub(crate) queues: HashMap<ChannelId, Vec<Intervention>>,
     pub(crate) overrides: HashMap<ChannelId, ChannelId>,
     pub(crate) quarantined: Vec<(ChannelId, String)>,
+    pub(crate) scan_errors: Vec<String>,
 }
 
 pub(crate) fn load_pending_dispatch_markers(

@@ -24,7 +24,7 @@ pub(super) fn enqueue_behind(
     settlement: Option<(&ProviderKind, ChannelId)>,
     reserved_front: bool,
 ) -> EnqueueInterventionResult {
-    let mut queue_exit_events = prune_interventions(queue);
+    let mut queue_exit_events = overflow::drain_head_overflow_behind(queue, reserved_front);
     ensure_source_message_ids(&mut intervention);
 
     if intervention_sources_all_match_active(&intervention, active_user_message_id) {
@@ -114,7 +114,7 @@ pub(super) fn enqueue_behind(
     }
 
     queue.push(intervention);
-    queue_exit_events.extend(drain_head_overflow(queue));
+    queue_exit_events.extend(overflow::drain_head_overflow_behind(queue, reserved_front));
     EnqueueInterventionResult {
         enqueued: true,
         merged: false,
