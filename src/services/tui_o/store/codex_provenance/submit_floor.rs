@@ -74,6 +74,10 @@ pub(crate) struct NativeFloor {
 }
 
 impl NativeFloor {
+    pub(crate) fn generation(&self) -> i64 {
+        self.generation_mtime_ns
+    }
+
     pub(crate) fn execution(&self) -> &ExecutionProofRef {
         &self.execution
     }
@@ -82,7 +86,7 @@ impl NativeFloor {
         (&self.canonical_source, self.through, &self.prefix_hash)
     }
 
-    pub(super) fn verify_before_prepare(&self) -> Result<(), &'static str> {
+    pub(crate) fn verify_before_prepare(&self) -> Result<(), &'static str> {
         let cursor = Cursor {
             source: self.canonical_source.clone(),
             captured_through: self.through,
@@ -255,6 +259,6 @@ impl DurableClosedEpisode {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 #[path = "submit_floor_tests.rs"]
 pub(crate) mod tests;

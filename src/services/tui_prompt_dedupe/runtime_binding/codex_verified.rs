@@ -21,14 +21,12 @@ use std::{io, path::Path};
 
 pub(crate) mod provenance;
 
-#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VerifiedSourceSnapshot {
     context: BindingContext,
     execution: provenance::ExecutionProofRef,
 }
 
-#[cfg(test)]
 impl VerifiedSourceSnapshot {
     pub(crate) fn capture(authority: &TmuxSourceAuthority<'_>) -> io::Result<Self> {
         let context = current_context(authority)?

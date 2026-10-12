@@ -655,22 +655,19 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs",
+        "src/services/codex/actual_submit_tests.rs",
     }
 )
 
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
-        "src/services/tui_o/store/codex_provenance/submit_floor.rs",
         "src/services/discord/turn_bridge/replay_policy.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
         "src/services/discord/queue_io/cancel_reclaim_support_test.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests/autoheal.rs",
         "src/services/discord/turn_bridge/cancel_backstop_test_support.rs",
         "src/services/discord/zombie_foreground_release/cancel_backstop_test_support.rs",
-        "src/services/codex_tui/rollout_tail/provenance.rs",
-        "src/services/tui_o/store/codex_provenance/mutation.rs",
-        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant_construction.rs",
         "src/services/discord/relay_recovery/tests/retirement.rs",
         "src/services/discord/recovery_engine/o_cut_recorder.rs",
         "src/services/tui_o/channel_policy/adoption/body_check.rs",
@@ -728,7 +725,6 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/test_env_panic_probe.rs",
         "src/services/tui_o/gates_m1.rs",
         "src/services/tui_o/gates_m1_support.rs",
-        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/permission.rs",
         "src/services/discord/health/legacy_supervision/boot_status.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/cohort.rs",

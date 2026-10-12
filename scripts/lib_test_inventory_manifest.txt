@@ -2691,6 +2691,7 @@ services::cluster::watcher_supervisor::tests::shutdown_observation_sites_are_bra
 services::cluster::watcher_supervisor::tests::shutdown_observation_waits_before_reporting
 services::cluster::watcher_supervisor::tests::supervisor_publishes_producer_for_each_spawn
 services::cluster::watcher_supervisor::tests::supervisor_teardown_completes_with_outliving_producer_clone
+services::codex::actual_submit_tests::s2b1b_actual_driver_missing_episode_refuses_before_transport
 services::codex::c1_teardown_tests::a_cleared_existing_session_is_relaunched_exactly_once
 services::codex::c1_teardown_tests::an_existing_session_is_recreated_only_under_its_clearance
 services::codex::codex_fifo_followup_transport_tests::reused_fifo_wrapper_buffer_keeps_protocol_line_terminated
@@ -12389,6 +12390,10 @@ services::tui_o::writer::tests::actor::host_start::rotation_unsettled::the_readi
 services::tui_o::writer::tests::actor::host_start::s2a::s2a_same_claim_restart_rejects_delayed_close_reply_before_issue_and_attach
 services::tui_o::writer::tests::actor::host_start::s2a::s2b1a_dropping_command_sender_does_not_stop_hosted_actor
 services::tui_o::writer::tests::actor::host_start::s2a::s2b1a_same_claim_restart_rejects_delayed_typed_prepare_before_submit
+services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_delivery_gate_off_keeps_closed_evidence_without_post
+services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_failures_cancel_and_stale_evidence_issue_nothing
+services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_issued_record_fences_cancellation_during_first_poll
+services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_two_warm_turns_share_execution_and_post_once_each
 services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
 services::tui_o::writer::tests::actor::operator_resume::operator_resume_empty_spool_is_owed_before_wait_observation_at_300_seconds
 services::tui_o::writer::tests::actor::operator_resume::operator_resume_lease_wait_preserves_readiness_and_drain_owing

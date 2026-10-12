@@ -35,7 +35,6 @@ pub(crate) mod idle_recap;
 mod idle_recap_interaction;
 mod idle_relay_drift;
 mod inflight;
-#[cfg(test)]
 pub(crate) use inflight::read_only_owner_snapshot::{
     CodexEpisodeOwnerSnapshot, codex_episode_snapshot,
 };
@@ -3510,3 +3509,6 @@ pub(crate) use recovery_engine::{codex_rebind_spawn_for_tests, codex_restart_out
 pub(crate) use tmux::tmux_output_stream::{
     codex_native_read_for_tests, codex_source_witness_present_for_tests,
 };
+
+#[cfg(test)]
+pub(crate) use inflight::read_only_owner_snapshot::save_actual_episode_for_tests;

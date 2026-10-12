@@ -1,5 +1,4 @@
 //! Read-only episode evidence uses the existing mailbox incarnation and never repairs its row.
-#![cfg(test)]
 
 use super::load_inflight_state_read_only_result;
 use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
@@ -276,4 +275,32 @@ mod tests {
         fixture.token.cancelled.store(true, Ordering::Release);
         assert!(fixture.snapshot(&fixture.token).is_err());
     }
+}
+
+#[cfg(test)]
+pub(crate) fn save_actual_episode_for_tests(
+    channel: u64,
+    tmux: &str,
+    message: u64,
+    token: &Arc<CancelToken>,
+) -> std::path::PathBuf {
+    crate::config::test_env_lock::assert_shared_test_env_lock_held();
+    let mut row = super::InflightTurnState::new(
+        ProviderKind::Codex,
+        channel,
+        None,
+        8,
+        message,
+        message + 1,
+        "actual warm prompt".into(),
+        None,
+        Some(tmux.into()),
+        None,
+        None,
+        0,
+    );
+    row.turn_nonce = token.turn_nonce().map(str::to_owned);
+    let root = super::inflight_runtime_root().unwrap();
+    super::save_inflight_state_in_root(&root, &row).unwrap();
+    super::inflight_state_path(&root, &ProviderKind::Codex, channel)
 }

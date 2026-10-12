@@ -3,6 +3,7 @@
 Unknown primitive helpers, aliases/reexports, macros and external symbol references fail closed.
 """
 import hashlib
+import argparse
 import re
 import sys
 from collections import Counter
@@ -110,18 +111,32 @@ def check(root):
     names = "canonical_retired_production_writers boot_cohort_application_install_calls boot_barrier_application_wait_calls boot_publication_application_calls typed_completion_live_reaper_connections boot_health_endpoint_connections"
     return True, "B1_DORMANT=PASS\n" + "\n".join(name + "=0" for name in names.split()) + "\nactivation_ready=false"
 
-def sync_skips(root):
+def sync_skips(root, promoted_paths=()):
     pin = classifier._SKIP_PIN
     files = pin._lexical_rust_files(root, Path("src"))
     basename = {p for p in files if classifier.is_test_file(p.name)}
     resolved = pin._INVENTORY.test_only_module_files(production_files=[p for p in files if p not in basename], all_files=files)
     path = root / "scripts/test_only_module_skip_pin.py"
     source = path.read_text()
+    actual = {p.relative_to(root).as_posix() for p in basename | resolved}
+    existing = {p.relative_to(root).as_posix() for p in files}
+    promoted = set(promoted_paths)
+    for rel in sorted(promoted):
+        if rel not in existing:
+            raise RuntimeError("promotion path missing: " + rel)
+        if rel in actual:
+            raise RuntimeError("promotion remains test-only: " + rel)
+        if rel not in pin.PINNED_TEST_ONLY_MODULE_FILES:
+            raise RuntimeError("promotion is not pinned: " + rel)
+    if pin.PINNED_TEST_ONLY_MODULE_FILES - actual - promoted:
+        raise RuntimeError("refusing pin removal")
+    for rel in sorted(promoted):
+        pattern = r'(?m)^[ \t]*"' + re.escape(rel) + r'",\n'
+        source, count = re.subn(pattern, '', source)
+        if count != 1:
+            raise RuntimeError("promotion pin is ambiguous: " + rel)
     for name, paths in (("PINNED_BASENAME_TEST_FILES", basename), ("PINNED_RESOLVER_TEST_ONLY_FILES", resolved)):
         measured = {p.relative_to(root).as_posix() for p in paths}
-        actual = {p.relative_to(root).as_posix() for p in basename | resolved}
-        if pin.PINNED_TEST_ONLY_MODULE_FILES - actual:
-            raise RuntimeError("refusing pin removal")
         end = source.index("\n    }\n)", source.index(name + " ="))
         additions = "".join('\n        "' + p + '",' for p in sorted(measured - pin.PINNED_TEST_ONLY_MODULE_FILES))
         source = source[:end] + additions + source[end:]
@@ -129,8 +144,12 @@ def sync_skips(root):
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--sync-skips"]:
-        sync_skips(Path.cwd())
+    if sys.argv[1:2] == ["--sync-skips"]:
+        parser = argparse.ArgumentParser(description="Synchronize lexical test-only pins")
+        parser.add_argument('--promote', action='append', default=[], metavar='PATH',
+                            help='explicitly remove this existing production module from the skip pin')
+        args = parser.parse_args(sys.argv[2:])
+        sync_skips(Path.cwd(), args.promote)
         sys.exit(0)
     ok, report = check(Path.cwd())
     print(report)

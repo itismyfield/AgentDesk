@@ -1153,7 +1153,9 @@ pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result
         prompt_readiness_snapshot,
         crate::services::tui_prompt_dedupe::record_discord_originated_prompt,
         crate::services::tui_prompt_dedupe::remove_discord_originated_prompt,
-        |session_name, prompt| submit_codex_followup_prompt_under_lock(session_name, prompt, None),
+        |session_name, prompt| {
+            submit_codex_followup_prompt_under_lock(session_name, prompt, None, None)
+        },
     )
 }
 
@@ -1164,20 +1166,13 @@ pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result
 /// when the first sample still contains a live draft (or cannot be captured).
 /// This makes relaunch/replay legal only with positive evidence that the prompt
 /// remained in the editor.
-pub(crate) fn submit_codex_followup_prompt(
-    session_name: &str,
-    prompt: &str,
-    cancel_token: Option<&CancelToken>,
-) -> CodexFollowupPromptSubmitOutcome {
-    with_composer_mutation_lock(session_name, || {
-        submit_codex_followup_prompt_under_lock(session_name, prompt, cancel_token)
-    })
-}
+pub(crate) use super::host_input::submit_codex_followup_prompt;
 
-fn submit_codex_followup_prompt_under_lock(
+pub(super) fn submit_codex_followup_prompt_under_lock(
     session_name: &str,
     prompt: &str,
     cancel_token: Option<&CancelToken>,
+    effect: Option<&super::host_input::VerifiedEffect<'_>>,
 ) -> CodexFollowupPromptSubmitOutcome {
     let actions = match plan_prompt_submit(prompt) {
         Ok(actions) => actions,
@@ -1203,12 +1198,21 @@ fn submit_codex_followup_prompt_under_lock(
             error: "Codex TUI warm follow-up final pane snapshot rejected submit".to_string(),
         };
     }
-    let submit = host_input::run_prompt_submission_legacy(
-        session_name,
-        &actions,
-        before.as_deref(),
-        cancel_token,
-    );
+    let submit = match effect {
+        Some(effect) => host_input::run_prompt_submission_guarded(
+            session_name,
+            &actions,
+            before.as_deref(),
+            cancel_token,
+            Some(effect),
+        ),
+        None => host_input::run_prompt_submission_legacy(
+            session_name,
+            &actions,
+            before.as_deref(),
+            cancel_token,
+        ),
+    };
     if !submit.composer_mutated
         && !submit.enter_attempted
         && matches!(
@@ -1241,7 +1245,9 @@ fn submit_codex_followup_prompt_under_lock(
         .err()
         .is_some_and(|error| is_prompt_ready_cancelled_error(error))
     {
-        clear_cancelled_partial_prompt_draft(session_name, prompt, &submit);
+        if effect.is_none() {
+            clear_cancelled_partial_prompt_draft(session_name, prompt, &submit);
+        }
         return CodexFollowupPromptSubmitOutcome::Cancelled;
     }
     if let Err(error) = action_result.as_ref()
@@ -3356,4 +3362,8 @@ finalising response";
             elapsed
         );
     }
+}
+
+pub(super) fn with_submission_lock<T>(session: &str, effect: impl FnOnce() -> T) -> T {
+    with_composer_mutation_lock(session, effect)
 }

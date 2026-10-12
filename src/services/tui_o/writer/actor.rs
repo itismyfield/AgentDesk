@@ -148,7 +148,6 @@ where
     B: BindingEvents,
 {
     let run = || {
-        #[cfg(test)]
         let commands = codex_submission::take_spawn_receiver();
         let projections = (unsettled, owing);
         tokio::spawn(run_publishing(
@@ -158,7 +157,6 @@ where
             (stop, resumed),
             projections,
             (None, readers),
-            #[cfg(test)]
             commands,
         ))
     };
@@ -227,7 +225,6 @@ where
         (stop, resumed),
         projections,
         (None, None),
-        #[cfg(test)]
         None,
     )
     .await
@@ -241,7 +238,7 @@ async fn run_publishing<P, L, A, B>(
     (mut stop, resumed): (watch::Receiver<bool>, watch::Sender<bool>),
     (unsettled, owing): (Unsettled, Owing),
     (utc, readers): (Option<chrono::DateTime<chrono::Utc>>, Option<ReaderConfig>),
-    #[cfg(test)] mut commands: Option<codex_submission::Receiver>,
+    mut commands: Option<codex_submission::Receiver>,
 ) -> Option<StopCause>
 where
     P: DiscordPort,
@@ -256,7 +253,12 @@ where
         sources = sources.with_readers(readers);
     }
     let owed = VecDeque::new();
-    let ready = admission::owed_delivery_ready(writer.channel());
+    let ready = admission::owed_delivery_ready(writer.channel())
+        || (provider == ShadowProvider::Codex
+            && writer.channel() == crate::services::codex_tui::canary::CANARY_CHANNEL
+            && crate::services::tui_prompt_dedupe::codex_verified_requires_proof(
+                crate::services::codex_tui::canary::CANARY_TMUX,
+            ));
     let verified = ready.then(|| super::owed::OwedLog::new(writer.channel(), provider));
     let mut actor = Actor {
         writer,
@@ -312,7 +314,6 @@ where
                 owing.published.send_replace(actor.undelivered(asked));
             }
         }
-        #[cfg(test)]
         if let Some(receiver) = &mut commands {
             tokio::select! {
                 request = receiver.next() => {
@@ -356,13 +357,11 @@ where
         (stop, watch::channel(false).0),
         (watch::channel(None).0, Owing::default()),
         (Some(utc), None),
-        #[cfg(test)]
         None,
     )
     .await
 }
 
-#[cfg(test)]
 pub(crate) mod codex_submission {
     use super::*;
     use crate::services::tui_o::store::StoreError;
@@ -388,6 +387,7 @@ pub(crate) mod codex_submission {
     }
 
     pub(crate) enum Operation {
+        #[cfg(test)]
         Prepare(SubmitFloor),
         Capture(Box<(PreparedLaunch, ExecutionProofRef)>),
         Close(Box<CodexEpisodeSpan>),
@@ -450,6 +450,7 @@ pub(crate) mod codex_submission {
             )
         }
 
+        #[cfg(test)]
         pub(crate) fn same_run(&self, other: &Self) -> bool {
             Arc::ptr_eq(&self.run, &other.run)
         }
@@ -481,6 +482,10 @@ pub(crate) mod codex_submission {
             Ok(closed)
         }
 
+        pub(crate) fn accepts_prepared(&self, prepared: &Prepared) -> bool {
+            Arc::ptr_eq(&self.run, &prepared.run)
+        }
+
         pub(crate) fn take_prepared(&self, reply: Reply) -> Result<Prepared, &'static str> {
             if self.generation != reply.generation || !Arc::ptr_eq(&self.run, &reply.run) {
                 return Err("stale_actor_reply");
@@ -508,6 +513,7 @@ pub(crate) mod codex_submission {
                 Err(StoreError::Rejected("foreign actor command".into()))
             } else {
                 match request.operation {
+                    #[cfg(test)]
                     Operation::Prepare(floor) => {
                         if let SubmitFloor::NativeFloor(floor) = &floor {
                             prepared = Some((**floor).clone());
@@ -573,7 +579,31 @@ pub(crate) mod codex_submission {
     }
 
     impl crate::services::tui_o::writer::host::Readiness {
+        pub(crate) fn prepared_reply(
+            &self,
+            channel: u64,
+            reply: Reply,
+        ) -> Result<Prepared, &'static str> {
+            self.with_submission(channel, |port| port.take_prepared(reply))
+        }
+
+        /// Rechecks this run under Live through one synchronous source-guarded effect.
+        pub(crate) fn with_current_prepared<T>(
+            &self,
+            channel: u64,
+            prepared: &Prepared,
+            effect: impl FnOnce() -> T,
+        ) -> Result<T, &'static str> {
+            self.with_submission(channel, |port| {
+                if !port.accepts_prepared(prepared) {
+                    return Err("stale_actor_reply");
+                }
+                Ok(effect())
+            })
+        }
+
         /// Consumers must be bounded and synchronous, without re-entering Readiness.
+        #[cfg(test)]
         pub(crate) fn with_prepared_reply<T>(
             &self,
             channel: u64,
