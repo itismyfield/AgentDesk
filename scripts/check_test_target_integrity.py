@@ -188,8 +188,9 @@ return 1
 ;;
 esac
 readonly -a PG_INCLUDE_ARGS""".splitlines())
-# A word ending one command and starting another; redirections such as `2>&1` are not.
-SHELL_CONTROL = re.compile(r"[;|]|&&|(?<![<>])&(?!>)")
+# A control operator left visible in lexed syntax; the lexer masks quoted, escaped,
+# substituted and redirection text, so `2>&1` or a quoted `;` never matches.
+SHELL_CONTROL = re.compile(r"[;&|()]")
 # Violation kind prefix for a generated array expanded without a proven source.
 KNOWN_ARRAY_KINDS = {"NON_PG_SKIP_ARGS": "non-pg", "PG_INCLUDE_ARGS": "pg-include"}
 LIB_INVENTORY_MANIFEST_HEADER = (
@@ -904,59 +905,45 @@ def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
     return modules
 
 
+def _lex():
+    """The shell lexer the PG lane gate also reads shell with."""
+    return _membership().shell_lexer()
+
+
 def _shell_comment_start(snippet: str) -> int:
     """Where Bash starts a comment on one line: an unquoted `#` that opens a word, so
-    one inside a word (`x#tag`) stays literal; the line's length when there is none."""
-    quote, word_start, index = "", True, 0
-    while index < len(snippet):
-        char = snippet[index]
-        if quote:
-            if char == quote:
-                quote = ""
-            elif quote == '"' and char == "\\":
-                index += 1
-        elif char == "#" and word_start:
-            return index
-        elif char in "'\"":
-            quote = char
-        elif char == "\\":
-            index += 1
-        word_start = not quote and char in " \t\r\n;&|()<>"
-        index += 1
-    return len(snippet)
+    one inside a word (`x#tag`, `$(true)#tag`) stays literal; else the line's length."""
+    return _lex().comment_start(snippet)
 
 
 def _syntax_words(snippet: str) -> list[str]:
-    """``shlex.split(snippet)``'s words with every quoted or escaped character
-    blanked to `_`, so only the shell syntax around them stays visible."""
-    words: list[str] = []
-    word: list[str] | None = None
-    quote = ""
-    chars = iter(snippet)
-    for char in chars:
-        if quote:
-            if char == quote:
-                quote = ""
-                continue
-            if quote == '"' and char == "\\":
-                next(chars, "")
-            word.append("_")
-        elif char in " \t\r\n":
-            if word is not None:
-                words.append("".join(word))
-            word = None
-        else:
-            word = [] if word is None else word
-            if char in "'\"":
-                quote = char
-            elif char == "\\":
-                next(chars, "")
-                word.append("_")
-            else:
-                word.append(char)
-    if word is not None:
-        words.append("".join(word))
-    return words
+    """``snippet``'s shell words with quoted, escaped, substituted and redirection
+    text blanked to `_`, so only real control operators stay visible."""
+    return _lex().scan_shell(snippet).syntax_masked.split()
+
+
+def _chained_commands(scan) -> list:
+    """A lexed line's outer simple commands, less a canonical source heading its `&&` chain."""
+    commands = _lex().simple_commands(scan)
+    if [token.value for token in commands[:1] for token in token] == [
+            "source", NON_PG_FILTER_REL.as_posix()] \
+            and [token.raw for token in scan.tokens if token.kind == "OP"][:1] == ["&&"]:
+        return commands[1:]
+    return commands
+
+
+def _unproven_cargo(scan) -> bool:
+    """Whether a lexed line may run a cargo test outside the one command it extracts:
+    in a second command, a substitution, or past a boundary the lexer cannot prove."""
+    commands = _chained_commands(scan)
+    words = [token.value or "" for token in scan.tokens if token.kind == "WORD"]
+    pairs = any(words[index:index + 2] == ["cargo", "test"] for index in range(len(words)))
+    nested = [token.value for token in scan.tokens if token.depth]
+    return (bool(scan.issues) and pairs) \
+        or any(nested[index:index + 2] == ["cargo", "test"] for index in range(len(nested))) \
+        or (len(commands) > 1 and any(
+            _direct_cargo_test(values, values) is not None
+            for values in ([token.value or "" for token in command] for command in commands)))
 
 
 def _direct_cargo_test(words: list[str], syntax: list[str]) -> list[str] | None:
@@ -1036,16 +1023,17 @@ def _parse_command_line(line: str, *, yaml_run_scalar: bool = False,
     snippet = _shell_text(line, yaml_run_scalar)
     if not snippet or snippet.startswith("#"):
         return None
+    scan = _lex().scan_shell(snippet)
     code = snippet[:_shell_comment_start(snippet)]
     try:
         words = shlex.split(code)
     except ValueError:
-        return None
+        return [] if _unproven_cargo(scan) else None
     syntax = _syntax_words(code)
     aligned = len(syntax) == len(words)
     # Quoted text never ends a command; unaligned words leave the syntax unproven.
     cargo = _direct_cargo_test(words, syntax if aligned else words)
-    if cargo and not aligned:
+    if (cargo and not aligned) or _unproven_cargo(scan):
         cargo = []
     if cargo is None and diagnostics is not None and "cargo test" in snippet:
         first = next((word for word in words
@@ -1391,11 +1379,8 @@ class PackageTestIds:
                           flags=re.MULTILINE)
             bodies = re.findall(r"^NON_PG_SKIP_ARGS=\((.*?)^\)$", rest,
                                 re.MULTILINE | re.DOTALL)
-            try:
-                words = shlex.split(bodies[0], comments=True) \
-                    if len(bodies) == 1 and rest.count("NON_PG_SKIP_ARGS") == 1 else []
-            except ValueError:
-                words = []
+            words = (_lex().shell_words(bodies[0]) or ()) \
+                if len(bodies) == 1 and rest.count("NON_PG_SKIP_ARGS") == 1 else ()
             values = tuple(words[1::2])
             if words and len(words) % 2 == 0 and set(words[::2]) == {"--skip"} \
                     and all(value and not SHELL_EXPANSION.search(value)
@@ -1693,14 +1678,20 @@ def run_list_check(words: list[str], repo_root: Path) -> str | None:
 def _command_lines(text: str) -> list[list[str]]:
     commands: list[list[str]] = []
     for line in text.splitlines():
+        snippet = line.strip()
+        scan = _lex().scan_shell(snippet)
         try:
-            words = shlex.split(line.strip(), comments=True)
+            words = shlex.split(snippet[:_shell_comment_start(snippet)])
         except ValueError as error:
-            raise RuntimeError(f"could not parse command: {line.strip()}") from error
+            raise RuntimeError(f"could not parse command: {snippet}") from error
         if words[:1] == ["run:"]:
             words = words[1:]
         if any(words[index:index + 2] == ["cargo", "test"]
                for index in range(len(words) - 1)):
+            # A joined, nested or unproven part would be observed as another command.
+            if scan.issues or len(_chained_commands(scan)) > 1 \
+                    or any(token.depth or token.kind == "REDIR" for token in scan.tokens):
+                raise RuntimeError(f"could not parse command: {snippet}")
             commands.append(words)
     return commands
 
@@ -1733,7 +1724,7 @@ def curated_commands(repo_root: Path, workflow: Path,
     commands = _command_lines(text)
     for line in text.splitlines():
         try:
-            words = shlex.split(line.strip(), comments=True)
+            words = shlex.split(line.strip()[:_shell_comment_start(line.strip())])
         except ValueError:
             continue
         if words[:1] == ["run:"]:
