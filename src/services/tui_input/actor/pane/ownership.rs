@@ -11,13 +11,15 @@ pub(super) fn spawn(
     handle: &tokio::runtime::Handle,
     command: &mut Command,
     budget: Duration,
-    enter: bool,
+    _enter: bool,
 ) -> Result<Pending, BoundedTmuxError> {
-    let mutant = if enter {
+    #[cfg(test)]
+    let mutant = if _enter {
         "pre_enter_epoch"
     } else {
         "pre_paste_epoch"
     };
+    #[cfg(test)]
     if super::super::super::transition::mutant(mutant) {
         return spawn_with_budget(handle, command, budget);
     }

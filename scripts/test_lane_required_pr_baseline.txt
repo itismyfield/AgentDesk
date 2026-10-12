@@ -1,0 +1,2 @@
+# Logical Rust cfg(test) modules no required PR job fully selects. Keep sorted; a
+# candidate may only shrink against its immutable comparison snapshot.
