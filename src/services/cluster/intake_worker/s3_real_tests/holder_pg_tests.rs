@@ -371,12 +371,10 @@ async fn th6_both_restart_only_one_owner_pg() {
             );
             eprintln!("[s3] {} window: {}", node.name(), seen.unwrap());
         }
-        let events = post_lifecycle(scene.dir());
-        assert_eq!(
-            open_posts(&events),
-            0,
-            "a POST open before the kill: {events:#?}"
-        );
+        let events = lifecycle(scene.dir()).unwrap();
+        if let Err(error) = post_spans(&events) {
+            panic!("a POST open or broken before the kill: {error}\n{events:#?}");
+        }
         assert_eq!(
             home_row(&scene).await,
             held,
@@ -390,7 +388,7 @@ async fn th6_both_restart_only_one_owner_pg() {
             gw.finish(WITHIN).await;
         }
     }
-    let events = post_lifecycle(scene.dir());
+    let events = lifecycle(scene.dir()).unwrap();
     for event in &events {
         eprintln!("[s3] lifecycle {}", serde_json::to_string(event).unwrap());
     }
@@ -406,14 +404,14 @@ async fn th6_both_restart_only_one_owner_pg() {
     for span in &spans {
         assert_eq!(
             span.observed,
-            Some(epoch),
+            Some((Some(epoch), EpochSource::Gate)),
             "{span:?} posted outside the held epoch"
         );
     }
-    let started = events.iter().filter(|e| e.step == PostStep::Started);
+    let started = events.iter().filter(|e| e.step == LifeStep::Started);
     for event in started {
-        let fixed = (event.epoch, event.epoch_source.as_deref());
-        assert_eq!(fixed, (Some(epoch), Some("scene")));
+        let fixed = (event.epoch, event.epoch_source);
+        assert_eq!(fixed, (Some(epoch), Some(EpochSource::Scene)));
     }
     scene.drop_db().await;
 }
@@ -534,30 +532,30 @@ pub(super) async fn both_gateway_node(env: &Env) {
     finish_generation(env, node).await;
 }
 
-/// Samples `holds` every 100 ms for [`TWO_ROUNDS`]; the first sample it failed sticks. The count
-/// and largest gap go to the parent.
+/// Samples `holds` every 100 ms through [`TWO_ROUNDS`], the last sample at or after its end; the
+/// first failed sample sticks, and so does too thin a watch. The samples go to the parent.
 async fn watch_window(env: &Env, holds: impl Fn() -> bool) -> Option<String> {
     let start = tokio::time::Instant::now();
-    let (mut samples, mut gap, mut last, mut failed) = (0, Duration::ZERO, start, None);
-    while start.elapsed() < TWO_ROUNDS {
-        samples += 1;
+    let (mut offsets, mut failed) = (Vec::new(), None);
+    loop {
+        let at = start.elapsed();
+        offsets.push(at);
         if !holds() && failed.is_none() {
-            failed = Some(format!("sample {samples} at {:?}", start.elapsed()));
+            failed = Some(format!("sample {} at {at:?}", offsets.len()));
+        }
+        if at >= TWO_ROUNDS {
+            break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-        gap = gap.max(last.elapsed());
-        last = tokio::time::Instant::now();
     }
-    let seen = format!(
-        "{samples} samples over {:?}, largest gap {gap:?}",
-        start.elapsed()
-    );
+    let watched = observed_throughout(&offsets, TWO_ROUNDS);
+    let seen = format!("{watched:?}: {} samples", offsets.len());
     put(
         &env.dir,
         &format!("window.g{}.{}", generation_of(env), env.role),
         seen,
     );
-    failed
+    failed.or(watched.err())
 }
 
 /// Generation 1 waits to be killed; generation 2 stops and ends.

@@ -23,6 +23,8 @@ use crate::services::tui_o::store::{OStore, STORE_DIR_NAME, StoreConfig};
 const WITHIN: Duration = Duration::from_secs(60);
 /// Two periods of each node's watch and lease, and a margin.
 const TWO_ROUNDS: Duration = Duration::from_secs(12);
+/// How long one good watch read may take to clear the probe; a bound, not an observation window.
+const WATCH_READ_WITHIN: Duration = Duration::from_secs(30);
 
 async fn force(scene: &Scene) -> Result<String, String> {
     let mut config = crate::config::Config::default();
@@ -344,8 +346,13 @@ impl Observed {
             let same = node.gate().is_some_and(|now| Arc::ptr_eq(&now, &gate));
             same && node.drain_blocker().is_none()
         };
-        self.until(node, "a watch read clears the probe", TWO_ROUNDS, read)
-            .await;
+        self.until(
+            node,
+            "a watch read clears the probe",
+            WATCH_READ_WITHIN,
+            read,
+        )
+        .await;
     }
 }
 

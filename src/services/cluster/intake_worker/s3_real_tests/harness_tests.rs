@@ -257,10 +257,24 @@ const CHILD: &str = concat!(module_path!(), "::s3_node_child");
 impl Node {
     pub(super) fn spawn(scene: &Scene, scenario: &str, role: &'static str) -> Self {
         let n = scene.spawned.fetch_add(1, Ordering::SeqCst);
+        Self::spawn_at(scene.dir(), scene.url(), n, scenario, role)
+    }
+
+    /// As [`Node::spawn`] in a bare directory: the scenario must open no database.
+    pub(super) fn spawn_without_db(
+        dir: &Path,
+        n: usize,
+        scenario: &str,
+        role: &'static str,
+    ) -> Self {
+        Self::spawn_at(dir, "", n, scenario, role)
+    }
+
+    fn spawn_at(dir: &Path, db: &str, n: usize, scenario: &str, role: &'static str) -> Self {
         let spawn = format!("{role}-{n}");
-        let root = scene.dir().join(format!("root-{role}"));
+        let root = dir.join(format!("root-{role}"));
         std::fs::create_dir_all(&root).unwrap();
-        let log = scene.dir().join(format!("{spawn}.log"));
+        let log = dir.join(format!("{spawn}.log"));
         let out = std::fs::File::create(&log).unwrap();
         // The entry sits beside this module; libtest names drop the crate segment.
         let parent = CHILD.rsplit_once("::harness::").unwrap().0;
@@ -276,8 +290,8 @@ impl Node {
             ])
             .env(ENV_SCENARIO, scenario)
             .env(ENV_ROLE, role)
-            .env(ENV_DIR, scene.dir())
-            .env(ENV_DB, scene.url())
+            .env(ENV_DIR, dir)
+            .env(ENV_DB, db)
             .env(ENV_SPAWN, &spawn)
             .env("AGENTDESK_ROOT_DIR", &root)
             .env(test_override::CHILD_ENV, "1")
@@ -288,7 +302,7 @@ impl Node {
         Self {
             role,
             spawn,
-            dir: scene.dir().to_path_buf(),
+            dir: dir.to_path_buf(),
             child: Some(child),
             log,
         }
@@ -407,59 +421,100 @@ pub(super) enum Seen {
     Dropped(String),
 }
 
-/// The scene file every recording node appends its POSTs' lifecycles to.
-pub(super) const POST_LIFECYCLE: &str = "post-lifecycle.jsonl";
+/// The scene file every recording node appends its POST and history steps to, one JSON per line.
+pub(super) const LIFECYCLE: &str = "lifecycle.jsonl";
 
-/// One line of [`POST_LIFECYCLE`]: a step of request `request` made by process `spawn` of `node`,
-/// with an epoch and where that epoch came from.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(super) struct PostEvent {
-    pub(super) node: String,
-    pub(super) spawn: String,
-    pub(super) request: String,
-    pub(super) step: PostStep,
-    pub(super) content: String,
-    pub(super) epoch: Option<i64>,
-    pub(super) epoch_source: Option<String>,
+/// Where a step's epoch came from: the scene's fixed epoch, or the node's gate read just then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum EpochSource {
+    Scene,
+    Gate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum PostStep {
-    /// Written in the first poll before its first await, with the scene's fixed epoch.
+pub(super) enum LifeStep {
+    /// A POST in its first poll before its first await, with the scene's fixed epoch.
     Started,
-    /// The home epoch read just after the first poll, outside the admission lock.
+    /// The home epoch the POST read just after its first poll, outside the admission lock.
     Observed,
     Accepted,
     Ended,
     Dropped,
+    /// A history read as asked, and as answered.
+    Asked,
+    Answered,
 }
 
-/// Appends this process's POST steps to the scene file; request ids are `<spawn>/<n>`.
-struct PostRecorder {
+/// One line of [`LIFECYCLE`]: step `step` of POST or history read `id`, made by process `spawn`
+/// of `node` on `channel`; `line` is the step's line in the file, kept through any filtering.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct LifeEvent {
+    #[serde(skip)]
+    pub(super) line: usize,
+    pub(super) node: String,
+    pub(super) spawn: String,
+    pub(super) channel: u64,
+    pub(super) id: String,
+    pub(super) step: LifeStep,
+    /// The POST payload, or the anchor a history read asked after.
+    pub(super) detail: String,
+    pub(super) epoch: Option<i64>,
+    pub(super) epoch_source: Option<EpochSource>,
+    /// What a history read answered: `messages <n>` or `error: <reason>`.
+    pub(super) answer: Option<String>,
+}
+
+/// Appends this process's steps to the lifecycle file; ids are `post/<spawn>/<n>` and
+/// `history/<spawn>/<n>`.
+struct Recorder {
     file: PathBuf,
     node: String,
     spawn: String,
     scene_epoch: Option<i64>,
-    next: AtomicU64,
+    posts: AtomicU64,
+    reads: AtomicU64,
 }
 
-impl PostRecorder {
-    fn write(&self, request: &str, step: PostStep, content: &str, epoch: (Option<i64>, &str)) {
-        use std::io::Write;
-        let line = PostEvent {
+impl Recorder {
+    /// Creates `file` if needed, so a reader that finds none fails instead of reading no steps.
+    fn new(file: PathBuf, node: &str, spawn: &str, scene_epoch: Option<i64>) -> Self {
+        let options = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file);
+        drop(options.unwrap());
+        Self {
+            file,
+            node: node.into(),
+            spawn: spawn.into(),
+            scene_epoch,
+            posts: AtomicU64::new(0),
+            reads: AtomicU64::new(0),
+        }
+    }
+
+    fn event(&self, channel: u64, id: &str, step: LifeStep, detail: &str) -> LifeEvent {
+        LifeEvent {
+            line: 0,
             node: self.node.clone(),
             spawn: self.spawn.clone(),
-            request: request.into(),
+            channel,
+            id: id.into(),
             step,
-            content: content.into(),
-            epoch: epoch.0,
-            epoch_source: epoch.0.map(|_| epoch.1.to_string()),
-        };
-        let mut bytes = serde_json::to_vec(&line).unwrap();
+            detail: detail.into(),
+            epoch: None,
+            epoch_source: None,
+            answer: None,
+        }
+    }
+
+    fn write(&self, event: &LifeEvent) {
+        use std::io::Write;
+        let mut bytes = serde_json::to_vec(event).unwrap();
         bytes.push(b'\n');
         let mut file = std::fs::OpenOptions::new()
-            .create(true)
             .append(true)
             .open(&self.file)
             .unwrap();
@@ -468,113 +523,215 @@ impl PostRecorder {
         file.write_all(&bytes).unwrap();
     }
 
-    fn start(self: &Arc<Self>, content: &str) -> PostRecord {
-        let n = self.next.fetch_add(1, Ordering::SeqCst) + 1;
-        let request = format!("{}/{n}", self.spawn);
-        let epoch = (self.scene_epoch, "scene");
-        self.write(&request, PostStep::Started, content, epoch);
+    fn start(self: &Arc<Self>, channel: u64, content: &str) -> PostRecord {
+        let n = self.posts.fetch_add(1, Ordering::SeqCst) + 1;
+        let id = format!("post/{}/{n}", self.spawn);
+        let started = LifeEvent {
+            epoch: self.scene_epoch,
+            epoch_source: Some(EpochSource::Scene),
+            ..self.event(channel, &id, LifeStep::Started, content)
+        };
+        self.write(&started);
         PostRecord {
             recorder: Arc::clone(self),
-            request,
+            channel,
+            id,
             content: content.into(),
             accepted: false,
         }
+    }
+
+    /// Records one history read as asked, then as answered with `answer`.
+    fn read(&self, channel: u64, after: u64, answer: impl FnOnce() -> Result<usize, String>) {
+        let n = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+        let (id, after) = (format!("history/{}/{n}", self.spawn), after.to_string());
+        self.write(&self.event(channel, &id, LifeStep::Asked, &after));
+        let answer = match answer() {
+            Ok(messages) => format!("messages {messages}"),
+            Err(error) => format!("error: {error}"),
+        };
+        let answered = LifeEvent {
+            answer: Some(answer),
+            ..self.event(channel, &id, LifeStep::Answered, &after)
+        };
+        self.write(&answered);
     }
 }
 
 /// A recorded POST from its Started on; going, it writes Ended once accepted and Dropped before.
 struct PostRecord {
-    recorder: Arc<PostRecorder>,
-    request: String,
+    recorder: Arc<Recorder>,
+    channel: u64,
+    id: String,
     content: String,
     accepted: bool,
 }
 
 impl PostRecord {
-    fn note(&self, step: PostStep, epoch: (Option<i64>, &str)) {
-        let recorder = &self.recorder;
-        recorder.write(&self.request, step, &self.content, epoch);
+    fn note(&self, step: LifeStep) -> LifeEvent {
+        (self.recorder).event(self.channel, &self.id, step, &self.content)
+    }
+
+    /// The gate's epoch as read, kept with its source even when the gate held none.
+    fn observed(&self, epoch: Option<i64>) {
+        let observed = LifeEvent {
+            epoch,
+            epoch_source: Some(EpochSource::Gate),
+            ..self.note(LifeStep::Observed)
+        };
+        self.recorder.write(&observed);
+    }
+
+    fn accepted(&mut self) {
+        self.recorder.write(&self.note(LifeStep::Accepted));
+        self.accepted = true;
     }
 }
 
 impl Drop for PostRecord {
     fn drop(&mut self) {
         let end = if self.accepted {
-            PostStep::Ended
+            LifeStep::Ended
         } else {
-            PostStep::Dropped
+            LifeStep::Dropped
         };
-        self.note(end, (None, ""));
+        self.recorder.write(&self.note(end));
     }
 }
 
-/// Every line of the scene's [`POST_LIFECYCLE`] in file order; no file is no POST.
-pub(super) fn post_lifecycle(dir: &Path) -> Vec<PostEvent> {
-    let text = std::fs::read_to_string(dir.join(POST_LIFECYCLE)).unwrap_or_default();
-    let lines = text.lines().map(|line| serde_json::from_str(line).unwrap());
-    lines.collect()
+/// Every line of `dir`'s [`LIFECYCLE`], read under the writers' lock; a missing file, a torn last
+/// line or a line that does not parse is an error, never fewer steps.
+pub(super) fn lifecycle(dir: &Path) -> Result<Vec<LifeEvent>, String> {
+    use std::io::Read;
+    let path = dir.join(LIFECYCLE);
+    let failed = |error: std::io::Error| format!("{}: {error}", path.display());
+    let mut file = std::fs::File::open(&path).map_err(failed)?;
+    file.lock_shared().map_err(failed)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).map_err(failed)?;
+    parse_lifecycle(&text)
 }
 
-/// Requests started and not yet Ended or Dropped.
-pub(super) fn open_posts(events: &[PostEvent]) -> usize {
-    let started = events.iter().filter(|e| e.step == PostStep::Started);
-    let ended = events
-        .iter()
-        .filter(|e| matches!(e.step, PostStep::Ended | PostStep::Dropped));
-    started.count().saturating_sub(ended.count())
+fn parse_lifecycle(text: &str) -> Result<Vec<LifeEvent>, String> {
+    if !text.is_empty() && !text.ends_with('\n') {
+        return Err("the last line is torn".into());
+    }
+    let parse = |(line, json): (usize, &str)| {
+        let event: Result<LifeEvent, _> = serde_json::from_str(json);
+        let event = event.map_err(|error| format!("line {line}: {error}"))?;
+        Ok(LifeEvent { line, ..event })
+    };
+    text.lines().enumerate().map(parse).collect()
 }
 
-/// A request's span in the lifecycle file: the line of its Started and of its terminal step.
+/// Whether `step` may follow `last` for one id: a POST is `Started, Observed?` then `Accepted,
+/// Ended` or `Dropped`; a history read is `Asked, Answered`.
+fn may_follow(last: Option<LifeStep>, step: LifeStep) -> bool {
+    use LifeStep::{Accepted, Answered, Asked, Dropped, Ended, Observed, Started};
+    matches!(
+        (last, step),
+        (None, Started | Asked)
+            | (Some(Started), Observed | Dropped)
+            | (Some(Observed), Accepted | Dropped)
+            | (Some(Accepted), Ended)
+            | (Some(Asked), Answered)
+    )
+}
+
+fn ended(step: LifeStep) -> bool {
+    matches!(
+        step,
+        LifeStep::Ended | LifeStep::Dropped | LifeStep::Answered
+    )
+}
+
+/// A step carries the epoch and answer its kind does and no others: Started the scene's epoch,
+/// Observed the gate's (which may be none), Answered an answer.
+fn well_formed(event: &LifeEvent) -> bool {
+    let source = event.epoch_source;
+    match event.step {
+        LifeStep::Started => source == Some(EpochSource::Scene) && event.answer.is_none(),
+        LifeStep::Observed => source == Some(EpochSource::Gate) && event.answer.is_none(),
+        LifeStep::Answered => event.answer.is_some() && event.epoch.is_none() && source.is_none(),
+        _ => event.epoch.is_none() && source.is_none() && event.answer.is_none(),
+    }
+}
+
+/// Folds the steps per id in file order, failing on a malformed step, a step out of order or
+/// after the id ended, and a step whose process, channel or detail is not its id's.
+pub(super) fn tracks(events: &[LifeEvent]) -> Result<BTreeMap<String, Vec<LifeEvent>>, String> {
+    let mut tracks: BTreeMap<String, Vec<LifeEvent>> = BTreeMap::new();
+    for event in events {
+        let steps = tracks.entry(event.id.clone()).or_default();
+        let (line, id, step) = (event.line, &event.id, event.step);
+        if !well_formed(event) {
+            return Err(format!(
+                "line {line}: {id} {step:?} is malformed: {event:?}"
+            ));
+        }
+        let last = steps.last().map(|last| last.step);
+        if !may_follow(last, step) {
+            return Err(format!("line {line}: {id} {step:?} after {last:?}"));
+        }
+        let owner = |e: &LifeEvent| (e.node.clone(), e.spawn.clone(), e.channel, e.detail.clone());
+        if steps
+            .first()
+            .is_some_and(|first| owner(first) != owner(event))
+        {
+            return Err(format!("line {line}: {id} {step:?} from another request"));
+        }
+        steps.push(event.clone());
+    }
+    Ok(tracks)
+}
+
+/// The ids not yet ended, by the rules [`post_spans`] judges with; a broken record is an error.
+pub(super) fn open_ids(events: &[LifeEvent]) -> Result<Vec<String>, String> {
+    let tracks = tracks(events)?;
+    let open = tracks.into_iter().filter(|(_, steps)| {
+        let last = steps.last().expect("a track has a step");
+        !ended(last.step)
+    });
+    Ok(open.map(|(id, _)| id).collect())
+}
+
+/// A POST's span in the lifecycle file: the file lines of its Started and of its terminal step.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PostSpan {
     pub(super) node: String,
     pub(super) spawn: String,
+    pub(super) channel: u64,
+    pub(super) id: String,
     pub(super) content: String,
     pub(super) started: usize,
     pub(super) ended: usize,
     pub(super) accepted: bool,
-    pub(super) observed: Option<i64>,
+    pub(super) observed: Option<(Option<i64>, EpochSource)>,
 }
 
-/// Pairs each request's steps in file order, failing on a missing, repeated or misordered step,
-/// and on any two requests of different processes whose spans overlap.
-pub(super) fn post_spans(events: &[PostEvent]) -> Result<Vec<PostSpan>, String> {
-    use PostStep::{Accepted, Dropped, Ended, Observed, Started};
-    let mut requests: BTreeMap<&str, Vec<(usize, &PostEvent)>> = BTreeMap::new();
-    for (line, event) in events.iter().enumerate() {
-        requests
-            .entry(&event.request)
-            .or_default()
-            .push((line, event));
-    }
+/// Every POST's span, failing on any id not yet ended and on two processes' POSTs whose spans
+/// overlap; lines are the file's own.
+pub(super) fn post_spans(events: &[LifeEvent]) -> Result<Vec<PostSpan>, String> {
     let mut spans = Vec::new();
-    for (request, steps) in requests {
-        let order: Vec<PostStep> = steps.iter().map(|(_, event)| event.step).collect();
-        let whole = matches!(
-            order[..],
-            [Started, Observed, Accepted, Ended]
-                | [Started, Observed, Dropped]
-                | [Started, Dropped]
-        );
-        if !whole {
-            return Err(format!("{request}: steps {order:?}"));
+    for (id, steps) in tracks(events)? {
+        let (first, last) = (&steps[0], &steps[steps.len() - 1]);
+        if !ended(last.step) {
+            return Err(format!("{id} is still open after {:?}", last.step));
         }
-        let (first, last) = (steps[0], steps[steps.len() - 1]);
-        let same = |(_, event): &(usize, &PostEvent)| {
-            (&event.spawn, &event.content) == (&first.1.spawn, &first.1.content)
-        };
-        if !steps.iter().all(same) {
-            return Err(format!("{request}: steps from different requests"));
+        if first.step != LifeStep::Started {
+            continue;
         }
-        let observed = steps.iter().find(|(_, event)| event.step == Observed);
+        let observed = steps.iter().find(|e| e.step == LifeStep::Observed);
         spans.push(PostSpan {
-            node: first.1.node.clone(),
-            spawn: first.1.spawn.clone(),
-            content: first.1.content.clone(),
-            started: first.0,
-            ended: last.0,
-            accepted: order.contains(&Accepted),
-            observed: observed.and_then(|(_, event)| event.epoch),
+            node: first.node.clone(),
+            spawn: first.spawn.clone(),
+            channel: first.channel,
+            id,
+            content: first.detail.clone(),
+            started: first.line,
+            ended: last.line,
+            accepted: steps.iter().any(|e| e.step == LifeStep::Accepted),
+            observed: observed.map(|e| (e.epoch, e.epoch_source.expect("well formed"))),
         });
     }
     spans.sort_by_key(|span| span.started);
@@ -588,68 +745,272 @@ pub(super) fn post_spans(events: &[PostEvent]) -> Result<Vec<PostSpan>, String> 
     Ok(spans)
 }
 
+/// The file line of the first history read of `channel` asked after file line `line`.
+pub(super) fn first_read_after(events: &[LifeEvent], channel: u64, line: usize) -> Option<usize> {
+    let asked = events.iter().filter(|e| e.step == LifeStep::Asked);
+    let after = asked.filter(|e| e.channel == channel && e.line > line);
+    after.map(|e| e.line).next()
+}
+
+fn life(id: &str, step: LifeStep) -> LifeEvent {
+    let spawn = id.split('/').nth(1).unwrap().to_string();
+    let (epoch, epoch_source, answer) = match step {
+        LifeStep::Started => (Some(7), Some(EpochSource::Scene), None),
+        LifeStep::Observed => (Some(7), Some(EpochSource::Gate), None),
+        LifeStep::Answered => (None, None, Some("messages 0".into())),
+        _ => (None, None, None),
+    };
+    LifeEvent {
+        line: 0,
+        node: spawn.clone(),
+        spawn,
+        channel: C,
+        id: id.into(),
+        step,
+        detail: format!("{id} payload"),
+        epoch,
+        epoch_source,
+        answer,
+    }
+}
+
+/// `events` as their lines in a file, in order.
+fn numbered(events: impl IntoIterator<Item = LifeEvent>) -> Vec<LifeEvent> {
+    let lines = events.into_iter().enumerate();
+    lines
+        .map(|(line, event)| LifeEvent { line, ..event })
+        .collect()
+}
+
 #[test]
 fn post_spans_pass_apart_and_name_each_broken_record() {
-    use PostStep::{Accepted, Dropped, Ended, Observed, Started};
-    let event = |request: &str, step| {
-        let spawn = request.split('/').next().unwrap().to_string();
-        let (node, content) = (spawn.clone(), format!("{request} payload"));
-        let (epoch, epoch_source) = (None, None);
-        let request = request.to_string();
-        PostEvent {
-            node,
-            spawn,
-            request,
-            step,
-            content,
-            epoch,
-            epoch_source,
-        }
-    };
-    let posted = |request| [Started, Observed, Accepted, Ended].map(|step| event(request, step));
-    let apart: Vec<_> = posted("a/1").into_iter().chain(posted("b/1")).collect();
-    assert_eq!(post_spans(&apart).map(|spans| spans.len()), Ok(2));
-    let crossed = [
-        event("a/1", Started),
-        event("b/1", Started),
-        event("a/1", Dropped),
-        event("b/1", Dropped),
-    ];
+    use LifeStep::{Accepted, Answered, Asked, Dropped, Ended, Observed, Started};
+    let posted = |id| [Started, Observed, Accepted, Ended].map(|step| life(id, step));
+    let read = [Asked, Answered].map(|step| life("history/a/1", step));
+    let apart = numbered(
+        posted("post/a/1")
+            .into_iter()
+            .chain(read)
+            .chain(posted("post/b/1")),
+    );
+    let spans = post_spans(&apart).unwrap();
+    assert_eq!(
+        spans
+            .iter()
+            .map(|s| (s.started, s.ended))
+            .collect::<Vec<_>>(),
+        [(0, 3), (6, 9)]
+    );
+    assert_eq!(
+        first_read_after(&apart, C, 3),
+        Some(4),
+        "the file's own line, not the POSTs'"
+    );
+    let crossed = numbered([
+        life("post/a/1", Started),
+        life("post/b/1", Started),
+        life("post/a/1", Dropped),
+        life("post/b/1", Dropped),
+    ]);
     assert!(post_spans(&crossed).unwrap_err().contains("overlap"));
-    let same_process = [
-        event("a/1", Started),
-        event("a/2", Started),
-        event("a/1", Dropped),
-        event("a/2", Dropped),
-    ];
+    let channels = numbered([
+        life("post/a/1", Started),
+        LifeEvent {
+            channel: C + 1,
+            detail: "post/a/1 payload".into(),
+            ..life("post/a/2", Started)
+        },
+        life("post/a/1", Dropped),
+        LifeEvent {
+            channel: C + 1,
+            detail: "post/a/1 payload".into(),
+            ..life("post/a/2", Dropped)
+        },
+    ]);
+    let spans = post_spans(&channels).unwrap();
+    let apart: Vec<_> = spans
+        .iter()
+        .map(|s| (s.id.as_str(), s.channel, s.content.as_str()))
+        .collect();
+    let payload = "post/a/1 payload";
+    assert_eq!(
+        apart,
+        [("post/a/1", C, payload), ("post/a/2", C + 1, payload)],
+        "same payload"
+    );
+    let same_process = numbered([
+        life("post/a/1", Started),
+        life("post/a/2", Started),
+        life("post/a/1", Dropped),
+        life("post/a/2", Dropped),
+    ]);
     assert!(
         post_spans(&same_process).is_ok(),
         "overlap is judged across processes"
     );
-    let open = [event("a/1", Started), event("a/1", Observed)];
-    assert_eq!(open_posts(&open), 1);
-    let broken: [&[PostEvent]; 4] = [
-        &open,
-        &[
-            event("a/1", Started),
-            event("a/1", Dropped),
-            event("a/1", Dropped),
+    let open = numbered([life("post/a/1", Started), life("post/a/1", Observed)]);
+    assert_eq!(open_ids(&open), Ok(vec!["post/a/1".to_string()]));
+    assert!(post_spans(&open).unwrap_err().contains("still open"));
+    let other_channel = LifeEvent {
+        channel: C + 1,
+        ..life("post/a/1", Dropped)
+    };
+    let gate_scene = LifeEvent {
+        epoch_source: Some(EpochSource::Scene),
+        ..life("post/a/1", Observed)
+    };
+    let accepted_epoch = LifeEvent {
+        epoch: Some(7),
+        ..life("post/a/1", Accepted)
+    };
+    let broken: [Vec<LifeEvent>; 7] = [
+        vec![
+            life("post/a/1", Started),
+            life("post/b/1", Started),
+            life("post/b/1", Dropped),
+            life("post/b/1", Dropped),
         ],
-        &[
-            event("a/1", Accepted),
-            event("a/1", Started),
-            event("a/1", Ended),
+        vec![life("post/a/1", Dropped)],
+        vec![life("post/a/1", Accepted), life("post/a/1", Started)],
+        vec![
+            life("post/a/1", Started),
+            life("post/a/1", Observed),
+            life("post/a/1", Ended),
         ],
-        &[
-            event("a/1", Started),
-            event("a/1", Observed),
-            event("a/1", Ended),
+        vec![life("post/a/1", Started), other_channel],
+        vec![life("post/a/1", Started), gate_scene],
+        vec![
+            life("post/a/1", Started),
+            life("post/a/1", Observed),
+            accepted_epoch,
         ],
     ];
     for events in broken {
-        let error = post_spans(events).unwrap_err();
-        assert!(error.contains("a/1: steps"), "{error}");
+        let events = numbered(events);
+        assert!(open_ids(&events).is_err(), "{events:#?}");
+        assert!(post_spans(&events).is_err(), "{events:#?}");
     }
+}
+
+#[test]
+fn lifecycle_reads_whole_lines_or_fails() {
+    let lost_gate = LifeEvent {
+        epoch: None,
+        ..life("post/a/1", LifeStep::Observed)
+    };
+    let mut text = String::new();
+    for event in [life("post/a/1", LifeStep::Started), lost_gate.clone()] {
+        text += &format!("{}\n", serde_json::to_string(&event).unwrap());
+    }
+    let read = parse_lifecycle(&text).unwrap();
+    assert_eq!(
+        read[1],
+        LifeEvent {
+            line: 1,
+            ..lost_gate
+        },
+        "a Lost gate keeps its source"
+    );
+    assert_eq!(read[1].epoch_source, Some(EpochSource::Gate));
+    assert!(
+        parse_lifecycle(&text[..text.len() - 1])
+            .unwrap_err()
+            .contains("torn")
+    );
+    let dir = tempfile::tempdir().unwrap();
+    assert!(lifecycle(dir.path()).is_err(), "no file is not no steps");
+}
+
+/// A recording Discord appending to `dir`'s lifecycle file as process `spawn`.
+fn recording_in(dir: &Path, spawn: &str) -> Discord {
+    let recorder = Recorder::new(dir.join(LIFECYCLE), "node", spawn, Some(7));
+    Discord::default().with_recorder(recorder)
+}
+
+/// A POST records nothing unpolled, Started and Dropped when dropped after its first poll,
+/// Observed too when dropped while held, and one terminal when it completes.
+#[tokio::test(flavor = "current_thread")]
+async fn recorded_steps_follow_how_far_each_post_ran() {
+    use LifeStep::{Accepted, Dropped, Ended, Observed, Started};
+    let dir = tempfile::tempdir().unwrap();
+    let discord = recording_in(dir.path(), "p");
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    drop(discord.post(C, "never polled".into()));
+    let mut first = Box::pin(discord.post(C, "first poll".into()));
+    assert!(first.as_mut().poll(&mut cx).is_pending());
+    drop(first);
+    discord.hold();
+    let mut held = Box::pin(discord.post(C, "held".into()));
+    for _ in 0..2 {
+        assert!(held.as_mut().poll(&mut cx).is_pending());
+    }
+    assert_eq!(
+        discord.running(),
+        1,
+        "past its first yield, held at the valve"
+    );
+    drop(held);
+    discord.release();
+    let done = discord.post(C, "done".into()).await;
+    assert!(matches!(done, PostOutcome::Created(_)), "{done:?}");
+    let events = lifecycle(dir.path()).unwrap();
+    let steps = |content: &str| {
+        let ours = events.iter().filter(|e| e.detail == content);
+        ours.map(|e| e.step).collect::<Vec<_>>()
+    };
+    assert_eq!(steps("never polled"), Vec::<LifeStep>::new());
+    assert_eq!(steps("first poll"), [Started, Dropped]);
+    assert_eq!(steps("held"), [Started, Observed, Dropped]);
+    assert_eq!(steps("done"), [Started, Observed, Accepted, Ended]);
+    assert_eq!(open_ids(&events), Ok(vec![]));
+    let gate = events.iter().find(|e| e.step == Observed).unwrap();
+    assert_eq!(
+        (gate.epoch, gate.epoch_source),
+        (None, Some(EpochSource::Gate))
+    );
+}
+
+/// Two processes append to one lifecycle file at once: both POSTs start before either ends, every
+/// line is whole, and the judge names their overlap.
+#[tokio::test(flavor = "current_thread")]
+async fn two_processes_append_whole_steps_to_one_lifecycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let within = Duration::from_secs(30);
+    let mut nodes = [(0, MINI), (1, GW)]
+        .map(|(n, role)| Node::spawn_without_db(dir.path(), n, "lifecycle_writer", role));
+    for node in &mut nodes {
+        let started = format!("in_flight.{}", node.role());
+        node.wait_signal(&started, within).await;
+    }
+    signal(dir.path(), "release");
+    for node in nodes {
+        node.finish(within).await;
+    }
+    let events = lifecycle(dir.path()).unwrap();
+    let lines = |done: fn(LifeStep) -> bool| {
+        let ours = events.iter().filter(|e| done(e.step));
+        ours.map(|e| e.line).collect::<Vec<_>>()
+    };
+    let (starts, ends) = (lines(|s| s == LifeStep::Started), lines(ended));
+    assert_eq!((starts.len(), ends.len()), (2, 2), "{events:#?}");
+    assert!(starts.iter().max() < ends.iter().min(), "{events:#?}");
+    assert_eq!(open_ids(&events), Ok(vec![]));
+    assert!(post_spans(&events).unwrap_err().contains("overlap"));
+}
+
+/// One node's side of the two-writer test: a recorded POST held in flight until the parent
+/// releases both.
+pub(super) async fn lifecycle_writer_node(env: &Env) {
+    let within = Duration::from_secs(30);
+    let discord = Discord::default().recording(env);
+    discord.hold();
+    let post = tokio::spawn(discord.post(C, format!("{} payload", env.role)));
+    until("the POST is in flight", within, || discord.running() == 1).await;
+    signal(&env.dir, &format!("in_flight.{}", env.role));
+    wait_signal(&env.dir, "release", within).await;
+    discord.release();
+    let done = post.await.unwrap();
+    assert!(matches!(done, PostOutcome::Created(_)), "{done:?}");
 }
 
 #[derive(Default)]
@@ -662,7 +1023,59 @@ struct DiscordState {
     kept: Vec<(u64, SeenMessage)>,
     /// Where each accepted message is also written, for the next generation's Discord to keep.
     file: Option<PathBuf>,
-    recorder: Option<Arc<PostRecorder>>,
+    recorder: Option<Arc<Recorder>>,
+    reads: Mutex<Vec<HistoryRead>>,
+}
+
+/// Whether samples at `offsets` from a watch's start cover `window`: the first right at the
+/// start, the last at or past its end, and no gap a whole renewal period long.
+pub(super) fn observed_throughout(offsets: &[Duration], window: Duration) -> Result<(), String> {
+    let renewal = crate::services::cluster::channel_home::RENEW_EVERY;
+    let (first, last) = match offsets {
+        [first, .., last] => (*first, *last),
+        _ => return Err(format!("too few samples: {offsets:?}")),
+    };
+    let gap = offsets
+        .windows(2)
+        .map(|w| w[1].saturating_sub(w[0]))
+        .max()
+        .unwrap();
+    if first >= renewal || last < window || gap >= renewal {
+        let seen = format!(
+            "{} samples, {first:?}..{last:?}, gap {gap:?}",
+            offsets.len()
+        );
+        return Err(format!("too thin a watch of {window:?}: {seen}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_watch_with_a_window_long_gap_is_too_thin() {
+    let window = Duration::from_secs(12);
+    let even: Vec<_> = (0..=120).map(|n| Duration::from_millis(100 * n)).collect();
+    assert_eq!(observed_throughout(&even, window), Ok(()));
+    let gapped = [Duration::ZERO, window];
+    assert!(
+        observed_throughout(&gapped, window)
+            .unwrap_err()
+            .contains("too thin")
+    );
+    let short = &even[..even.len() - 1];
+    assert!(
+        observed_throughout(short, window).is_err(),
+        "ends before the window does"
+    );
+    assert!(observed_throughout(&even[..1], window).is_err());
+}
+
+/// One history read as this Discord answered it, on this process's monotonic clock.
+#[derive(Clone, Debug)]
+pub(super) struct HistoryRead {
+    pub(super) channel: u64,
+    pub(super) after: u64,
+    pub(super) at: std::time::Instant,
+    pub(super) answer: Result<usize, String>,
 }
 
 /// A fake Discord that keeps each request's lifecycle and can hold requests open.
@@ -720,18 +1133,23 @@ impl Discord {
         self
     }
 
-    /// As this Discord, appending each POST's lifecycle to the scene's [`POST_LIFECYCLE`].
-    pub(super) fn recording(mut self, env: &Env) -> Self {
-        let recorder = PostRecorder {
-            file: env.dir.join(POST_LIFECYCLE),
-            node: env.role.clone(),
-            spawn: env.spawn.clone(),
-            scene_epoch: get(&env.dir, "epoch").map(|epoch| epoch.parse().unwrap()),
-            next: AtomicU64::new(0),
-        };
+    /// As this Discord, appending each POST's and history read's steps to the scene's
+    /// [`LIFECYCLE`].
+    pub(super) fn recording(self, env: &Env) -> Self {
+        let epoch = get(&env.dir, "epoch").map(|epoch| epoch.parse().unwrap());
+        let file = env.dir.join(LIFECYCLE);
+        self.with_recorder(Recorder::new(file, &env.role, &env.spawn, epoch))
+    }
+
+    fn with_recorder(mut self, recorder: Recorder) -> Self {
         let state = Arc::get_mut(&mut self.state).expect("a Discord not yet shared");
         state.recorder = Some(Arc::new(recorder));
         self
+    }
+
+    /// Every history read so far, in order.
+    pub(super) fn history_reads(&self) -> Vec<HistoryRead> {
+        locked(&self.state.reads).clone()
     }
 
     /// What earlier generations accepted.
@@ -822,12 +1240,12 @@ impl DiscordPort for Discord {
         let mut valve = self.valve.subscribe();
         async move {
             // Before the first await: a request dropped at its first yield still records its end.
-            let mut record = state.recorder.as_ref().map(|r| r.start(&content));
+            let mut record = state.recorder.as_ref().map(|r| r.start(channel, &content));
             // The first poll runs under the home gate's admission lock; read its epoch after it.
             tokio::task::yield_now().await;
             let home_epoch = home_epoch_now(channel);
             if let Some(record) = &record {
-                record.note(PostStep::Observed, (home_epoch, "gate"));
+                record.observed(home_epoch);
             }
             let started = Seen::Started {
                 content: content.clone(),
@@ -867,8 +1285,7 @@ impl DiscordPort for Discord {
             locked(&state.seen).push(Seen::Accepted(content));
             request.accepted = true;
             if let Some(record) = &mut record {
-                record.note(PostStep::Accepted, (None, ""));
-                record.accepted = true;
+                record.accepted();
             }
             PostOutcome::Created(message)
         }
@@ -879,13 +1296,33 @@ impl DiscordPort for Discord {
         channel: u64,
         after: u64,
     ) -> impl Future<Output = Result<Vec<SeenMessage>, String>> + Send {
-        if self.history_unavailable {
-            return std::future::ready(Err(HISTORY_UNAVAILABLE.into()));
+        let mut answer = None;
+        let mut read = || {
+            let page = if self.history_unavailable {
+                Err(HISTORY_UNAVAILABLE.to_string())
+            } else {
+                let created = locked(&self.state.created);
+                let page = (self.state.kept.iter().chain(created.iter()))
+                    .filter(|(c, m)| *c == channel && m.id > after);
+                Ok(page.map(|(_, m)| m.clone()).collect::<Vec<_>>())
+            };
+            let read = HistoryRead {
+                channel,
+                after,
+                at: std::time::Instant::now(),
+                answer: page.as_ref().map(Vec::len).map_err(Clone::clone),
+            };
+            locked(&self.state.reads).push(read.clone());
+            answer = Some(page);
+            read.answer
+        };
+        match &self.state.recorder {
+            Some(recorder) => recorder.read(channel, after, &mut read),
+            None => {
+                let _ = read();
+            }
         }
-        let created = locked(&self.state.created);
-        let page = (self.state.kept.iter().chain(created.iter()))
-            .filter(|(c, m)| *c == channel && m.id > after);
-        std::future::ready(Ok(page.map(|(_, m)| m.clone()).collect()))
+        std::future::ready(answer.expect("the history was read"))
     }
 
     fn history_readable(&self, _: u64) -> bool {
@@ -923,6 +1360,8 @@ pub(super) struct EventLog {
     served: AtomicU64,
     /// A seq whose publish waits a moment after it is stored, so a racing commit could pass it.
     slow_publish: AtomicU64,
+    /// Per publish, whether the event list was still locked as it went out.
+    publishes: Mutex<Vec<bool>>,
 }
 
 impl EventLog {
@@ -933,6 +1372,7 @@ impl EventLog {
             notice: watch::channel(latest).0,
             served: AtomicU64::new(0),
             slow_publish: AtomicU64::new(0),
+            publishes: Mutex::default(),
         }
     }
 
@@ -957,6 +1397,11 @@ impl EventLog {
         if seq == self.slow_publish.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(100));
         }
+        let held = matches!(
+            self.events.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        );
+        locked(&self.publishes).push(held);
         self.notice.send_replace(seq);
         seq
     }
@@ -984,9 +1429,7 @@ impl BindingEvents for EventLog {
     }
 }
 
-/// The commits start together and seq 2's publish waits; outside the lock it would end on 2.
-#[test]
-fn racing_commits_publish_the_latest_seq_and_every_event() {
+fn startup_log() -> EventLog {
     let source = SourceId {
         session_id: "s1".into(),
         path: PathBuf::from("/s1.jsonl"),
@@ -994,15 +1437,37 @@ fn racing_commits_publish_the_latest_seq_and_every_event() {
         ino: 1,
     };
     let startup = TestHost::new([(C, source)]).bindings(C, ShadowProvider::Claude);
-    let log = EventLog::new(startup.binding_events_since(C, 0).unwrap());
-    let rejected = |detail: &str| BindingRecord::Rejected {
+    EventLog::new(startup.binding_events_since(C, 0).unwrap())
+}
+
+fn rejected(detail: &str) -> BindingRecord {
+    BindingRecord::Rejected {
         detail: detail.into(),
-    };
+    }
+}
+
+/// One commit publishes while its own lock on the events is still held.
+#[test]
+fn a_commit_publishes_before_it_unlocks_the_events() {
+    let log = startup_log();
+    assert_eq!(log.commit(rejected("a")), 2);
+    assert_eq!(
+        *locked(&log.publishes),
+        [true],
+        "published after the events unlocked"
+    );
+    assert_eq!(*log.subscribe(C).borrow(), 2);
+}
+
+/// The commits start together and seq 2's publish waits; outside the lock it would end on 2.
+#[test]
+fn racing_commits_publish_the_latest_seq_and_every_event() {
+    let log = startup_log();
     log.slow_publish.store(2, Ordering::SeqCst);
     let start = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
         for detail in ["a", "b"] {
-            let (log, start, rejected) = (&log, &start, &rejected);
+            let (log, start) = (&log, &start);
             scope.spawn(move || {
                 start.wait();
                 log.commit(rejected(detail))

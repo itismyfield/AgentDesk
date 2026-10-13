@@ -400,9 +400,14 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::intake_router_hook::o_route_tests::unavailable_delegation_blocks_before_a_home_read_or_local_fallback
   services::cluster::intake_router_hook::owner_record::tests::advisory_lock_key_is_stable
   services::cluster::intake_router_hook::owner_record::tests::idempotency_key_is_composed_and_normalized
+  services::cluster::intake_worker::home_route_tests::s3_real::harness::a_commit_publishes_before_it_unlocks_the_events
+  services::cluster::intake_worker::home_route_tests::s3_real::harness::a_watch_with_a_window_long_gap_is_too_thin
+  services::cluster::intake_worker::home_route_tests::s3_real::harness::lifecycle_reads_whole_lines_or_fails
   services::cluster::intake_worker::home_route_tests::s3_real::harness::post_spans_pass_apart_and_name_each_broken_record
   services::cluster::intake_worker::home_route_tests::s3_real::harness::racing_commits_publish_the_latest_seq_and_every_event
+  services::cluster::intake_worker::home_route_tests::s3_real::harness::recorded_steps_follow_how_far_each_post_ran
   services::cluster::intake_worker::home_route_tests::s3_real::harness::route_as_asks_for_the_given_provider
+  services::cluster::intake_worker::home_route_tests::s3_real::harness::two_processes_append_whole_steps_to_one_lifecycle
   services::cluster::intake_worker::home_route_tests::s3_real::s3_node_child
   services::cluster::machine_resources::store::tests::recorder_queue_is_bounded_without_waiting_for_the_database
   services::discord::commands::control::clear_persist_failure_tests::clear_callers_propagate_a_failed_clear_before_their_success_effect

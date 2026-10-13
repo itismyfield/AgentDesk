@@ -24,6 +24,7 @@ use crate::services::tui_o::store::{
 use crate::services::tui_o::writer::binding::{
     BindingCause, BindingEvidence, BindingRecord, BindingTarget,
 };
+use crate::services::tui_o::writer::confirm::{FIRST_LOOK, LAST_LOOK};
 use crate::services::tui_o::writer::deliver::{self, ChannelWriter, Step};
 use crate::services::tui_o::writer::host::test_io::Alarms;
 use crate::services::tui_o::writer::host::{self, HostIo};
@@ -558,7 +559,25 @@ async fn unsent_settles(scenario: &str) -> Scene {
 }
 
 pub(super) async fn settles_not_found_node(env: &Env) {
-    let node = settled_on_replay(env, Discord::kept_in(&env.dir.join(HISTORY))).await;
+    let discord = Discord::kept_in(&env.dir.join(HISTORY));
+    let (node, replayed) = settled_on_replay(env, discord).await;
+    let reads = node.discord().history_reads();
+    let after = reads.first().map(|r| r.after);
+    let answers: Vec<_> = (reads.iter())
+        .map(|r| (r.channel, Some(r.after), r.answer.clone()))
+        .collect();
+    assert_eq!(
+        answers,
+        [(C, after, Ok(0)), (C, after, Ok(0))],
+        "both looks, one anchor"
+    );
+    let first = reads[0].at.duration_since(replayed);
+    let last = reads[1].at.duration_since(reads[0].at);
+    assert!(first >= FIRST_LOOK, "first read {first:?} after the row");
+    assert!(
+        last >= LAST_LOOK - FIRST_LOOK,
+        "second read {last:?} after the first"
+    );
     assert_eq!(settled(&node), [LedgerEntry::NotFound { serial: 0 }]);
     assert_eq!(settle_alarms(&node), [WriterAlarm::NotFound { serial: 0 }]);
     node.stop().await;
@@ -566,7 +585,16 @@ pub(super) async fn settles_not_found_node(env: &Env) {
 
 pub(super) async fn settles_unresolved_node(env: &Env) {
     let discord = Discord::kept_in(&env.dir.join(HISTORY)).history_unavailable();
-    let node = settled_on_replay(env, discord).await;
+    let (node, replayed) = settled_on_replay(env, discord).await;
+    let reads = node.discord().history_reads();
+    let answers: Vec<_> = reads
+        .iter()
+        .map(|r| (r.channel, r.answer.clone()))
+        .collect();
+    let failed = (C, Err(HISTORY_UNAVAILABLE.to_string()));
+    assert_eq!(answers, [failed], "read again after an error");
+    let first = reads[0].at.duration_since(replayed);
+    assert!(first >= FIRST_LOOK, "first read {first:?} after the row");
     let outcomes = settled(&node);
     let [LedgerEntry::Unresolved { serial: 0, reason }] = &outcomes[..] else {
         panic!("settled {outcomes:?}");
@@ -581,12 +609,18 @@ pub(super) async fn settles_unresolved_node(env: &Env) {
 }
 
 /// Holds on the unsent Prepared, then appends the row that derives its unit again, which is what
-/// starts the settlement; waits for it and the leave, with nothing posted.
-async fn settled_on_replay(env: &Env, discord: Discord) -> Booted {
+/// starts the settlement; waits for it and the leave, with nothing posted. Returns when the row
+/// was appended, on the clock history reads are stamped with.
+async fn settled_on_replay(env: &Env, discord: Discord) -> (Booted, std::time::Instant) {
     let node = holds_on_prepared(env, discord).await;
     assert_eq!(settled(&node), [], "settled before the row came again");
     assert_eq!(settle_alarms(&node), []);
-    let replayed = tokio::time::Instant::now();
+    let reads = node.discord().history_reads();
+    assert!(
+        reads.is_empty(),
+        "history read before the row came again: {reads:?}"
+    );
+    let replayed = std::time::Instant::now();
     append(&node.transcript, &row("m1", MAYBE_SENT));
     let clear = || async { node.owed().await == Some(Owed::default()) };
     until_async("the replayed row settles the Prepared", WITHIN, clear).await;
@@ -596,7 +630,7 @@ async fn settled_on_replay(env: &Env, discord: Discord) -> Booted {
     until_left(&node).await;
     assert_eq!(node.discord().seen(), Vec::<Seen>::new(), "no POST started");
     assert!(!node.halted(), "{:?}", node.raised());
-    node
+    (node, replayed)
 }
 
 /// The ledger's entries other than Prepared, read from its file while the actor holds the store.
