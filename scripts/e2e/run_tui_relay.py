@@ -51,7 +51,7 @@ import yaml  # type: ignore[import-untyped]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tui_relay import assertions, discord, durable_delivery, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
+from tui_relay import assertions, discord, durable_delivery, feature_accounting, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -3255,11 +3255,13 @@ def run_scenario(
             )
         return result
 
-    enabled_features = {
-        feature.strip()
-        for feature in os.environ.get("AGENTDESK_E2E_FEATURES", "").split(",")
-        if feature.strip()
-    }
+    try:
+        enabled_features = feature_accounting.scenario_features(scenario)
+    except (OSError, ValueError) as error:
+        result.update(status="fail", reason=str(error))
+        result["failure_attribution"] = _failure_attribution("harness", str(error))
+        return result
+    scenario = {**scenario, "_enabled_features": enabled_features}
     required_features = {
         str(feature).strip()
         for feature in scenario.get("requires_features") or []
@@ -3268,11 +3270,18 @@ def run_scenario(
     missing_features = sorted(required_features - enabled_features)
     if missing_features:
         result["status"] = "skipped"
-        result["reason"] = "missing E2E features: " + ", ".join(missing_features)
+        result["reason"] = "explicitly disabled E2E features: " + ", ".join(missing_features)
+        result.update(execution_status="dormant", dormant_reason=result["reason"],
+                      required_features=sorted(required_features), disabled_features=missing_features)
         result["failure_attribution"] = _failure_attribution(
             "feature_gate",
             str(result["reason"]),
         )
+        if not args.dry_run:
+            _apply_observed_required_agent_mode_gate(result, required=getattr(args, "required_agent_mode", None),
+                                                     declared=declared_agent_mode, scenario_id=scenario_id)
+            _apply_observed_required_coverage_class_gate(result, required=getattr(args, "required_coverage_class", None),
+                                                        declared=declared_coverage_class, scenario_id=scenario_id)
         return result
 
     destructive = is_destructive(scenario)
@@ -3343,6 +3352,7 @@ def run_scenario(
         time.sleep(2.0)
 
     try:
+        result["executed"] = not args.dry_run
         window = run_one_cell(
             scenario=scenario,
             cell=cell,
@@ -3400,7 +3410,7 @@ def run_scenario(
                 record=window,
             )
         else:
-            result["status"] = "pass"
+            result["status"] = "dry_run" if args.dry_run else "pass"
     except HarnessEvidenceError as error:
         partial = partial_record_holder.get("record")
         if isinstance(partial, dict):
@@ -3521,7 +3531,7 @@ def run_scenario(
             result["completed_at"] = dt.datetime.now().isoformat(timespec="seconds")
 
     result["completed_at"] = dt.datetime.now().isoformat(timespec="seconds")
-    return result
+    return feature_accounting.annotate(result)
 
 
 def post_send_sleep(step):
@@ -3634,6 +3644,12 @@ def run_one_cell(
     if dry_run:
         print(f"[dry-run] {scenario_id} ({cell}): would send setup → steps → teardown")
         return record
+
+    try:
+        enabled_features = (scenario["_enabled_features"] if "_enabled_features" in scenario
+                            else feature_accounting.scenario_features(scenario))
+    except (OSError, ValueError) as error:
+        raise HarnessEvidenceError(str(error)) from error
 
     if scenario.get("e36_normal_intake"):
         try:
@@ -4285,23 +4301,19 @@ def run_one_cell(
                 normal_intake_evidence.drained(e36.watcher())
             except (OSError, ValueError, KeyError, TypeError) as error:
                 raise HarnessEvidenceError(f"E36 final evidence unavailable: {error}") from error
-        enabled_features = frozenset(
-            feature.strip()
-            for feature in os.environ.get("AGENTDESK_E2E_FEATURES", "").split(",")
-            if feature.strip()
-        )
         for assertion_spec in scenario.get("assertions") or []:
-            run_assertion(
-                assertion_spec,
-                window=window,
-                record=record,
-                enabled_features=enabled_features,
-                run_id=run_id,
-                pending_refetch=_pending_refetch,
-                observation_context=observation_context,
-                provider=cell_provider(cell),
-            )
-            record["assertions"].append({"spec": assertion_spec, "passed": True})
+            try:
+                outcome = run_assertion(
+                    assertion_spec, window=window, record=record, enabled_features=enabled_features,
+                    run_id=run_id, pending_refetch=_pending_refetch,
+                    observation_context=observation_context, provider=cell_provider(cell),
+                )
+            except assertions.AssertionError as error:
+                unevaluable = isinstance(error, HarnessEvidenceError)
+                record["assertions"].append({"spec": assertion_spec, "status": "unevaluable" if unevaluable else "fail",
+                                             "passed": None if unevaluable else False, "reason": str(error)})
+                raise
+            record["assertions"].append({"spec": assertion_spec, **outcome})
 
         idle_check = assert_cell_idle(
             base_url=client.base_url,
@@ -4701,12 +4713,12 @@ def run_assertion(
     *,
     window: assertions.Window,
     record: dict[str, Any] | None = None,
-    enabled_features: frozenset[str] = frozenset(),
+    enabled_features: frozenset[str] | None = None,
     run_id: str | None = None,
     pending_refetch: Callable[[], None] | None = None,
     observation_context: ObservationContext | None = None,
     provider: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     def expand_marker(value: str) -> str:
         return value.replace("{run_id}", run_id) if run_id is not None else value
 
@@ -4718,8 +4730,10 @@ def run_assertion(
     required_feature = spec.get("requires_feature")
     if required_feature is not None:
         required_feature = str(required_feature)
+        if enabled_features is None:
+            raise HarnessEvidenceError(f"feature evidence unavailable: {required_feature}")
         if required_feature not in enabled_features:
-            return
+            return feature_accounting.skipped_assertion(required_feature)
         spec = {key: value for key, value in spec.items() if key != "requires_feature"}
     if "message_count_between_markers" in spec:
         params = spec["message_count_between_markers"]
@@ -5031,6 +5045,7 @@ def run_assertion(
         )
     else:
         raise assertions.AssertionError(f"unknown assertion: {spec!r}")
+    return {"status": "pass", "passed": True}
 
 
 def agent_mode_totals(results: list[dict[str, Any]]) -> dict[str, int]:
@@ -5169,6 +5184,7 @@ def main() -> int:
     # shared --output dir for all 4 cells never overwrites a sibling report.
     summary_path = output_dir / f"report.{cell}.json"
     summary = {
+        "schema_version": feature_accounting.SCHEMA_VERSION,
         "run_id": run_id,
         "cell": cell,
         "provider": cell_provider(cell),
@@ -5182,13 +5198,7 @@ def main() -> int:
             result.get("real_provider_contacted") is True for result in results
         ),
         "scenarios": results,
-        "totals": {
-            "pass": sum(1 for r in results if r["status"] == "pass"),
-            "fail": sum(1 for r in results if r["status"] == "fail"),
-            "skipped": sum(1 for r in results if r["status"] == "skipped"),
-            **{status: sum(r["status"] == status for r in results)
-               for status in ("not_applicable", "known_gap", "unexpected_pass", "dry_run")},
-        },
+        "totals": feature_accounting.totals(results),
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     if deferred_failure is not None:
