@@ -353,19 +353,24 @@ impl Node {
         assert!(done.exists(), "node {} returned before its end", self.role);
     }
 
+    /// Fails at once with this node's log if it exited before sending `name`.
+    pub(super) fn alive_before(&mut self, name: &str) {
+        let exited = self.child.as_mut().expect("running").try_wait().unwrap();
+        if let Some(status) = exited.filter(|_| !signalled(&self.dir, name)) {
+            let tail = self.log_tail();
+            panic!(
+                "node {} exited ({status}) before signal {name}\n{tail}",
+                self.role
+            );
+        }
+    }
+
     /// Waits for `name` from this node; its exit before the signal fails at once with its log.
     pub(super) async fn wait_signal(&mut self, name: &str, within: Duration) {
         eprintln!("[s3] waiting for signal {name} from {}", self.role);
         let deadline = tokio::time::Instant::now() + within;
         while !signalled(&self.dir, name) {
-            let exited = self.child.as_mut().expect("running").try_wait().unwrap();
-            if let Some(status) = exited.filter(|_| !signalled(&self.dir, name)) {
-                let tail = self.log_tail();
-                panic!(
-                    "node {} exited ({status}) before signal {name}\n{tail}",
-                    self.role
-                );
-            }
+            self.alive_before(name);
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "signal {name} never came from {}\n{}",

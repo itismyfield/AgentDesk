@@ -572,6 +572,9 @@ const ENV_AGENTDESK_BIN: &str = "ADK_S3_AGENTDESK_BIN";
 const REFUSED: &str = "s3_renewals_refused";
 /// How long the observer allows a timed-out POST to be gone past [`POST_TIMEOUT`].
 const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
+/// How late after H the step 4 sample may be: 100 ms sampling plus scheduling slack, far from the
+/// 5 s a late expiry would add.
+const SAMPLE_LATE_MAX: Duration = Duration::from_secs(1);
 const H9W_CHILD_BUDGET: Duration = Duration::from_secs(360);
 const H9W_PARENT_BUDGET: Duration = Duration::from_secs(420);
 const POSITIVE: &str = "h9w-positive";
@@ -703,19 +706,30 @@ async fn waits_out_h_timeout_and_f(bin: &str) {
         );
         age
     };
+    // Waits for the child's `name` while checking the row every 500 ms; either failing ends it.
+    let wait_unmoved = async |node: &mut Node, name: &str, within: Duration| {
+        let deadline = Instant::now() + within;
+        while !signalled(scene.dir(), name) {
+            node.alive_before(name);
+            assert!(Instant::now() < deadline, "signal {name} never came");
+            unmoved(&format!("waiting for {name}")).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    };
 
-    node.wait_signal("lost", WITHIN).await;
+    wait_unmoved(&mut node, "lost", WITHIN).await;
     let age = unmoved("step 4").await;
     let child = |key| get(scene.dir(), key).unwrap();
     let (left, lost) = (child("acked_left_ms"), child("lost_after_ms"));
+    let late = child("lost_sample_late_ms");
     eprintln!("[s3] H9-W step 3: local H {left} ms after the ACK");
-    eprintln!("[s3] H9-W step 4: Lost {lost} ms after the last send; row held, age {age:?}");
-    node.wait_signal("timed_out", POST_TIMEOUT + WITHIN).await;
+    eprintln!("[s3] H9-W step 4: Lost {lost} ms after the last send, sampled {late} ms after H");
+    eprintln!("[s3] H9-W step 4: row held, age {age:?}");
+    wait_unmoved(&mut node, "timed_out", POST_TIMEOUT + WITHIN).await;
     let age = unmoved("step 5").await;
     let (id, took) = (child("held_id"), child("timed_out_after_ms"));
     eprintln!("[s3] H9-W step 5: {id} gone {took} ms after it ran; age {age:?}");
 
-    tokio::time::sleep(Duration::from_secs(75)).await;
     let before = scene.row().await.unwrap();
     let (_, age) = lease_age(&scene.pool).await;
     assert!(
@@ -742,7 +756,7 @@ async fn waits_out_h_timeout_and_f(bin: &str) {
     );
     eprintln!("[s3] H9-W step 6: refused at age {age:?}..{after_age:?}");
 
-    node.wait_signal("f_local", FORCE_AFTER).await;
+    wait_unmoved(&mut node, "f_local", FORCE_AFTER).await;
     loop {
         let age = unmoved("step 7").await;
         if age > FORCE_AFTER {
@@ -780,6 +794,8 @@ async fn waits_out_h_timeout_and_f(bin: &str) {
     );
     signal(scene.dir(), "forced");
     node.finish(WITHIN).await;
+    let watch = child("after_force_watch");
+    eprintln!("[s3] H9-W step 8: after the force, {watch}");
     assert_eq!(
         scene.row().await.unwrap(),
         orphan,
@@ -898,28 +914,40 @@ async fn holds_through_h_timeout_and_f(env: &Env) {
         assert!(now < expiry, "step 3: local H passed before the ACK");
         let last_sent = expiry - HOLD_FOR;
         put(&env.dir, "acked_left_ms", (expiry - now).as_millis());
-        while Instant::now() < expiry {
-            let now = gate.expiry();
+        loop {
+            let now = Instant::now();
+            if now >= expiry {
+                break;
+            }
+            let held = gate.expiry();
             assert!(
-                now.is_none_or(|now| now == expiry),
+                held.is_none_or(|held| held == expiry),
                 "step 3: the hold was extended"
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep_until(expiry.min(now + Duration::from_millis(100))).await;
         }
-        until("step 4: the gate is Lost", WITHIN, || {
-            gate.ownership() == HomeOwnership::Lost
-        })
-        .await;
-        until("step 4: the writer stops accepting", WITHIN, || {
-            !node.accepts()
-        })
-        .await;
+        // The first sample at or after H judges admission at once; readiness re-reads the gate.
+        let at = Instant::now();
+        let ownership = gate.ownership();
+        let accepts = node.accepts();
         let mut admitted = false;
-        assert_eq!(gate.admit_post(|_| admitted = true), None);
-        assert!(!admitted, "step 4: a POST admitted after H");
+        let post = gate.admit_post(|_| admitted = true);
+        let command = gate.admit_command("claude").is_some();
+        let late = at - expiry;
         assert!(
-            gate.admit_command("claude").is_none(),
-            "step 4: a command admitted after H"
+            late <= SAMPLE_LATE_MAX,
+            "step 4: sampled {late:?} after H, too late to judge"
+        );
+        assert_eq!(ownership, HomeOwnership::Lost, "step 4: the gate open at H");
+        assert!(!accepts, "step 4: the writer accepts at H");
+        assert_eq!(post, None);
+        assert!(!admitted, "step 4: a POST admitted after H");
+        assert!(!command, "step 4: a command admitted after H");
+        let lost_after = at - last_sent;
+        let bound = HOLD_FOR + SAMPLE_LATE_MAX;
+        assert!(
+            lost_after <= bound,
+            "step 4: judged {lost_after:?} after the last send"
         );
         let running = (discord.running(), deliver::posts_in_flight(C));
         assert_eq!(
@@ -927,7 +955,8 @@ async fn holds_through_h_timeout_and_f(env: &Env) {
             (1, Some(1)),
             "step 4: H cancelled the POST in flight"
         );
-        put(&env.dir, "lost_after_ms", last_sent.elapsed().as_millis());
+        put(&env.dir, "lost_after_ms", lost_after.as_millis());
+        put(&env.dir, "lost_sample_late_ms", late.as_millis());
         signal(&env.dir, "lost");
         last_sent
     };
@@ -951,8 +980,10 @@ async fn holds_through_h_timeout_and_f(env: &Env) {
     signal(&env.dir, "f_local");
 
     wait_signal(&env.dir, "forced", WITHIN).await;
-    let watched = Instant::now();
-    while watched.elapsed() < TWO_ROUNDS {
+    let (watched, mut offsets) = (Instant::now(), Vec::new());
+    loop {
+        let at = watched.elapsed();
+        offsets.push(at);
         let lost = node
             .gate()
             .is_none_or(|g| g.ownership() == HomeOwnership::Lost);
@@ -960,8 +991,21 @@ async fn holds_through_h_timeout_and_f(env: &Env) {
             lost && !node.accepts(),
             "step 8: the old holder took the channel back"
         );
+        if at >= TWO_ROUNDS {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    if let Err(thin) = observed_throughout(&offsets, TWO_ROUNDS) {
+        panic!("step 8: {thin}");
+    }
+    let gap = offsets.windows(2).map(|w| w[1] - w[0]).max().unwrap();
+    let watch = format!(
+        "{} samples over {:?}, largest gap {gap:?}",
+        offsets.len(),
+        offsets[offsets.len() - 1]
+    );
+    put(&env.dir, "after_force_watch", watch);
     assert_eq!(node.home_epoch(), None);
     assert_eq!(
         discord.posts(),
