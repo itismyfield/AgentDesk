@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
-use crate::services::cluster::channel_home::HomeGate;
+pub(super) use crate::services::cluster::channel_home::HomeGate;
 use crate::services::discord::SharedData;
 use crate::services::discord::tmux_watcher_registry::TmuxWatcherRegistry;
 use crate::services::provider::ProviderKind;

@@ -284,7 +284,7 @@ impl super::entrypoints::Fence for Runtime {
     fn withdraw_unmounted(
         &self,
         channel: u64,
-        mount: Option<&Arc<crate::services::cluster::channel_home::HomeGate>>,
+        mount: Option<&Arc<super::entrypoints::HomeGate>>,
         cause: &'static str,
     ) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());

@@ -681,8 +681,8 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                         "  [{ts}] ⛔ GATEWAY-LEASE: {} singleton lease taken by another instance — self-fencing",
                         provider_for_lease.display_name()
                     );
-                    gate.lost();
                     let (shared, provider) = (&shared_for_lease, &provider_for_lease);
+                    gate.lost();
                     self_fence_gateway(shared, provider, &gate, &shard_manager).await;
                     return;
                 }
