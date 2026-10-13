@@ -259,6 +259,11 @@ if run_check guards "N1 native oracle contracts"; then
 "$PYTHON" tests/run_n1_canary_native_mutations.py
 fi
 
+if run_check guards "N1 canary final audit contracts"; then
+"$PYTHON" -m unittest tests.test_n1_canary_audit
+"$PYTHON" tests/run_n1_canary_audit_mutations.py
+fi
+
 if run_check guards "Alert dedupe/authority/routing wiring contract (#4448/#4449)"; then
 "$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 fi
