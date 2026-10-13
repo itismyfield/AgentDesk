@@ -213,6 +213,11 @@ class RegistrySemantics(FixtureCase):
             {"file": "src/kd.rs", "decision": "keep", "owner": "relay", "keep_reason": "cohesive", "deadline": "2026-10-20"},
         ]))
         self.assertEqual(list(by_path(report)), ["src/near.rs"])
+        drifted = build(registry_text([shrink("src/near.rs", "2026-10-20", extension="2027-01-01")]) + "[policy]\nmode = 1\n")
+        self.assertEqual(list(by_path(drifted)), ["src/near.rs"])
+        self.assertIn("unknown field(s) not interpreted: extension", problems(drifted))
+        self.assertIn("unknown top-level key(s) not interpreted: policy", problems(drifted))
+        self.assertEqual(drifted["completeness"]["status"], "partial")
         self.assertEqual((report["deadlines"]["counts"]["invalid"], report["deadlines"]["counts"]["keep"]), (2, 0))
         self.assertIn("src/odd.rs unknown decision 'defer'", problems(report))
         self.assertIn("src/kd.rs keep forbids deadline", problems(report))
@@ -422,7 +427,7 @@ class WorkflowStructure(unittest.TestCase):
             self.assertNotIn("continue-on-error", step)
             run = step.get("run", "")
             self.assertNotIn("${{", run)
-            for forbidden in ("cargo", "ci-script-checks", "generate_inventory_docs", "giant_file_progress",
+            for forbidden in ("cargo", "ci-script-checks", "generate_inventory_docs", "giant_file_progress", "GFP_",
                               "refresh_giant_file_issue_metadata", "gh ", "git push", "git commit"):
                 self.assertNotIn(forbidden, run)
 

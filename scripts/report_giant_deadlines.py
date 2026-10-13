@@ -38,6 +38,7 @@ URGENT_DAYS = 14
 HORIZON_DAYS = 60
 FRESHNESS_WINDOW = timedelta(days=30)
 STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+REGISTRY_KEYS = frozenset({"grandfathered_baseline_paths", "grandfathered", "entry"})
 ENTRY_FIELDS = frozenset({"file", "decision", "owner", "deadline", "decompose_issue", "keep_reason"})
 PLACEHOLDERS = frozenset({"tbd", "unknown", "none", "umbrella"})
 SELF_REFERENCE_ISSUE = "#4519"
@@ -156,6 +157,9 @@ def _registry_population(source: InputFile, diagnostics: list[dict]) -> dict | N
         problem(None, "registry `grandfathered` must be an array of path strings")
         return None
 
+    unknown_tables = sorted(set(document) - REGISTRY_KEYS)
+    if unknown_tables:
+        problem(None, f"unknown top-level key(s) not interpreted: {', '.join(unknown_tables)}")
     occurrences = Counter(entry["file"] for entry in entries if isinstance(entry.get("file"), str))
     occurrences.update(grandfathered)
     population = {"shrink": [], "keep": 0, "invalid": 0, "untracked": []}
