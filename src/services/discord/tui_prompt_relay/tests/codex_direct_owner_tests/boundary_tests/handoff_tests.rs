@@ -1,0 +1,517 @@
+//! A TUI input typed while a Discord prompt is handed to Codex: one echo when it joins the
+//! Discord turn, its own answer when it opens another, whichever observer sees it first.
+use super::*;
+use crate::services::tui_prompt_dedupe as dedupe;
+
+const ORIGIN: &str = "[User: probe (ID: 5845)] codex discord prompt 5845";
+const STEER: &str = "codex input typed during the discord handoff 5845";
+const DISCORD_ANSWER: &str = "DISCORD_5845_ANSWER";
+const STEER_ANSWER: &str = "STEER_5845_ANSWER";
+
+/// A user record with the metadata codex-cli 0.160 writes: its turn and creation time.
+fn user_record(text: &str, turn: &str) -> String {
+    user_record_at(text, turn, chrono::Utc::now())
+}
+
+fn user_record_at(text: &str, turn: &str, created: chrono::DateTime<chrono::Utc>) -> String {
+    let created = created.timestamp_millis() as f64 / 1000.0;
+    rollout_line(serde_json::json!({"type": "response_item", "payload": {
+        "type": "message", "role": "user", "content": [{"type": "input_text", "text": text}],
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": turn, "create_time": created, "content_item_kinds": ["user.text"]}}}))
+}
+
+fn opening_record(turn: &str, text: &str) -> String {
+    rollout_line(serde_json::json!({"type": "event_msg", "payload": {
+        "type": "task_started", "turn_id": turn}}))
+        + &rollout_line(serde_json::json!({"type": "turn_context", "payload": {"turn_id": turn}}))
+        + &user_record(text, turn)
+}
+
+/// The captured codex-cli UserPromptSubmit payload, re-aimed at `prompt` in `turn`.
+fn send_captured_hook(fx: &Fixture, prompt: &str, turn: &str) {
+    send_captured_hook_on(&fx.hooks, &fx.codex.tmux, prompt, turn);
+}
+
+fn send_captured_hook_on(
+    hooks: &tokio::sync::broadcast::Sender<HookEvent>,
+    tmux: &str,
+    prompt: &str,
+    turn: &str,
+) {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/hook_payload/codex-0.157.1.json"
+    )))
+    .expect("captured hook fixture");
+    let mut payload = fixture["runs"][1]["events"]
+        .as_array()
+        .expect("captured events")
+        .iter()
+        .find(|event| event["event"] == "UserPromptSubmit")
+        .expect("captured UserPromptSubmit")["payload"]
+        .clone();
+    payload["prompt"] = prompt.into();
+    payload["turn_id"] = turn.into();
+    hooks
+        .send(HookEvent {
+            provider: "codex".to_string(),
+            session_id: tmux.to_string(),
+            kind: HookEventKind::UserPromptSubmit,
+            received_at: chrono::Utc::now(),
+            payload,
+            fanout: None,
+        })
+        .expect("hook observer listening");
+}
+
+/// The Discord turn's row; the idle scan waits while it stands.
+fn discord_row(fx: &Fixture, anchor: u64) {
+    let row = inflight::InflightTurnState::new(
+        ProviderKind::Codex,
+        fx.codex.channel.get(),
+        None,
+        1,
+        anchor,
+        anchor + 1,
+        ORIGIN.to_string(),
+        Some("s-5704".to_string()),
+        Some(fx.codex.tmux.clone()),
+        Some(fx.codex.rollout.to_str().unwrap().to_string()),
+        None,
+        0,
+    );
+    inflight::save_inflight_state(&row).expect("discord row");
+}
+
+/// The Discord turn's handoff as the warm path holds it before submitting.
+fn reserve(fx: &Fixture) -> dedupe::HandoffGuard {
+    let guard = dedupe::reserve_discord_handoff("codex", &fx.codex.tmux, ORIGIN);
+    dedupe::record_discord_originated_prompt("codex", &fx.codex.tmux, ORIGIN);
+    guard
+}
+
+fn terminal_results(rx: std::sync::mpsc::Receiver<crate::services::agent_protocol::StreamMessage>) -> Vec<String> {
+    rx.try_iter()
+        .filter_map(|message| match message {
+            crate::services::agent_protocol::StreamMessage::Done { result, .. }
+            | crate::services::agent_protocol::StreamMessage::CodexTuiTerminalDone { result, .. } => Some(result),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The production warm handoff tail from the rollout's current end.
+fn start_handoff_tail(fx: &Fixture) -> std::thread::JoinHandle<Vec<String>> {
+    let rollout = fx.codex.rollout.clone();
+    let tmux = fx.codex.tmux.clone();
+    let start = std::fs::metadata(&rollout).unwrap().len();
+    std::thread::spawn(move || {
+        let (sender, rx) = std::sync::mpsc::channel();
+        crate::services::codex_tui::rollout_tail::tail_warm_followup_rollout_for_tmux(
+            &rollout,
+            start,
+            "s-5704",
+            sender,
+            None,
+            || true,
+            &tmux,
+            ORIGIN,
+        )
+        .expect("handoff tail");
+        terminal_results(rx)
+    })
+}
+
+async fn tail_answers(tail: std::thread::JoinHandle<Vec<String>>) -> Vec<String> {
+    assert!(
+        wait_for(Duration::from_secs(15), || tail.is_finished()).await,
+        "the handoff tail never returned"
+    );
+    tail.join().expect("handoff tail thread")
+}
+
+/// Events published for `prompt` within `window`, unrelayed.
+async fn events_for(fx: &mut Fixture, prompt: &str, window: Duration) -> Vec<ObservedTuiPrompt> {
+    let (deadline, mut events) = (tokio::time::Instant::now() + window, Vec::new());
+    while let Ok(event) = tokio::time::timeout_at(deadline, fx.observed.recv()).await {
+        let event = event.expect("observation channel open");
+        if event.tmux_session_name == fx.codex.tmux && event.prompt == prompt {
+            events.push(event);
+        }
+    }
+    events
+}
+
+async fn held(fx: &Fixture, inputs: usize) {
+    let tmux = fx.codex.tmux.clone();
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            dedupe::held_handoff_inputs_for_tests("codex", &tmux) == Some(inputs)
+        })
+        .await,
+        "the handoff never held {inputs} input(s)"
+    );
+}
+
+/// Only the echo reached Discord for the input, the Discord answer came from its own tail,
+/// and nothing opened a turn for the input; `row` is the Discord row still standing.
+async fn assert_echo_only(fx: &Fixture, row: Option<u64>, answers: &[String]) {
+    fx.polls(3).await;
+    assert_eq!(answers, [DISCORD_ANSWER.to_string()], "the handoff tail answers once");
+    assert_eq!(fx.sent(STEER).len(), 1, "the input is echoed once");
+    assert!(fx.sent(DISCORD_ANSWER).is_empty(), "no relay answer");
+    assert!(fx.sent("codex discord prompt 5845").is_empty(), "the Discord prompt is not relayed");
+    assert!(fx.pending_starts().is_empty(), "no deferred start");
+    assert_eq!(tail_starts(fx.codex.channel), 0, "no repair tail");
+    assert_eq!(fx.codex.row().map(|row| row.user_msg_id), row, "no row for the input");
+}
+
+/// The input's own owning event, relayed once its turn's records are scanned: its answer
+/// reaches its own anchor.
+async fn assert_own_answer(fx: &mut Fixture, event: ObservedTuiPrompt, turn: &str) {
+    assert!(!event.steer_echo, "the input owns its turn");
+    assert_eq!(event.native_turn_id.as_deref(), Some(turn));
+    let end = fx.append(&(opening_record(turn, STEER) + &item_completed_line_for(turn)));
+    fx.scanned_past(end).await;
+    super::super::super::super::relay_observed_prompt(&fx.shared, event).await;
+    let anchor = fx.codex.row().expect("the input's row").user_msg_id;
+    fx.append(&answer_for(turn, STEER_ANSWER));
+    fx.assert_answers_in_order(&[STEER_ANSWER], Some(1)).await;
+    assert_eq!(fx.anchor_of(STEER_ANSWER), anchor);
+    assert!(events_for(fx, STEER, Duration::from_secs(1)).await.is_empty(), "published once");
+}
+
+/// The handoff tail reads the Discord prompt and the input in its turn, no hook first.
+#[test]
+fn codex_input_read_after_the_discord_prompt_is_only_echoed() {
+    run(|root| {
+        Box::pin(async move {
+            let mut fx = Fixture::start(&root, 5_845_010, "AgentDesk-codex-5845-seq").await;
+            let t1 = turn(1);
+            discord_row(&fx, 5_845_011);
+            let guard = reserve(&fx);
+            let tail = start_handoff_tail(&fx);
+            fx.append(
+                &(opening_record(&t1, ORIGIN)
+                    + &user_record(STEER, &t1)
+                    + &answer_for(&t1, DISCORD_ANSWER)),
+            );
+            assert_eq!(fx.relay_echoes(STEER).await, 1, "one echo");
+            let answers = tail_answers(tail).await;
+            drop(guard);
+            assert_echo_only(&fx, Some(5_845_011), &answers).await;
+            fx.finish();
+        })
+    });
+}
+
+/// The input's hook lands before the handoff tail read the Discord prompt: it is held, then
+/// echoed once the Discord prompt's record names the same turn.
+#[test]
+fn codex_input_hooked_before_the_discord_prompt_is_only_echoed() {
+    run(|root| {
+        Box::pin(async move {
+            let mut fx = Fixture::start(&root, 5_845_020, "AgentDesk-codex-5845-rev").await;
+            let t1 = turn(1);
+            discord_row(&fx, 5_845_021);
+            let guard = reserve(&fx);
+            let tail = start_handoff_tail(&fx);
+            send_captured_hook(&fx, STEER, &t1);
+            held(&fx, 1).await;
+            assert!(events_for(&mut fx, STEER, Duration::from_millis(500)).await.is_empty());
+            fx.append(
+                &(opening_record(&t1, ORIGIN)
+                    + &user_record(STEER, &t1)
+                    + &answer_for(&t1, DISCORD_ANSWER)),
+            );
+            assert_eq!(fx.relay_echoes(STEER).await, 1, "one echo");
+            let answers = tail_answers(tail).await;
+            drop(guard);
+            assert_echo_only(&fx, Some(5_845_021), &answers).await;
+            fx.finish();
+        })
+    });
+}
+
+/// The held input names the next turn: once the Discord turn ends, it owns that turn and gets
+/// its own answer, and the Discord answer stays the handoff tail's.
+#[test]
+fn codex_input_hooked_into_the_next_turn_gets_its_own_answer() {
+    run(|root| {
+        Box::pin(async move {
+            let mut fx = Fixture::start(&root, 5_845_030, "AgentDesk-codex-5845-next").await;
+            let (t1, t2) = (turn(1), turn(2));
+            discord_row(&fx, 5_845_031);
+            let guard = reserve(&fx);
+            let tail = start_handoff_tail(&fx);
+            send_captured_hook(&fx, STEER, &t2);
+            held(&fx, 1).await;
+            fx.append(&(opening_record(&t1, ORIGIN) + &answer_for(&t1, DISCORD_ANSWER)));
+            // The next turn's records land only after the handoff tail returned.
+            let answers = tail_answers(tail).await;
+            assert_eq!(answers, [DISCORD_ANSWER.to_string()]);
+            drop(guard);
+            assert!(crate::services::discord::inflight::clear_inflight_state(
+                &ProviderKind::Codex,
+                fx.codex.channel.get()
+            ));
+            let mut events = events_for(&mut fx, STEER, Duration::from_secs(1)).await;
+            assert_eq!(events.len(), 1, "{events:?}");
+            assert_own_answer(&mut fx, events.remove(0), &t2).await;
+            assert!(fx.sent(DISCORD_ANSWER).is_empty(), "no relay answer for the Discord turn");
+            fx.finish();
+        })
+    });
+}
+
+/// The handoff ends without its prompt ever being read: the held input is published once.
+#[test]
+fn codex_input_held_by_an_unsubmitted_handoff_is_published_once() {
+    run(|root| {
+        Box::pin(async move {
+            let mut fx = Fixture::start(&root, 5_845_040, "AgentDesk-codex-5845-rel").await;
+            let guard = reserve(&fx);
+            send_captured_hook(&fx, STEER, &turn(1));
+            held(&fx, 1).await;
+            drop(guard);
+            let events = events_for(&mut fx, STEER, Duration::from_secs(1)).await;
+            assert_eq!(events.len(), 1, "{events:?}");
+            assert!(!events[0].steer_echo && events[0].source_event_id.is_none());
+            fx.finish();
+        })
+    });
+}
+
+/// The scan reads an earlier record of the Discord prompt's text: it binds nothing, so an input
+/// hooked next still waits for the submission's own record.
+#[test]
+fn codex_scan_of_an_earlier_discord_prompt_record_binds_nothing() {
+    run(|root| {
+        Box::pin(async move {
+            let mut fx = Fixture::start(&root, 5_845_090, "AgentDesk-codex-5845-stale").await;
+            let (t0, t1) = (turn(0), turn(1));
+            let guard = reserve(&fx);
+            let earlier = chrono::Utc::now() - chrono::TimeDelta::minutes(5);
+            let started = rollout_line(serde_json::json!({"type": "event_msg", "payload": {
+                "type": "task_started", "turn_id": t0}}));
+            let end = fx.append(
+                &(started + &user_record_at(ORIGIN, &t0, earlier) + &answer_for(&t0, "EARLIER_5845")),
+            );
+            fx.scanned_past(end).await;
+            send_captured_hook(&fx, STEER, &t1);
+            held(&fx, 1).await;
+            drop(guard);
+            let events = events_for(&mut fx, STEER, Duration::from_secs(1)).await;
+            assert_eq!(events.len(), 1, "{events:?}");
+            fx.finish();
+        })
+    });
+}
+
+/// After a Discord turn ended with no input, a later direct input the scan reads first owns
+/// its turn.
+#[test]
+fn codex_input_scanned_after_a_finished_discord_turn_owns_its_turn() {
+    run(|root| {
+        Box::pin(async move {
+            let mut fx = Fixture::start(&root, 5_845_050, "AgentDesk-codex-5845-scan").await;
+            let (t1, t2) = (turn(1), turn(2));
+            discord_row(&fx, 5_845_051);
+            let guard = reserve(&fx);
+            let tail = start_handoff_tail(&fx);
+            fx.append(&(opening_record(&t1, ORIGIN) + &answer_for(&t1, DISCORD_ANSWER)));
+            assert_eq!(tail_answers(tail).await, [DISCORD_ANSWER.to_string()]);
+            drop(guard);
+            assert!(crate::services::discord::inflight::clear_inflight_state(
+                &ProviderKind::Codex,
+                fx.codex.channel.get()
+            ));
+            let end = fx.append(&(opening_record(&t2, PROMPT3) + &item_completed_line_for(&t2)));
+            let mut events = events_for(&mut fx, PROMPT3, Duration::from_secs(5)).await;
+            assert_eq!(events.len(), 1, "{events:?}");
+            let event = events.remove(0);
+            assert!(!event.steer_echo);
+            assert_eq!(event.native_turn_id.as_deref(), Some(t2.as_str()));
+            fx.scanned_past(end).await;
+            super::super::super::super::relay_observed_prompt(&fx.shared, event).await;
+            let anchor = fx.codex.row().expect("the input's row").user_msg_id;
+            fx.append(&answer_for(&t2, RESPONSE3));
+            fx.assert_answers_in_order(&[RESPONSE3], None).await;
+            assert_eq!(fx.anchor_of(RESPONSE3), anchor);
+            assert!(fx.sent(DISCORD_ANSWER).is_empty());
+            fx.finish();
+        })
+    });
+}
+
+/// The production hook observer on its own thread, so a hook paused mid-decision leaves the
+/// idle loop running.
+struct HookThread {
+    hooks: tokio::sync::broadcast::Sender<HookEvent>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HookThread {
+    fn start() -> Self {
+        let (hooks, hook_rx) = tokio::sync::broadcast::channel(8);
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("hook runtime");
+            runtime.block_on(async move {
+                super::super::super::super::hook_observer::spawn_tui_prompt_relay_observer_inner(
+                    "codex".to_string(),
+                    hook_rx,
+                    |_| Box::pin(async {}),
+                    None,
+                );
+                let _ = stopped.await;
+            });
+        });
+        Self {
+            hooks,
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for HookThread {
+    fn drop(&mut self) {
+        let _ = self.stop.take().map(|stop| stop.send(()));
+        let _ = self.thread.take().map(std::thread::JoinHandle::join);
+    }
+}
+
+/// The scan reads a direct input while its hook already decided to own the turn but has not
+/// published yet: the hook's owning event is the only one, and the answer reaches its anchor.
+#[test]
+fn codex_input_scanned_between_its_hook_decision_and_publish_is_published_once() {
+    run(|root| {
+        Box::pin(async move {
+            let mut fx = Fixture::start(&root, 5_845_060, "AgentDesk-codex-5845-race").await;
+            let t1 = turn(1);
+            let (paused_tx, paused_rx) = std::sync::mpsc::channel::<()>();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let gate = std::sync::Mutex::new(Some((paused_tx, release_rx)));
+            let _probe = dedupe::probes::on_owning_publish(move |prompt| {
+                if prompt != PROMPT {
+                    return;
+                }
+                if let Some((paused, release)) = gate.lock().unwrap().take() {
+                    let _ = paused.send(());
+                    let _ = release.recv_timeout(Duration::from_secs(20));
+                }
+            });
+            let hook = HookThread::start();
+            send_captured_hook_on(&hook.hooks, &fx.codex.tmux, PROMPT, &t1);
+            assert!(
+                wait_for(Duration::from_secs(5), || paused_rx.try_recv().is_ok()).await,
+                "the hook never reached its publish"
+            );
+            let end = fx.append(&(opening(&t1, PROMPT) + &item_completed_line_for(&t1)));
+            fx.scanned_past(end).await;
+            release_tx.send(()).expect("hook waiting");
+            let mut events = events_for(&mut fx, PROMPT, Duration::from_secs(2)).await;
+            assert_eq!(events.len(), 1, "one owning event, no echo: {events:?}");
+            let event = events.remove(0);
+            assert!(!event.steer_echo);
+            super::super::super::super::relay_observed_prompt(&fx.shared, event).await;
+            let anchor = fx.codex.row().expect("the input's row").user_msg_id;
+            fx.append(&answer_for(&t1, RESPONSE));
+            fx.assert_answers_in_order(&[RESPONSE], Some(1)).await;
+            assert_eq!(fx.anchor_of(RESPONSE), anchor);
+            drop(hook);
+            fx.finish();
+        })
+    });
+}
+
+/// The process stops while a handoff holds an input; the restarted process restores the
+/// binding through the rehydration path, and the scan settles the input from the records.
+async fn restart_with_held_input(root: PathBuf, channel: u64, tmux: &str, same_turn: bool) {
+    let mut fx = Fixture::start(&root, channel, tmux).await;
+    let (t1, t2) = (turn(1), turn(2));
+    let steer_turn = if same_turn { &t1 } else { &t2 };
+    discord_row(&fx, channel + 1);
+    std::mem::forget(reserve(&fx));
+    send_captured_hook(&fx, STEER, steer_turn);
+    held(&fx, 1).await;
+    assert!(dedupe::durable_handoff_present_for_tests("codex", tmux));
+    let a_start = std::fs::metadata(&fx.codex.rollout).unwrap().len();
+    let mut records = opening_record(&t1, ORIGIN);
+    if same_turn {
+        records += &user_record(STEER, &t1);
+    }
+    records += &answer_for(&t1, DISCORD_ANSWER);
+    let eof = fx.append(&records);
+
+    // SIGTERM marks the rows and exits without dropping the guard; memory is lost, the mirror stays.
+    let mode = crate::services::discord::InflightRestartMode::DrainRestart;
+    let marked = inflight::mark_restart_mode_blocking(ProviderKind::Codex, mode).await;
+    assert_eq!(marked.marked, 1, "{marked:?}");
+    dedupe::reset_state_for_tests();
+    let restore = super::super::super::super::codex_tui_rehydrated_binding_from_rollout_path;
+    let binding = restore(tmux, &fx.codex.rollout, Some("s-5704".to_string())).expect("binding");
+    assert!(binding.last_offset > a_start && binding.last_offset < eof, "{}", binding.last_offset);
+    dedupe::register_tmux_runtime_binding(tmux, binding);
+    let plain = restore("AgentDesk-codex-5845-plain", &fx.codex.rollout, None).expect("binding");
+    assert_eq!(plain.last_offset, eof, "no held handoff keeps the end-of-file cursor");
+
+    // The Discord turn's recovery tail answers it; then its row ends.
+    let (sender, rx) = std::sync::mpsc::channel();
+    crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset(
+        &fx.codex.rollout,
+        a_start,
+        Some("s-5704"),
+        sender,
+        None,
+        || true,
+    )
+    .expect("recovery tail");
+    let answers = terminal_results(rx);
+    assert!(crate::services::discord::inflight::clear_inflight_state(
+        &ProviderKind::Codex,
+        fx.codex.channel.get()
+    ));
+    if same_turn {
+        assert_eq!(fx.relay_echoes(STEER).await, 1, "one echo");
+        assert_echo_only(&fx, None, &answers).await;
+    } else {
+        let mut events = events_for(&mut fx, STEER, Duration::from_secs(5)).await;
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(answers, [DISCORD_ANSWER.to_string()]);
+        assert_own_answer(&mut fx, events.remove(0), &t2).await;
+        assert!(fx.sent(DISCORD_ANSWER).is_empty());
+    }
+    assert!(!dedupe::durable_handoff_present_for_tests("codex", tmux));
+    fx.finish();
+}
+
+#[test]
+fn codex_input_held_across_a_restart_is_only_echoed() {
+    run(|root| {
+        Box::pin(restart_with_held_input(
+            root,
+            5_845_070,
+            "AgentDesk-codex-5845-restart",
+            true,
+        ))
+    });
+}
+
+#[test]
+fn codex_input_held_across_a_restart_for_the_next_turn_gets_its_own_answer() {
+    run(|root| {
+        Box::pin(restart_with_held_input(
+            root,
+            5_845_080,
+            "AgentDesk-codex-5845-restart-next",
+            false,
+        ))
+    });
+}

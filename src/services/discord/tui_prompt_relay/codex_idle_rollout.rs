@@ -95,6 +95,8 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
             while let Ok(tmux_session_name) = done_rx.try_recv() {
                 active_tails.remove(&tmux_session_name);
             }
+            // A reservation that never settled still relays what it held.
+            crate::services::tui_prompt_dedupe::drain_expired_handoffs();
 
             for (tmux_session_name, binding) in
                 crate::services::tui_prompt_dedupe::runtime_bindings_for_kind(
@@ -165,6 +167,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                     prompt: inflight.user_text.clone(),
                                     line_end_offset,
                                     entry_id: None,
+                                    evidence: Default::default(),
                                 }))
                             }
                             Ok(CodexTurnPrompt::NotYet) => Ok(None),
@@ -356,6 +359,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                         prompt,
                         line_end_offset,
                         entry_id,
+                        evidence,
                     } => {
                         let observed_at = chrono::Utc::now();
                         let own_turn = super::idle_transcript_scan::codex_native_turn_at(
@@ -363,11 +367,12 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                             line_end_offset,
                         );
                         let observation =
-                            crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at(
+                            crate::services::tui_prompt_dedupe::observe_codex_record_prompt_at(
                                 &tmux_session_name,
                                 &prompt,
                                 entry_id.as_deref(),
                                 own_turn.as_deref(),
+                                &evidence,
                                 observed_at,
                             );
                         tracing::info!(

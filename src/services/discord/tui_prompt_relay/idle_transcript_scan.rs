@@ -46,6 +46,8 @@ pub(super) enum CodexIdleRolloutScan {
         prompt: String,
         line_end_offset: u64,
         entry_id: Option<String>,
+        /// The turn and creation time the record names itself.
+        evidence: crate::services::tui_prompt_dedupe::RecordEvidence,
     },
 }
 
@@ -362,8 +364,8 @@ pub(super) fn scan_codex_idle_rollout_for_prompt(
             }
             continue;
         };
-        if let Some((prompt, entry_id)) =
-            crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_entry_id(
+        if let Some((prompt, entry_id, evidence)) =
+            crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_evidence(
                 &json,
             )
         {
@@ -371,6 +373,7 @@ pub(super) fn scan_codex_idle_rollout_for_prompt(
                 prompt,
                 line_end_offset: offset,
                 entry_id,
+                evidence,
             });
         }
     }
@@ -407,8 +410,8 @@ pub(super) fn scan_codex_idle_rollout_for_latest_prompt_matching(
             }
             continue;
         };
-        if let Some((prompt, entry_id)) =
-            crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_entry_id(
+        if let Some((prompt, entry_id, evidence)) =
+            crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_evidence(
                 &json,
             )
             && prompt.trim() == target
@@ -417,6 +420,7 @@ pub(super) fn scan_codex_idle_rollout_for_latest_prompt_matching(
                 prompt,
                 line_end_offset: offset,
                 entry_id,
+                evidence,
             });
         } else if !line.ends_with('\n') {
             return Ok(latest);
@@ -547,6 +551,7 @@ mod tests {
                 prompt: "direct prompt".to_string(),
                 line_end_offset: (before.len() + prompt.len()) as u64,
                 entry_id: None,
+                evidence: Default::default(),
             }
         );
         assert_eq!(
@@ -588,6 +593,7 @@ mod tests {
                 prompt: "after shrink".to_string(),
                 line_end_offset: prompt.len() as u64,
                 entry_id: None,
+                evidence: Default::default(),
             }
         );
     }
@@ -612,6 +618,7 @@ mod tests {
                     prompt,
                     line_end_offset,
                     entry_id,
+                    ..
                 } => (prompt, line_end_offset, entry_id),
                 other => panic!("expected Codex prompt, got {other:?}"),
             };
@@ -672,6 +679,7 @@ mod tests {
                 prompt: "same prompt".to_string(),
                 line_end_offset: (first.len() + middle.len() + second.len()) as u64,
                 entry_id: Some("second".to_string()),
+                evidence: Default::default(),
             })
         );
     }

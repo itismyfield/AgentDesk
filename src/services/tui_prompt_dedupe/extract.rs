@@ -44,6 +44,14 @@ pub fn extract_codex_rollout_user_prompt_with_entry_id(
     Some((prompt, entry_id))
 }
 
+/// The user record's prompt, entry id and the turn and creation time it names itself.
+pub fn extract_codex_rollout_user_prompt_with_evidence(
+    json: &Value,
+) -> Option<(String, Option<String>, RecordEvidence)> {
+    let (prompt, entry_id) = extract_codex_rollout_user_prompt_with_entry_id(json)?;
+    Some((prompt, entry_id, RecordEvidence::from_record(json)))
+}
+
 /// Codex records a `!cmd` run as a user message whose every item is the shell's; typed text
 /// with the same body names `user.text` (or nothing, on older writers) and stays an input.
 fn is_codex_shell_command_record(payload: &Value) -> bool {
@@ -285,6 +293,8 @@ pub enum PromptObservation {
     InjectedSteer,
     /// An injected input seen without its native turn; an observer naming the turn settles it.
     InjectedDeferred,
+    /// Seen before the reserved Discord handoff named its turn; held until it does or ends.
+    ParkedForHandoff,
     Ignored,
 }
 
@@ -301,6 +311,7 @@ pub(crate) fn resolve_tmux_session_name(
 }
 
 /// Whether `native_turn` is the turn the latest published Codex input opened.
+#[cfg(test)]
 pub(super) fn native_turn_is_open(
     provider: &str,
     tmux_session_name: &str,
@@ -308,10 +319,7 @@ pub(super) fn native_turn_is_open(
 ) -> bool {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
-    state
-        .native_turn_by_tmux
-        .get(&PromptKey::new(provider, tmux_session_name))
-        .is_some_and(|open| open.value.turn == native_turn)
+    state.native_turn_open(provider, tmux_session_name, native_turn)
 }
 
 /// Records `native_turn` as opened by observation `observed_by` and answered by `owner`.
@@ -319,20 +327,10 @@ pub(super) fn open_native_turn(
     provider: &str,
     tmux_session_name: &str,
     native_turn: &str,
-    (observed_by, owner): (u64, NativeTurnOwner),
+    opened: (u64, NativeTurnOwner),
 ) {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.native_turn_by_tmux.insert(
-        PromptKey::new(provider, tmux_session_name),
-        TimedValue {
-            value: NativeTurnSlot {
-                turn: native_turn.to_string(),
-                observed_by,
-                owner,
-            },
-            recorded_at: Instant::now(),
-        },
-    );
+    state.open_native_turn_slot(provider, tmux_session_name, native_turn, opened);
 }
 
 /// A row now answers the native turn `prompt` opened.
@@ -405,23 +403,7 @@ pub(super) fn take_matching_pending_prompt(
 ) -> bool {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
-    let key = PromptKey::new(provider, tmux_session_name);
-    let Some(queue) = state.pending_by_tmux.get_mut(&key) else {
-        return false;
-    };
-    let matched = queue
-        .iter()
-        .position(|pending| prompts_match(&pending.value, prompt));
-    if let Some(index) = matched {
-        queue.remove(index);
-    }
-    if queue.is_empty() {
-        state.pending_by_tmux.remove(&key);
-    }
-    if matched.is_some() {
-        state.record_recent_observed_prompt(provider, tmux_session_name, prompt);
-    }
-    matched.is_some()
+    state.take_matching_pending(provider, tmux_session_name, prompt)
 }
 
 pub(super) fn take_or_record_recent_observed_prompt(
@@ -431,16 +413,7 @@ pub(super) fn take_or_record_recent_observed_prompt(
 ) -> bool {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
-    let key = PromptKey::new(provider, tmux_session_name);
-    let queue = state.recent_observed_by_tmux.entry(key).or_default();
-    if queue
-        .iter()
-        .any(|observed| prompts_match(&observed.value, prompt))
-    {
-        return true;
-    }
-    state.record_recent_observed_prompt(provider, tmux_session_name, prompt);
-    false
+    state.take_or_record_recent(provider, tmux_session_name, prompt)
 }
 
 /// #3540: `true` iff `entry_id` is in the already-relayed ledger for this
@@ -464,19 +437,86 @@ pub(super) fn relayed_entry_id_already_seen(
 pub(super) fn record_relayed_entry_id(provider: &str, tmux_session_name: &str, entry_id: &str) {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
-    let queue = state
-        .relayed_entry_ids_by_tmux
-        .entry(PromptKey::new(provider, tmux_session_name))
-        .or_default();
-    if queue.iter().any(|seen| seen.value == entry_id) {
-        return;
+    state.record_relayed_entry(provider, tmux_session_name, entry_id);
+}
+
+/// The ledger steps an observation decides under one STATE lock.
+impl TuiPromptDedupeState {
+    pub(super) fn native_turn_open(&self, provider: &str, tmux: &str, native_turn: &str) -> bool {
+        self.native_turn_by_tmux
+            .get(&PromptKey::new(provider, tmux))
+            .is_some_and(|open| open.value.turn == native_turn)
     }
-    queue.push_back(TimedValue {
-        value: entry_id.to_string(),
-        recorded_at: Instant::now(),
-    });
-    while queue.len() > RELAYED_ENTRY_ID_RING_CAP {
-        queue.pop_front();
+
+    pub(super) fn open_native_turn_slot(
+        &mut self,
+        provider: &str,
+        tmux: &str,
+        native_turn: &str,
+        (observed_by, owner): (u64, NativeTurnOwner),
+    ) {
+        let slot = NativeTurnSlot {
+            turn: native_turn.to_string(),
+            observed_by,
+            owner,
+        };
+        let recorded_at = Instant::now();
+        let key = PromptKey::new(provider, tmux);
+        let value = TimedValue {
+            value: slot,
+            recorded_at,
+        };
+        self.native_turn_by_tmux.insert(key, value);
+    }
+
+    pub(super) fn take_matching_pending(&mut self, provider: &str, tmux: &str, prompt: &str) -> bool {
+        let key = PromptKey::new(provider, tmux);
+        let Some(queue) = self.pending_by_tmux.get_mut(&key) else {
+            return false;
+        };
+        let matched = queue
+            .iter()
+            .position(|pending| prompts_match(&pending.value, prompt));
+        if let Some(index) = matched {
+            queue.remove(index);
+        }
+        if queue.is_empty() {
+            self.pending_by_tmux.remove(&key);
+        }
+        if matched.is_some() {
+            self.record_recent_observed_prompt(provider, tmux, prompt);
+        }
+        matched.is_some()
+    }
+
+    pub(super) fn take_or_record_recent(&mut self, provider: &str, tmux: &str, prompt: &str) -> bool {
+        let key = PromptKey::new(provider, tmux);
+        let queue = self.recent_observed_by_tmux.entry(key).or_default();
+        if queue
+            .iter()
+            .any(|observed| prompts_match(&observed.value, prompt))
+        {
+            return true;
+        }
+        self.record_recent_observed_prompt(provider, tmux, prompt);
+        false
+    }
+
+    pub(super) fn record_relayed_entry(&mut self, provider: &str, tmux: &str, entry_id: &str) {
+        let queue = self
+            .relayed_entry_ids_by_tmux
+            .entry(PromptKey::new(provider, tmux))
+            .or_default();
+        if queue.iter().any(|seen| seen.value == entry_id) {
+            return;
+        }
+        queue.push_back(TimedValue {
+            value: entry_id.to_string(),
+            recorded_at: Instant::now(),
+        });
+        while queue.len() > RELAYED_ENTRY_ID_RING_CAP {
+            queue.pop_front();
+        }
     }
 }
 
