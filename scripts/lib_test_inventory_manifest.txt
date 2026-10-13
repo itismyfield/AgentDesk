@@ -10281,6 +10281,7 @@ services::discord::turn_presence::lifecycle::tests::b2_retire_then_prune_removes
 services::discord::turn_presence::lifecycle::tests::b2_suspend_refuses_admission_and_resume_is_fresh_unknown
 services::discord::turn_presence::lifecycle::tests::b2_ticket_capture_and_invalidation_serialize_in_both_orders
 services::discord::turn_presence::lifecycle::tests::b2b1_fence_withdraws_only_existing_registrations_and_never_revives_retired_ones
+services::discord::turn_presence::strict_runtime::tests::b2b3_a_client_without_its_own_bot_id_starts_and_installs_nothing
 services::discord::turn_presence::supervisor::strict_tests::b2b3_a_boot_owns_its_runtime_before_the_first_poll_and_a_restart_closes_the_first
 services::discord::turn_presence::supervisor::strict_tests::b2b3_a_home_change_clears_the_real_presence_and_only_a_fresh_reading_types_again
 services::discord::turn_presence::supervisor::strict_tests::b2b3_a_refused_approval_polls_no_request_and_is_no_send_error
