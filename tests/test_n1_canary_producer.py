@@ -141,6 +141,39 @@ class ProducerCLI(unittest.TestCase):
         self.assertEqual(recorded.read_text().splitlines(), ["-m unittest tests.test_n1_canary_producer",
                                                            "tests/run_n1_canary_producer_mutations.py"])
 
+    def test_mutation_runner_noop_is_a_survivor_with_green_control(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from unittest.mock import patch
+        from tests import run_n1_canary_producer_mutations as runner
+        before = '"$PYTHON" -m unittest tests.test_n1_canary_producer'
+        case = ("producer-ci-noop", "ci-script-checks.sh", before, before,
+                "test_required_guards_producer_recipe_executes_tests_and_mutants")
+        output = StringIO()
+        with patch.object(runner, "MUTANTS", [case]), redirect_stdout(output):
+            survived = runner.main()
+        self.assertTrue(survived, output.getvalue())
+        self.assertIn("control GREEN", output.getvalue())
+        self.assertIn("producer-ci-noop: SURVIVED/INVALID", output.getvalue())
+
+    def test_mutation_runner_rejects_a_broken_control(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from unittest.mock import patch
+        from tests import run_n1_canary_producer_mutations as runner
+        before = '"$PYTHON" -m unittest tests.test_n1_canary_producer'
+        case = ("broken-ci-control", "ci-script-checks.sh", before, before,
+                "test_required_guards_producer_recipe_executes_tests_and_mutants")
+        copy_file = runner.shutil.copy2
+
+        def omit_runner(source, destination):
+            if source.name != "run_n1_canary_producer_mutations.py":
+                return copy_file(source, destination)
+
+        with patch.object(runner, "MUTANTS", [case]), patch.object(runner.shutil, "copy2", omit_runner), redirect_stdout(StringIO()):
+            with self.assertRaisesRegex(AssertionError, "control not GREEN"):
+                runner.main()
+
     def test_t10_unknown_shape_source_and_logical_scope_are_strict(self):
         self.append_unknown([self.witness()])
         original = copy.deepcopy(self.values["log"][-1])
@@ -166,6 +199,32 @@ class ProducerCLI(unittest.TestCase):
         self.assertIn("unknown_outcome_present", result["reasons"])
         self.assertEqual(result["observation"]["unknown_outcome_events"], 0)
         self.assertEqual(result["observation"]["unknown_witnesses_distinct"], 1)
+
+    def test_prebaseline_unknown_without_witness_is_incomplete(self):
+        self.run_cli(0)
+        for row in self.values["log"]:
+            row["seq"] += 1
+        self.values["log"][0]["confirmation_window_start"]["seq"] = 1
+        self.manifest["observation"].update(seq_start=2, confirmation_seq=2)
+        self.append_log_rows([])
+        for name in ("baseline", "end_snapshot"):
+            self.values[name]["counters"]["unknown_outcome_events"] = 1
+            self.values[name]["first_confirmation"]["seq"] = 1
+        self.values["baseline"]["seq_high_water"] = 2
+        missing = self.run_cli(2)
+        self.assertIn("unknown_history_incomplete", missing["reasons"])
+        self.assertTrue(missing["observation"]["sequence_complete"])
+        self.assertIsNone(missing["observation"]["unknown_outcome_events"])
+        self.assertIsNone(missing["observation"]["unknown_witnesses_distinct"])
+        self.assertEqual(missing["failures"], [])
+        self.assertIn("unknown_outcome_unproduced", self.run_cli(2, supported=False)["reasons"])
+        self.values["log"].insert(0, self.witness(seq=1, observed_at_us=5, witness_offset=0))
+        self.manifest["observation"]["seq_start"] = 1
+        restored = self.run_cli(2)
+        self.assertNotIn("unknown_history_incomplete", restored["reasons"])
+        self.assertIn("unknown_outcome_present", restored["reasons"])
+        self.assertEqual(restored["observation"]["unknown_outcome_events"], 0)
+        self.assertEqual(restored["observation"]["unknown_witnesses_distinct"], 1)
 
     def test_t10_named_unknown_conflicts_with_completed_not_resolved_by_it(self):
         logical = copy.deepcopy(self.values["log"][1]["logical_turn_key"])

@@ -13,6 +13,8 @@ def unknown_checks(manifest, values):
     reasons, witnesses = [], set()
     if end < before or end - before != raw:
         reasons.append("unknown_counter_mismatch")
+    if before != len(rows) - raw:
+        reasons.append("unknown_history_incomplete")
     keys = {"event", "schema_version", "boot_id", "channel_id", "provider", "seq", "observed_at_us",
             "source_id", "witness_offset", "logical_turn_key", "reason"}
     logical_spec = {"provider": text, "channel_id": uint, "provider_session_id": text, "native_turn_id": text}

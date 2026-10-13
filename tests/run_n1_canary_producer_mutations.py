@@ -18,6 +18,8 @@ MUTANTS = [
      "test_t9_unapproved_pair_or_capability_never_becomes_zero"),
     ("unknown-log-counter-comparison-removed", "outcomes.py", 'if end < before or end - before != raw:', 'if False:',
      "test_t10_counter_only_missing_log_and_regression_are_unknown"),
+    ("prebaseline-unknown-history-ignored", "outcomes.py", 'if before != len(rows) - raw:', 'if False:',
+     "test_prebaseline_unknown_without_witness_is_incomplete"),
     ("unknown-witness-reread-counted-twice", "outcomes.py", 'unknown_witnesses_distinct=len(witnesses)', 'unknown_witnesses_distinct=len(rows)',
      "test_t10_unknown_reread_is_one_witness_two_raw_events"),
     ("resume-forgets-unknown", "outcomes.py", 'witnesses.add(witness)',
@@ -36,11 +38,16 @@ MUTANTS = [
      "test_t12_denied_confirmation_capture_stays_unknown"),
     ("producer-ci-disconnected", "ci-script-checks.sh", '"$PYTHON" -m unittest tests.test_n1_canary_producer', 'true',
      "test_required_guards_producer_recipe_executes_tests_and_mutants"),
+    ("runner-self-copy-removed", "run_n1_canary_producer_mutations.py", '*(ROOT / "tests").glob("run_n1_canary_*mutations.py")', '*[]',
+     "test_mutation_runner_noop_is_a_survivor_with_green_control"),
+    ("runner-broken-control-accepted", "run_n1_canary_producer_mutations.py", 'assert (control.returncode == 0', 'assert (True or control.returncode == 0',
+     "test_mutation_runner_rejects_a_broken_control"),
 ]
 
 
 def main():
     files = [ROOT / "scripts/n1_turn_canary_oracle.py", ROOT / "scripts/ci-script-checks.sh",
+             Path(__file__).resolve(), *sorted((ROOT / "tests").glob("test_n1_canary_*.py")),
              *sorted((ROOT / "scripts/n1_canary").glob("*.*"))]
     original = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
     survived = []
@@ -52,15 +59,22 @@ def main():
                 shutil.copy2(ROOT / "scripts" / name, dest / "scripts" / name)
             (dest / "tests").mkdir()
             (dest / "tests/__init__.py").write_text("")
-            for p in (ROOT / "tests").glob("test_n1_canary_*.py"):
+            for p in [*(ROOT / "tests").glob("test_n1_canary_*.py"), *(ROOT / "tests").glob("run_n1_canary_*mutations.py")]:
                 shutil.copy2(p, dest / "tests" / p.name)
             for fixture in ("n1_canary_o1", "n1_canary_o2"):
                 shutil.copytree(ROOT / "tests/fixtures" / fixture, dest / "tests/fixtures" / fixture)
-            path = dest / "scripts" / filename if filename in {"ci-script-checks.sh", "n1_turn_canary_oracle.py"} else dest / "scripts/n1_canary" / filename
+            path = (dest / "tests" / filename if filename.startswith("run_n1_canary_") else
+                    dest / "scripts" / filename if filename in {"ci-script-checks.sh", "n1_turn_canary_oracle.py"}
+                    else dest / "scripts/n1_canary" / filename)
             source = path.read_text()
             assert before in source, f"missing mutant: {label}"
-            path.write_text(source.replace(before, after, 1))
-            run = subprocess.run([sys.executable, "-m", "unittest", "-v", TEST + test], cwd=dest, capture_output=True, text=True, timeout=40)
+            command = [sys.executable, "-m", "unittest", "-v", TEST + test]
+            control = subprocess.run(command, cwd=dest, capture_output=True, text=True, timeout=40)
+            assert (control.returncode == 0 and re.search(r"^Ran 1 test in ", control.stderr, re.M)
+                    and control.stderr.rstrip().endswith("OK")), f"{label}: control not GREEN\n{control.stderr}"
+            print(f"{label}: control GREEN (1 test)", flush=True)
+            path.write_text(after.join(source.rsplit(before, 1)))
+            run = subprocess.run(command, cwd=dest, capture_output=True, text=True, timeout=40)
             red = run.returncode == 1 and "FAIL:" in run.stderr and "AssertionError" in run.stderr and not re.search(r"^ERROR: test_", run.stderr, re.M)
             print(f"{label}: {'RED (assertion)' if red else 'SURVIVED/INVALID'}", flush=True)
             print(run.stderr, flush=True)
