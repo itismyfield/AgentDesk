@@ -175,6 +175,12 @@ impl RepostHook<RealWriter> for Reached {
     fn original(&mut self, serial: u64, piece: PieceRecord) -> Turned<'_, OriginalGate> {
         self.inner.original(serial, piece)
     }
+
+    fn receipts(
+        &mut self,
+    ) -> Turned<'_, crate::services::tui_o::repost::projection::ReceiptOverlay> {
+        self.inner.receipts()
+    }
 }
 
 struct RealHost {
@@ -522,6 +528,14 @@ impl RepostHook<RealWriter> for SendOnce {
     fn original(&mut self, _: u64, _: PieceRecord) -> Turned<'_, OriginalGate> {
         Box::pin(std::future::ready(OriginalGate::Admitted))
     }
+
+    fn receipts(
+        &mut self,
+    ) -> Turned<'_, crate::services::tui_o::repost::projection::ReceiptOverlay> {
+        Box::pin(std::future::ready(
+            crate::services::tui_o::repost::projection::ReceiptOverlay::Disabled,
+        ))
+    }
 }
 
 #[tokio::test]
@@ -717,6 +731,12 @@ impl RepostHook<RealWriter> for WireTurn {
     }
     fn original(&mut self, serial: u64, piece: PieceRecord) -> Turned<'_, OriginalGate> {
         self.inner.original(serial, piece)
+    }
+
+    fn receipts(
+        &mut self,
+    ) -> Turned<'_, crate::services::tui_o::repost::projection::ReceiptOverlay> {
+        self.inner.receipts()
     }
 }
 

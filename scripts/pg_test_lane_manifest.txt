@@ -164,6 +164,7 @@ src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs
 src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs
 src/services/discord/recovery_engine/restore_inflight/scoped_policy_receipt_tests.rs
 src/services/discord/recovery_engine/restore_inflight/scoped_restore.rs
+src/services/discord/recovery_engine/restore_inflight/scoped_restore_claim_tests.rs
 src/services/discord/recovery_engine/routing_orphan_tests.rs
 src/services/discord/relay_recovery/tests/host_deferred.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
@@ -291,6 +292,7 @@ src/services/tui_o/repost/allowlist_host_tests.rs
 src/services/tui_o/repost/allowlist_runner_tests.rs
 src/services/tui_o/repost/allowlist_writer_tests.rs
 src/services/tui_o/repost/backlog_tests.rs
+src/services/tui_o/repost/projection_tests.rs
 src/services/tui_o/repost/runner_activation_tests.rs
 src/services/tui_o/repost/runner_tests.rs
 src/services/tui_o/repost/runtime_host_activation_tests.rs
@@ -478,6 +480,7 @@ services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
 services::discord::recovery_engine::restore_inflight::replay_hold_tests
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
+services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests
 services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests
 services::discord::recovery_engine::routing_orphan::host_guard_tests
 services::discord::relay_recovery::apply::host_deferred_tests
@@ -617,6 +620,7 @@ services::tui_o::repost::runner::activation_tests::backlog_tests
 services::tui_o::repost::runner_tests
 services::tui_o::writer::tests::actor::host_start::deferred::pg
 services::tui_o::writer::tests::actor::host_start::late_delegated
+services::tui_o::writer::tests::actor::host_start::receipt_projection
 services::tui_o::writer::tests::actor::repost_turn
 services::tui_o::writer::tests::actor::repost_turn::activation
 services::tui_o::writer::tests::actor::repost_turn::allowlist
@@ -1602,7 +1606,7 @@ services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_projected_read_errors_keep_bytes_until_authority_recovers_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_read_error_is_not_a_durable_hold_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_retains_ambiguous_or_invalid_frozen_debt_pg
-services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_fresh_progress_can_transfer_only_pending_responsibility_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_fresh_progress_cannot_inherit_pending_responsibility_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_handoff_checks_actual_actor_before_feedback_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_handoff_rechecks_exact_row_before_feedback_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_handoff_rechecks_generation_before_feedback_pg
@@ -1620,6 +1624,10 @@ services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_resume_hydrate_releases_lock_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_resume_snapshot_change_is_preserved_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_uncertain_output_is_preserved_without_admission_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests::s3b_driver_waits_for_its_exact_ready_confirm_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests::s3b_handoff_refuses_every_inexact_proof_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests::s3b_install_cancelled_around_its_claim_commit_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests::s3b_install_writes_queue_and_debt_in_one_snapshot_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests::s3act_b3b3_g1_current_generation_receipt_is_held_without_actor_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests::s3act_b3b3_g2_unverified_replay_authority_holds_the_receipt_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests::s3act_b3b3_g3_receipt_free_rows_keep_their_class_pg
@@ -2311,6 +2319,13 @@ services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_de
 services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_foreign_body_gate_and_host_share_candidate
 services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_home_body_before_first_decision_preserves_reservation
 services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_off_foreign_standby_legacy_body_releases_before_host_can_adopt
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_dormant_host_positive_controls_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_legacy_ledger_receipt_overlay_is_read_only_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipt_overlay_judges_the_recovered_writer_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipted_approval_is_never_owed_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_remote_receipt_overrides_local_serial_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_shared_receipt_settles_local_authorized_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_startup_blocked_reconciles_before_actor_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_actor_stop_during_429_wait_prevents_retry_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_actor_stop_receiver_reaches_a_running_repost_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_channel_turn_binds_switch_before_real_repost_pg

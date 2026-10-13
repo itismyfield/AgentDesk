@@ -1338,7 +1338,8 @@ src/
 │   │   │   │   ├── replay_hold.rs
 │   │   │   │   ├── replay_hold_tests.rs
 │   │   │   │   ├── scoped_policy_receipt_tests.rs
-│   │   │   │   └── scoped_restore.rs
+│   │   │   │   ├── scoped_restore.rs
+│   │   │   │   └── scoped_restore_claim_tests.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
@@ -1826,6 +1827,7 @@ src/
 │   │   │   │   ├── herdr_terminate_route_e2e_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── n1a_turn_mode_tests.rs
+│   │   │   │   ├── pending_admission_e2e_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
 │   │   │   │   ├── queue_recovery_e2e.rs
 │   │   │   │   ├── reconcile_stale_turn_e2e_tests.rs
@@ -2671,8 +2673,11 @@ src/
 │   │   │   ├── identity.rs
 │   │   │   ├── matcher.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── pg_statements_tests.rs
 │   │   │   ├── probe.rs
 │   │   │   ├── probe_tests.rs
+│   │   │   ├── projection.rs
+│   │   │   ├── projection_tests.rs
 │   │   │   ├── provenance.rs
 │   │   │   ├── rollback_rehearsal_tests.rs
 │   │   │   ├── runner.rs
@@ -2916,6 +2921,8 @@ src/
 │   │   ├── registry_purge.rs
 │   │   ├── remint_fence.rs
 │   │   ├── reply_results.rs
+│   │   ├── scoped_claim.rs
+│   │   ├── scoped_claim_tests.rs
 │   │   ├── source_generation.rs
 │   │   └── turn_finished_signal.rs
 │   ├── writer_protocol/
