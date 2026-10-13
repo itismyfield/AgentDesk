@@ -11,9 +11,8 @@
 //! Runtime bootstrap starts the loop in observe/enforce mode when PostgreSQL is available.
 //!
 //! Critical invariants enforced here:
-//!   - Workers MUST abort the turn before spawning when
-//!     `mark_accepted` returns `Ok(false)` — that means the leader's
-//!     claim, channel home, replay authority, or stamped owner generation no longer admits it.
+//!   - Workers MUST abort before spawning when `mark_accepted` returns `Ok(false)`:
+//!     the claim, channel home, replay authority, or stamped owner generation no longer admits it.
 //!   - Once a row reaches `accepted`, auto-retry is forbidden
 //!     (round-2 P0 #2). Post-accept failures call `mark_failed_post_accept`
 //!     and the operator alert path takes over.
@@ -22,7 +21,6 @@ use crate::db::intake_outbox::{
     IntakeOutboxRow, claim_pending_for_target_except, mark_accepted, mark_done,
     mark_failed_post_accept, mark_failed_pre_accept, mark_spawned, return_claimed_to_pending,
 };
-
 use crate::db::intake_outbox_dispatch_stamp::observe_status;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
 #[cfg(not(test))]
