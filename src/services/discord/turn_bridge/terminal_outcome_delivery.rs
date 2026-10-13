@@ -796,9 +796,9 @@ pub(super) async fn run_terminal_outcome_delivery(
                 transport_error,
                 recovery_retry,
                 resume_failure_detected,
+                busy_attempt_cost,
                 claude_tui_followup_pre_submit_requeue_candidate,
                 claude_tui_busy_requeue_pending,
-                busy_attempt_cost,
                 tui_error_classification,
                 #[cfg(unix)]
                 bridge_tui_gate_outcome_early,
