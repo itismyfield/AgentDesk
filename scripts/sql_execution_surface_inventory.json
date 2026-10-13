@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "ad1007b0686187ff15667f73ecd085dc77eec2ca",
+  "measured_at_sha": "907a258933c746060b6b67f91a4544c7690aa22f",
   "records": [
     {
       "root": "migrations/postgres",
@@ -28905,10 +28905,46 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:13fffa1c3e6c1c9b3a5e0cad763f5f3c674dcf470423ccfe6feff74f6f121d88"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:cf9319b517f3cfb30cb579713e98cfca213c46de4eee8259bcdb0c44766d3c26"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a56e390ef93fd30b07a0f1bee3ed8c970dd073400c78353823b9562ceeb0fe73"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs",
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:dfe17f1b4b504756a5c1187ebc38a56107d5736cc9045b60fc4404e23bfccecd"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:d7f902bf9d874f5081d390b168a11bed7939c8a9eae64737de49a1035f2c7e46"
     },
     {
       "root": "src",
