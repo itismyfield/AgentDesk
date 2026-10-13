@@ -3184,7 +3184,10 @@ services::discord::bot_role::tests::utility_bot_role_metadata_is_exhaustive
 services::discord::busy_followup_retry_store::policy::tests::a_latched_cap_survives_time_and_later_charges
 services::discord::busy_followup_retry_store::policy::tests::an_unreadable_source_holds_the_queue_until_it_reads_as_parked
 services::discord::busy_followup_retry_store::policy::tests::checked_restore_keeps_legacy_meaning_and_refuses_what_it_cannot_read
+services::discord::busy_followup_retry_store::policy::tests::classification_refuses_views_and_layers_it_cannot_vouch_for
 services::discord::busy_followup_retry_store::policy::tests::draft_release_clears_count_cost_and_latch_but_keeps_the_notice
+services::discord::busy_followup_retry_store::policy::tests::each_refusal_keeps_its_reason_and_absence_stays_ready
+services::discord::busy_followup_retry_store::policy::tests::latch_fields_restore_only_when_all_or_none_are_written
 services::discord::busy_followup_retry_store::policy::tests::legacy_writer_bytes_and_reader_results_are_unchanged
 services::discord::busy_followup_retry_store::policy::tests::queue_wait_costs_nothing_and_only_real_attempts_reach_the_cap
 services::discord::busy_followup_retry_store::policy::tests::source_precedence_and_queue_selection_follow_the_written_tables

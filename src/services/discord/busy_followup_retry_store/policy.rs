@@ -12,12 +12,15 @@ use crate::services::provider::ProviderKind;
 
 use super::{MAX_BUSY_RETRY_COUNT, MAX_BUSY_RETRY_ELAPSED, STORE_WRITE_LOCK};
 
+/// Fields the latch format adds; a stored record carries all of them or none.
+const LATCH_FIELDS: [&str; 3] = ["active_retry_ms", "capped", "notice_bound"];
+
 fn notice_bound_by_default() -> bool {
     true
 }
 
 /// One input's retry budget: the legacy fields plus the summed cost of real attempts and a cap
-/// latch. Legacy files carry none of the new fields; unknown fields are refused.
+/// latch. Legacy files carry none of the new fields; partial or unknown fields are refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RetryBudget {
@@ -86,20 +89,56 @@ impl RetryBudget {
     }
 }
 
-/// Why stored bytes are not a budget this build can trust.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum DecodeError {
-    Malformed(String),
-    ZeroNotice,
+/// Why an input's retry state cannot be trusted. Consumers branch on this, never on the detail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UnavailableReason {
+    RootUnavailable,
+    ReadFailed,
+    MalformedRecord,
+    /// Some latch fields present, or one written as null.
+    IncompleteRecord,
+    InvalidNotice,
+    /// The reads do not cover exactly the input's identity.
+    IncompleteView,
 }
 
-/// Restores a budget from stored bytes without guessing: truncated, unknown or incomplete
-/// records are errors, never an empty budget.
-pub(super) fn decode_checked(bytes: &[u8]) -> Result<RetryBudget, DecodeError> {
-    let budget: RetryBudget =
-        serde_json::from_slice(bytes).map_err(|error| DecodeError::Malformed(error.to_string()))?;
+/// A refused read: the coded reason and a detail kept for diagnostics only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ReadRefusal {
+    pub reason: UnavailableReason,
+    pub detail: String,
+}
+
+impl ReadRefusal {
+    fn new(reason: UnavailableReason, detail: impl ToString) -> Self {
+        Self {
+            reason,
+            detail: detail.to_string(),
+        }
+    }
+}
+
+/// Restores a budget from stored bytes without guessing: truncated, partial, unknown or
+/// incomplete records are refused, never read as an empty budget.
+pub(super) fn decode_checked(bytes: &[u8]) -> Result<RetryBudget, ReadRefusal> {
+    use UnavailableReason::{IncompleteRecord, InvalidNotice, MalformedRecord};
+    let malformed = |error: serde_json::Error| ReadRefusal::new(MalformedRecord, error);
+    let fields: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(bytes).map_err(malformed)?;
+    let named = LATCH_FIELDS
+        .iter()
+        .filter(|name| fields.contains_key(**name));
+    let written = named
+        .clone()
+        .filter(|name| !fields[**name].is_null())
+        .count();
+    if named.count() != written || (written != 0 && written != LATCH_FIELDS.len()) {
+        let detail = format!("{written} of {} latch fields written", LATCH_FIELDS.len());
+        return Err(ReadRefusal::new(IncompleteRecord, detail));
+    }
+    let budget: RetryBudget = serde_json::from_slice(bytes).map_err(malformed)?;
     if budget.notice_message_id == 0 {
-        return Err(DecodeError::ZeroNotice);
+        return Err(ReadRefusal::new(InvalidNotice, "notice_message_id is 0"));
     }
     Ok(budget)
 }
@@ -109,7 +148,7 @@ pub(super) fn decode_checked(bytes: &[u8]) -> Result<RetryBudget, DecodeError> {
 pub(super) enum SourceRead {
     Absent,
     Budget(RetryBudget),
-    Unreadable,
+    Unreadable(ReadRefusal),
 }
 
 fn read_source_in_root(
@@ -120,38 +159,12 @@ fn read_source_in_root(
 ) -> SourceRead {
     let path = super::input_file_path_in_root(root, provider, channel_id, user_msg_id);
     match fs::read(path) {
-        Ok(bytes) => decode_checked(&bytes).map_or(SourceRead::Unreadable, SourceRead::Budget),
+        Ok(bytes) => decode_checked(&bytes).map_or_else(SourceRead::Unreadable, SourceRead::Budget),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => SourceRead::Absent,
-        Err(_) => SourceRead::Unreadable,
-    }
-}
-
-/// Reads the primary and every distinct source id of one logical input, naming which id holds
-/// each budget. No runtime root means nothing can be confirmed.
-pub(super) fn read_sources(
-    provider: &ProviderKind,
-    channel_id: u64,
-    primary: u64,
-    sources: &[MessageId],
-) -> Vec<(u64, SourceRead)> {
-    let mut ids = vec![primary];
-    for id in sources.iter().map(|id| id.get()) {
-        if !ids.contains(&id) {
-            ids.push(id);
+        Err(error) => {
+            SourceRead::Unreadable(ReadRefusal::new(UnavailableReason::ReadFailed, error))
         }
     }
-    let Some(root) = runtime_store::discord_busy_followup_retries_root() else {
-        return ids
-            .into_iter()
-            .map(|id| (id, SourceRead::Unreadable))
-            .collect();
-    };
-    let _guard = STORE_WRITE_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    ids.into_iter()
-        .map(|id| (id, read_source_in_root(&root, provider, channel_id, id)))
-        .collect()
 }
 
 /// How the automatic paths may treat one queued input.
@@ -162,20 +175,134 @@ pub(super) enum RetryClass {
     /// Budget spent: kept, never auto-submitted, and never holds back later inputs.
     Parked,
     /// State unknown: neither run nor skipped, and it holds back later inputs.
-    Unavailable,
+    Unavailable(UnavailableReason),
 }
 
-/// One logical input: Unavailable over Parked over Ready, decided only after every source.
-pub(super) fn classify_input<'a>(reads: impl IntoIterator<Item = &'a SourceRead>) -> RetryClass {
+/// Unavailable over Parked over Ready, decided only after every read; the first refusal names
+/// the reason.
+fn classify_reads<'a>(reads: impl IntoIterator<Item = &'a SourceRead>) -> RetryClass {
     let mut class = RetryClass::Ready;
     for read in reads {
         match read {
-            SourceRead::Unreadable => return RetryClass::Unavailable,
+            SourceRead::Unreadable(refusal) => return RetryClass::Unavailable(refusal.reason),
             SourceRead::Budget(budget) if budget.exhausted() => class = RetryClass::Parked,
             SourceRead::Budget(_) | SourceRead::Absent => {}
         }
     }
     class
+}
+
+/// The primary first, then each distinct source id.
+fn identity_ids(primary: u64, sources: &[MessageId]) -> Vec<u64> {
+    let mut ids = vec![primary];
+    for id in sources.iter().map(|id| id.get()) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// One logical input's identity together with a checked read of every id it names; the only
+/// way outside this module to classify an input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CheckedInputView {
+    provider: ProviderKind,
+    channel_id: u64,
+    primary: u64,
+    sources: Vec<MessageId>,
+    reads: Vec<(u64, SourceRead)>,
+}
+
+impl CheckedInputView {
+    /// Reads the primary and every distinct source id under one store lock.
+    pub fn read(
+        provider: &ProviderKind,
+        channel_id: u64,
+        primary: u64,
+        sources: &[MessageId],
+    ) -> Self {
+        let root = runtime_store::discord_busy_followup_retries_root();
+        Self::read_in(root.as_deref(), provider, channel_id, primary, sources)
+    }
+
+    fn read_in(
+        root: Option<&Path>,
+        provider: &ProviderKind,
+        channel_id: u64,
+        primary: u64,
+        sources: &[MessageId],
+    ) -> Self {
+        let ids = identity_ids(primary, sources);
+        let reads = match root {
+            None => {
+                let refusal = ReadRefusal::new(
+                    UnavailableReason::RootUnavailable,
+                    "runtime root unavailable",
+                );
+                ids.into_iter()
+                    .map(|id| (id, SourceRead::Unreadable(refusal.clone())))
+                    .collect()
+            }
+            Some(root) => {
+                let _guard = STORE_WRITE_LOCK
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                ids.into_iter()
+                    .map(|id| (id, read_source_in_root(root, provider, channel_id, id)))
+                    .collect()
+            }
+        };
+        Self::from_reads(provider, channel_id, primary, sources, reads)
+    }
+
+    /// Wraps reads a consumer already holds; `classify` refuses them unless they cover the
+    /// input's identity exactly once each.
+    pub fn from_reads(
+        provider: &ProviderKind,
+        channel_id: u64,
+        primary: u64,
+        sources: &[MessageId],
+        reads: Vec<(u64, SourceRead)>,
+    ) -> Self {
+        Self {
+            provider: provider.clone(),
+            channel_id,
+            primary,
+            sources: sources.to_vec(),
+            reads,
+        }
+    }
+
+    /// A fresh read of the same identity, for re-checking at claim time.
+    pub fn reread(&self) -> Self {
+        Self::read(&self.provider, self.channel_id, self.primary, &self.sources)
+    }
+
+    /// Each identity id with its read, naming which id holds a budget.
+    pub fn reads(&self) -> &[(u64, SourceRead)] {
+        &self.reads
+    }
+
+    fn covers_identity(&self) -> bool {
+        let ids = identity_ids(self.primary, &self.sources);
+        self.primary != 0
+            && self.reads.len() == ids.len()
+            && ids.iter().all(|id| {
+                self.reads
+                    .iter()
+                    .filter(|(read_id, _)| read_id == id)
+                    .count()
+                    == 1
+            })
+    }
+
+    pub fn classify(&self) -> RetryClass {
+        if !self.covers_identity() {
+            return RetryClass::Unavailable(UnavailableReason::IncompleteView);
+        }
+        classify_reads(self.reads.iter().map(|(_, read)| read))
+    }
 }
 
 /// Automatic selection: parked inputs are passed over, the first ready one is taken, and an
@@ -185,18 +312,34 @@ pub(super) fn auto_pick(classes: &[RetryClass]) -> Option<usize> {
         match class {
             RetryClass::Parked => continue,
             RetryClass::Ready => return Some(index),
-            RetryClass::Unavailable => return None,
+            RetryClass::Unavailable(_) => return None,
         }
     }
     None
 }
 
-/// Whether a later input may be injected past the queued backlog. Each layer (memory queue,
-/// disk queue) is `None` when its snapshot could not be read; only parked-only layers admit.
-pub(super) fn admits_later_input(layers: &[Option<&[RetryClass]>]) -> bool {
-    layers.iter().all(|layer| {
-        layer.is_some_and(|classes| classes.iter().all(|class| *class == RetryClass::Parked))
-    })
+/// One queue layer as the injection check read it.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum LayerSnapshot<'a> {
+    Classes(&'a [RetryClass]),
+    Unreadable,
+}
+
+/// The backlog a later input would pass. Both layers are required; one left unchecked refuses.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct BacklogLayers<'a> {
+    pub memory: Option<LayerSnapshot<'a>>,
+    pub disk: Option<LayerSnapshot<'a>>,
+}
+
+impl BacklogLayers<'_> {
+    /// Only layers read as parked-only admit a later input past them.
+    pub fn admits_later_input(&self) -> bool {
+        [self.memory, self.disk].iter().all(|layer| {
+            matches!(layer, Some(LayerSnapshot::Classes(classes))
+                if classes.iter().all(|class| *class == RetryClass::Parked))
+        })
+    }
 }
 
 #[cfg(test)]

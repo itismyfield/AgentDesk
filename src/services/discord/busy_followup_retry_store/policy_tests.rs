@@ -1,11 +1,23 @@
 use super::RetryClass::{Parked, Ready, Unavailable};
+use super::UnavailableReason::{
+    IncompleteRecord, IncompleteView, InvalidNotice, MalformedRecord, ReadFailed, RootUnavailable,
+};
 use super::*;
 use crate::services::discord::busy_followup_retry_store as store;
 
 const MINUTE_MS: u64 = 60_000;
+const UNREAD: RetryClass = Unavailable(ReadFailed);
 
-/// A memory or disk queue snapshot; `None` when it could not be read.
-type Layer = Option<&'static [RetryClass]>;
+/// A memory or disk queue layer as the injection check saw it; `None` when left unchecked.
+type Layer = Option<LayerSnapshot<'static>>;
+
+fn layer(classes: &'static [RetryClass]) -> Layer {
+    Some(LayerSnapshot::Classes(classes))
+}
+
+fn layers(memory: Layer, disk: Layer) -> bool {
+    BacklogLayers { memory, disk }.admits_later_input()
+}
 
 fn with_root(test: impl FnOnce(&Path)) {
     let _lock = crate::config::shared_test_env_lock()
@@ -33,9 +45,25 @@ fn budget(count: u32, active_ms: u64, capped: bool) -> RetryBudget {
     }
 }
 
+fn unreadable() -> SourceRead {
+    SourceRead::Unreadable(ReadRefusal::new(ReadFailed, "test"))
+}
+
+/// Classifies reads through a complete view: ids 1..=n, the first one primary.
+fn class_of(reads: &[&SourceRead]) -> RetryClass {
+    let reads: Vec<(u64, SourceRead)> = (1..)
+        .zip(reads.iter().map(|read| (*read).clone()))
+        .collect();
+    let sources: Vec<MessageId> = reads
+        .iter()
+        .skip(1)
+        .map(|(id, _)| MessageId::new(*id))
+        .collect();
+    CheckedInputView::from_reads(&ProviderKind::Claude, 1, 1, &sources, reads).classify()
+}
+
 fn class_of_bytes(bytes: &[u8]) -> RetryClass {
-    let read = decode_checked(bytes).map_or(SourceRead::Unreadable, SourceRead::Budget);
-    classify_input([&read])
+    class_of(&[&decode_checked(bytes).map_or_else(SourceRead::Unreadable, SourceRead::Budget)])
 }
 
 #[test]
@@ -54,7 +82,7 @@ fn queue_wait_costs_nothing_and_only_real_attempts_reach_the_cap() {
         "six minutes queued between two 45 s failures must not cap the input"
     );
     assert_eq!(after_wait.first_busy_retry_at_ms, t0);
-    assert_eq!(classify_input([&SourceRead::Budget(after_wait)]), Ready);
+    assert_eq!(class_of(&[&SourceRead::Budget(after_wait)]), Ready);
 
     let mut slow = None;
     for (attempt, capped) in [(1, false), (2, false), (3, false), (4, true)] {
@@ -79,6 +107,14 @@ fn queue_wait_costs_nothing_and_only_real_attempts_reach_the_cap() {
         assert_eq!(charged.capped, count == MAX_BUSY_RETRY_COUNT);
         counted = Some(charged);
     }
+    let five = (0..5).fold(None, |prior, _| {
+        Some(RetryBudget::charge(prior, 700, 1, t0, false))
+    });
+    assert!(!five.unwrap().capped, "five failures stay runnable");
+    assert!(
+        RetryBudget::charge(five, 700, 1, t0, false).capped,
+        "the sixth failure caps"
+    );
 }
 
 #[test]
@@ -162,62 +198,150 @@ fn checked_restore_keeps_legacy_meaning_and_refuses_what_it_cannot_read() {
     assert_eq!(class_of_bytes(spent.as_bytes()), Parked);
     store::set_clock_for_tests(None);
 
-    for (case, raw) in [
+    for (case, raw, reason) in [
         (
             "truncated",
             r#"{"notice_message_id":700,"busy_retry_count":1,"first_bu"#,
+            MalformedRecord,
         ),
-        ("empty", ""),
+        ("empty", "", MalformedRecord),
+        ("not an object", "[700, 1, 1000]", MalformedRecord),
         (
             "missing count",
             r#"{"notice_message_id":700,"first_busy_retry_at_ms":1000}"#,
+            MalformedRecord,
         ),
         (
             "missing first",
             r#"{"notice_message_id":700,"busy_retry_count":1}"#,
+            MalformedRecord,
         ),
         (
             "unknown field",
             r#"{"notice_message_id":700,"busy_retry_count":1,"first_busy_retry_at_ms":1000,"retry_epoch":2}"#,
+            MalformedRecord,
         ),
         (
             "wrong type",
             r#"{"notice_message_id":700,"busy_retry_count":"1","first_busy_retry_at_ms":1000}"#,
+            MalformedRecord,
         ),
         (
             "zero notice",
             r#"{"notice_message_id":0,"busy_retry_count":1,"first_busy_retry_at_ms":1000}"#,
+            InvalidNotice,
         ),
     ] {
-        assert!(restored(raw).is_err(), "{case} must not restore");
-        assert_eq!(class_of_bytes(raw.as_bytes()), Unavailable, "{case}");
+        assert_eq!(
+            restored(raw).map_err(|refusal| refusal.reason),
+            Err(reason),
+            "{case}"
+        );
+        assert_eq!(
+            class_of_bytes(raw.as_bytes()),
+            Unavailable(reason),
+            "{case}"
+        );
     }
+}
+
+#[test]
+fn latch_fields_restore_only_when_all_or_none_are_written() {
+    let legacy = Ok(budget(2, 0, false));
+    let full = Ok(RetryBudget {
+        notice_bound: false,
+        ..budget(2, 0, true)
+    });
+    let partial = Err(IncompleteRecord);
+    // Presence of (active_retry_ms, capped, notice_bound), written by hand.
+    let rows: [(&str, Result<RetryBudget, UnavailableReason>); 10] = [
+        (
+            r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000}"#,
+            legacy,
+        ),
+        (
+            r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"active_retry_ms":0}"#,
+            partial,
+        ),
+        (
+            r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"capped":true}"#,
+            partial,
+        ),
+        (
+            r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"notice_bound":false}"#,
+            partial,
+        ),
+        (
+            r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"active_retry_ms":0,"capped":true}"#,
+            partial,
+        ),
+        (
+            r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"active_retry_ms":0,"notice_bound":false}"#,
+            partial,
+        ),
+        (
+            r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"capped":true,"notice_bound":false}"#,
+            partial,
+        ),
+        (
+            r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"active_retry_ms":0,"capped":true,"notice_bound":false}"#,
+            full,
+        ),
+        (
+            r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"active_retry_ms":0,"capped":null,"notice_bound":false}"#,
+            partial,
+        ),
+        (
+            r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"active_retry_ms":null,"capped":null,"notice_bound":null}"#,
+            partial,
+        ),
+    ];
+    for (index, (raw, expected)) in rows.into_iter().enumerate() {
+        let decoded = decode_checked(raw.as_bytes());
+        assert_eq!(
+            decoded.clone().map_err(|refusal| refusal.reason),
+            expected,
+            "row {index}"
+        );
+        if let Err(refusal) = decoded {
+            assert!(
+                refusal.detail.contains("latch fields"),
+                "row {index}: {}",
+                refusal.detail
+            );
+        }
+    }
+    assert_eq!(
+        class_of_bytes(rows_partial_capped().as_bytes()),
+        Unavailable(IncompleteRecord)
+    );
+}
+
+/// The latched record of the restore fixtures with only its `capped` field dropped.
+fn rows_partial_capped() -> &'static str {
+    r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"active_retry_ms":0,"notice_bound":false}"#
 }
 
 #[test]
 fn source_precedence_and_queue_selection_follow_the_written_tables() {
     let ready = SourceRead::Budget(budget(1, 45_000, false));
     let capped = SourceRead::Budget(budget(2, 0, true));
-    let (absent, unreadable) = (SourceRead::Absent, SourceRead::Unreadable);
+    let (absent, unreadable) = (SourceRead::Absent, unreadable());
     let inputs: [(&[&SourceRead], RetryClass); 11] = [
         (&[&absent], Ready),
         (&[&ready], Ready),
         (&[&capped], Parked),
-        (&[&unreadable], Unavailable),
+        (&[&unreadable], UNREAD),
         (&[&absent, &capped], Parked),
         (&[&ready, &capped], Parked),
         (&[&capped, &ready, &absent], Parked),
-        (&[&capped, &unreadable], Unavailable),
-        (&[&unreadable, &capped], Unavailable),
-        (&[&ready, &unreadable], Unavailable),
+        (&[&capped, &unreadable], UNREAD),
+        (&[&unreadable, &capped], UNREAD),
+        (&[&ready, &unreadable], UNREAD),
         (&[&absent, &absent], Ready),
     ];
     for (index, (reads, expected)) in inputs.iter().enumerate() {
-        assert_eq!(
-            classify_input(reads.iter().copied()),
-            *expected,
-            "input row {index}"
-        );
+        assert_eq!(class_of(reads), *expected, "input row {index}");
     }
 
     let picks: [(&[RetryClass], Option<usize>); 7] = [
@@ -225,28 +349,29 @@ fn source_precedence_and_queue_selection_follow_the_written_tables() {
         (&[Ready, Ready], Some(0)),
         (&[Parked, Ready], Some(1)),
         (&[Parked, Parked], None),
-        (&[Unavailable, Ready], None),
-        (&[Parked, Unavailable, Ready], None),
-        (&[Parked, Ready, Unavailable], Some(1)),
+        (&[UNREAD, Ready], None),
+        (&[Parked, UNREAD, Ready], None),
+        (&[Parked, Ready, UNREAD], Some(1)),
     ];
     for (classes, expected) in picks {
         assert_eq!(auto_pick(classes), expected, "{classes:?}");
     }
 
-    let layers: [(Layer, Layer, bool); 9] = [
-        (Some(&[]), Some(&[]), true),
-        (Some(&[Parked]), Some(&[Parked]), true),
-        (Some(&[Parked]), Some(&[]), true),
-        (Some(&[Parked, Ready]), Some(&[Parked]), false),
-        (Some(&[Parked]), Some(&[Ready]), false),
-        (Some(&[]), Some(&[Unavailable]), false),
-        (Some(&[Unavailable]), Some(&[Parked]), false),
-        (None, Some(&[]), false),
-        (Some(&[Parked]), None, false),
+    let unread_layer = Some(LayerSnapshot::Unreadable);
+    let table: [(Layer, Layer, bool); 9] = [
+        (layer(&[]), layer(&[]), true),
+        (layer(&[Parked]), layer(&[Parked]), true),
+        (layer(&[Parked]), layer(&[]), true),
+        (layer(&[Parked, Ready]), layer(&[Parked]), false),
+        (layer(&[Parked]), layer(&[Ready]), false),
+        (layer(&[]), layer(&[UNREAD]), false),
+        (layer(&[UNREAD]), layer(&[Parked]), false),
+        (unread_layer, layer(&[]), false),
+        (layer(&[Parked]), unread_layer, false),
     ];
-    for (memory, disk, admits) in layers {
+    for (memory, disk, admits) in table {
         assert_eq!(
-            admits_later_input(&[memory, disk]),
+            layers(memory, disk),
             admits,
             "memory={memory:?} disk={disk:?}"
         );
@@ -273,38 +398,33 @@ fn an_unreadable_source_holds_the_queue_until_it_reads_as_parked() {
         .unwrap();
         fs::create_dir(path(broken_source)).unwrap();
         let sources = [capped_source, broken_source, primary].map(MessageId::new);
-        let queue = |sources: &[MessageId]| {
-            let head = read_sources(&provider, channel, primary, sources);
-            let tail = read_sources(&provider, channel, later, &[]);
-            [head, tail].map(|reads| classify_input(reads.iter().map(|(_, read)| read)))
-        };
-
-        let head = read_sources(&provider, channel, primary, &sources);
-        let ids: Vec<u64> = head.iter().map(|(id, _)| *id).collect();
+        let head = CheckedInputView::read(&provider, channel, primary, &sources);
+        let tail = CheckedInputView::read(&provider, channel, later, &[]);
+        let ids: Vec<u64> = head.reads().iter().map(|(id, _)| *id).collect();
         assert_eq!(
             ids,
             [primary, capped_source, broken_source],
             "each id is read once"
         );
         assert_eq!(
-            head[1].1,
+            head.reads()[1].1,
             SourceRead::Budget(budget(2, 0, true)),
             "the capped id is named"
         );
-        let blocked = queue(&sources);
-        assert_eq!(blocked, [Unavailable, Ready]);
+        let blocked = [head.classify(), tail.classify()];
+        assert_eq!(blocked, [UNREAD, Ready]);
         assert_eq!(
             auto_pick(&blocked),
             None,
             "B must not overtake an unconfirmed A"
         );
-        assert!(!admits_later_input(&[Some(&blocked[..1])]));
+        assert!(!layers(layer(&[UNREAD]), layer(&[])));
 
         fs::remove_dir(path(broken_source)).unwrap();
-        let healed = queue(&sources);
+        let healed = [head.reread().classify(), tail.reread().classify()];
         assert_eq!(healed, [Parked, Ready]);
         assert_eq!(auto_pick(&healed), Some(1));
-        assert!(admits_later_input(&[Some(&healed[..1])]));
+        assert!(layers(layer(&[Parked]), layer(&[])));
     });
 }
 
@@ -374,4 +494,106 @@ fn legacy_writer_bytes_and_reader_results_are_unchanged() {
             "a rolled-back reader still reads the legacy fields of the new format"
         );
     });
+}
+
+#[test]
+fn each_refusal_keeps_its_reason_and_absence_stays_ready() {
+    with_root(|root| {
+        let provider = ProviderKind::Claude;
+        let channel = 68_980;
+        let path = |id: u64| store::input_file_path_in_root(root, &provider, channel, id);
+        fs::create_dir_all(path(1).parent().unwrap()).unwrap();
+        fs::create_dir(path(2)).unwrap();
+        fs::write(
+            path(3),
+            r#"{"notice_message_id":700,"busy_retry_count":1,"first_bu"#,
+        )
+        .unwrap();
+        fs::write(
+            path(4),
+            r#"{"notice_message_id":0,"busy_retry_count":1,"first_busy_retry_at_ms":1000}"#,
+        )
+        .unwrap();
+        fs::write(path(5), rows_partial_capped()).unwrap();
+        fs::write(path(6), serde_json::to_vec(&budget(2, 0, true)).unwrap()).unwrap();
+        let class = |primary: u64, sources: &[u64]| {
+            let sources: Vec<MessageId> = sources.iter().copied().map(MessageId::new).collect();
+            CheckedInputView::read(&provider, channel, primary, &sources).classify()
+        };
+        assert_eq!(class(1, &[]), Ready, "a confirmed absence is not a refusal");
+        assert_eq!(class(2, &[]), Unavailable(ReadFailed));
+        assert_eq!(class(3, &[]), Unavailable(MalformedRecord));
+        assert_eq!(class(4, &[]), Unavailable(InvalidNotice));
+        assert_eq!(class(5, &[]), Unavailable(IncompleteRecord));
+        assert_eq!(
+            class(6, &[2]),
+            Unavailable(ReadFailed),
+            "a refusal outranks a cap"
+        );
+        assert_eq!(class(6, &[1]), Parked);
+        let rootless = CheckedInputView::read_in(None, &provider, channel, 1, &[MessageId::new(6)]);
+        assert_eq!(rootless.classify(), Unavailable(RootUnavailable));
+        assert_eq!(
+            rootless.reads().len(),
+            2,
+            "every identity id carries the refusal"
+        );
+    });
+}
+
+#[test]
+fn classification_refuses_views_and_layers_it_cannot_vouch_for() {
+    let provider = ProviderKind::Claude;
+    let capped = SourceRead::Budget(budget(2, 0, true));
+    let view = |primary: u64, sources: &[u64], reads: Vec<(u64, SourceRead)>| {
+        let sources: Vec<MessageId> = sources.iter().copied().map(MessageId::new).collect();
+        CheckedInputView::from_reads(&provider, 7, primary, &sources, reads).classify()
+    };
+    let refused = Unavailable(IncompleteView);
+    assert_eq!(view(1, &[], vec![]), refused, "no read at all");
+    assert_eq!(
+        view(1, &[2], vec![(1, SourceRead::Absent)]),
+        refused,
+        "a source left unread"
+    );
+    assert_eq!(
+        view(
+            1,
+            &[],
+            vec![(1, SourceRead::Absent), (1, SourceRead::Absent)]
+        ),
+        refused,
+        "an id read twice"
+    );
+    assert_eq!(
+        view(1, &[], vec![(1, SourceRead::Absent), (9, capped.clone())]),
+        refused,
+        "a read outside the identity"
+    );
+    assert_eq!(
+        view(0, &[], vec![(0, SourceRead::Absent)]),
+        refused,
+        "no primary identity"
+    );
+    assert_eq!(
+        view(1, &[], vec![(1, SourceRead::Absent)]),
+        Ready,
+        "a confirmed absent primary"
+    );
+    assert_eq!(
+        view(1, &[2, 1], vec![(2, capped), (1, SourceRead::Absent)]),
+        Parked,
+        "read order is free"
+    );
+
+    assert!(
+        !BacklogLayers::default().admits_later_input(),
+        "no layer checked"
+    );
+    assert!(!layers(layer(&[]), None), "disk left unchecked");
+    assert!(!layers(None, layer(&[])), "memory left unchecked");
+    assert!(
+        layers(layer(&[]), layer(&[])),
+        "both queues confirmed empty"
+    );
 }
