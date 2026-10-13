@@ -1,3 +1,4 @@
+use super::legacy_replay_coordinate::is_coordinate_hold_reason;
 use super::{Deserialize, InflightTurnState, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,8 +72,9 @@ impl InflightTurnIdentity {
 }
 
 impl InflightTurnState {
+    /// A held reason or an unfinished coordinate replay install forbids an automatic rerun.
     pub(in crate::services::discord) fn replay_rerun_blocked(&self) -> bool {
-        !self.replay_hold_reasons.is_empty()
+        !self.replay_hold_reasons.is_empty() || self.legacy_replay_coordinate.is_some()
     }
 
     /// Keep a held recovery request's body, session and delivery with its existing owner.
@@ -97,7 +99,8 @@ impl InflightTurnState {
     }
 
     /// Keep a projected episode's receipt and hold reasons; refuse a different projected episode
-    /// or a conflicting receipt before the guarded writer can persist anything.
+    /// or a conflicting receipt before the guarded writer can persist anything. `self` is the
+    /// durable row: its coordinate holds stand, and `other`'s coordinate holds are not unioned.
     pub(in crate::services::discord) fn merge_replay_projection(&mut self, other: &Self) -> bool {
         let has_projection = self.replay_receipt_id.or(other.replay_receipt_id).is_some()
             || self.replay_rerun_blocked()
@@ -114,7 +117,7 @@ impl InflightTurnState {
             self.replay_receipt_id = other.replay_receipt_id;
         }
         for reason in &other.replay_hold_reasons {
-            if !self.replay_hold_reasons.contains(reason) {
+            if !is_coordinate_hold_reason(reason) && !self.replay_hold_reasons.contains(reason) {
                 self.replay_hold_reasons.push(reason.clone());
             }
         }

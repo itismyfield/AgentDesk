@@ -16,6 +16,14 @@ use super::*;
 #[path = "save_store/create_monotonic_observer.rs"]
 mod create_monotonic_observer;
 
+// Dormant until the legacy restart replay installer calls it.
+#[cfg(test)]
+#[path = "save_store/coordinate_replay.rs"]
+pub(in crate::services::discord) mod coordinate_replay;
+#[cfg(test)]
+#[path = "save_store/coordinate_replay_tests.rs"]
+mod coordinate_replay_tests;
+
 #[path = "save_store/delivery_rewind.rs"]
 mod delivery_rewind;
 #[path = "save_store/identity_gate.rs"]

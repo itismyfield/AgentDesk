@@ -102,7 +102,9 @@ pub(super) fn merge_runtime_stamp_progress(
     preserve_tool_field!(task_notification_kind);
     durable.any_tool_used |= local.any_tool_used;
     durable.has_post_tool_text |= local.has_post_tool_text;
-    durable.last_offset = durable.last_offset.max(local.last_offset);
+    if durable.same_coordinate_source(local) {
+        durable.last_offset = durable.last_offset.max(local.last_offset);
+    }
     for frozen_id in &local.streaming_rollover_frozen_msg_ids {
         if !durable
             .streaming_rollover_frozen_msg_ids

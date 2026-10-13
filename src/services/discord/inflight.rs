@@ -34,6 +34,10 @@ pub(in crate::services::discord) use model::{
     InflightTurnIdentity, InflightTurnState, RelayOwnerKind, TurnSource, opt_channel_id,
     opt_message_id, optional_message_id, transfer_end,
 };
+#[cfg(test)]
+pub(in crate::services::discord) use model::{COORDINATE_HOLD_PREFIX, RawTurnWitness};
+#[cfg(test)]
+pub(in crate::services::discord) use save_store::coordinate_replay;
 
 impl InflightTurnState {
     pub(in crate::services::discord) fn effective_busy_followup_retry_user_msg_id(&self) -> u64 {

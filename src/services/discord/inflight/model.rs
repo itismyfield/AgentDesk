@@ -9,10 +9,18 @@ use super::*;
 use crate::services::agent_protocol::TaskNotificationKind;
 
 mod identity;
+mod legacy_replay_coordinate;
 mod serde_adapters;
 mod turn_kinds;
 
 pub(in crate::services::discord) use identity::InflightTurnIdentity;
+pub(in crate::services::discord) use legacy_replay_coordinate::{
+    COORDINATE_HOLD_PREFIX, LegacyReplayCoordinate,
+};
+#[cfg(test)]
+pub(in crate::services::discord) use legacy_replay_coordinate::{
+    CoordinateInstallPhase, InstalledSourceWitness, PriorNormalizedCoordinate, RawTurnWitness,
+};
 use serde_adapters::{
     deserialize_relay_owner_kind_tolerant, deserialize_runtime_kind_tolerant,
     deserialize_task_notification_kind, serialize_task_notification_kind,
@@ -600,6 +608,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Why this episode's replay is held; any reason forbids an automatic rerun of the turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replay_hold_reasons: Vec<String>,
+    /// Coordinate origin and install state of a legacy restart replay; absent on every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_replay_coordinate: Option<LegacyReplayCoordinate>,
 }
 
 #[cfg(test)]
@@ -1168,6 +1179,7 @@ impl InflightTurnState {
             streaming_rollover_frozen_msg_ids: Vec::new(),
             replay_receipt_id: None,
             replay_hold_reasons: Vec::new(),
+            legacy_replay_coordinate: None,
         }
     }
 
