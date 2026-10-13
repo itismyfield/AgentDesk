@@ -170,6 +170,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::terminal_ui_obligation::tests
   --skip services::discord::tmux::tmux_watcher::path_b_record::tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
+  --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::injected_watcher_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
