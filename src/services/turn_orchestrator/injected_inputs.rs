@@ -211,19 +211,41 @@ pub(super) fn reserve(
     if !same_claim {
         return ReserveOutcome::HolderChanged;
     }
+    // A reservation, a dequeued head or a queued head mid-injection is unfinished ownership.
     if holds_order(state)
-        || !state.intervention_queue.is_empty()
         || state.pending_user_dispatch.is_some()
+        || super::queued_head::holds_front(state)
     {
         return ReserveOutcome::Backlog;
     }
-    match disk_backlog(channel_id, persistence) {
-        Ok(false) => {}
-        Ok(true) => return ReserveOutcome::Backlog,
+    use crate::services::discord::busy_followup_retry_store::{
+        BacklogLayers, LayerSnapshot, RetryClass, input_class,
+    };
+    let classify = |queue: &[Intervention]| -> Vec<RetryClass> {
+        let class = |item| input_class(&persistence.provider, channel_id, item);
+        queue.iter().map(class).collect()
+    };
+    let disk = match disk_backlog(channel_id, persistence) {
+        Ok(Some(queued)) => Some(classify(&queued)),
+        Ok(None) => return ReserveOutcome::Backlog,
         Err(error) => {
             tracing::warn!(channel = channel_id.get(), %error, "injection reservation refused");
-            return ReserveOutcome::Unavailable;
+            None
         }
+    };
+    let memory = classify(&state.intervention_queue);
+    let layers = BacklogLayers {
+        memory: Some(LayerSnapshot::Classes(&memory)),
+        disk: Some(
+            disk.as_deref()
+                .map_or(LayerSnapshot::Unreadable, LayerSnapshot::Classes),
+        ),
+    };
+    if !layers.admits_later_input() {
+        return match disk {
+            Some(_) => ReserveOutcome::Backlog,
+            None => ReserveOutcome::Unavailable,
+        };
     }
     let lease = Arc::new(InjectionLease);
     state.injection_reserved = Some((message_id, lease.clone()));
@@ -308,18 +330,18 @@ pub(super) fn enqueue_refusal(
     Some(reason)
 }
 
-/// Queued input or a dequeued head this actor has not loaded still runs first; an error when the
-/// queue file or the dispatch marker cannot be read.
+/// The persisted queue this actor may not have loaded, or `None` when a dequeued head's marker
+/// still runs first; an error when the queue file or the marker cannot be read.
 fn disk_backlog(
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
-) -> Result<bool, String> {
+) -> Result<Option<Vec<Intervention>>, String> {
     use super::pending_queue_persistence as disk;
     let (provider, token_hash) = (&persistence.provider, persistence.token_hash.as_str());
     let (queued, _) = disk::load_channel_pending_queue_checked(provider, token_hash, channel_id)?;
     let marker =
         disk::load_channel_pending_dispatch_marker_checked(provider, token_hash, channel_id)?;
-    Ok(!queued.is_empty() || marker.is_some())
+    Ok(marker.is_none().then_some(queued))
 }
 
 fn release(state: &mut ChannelMailboxState, ticket: &InjectionTicket) {

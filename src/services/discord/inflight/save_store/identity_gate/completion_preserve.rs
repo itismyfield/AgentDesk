@@ -113,8 +113,11 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_matches_ide
             "completion inflight preserve kept a concurrently advanced divergent durable response"
         );
     }
-    updated.last_offset = updated.last_offset.max(state.last_offset);
-    updated.terminal_delivery_committed |= state.terminal_delivery_committed;
+    // A snapshot of another coordinate source keeps only same-turn body and frozen-id progress.
+    if updated.same_coordinate_source(&state) {
+        updated.last_offset = updated.last_offset.max(state.last_offset);
+        updated.terminal_delivery_committed |= state.terminal_delivery_committed;
+    }
     for frozen_id in &state.streaming_rollover_frozen_msg_ids {
         if !updated
             .streaming_rollover_frozen_msg_ids

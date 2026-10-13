@@ -30,6 +30,8 @@ pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 // #3479: the pure domain model moved to `model.rs`; re-export every public
 // item at its original visibility so existing `inflight::*` / `super::*`
 // references across the discord module resolve unchanged.
+#[cfg(test)]
+pub(in crate::services::discord) use model::{COORDINATE_HOLD_PREFIX, RawTurnWitness};
 pub(in crate::services::discord) use model::{
     InflightTurnIdentity, InflightTurnState, RelayOwnerKind, TurnSource, opt_channel_id,
     opt_message_id, optional_message_id, transfer_end,

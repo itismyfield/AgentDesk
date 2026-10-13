@@ -303,7 +303,6 @@ pub(in crate::services::discord) async fn handle_event(
     data: &Data,
 ) -> Result<(), Error> {
     maybe_cleanup_sessions(&data.shared).await;
-    crate::services::tui_o::shadow_host::observe(ctx, event);
     match event {
         serenity::FullEvent::InteractionCreate { interaction } => {
             if let Some(component) = interaction.as_message_component() {
