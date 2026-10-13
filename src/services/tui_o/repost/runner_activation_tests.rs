@@ -736,3 +736,6 @@ async fn d4act_source_revoked_after_tick_never_grants_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[path = "allowlist_runner_tests.rs"]
+mod allowlist;

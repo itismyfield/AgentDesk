@@ -1,0 +1,1 @@
+{"links":{"@PKEY@":{"source":@P@,"seq":2,"parent":@A@,"committed_at":"2026-10-01T00:00:00Z","boundary":{"owed":{"from":@FROM@}}},"@BKEY@":{"source":@B@,"seq":3,"parent":@P@,"committed_at":"2026-10-01T00:00:00Z","boundary":{"owed":{"from":@CHILD_FROM@}}}},"successors":{"@AKEY@":@P@,"@PKEY@":@B@}}
