@@ -30,18 +30,25 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Generate inventory docs
-        run: python3 scripts/generate_inventory_docs.py
+        run: |
+          python3 scripts/generate_inventory_docs.py
+          python3 scripts/generate_env_reference.py
+          python3 scripts/generate_cli_reference.py
 
       - name: Detect tracked-doc drift
         id: drift
         shell: bash
         run: |
           set -euo pipefail
-          if git diff --quiet -- ARCHITECTURE.md docs/generated/route-inventory.md docs/generated/worker-inventory.md; then
+          drift_status=0
+          git diff --quiet -- ARCHITECTURE.md docs/generated/route-inventory.md docs/generated/worker-inventory.md docs/generated/env-reference.md docs/generated/cli-reference.md || drift_status=$?
+          if [ "$drift_status" -eq 0 ]; then
             echo "has_drift=false" >> "$GITHUB_OUTPUT"
             echo "Tracked inventory docs are up to date."
-          else
+          elif [ "$drift_status" -eq 1 ]; then
             echo "has_drift=true" >> "$GITHUB_OUTPUT"
+          else
+            exit "$drift_status"
           fi
 
       - name: Open maintenance PR with regenerated docs
@@ -63,7 +70,7 @@ jobs:
           fi
 
           git checkout -b "$branch"
-          git add ARCHITECTURE.md docs/generated/route-inventory.md docs/generated/worker-inventory.md
+          git add ARCHITECTURE.md docs/generated/route-inventory.md docs/generated/worker-inventory.md docs/generated/env-reference.md docs/generated/cli-reference.md
           git commit -m "chore: regenerate inventory docs"
           git push -u origin "$branch"
 

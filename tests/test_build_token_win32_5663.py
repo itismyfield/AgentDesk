@@ -1,7 +1,6 @@
 from __future__ import annotations
 from contextlib import nullcontext, redirect_stderr
 import ctypes
-from hashlib import sha256
 import importlib.util
 import inspect
 import io
@@ -214,9 +213,26 @@ class PortableWin32BuildTokenContractTests(unittest.TestCase):
         mirror = _workflow_block(text, "  win32_build_token_required_context:")
         for block, line in ((outputs, "      win32_build_token: ${{ steps.filter.outputs.win32_build_token }}"), (filters, "            win32_build_token: ['scripts/build_token.py', 'scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']"), (native, "    runs-on: windows-latest"), (mirror, "    if: ${{ !cancelled() }}")):
             self.assertEqual(block.count(line), 1)
-        self.assertEqual(sha256(native.encode()).hexdigest(), "9967076fc22441fddebb330d21a4f996047147fa4a854cf7e127ab58d97a9753")
-        self.assertEqual(sha256(mirror.encode()).hexdigest(), "a40b712aeaaa700acfa11c280d7c465d0f61160a8b32e8adc4ffa9ee90e0bd31")
-        self.assertEqual(sha256((native + "\0" + mirror).encode()).hexdigest(), "bc3bb99e94152ef3c1f0c77b4d87ccc1fe5a449870fb3a0e079bd258bc977f51")
+        self.assertIn("    if: needs.changes.outputs.win32_build_token == 'true'", native)
+        self.assertIn("python -m unittest -v tests.test_build_token_win32_5663", native)
+        self.assertNotIn("continue-on-error:", native)
+        self.assertIn("    needs: [changes, win32_build_token]", mirror)
+        self.assertIn("'${{ needs.win32_build_token.result }}'", mirror)
+        self.assertIn("        run: ./scripts/required-check-mirror.sh", mirror)
+    def test_workflow_comment_edit_preserves_required_lane_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = Path(tmp) / "ci-pr.yml"
+            workflow.write_text(WORKFLOW.read_text().replace(
+                "  win32_build_token:\n", "  win32_build_token:\n    # Native execution evidence.\n", 1))
+            with mock.patch.dict(globals(), {"WORKFLOW": workflow}):
+                self.test_helper_only_change_selects_windows_required_lane()
+    def test_required_lane_execution_removal_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = Path(tmp) / "ci-pr.yml"
+            workflow.write_text(WORKFLOW.read_text().replace(
+                "python -m unittest -v tests.test_build_token_win32_5663", "true", 1))
+            with mock.patch.dict(globals(), {"WORKFLOW": workflow}), self.assertRaises(AssertionError):
+                self.test_helper_only_change_selects_windows_required_lane()
 @unittest.skipUnless(sys.platform == "win32", "native Win32 contract")
 class NativeWin32BuildTokenContractTests(unittest.TestCase):
     def nonce(self) -> str:

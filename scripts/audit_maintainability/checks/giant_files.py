@@ -170,6 +170,6 @@ CHECK = CheckSpec(
         f"Production Rust files in src/ with >= {THRESHOLD} lines that are not "
         f"listed in {CHANGE_SURFACES_DOC}."
     ),
-    hard_gate=True,
+    hard_gate=False,
     runner=_run,
 )

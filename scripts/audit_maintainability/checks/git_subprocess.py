@@ -43,7 +43,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
             findings.append(
                 Finding(
                     rule="git_subprocess_callsites",
-                    severity="info",
+                    severity="error",
                     file=rel,
                     line=line,
                     message="direct git subprocess (consider services::git helper)",

@@ -1,33 +1,5 @@
 #!/usr/bin/env python3
-"""Raw-LOC ratchet guard for the oversized Discord-relay hot files (#3565).
-
-`tmux_watcher.rs`, `tui_prompt_relay.rs`, and `turn_bridge/mod.rs` are already
-far too large and a regression risk: any further growth makes an eventual
-decomposition harder. This guard freezes each file's RAW line count (`wc -l`:
-comments, blank lines, and test code all COUNTED) at the ceiling recorded in
-`scripts/hotfile_ratchet.toml`. A file may shrink (lower the ceiling to lock in
-the win) but may never exceed its ceiling plus ``WIRING_SLACK_LINES`` (shared
-with the giant-file ratchet). The slack is measured from the frozen ceiling, so
-it admits a few wiring lines once, never cumulative growth.
-
-Metric: raw physical line count. This is a deliberately different, complementary
-metric from the production-LoC ratchet in
-`scripts/audit_maintainability_giant_baseline.toml` (which excludes `#[cfg(test)]`
-code). Both gates are intended to stay in force.
-
-Counting uses ``len(text.splitlines())`` rather than shelling out to ``wc`` so
-the check is deterministic and dependency-free. For the repo's LF-terminated
-source files this is exactly the ``wc -l`` value (CRLF is not used here).
-
-A missing hot file or a missing manifest is a HARD error (exit 1): a rename or
-move must not silently pass the gate.
-
-The three relay hot files in ``REQUIRED_HOTFILES`` MUST each have a ceiling
-entry in the manifest. Dropping a key from the manifest would otherwise stop
-that file from being checked while the script still passed (the manifest table
-is non-empty); ``REQUIRED_HOTFILES`` closes that bypass by hard-failing (exit 1)
-on any missing required entry.
-"""
+"""Freeze hotfile raw line counts at the immutable comparison SHA; exports use caps."""
 
 from __future__ import annotations
 
@@ -57,15 +29,10 @@ if sys.version_info < MIN_PYTHON:
 
 import tomllib
 
-from ratchet_admission import WIRING_SLACK_LINES, audit_repository_admissions
+from ratchet_admission import audit_repository_admissions, parse_cap_table, _git_text
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = REPO_ROOT / "scripts" / "hotfile_ratchet.toml"
-
-# The relay hot files that MUST always be ratcheted. Every path here has to have
-# a ceiling entry in scripts/hotfile_ratchet.toml; if a future edit deletes one
-# of these keys (which would silently stop checking that file), the gate fails
-# closed instead of passing on the remaining non-empty table.
 REQUIRED_HOTFILES = (
     "src/services/discord/tmux_watcher.rs",
     "src/services/discord/tui_prompt_relay.rs",
@@ -74,95 +41,49 @@ REQUIRED_HOTFILES = (
 
 
 def line_count(path: Path) -> int:
-    """Return the raw line count of ``path`` (``wc -l`` equivalent for LF files)."""
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return len(text.splitlines())
+    return len(path.read_text(encoding="utf-8").splitlines())
+
+
+def check() -> int:
+    ceilings = parse_cap_table(MANIFEST.read_text(encoding="utf-8"), "hotfile_ratchet")
+    if not ceilings or any(rel not in ceilings for rel in REQUIRED_HOTFILES):
+        raise ValueError("hotfile manifest must contain every required hotfile ceiling")
+    audit = audit_repository_admissions(repo_root=REPO_ROOT, ratchet="hotfile_ratchet",
+        config_rel_path="scripts/hotfile_ratchet.toml", table_name="hotfile_ratchet")
+    failed = bool(audit.errors)
+    for warning in audit.warnings:
+        print(warning, file=sys.stderr)
+    for error in audit.errors:
+        print(f"FAIL: {error}", file=sys.stderr)
+    if audit.base_sha:
+        prior_text, exists = _git_text(REPO_ROOT, audit.base_sha, "scripts/hotfile_ratchet.toml")
+        prior_caps = parse_cap_table(prior_text, "hotfile_ratchet") if exists else {}
+        if prior_caps.keys() - ceilings.keys():
+            raise ValueError("ratcheted hotfile ceiling removed: " + ", ".join(sorted(prior_caps.keys() - ceilings.keys())))
+    for rel, ceiling in sorted(ceilings.items()):
+        current = line_count(REPO_ROOT / rel)
+        limit, label = ceiling, "ceiling"
+        if audit.base_sha:
+            prior, exists = _git_text(REPO_ROOT, audit.base_sha, rel)
+            if exists:
+                limit, label = len(prior.splitlines()), f"base {audit.base_sha}"
+        if current > limit:
+            print(f"FAIL: {rel} grew to {current} lines > {label} {limit}.", file=sys.stderr)
+            failed = True
+        else:
+            print(f"OK: {rel} = {current} lines ({label} {limit}).")
+    return int(failed)
 
 
 def main() -> int:
-    if not MANIFEST.is_file():
-        print(
-            f"FAIL: hotfile ratchet manifest not found: {MANIFEST}",
-            file=sys.stderr,
-        )
+    try:
+        return check()
+    except tomllib.TOMLDecodeError as error:
+        print(f"FAIL: hotfile cap metadata invalid: {error}", file=sys.stderr)
         return 1
-
-    with MANIFEST.open("rb") as fh:
-        manifest = tomllib.load(fh)
-
-    ceilings = manifest.get("hotfile_ratchet", {})
-    if not ceilings:
-        print(
-            f"FAIL: no [hotfile_ratchet] entries in {MANIFEST}.",
-            file=sys.stderr,
-        )
+    except Exception as error:
+        print(f"FAIL: hotfile measurement failed: {error}", file=sys.stderr)
         return 1
-
-    missing_required = [rel for rel in REQUIRED_HOTFILES if rel not in ceilings]
-    if missing_required:
-        for rel in missing_required:
-            print(
-                f"FAIL: required relay hot file '{rel}' has no ceiling entry in "
-                f"{MANIFEST}. Every path in REQUIRED_HOTFILES must stay ratcheted; "
-                "do not delete its entry (that would silently stop checking it).",
-                file=sys.stderr,
-            )
-        return 1
-
-    failed = False
-    admission_audit = audit_repository_admissions(
-        repo_root=REPO_ROOT,
-        ratchet="hotfile_ratchet",
-        config_rel_path="scripts/hotfile_ratchet.toml",
-        table_name="hotfile_ratchet",
-    )
-    for warning in admission_audit.warnings:
-        print(warning, file=sys.stderr)
-    for error in admission_audit.errors:
-        print(f"FAIL: {error}", file=sys.stderr)
-        failed = True
-
-    for rel, ceiling in sorted(ceilings.items()):
-        path = REPO_ROOT / rel
-        if not path.is_file():
-            print(
-                f"FAIL: ratcheted hot file is missing: {rel}. If it was moved or "
-                "renamed, update scripts/hotfile_ratchet.toml.",
-                file=sys.stderr,
-            )
-            failed = True
-            continue
-
-        current = line_count(path)
-        if current > ceiling + WIRING_SLACK_LINES:
-            print(
-                f"FAIL: {rel} grew to {current} lines > ceiling {ceiling} + slack "
-                f"{WIRING_SLACK_LINES}.",
-                file=sys.stderr,
-            )
-            print(
-                "      Hot-file line counts may only grow within the wiring slack. "
-                "Shrink the file (prefer decomposition) instead of raising the "
-                "ceiling.",
-                file=sys.stderr,
-            )
-            failed = True
-        elif current > ceiling:
-            # Within the slack: pass without a lock-in note, the ceiling is not stale.
-            print(
-                f"OK: {rel} = {current} lines (ceiling {ceiling} + slack "
-                f"{WIRING_SLACK_LINES}; {current - ceiling} slack lines used)."
-            )
-        elif current < ceiling:
-            print(
-                f"NOTE: {rel} has {current} lines, below its ceiling of {ceiling}. "
-                f"Lower ceiling to {current} in scripts/hotfile_ratchet.toml to "
-                "lock in the win."
-            )
-        else:
-            print(f"OK: {rel} = {current} lines (ceiling {ceiling}).")
-
-    return 1 if failed else 0
 
 
 if __name__ == "__main__":

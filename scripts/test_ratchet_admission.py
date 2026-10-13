@@ -1,144 +1,224 @@
 #!/usr/bin/env python3
-"""Focused tests for the ratchet cap-admission guard (#4269)."""
-
+"""Executable cap, history-warning, and raw measurement boundary fixtures."""
 from __future__ import annotations
 
 import contextlib
 import io
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from scripts.ratchet_admission import (
-    ADMISSION_WARN_THRESHOLD,
-    WIRING_SLACK_LINES,
-    AdmissionEvent,
-    admission_warning_messages,
-    validate_admission_delta,
-)
-
-# check_hotfile_ratchet imports ratchet_admission as a top-level module.
 SCRIPTS_DIR = Path(__file__).resolve().parent
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
-import check_hotfile_ratchet  # noqa: E402
+sys.path.insert(0, str(SCRIPTS_DIR))
+import check_hotfile_ratchet as hotfile
+import ratchet_admission as admission
 
 
 class RatchetAdmissionGuardTest(unittest.TestCase):
-    def _event(self, decompose_issue: object) -> AdmissionEvent:
-        return AdmissionEvent(
-            ratchet="hotfile_ratchet",
-            file="src/services/discord/example.rs",
-            old_cap=100,
-            new_cap=120,
-            decompose_issue=decompose_issue,
-            count=1,
-        )
+    def test_cap_raise_with_valid_history_still_fails(self):
+        event = admission.AdmissionEvent("hotfile_ratchet", "src/a.rs", 100, 101, 1, 1)
+        self.assertTrue(admission.validate_admission_delta(ratchet="hotfile_ratchet",
+            current_caps={"src/a.rs": 101}, prior_caps={"src/a.rs": 100},
+            current_events=[event], prior_events=[]))
 
-    def test_admission_requires_decompose_issue_and_accepts_it_when_present(self) -> None:
-        common = {
-            "ratchet": "hotfile_ratchet",
-            "current_caps": {"src/services/discord/example.rs": 120},
-            "prior_caps": {"src/services/discord/example.rs": 100},
-            "prior_events": [],
-        }
+    def test_history_form_does_not_block_without_cap_growth(self):
+        event = admission.AdmissionEvent("hotfile_ratchet", "src/a.rs", 100, 101, None, 4)
+        self.assertEqual(admission.validate_admission_delta(ratchet="hotfile_ratchet",
+            current_caps={"src/a.rs": 100}, prior_caps={"src/a.rs": 100},
+            current_events=[event], prior_events=[]), [])
+        self.assertTrue(admission.validate_history([event]))
 
-        rejected = validate_admission_delta(
-            **common,
-            current_events=[self._event(None)],
-        )
-        self.assertTrue(
-            any("decompose_issue is mandatory" in error for error in rejected),
-            "cap admission without decompose_issue must be rejected",
-        )
+    def test_equal_and_lower_caps_pass(self):
+        for cap in (99, 100):
+            self.assertEqual(admission.validate_admission_delta(ratchet="hotfile_ratchet",
+                current_caps={"src/a.rs": cap}, prior_caps={"src/a.rs": 100},
+                current_events=[], prior_events=[]), [])
 
-        accepted = validate_admission_delta(
-            **common,
-            current_events=[self._event(4269)],
-        )
-        self.assertEqual(accepted, [], "linked cap admission must be accepted")
-
-    def test_more_than_named_threshold_emits_decomposition_warning(self) -> None:
-        events = [
-            AdmissionEvent(
-                ratchet="hotfile_ratchet",
-                file="src/services/discord/example.rs",
-                old_cap=100 + count,
-                new_cap=101 + count,
-                decompose_issue=4200 + count,
-                count=count,
-            )
-            for count in range(1, ADMISSION_WARN_THRESHOLD + 2)
-        ]
-
-        warnings = admission_warning_messages(events, "hotfile_ratchet")
+    def test_repeated_admission_history_keeps_decomposition_warning(self):
+        events = [admission.AdmissionEvent("hotfile_ratchet", "src/a.rs", 100 + count,
+                    101 + count, 4200 + count, count)
+                  for count in range(1, admission.ADMISSION_WARN_THRESHOLD + 2)]
+        warnings = admission.admission_warning_messages(events, "hotfile_ratchet")
         self.assertEqual(len(warnings), 1)
         self.assertIn("prioritize decomposition", warnings[0])
-        self.assertIn("src/services/discord/example.rs", warnings[0])
 
 
-class HotfileWiringSlackTest(unittest.TestCase):
-    CEILING = 100
+class HotfileRatchetTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.manifest = self.root / "scripts/hotfile_ratchet.toml"
+        self.history = self.root / admission.HISTORY_REL_PATH
+        self.manifest.parent.mkdir(parents=True)
+        self.caps = {path: 100 for path in hotfile.REQUIRED_HOTFILES}
+        self.write_caps()
+        self.history.write_text("schema_version = 1\nadmission = []\n")
+        for path in self.caps:
+            self.write_size(path, 100)
+        self.grown = hotfile.REQUIRED_HOTFILES[0]
+        for target, value in (("REPO_ROOT", self.root), ("MANIFEST", self.manifest)):
+            patch = mock.patch.object(hotfile, target, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        patch = mock.patch.dict(os.environ, {}, clear=True)
+        patch.start()
+        self.addCleanup(patch.stop)
 
-    def _run(self, grown: int) -> tuple[int, str, str]:
-        """Run the hot-file check on a fixture tree; the first file is ``grown``
-        lines over its ceiling, the second is at it, the third one line under."""
+    def write_caps(self):
+        self.manifest.write_text("[hotfile_ratchet]\n" + "".join(
+            f'"{path}" = {cap}\n' for path, cap in self.caps.items()))
 
-        grown_rel, at_rel, under_rel = check_hotfile_ratchet.REQUIRED_HOTFILES
-        sizes = {grown_rel: self.CEILING + grown, at_rel: self.CEILING,
-                 under_rel: self.CEILING - 1}
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            for rel, lines in sizes.items():
-                (root / rel).parent.mkdir(parents=True, exist_ok=True)
-                (root / rel).write_text("x\n" * lines, encoding="utf-8")
-            manifest = root / "scripts" / "hotfile_ratchet.toml"
-            manifest.parent.mkdir(parents=True, exist_ok=True)
-            manifest.write_text(
-                "[hotfile_ratchet]\n"
-                + "".join(f'"{rel}" = {self.CEILING}\n' for rel in sizes),
-                encoding="utf-8",
-            )
-            (root / "scripts" / "ratchet_admission_history.toml").write_text(
-                "schema_version = 1\nadmission = []\n", encoding="utf-8"
-            )
-            out, err = io.StringIO(), io.StringIO()
-            with mock.patch.object(check_hotfile_ratchet, "REPO_ROOT", root), \
-                    mock.patch.object(check_hotfile_ratchet, "MANIFEST", manifest), \
-                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                rc = check_hotfile_ratchet.main()
+    def write_size(self, path, lines):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n" * lines)
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.root, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def init_git(self, inherited=100):
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "hotfile@example.invalid")
+        self.git("config", "user.name", "Hotfile Fixture")
+        self.write_size(self.grown, inherited)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "base")
+        self.base = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+        return self.base
+
+    def run_check(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = hotfile.main()
         return rc, out.getvalue(), err.getvalue()
 
-    def test_growth_within_wiring_slack_passes_without_a_lock_in_note(self) -> None:
-        self.assertEqual(WIRING_SLACK_LINES, 30)
-        self.assertEqual(check_hotfile_ratchet.WIRING_SLACK_LINES, WIRING_SLACK_LINES)
-        grown_rel, _, under_rel = check_hotfile_ratchet.REQUIRED_HOTFILES
-        for grown in (1, WIRING_SLACK_LINES):
-            with self.subTest(grown=grown):
-                rc, out, err = self._run(grown)
-                self.assertEqual(rc, 0, err)
-                self.assertNotIn("FAIL", err)
-                self.assertIn(
-                    f"OK: {grown_rel} = {self.CEILING + grown} lines "
-                    f"(ceiling {self.CEILING} + slack {WIRING_SLACK_LINES}",
-                    out,
-                )
-                self.assertNotIn(f"NOTE: {grown_rel}", out)
-                # Shrink lock-in still compares against the frozen ceiling.
-                self.assertIn(f"Lower ceiling to {self.CEILING - 1}", out)
-                self.assertEqual(out.count("NOTE:"), 1)
+    def test_export_no_growth_equal_and_reduction(self):
+        for size, expected in ((99, 0), (100, 0), (101, 1), (130, 1)):
+            self.write_size(self.grown, size)
+            rc, _, err = self.run_check()
+            self.assertEqual(rc, expected, err)
+            if expected:
+                self.assertIn(f"grew to {size} lines > ceiling 100", err)
 
-    def test_growth_past_wiring_slack_fails_naming_ceiling_and_slack(self) -> None:
-        grown_rel = check_hotfile_ratchet.REQUIRED_HOTFILES[0]
-        rc, _, err = self._run(WIRING_SLACK_LINES + 1)
+    def test_inherited_overage_frozen_by_sha_no_one_line_growth(self):
+        self.init_git(inherited=124)
+        for size, expected in ((123, 0), (124, 0), (125, 1)):
+            self.write_size(self.grown, size)
+            rc, out, err = self.run_check()
+            self.assertEqual(rc, expected, err)
+            self.assertIn(self.base, err if expected else out)
+
+    def test_cap_space_does_not_allow_regrowth_from_smaller_base(self):
+        self.init_git(inherited=90)
+        self.write_size(self.grown, 91)
+        rc, _, err = self.run_check()
         self.assertEqual(rc, 1)
-        self.assertIn(
-            f"FAIL: {grown_rel} grew to {self.CEILING + WIRING_SLACK_LINES + 1} "
-            f"lines > ceiling {self.CEILING} + slack {WIRING_SLACK_LINES}.",
-            err,
-        )
+        self.assertIn("grew to 91 lines", err)
+
+    def test_cap_raise_fails_even_if_file_shrinks(self):
+        self.init_git()
+        self.write_size(self.grown, 99)
+        self.caps[self.grown] = 101
+        self.write_caps()
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 1)
+        self.assertIn("cap raised", err)
+
+    def test_ledger_format_fixtures_warn_and_pass(self):
+        for text in ('[broken\n', 'schema_version = 9\n',
+                     'schema_version = 1\n[[admission]]\nfile = "src/a.rs"\n'):
+            with self.subTest(text=text):
+                self.history.write_text(text)
+                rc, _, err = self.run_check()
+                self.assertEqual(rc, 0, err)
+                self.assertIn("WARN:", err)
+                self.assertNotIn("FAIL:", err)
+
+    def test_history_removal_warns_and_passes_in_git_fixture(self):
+        self.history.write_text('schema_version = 1\n[[admission]]\nratchet="hotfile_ratchet"\n'
+            'file="src/a.rs"\nold_cap=100\nnew_cap=101\ndecompose_issue=1\ncount=1\n')
+        self.init_git()
+        self.history.write_text('schema_version = 1\nadmission = []\n')
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("WARN:", err)
+        self.assertIn("not append-only", err)
+
+    def test_missing_file_bad_cap_and_removed_required_cap_fail(self):
+        target = self.root / self.grown
+        target.unlink()
+        self.assertEqual(self.run_check()[0], 1)
+        self.write_size(self.grown, 100)
+        for broken in ('[broken\n', '[hotfile_ratchet]\n',
+                       '[hotfile_ratchet]\n"src/a.rs"=true\n'):
+            self.manifest.write_text(broken)
+            self.assertEqual(self.run_check()[0], 1)
+
+    def test_nonrequired_ceiling_removal_cannot_hide_file(self):
+        self.caps["src/extra.rs"] = 100
+        self.write_caps()
+        self.write_size("src/extra.rs", 100)
+        self.init_git()
+        del self.caps["src/extra.rs"]
+        self.write_caps()
+        self.write_size("src/extra.rs", 101)
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 1)
+        self.assertIn("ceiling removed", err)
+
+    def test_invalid_explicit_base_does_not_fall_back(self):
+        self.init_git()
+        os.environ["RATCHET_ADMISSION_BASE_REF"] = "refs/missing"
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot resolve", err)
+
+    def test_measurement_exception_cannot_warn_pass(self):
+        for exception in (OSError("cannot read"), RuntimeError("checker crashed"),
+                          UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad byte")):
+            with mock.patch.object(hotfile, "line_count", side_effect=exception):
+                rc, _, err = self.run_check()
+            self.assertEqual(rc, 1)
+            self.assertIn("FAIL:", err)
+
+    def test_git_blob_read_exception_is_failure(self):
+        self.init_git()
+        with mock.patch.object(admission, "_git_text", side_effect=ValueError("Git read failed")):
+            rc, _, err = self.run_check()
+        self.assertEqual(rc, 1)
+        self.assertIn("Git read failed", err)
+
+    def test_missing_base_object_is_not_a_missing_path(self):
+        self.init_git()
+        with self.assertRaisesRegex(ValueError, "git could not read"):
+            admission._git_text(self.root, "0" * 40, "src/a.rs")
+
+    def test_pr_candidate_sha_and_parent_order_are_checked(self):
+        self.init_git()
+        self.git("checkout", "-qb", "pr")
+        self.write_size(self.grown, 99)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "pr")
+        head = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "main")
+        self.git("merge", "--no-ff", "-qm", "candidate", "pr")
+        candidate = self.git("rev-parse", "HEAD")
+        env = {"GFP_EVENT_NAME": "pull_request", "GFP_CANDIDATE_SHA": candidate,
+               "GFP_BASE_SHA": self.base, "GFP_HEAD_SHA": head}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(admission.comparison_base(self.root), (self.base, None))
+            self.assertEqual(self.run_check()[0], 0)
+            for key, value in (("GFP_CANDIDATE_SHA", head), ("GFP_HEAD_SHA", self.base),
+                               ("GFP_BASE_SHA", head), ("GFP_BASE_SHA", "0" * 40)):
+                with self.subTest(key=key), mock.patch.dict(os.environ, {key: value}):
+                    self.assertEqual(self.run_check()[0], 1)
 
 
 if __name__ == "__main__":
