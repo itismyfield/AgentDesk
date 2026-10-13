@@ -800,6 +800,7 @@ src/
 │   │   │   └── submission.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── parser/
+│   │   │   │   ├── handoff_binding_tests.rs
 │   │   │   │   ├── herdr_replay.rs
 │   │   │   │   └── herdr_terminal_tests.rs
 │   │   │   ├── child_binding_tests.rs
@@ -1828,6 +1829,7 @@ src/
 │   │   │   ├── tests/
 │   │   │   │   ├── codex_direct_owner_tests/
 │   │   │   │   │   ├── boundary_tests/
+│   │   │   │   │   │   ├── handoff_tests.rs
 │   │   │   │   │   │   ├── loss_tests.rs
 │   │   │   │   │   │   └── native_turn_tests.rs
 │   │   │   │   │   ├── boundary_tests.rs
@@ -2841,6 +2843,8 @@ src/
 │   │   ├── binding_context.rs
 │   │   ├── binding_events.rs
 │   │   ├── extract.rs
+│   │   ├── handoff.rs
+│   │   ├── handoff_tests.rs
 │   │   ├── injected_steer.rs
 │   │   ├── injected_steer_tests.rs
 │   │   ├── native_clear.rs
