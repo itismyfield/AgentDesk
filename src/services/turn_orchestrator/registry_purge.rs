@@ -74,6 +74,11 @@ pub(super) fn close_if_idle_verdict(state: &mut ChannelMailboxState) -> Result<(
     if super::injected_inputs::holds_order(state) {
         return Err("injection_reserved");
     }
+    // An installed actor's unacknowledged exits and driver outlive its slot.
+    #[cfg(test)]
+    if state.installed_pending.is_some() {
+        return Err("installed_pending");
+    }
     state.closed = true;
     Ok(())
 }
@@ -113,6 +118,13 @@ pub(super) fn gate_closed_arm(
         M::RestoreActiveTurn { reply, .. } => {
             let _ = reply.send(());
             "RestoreActiveTurn"
+        }
+        #[cfg(test)]
+        M::ScopedClaim(super::scoped_claim::ScopedMsg::Pending { .. }) => return Some(msg),
+        #[cfg(test)]
+        M::ScopedClaim(scoped) => {
+            scoped.refuse(super::scoped_claim::ScopedClaimRefusal::ActorClosed);
+            "ScopedClaim"
         }
         #[cfg(test)]
         M::InstalledActorHandoff(request) => {
