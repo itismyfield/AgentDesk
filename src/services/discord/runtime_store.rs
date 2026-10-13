@@ -934,7 +934,70 @@ pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     file.sync_all()
         .map_err(|e| classify_io_error("sync_all", e))?;
     log_discord_inflight_atomic_replace(path);
-    fs::rename(&tmp, path).map_err(|e| classify_io_error("rename", e))
+    #[cfg(test)]
+    rename_fault::before(path, &tmp);
+    let renamed = fs::rename(&tmp, path);
+    #[cfg(test)]
+    rename_fault::after(path, &renamed);
+    renamed.map_err(|e| classify_io_error("rename", e))
+}
+
+/// Real rename failures of `atomic_write` for one path: the synced temp file is removed right
+/// before its rename, so the OS refuses that rename and the target keeps its bytes.
+#[cfg(test)]
+pub(in crate::services::discord) mod rename_fault {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// (path, fault still pending, rename attempts, their OS errors)
+    static ARMED: Mutex<Vec<(PathBuf, bool, usize, Vec<String>)>> = Mutex::new(Vec::new());
+
+    /// Fails the next rename onto its path; records that path's renames until dropped.
+    pub(in crate::services::discord) struct Armed(PathBuf);
+
+    impl Armed {
+        pub(in crate::services::discord) fn new(path: &Path) -> Self {
+            let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
+            armed.push((path.to_path_buf(), true, 0, Vec::new()));
+            Self(path.to_path_buf())
+        }
+        /// Renames attempted onto the path since arming and the errors they returned.
+        pub(in crate::services::discord) fn evidence(&self) -> (usize, Vec<String>) {
+            let armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
+            armed
+                .iter()
+                .find(|entry| entry.0 == self.0)
+                .map(|entry| (entry.2, entry.3.clone()))
+                .unwrap_or_default()
+        }
+    }
+
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(index) = armed.iter().position(|entry| entry.0 == self.0) {
+                armed.remove(index);
+            }
+        }
+    }
+
+    pub(super) fn before(path: &Path, tmp: &Path) {
+        let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = armed.iter_mut().find(|entry| entry.0 == path) {
+            entry.2 += 1;
+            if std::mem::take(&mut entry.1) {
+                let _ = std::fs::remove_file(tmp);
+            }
+        }
+    }
+
+    pub(super) fn after(path: &Path, renamed: &std::io::Result<()>) {
+        let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some(entry), Err(error)) = (armed.iter_mut().find(|entry| entry.0 == path), renamed)
+        {
+            entry.3.push(error.to_string());
+        }
+    }
 }
 
 /// #5254 D10: fsync the directory entry `atomic_write` published, so the rename

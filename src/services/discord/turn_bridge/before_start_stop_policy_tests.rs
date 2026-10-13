@@ -1227,5 +1227,130 @@ async fn p10_fin_off_and_legacy() {
     assert_held(&close, &Some(unknown), &queued, "unknown").await;
 }
 
+/// Admits and acks `close`'s receipt the way a first pass did, leaving it delivered.
+async fn delivered(close: &Close) {
+    let generation = close.shared.restart.current_generation;
+    let admitted = close
+        .row
+        .admit_before_start_receipt(&close.proof.turn_nonce, close.proof.basis, generation)
+        .await
+        .unwrap();
+    admitted
+        .ack_before_start_notice(&shown().await)
+        .await
+        .unwrap();
+}
+
+/// A re-entry over a delivered receipt shows nothing and writes nothing before its submission,
+/// which still settles the turn; without its message it stays held and is never cleared.
+#[tokio::test(flavor = "current_thread")]
+async fn p10_fin_delivered_reentry_skips_the_notice_but_not_the_message_check() {
+    let close = Close::open(5_340_981, |_| {}).await;
+    delivered(&close).await;
+    let zeroed = {
+        let mut row = close.durable().unwrap();
+        row.current_msg_id = 0;
+        row
+    };
+    discord::inflight::save_inflight_state(&zeroed).unwrap();
+    let zeroed = close.durable().unwrap();
+    let before = close.bytes();
+    let submitted = test_hooks::submitted();
+    let polled = std::sync::atomic::AtomicBool::new(false);
+    assert!(!close.consume(recorded(&polled)).await);
+    assert!(!polled.load(Ordering::Acquire), "no message, no notice");
+    assert_eq!(
+        test_hooks::submitted(),
+        submitted,
+        "no message, no submission"
+    );
+    assert_eq!(close.bytes(), before);
+    assert!(close.held().await);
+    let receipt = zeroed
+        .clone()
+        .into_policy_receipt(close.shared.restart.current_generation);
+    assert_eq!(
+        step::with_authority(None, |legacy| receipt.try_clear(legacy)),
+        PolicyClear::Mismatch,
+        "a delivered receipt without its message is never cleared"
+    );
+    assert_eq!(close.bytes(), before);
+
+    discord::inflight::save_inflight_state(&close.row).unwrap();
+    let path = close.path();
+    let delivered_bytes = close.bytes();
+    assert!(
+        close
+            .durable()
+            .unwrap()
+            .herdr_before_start_stop
+            .unwrap()
+            .notice_delivered()
+    );
+    let at_submit = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = at_submit.clone();
+    test_hooks::observe(Some(Box::new(move |stage, _| {
+        if stage == "before_submit" {
+            *slot.borrow_mut() = Some(std::fs::read(&path).ok());
+        }
+    })));
+    let settled = close.consume(recorded(&polled)).await;
+    test_hooks::observe(None);
+    assert!(settled);
+    assert!(
+        !polled.load(Ordering::Acquire),
+        "a delivered notice is not shown again"
+    );
+    assert_eq!(
+        *at_submit.borrow(),
+        Some(delivered_bytes),
+        "no second ACK write"
+    );
+    assert_eq!(test_hooks::submitted(), submitted + 1);
+    assert!(close.durable().is_none());
+}
+
+/// A receipt this binary cannot read is refused before reuse even when its admission keys match:
+/// no notice, no byte written, the turn held.
+#[tokio::test(flavor = "current_thread")]
+async fn p10_fin_unsupported_receipt_is_refused_before_the_notice() {
+    let close = Close::open(5_340_982, |_| {}).await;
+    let generation = close.shared.restart.current_generation;
+    close
+        .row
+        .admit_before_start_receipt(&close.proof.turn_nonce, close.proof.basis, generation)
+        .await
+        .unwrap();
+    let mut raw: serde_json::Value = serde_json::from_slice(&close.bytes().unwrap()).unwrap();
+    raw["herdr_before_start_stop"]["future"] = 1.into();
+    std::fs::write(close.path(), serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+    let before = close.bytes();
+    let submitted = test_hooks::submitted();
+    let polled = std::sync::atomic::AtomicBool::new(false);
+    assert!(!close.consume(recorded(&polled)).await);
+    assert!(!polled.load(Ordering::Acquire), "nothing shown");
+    assert_eq!(close.bytes(), before);
+    assert!(close.held().await);
+    assert_eq!(test_hooks::submitted(), submitted);
+}
+
+/// A message reposted while the notice is in flight is not acked: the receipt stays pending, the
+/// turn stays held with its +1, and nothing is submitted.
+#[tokio::test(flavor = "current_thread")]
+async fn p10_fin_ack_refuses_a_message_moved_during_the_notice() {
+    let close = Close::open(5_340_983, |_| {}).await;
+    let submitted = test_hooks::submitted();
+    let notice = async {
+        let mut moved = close.durable().unwrap();
+        moved.current_msg_id += 1;
+        discord::inflight::save_inflight_state(&moved).unwrap();
+        Ok(ReplaceLongMessageOutcome::EditedOriginal)
+    };
+    assert!(!close.consume(notice).await);
+    assert_eq!(close.receipt_pending(), Some(true));
+    assert!(close.held().await);
+    assert_eq!(test_hooks::submitted(), submitted);
+}
+
 #[path = "before_start_stop_protected_tests.rs"]
 mod protected;
