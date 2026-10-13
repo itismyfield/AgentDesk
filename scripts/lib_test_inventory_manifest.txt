@@ -6540,6 +6540,21 @@ services::discord::router::intake_dispatch::home_order_tests::source_forwarding_
 services::discord::router::intake_dispatch::notice::tests::intake_dispatch_invariant_blocked_notice_is_throttled_atomically
 services::discord::router::intake_dispatch::queued::tests::actual_merge_persistence_restores_canonical_retry_lineage_4888
 services::discord::router::intake_dispatch::queued::tests::queued_admission_carries_every_absorbed_source_message_id
+services::discord::router::intake_dispatch::queued::transition_busy_tests::legacy_array_bot_busy_preserves_restored_original
+services::discord::router::intake_dispatch::queued::transition_busy_tests::missing_lease_refuses_local_intake_without_consuming_session
+services::discord::router::intake_dispatch::queued::transition_busy_tests::p2_a_full_identity_changes_refuse_but_matching_identity_takes
+services::discord::router::intake_dispatch::queued::transition_busy_tests::p2_b_actual_redirect_busy_restores_origin_channel
+services::discord::router::intake_dispatch::queued::transition_busy_tests::s2b_on_bidirectional_claims_and_reserved_front_protection
+services::discord::router::intake_dispatch::queued::transition_busy_tests::t1_a_busy_restores_original_uploads_and_new_lease
+services::discord::router::intake_dispatch::queued::transition_busy_tests::t1_b_selection_before_restore_must_not_take_tail
+services::discord::router::intake_dispatch::queued::transition_busy_tests::t1_c_restore_arms_only_sixty_second_wake_with_real_take
+services::discord::router::intake_dispatch::queued::transition_busy_tests::t2_fresh_busy_keeps_tail_order
+services::discord::router::intake_dispatch::queued::transition_busy_tests::t3_capped_physical_head_allows_eligible_tail
+services::discord::router::intake_dispatch::queued::transition_busy_tests::t3_observed_empty_is_stale_after_marker_recovery
+services::discord::router::intake_dispatch::queued::transition_busy_tests::t4_failed_restore_holds_payload_until_sixty_second_retry
+services::discord::router::intake_dispatch::queued::transition_busy_tests::t5_gateway_busy_returns_ok_after_durable_restore
+services::discord::router::intake_dispatch::queued::transition_busy_tests::t5_kickoff_busy_reports_no_start_after_durable_restore
+services::discord::router::intake_dispatch::queued::transition_busy_tests::t5_old_lease_cleanup_preserves_new_reservation_and_marker
 services::discord::router::intake_dispatch::replay_admission_tests::dormant_production_context_creates_no_receipt_even_with_producers_env_on_pg
 services::discord::router::intake_dispatch::replay_admission_tests::exact_retry_reenters_only_through_its_own_continuation_pg
 services::discord::router::intake_dispatch::replay_admission_tests::exact_retry_refuses_a_different_request_before_begin_pg
@@ -6726,6 +6741,7 @@ services::discord::router::message_handler::intake_turn::replay_start_tests::wor
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests::b_worker_malformed_sql_sources_hold_claimed_custody_without_failure_or_child_pg
 services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests::held_native_boundary_accepts_clear_through_the_text_command_router_pg
 services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests::native_hold_requeues_the_real_router_input_and_uploads_durably_pg
+services::discord::router::message_handler::intake_turn::runtime_transition::tests::queued_busy_returns_only_owned_vector_and_keeps_later_session_uploads
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::runtime_transition_busy_forwards_owned_uploads_without_taking_session_state
 services::discord::router::message_handler::intake_turn::tui_busy_pre_submit_queue_reaction_tests::busy_pre_submit_enqueue_keeps_the_authoritative_queue_view
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::gated_stale_lookup_feeds_the_turn_abort_branch
@@ -9324,6 +9340,7 @@ services::discord::turn_bridge::context_window::tests::sentinel_overwrite_clamps
 services::discord::turn_bridge::current_message_anchor::tests::authority_or_message_epoch_advance_during_send_aborts_and_deletes_candidate
 services::discord::turn_bridge::current_message_anchor::tests::cleanup_deletes_the_candidate_and_queues_it_only_when_delete_fails
 services::discord::turn_bridge::current_message_anchor::tests::cleared_durable_current_message_stays_absent_until_real_anchor_exists
+services::discord::turn_bridge::finalize_epilogue::r1_transition_busy_tests::t5_real_gateway_busy_never_arms_finalize_error_kick
 services::discord::turn_bridge::finalize_epilogue::tests::a_held_turn_mode_transcript_keeps_the_finalizer_from_dequeuing
 services::discord::turn_bridge::finalize_epilogue::tests::disconnected_gateway_watcher_resume_requires_completion_ownership
 services::discord::turn_bridge::finalize_epilogue::tests::dispatch_failure_requeue_front_schedules_deferred_kickoff

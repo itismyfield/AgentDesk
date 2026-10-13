@@ -318,12 +318,13 @@ use placeholder_controller::queued_card_gate::{self, QueuedCardDisposition, Queu
 pub(in crate::services::discord) use prompt_builder::load_channel_recent_context;
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};
 pub(in crate::services::discord) use queue_dispatch::MailboxEnqueueOutcome;
+#[cfg(test)]
+use queue_dispatch::mailbox_take_next_soft_intervention;
 use queue_dispatch::{
     AutomaticQueueProgression, MailboxTakeNextSoftOutcome,
     automatic_progression as automatic_queue_progression,
     mailbox_abandon_unclaimed_dispatch_after_success, mailbox_requeue_intervention_front,
     mailbox_restore_dequeued_head, mailbox_take_next_automatic_intervention,
-    mailbox_take_next_soft_intervention,
 };
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
