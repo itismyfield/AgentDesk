@@ -702,11 +702,11 @@ pub(in crate::services::discord) fn release_draft_holds(
     })
 }
 
-/// Each `(channel, input, pane)` whose last retry met a person's draft in that pane; read after a
-/// restart, when no watch remains for them.
+/// Draft-held inputs to watch after a restart; legacy records may have no saved pane.
+/// A missing pane must be resolved from the current runtime binding before watching.
 pub(in crate::services::discord) fn draft_held_inputs(
     provider: &ProviderKind,
-) -> Vec<(u64, u64, String)> {
+) -> Vec<(u64, u64, Option<String>)> {
     let Ok((root, _guard)) = locked_root() else {
         return Vec::new();
     };
@@ -724,8 +724,8 @@ pub(in crate::services::discord) fn draft_held_inputs(
                 continue;
             };
             let budget = fs::read(&path).ok().and_then(|b| decode_checked(&b).ok());
-            if let Some(session) = budget.and_then(|b| b.draft_session.filter(|_| b.draft_hold)) {
-                held.push((channel_id, input, session));
+            if let Some(budget) = budget.filter(|b| b.draft_hold) {
+                held.push((channel_id, input, budget.draft_session));
             }
         }
     }

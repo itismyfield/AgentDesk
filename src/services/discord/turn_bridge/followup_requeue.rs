@@ -300,7 +300,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
 
 /// How often an input held by a person's draft looks for that protection to lift.
 const DRAFT_RELEASE_POLL: std::time::Duration = std::time::Duration::from_secs(5);
-/// The retry store keeps a binding this long, so nothing is left to resume after it.
+/// A stalled pane is watched for at most one day; unobserved holds stay persisted.
 const DRAFT_RELEASE_WATCH: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 static DRAFT_RELEASE_WATCHES: std::sync::LazyLock<
@@ -363,8 +363,8 @@ fn watch_draft_release(
     });
 }
 
-/// After a restart nothing remembers which panes protect a person's draft. Each pane a queued
-/// input is still held by is protected again, so only a capture of it releases the input.
+/// Re-protects saved panes, resolving legacy holds through the current watcher binding.
+/// Holds without a binding keep their input and budget for a later recovery.
 pub(in crate::services::discord) fn rewatch_draft_holds(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -378,6 +378,16 @@ pub(in crate::services::discord) fn rewatch_draft_holds(
             .get(&channel_id)
             .is_some_and(|ids| ids.contains(&input))
         {
+            let _binding_guard = super::super::tmux_watcher_registry::lock_tmux_watcher_registry();
+            let Some(session) = session.or_else(|| {
+                shared
+                    .tmux_watchers
+                    .channel_binding(&channel_id)
+                    .filter(|binding| binding.owner_channel_id == channel_id)
+                    .map(|binding| binding.tmux_session_name)
+            }) else {
+                continue;
+            };
             guard_draft(&session, DraftGuard::RecoveryRequired);
             watch_draft_release(shared.clone(), provider.clone(), channel_id, session);
         }
