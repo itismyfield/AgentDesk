@@ -42,6 +42,7 @@ fn budget(count: u32, active_ms: u64, capped: bool) -> RetryBudget {
         active_retry_ms: active_ms,
         capped,
         notice_bound: true,
+        draft_session: None,
     }
 }
 
@@ -69,9 +70,9 @@ fn class_of_bytes(bytes: &[u8]) -> RetryClass {
 #[test]
 fn queue_wait_costs_nothing_and_only_real_attempts_reach_the_cap() {
     let t0 = 10_000_000;
-    let first = RetryBudget::charge(None, 700, 45_000, t0, false);
+    let first = RetryBudget::charge(None, 700, 45_000, t0, None);
     let after_wait =
-        RetryBudget::charge(Some(first), 700, 45_000, t0 + 6 * MINUTE_MS + 45_000, false);
+        RetryBudget::charge(Some(first), 700, 45_000, t0 + 6 * MINUTE_MS + 45_000, None);
     assert_eq!(
         (
             after_wait.busy_retry_count,
@@ -86,7 +87,7 @@ fn queue_wait_costs_nothing_and_only_real_attempts_reach_the_cap() {
 
     let mut slow = None;
     for (attempt, capped) in [(1, false), (2, false), (3, false), (4, true)] {
-        let charged = RetryBudget::charge(slow, 700, 80_000, t0 + attempt * MINUTE_MS, false);
+        let charged = RetryBudget::charge(slow, 700, 80_000, t0 + attempt * MINUTE_MS, None);
         assert_eq!(
             (charged.active_retry_ms, charged.capped),
             (attempt * 80_000, capped)
@@ -94,25 +95,28 @@ fn queue_wait_costs_nothing_and_only_real_attempts_reach_the_cap() {
         slow = Some(charged);
     }
 
-    let edge = RetryBudget::charge(None, 700, 299_999, t0, false);
+    let edge = RetryBudget::charge(None, 700, 299_999, t0, None);
     assert!(
         !edge.capped,
         "one millisecond short of the cost cap stays ready"
     );
-    assert!(RetryBudget::charge(Some(edge), 700, 1, t0, false).capped);
+    assert!(RetryBudget::charge(Some(edge), 700, 1, t0, None).capped);
 
     let mut counted = None;
     for count in 1..=MAX_BUSY_RETRY_COUNT {
-        let charged = RetryBudget::charge(counted, 700, 1, t0, false);
+        let charged = RetryBudget::charge(counted, 700, 1, t0, None);
         assert_eq!(charged.capped, count == MAX_BUSY_RETRY_COUNT);
         counted = Some(charged);
     }
     let five = (0..5).fold(None, |prior, _| {
-        Some(RetryBudget::charge(prior, 700, 1, t0, false))
+        Some(RetryBudget::charge(prior, 700, 1, t0, None))
     });
-    assert!(!five.unwrap().capped, "five failures stay runnable");
     assert!(
-        RetryBudget::charge(five, 700, 1, t0, false).capped,
+        !five.as_ref().unwrap().capped,
+        "five failures stay runnable"
+    );
+    assert!(
+        RetryBudget::charge(five, 700, 1, t0, None).capped,
         "the sixth failure caps"
     );
 }
@@ -127,7 +131,7 @@ fn a_latched_cap_survives_time_and_later_charges() {
             700,
             80_000,
             t0 + attempt,
-            false,
+            None,
         ));
     }
     let latched = latched.unwrap();
@@ -140,7 +144,7 @@ fn a_latched_cap_survives_time_and_later_charges() {
         flag_only.exhausted(),
         "the latch alone keeps the input parked"
     );
-    assert!(RetryBudget::charge(Some(flag_only), 700, 0, t0, false).capped);
+    assert!(RetryBudget::charge(Some(flag_only), 700, 0, t0, None).capped);
     store::set_clock_for_tests(None);
 }
 
@@ -161,6 +165,7 @@ fn draft_release_clears_count_cost_and_latch_but_keeps_the_notice() {
             active_retry_ms: 0,
             capped: false,
             notice_bound: false,
+            draft_session: None,
         }
     );
 }
@@ -261,27 +266,27 @@ fn latch_fields_restore_only_when_all_or_none_are_written() {
         ),
         (
             r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"active_retry_ms":0}"#,
-            partial,
+            partial.clone(),
         ),
         (
             r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"capped":true}"#,
-            partial,
+            partial.clone(),
         ),
         (
             r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"notice_bound":false}"#,
-            partial,
+            partial.clone(),
         ),
         (
             r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"active_retry_ms":0,"capped":true}"#,
-            partial,
+            partial.clone(),
         ),
         (
             r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"active_retry_ms":0,"notice_bound":false}"#,
-            partial,
+            partial.clone(),
         ),
         (
             r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"capped":true,"notice_bound":false}"#,
-            partial,
+            partial.clone(),
         ),
         (
             r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"active_retry_ms":0,"capped":true,"notice_bound":false}"#,
@@ -289,11 +294,11 @@ fn latch_fields_restore_only_when_all_or_none_are_written() {
         ),
         (
             r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"active_retry_ms":0,"capped":null,"notice_bound":false}"#,
-            partial,
+            partial.clone(),
         ),
         (
             r#"{"notice_message_id":700,"busy_retry_count":2,"first_busy_retry_at_ms":1000,"active_retry_ms":null,"capped":null,"notice_bound":null}"#,
-            partial,
+            partial.clone(),
         ),
     ];
     for (index, (raw, expected)) in rows.into_iter().enumerate() {
@@ -428,71 +433,58 @@ fn an_unreadable_source_holds_the_queue_until_it_reads_as_parked() {
     });
 }
 
+/// The writer keeps every latch field, waiting adds no cost, and a rolled-back binary that knows
+/// only the legacy fields still reads what the writer stored.
 #[test]
-fn legacy_writer_bytes_and_reader_results_are_unchanged() {
+fn writer_stores_the_latch_and_a_rolled_back_reader_still_reads_it() {
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct RolledBack {
+        notice_message_id: u64,
+        busy_retry_count: u32,
+        first_busy_retry_at_ms: u64,
+        #[serde(default)]
+        draft_hold: bool,
+    }
     with_root(|root| {
         let provider = ProviderKind::Claude;
         let channel = 68_975;
         let path = store::input_file_path_in_root(root, &provider, channel, 68_976);
         store::bind_notice_if_absent(&provider, channel, 68_976, 700).unwrap();
-        let bound = "{\n  \"notice_message_id\": 700,\n  \"busy_retry_count\": 0,\n  \"first_busy_retry_at_ms\": 0\n}";
-        assert_eq!(fs::read_to_string(&path).unwrap(), bound);
+        let bound = decode_checked(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            bound,
+            RetryBudget {
+                first_busy_retry_at_ms: 0,
+                ..budget(0, 0, false)
+            }
+        );
         store::set_clock_for_tests(Some(5_000));
-        let decision = store::record_busy_retry(&provider, channel, 68_976, 701).unwrap();
-        let retried = "{\n  \"notice_message_id\": 700,\n  \"busy_retry_count\": 1,\n  \"first_busy_retry_at_ms\": 5000\n}";
-        assert_eq!(fs::read_to_string(&path).unwrap(), retried);
-        assert!(!decision.capped);
+        store::record_busy_retry(&provider, channel, 68_976, 701).unwrap();
         store::set_clock_for_tests(Some(5_000 + 6 * MINUTE_MS));
-        let held = store::record_draft_hold_retry(&provider, channel, 68_976, 701).unwrap();
-        let held_bytes = "{\n  \"notice_message_id\": 700,\n  \"busy_retry_count\": 2,\n  \"first_busy_retry_at_ms\": 5000,\n  \"draft_hold\": true\n}";
-        assert_eq!(fs::read_to_string(&path).unwrap(), held_bytes);
+        let ids = (channel, 68_976, 701);
+        let held =
+            store::record_attempt(&provider, ids, &[], std::time::Duration::ZERO, Some("pane"))
+                .unwrap();
         assert!(
-            held.capped,
-            "the legacy reader keeps its wall-clock cap until the switch-over"
+            !held.capped,
+            "six minutes of waiting must not cap the input"
         );
-        assert!(store::is_capped(&provider, channel, 68_976));
-
-        let legacy = store::load(&provider, channel, 68_976).unwrap();
-        let checked = decode_checked(held_bytes.as_bytes()).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let stored = decode_checked(&bytes).unwrap();
+        assert_eq!(stored, held.state);
         assert_eq!(
-            (
-                checked.notice_message_id,
-                checked.busy_retry_count,
-                checked.first_busy_retry_at_ms,
-                checked.draft_hold
-            ),
-            (
-                legacy.notice_message_id,
-                legacy.busy_retry_count,
-                legacy.first_busy_retry_at_ms,
-                legacy.draft_hold
-            )
+            (stored.busy_retry_count, stored.first_busy_retry_at_ms),
+            (2, 5_000)
         );
-        assert_eq!(
-            (
-                checked.active_retry_ms,
-                checked.capped,
-                checked.notice_bound
-            ),
-            (0, false, true)
-        );
-
-        let latched = serde_json::to_vec(&RetryBudget {
+        assert_eq!(stored.draft_session.as_deref(), Some("pane"));
+        let rolled_back: RolledBack = serde_json::from_slice(&bytes).unwrap();
+        let expected = RolledBack {
+            notice_message_id: 700,
+            busy_retry_count: 2,
+            first_busy_retry_at_ms: 5_000,
             draft_hold: true,
-            ..budget(2, 90_000, true)
-        })
-        .unwrap();
-        fs::write(&path, latched).unwrap();
-        assert_eq!(
-            store::load(&provider, channel, 68_976),
-            Some(store::BusyFollowupRetryState {
-                notice_message_id: 700,
-                busy_retry_count: 2,
-                first_busy_retry_at_ms: 1_000,
-                draft_hold: true,
-            }),
-            "a rolled-back reader still reads the legacy fields of the new format"
-        );
+        };
+        assert_eq!(rolled_back, expected);
     });
 }
 

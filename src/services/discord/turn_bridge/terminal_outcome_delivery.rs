@@ -98,6 +98,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     let had_prior_session_id_at_turn_start = ctx.had_prior_session_id_at_turn_start;
     let session_handshake_seen = ctx.session_handshake_seen;
     let turn_start = ctx.turn_start;
+    let busy_attempt_cost = ctx.busy_attempt_cost;
     #[cfg(unix)]
     let bridge_tui_gate_outcome_early = ctx.bridge_tui_gate_outcome_early;
 
@@ -350,15 +351,18 @@ pub(super) async fn run_terminal_outcome_delivery(
         // Recovery wrote `claude_tui_busy_requeue_pending` back through its state
         // borrow (now released), so the requeue re-borrows the shared locals here
         // sequentially — never aliased with the recovery call above.
+        let attempt = followup_requeue::BusyAttempt {
+            turn_id: turn_id.as_str(),
+            cost: busy_attempt_cost,
+        };
         busy_requeue_outcome = apply_busy_requeue_if_pending(
-            claude_tui_busy_requeue_pending,
+            claude_tui_busy_requeue_pending.then_some(attempt),
             &shared_owned,
             &provider,
             channel_id,
             &inflight_state,
             dispatch_id.as_deref(),
             adk_session_key.as_deref(),
-            turn_id.as_str(),
             &mut delivery_response,
             &mut preserve_inflight_for_cleanup_retry,
         )
@@ -794,6 +798,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 resume_failure_detected,
                 claude_tui_followup_pre_submit_requeue_candidate,
                 claude_tui_busy_requeue_pending,
+                busy_attempt_cost,
                 tui_error_classification,
                 #[cfg(unix)]
                 bridge_tui_gate_outcome_early,
@@ -818,19 +823,10 @@ pub(super) async fn run_terminal_outcome_delivery(
         )
         .await;
     }
-    // #4888: the busy-notice binding and its aggregate retry budget outlive a
-    // single turn on purpose — the retry kickoff must find the same card and the
-    // same counter. Release them here, once this turn reached a terminal outcome
-    // WITHOUT requeueing for a Claude-TUI busy timeout, so a later turn cannot
-    // edit a card that now holds a delivered answer.
-    if busy_requeue_outcome.is_none()
-        && inflight_state.effective_busy_followup_retry_user_msg_id() != 0
-    {
-        let _ = super::busy_followup_retry_store::clear_for_input(
-            &provider,
-            channel_id.get(),
-            inflight_state.effective_busy_followup_retry_user_msg_id(),
-        );
+    // A terminal answer without a busy requeue unties the card so no later turn edits it; any
+    // spent retries stay with the input.
+    if busy_requeue_outcome.is_none() {
+        super::busy_followup_retry_store::release_notice(&provider, channel_id, &inflight_state);
     }
     // Consume, rather than re-sample, the stamp snapshot under the
     // `SettlementCapabilities` contract.

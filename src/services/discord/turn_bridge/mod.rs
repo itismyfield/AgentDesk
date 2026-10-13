@@ -12,6 +12,7 @@ mod current_message_anchor;
 mod early_tui_completion;
 mod finalize_epilogue;
 mod followup_requeue;
+pub(in crate::services::discord) use followup_requeue::rewatch_draft_holds;
 mod guards;
 mod headless_delivery;
 pub(in crate::services::discord) mod intake_settlement;
@@ -688,6 +689,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             },
         )
         .await;
+        let busy_attempt_cost = turn_start.elapsed();
         match stream_loop_output.outcome {
             stream_loop::StreamLoopOutcome::Completed => {}
             stream_loop::StreamLoopOutcome::AuthorityLost => {
@@ -816,6 +818,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                     had_prior_session_id_at_turn_start,
                     session_handshake_seen,
                     turn_start,
+                    busy_attempt_cost,
                     #[cfg(unix)]
                     bridge_tui_gate_outcome_early,
                 },

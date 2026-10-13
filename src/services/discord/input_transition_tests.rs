@@ -134,12 +134,23 @@ mod supported {
             let busy = root
                 .path()
                 .join("discord_busy_followup_retries/claude/9/8.json");
+            // A moving input whose retries are spent stays put: the new input cannot carry them.
             save(
                 &busy,
                 &json!({"notice_message_id":108,"busy_retry_count":1,"first_busy_retry_at_ms":100}),
             );
-            let mut host = files(root.path());
             let ledger = Ledger::open(root.path(), 9).unwrap();
+            let refused = files(root.path())
+                .collect(&ledger)
+                .err()
+                .expect("refused")
+                .to_string();
+            assert!(refused.contains("busy retry budget"), "{refused}");
+            save(
+                &busy,
+                &json!({"notice_message_id":108,"busy_retry_count":0,"first_busy_retry_at_ms":100}),
+            );
+            let mut host = files(root.path());
             assert_eq!(host.collect(&ledger).unwrap().len(), 3);
             assert_eq!(
                 host.captured.len(),
@@ -454,7 +465,7 @@ mod supported {
                 );
                 save(
                     &busy,
-                    &json!({"notice_message_id":81,"busy_retry_count":1,"first_busy_retry_at_ms":1}),
+                    &json!({"notice_message_id":81,"busy_retry_count":0,"first_busy_retry_at_ms":1}),
                 );
                 let mut adapter = files(root.path());
                 adapter.effects.accepted = true;

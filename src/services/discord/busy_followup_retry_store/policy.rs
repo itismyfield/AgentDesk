@@ -1,5 +1,5 @@
 //! Retry-budget latch codec and the Ready/Parked/Unavailable classifier shared by every queue
-//! consumer. Nothing in production reads or writes this format yet.
+//! consumer.
 
 use std::fs;
 use std::path::Path;
@@ -21,9 +21,9 @@ fn notice_bound_by_default() -> bool {
 
 /// One input's retry budget: the legacy fields plus the summed cost of real attempts and a cap
 /// latch. Legacy files carry none of the new fields; partial or unknown fields are refused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct RetryBudget {
+pub(in crate::services::discord) struct RetryBudget {
     pub notice_message_id: u64,
     pub busy_retry_count: u32,
     /// Diagnostic only; never an input to the cap.
@@ -39,6 +39,10 @@ pub(super) struct RetryBudget {
     /// Whether the notice card still belongs to this input. Legacy files restore as bound.
     #[serde(default = "notice_bound_by_default")]
     pub notice_bound: bool,
+    /// The pane that refused the last retry to protect a person's draft, watched again after a
+    /// restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_session: Option<String>,
 }
 
 impl RetryBudget {
@@ -49,29 +53,45 @@ impl RetryBudget {
             || self.active_retry_ms >= MAX_BUSY_RETRY_ELAPSED.as_millis() as u64
     }
 
+    /// Any retry spent so far; a bare notice binding has none.
+    pub fn has_budget(&self) -> bool {
+        self.busy_retry_count > 0 || self.active_retry_ms > 0 || self.capped
+    }
+
+    /// Carries another id's spending of the same logical input: the larger count and cost, and
+    /// either latch.
+    pub fn absorb(&mut self, other: &Self) {
+        self.busy_retry_count = self.busy_retry_count.max(other.busy_retry_count);
+        self.active_retry_ms = self.active_retry_ms.max(other.active_retry_ms);
+        self.capped |= other.capped;
+    }
+
     /// Charges one real pre-submit failure that took `attempt_ms`; the latch never clears here.
+    /// `draft_session` names the pane that refused it to protect a person's draft.
     pub fn charge(
         prior: Option<Self>,
         notice_message_id: u64,
         attempt_ms: u64,
         now_ms: u64,
-        draft_hold: bool,
+        draft_session: Option<&str>,
     ) -> Self {
         let mut budget = prior.unwrap_or(Self {
             notice_message_id,
             busy_retry_count: 0,
             first_busy_retry_at_ms: now_ms,
-            draft_hold,
+            draft_hold: false,
             active_retry_ms: 0,
             capped: false,
             notice_bound: true,
+            draft_session: None,
         });
         if budget.first_busy_retry_at_ms == 0 {
             budget.first_busy_retry_at_ms = now_ms;
         }
         budget.busy_retry_count = budget.busy_retry_count.saturating_add(1);
         budget.active_retry_ms = budget.active_retry_ms.saturating_add(attempt_ms);
-        budget.draft_hold = draft_hold;
+        budget.draft_hold = draft_session.is_some();
+        budget.draft_session = draft_session.map(str::to_string);
         budget.capped = budget.exhausted();
         budget
     }
@@ -84,6 +104,7 @@ impl RetryBudget {
             draft_hold: false,
             active_retry_ms: 0,
             capped: false,
+            draft_session: None,
             ..self
         }
     }
@@ -91,7 +112,7 @@ impl RetryBudget {
 
 /// Why an input's retry state cannot be trusted. Consumers branch on this, never on the detail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum UnavailableReason {
+pub(crate) enum UnavailableReason {
     RootUnavailable,
     ReadFailed,
     MalformedRecord,
@@ -104,7 +125,7 @@ pub(super) enum UnavailableReason {
 
 /// A refused read: the coded reason and a detail kept for diagnostics only.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ReadRefusal {
+pub(in crate::services::discord) struct ReadRefusal {
     pub reason: UnavailableReason,
     pub detail: String,
 }
@@ -120,7 +141,9 @@ impl ReadRefusal {
 
 /// Restores a budget from stored bytes without guessing: truncated, partial, unknown or
 /// incomplete records are refused, never read as an empty budget.
-pub(super) fn decode_checked(bytes: &[u8]) -> Result<RetryBudget, ReadRefusal> {
+pub(in crate::services::discord) fn decode_checked(
+    bytes: &[u8],
+) -> Result<RetryBudget, ReadRefusal> {
     use UnavailableReason::{IncompleteRecord, InvalidNotice, MalformedRecord};
     let malformed = |error: serde_json::Error| ReadRefusal::new(MalformedRecord, error);
     let fields: serde_json::Map<String, serde_json::Value> =
@@ -145,13 +168,13 @@ pub(super) fn decode_checked(bytes: &[u8]) -> Result<RetryBudget, ReadRefusal> {
 
 /// What one source id's retry file says, with a missing file kept apart from an unreadable one.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum SourceRead {
+pub(in crate::services::discord) enum SourceRead {
     Absent,
     Budget(RetryBudget),
     Unreadable(ReadRefusal),
 }
 
-fn read_source_in_root(
+pub(super) fn read_source_in_root(
     root: &Path,
     provider: &ProviderKind,
     channel_id: u64,
@@ -169,7 +192,7 @@ fn read_source_in_root(
 
 /// How the automatic paths may treat one queued input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RetryClass {
+pub(crate) enum RetryClass {
     /// Runnable; it also holds back inputs that arrived later.
     Ready,
     /// Budget spent: kept, never auto-submitted, and never holds back later inputs.
@@ -206,7 +229,7 @@ fn identity_ids(primary: u64, sources: &[MessageId]) -> Vec<u64> {
 /// One logical input's identity together with a checked read of every id it names; the only
 /// way outside this module to classify an input.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct CheckedInputView {
+pub(in crate::services::discord) struct CheckedInputView {
     provider: ProviderKind,
     channel_id: u64,
     primary: u64,
@@ -275,6 +298,7 @@ impl CheckedInputView {
     }
 
     /// A fresh read of the same identity, for re-checking at claim time.
+    #[cfg(test)]
     pub fn reread(&self) -> Self {
         Self::read(&self.provider, self.channel_id, self.primary, &self.sources)
     }
@@ -307,7 +331,7 @@ impl CheckedInputView {
 
 /// Automatic selection: parked inputs are passed over, the first ready one is taken, and an
 /// unavailable one stops the walk so nothing behind it overtakes it.
-pub(super) fn auto_pick(classes: &[RetryClass]) -> Option<usize> {
+pub(in crate::services::discord) fn auto_pick(classes: &[RetryClass]) -> Option<usize> {
     for (index, class) in classes.iter().enumerate() {
         match class {
             RetryClass::Parked => continue,
@@ -318,16 +342,21 @@ pub(super) fn auto_pick(classes: &[RetryClass]) -> Option<usize> {
     None
 }
 
+/// Whether nothing but parked inputs sits in one queue layer.
+pub(crate) fn parked_only(classes: &[RetryClass]) -> bool {
+    classes.iter().all(|class| *class == RetryClass::Parked)
+}
+
 /// One queue layer as the injection check read it.
 #[derive(Clone, Copy, Debug)]
-pub(super) enum LayerSnapshot<'a> {
+pub(crate) enum LayerSnapshot<'a> {
     Classes(&'a [RetryClass]),
     Unreadable,
 }
 
 /// The backlog a later input would pass. Both layers are required; one left unchecked refuses.
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) struct BacklogLayers<'a> {
+pub(crate) struct BacklogLayers<'a> {
     pub memory: Option<LayerSnapshot<'a>>,
     pub disk: Option<LayerSnapshot<'a>>,
 }
@@ -335,10 +364,9 @@ pub(super) struct BacklogLayers<'a> {
 impl BacklogLayers<'_> {
     /// Only layers read as parked-only admit a later input past them.
     pub fn admits_later_input(&self) -> bool {
-        [self.memory, self.disk].iter().all(|layer| {
-            matches!(layer, Some(LayerSnapshot::Classes(classes))
-                if classes.iter().all(|class| *class == RetryClass::Parked))
-        })
+        [self.memory, self.disk].iter().all(
+            |layer| matches!(layer, Some(LayerSnapshot::Classes(classes)) if parked_only(classes)),
+        )
     }
 }
 

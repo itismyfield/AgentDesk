@@ -1400,3 +1400,5 @@ async fn legacy_array_bot_busy_preserves_restored_original() {
     );
     f.shared.mailboxes.remove_fixture_for_test(f.channel);
 }
+
+mod retry_tests;

@@ -83,6 +83,14 @@ fn schedule_retry_if_eligible(
     true
 }
 
+/// One submission that failed before reaching the pane: its turn and the bridge-active time it
+/// cost, frozen once when the stream loop ended.
+#[derive(Clone, Copy)]
+pub(super) struct BusyAttempt<'a> {
+    pub(super) turn_id: &'a str,
+    pub(super) cost: std::time::Duration,
+}
+
 pub(super) async fn requeue_if_needed(
     outcome: &mut Option<FollowupRequeueOutcome>,
     requeue_candidate: bool,
@@ -93,7 +101,7 @@ pub(super) async fn requeue_if_needed(
     inflight_state: &InflightTurnState,
     dispatch_id: Option<&str>,
     adk_session_key: Option<&str>,
-    turn_id: &str,
+    attempt: BusyAttempt<'_>,
 ) {
     if !requeue_candidate || already_pending {
         return;
@@ -106,7 +114,7 @@ pub(super) async fn requeue_if_needed(
             inflight_state,
             dispatch_id,
             adk_session_key,
-            turn_id,
+            attempt,
         )
         .await,
     );
@@ -119,7 +127,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
     inflight_state: &InflightTurnState,
     dispatch_id: Option<&str>,
     adk_session_key: Option<&str>,
-    turn_id: &str,
+    attempt: BusyAttempt<'_>,
 ) -> FollowupRequeueOutcome {
     let notice_message_id = super::super::busy_followup_retry_store::bind_notice_if_absent(
         provider,
@@ -143,18 +151,36 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
         .tmux_session_name
         .as_deref()
         .filter(|session| crate::services::claude_tui::composer_lock::draft_guarded(session));
-    let record = match held {
-        Some(_) => super::super::busy_followup_retry_store::record_draft_hold_retry,
-        None => super::super::busy_followup_retry_store::record_busy_retry,
-    };
-    let retry_decision = record(
+    let mut sources = inflight_state.source_message_ids.clone();
+    sources.push(inflight_state.user_msg_id);
+    let retry_decision = match super::super::busy_followup_retry_store::record_attempt(
         provider,
-        channel_id.get(),
-        inflight_state.effective_busy_followup_retry_user_msg_id(),
-        notice_message_id.get(),
-    )
-    .ok();
-    if retry_decision.is_some_and(|decision| decision.capped) {
+        (
+            channel_id.get(),
+            inflight_state.effective_busy_followup_retry_user_msg_id(),
+            notice_message_id.get(),
+        ),
+        &sources,
+        attempt.cost,
+        held,
+    ) {
+        Ok(decision) => decision,
+        // An unrecorded failure must not become a free retry: keep the inflight turn instead.
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                error = %error,
+                "busy follow-up retry budget not recorded; preserving inflight without requeue"
+            );
+            return FollowupRequeueOutcome {
+                requeued: false,
+                retry_capped: false,
+                notice_message_id,
+            };
+        }
+    };
+    if retry_decision.capped {
         tracing::warn!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
@@ -185,7 +211,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
         channel_id.get(),
         dispatch_id,
         adk_session_key,
-        Some(turn_id),
+        Some(attempt.turn_id),
         "claude_tui_followup_pre_submit_requeue",
         serde_json::json!({
             "user_msg_id": inflight_state.effective_busy_followup_retry_user_msg_id(),
@@ -267,7 +293,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
     }
     FollowupRequeueOutcome {
         requeued: retry_present_or_accepted,
-        retry_capped: retry_decision.is_some_and(|decision| decision.capped),
+        retry_capped: retry_decision.capped,
         notice_message_id,
     }
 }
@@ -337,6 +363,27 @@ fn watch_draft_release(
     });
 }
 
+/// After a restart nothing remembers which panes protect a person's draft. Each pane a queued
+/// input is still held by is protected again, so only a capture of it releases the input.
+pub(in crate::services::discord) fn rewatch_draft_holds(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    live_queue_ids: &std::collections::HashMap<ChannelId, std::collections::HashSet<u64>>,
+) {
+    use crate::services::claude_tui::composer_lock::{DraftGuard, guard_draft};
+    let held = super::super::busy_followup_retry_store::draft_held_inputs(provider);
+    for (channel, input, session) in held {
+        let channel_id = ChannelId::new(channel);
+        if live_queue_ids
+            .get(&channel_id)
+            .is_some_and(|ids| ids.contains(&input))
+        {
+            guard_draft(&session, DraftGuard::RecoveryRequired);
+            watch_draft_release(shared.clone(), provider.clone(), channel_id, session);
+        }
+    }
+}
+
 /// A pane still marked protected is read off the runtime, between composer mutations.
 async fn draft_lifted(session: &str) -> bool {
     use crate::services::claude_tui::composer_lock::{draft_guarded, draft_released};
@@ -353,6 +400,14 @@ mod tests {
     use super::*;
 
     mod person_draft_tests;
+
+    /// A failed attempt that cost no bridge time.
+    fn attempt(turn_id: &str) -> BusyAttempt<'_> {
+        BusyAttempt {
+            turn_id,
+            cost: std::time::Duration::ZERO,
+        }
+    }
 
     struct ScopedRuntimeRoot {
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -424,7 +479,7 @@ mod tests {
                     &state,
                     None,
                     None,
-                    "c1b-preclose-timeout",
+                    attempt("c1b-preclose-timeout"),
                 )
                 .await
             }
@@ -528,7 +583,7 @@ mod tests {
                 &inflight,
                 None,
                 None,
-                "turn-4248-reaction-failure",
+                attempt("turn-4248-reaction-failure"),
             )
             .await
             .requeued
@@ -557,7 +612,7 @@ mod tests {
             &inflight,
             None,
             None,
-            "turn-4888-delivery-order",
+            attempt("turn-4888-delivery-order"),
         )
         .await;
         assert!(outcome.requeued);
@@ -779,7 +834,7 @@ mod tests {
             &inflight,
             None,
             None,
-            "turn-4888-cap",
+            attempt("turn-4888-cap"),
         )
         .await;
         assert!(outcome.requeued);
@@ -940,7 +995,7 @@ mod tests {
             &state,
             None,
             None,
-            "turn-5845-draft-hold",
+            attempt("turn-5845-draft-hold"),
         )
         .await;
         let outcome = outcome.expect("requeued");
@@ -1077,8 +1132,8 @@ mod tests {
         (sent, hook)
     }
 
-    /// A draft-held input is watched from its first retry. It reaches the cap by time while queued,
-    /// and the watch alone, reading the pane, lifts it; it is sent once and leaves the queue.
+    /// A draft-held input is watched from its first retry. Its attempts' cost reaches the cap, and
+    /// the watch alone, reading the pane, lifts it; it is sent once and leaves the queue.
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_held_input_capped_while_queued_is_sent_once_after_the_watch_sees_the_draft_gone() {
@@ -1124,38 +1179,44 @@ mod tests {
             let provider = provider.clone();
             async move {
                 requeue_claude_tui_followup_pre_submit_timeout(
-                    &shared, &provider, channel_id, &state, None, None, turn,
+                    &shared,
+                    &provider,
+                    channel_id,
+                    &state,
+                    None,
+                    None,
+                    attempt(turn),
                 )
                 .await
             }
         };
         assert!(requeue(busy, "turn-busy-cap").await.retry_capped);
 
-        // The held input is refused twice, far from either cap; the second watch request is a no-op.
+        // The held input is refused twice; the second attempt spends the 300s budget, and the
+        // second watch request is a no-op.
         let mut held = inflight(channel_id, held_id);
         held.tmux_session_name = Some(session.clone());
-        for turn in ["turn-held-1", "turn-held-2"] {
-            let outcome = requeue(held.clone(), turn).await;
-            assert!(outcome.requeued && !outcome.retry_capped, "{turn}");
+        for (turn_id, secs) in [("turn-held-1", 0), ("turn-held-2", 300)] {
+            let cost = std::time::Duration::from_secs(secs);
+            let outcome = requeue_claude_tui_followup_pre_submit_timeout(
+                &shared,
+                &provider,
+                channel_id,
+                &held,
+                None,
+                None,
+                BusyAttempt { turn_id, cost },
+            )
+            .await;
+            assert!(outcome.requeued, "{turn_id}");
+            assert_eq!(outcome.retry_capped, secs > 0, "{turn_id}");
         }
         let watch = (channel_id.get(), session.clone());
         assert!(draft_release_watches().contains(&watch));
-
-        // Waiting in the queue, the held input crosses the 300s budget with nothing requeuing it.
-        let progression = |now| {
-            retries::set_clock_for_tests(Some(now));
-            let shared = shared.clone();
-            let provider = provider.clone();
-            async move {
-                let snapshot =
-                    crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
-                automatic_progression(&shared, &provider, channel_id, &snapshot)
-            }
-        };
-        let eligible = AutomaticQueueProgression::Eligible(held_id);
-        assert_eq!(progression(t0 + 299_000).await, eligible);
+        let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
         let blocked = AutomaticQueueProgression::BlockedByCappedRetries;
-        assert_eq!(progression(t0 + 301_000).await, blocked);
+        let progression = automatic_progression(&shared, &provider, channel_id, &snapshot);
+        assert_eq!(progression, blocked);
 
         let (sent, _hook) =
             dispatch_on_kickoff(channel_id, session.clone(), idle_pane(""), idle.clone());
@@ -1181,9 +1242,10 @@ mod tests {
         assert!(!draft_release_watches().contains(&watch));
         assert!(!draft_guarded(&session));
         let held_retry = retries::load(&provider, channel_id.get(), held_id.get()).expect("held");
+        let spent = (held_retry.busy_retry_count, held_retry.active_retry_ms);
         assert_eq!(
-            (held_retry.busy_retry_count, held_retry.draft_hold),
-            (0, false)
+            (spent, held_retry.capped, held_retry.draft_hold),
+            ((0, 0), false, false)
         );
         assert!(retries::is_capped(
             &provider,
@@ -1211,6 +1273,96 @@ mod tests {
             "claude",
             &session,
             "queued follow-up",
+        );
+    }
+
+    /// Each requeue charges the bridge time its attempt cost; minutes spent queued between attempts
+    /// add nothing, and attempts whose costs sum to the time budget cap the input.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_requeue_charges_its_attempt_cost_and_nothing_for_the_wait() {
+        use crate::services::discord::busy_followup_retry_store as retries;
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(100_000_006_897_201);
+        let (waited, slow) = (
+            MessageId::new(100_000_006_897_202),
+            MessageId::new(100_000_006_897_203),
+        );
+        let t0 = 1_800_000_000_000;
+        let mut capped = Vec::new();
+        for (id, secs, now) in [
+            (waited, 45, t0),
+            (waited, 45, t0 + 6 * 60_000),
+            (slow, 80, t0),
+            (slow, 80, t0),
+            (slow, 80, t0),
+            (slow, 80, t0),
+        ] {
+            retries::set_clock_for_tests(Some(now));
+            let cost = std::time::Duration::from_secs(secs);
+            let attempt = BusyAttempt {
+                turn_id: "turn-6897",
+                cost,
+            };
+            let state = inflight(channel_id, id);
+            let outcome = requeue_claude_tui_followup_pre_submit_timeout(
+                &shared, &provider, channel_id, &state, None, None, attempt,
+            )
+            .await;
+            assert!(outcome.requeued);
+            capped.push(outcome.retry_capped);
+        }
+        retries::set_clock_for_tests(None);
+        assert_eq!(capped, [false, false, false, false, false, true]);
+        let after_wait = retries::load(&provider, channel_id.get(), waited.get()).unwrap();
+        assert_eq!(
+            (after_wait.busy_retry_count, after_wait.active_retry_ms),
+            (2, 90_000)
+        );
+        let spent = retries::load(&provider, channel_id.get(), slow.get()).unwrap();
+        assert_eq!(spent.active_retry_ms, 320_000);
+    }
+
+    /// A failure whose retry budget cannot be written, or whose record cannot be read, is not
+    /// requeued as a fresh retry: the inflight turn is kept and nothing is queued or kicked.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unrecorded_failure_keeps_the_inflight_turn_instead_of_requeueing() {
+        use crate::services::discord::busy_followup_retry_store as retries;
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(100_000_006_897_301);
+        let (unsaved, unreadable) = (100_000_006_897_302, 100_000_006_897_303);
+        let root = crate::services::discord::runtime_store::discord_busy_followup_retries_root();
+        let dir = root.unwrap().join(format!("claude/{}", channel_id.get()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{unreadable}.json")), "{").unwrap();
+        for (id, fail_saves) in [(unsaved, true), (unreadable, false)] {
+            retries::fail_saves_for_tests(fail_saves);
+            let state = inflight(channel_id, MessageId::new(id));
+            let outcome = requeue_claude_tui_followup_pre_submit_timeout(
+                &shared,
+                &provider,
+                channel_id,
+                &state,
+                None,
+                None,
+                attempt("turn-6897-unrecorded"),
+            )
+            .await;
+            retries::fail_saves_for_tests(false);
+            assert!(!outcome.requeued && !outcome.retry_capped, "{id}");
+            let reason = "test_unrecorded_busy_retry";
+            let kicked =
+                schedule_retry_if_eligible(Some(outcome), &shared, &provider, channel_id, reason);
+            assert!(!kicked, "{id}");
+        }
+        let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert!(snapshot.intervention_queue.is_empty());
+        assert_eq!(
+            std::fs::read(dir.join(format!("{unreadable}.json"))).unwrap(),
+            b"{"
         );
     }
 
@@ -1249,7 +1401,9 @@ mod tests {
             let session = format!("release-retry-{index}-{}", uuid::Uuid::new_v4().simple());
             let inputs = [channel.get() + 1, channel.get() + 2];
             for input in inputs {
-                retries::record_draft_hold_retry(&provider, channel.get(), input, input + 100)
+                let ids = (channel.get(), input, input + 100);
+                let held = Some(session.as_str());
+                retries::record_attempt(&provider, ids, &[], std::time::Duration::ZERO, held)
                     .expect("held retry");
             }
             retries::fail_release_steps_for_tests(faults);
@@ -1272,7 +1426,10 @@ mod tests {
                 .collect();
             assert!(!unsaved.is_empty(), "{name}");
             for input in unsaved.iter().filter(|_| leaves) {
-                assert!(retries::clear_for_input(&provider, channel.get(), *input));
+                let root =
+                    crate::services::discord::runtime_store::discord_busy_followup_retries_root();
+                let file = format!("claude/{}/{input}.json", channel.get());
+                std::fs::remove_file(root.unwrap().join(file)).expect("input leaves the store");
             }
             tokio::time::sleep(poll).await;
             assert!(!draft_release_watches().contains(&watch), "{name}");
@@ -1313,7 +1470,7 @@ mod tests {
             &inflight,
             None,
             None,
-            "turn-4248",
+            attempt("turn-4248"),
         )
         .await;
 
