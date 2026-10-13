@@ -273,6 +273,10 @@ struct TuiPromptDedupeState {
     native_turn_by_tmux: HashMap<PromptKey, TimedValue<NativeTurnSlot>>,
     // Nonces pasted into a running Codex turn; the first observation naming a native turn settles each.
     injected_steer_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<InjectedSteer>>>,
+    // A Discord turn's reserved handoff and the inputs it holds until it names its turn.
+    handoff_by_tmux: HashMap<PromptKey, TimedValue<handoff::HandoffReservation>>,
+    // Held inputs of expired reservations, relayed outside the lock by `drain_expired_handoffs`.
+    handoff_expired: Vec<(PromptKey, Vec<handoff::ParkedObservation>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -322,6 +326,7 @@ impl PromptKey {
 }
 
 mod extract;
+mod handoff;
 mod injected_steer;
 pub(crate) mod native_clear;
 mod observation;
@@ -338,13 +343,26 @@ pub(crate) use shadow_peek::{
     BindingPeekBusy, peek_tmux_runtime_binding, try_peek_tmux_runtime_binding,
 };
 
+#[cfg(test)]
+use extract::native_turn_is_open;
 pub use extract::*;
 use extract::{
     is_discord_relayed_user_prompt, is_user_prefixed_subagent_notification_machine_event,
-    native_turn_is_open, normalize_line_endings, normalize_provider, open_native_turn,
-    record_relayed_entry_id, relayed_entry_id_already_seen, take_matching_pending_prompt,
+    normalize_line_endings, normalize_provider, open_native_turn, record_relayed_entry_id,
+    relayed_entry_id_already_seen, take_matching_pending_prompt,
     take_or_record_recent_observed_prompt,
 };
+pub use handoff::RecordEvidence;
+#[cfg(unix)]
+pub(crate) use handoff::codex_replay_restored_handoff_inputs;
+#[cfg(test)]
+pub(crate) use handoff::tests::on_owning_publish;
+pub(crate) use handoff::{
+    BindOutcome, HandoffGuard, bind_discord_handoff_record, codex_rehydrated_scan_offset,
+    drain_expired_handoffs, reserve_discord_handoff,
+};
+#[cfg(test)]
+pub(crate) use handoff::{durable_handoff_present_for_tests, held_handoff_inputs_for_tests};
 use injected_steer::{Claim, InjectedSteer, claim_injected_steer};
 pub(crate) use injected_steer::{register_injected_steer, withdraw_injected_steer};
 use observation::clear_ssh_direct_observation_pending;
@@ -385,6 +403,11 @@ mod test_clock {
 
         pub(crate) fn reset() {
             *offset() = Duration::ZERO;
+        }
+
+        /// Moves the clock forward without restamping anything, so recorded entries age.
+        pub(crate) fn advance(by: Duration) {
+            *offset() += by;
         }
 
         pub(crate) fn elapsed(self) -> Duration {
@@ -442,7 +465,8 @@ mod test_clock {
                 prompt_anchor_by_tmux,
                 ssh_direct_observation_by_tmux,
                 external_input_relay_lease_by_tmux,
-                deferred_anchor_completion_by_tmux
+                deferred_anchor_completion_by_tmux,
+                handoff_by_tmux
             );
             shift_queues!(
                 pending_by_tmux,

@@ -5,7 +5,7 @@ import subprocess
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from . import Unknown, loads
-from .manifest import RUNTIME, digest, shape, uint
+from .manifest import RUNTIME, digest, shape, snowflake, uint
 from .outcomes import unknown_checks
 
 JSONL = {"transcript", "bindings", "log", "o_ledger"}
@@ -15,11 +15,11 @@ PG_OPTIONS = "-c default_transaction_read_only=on -c statement_timeout=10000"
 PG_SELECT = """SELECT json_build_object(
  'intake_outbox', (SELECT coalesce(json_agg(t), '[]'::json) FROM
  (SELECT id, channel_id, user_msg_id, turn_kind, status, created_at, completed_at
- FROM public.intake_outbox WHERE channel_id = :'channel'::bigint
+ FROM public.intake_outbox WHERE channel_id = :'channel'
  AND created_at BETWEEN :'start'::timestamptz AND :'end'::timestamptz ORDER BY id) t),
  'turn_lifecycle_events', (SELECT coalesce(json_agg(t), '[]'::json) FROM
  (SELECT turn_id, channel_id, kind, details_json, created_at
- FROM public.turn_lifecycle_events WHERE channel_id = :'channel'::bigint
+ FROM public.turn_lifecycle_events WHERE channel_id = :'channel'
  AND created_at BETWEEN :'start'::timestamptz AND :'end'::timestamptz
  ORDER BY created_at, turn_id) t));"""
 
@@ -58,6 +58,12 @@ def pg_select(env_name, scope):
         value = loads(result.stdout)
         if not pg_valid(value):
             raise Unknown("pg_invalid")
+        # PG stores channel IDs as TEXT; audits use exact Python integers.
+        for rows in value.values():
+            for row in rows:
+                if not snowflake(row.get("channel_id")) or int(row["channel_id"]) != scope["channel_id"]:
+                    raise Unknown("pg_invalid")
+                row["channel_id"] = int(row["channel_id"])
         return value
     except (OSError, ValueError, subprocess.SubprocessError):
         raise Unknown("pg_unavailable") from None

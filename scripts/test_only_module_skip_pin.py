@@ -34,6 +34,7 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs",
         "src/services/discord/queue_io/queued_head_inject_tests.rs",
         "src/services/turn_orchestrator/overflow_s2b_tests.rs",
         "src/services/turn_orchestrator/pending_queue_persistence/queue_exit_debt_tests.rs",
@@ -692,6 +693,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_placeholders/tests/n3bc_tests.rs",
+        "src/services/tui_prompt_dedupe/handoff_tests.rs",
+        "src/services/codex_tui/rollout_tail/parser/handoff_binding_tests.rs",
+        "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/handoff_tests.rs",
         "src/services/tui_o/repost/projection_tests.rs",
         "src/services/tui_o/repost/pg_statements_tests.rs",
     }

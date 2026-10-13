@@ -221,8 +221,8 @@ pub(super) fn observe_rollout_user_prompt(json: &Value, state: &mut RolloutParse
     let Some(tmux_session_name) = state.tmux_session_name.clone() else {
         return;
     };
-    let Some((prompt, entry_id)) =
-        crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_entry_id(json)
+    let Some((prompt, entry_id, record)) =
+        crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_evidence(json)
     else {
         return;
     };
@@ -238,19 +238,30 @@ pub(super) fn observe_rollout_user_prompt(json: &Value, state: &mut RolloutParse
             &tmux_session_name,
             &prompt,
         );
-        state.discord_origin_prompt = None;
+        // Suppression and the handoff bind are separate; an older record of the same text
+        // stays suppressed but leaves the origin for this submission's own record.
+        let outcome = crate::services::tui_prompt_dedupe::bind_discord_handoff_record(
+            &tmux_session_name,
+            &prompt,
+            &record,
+        );
+        if outcome != crate::services::tui_prompt_dedupe::BindOutcome::Stale {
+            state.discord_origin_prompt = None;
+        }
         tracing::debug!(
             tmux_session_name,
+            outcome = ?outcome,
             "suppressed Codex launch prompt observed in rollout"
         );
         return;
     }
-    // The record belongs to the turn the latest `task_started` opened; a steer names it.
-    let observation = crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at(
+    // The record names its own turn; without that, the latest `task_started`'s turn.
+    let observation = crate::services::tui_prompt_dedupe::observe_codex_record_prompt_at(
         &tmux_session_name,
         &prompt,
         entry_id.as_deref(),
         state.latest_turn.as_deref(),
+        &record,
         chrono::Utc::now(),
     );
     tracing::debug!(
@@ -849,3 +860,6 @@ mod herdr_replay;
 
 #[cfg(all(test, unix))]
 mod herdr_terminal_tests;
+
+#[cfg(test)]
+mod handoff_binding_tests;
