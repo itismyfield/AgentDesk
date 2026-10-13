@@ -260,6 +260,30 @@ class HerdrTurnSmoke(unittest.TestCase):
                 result["marker_counts"][f"[E2E:E50:{RUN_ID}:{label}]"] = hits
                 self.assertFalse(self.judge(result)[0])
 
+    def test_herdr_judge_requires_two_complete_observations_and_valid_final_row(self):
+        evidence = self.evidence()
+        cases = [("one", lambda obs: obs[:1], "observations missing"),
+                 ("final row", lambda obs: [*obs[:-1], {**evidence, "row": {**evidence["row"], "provider": "codex"}}],
+                  "not a verified running execution")]
+        for key, value in (("surface", "GET /api/health"), ("validated", False), ("status_surface", "tmux"),
+                           ("current_input_holds", True), ("current_input_holds", 1)):
+            cases.append((key, lambda obs, k=key, v=value: [{**obs[0], k: v}, *obs[1:]], "evidence incomplete"))
+        for name, change, reason in cases:
+            with self.subTest(name):
+                result = self.collect()
+                result["herdr_observations"] = change(result["herdr_observations"])
+                passed, detail = self.judge(result)
+                self.assertFalse(passed)
+                self.assertRegex(detail, f"Herdr observation unavailable: [^;]*{reason}")
+
+    def test_herdr_judge_requires_t1_t2_after_clear_label_set(self):
+        markers = turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID)
+        passed, detail = turn_smoke.judge(report={"run_id": RUN_ID, "channel_id": "41", "scenarios": [self.collect()]},
+                                          scenario_id="E-50", markers=markers[:2], log_counts=None, driver_rc=0,
+                                          cell="claude-herdr")
+        self.assertFalse(passed)
+        self.assertIn("requires T1, T2 and AFTER_CLEAR", detail)
+
     def test_herdr_judge_cli_ignores_tmux_log_surface(self):
         report = {"run_id": RUN_ID, "scenarios": [self.collect()]}
         with patch.object(turn_smoke, "_load_report", return_value=report), \

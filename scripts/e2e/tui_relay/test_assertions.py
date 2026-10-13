@@ -2047,7 +2047,7 @@ class HerdrHealthAssertions(unittest.TestCase):
                          herdr_endpoint='test', herdr_status_bin='/test/agentdesk')
         with patch.object(driver, '_read_api_json', return_value=(200, self.fixture())) as health, \
              patch.object(herdr.subprocess, 'run', return_value=Namespace(stdout=json.dumps(self.row()))) as status:
-            result = herdr.observe(driver, args, clean=True, reconnected=True)
+            result = herdr.observe(driver, args, reconnected=True)
         health.assert_called_once_with(args.base_url, '/api/health/detail', timeout=5)
         status.assert_called_once_with(['/test/agentdesk', 'herdr', 'status'], capture_output=True, text=True, check=True, timeout=30)
         self.assertEqual(result['row']['nonce'], 'one')

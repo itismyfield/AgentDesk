@@ -200,7 +200,7 @@ def preflight_busy_reasons(
     if cell_driver.cell_runtime(cell) == "herdr":
         args = argparse.Namespace(base_url=base_url, cell=cell, channel_id=channel_id,
                                   herdr_endpoint=herdr_endpoint, herdr_status_bin=herdr_status_bin)
-        cell_driver.herdr.observe(cell_driver, args, clean=True, cold=True)
+        cell_driver.herdr.observe(cell_driver, args, cold=True)
         return []
     if runtime_root is None:
         raise ValueError("legacy preflight requires --queue-runtime-root")

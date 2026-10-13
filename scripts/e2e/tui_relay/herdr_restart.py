@@ -7,6 +7,9 @@ from pathlib import Path
 from . import herdr
 
 LIMITATION = "dcserver incarnation change is not proven; operator restart evidence is required"
+UPTIME_NOTE = "restart inferred from server uptime below time since mark; no boot id"
+# Covers whole-second uptime truncation and the mark request's own latency.
+UPTIME_MARGIN_S = 2
 
 
 def add_arguments(parser):
@@ -48,6 +51,20 @@ def load_mark(path, args):
     return mark
 
 
+def restart_evidence(after, mark_observed_at):
+    """Prove a restart only when the server started after the mark; otherwise report not_proven."""
+    uptime = after.get("server_values", {}).get("uptime_secs")
+    if type(uptime) is not int or uptime < 0:
+        return {"restart_evidence": "not_proven"}
+    # Both observed_at values precede their health requests, so elapsed errs toward refusing.
+    elapsed = (dt.datetime.fromisoformat(after["observed_at"])
+               - dt.datetime.fromisoformat(mark_observed_at)).total_seconds()
+    evidence = {"restart_evidence": "server_uptime", "uptime_secs": uptime, "elapsed_secs": elapsed}
+    if elapsed <= 0 or not uptime < elapsed - UPTIME_MARGIN_S:
+        evidence["restart_evidence"] = "not_observed"
+    return evidence
+
+
 def followup_scenarios(driver, args):
     if not args.filter or args.filter == "E-19":
         marker = "[E2E:E19:{run_id}:POST]"
@@ -80,7 +97,7 @@ def run(driver, args):
             print("[dry-run] observe-only: detail + local CLI status; no mark read/write or restart")
             restart["status"] = "dry_run"
         elif args.herdr_restart_observe_only == "mark":
-            before = herdr.observe(driver, args, clean=True)
+            before = herdr.observe(driver, args)
             restart["before"] = before
             mark = {"version": 1, "run_id": run_id, "target": target(args), "observation": before}
             with Path(args.herdr_restart_mark).open("x", encoding="utf-8") as handle:
@@ -90,23 +107,31 @@ def run(driver, args):
             mark = load_mark(args.herdr_restart_mark, args)
             restart["before"] = mark["observation"]
             restart["mark_run_id"] = mark["run_id"]
-            after = herdr.observe(driver, args, clean=True, reconnected=True)
-            restart["after"] = after
-            if any(after["row"].get(k) != mark["observation"]["row"].get(k) for k in ("channel", "provider", "nonce")):
-                raise ValueError("restart target row continuity failed")
-            restart["status"] = "verified"
-            restart["followup_scope"] = "Post-restart turn only; original E-8/E-19 acceptance is not claimed."
-            client = driver.discord.DiscordClient(base_url=args.base_url, timeout_s=args.turn_start_timeout_s)
-            for scenario in scenarios:
-                result = driver.run_scenario(scenario, args=args, client=client, run_id=run_id)
-                report["scenarios"].append(result)
-                if result["status"] != "pass":
-                    break
+            # Same cell lease key as the driver's normal sweep, so the two never share a channel.
+            with driver.lease.acquire(f"{args.cell}-{run_id}", cell=args.cell.replace("-herdr", "-tui")):
+                after = herdr.observe(driver, args, reconnected=True)
+                restart["after"] = after
+                if any(after["row"].get(k) != mark["observation"]["row"].get(k) for k in ("channel", "provider", "nonce")):
+                    raise ValueError("restart target row continuity failed")
+                restart.update(restart_evidence(after, mark["observation"]["observed_at"]))
+                if restart["restart_evidence"] == "not_observed":
+                    raise ValueError(f"server uptime {restart['uptime_secs']}s is not below {restart['elapsed_secs']:.3f}s "
+                                     f"since mark minus {UPTIME_MARGIN_S}s; restart not observed")
+                if restart["restart_evidence"] == "server_uptime":
+                    restart["limitation"] = UPTIME_NOTE
+                restart["status"] = "verified"
+                restart["followup_scope"] = "Post-restart turn only; original E-8/E-19 acceptance is not claimed."
+                client = driver.discord.DiscordClient(base_url=args.base_url, timeout_s=args.turn_start_timeout_s)
+                for scenario in scenarios:
+                    result = driver.run_scenario(scenario, args=args, client=client, run_id=run_id)
+                    report["scenarios"].append(result)
+                    if result["status"] != "pass":
+                        break
     except Exception as error:
         restart.update(status="fail", reason=f"{type(error).__name__}: {error}")
         if hasattr(error, "herdr_observation"):
             restart["failed_observation"] = error.herdr_observation
     path = output / f"report.{args.cell}.json"
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(f"[e2e] observe-only {restart['status']}; {LIMITATION}; report → {path}")
+    print(f"[e2e] observe-only {restart['status']}; {restart['limitation']}; report → {path}")
     return int(restart["status"] == "fail" or any(r["status"] != "pass" for r in report["scenarios"]))

@@ -90,7 +90,7 @@ def current_row(status, *, channel, provider, cold=False):
     return row
 
 
-def observe(driver, args, *, clean=False, reconnected=False, cold=False):
+def observe(driver, args, *, reconnected=False, cold=False):
     evidence = {"surface": "GET /api/health/detail", "status_surface": "agentdesk herdr status",
                 "observed_at": dt.datetime.now(dt.timezone.utc).isoformat()}
     try:
@@ -269,7 +269,7 @@ def _run(driver, scenario, args, client, run_id, result):
     # Reset/cancel and queue truncation are deliberately never used as Herdr setup.
     result["reset_policy"] = "preserve Herdr session; reset-before-each not executed"
     try:
-        result["herdr_observations"].append(observe(driver, args, clean=True, cold=True))
+        result["herdr_observations"].append(observe(driver, args, cold=True))
         phase = "setup"
         sent = client.send_control(args.channel_id, f"### E2E SETUP {scenario['id']} cell={args.cell} run={run_id}")
         setup_id = str(sent.get("message_id") or sent.get("id") or "")
@@ -359,7 +359,7 @@ def _run(driver, scenario, args, client, run_id, result):
                     if step.get("request_key") == "QB":
                         qa = next(s for s in scenario["steps"] if s.get("request_key") == "QA")
                         wait(qa["body_marker"].replace("{run_id}", run_id), 240)
-                    result["herdr_observations"].append(observe(driver, args, clean=True))
+                    result["herdr_observations"].append(observe(driver, args))
             elif "wait_for_discord_text" in step:
                 wait(str(step["wait_for_discord_text"]).replace("{run_id}", run_id), float(step.get("timeout_s", 240)),
                      raw=scenario["id"] == "E-12" and step["wait_for_discord_text"] == "session ended")
@@ -434,7 +434,7 @@ def _run(driver, scenario, args, client, run_id, result):
                 deadline = time.monotonic() + 90
                 while True:
                     try:
-                        evidence = observe(driver, args, clean=True, reconnected=True)
+                        evidence = observe(driver, args, reconnected=True)
                         if evidence["row"]["nonce"] != before[0]["nonce"]:
                             raise assertions.AssertionError("Herdr restart replaced execution nonce")
                         break
@@ -444,7 +444,7 @@ def _run(driver, scenario, args, client, run_id, result):
                         time.sleep(2)
                 result["herdr_observations"].append(evidence)
             elif "assert_health" in step:
-                result["herdr_observations"].append(observe(driver, args, clean=True))
+                result["herdr_observations"].append(observe(driver, args))
             else:
                 raise ValueError(f"unsupported Herdr step: {step}")
         phase = "assertions"
@@ -480,7 +480,7 @@ def _run(driver, scenario, args, client, run_id, result):
                 driver.run_assertion({"text_present": marker}, window=window, record=result)
             result["e36_acceptance"] = {"discord_markers": "pass", "native_intake_queue_join": "not_applicable"}
         phase = "clean_turn"
-        result["herdr_observations"].append(observe(driver, args, clean=True))
+        result["herdr_observations"].append(observe(driver, args))
         result.update(status="not_applicable" if result["not_applicable"] else "pass",
                       reason="partial coverage: see not_applicable checks" if result["not_applicable"] else None)
         if profile and gap_trials:
