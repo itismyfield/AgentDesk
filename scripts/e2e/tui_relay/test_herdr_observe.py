@@ -307,7 +307,7 @@ class HerdrDegradedWaiver(unittest.TestCase):
                 self.refused(payload, code=code)
         self.cli.assert_not_called()
 
-    def test_waiver_keeps_every_herdr_block_and_row_check(self):
+    def test_waiver_keeps_herdr_block_and_target_row_checks(self):
         for herdr_change in ({"admission": "closed"}, {"restart_required": True}, {"input_holds": 1},
                              {"configured_channels": ["99"]}):
             payload = degraded()
@@ -319,6 +319,52 @@ class HerdrDegradedWaiver(unittest.TestCase):
             with self.subTest(rows=rows):
                 self.cli.return_value.stdout = json.dumps(status(rows))
                 self.refused(degraded(), "target row")
+
+    def test_waiver_keeps_each_guard_failing_on_its_own(self):
+        def changed(herdr_block=None, reconnect=None, **top):
+            payload = degraded(**top)
+            payload["herdr"]["reconnect"].update({"channels": 1, "published": 1, **(reconnect or {})})
+            payload["herdr"].update(herdr_block or {})
+            return payload
+        other_hold = {**row(), "channel": "99", "nonce": "other", "input_hold": {"recorded_at": "now"}}
+        # (label, argument change, detail, HTTP code, CLI status, reconnected, waiver at refusal, reason)
+        cases = (("endpoint not selected", {"herdr_endpoint": "other"}, changed(), 200, status(), True, "applied", "explicitly selected and local"),
+                 ("endpoint remote", {}, changed({"endpoints": {"test": {"local": False}}}), 200, status(), True, "applied", "explicitly selected and local"),
+                 ("mixed endpoints", {}, changed({"endpoints": {"test": {"local": True}, "far": {"local": False}}}), 200, status(), True, "applied", "mixed/remote"),
+                 ("reconnect missing", {}, changed({"reconnect": None}), 200, status(), False, "applied", "reconnect counts missing"),
+                 ("reconnect negative", {}, changed(reconnect={"pending": -1}), 200, status(), False, "applied", "reconnect counts missing"),
+                 ("reconnect not int", {}, changed(reconnect={"published": "1"}), 200, status(), False, "applied", "reconnect counts missing"),
+                 ("published zero", {}, changed(reconnect={"published": 0, "channels": 0}), 200, status(), True, "applied", "unpublished"),
+                 ("withheld", {}, changed(reconnect={"withheld": 1}), 200, status(), True, "applied", "unpublished"),
+                 ("unknown", {}, changed(reconnect={"unknown": 1}), 200, status(), True, "applied", "unpublished"),
+                 ("pending", {}, changed(reconnect={"pending": 1}), 200, status(), True, "applied", "unpublished"),
+                 ("unpublished channel", {}, changed(reconnect={"channels": 2}), 200, status(), True, "applied", "publish every row"),
+                 ("other row hold", {}, changed(), 200, status([row(), other_hold]), False, "applied", "input hold"),
+                 ("orphan hold", {}, changed(), 200, {**status(), "other_input_holds": [{"nonce": "x"}]}, False, "applied", "other input holds"),
+                 ("not fully recovered", {}, changed(fully_recovered=False), 200, status(), True, "unused", "readiness failed"),
+                 ("HTTP 503", {}, changed(), 503, status(), True, "unused", "readiness failed"),
+                 ("unknown status", {}, changed(status="starting"), 200, status(), True, "unused", "readiness failed"))
+        for label, arg_change, payload, code, current, reconnected, waiver, reason in cases:
+            with self.subTest(label=label):
+                self.args = arguments(*WAIVE)
+                self.http.return_value = (200, changed())
+                self.cli.return_value.stdout = json.dumps(status())
+                self.assertTrue(herdr.observe(driver, self.args, reconnected=reconnected)["validated"])
+                vars(self.args).update(arg_change)
+                self.http.return_value = (code, payload)
+                self.cli.return_value.stdout = json.dumps(current)
+                with self.assertRaisesRegex(driver.assertions.AssertionError, reason) as caught:
+                    herdr.observe(driver, self.args, reconnected=reconnected)
+                self.assertEqual(caught.exception.herdr_observation["readiness"]["degraded_reason_waiver"], waiver)
+
+    def test_flag_with_healthy_detail_still_fails_on_herdr_block(self):
+        for change, reason in (({"admission": "closed"}, "admission closed"), ({"restart_required": None}, "restart required"),
+                               ({"input_holds": 1}, "input_holds")):
+            payload = health()
+            payload["herdr"].update(change)
+            with self.subTest(change=change):
+                readiness = self.refused(payload, reason)["readiness"]
+                self.assertEqual((readiness["degraded_reason_waiver"], readiness["ignored_degraded_reasons"]), ("unused", []))
 
     def test_scenario_health_steps_withhold_waiver(self):
         client = Mock()
@@ -574,6 +620,26 @@ class RestartObserveOnly(unittest.TestCase):
         self.client.reset_mock()
         self.scenario.reset_mock()
         self.assert_refused("readiness failed")
+
+    def test_restart_summary_is_union_of_mark_and_verify_reasons(self):
+        self.args.herdr_allowed_degraded_reason = WAIVE[1::2]
+        self.http.return_value = (200, degraded(["tui_o:released:a"]))
+        self.assertEqual(self.run_mode("mark")[0], 0)
+        self.set_mark()
+        for verify_reasons, expected_rc, after_key in ((["provider:claude:pending_queue_depth:1"], 0, "after"),
+                                                       (["disk_low_free_bytes:1"], 1, "failed_observation")):
+            with self.subTest(verify_reasons=verify_reasons):
+                payload = degraded(verify_reasons, uptime_secs=3)
+                payload["herdr"]["reconnect"].update(channels=1, published=1)
+                self.http.return_value = (200, payload)
+                rc, report = self.run_mode("verify")
+                self.assertEqual(rc, expected_rc, report)
+                restart = report["restart_observation"]
+                self.assertEqual(restart["before"]["readiness"]["ignored_degraded_reasons"], ["tui_o:released:a"])
+                after = verify_reasons if expected_rc == 0 else []
+                self.assertEqual(restart[after_key]["readiness"]["ignored_degraded_reasons"], after)
+                # The report summary is the union over mark and verify, not either moment alone.
+                self.assertEqual(report["herdr_readiness_waiver"]["ignored_degraded_reasons"], sorted(["tui_o:released:a", *after]))
 
     def test_unpublished_counts_and_restart_scenario_fail_before_input(self):
         self.marked()
