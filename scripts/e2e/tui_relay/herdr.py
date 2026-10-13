@@ -6,6 +6,7 @@ import copy
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.error
@@ -18,6 +19,9 @@ TMUX_STEPS = {
     "poison_claude_tui_relay_offset", "send_keys", "send_keys_no_enter",
     "send_keys_sequence", "local_control_then_prompt",
 }
+# Server reasons name a channel only as its raw Discord id; provider and counter aggregates never do.
+AGGREGATE_REASON_PREFIXES = ("provider:", "global_active_counter_", "no_providers_registered")
+CHANNEL_ID = re.compile(r"\d{17,}")
 
 
 def validate_arguments(parser, args):
@@ -57,12 +61,19 @@ def detail_ready(driver, http_status, payload, *, allowed, channel):
     return reasons
 
 
+def unattributed(reasons):
+    """Waived reasons whose text cannot show they are not the target's; the operator checks those."""
+    return [r for r in reasons if r.startswith(AGGREGATE_REASON_PREFIXES) or not CHANNEL_ID.search(r)]
+
+
 def waiver_summary(args, observations):
     allowed = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
-    ignored = sorted({r for o in observations if isinstance(o, dict)
-                      for r in (o.get("readiness") or {}).get("ignored_degraded_reasons", [])})
+    readiness = [o.get("readiness") or {} for o in observations if isinstance(o, dict)]
+    ignored = sorted({r for item in readiness for r in item.get("ignored_degraded_reasons", [])})
     return {"degraded_reason_waiver": "applied" if ignored else ("unused" if allowed else "none"),
-            "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": ignored}
+            "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": ignored,
+            "ignored_degraded_reasons_unattributed":
+                sorted({r for item in readiness for r in item.get("ignored_degraded_reasons_unattributed", [])})}
 
 
 def report_waiver(args, result):
@@ -149,7 +160,8 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
     evidence = {"surface": "GET /api/health/detail", "status_surface": "agentdesk herdr status",
                 "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "readiness": {"degraded_reason_waiver": ("unused" if waivable else "withheld") if operator else "none",
-                              "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": []}}
+                              "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": [],
+                              "ignored_degraded_reasons_unattributed": []}}
     try:
         if not http_auth.loopback_origin(args.base_url):
             raise assertions.AssertionError("Herdr observations require target-node loopback API and local CLI")
@@ -163,7 +175,8 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
                                      ("uptime_secs", "started_at", "process_started_at_unix", "incarnation", "boot_id") if k in payload}
         ignored = detail_ready(driver, status, payload, allowed=allowed, channel=args.channel_id)
         if ignored:
-            evidence["readiness"].update(degraded_reason_waiver="applied", ignored_degraded_reasons=list(ignored))
+            evidence["readiness"].update(degraded_reason_waiver="applied", ignored_degraded_reasons=list(ignored),
+                                         ignored_degraded_reasons_unattributed=unattributed(ignored))
         block = ready(payload, endpoint=getattr(args, "herdr_endpoint", None), channel=args.channel_id)
         evidence["herdr"] = {k: block[k] for k in
                              ("admission", "restart_required", "configured_channels", "endpoints", "input_holds", "reconnect") if k in block}

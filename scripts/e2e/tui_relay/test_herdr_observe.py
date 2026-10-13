@@ -268,7 +268,8 @@ class HerdrDegradedWaiver(unittest.TestCase):
         self.assertEqual(result["status"], "pass", result)
         self.assertEqual(result["herdr_readiness_waiver"],
                          {"degraded_reason_waiver": "applied", "allowed_degraded_reasons": WAIVE[1::2],
-                          "ignored_degraded_reasons": sorted(NODE_REASONS)})
+                          "ignored_degraded_reasons": sorted(NODE_REASONS),
+                          "ignored_degraded_reasons_unattributed": sorted(NODE_REASONS)})
         self.assertIn("herdr readiness waiver", out.getvalue())
 
     def test_unmatched_herdr_or_target_channel_reason_is_never_waived(self):
@@ -279,6 +280,22 @@ class HerdrDegradedWaiver(unittest.TestCase):
             with self.subTest(reasons=reasons):
                 readiness = self.refused(degraded(reasons), "not waived.*" + blocked)["readiness"]
                 self.assertEqual(readiness["ignored_degraded_reasons"], [])
+
+    def test_waived_reasons_without_a_channel_id_are_marked_unattributed(self):
+        other = "relay_verdict_unknown_codex_1509350490565180999"
+        aggregate = ["provider:claude:pending_queue_depth:1", "tui_o:content_transform",
+                     "global_active_counter_out_of_bounds:raw=18446744073709551615:provider_active_turns=0:global_finalizing=0"]
+        self.args = arguments(*WAIVE, "--herdr-allowed-degraded-reason", "global_active_counter_out_of_bounds*")
+        self.http.return_value = (200, degraded([*aggregate, other]))
+        readiness = herdr.observe(driver, self.args)["readiness"]
+        self.assertEqual(readiness["ignored_degraded_reasons"], [*aggregate, other])
+        self.assertEqual(readiness["ignored_degraded_reasons_unattributed"], aggregate)
+        self.assertEqual(herdr.waiver_summary(self.args, [{"readiness": readiness}])["ignored_degraded_reasons_unattributed"],
+                         sorted(aggregate))
+        for reasons in (["relay_verdict_unknown_codex_41"], ["tui_o:released:herdr"]):
+            with self.subTest(reasons=reasons):
+                self.assertEqual(self.refused(degraded(reasons), "never_waived")["readiness"]
+                                 ["ignored_degraded_reasons_unattributed"], [])
 
     def test_unready_or_malformed_detail_fails(self):
         for payload, code in ((degraded(status="unhealthy"), 200), (degraded(status="starting"), 200),
@@ -347,7 +364,7 @@ class HerdrDegradedWaiver(unittest.TestCase):
                     self.assertEqual(result["herdr_readiness_waiver"],
                                      {"degraded_reason_waiver": "unused" if flagged else "none",
                                       "allowed_degraded_reasons": WAIVE[1::2] if flagged else [],
-                                      "ignored_degraded_reasons": []})
+                                      "ignored_degraded_reasons": [], "ignored_degraded_reasons_unattributed": []})
                     self.assertEqual("herdr readiness waiver" in out.getvalue(), flagged)
         self.http.assert_not_called()
 

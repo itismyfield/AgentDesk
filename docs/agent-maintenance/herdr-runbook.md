@@ -57,8 +57,11 @@ Herdr 로 띄운 Claude 채널(P9 대상: adk-dash-cc)의 운영 절차다. 5a�
 - 공유 노드의 무관한 사유는 `--herdr-allowed-degraded-reason <패턴>`(반복, 정확 일치 또는 끝 `*` 접두)으로 그 실행에서만 넘길 수 있다. 예: `--herdr-allowed-degraded-reason 'tui_o:released*'`.
   `status`가 `healthy`/`degraded`이고 **모든** 사유가 패턴에 맞을 때만 통과한다. `herdr`(대소문자 무시)나 대상 channel id를 담은 사유, 빈 패턴·`*` 단독은 거부하고, `fully_recovered`·herdr block·row 검사는 그대로다. Herdr 셀 밖에서는 인자 오류다.
   시나리오가 선언한 `assert_health`·`restart_dcserver` 단계의 관측에는 적용하지 않는다(`withheld`).
-  각 관측의 `readiness`에 `degraded_reason_waiver`(`none`/`unused`/`applied`/`withheld`)·`allowed_degraded_reasons`·`ignored_degraded_reasons`가, 결과 JSON에 `herdr_readiness_waiver`가 남는다.
-  실행 직전 detail의 `degraded_reasons`를 읽어 허용할 사유가 대상 채널 것이 아님을 확인한 뒤 넘긴다.
+  각 관측의 `readiness`에 `degraded_reason_waiver`(`none`/`unused`/`applied`/`withheld`)·`allowed_degraded_reasons`·`ignored_degraded_reasons`가 요청 전 거절·요청 실패에도 남는다.
+  결과 JSON의 `herdr_readiness_waiver`(observe-only는 report 최상위)는 조기 거절·skip을 포함한 모든 종료에 남고, 무시 목록은 그 실행 관측 전체의 합집합이다.
+  실행 직전 detail의 `degraded_reasons`를 읽어 허용할 사유가 대상 채널 것이 아님을 확인한 뒤 넘긴다. id 부재는 무관함의 증명이 아니다.
+  `provider:…:pending_queue_depth:N`처럼 채널을 담지 않는 집계 사유는 실행 직전 대상 mailbox로 따로 확인하고, 확인할 수 없으면 허용하지 않는다.
+  `ignored_degraded_reasons_unattributed`는 허용된 사유 중 채널 id(17자리 이상 숫자)가 없거나 provider·전역 카운터 집계인 것이다. 여기 든 사유는 문자열로 대상과 무관함을 보일 수 없었다는 뜻이며, 위 mailbox 확인 기록과 대조한다.
 - 종료 코드 0만으로 수용하지 않는다. **첫 gate는 시나리오별 `status=pass`를 직접 확인해야 한다**. `known_gap`·`unexpected_pass`·`not_applicable`은 gate 통과가 아니다.
 - E-50 smoke judge는 T1·T2·AFTER_CLEAR가 각각 1회이고 detail/CLI 관측이 있어야 통과한다. Herdr에서는 tmux 로그·legacy queue 파일을 읽지 않는다.
 - 재시작(E-8/19)·stop(E-18)·terminate(E-12)·E-35/36 원래 수용 기준은 이 첫 gate 밖이다.
