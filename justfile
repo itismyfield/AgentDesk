@@ -201,8 +201,9 @@ test-postgres-shard:
     set -euo pipefail
     python3 scripts/check_pg_test_lane_membership.py --validate-pg-shard "${PG_INCLUDE_SHARD:-}"
     test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
-    source scripts/ci/non-pg-test-filter.sh
-    cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
+    source scripts/ci/non-pg-test-filter.sh && cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
+    pg_selection_status=$?
+    if [ "$pg_selection_status" != 0 ]; then exit "$pg_selection_status"; fi
     if [ "$PG_INCLUDE_SHARD" != 0 ]; then exit 0; fi
     # The routing test keeps these targets identical to the unsharded recipe.
     cargo test --lib services::memory::memento::anchor::tests -- --nocapture --test-threads=1

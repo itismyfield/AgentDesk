@@ -59,6 +59,34 @@ class NonPgTestFilter(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     membership.partition_pg_test_list(listed, "0")
 
+    def test_shard_recipe_stops_before_targets_on_source_or_primary_failure(self) -> None:
+        membership = load_membership_module()
+        coverage = membership._load_coverage_module(ROOT)
+        program = "\n".join(coverage.just_recipe_commands((ROOT / "justfile").read_text(), "test-postgres-shard"))
+        ids = [next(f"ci_pg::case_{i}" for i in range(100) if membership.pg_test_shard(f"ci_pg::case_{i}") == shard)
+               for shard in range(membership.PG_SHARD_COUNT)]
+        listed = "".join(name + ": test\n" for name in ids) + f"\n{len(ids)} tests, 0 benchmarks\n"
+        script = r'''
+cargo() {
+  if [[ "${!#}" == --list ]]; then printf '%s' "$PG_LIST_TEXT"; return "$LIST_RC"; fi
+  printf 'execution\n' >> "$LOG"
+  return "$PRIMARY_RC"
+}
+export -f cargo
+bash -euo pipefail -c "$PROGRAM"
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            log = Path(temp) / "calls"
+            for list_rc, primary_rc, expected_calls in ((7, 0, 0), (0, 8, 1)):
+                with self.subTest(list_rc=list_rc, primary_rc=primary_rc):
+                    log.write_text("")
+                    env = {**os.environ, "PG_INCLUDE_SHARD": "0", "PG_LIST_TEXT": listed,
+                           "LIST_RC": str(list_rc), "PRIMARY_RC": str(primary_rc), "LOG": str(log),
+                           "PROGRAM": program, "POSTGRES_TEST_DATABASE_URL_BASE": "postgresql://stub:1"}
+                    result = subprocess.run(["bash", "-c", script], cwd=ROOT, env=env, capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(len(log.read_text().splitlines()), expected_calls)
+
     def test_new_tests_do_not_move_existing_assignments(self) -> None:
         from unittest.mock import patch
         membership = load_membership_module()
