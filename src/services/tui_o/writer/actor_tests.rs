@@ -204,6 +204,51 @@ async fn the_actor_posts_each_unit_after_the_switch_once_even_across_a_restart()
     halt(stop, task).await;
 }
 
+/// A cold resume of an interrupted turn writes a synthetic "No response requested." row; the
+/// actor records it excluded and posts only the next turn's answer.
+#[tokio::test(start_paused = true)]
+async fn a_resumed_sessions_synthetic_chrome_is_excluded_and_the_next_answer_posts() {
+    let (harness, path, _) = switched_over(&row("m0", "before the switch"));
+    harness.gate.acquired();
+    let (stop, task) = spawn(harness.writer());
+    let interrupted = serde_json::json!({"type": "user", "uuid": "u-int", "message": {
+        "role": "user", "content": [{"type": "text",
+        "text": "[Request interrupted by user for tool use]"}]}});
+    let chrome = serde_json::json!({"type": "assistant", "uuid": "u-synthetic",
+        "isApiErrorMessage": false, "message": {"id": "e785b300", "model": "<synthetic>",
+        "role": "assistant", "content": [{"type": "text", "text": "No response requested."}]}});
+    let prompt = serde_json::json!({"type": "user", "uuid": "u-q", "message": {
+        "role": "user", "content": "응답에 정확히 한 줄로 [E2E:E1:OK]"}});
+    for record in [interrupted, chrome, prompt] {
+        let mut line = serde_json::to_vec(&record).unwrap();
+        line.push(b'\n');
+        append(&path, &line);
+    }
+    append(&path, &row("msg_e1", "[E2E:E1:OK]"));
+    polls(3).await;
+    halt(stop, task).await;
+    assert_eq!(harness.port.posts(), ["[E2E:E1:OK]"]);
+    assert_eq!(harness.alarms.taken(), []);
+    let ledger = std::fs::read_to_string(ledger_path(&harness)).unwrap();
+    let entries: Vec<serde_json::Value> = ledger
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["entry"].clone())
+        .collect();
+    let of_type = |kind: &'static str| entries.iter().filter(move |e| e["type"] == kind);
+    let prepared: Vec<_> = of_type("prepared").map(|e| e["payload"].clone()).collect();
+    assert_eq!(prepared, ["[E2E:E1:OK]"]);
+    let excluded: Vec<_> = of_type("excluded")
+        .map(|e| (e["unit_key"]["native_key"].clone(), e["reason"].clone()))
+        .collect();
+    assert_eq!(
+        excluded,
+        [(
+            "u-synthetic".into(),
+            "claude_synthetic_resume_chrome".into()
+        )]
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn without_ownership_the_actor_keeps_spooling_and_posts_once_ownership_returns() {
     let (harness, path, source) = switched_over(&row("m0", "before the switch"));

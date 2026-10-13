@@ -54,6 +54,12 @@ struct HandoffFake {
 impl Ports for HandoffFake {
     type Clear = ClearFake;
     type Move = HandoffMove;
+    fn source_policy<'a>(
+        &'a mut self,
+        source: &'a super::super::super::source::Source,
+    ) -> Step<'a, bool> {
+        self.inner.source_policy(source)
+    }
     fn mapping(&self) -> mapping::Probe {
         self.probe.clone()
     }
@@ -717,4 +723,120 @@ async fn b_ready_views_cannot_boot_before_adopt_then_open_the_ledger() {
     };
     assert!(!returned);
     assert!(supervisor.release());
+}
+
+#[tokio::test]
+async fn c2_actual_serve_publishes_existing_client_only_after_adopt_and_final_views() {
+    use crate::services::discord::input_runtime::intake::{Access, lookup};
+    use crate::services::tui_input::rows::receipt_identity::Responsibility;
+
+    let rig = Rig::new(6_326_391);
+    let mut supervisor = handoff(&rig, reserved(&rig), vec![41]);
+    let overflow = supervisor.pending_overflow();
+    let (supply, supplied) = oneshot::channel();
+    let (commands, received) = mailbox::channel(8);
+    let client = supervisor.bind_intake(commands.clone()).unwrap();
+    let screen = Arc::new(Screen::default());
+    let mut run = task(
+        supervisor,
+        screen.clone(),
+        vec![ProviderKind::Claude, ProviderKind::Codex],
+        supplied,
+        received,
+    );
+    let before = overflow.generation();
+    assert!(matches!(
+        lookup(rig.registry, &ProviderKind::Claude, rig.channel),
+        Access::Deferred(Deferred::Closed)
+    ));
+    assert_eq!(
+        client.pending(vec![41]).await.unwrap_err(),
+        Deferred::Closed
+    );
+    assert_eq!(overflow.generation(), before + 2);
+    assert_eq!(adopt(&commands, rig.channel).await, Ok(()));
+    let before = overflow.generation();
+    assert!(matches!(
+        lookup(rig.registry, &ProviderKind::Claude, rig.channel),
+        Access::Deferred(Deferred::Closed)
+    ));
+    assert_eq!(
+        client.pending(vec![41]).await.unwrap_err(),
+        Deferred::Closed
+    );
+    assert_eq!(overflow.generation(), before + 2);
+    assert!(rig.world.log().is_empty());
+    assert!(!rig.root.join("input_ledger").exists());
+    assert!(
+        supply
+            .send(vec![
+                rig.world.runtime.shared.clone(),
+                runtime(ProviderKind::Codex),
+            ])
+            .is_ok()
+    );
+    let boot = tokio::time::timeout(Duration::from_secs(10), async {
+        while rig.gate.mode() != Mode::LedgerOpen {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    if boot.is_err() {
+        run.abort();
+        let _ = (&mut run).await;
+    }
+    boot.expect(
+        "fixture: serve reaches LedgerOpen; timeout is not ready-publication mutant evidence",
+    );
+    let identity = ReceiptIdentity::new(41, vec![41], 7, rig.channel, rig.channel).unwrap();
+    let sender = commands.clone();
+    let (reply, response) = oneshot::channel();
+    let rpc = tokio::time::timeout(Duration::from_secs(10), async move {
+        let sent = sender
+            .send(SupervisorCmd::LookupResponsibility { identity, reply })
+            .await;
+        (sent, response.await)
+    })
+    .await;
+    if rpc.is_err() {
+        run.abort();
+        let _ = (&mut run).await;
+    }
+    let (sent, responsibility) = rpc
+        .expect("fixture: raw lookup completes; timeout is not ready-publication mutant evidence");
+    let ready_same_arc = matches!(
+        lookup(rig.registry, &ProviderKind::Claude, rig.channel),
+        Access::Ready(ref published) if Arc::ptr_eq(published, &client)
+    );
+    let pending = client.pending(vec![41]).await;
+    let closed = client.close().await;
+    let screen_empty = screen.sent.lock().unwrap().is_empty();
+    drop(client);
+    drop(commands);
+    let (supervisor, returned) = run.await.unwrap();
+    let admission_closed = !supervisor.admission_open();
+    let sources = supervisor.pending_snapshot().sources;
+    let released = supervisor.release();
+
+    sent.expect("fixture: the original command sender reaches the running supervisor");
+    let responsibility = responsibility.expect("fixture: the raw lookup receives an actual reply");
+    assert!(
+        matches!(responsibility, Responsibility::Known { key: 41, .. }),
+        "fixture: boot and the original mailbox independently resolve the durable row"
+    );
+    assert!(
+        ready_same_arc,
+        "actual serve publishes the same client immediately after completed boot and raw RPC"
+    );
+    assert!(
+        pending.is_ok(),
+        "the published client uses the live mailbox"
+    );
+    assert_eq!(pending.unwrap().sources, vec![41]);
+    assert!(closed.is_ok());
+    assert!(screen_empty);
+    assert!(!returned);
+    assert!(admission_closed);
+    assert_eq!(sources, vec![41]);
+    assert!(released);
 }

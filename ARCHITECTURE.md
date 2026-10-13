@@ -95,6 +95,7 @@ src/
 │   ├── agent_channels.rs
 │   ├── cluster_role.rs
 │   ├── disk_write.rs
+│   ├── late_live_reload_tests.rs
 │   ├── peer_filter.rs
 │   ├── readers_live_reload_tests.rs
 │   ├── runtime_profile.rs
@@ -657,6 +658,7 @@ src/
 │   │   ├── busy_inject.rs
 │   │   ├── busy_inject_tests.rs
 │   │   ├── composer_lock.rs
+│   │   ├── guarded_outcome.rs
 │   │   ├── hook_bundle.rs
 │   │   ├── hook_output_guard.rs
 │   │   ├── hook_output_guard_tests.rs
@@ -773,6 +775,7 @@ src/
 │   │   ├── stream_relay.rs
 │   │   └── watcher_supervisor.rs
 │   ├── codex/
+│   │   ├── actual_submit_tests.rs
 │   │   ├── c1_teardown_tests.rs
 │   │   ├── followup_reader.rs
 │   │   ├── herdr_guard_tests.rs
@@ -953,6 +956,14 @@ src/
 │   │   │   ├── recovery/
 │   │   │   │   ├── live_agent_recovery/
 │   │   │   │   │   └── judged_finish_fence_tests.rs
+│   │   │   │   ├── self_watchdog/
+│   │   │   │   │   ├── policy/
+│   │   │   │   │   │   └── tests/
+│   │   │   │   │   │       └── mod.rs
+│   │   │   │   │   ├── tests/
+│   │   │   │   │   │   └── mod.rs
+│   │   │   │   │   ├── driver.rs
+│   │   │   │   │   └── policy.rs
 │   │   │   │   ├── stop_judgement/
 │   │   │   │   │   └── judged_finish_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
@@ -974,6 +985,8 @@ src/
 │   │   │   ├── stall_liveness/
 │   │   │   │   └── redrive_grace.rs
 │   │   │   ├── turn_deliver/
+│   │   │   │   ├── inject/
+│   │   │   │   │   └── names.rs
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   └── inject_tests.rs
@@ -1084,6 +1097,7 @@ src/
 │   │   │   ├── o_seed_observation_tests.rs
 │   │   │   ├── orphan_relay_reclaim.rs
 │   │   │   ├── ownership_ops.rs
+│   │   │   ├── read_only_owner_snapshot.rs
 │   │   │   ├── rebind_reap.rs
 │   │   │   ├── receipt_boundary_tests.rs
 │   │   │   ├── removal.rs
@@ -1106,7 +1120,12 @@ src/
 │   │   │   │   ├── modes.rs
 │   │   │   │   └── modes_tests.rs
 │   │   │   ├── intake/
+│   │   │   │   ├── admit.rs
+│   │   │   │   ├── admit_tests.rs
 │   │   │   │   ├── classify.rs
+│   │   │   │   ├── client.rs
+│   │   │   │   ├── client_tests.rs
+│   │   │   │   ├── skills.rs
 │   │   │   │   └── source.rs
 │   │   │   ├── runtime/
 │   │   │   │   ├── dormant_tests.rs
@@ -1203,6 +1222,7 @@ src/
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── o_writer_io.rs
+│   │   │   ├── o_writer_late_tmux_tests.rs
 │   │   │   ├── o_writer_legacy.rs
 │   │   │   ├── o_writer_repost_io.rs
 │   │   │   ├── o_writer_repost_io_tests.rs
@@ -1391,7 +1411,10 @@ src/
 │   │   │       └── values.rs
 │   │   ├── router/
 │   │   │   ├── intake_dispatch/
+│   │   │   │   ├── queued/
+│   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
+│   │   │   │   │   ├── final_guards.rs
 │   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── home_order_tests.rs
@@ -1408,6 +1431,9 @@ src/
 │   │   │   │   ├── busy_inject_test_support.rs
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
+│   │   │   │   ├── ledger.rs
+│   │   │   │   ├── ledger_io_tests.rs
+│   │   │   │   ├── ledger_tests.rs
 │   │   │   │   ├── queue_effects.rs
 │   │   │   │   ├── stale_turn.rs
 │   │   │   │   └── stale_turn_host_tests.rs
@@ -1609,6 +1635,8 @@ src/
 │   │   ├── terminal_delivery_custody/
 │   │   │   ├── pg_tests.rs
 │   │   │   └── tests.rs
+│   │   ├── terminal_ui_obligation/
+│   │   │   └── input_fence_tests.rs
 │   │   ├── tmux/
 │   │   │   ├── monitor_auto_turn_inflight.rs
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
@@ -1628,7 +1656,8 @@ src/
 │   │   │   ├── finalize.rs
 │   │   │   ├── host_guard.rs
 │   │   │   ├── host_guard_tests.rs
-│   │   │   └── retirement_await_tests.rs
+│   │   │   ├── retirement_await_tests.rs
+│   │   │   └── stale_busy_identity.rs
 │   │   ├── tmux_session_files/
 │   │   │   └── input_fence_tests.rs
 │   │   ├── tmux_watcher/
@@ -1860,6 +1889,8 @@ src/
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── o_panel_below.rs
 │   │   │   │   └── o_panel_below_tests.rs
+│   │   │   ├── finalize_epilogue/
+│   │   │   │   └── r1_transition_busy_tests.rs
 │   │   │   ├── followup_requeue/
 │   │   │   │   └── tests/
 │   │   │   │       └── person_draft_tests.rs
@@ -1956,6 +1987,7 @@ src/
 │   │   │   ├── before_start_stop.rs
 │   │   │   ├── before_start_stop_clear_order_tests.rs
 │   │   │   ├── before_start_stop_disk_gate_tests.rs
+│   │   │   ├── before_start_stop_policy_tests.rs
 │   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
@@ -2075,6 +2107,7 @@ src/
 │   │   │   │   ├── claude_restore.rs
 │   │   │   │   ├── liveness.rs
 │   │   │   │   ├── liveness_tests.rs
+│   │   │   │   ├── n3bc_restore_tests.rs
 │   │   │   │   ├── n4d2_boundary_tests.rs
 │   │   │   │   ├── n4d2_entry_test.rs
 │   │   │   │   ├── n4d2_o_writer_test.rs
@@ -2086,6 +2119,7 @@ src/
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
 │   │   │   │   ├── restore.rs
+│   │   │   │   ├── restore_core.rs
 │   │   │   │   ├── restore_mapping.rs
 │   │   │   │   ├── restore_support.rs
 │   │   │   │   ├── restore_tests.rs
@@ -2304,9 +2338,14 @@ src/
 │   │   ├── repo_resolver.rs
 │   │   ├── runner.rs
 │   │   └── worktree_resolver.rs
+│   ├── hang_forensics/
+│   │   └── tests/
+│   │       └── mod.rs
 │   ├── health_diagnostics/
 │   │   └── session_state.rs
 │   ├── imsg_reply/
+│   │   ├── contract.rs
+│   │   ├── episode.rs
 │   │   └── mod.rs
 │   ├── kakao/
 │   │   ├── account.rs
@@ -2600,6 +2639,7 @@ src/
 │   │   │   ├── adoption/
 │   │   │   │   └── body_check.rs
 │   │   │   ├── adoption.rs
+│   │   │   ├── late_reservation_tests.rs
 │   │   │   └── tests.rs
 │   │   ├── cutover/
 │   │   │   ├── channel_gate/
@@ -2703,6 +2743,8 @@ src/
 │   │   │   ├── deliver_home_tests.rs
 │   │   │   ├── drain_projection_tests.rs
 │   │   │   ├── fork_lineage.rs
+│   │   │   ├── fork_lineage_tests.rs
+│   │   │   ├── fork_mask_tests.rs
 │   │   │   ├── fork_tests.rs
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
@@ -2713,6 +2755,12 @@ src/
 │   │   │   ├── host_renumber_tests.rs
 │   │   │   ├── host_tests.rs
 │   │   │   ├── input_facts.rs
+│   │   │   ├── late_adopt.rs
+│   │   │   ├── late_adopt_binding_tests.rs
+│   │   │   ├── late_adopt_cleanup_tests.rs
+│   │   │   ├── late_adopt_delegated_tests.rs
+│   │   │   ├── late_adopt_host_tests.rs
+│   │   │   ├── late_pin_tests.rs
 │   │   │   ├── legacy_hop_retry_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_resume_actor_tests.rs
@@ -2817,6 +2865,8 @@ src/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
 │   │   ├── pending_queue_persistence/
+│   │   │   ├── queue_exit_debt.rs
+│   │   │   ├── queue_exit_debt_tests.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs
 │   │   ├── registry_purge/
@@ -2846,6 +2896,7 @@ src/
 │   │   ├── overflow.rs
 │   │   ├── overflow_s2b_tests.rs
 │   │   ├── pending_queue_persistence.rs
+│   │   ├── policy_close.rs
 │   │   ├── queue_cancellation.rs
 │   │   ├── queue_enqueue.rs
 │   │   ├── queued_head.rs

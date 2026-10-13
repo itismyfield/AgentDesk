@@ -811,6 +811,10 @@ fn source_authority_stem_for_orphan_file(filename: &str) -> &str {
 /// before deleting. Legacy `/tmp/` files are *never* swept at startup —
 /// pre-migration wrappers may still be writing into them.
 pub(super) async fn sweep_orphan_session_files() {
+    // Global file GC waits for the last protection to release and a later sweep.
+    if boot_skip(BootTarget::Unknown) {
+        return;
+    }
     let Some(dir) = crate::services::tmux_common::persistent_sessions_dir() else {
         return;
     };
@@ -833,6 +837,11 @@ pub(super) async fn sweep_orphan_session_files() {
 
 /// Sweeps `dir` given the live tmux session names.
 fn sweep_orphan_session_files_in(dir: &std::path::Path, live: &std::collections::HashSet<String>) {
+    if boot_skip(BootTarget::Unknown) {
+        return;
+    }
+    #[cfg(test)]
+    input_fence_tests::scan_started();
     const ORPHAN_MIN_AGE_SECS: u64 = 10 * 60; // 10 minutes
 
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -911,16 +920,21 @@ fn sweep_orphan_session_files_in(dir: &std::path::Path, live: &std::collections:
         let Ok(iter) = std::fs::read_dir(dir) else {
             continue;
         };
-        crate::services::tmux_common::with_session_temp_source_authority(&stem, || {
-            for entry in iter.flatten() {
-                if let Ok(fname) = entry.file_name().into_string() {
-                    if fname.starts_with(&format!("{}.", stem)) {
-                        let _ = std::fs::remove_file(entry.path());
+        let swept_group =
+            crate::services::tmux_common::with_session_temp_source_authority(&stem, || {
+                if boot_skip(BootTarget::Unknown) {
+                    return false;
+                }
+                for entry in iter.flatten() {
+                    if let Ok(fname) = entry.file_name().into_string() {
+                        if fname.starts_with(&format!("{}.", stem)) {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
                     }
                 }
-            }
-        });
-        swept += 1;
+                true
+            });
+        swept += usize::from(swept_group);
     }
     if swept > 0 {
         let ts = chrono::Local::now().format("%H:%M:%S");

@@ -465,6 +465,18 @@ pub(crate) fn run_prompt_submission_legacy(
     before: Option<&str>,
     cancel_token: Option<&CancelToken>,
 ) -> PlanRun {
+    run_prompt_submission_guarded(session_name, actions, before, cancel_token, None)
+}
+
+pub(crate) type VerifiedEffect<'a> = dyn Fn(&mut dyn FnMut() -> InputRun) -> InputRun + 'a;
+
+pub(crate) fn run_prompt_submission_guarded(
+    session_name: &str,
+    actions: &[TuiInputAction],
+    before: Option<&str>,
+    cancel_token: Option<&CancelToken>,
+    effect: Option<&VerifiedEffect<'_>>,
+) -> PlanRun {
     use std::cell::{Cell, RefCell};
 
     use crate::services::tui_input::submission::{
@@ -526,12 +538,18 @@ pub(crate) fn run_prompt_submission_legacy(
                     transport: &mut **transport,
                     attempted: &composer_attempted,
                 };
-                let mut result = run_plan(&target, gate, &mut writes, payload, cancel_token);
-                // An unacknowledged pane write can have landed; only load-only proves no effect.
-                result.composer_mutated |= composer_attempted.get();
-                let run = result.run.clone();
-                *payload_run.borrow_mut() = result;
-                run
+                let mut send = || {
+                    let mut result = run_plan(&target, gate, &mut writes, payload, cancel_token);
+                    // An unacknowledged pane write can have landed; only load-only proves no effect.
+                    result.composer_mutated |= composer_attempted.get();
+                    let run = result.run.clone();
+                    *payload_run.borrow_mut() = result;
+                    run
+                };
+                match effect {
+                    Some(effect) => effect(&mut send),
+                    None => send(),
+                }
             },
             || {
                 // Settle before the fresh capture, so no delay separates its guard from Enter.
@@ -574,13 +592,17 @@ pub(crate) fn run_prompt_submission_legacy(
                     composer_mutated: false,
                     enter_attempted: false,
                 };
-                let run = match plan.check_cancel().and_then(|()| {
+                let mut send = || match plan.check_cancel().and_then(|()| {
                     plan.mutate(&TuiInputAction::Enter, |transport| {
                         transport.send_keys(session_name, &[HostKey::Enter])
                     })
                 }) {
                     Ok(()) => InputRun::Applied,
                     Err(run) => run,
+                };
+                let run = match effect {
+                    Some(effect) => effect(&mut send),
+                    None => send(),
                 };
                 enter_attempted.set(plan.enter_attempted);
                 run
@@ -738,7 +760,7 @@ impl<E: TuiActionExecutor> CodexWrites for ExecutorWrites<'_, E> {
 
 /// Recording transport and gate the Codex TUI tests install in place of tmux.
 #[cfg(test)]
-pub(super) mod spy {
+pub(crate) mod spy {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -770,6 +792,7 @@ pub(super) mod spy {
         pub pane_pid: Option<u32>,
         pub sends: usize,
         pub assert_composer_lock: Option<String>,
+        pub on_enter: Option<Box<dyn FnMut()>>,
     }
 
     impl Default for SpyState {
@@ -789,6 +812,7 @@ pub(super) mod spy {
                 pane_pid: None,
                 sends: 0,
                 assert_composer_lock: None,
+                on_enter: None,
             }
         }
     }
@@ -880,7 +904,15 @@ pub(super) mod spy {
 
         fn send_keys(&mut self, _session: &str, keys: &[HostKey]) -> Result<Output, String> {
             let names: Vec<&str> = keys.iter().map(|key| tmux_key_name(*key)).collect();
-            self.send(format!("keys:{}", names.join("+")))
+            let result = self.send(format!("keys:{}", names.join("+")));
+            if keys == [HostKey::Enter] {
+                let action = self.0.borrow_mut().on_enter.take();
+                if let Some(mut action) = action {
+                    action();
+                    self.0.borrow_mut().on_enter = Some(action);
+                }
+            }
+            result
         }
     }
 
@@ -1603,4 +1635,35 @@ mod tests {
             assert_eq!(guard.calls(), calls(&["pane_pid"]));
         }
     }
+}
+
+pub(crate) fn submit_codex_followup_prompt(
+    session_name: &str,
+    prompt: &str,
+    cancel_token: Option<&CancelToken>,
+) -> super::input::CodexFollowupPromptSubmitOutcome {
+    super::input::with_submission_lock(session_name, || {
+        super::input::submit_codex_followup_prompt_under_lock(
+            session_name,
+            prompt,
+            cancel_token,
+            None,
+        )
+    })
+}
+
+pub(crate) fn submit_verified_followup(
+    session_name: &str,
+    prompt: &str,
+    cancel_token: &CancelToken,
+    effect: &VerifiedEffect<'_>,
+) -> super::input::CodexFollowupPromptSubmitOutcome {
+    super::input::with_submission_lock(session_name, || {
+        super::input::submit_codex_followup_prompt_under_lock(
+            session_name,
+            prompt,
+            Some(cancel_token),
+            Some(effect),
+        )
+    })
 }

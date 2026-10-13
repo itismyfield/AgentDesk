@@ -1,0 +1,3 @@
+{"source_id":@SOURCE@,"start_offset":0,"identity_version":2}
+r 0 66 {"message":{"content":"fixture prefix"},"type":"user","uuid":"z"}
+r 66 191 {"apiBlockIndex":0,"message":{"content":[{"text":"fixture shared","type":"text"}],"id":"r"},"type":"assistant","uuid":"u-r"}
