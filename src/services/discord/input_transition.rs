@@ -217,6 +217,7 @@ impl<E: Effects> Files<E> {
         let mut markers = Vec::new();
         let mut active = None;
         let mut synthetic = false;
+        let mut budgeted = BTreeSet::new();
         for file in &self.captured {
             let value: Value = serde_json::from_slice(&file.bytes)?;
             match file.phase {
@@ -253,13 +254,17 @@ impl<E: Effects> Files<E> {
                         .path
                         .starts_with(self.root.join("discord_busy_followup_retries"))
                     {
-                        file.path
+                        let id = file
+                            .path
                             .file_stem()
                             .and_then(|n| n.to_str())
                             .and_then(|n| n.parse::<u64>().ok())
                             .ok_or_else(|| invalid("invalid busy retry source id"))?;
-                        let _: super::busy_followup_retry_store::BusyFollowupRetryState =
-                            serde_json::from_value(value)?;
+                        let budget = super::busy_followup_retry_store::decode_checked(&file.bytes)
+                            .map_err(|refusal| invalid(&refusal.detail))?;
+                        if budget.has_budget() {
+                            budgeted.insert(id);
+                        }
                     } else {
                         let _: Vec<super::queued_placeholders_store::QueuedPlaceholderEntry> =
                             serde_json::from_value(value)?;
@@ -269,6 +274,12 @@ impl<E: Effects> Files<E> {
         }
         if synthetic {
             self.captured.retain(|file| file.phase != DeletePhase::Row);
+        }
+        // The moved input has no field for spent retries, so one carrying them stays put.
+        let spent =
+            |input: &Input| source_ids(&input.payload).is_ok_and(|ids| !ids.is_disjoint(&budgeted));
+        if queued.iter().chain(&markers).chain(&active).any(spent) {
+            return Err(invalid("a moving input carries a busy retry budget"));
         }
         Ok((queued, markers, active))
     }

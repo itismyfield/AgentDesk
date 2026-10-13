@@ -47,7 +47,15 @@ pub(super) fn enqueue_behind(
         );
     }
 
-    if let Some(last) = queue.last() {
+    // An input carrying a retry budget never absorbs a later one, by merge or by equal text.
+    let last_budgeted = settlement
+        .zip(queue.last())
+        .is_some_and(|((provider, channel), last)| {
+            crate::services::discord::busy_followup_retry_store::carries_retry_budget(
+                provider, channel, last,
+            )
+        });
+    if let Some(last) = queue.last().filter(|_| !last_budgeted) {
         if last.author_id == intervention.author_id
             && last.text == intervention.text
             && last.reply_context == intervention.reply_context
@@ -63,7 +71,8 @@ pub(super) fn enqueue_behind(
     }
 
     // A reserved queued head keeps its payload, so later input queues behind it instead.
-    let merge_index = (queue.len().checked_sub(1)).filter(|index| !(reserved_front && *index == 0));
+    let merge_index = (queue.len().checked_sub(1))
+        .filter(|index| !(reserved_front && *index == 0) && !last_budgeted);
     if let Some(index) = merge_index
         && should_merge_intervention(&queue[index], &intervention)
         && let Some((provider, channel_id)) = settlement

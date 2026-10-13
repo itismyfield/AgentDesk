@@ -108,9 +108,8 @@ pub(super) async fn run_placeholder_sweeper_tick(
     let drained_abandon_requests =
         super::super::abandon_request_store::drain(http, shared, provider, &shared.token_hash)
             .await;
-    // #4888: cleanup guards and process crashes can leave a retry binding
-    // without a surviving turn to clear it. Bound those durable sidecars
-    // independently of the normal terminal clear path.
+    // A busy-notice binding left without a turn ages out here; spent retry budgets and
+    // unreadable records are kept, so age never re-arms a retry.
     let swept_busy_retry_bindings = super::super::busy_followup_retry_store::sweep_expired();
     super::super::health::transcript_turn::observe_durable_residue(provider, &shared.token_hash);
     TickReport {
