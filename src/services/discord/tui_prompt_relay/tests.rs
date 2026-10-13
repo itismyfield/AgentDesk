@@ -6652,3 +6652,6 @@ mod fenced_admission_tests;
 
 #[cfg(unix)]
 mod codex_direct_owner_tests;
+
+#[cfg(unix)]
+mod legacy_non_bridge_claim_tests;
