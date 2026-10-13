@@ -124,7 +124,7 @@ async fn inline_completed_paths_never_reach_dispatched_pg() {
     assert_path_returns_before_handoff(
         source,
         "let (session_id, memento_context_loaded, current_path, auto_start_provider_isolated) =",
-        "let turn_start_attempt =",
+        "let add_turn_pending =",
         "return Ok(IntakeExecution::Executed);",
         2,
     );
