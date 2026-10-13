@@ -1,6 +1,5 @@
-//! Text `!clear` through the real dispatcher into a recording Discord: a refused clear answers the
-//! channel with the reason `/clear` shows and changes nothing; a clear that runs answers only its
-//! notice.
+//! Text `!clear` through the real dispatcher into a recording Discord: a refused clear answers
+//! with the reason `/clear` shows and changes nothing; one that runs answers only its notice.
 #![cfg(unix)]
 
 use std::sync::Arc;
