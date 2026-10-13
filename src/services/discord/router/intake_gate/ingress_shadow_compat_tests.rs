@@ -81,11 +81,14 @@ impl ObserverKind {
 }
 
 /// Everything a run leaves behind that the shadow must not change.
+/// Method, path with query, and raw body of one Discord request.
+type Call = (String, String, Vec<u8>);
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Effects {
     results: Vec<String>,
-    /// Method, path with query, and the raw body of every Discord request, in arrival order.
-    http: Vec<(String, String, Vec<u8>)>,
+    /// Every Discord request, in arrival order.
+    http: Vec<Call>,
     /// Every file under the runtime root: provider launches, queues and uploads included.
     files: BTreeMap<String, Vec<u8>>,
     queue: String,
@@ -105,7 +108,7 @@ struct Outcome {
 
 #[derive(Clone, Default)]
 struct Recorder {
-    calls: Arc<Mutex<Vec<(String, String, Vec<u8>)>>>,
+    calls: Arc<Mutex<Vec<Call>>>,
 }
 
 fn user_json() -> Value {
@@ -249,7 +252,7 @@ impl Transport {
     }
 
     /// The requests so far, once none arrived for a while: handler tasks finish their posts.
-    async fn settled(&self) -> Vec<(String, String, Vec<u8>)> {
+    async fn settled(&self) -> Vec<Call> {
         let mut seen = usize::MAX;
         for _ in 0..50 {
             let now = self.recorder.calls.lock().unwrap().len();
@@ -733,9 +736,7 @@ fn differences(left: &Effects, right: &Effects) -> Vec<String> {
     if left.results != right.results {
         found.push(format!("results {:?} vs {:?}", left.results, right.results));
     }
-    let shown = |call: &(String, String, Vec<u8>)| {
-        format!("{} {} {}", call.0, call.1, String::from_utf8_lossy(&call.2))
-    };
+    let shown = |call: &Call| format!("{} {} {}", call.0, call.1, String::from_utf8_lossy(&call.2));
     for index in 0..left.http.len().max(right.http.len()) {
         let (l, r) = (left.http.get(index), right.http.get(index));
         if l != r {

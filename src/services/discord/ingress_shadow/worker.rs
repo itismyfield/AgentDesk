@@ -13,7 +13,7 @@ use tokio::time::Instant;
 
 use super::Descriptor;
 use super::telemetry::{Counts, Observed, Record, Sink};
-use crate::db::o_channel_homes::{self, ChannelHome, HomeError, HomeProvider};
+use crate::db::o_channel_homes::{self, ChannelHome, HomeProvider};
 use crate::services::cluster::channel_home::HomeOwnership;
 use crate::services::cluster::channel_home::ingress_snapshot::{self, GateSample};
 use crate::services::cluster::channel_ingress::{
@@ -31,7 +31,7 @@ pub(super) type FixedRead = Arc<
             u64,
         ) -> futures::future::BoxFuture<
             'static,
-            Result<Option<(ChannelHome, DateTime<Utc>)>, HomeError>,
+            Result<Option<(ChannelHome, DateTime<Utc>)>, o_channel_homes::HomeError>,
         > + Send
         + Sync,
 >;
