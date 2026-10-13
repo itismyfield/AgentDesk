@@ -415,3 +415,170 @@ fn n1c_boot_confirms_only_selected_committed_channels_after_full_retirement() {
         markers::delete(&marker);
     }
 }
+
+// Pauses `channel`'s retirement on a worker running `boot`, checks it is not yet confirmed, then resumes.
+fn paused_boot<T: Send + 'static>(
+    channel: u64,
+    boot: impl FnOnce() -> T + Send + 'static,
+    while_paused: impl FnOnce(),
+) -> T {
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    *PAUSE.lock().unwrap_or_else(|e| e.into_inner()) = Some((channel, reached_tx, resume_rx));
+    let worker = std::thread::spawn(boot);
+    reached_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .unwrap();
+    assert!(!crate::services::tui_o::turn_mode::transcript_turns(
+        channel
+    ));
+    while_paused();
+    resume_tx.send(()).unwrap();
+    worker.join().unwrap()
+}
+
+// The stamp is read at the confirmed-set insertion, before a later channel delays the event.
+#[test]
+fn n1_boot_confirmation_stamps_the_insertion_not_the_event() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::cutover::test_override;
+    use crate::services::tui_o::n1_observation::tests as harness;
+    use crate::services::tui_o::turn_mode::TestConfirmation;
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root_dir = tempfile::tempdir().unwrap();
+    let _root = Root::new(root_dir.path());
+    let [first, delayed, refused] = [63250231, 63250232, 63250233];
+    let _boot = test_override::force_channels(&[
+        (first, ClaudeTui),
+        (delayed, ClaudeTui),
+        (refused, ClaudeTui),
+    ]);
+    let bad = root().unwrap().join(format!("claude_{refused}_8.json"));
+    std::fs::create_dir_all(bad.parent().unwrap()).unwrap();
+    std::fs::write(&bad, "invalid").unwrap();
+    let mut config = TuiOConfig::default();
+    config.turn.channels = [first, delayed, refused].into();
+    let (observer, rx) = harness::fixture(16);
+    let (shared, worker, boot_config) = (
+        test_override::shared_channels(),
+        observer.clone(),
+        config.clone(),
+    );
+    let mut held = 0;
+    let confirmed = paused_boot(
+        delayed,
+        move || {
+            let _boot = shared();
+            harness::scoped(Some(worker), || {
+                confirm_at_boot(&ProviderKind::Claude, Some(&boot_config))
+            })
+        },
+        || {
+            held = harness::clock(&observer);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        },
+    );
+    assert_eq!(confirmed, [first, delayed]);
+    let _confirmed = [first, delayed].map(TestConfirmation::confirmed);
+    let events: Vec<_> = rx
+        .try_iter()
+        .map(|e| serde_json::to_value(e).unwrap())
+        .collect();
+    assert_eq!(
+        events.len(),
+        2,
+        "a refused retirement emits no confirmation"
+    );
+    let at = |event: &serde_json::Value| {
+        let us = |v: &serde_json::Value| v.as_u64().unwrap();
+        let start = us(&event["confirmation_window_start"]["at_us"]);
+        (
+            start,
+            us(&event["actual_confirmed_at_us"]),
+            us(&event["observed_at_us"]),
+        )
+    };
+    assert_eq!(
+        (&events[0]["channel_id"], &events[1]["channel_id"]),
+        (&first.into(), &delayed.into())
+    );
+    let (start, actual, observed) = at(&events[0]);
+    assert!(
+        start <= actual && actual <= held && held < observed,
+        "{:?}",
+        at(&events[0])
+    );
+    let (start, actual, observed) = at(&events[1]);
+    assert!(
+        start <= held && held <= actual && actual <= observed,
+        "{:?}",
+        at(&events[1])
+    );
+
+    // A repeated confirmation is no transition and leaves the first window in place.
+    let again = harness::scoped(Some(observer.clone()), || {
+        confirm_at_boot(&ProviderKind::Claude, Some(&config))
+    });
+    assert_eq!(again, [first, delayed]);
+    let repeats: Vec<_> = rx
+        .try_iter()
+        .map(|e| serde_json::to_value(e).unwrap())
+        .collect();
+    assert_eq!(repeats.len(), 2);
+    assert!(
+        repeats
+            .iter()
+            .all(|e| e["actual_confirmed_at_us"].is_null())
+    );
+    assert_eq!(
+        harness::snapshot_value(&observer, first)["first_confirmation"],
+        events[0]["confirmation_window_start"]
+    );
+}
+
+// Observation faults leave the confirmed channels and retire-before-confirm as with no observer.
+#[test]
+fn n1_confirmation_result_ignores_observation_faults() {
+    use crate::services::tui_o::n1_observation::tests as harness;
+    use crate::services::tui_o::turn_mode::{TestConfirmation, transcript_turns};
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root_dir = tempfile::tempdir().unwrap();
+    let _root = Root::new(root_dir.path());
+    let refused = 63250240;
+    persist(&pending(refused)).unwrap();
+    let bad = root().unwrap().join(format!("claude_{refused}_8.json"));
+    std::fs::write(&bad, "invalid").unwrap();
+    for (i, failure) in ["off", "healthy", "full", "closed", "lock", "sink"]
+        .into_iter()
+        .enumerate()
+    {
+        let channel = 63250241 + i as u64;
+        let config = TurnConfig {
+            channels: [channel, refused].into(),
+            all_owned: false,
+        };
+        let boot = move || {
+            let run = || {
+                confirm_turn_channels(&ProviderKind::Claude, Some(&config), || {
+                    vec![channel, refused]
+                })
+            };
+            match failure {
+                "off" => harness::scoped(None, run),
+                "healthy" => {
+                    let (observer, _rx) = harness::fixture(16);
+                    harness::scoped(Some(observer), run)
+                }
+                fault => harness::faulted(fault, |_| run()),
+            }
+        };
+        assert_eq!(paused_boot(channel, boot, || {}), [channel], "{failure}");
+        let _confirmed = TestConfirmation::confirmed(channel);
+        assert!(!transcript_turns(refused), "{failure}");
+    }
+    assert!(bad.exists() && pending_synthetic_start_present("claude", refused));
+}
