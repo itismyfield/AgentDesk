@@ -29,6 +29,8 @@ for fn in _post_deploy_smoke_note _post_deploy_smoke_fail \
     eval "$body"
 done
 
+DISPOSITION=$(sed -n '/^# >>> BEGIN smoke-disposition region/,/^# <<< END smoke-disposition region/p' "$DEPLOY_SH")
+
 FIXTURES="$REPO_ROOT/tests/e2e/tui_relay/fixtures/turn_smoke"
 FAKE_DRIVER="$TMP_ROOT/fake_driver.py"
 cat > "$FAKE_DRIVER" <<'PY'
@@ -73,7 +75,11 @@ if mode in {"e1_gap", "e1_other"}:
         "status": "invalid_target", "error": "herdr turn refused: " + (
             "executor_not_wired" if mode == "e1_gap" else "other")}))
     status = "fail"
-report = {"cell": args.cell, "channel_id": args.channel_id, "run_id": run_id, "scenarios": [row], "totals": {"pass": int(status == "pass")}}
+row["assertions"] = []
+if status == "fail":
+    row["failure_attribution"] = {"source": "exception" if args.filter == "E-1" else "assertion",
+                                  "raw_reason": row["reason"].removeprefix("assertion: ")}
+report = {"coverage_class_violations": [], "cell": args.cell, "channel_id": args.channel_id, "run_id": run_id, "scenarios": [row], "totals": {"pass": int(status == "pass")}}
 (output / f"report.{args.cell}.json").write_text(json.dumps(report), encoding="utf-8")
 log = Path(os.environ["FAKE_SERVER_LOG"])
 fixture = Path(os.environ["FIXTURES"]) / (
@@ -132,7 +138,7 @@ run_case() {
         _notify_channel() { printf '%s\n' "$1" > "$root/alert"; }
         hostname() { echo fixture-node; }
         rc=0
-        if [[ "$name" == e1_* ]]; then
+        if [[ "$name" == e1_* || "$name" = both_classifications ]]; then
             POST_DEPLOY_SMOKE_READY=true
             POST_DEPLOY_SMOKE_HEALTH_BODY="$root/health"
             POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY="$root/detail"
@@ -144,6 +150,11 @@ run_case() {
             _post_deploy_smoke_check_relay_round_trip || rc=$?
         else
             _post_deploy_smoke_check_turn_scenarios || rc=$?
+        fi
+        if [ "$name" = both_classifications ]; then
+            _post_deploy_smoke_check_turn_scenarios || rc=$?
+            _run_post_deploy_functional_smoke() { return "$rc"; }
+            eval "$DISPOSITION"
         fi
         if [ "${#POST_DEPLOY_SMOKE_FAILURES[@]}" -gt 0 ]; then
             _report_post_deploy_smoke_failure > /dev/null
@@ -243,6 +254,14 @@ for mode in e1_gap e1_other; do
         grep -q '^FAIL: relay E-1 round-trip failed' "$root/evidence" || fail_test "e1_other: FAIL"
     fi
 done
+
+root=$(run_case both_classifications 1509350490461180105 "$herdr_cells" 0 FAKE_MODE_E_1=e1_gap)
+grep -q '^RC=0$' "$root/out" || fail_test "both classifications: rc"
+grep -q '^△ Post-deploy functional smoke completed with known gaps ' "$root/out" || fail_test "both classifications: known gaps summary"
+grep -q '^△ Post-deploy functional smoke completed with unexpected passes ' "$root/out" || fail_test "both classifications: unexpected passes summary"
+grep -q '^  KNOWN_GAP: relay E-1 ' "$root/out" || fail_test "both classifications: E-1 summary"
+grep -q '^  UNEXPECTED_PASS: relay E-50 ' "$root/out" || fail_test "both classifications: E-50 summary"
+[ ! -f "$root/alert" ] || fail_test "both classifications: false alarm"
 
 if [ "$failures" -ne 0 ]; then
     printf 'test_deploy_smoke_turn_scenarios_6561: %s assertion(s) failed\n' "$failures" >&2

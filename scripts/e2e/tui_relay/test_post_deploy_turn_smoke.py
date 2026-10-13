@@ -45,10 +45,12 @@ class LiveShapedDiscord:
         self.after_clear = after_clear
         self.ids = itertools.count(1_000)
         self.messages: list[dict] = []
+        self.channel_id = None
 
     def _post(self, content: str, *, author: str) -> dict:
         message = {
             "id": str(next(self.ids)),
+            "channel_id": self.channel_id,
             "content": content,
             "type": 0,
             "author": {"id": author, "bot": True},
@@ -56,7 +58,8 @@ class LiveShapedDiscord:
         self.messages.append(message)
         return message
 
-    def send_control(self, channel_id, content):  # noqa: ARG002
+    def send_control(self, channel_id, content):
+        self.channel_id = str(channel_id)
         return self._post(content, author=assertions.OUR_BOT_ID)
 
     def send(self, channel_id, content):  # noqa: ARG002
@@ -308,7 +311,7 @@ class ConfiguredHerdrClassification(unittest.TestCase):
 
     def row(self, scenario="E-1"):
         refusal = "세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled(59)"
-        return {"id": scenario, "run_id": RUN_ID, "cell": "claude-tui", "channel_id": "222",
+        row = {"id": scenario, "run_id": RUN_ID, "cell": "claude-tui", "channel_id": "222",
                 "status": "fail", "reason": "RuntimeError: turn/start HTTP 422: " + json.dumps(
                     {"status": "invalid_target", "error": "herdr turn refused: executor_not_wired"}),
                 **({"reason": "assertion: text !clear refused by the server: " + refusal,
@@ -316,9 +319,14 @@ class ConfiguredHerdrClassification(unittest.TestCase):
                         "id": "101", "channel_id": "222", "author": {"bot": True}, "content": refusal}},
                     "marker_counts": {m: (0 if m.endswith(":AFTER_CLEAR]") else 1) for m in self.markers}}
                    if scenario == "E-50" else {})}
+        row["assertions"] = []
+        row["failure_attribution"] = {"source": "exception" if scenario == "E-1" else "assertion",
+                                    "raw_reason": row["reason"].removeprefix("assertion: ")}
+        return row
 
     def classify(self, row, **overrides):
-        report = {"cell": "claude-tui", "channel_id": "222", "run_id": RUN_ID, "scenarios": [row]}
+        report = {"cell": "claude-tui", "channel_id": "222", "run_id": RUN_ID, "scenarios": [row],
+                  "coverage_class_violations": []}
         args = dict(report=report, scenario_id=row["id"], cell="claude-tui", channel_id="222",
                     run_id=RUN_ID, config_path=self.config, driver_rc=1, markers=self.markers,
                     log_counts=self.logs)
@@ -332,7 +340,8 @@ class ConfiguredHerdrClassification(unittest.TestCase):
                        row["reason"].replace("executor_not_wired", "executor_not_wired extra"),
                        row["reason"].replace("invalid_target", "busy"), "RuntimeError: turn/start HTTP 422: broken"):
             with self.subTest(reason=reason):
-                self.assertEqual(self.classify({**row, "reason": reason}), "FAIL")
+                self.assertEqual(self.classify({**row, "reason": reason, "failure_attribution": {
+                    **row["failure_attribution"], "raw_reason": reason}}), "FAIL")
         self.assertEqual(self.classify({**row, "teardown_error": "failed"}), "FAIL")
         self.assertEqual(self.classify(row, driver_rc=0), "FAIL")
 
@@ -357,6 +366,7 @@ class ConfiguredHerdrClassification(unittest.TestCase):
             changed = copy.deepcopy(row)
             changed["reason"] = changed["reason"].replace("(59)", f"({number})")
             changed["clear_refusal"]["reply"]["content"] = changed["clear_refusal"]["reply"]["content"].replace("(59)", f"({number})")
+            changed["failure_attribution"]["raw_reason"] = changed["reason"].removeprefix("assertion: ")
             self.assertEqual(self.classify(changed), "KNOWN_GAP")
         for replacement in ("rotation_unread", "turn_in_progress", "rotation_unsettled(0)",
                             "rotation_unsettled(-1)", "rotation_unsettled(1) extra"):
@@ -364,6 +374,7 @@ class ConfiguredHerdrClassification(unittest.TestCase):
             for target in (changed, changed["clear_refusal"]["reply"]):
                 key = "reason" if target is changed else "content"
                 target[key] = target[key].replace("rotation_unsettled(59)", replacement)
+            changed["failure_attribution"]["raw_reason"] = changed["reason"].removeprefix("assertion: ")
             self.assertEqual(self.classify(changed), "FAIL")
         for key, value in (("id", "99"), ("id", "100"), ("channel_id", "333"), ("author", {"bot": False}),
                            ("content", "herdr clear refused: rotation_unsettled(59)")):
@@ -407,7 +418,7 @@ class ConfiguredHerdrClassification(unittest.TestCase):
         channel = CHANNELS["claude-tui"]
         self.config.write_text(self.config.read_text().replace("222", channel))
         self.assertEqual(self.classify(result, channel_id=channel, report={"run_id": RUN_ID,
-                         "cell": "claude-tui", "channel_id": channel, "scenarios": [result]}), "KNOWN_GAP")
+                         "cell": "claude-tui", "channel_id": channel, "scenarios": [result], "coverage_class_violations": []}), "KNOWN_GAP")
         for variant in ("old", "foreign", "human", "unknown_boundary"):
             def bad_reply(client, channel, content):
                 sent = refusing(client, channel, content)
@@ -436,7 +447,7 @@ class ConfiguredHerdrClassification(unittest.TestCase):
         before = copy.deepcopy(result)
         channel = CHANNELS["claude-tui"]
         self.config.write_text(self.config.read_text().replace("222", channel))
-        report = {"run_id": RUN_ID, "cell": "claude-tui", "channel_id": channel, "scenarios": [result]}
+        report = {"run_id": RUN_ID, "cell": "claude-tui", "channel_id": channel, "scenarios": [result], "coverage_class_violations": []}
         self.assertEqual(self.classify(result, channel_id=channel, report=report), "KNOWN_GAP")
         self.assertEqual(result, before)
         for evidence in ({"teardown_error": "failed"}, {"assertions": [{"passed": False}]},
@@ -444,6 +455,51 @@ class ConfiguredHerdrClassification(unittest.TestCase):
             changed = {**result, **evidence}
             self.assertEqual(self.classify(changed, channel_id=channel,
                              report={**report, "scenarios": [changed]}), "FAIL")
+
+    def test_missing_reply_channel_is_not_inferred(self):
+        row = self.row("E-50")
+        self.assertEqual(self.classify(row), "KNOWN_GAP")
+        for value in (None, "", "333"):
+            changed = copy.deepcopy(row)
+            changed["clear_refusal"]["reply"]["channel_id"] = value
+            self.assertEqual(self.classify(changed), "FAIL")
+        del row["clear_refusal"]["reply"]["channel_id"]
+        self.assertEqual(self.classify(row), "FAIL")
+
+    def test_missing_failure_attribution_fails_closed(self):
+        for scenario in ("E-1", "E-50"):
+            row = self.row(scenario)
+            self.assertEqual(self.classify(row), "KNOWN_GAP")
+            for value in (None, [], "", {}, {"source": "harness", "raw_reason": row["failure_attribution"]["raw_reason"]},
+                          {**row["failure_attribution"], "raw_reason": "other"}):
+                with self.subTest(scenario=scenario, attribution=value):
+                    self.assertEqual(self.classify({**row, "failure_attribution": value}), "FAIL")
+            del row["failure_attribution"]
+            with self.subTest(scenario=scenario, missing="failure_attribution"):
+                self.assertEqual(self.classify(row), "FAIL")
+
+    def test_missing_coverage_class_violations_fails_closed(self):
+        for scenario in ("E-1", "E-50"):
+            row = self.row(scenario)
+            report = {"cell": "claude-tui", "channel_id": "222", "run_id": RUN_ID, "scenarios": [row]}
+            self.assertEqual(self.classify(row, report={**report, "coverage_class_violations": []}), "KNOWN_GAP")
+            for value in (None, {}, "", 0, False, ["regression"]):
+                with self.subTest(scenario=scenario, violations=value):
+                    self.assertEqual(self.classify(row, report={**report, "coverage_class_violations": value}), "FAIL")
+            with self.subTest(scenario=scenario, missing="coverage_class_violations"):
+                self.assertEqual(self.classify(row, report=report), "FAIL")
+
+    def test_missing_assertions_fails_closed(self):
+        for scenario in ("E-1", "E-50"):
+            row = self.row(scenario)
+            self.assertEqual(self.classify(row), "KNOWN_GAP")
+            changed = copy.deepcopy(row)
+            del changed["assertions"]
+            with self.subTest(scenario=scenario, missing="assertions"):
+                self.assertEqual(self.classify(changed), "FAIL")
+            for value in (None, {}, "", 0):
+                with self.subTest(scenario=scenario, assertions=value):
+                    self.assertEqual(self.classify({**row, "assertions": value}), "FAIL")
 
 
 if __name__ == "__main__":

@@ -212,7 +212,8 @@ def classify(
                 or row.get("run_id") != run_id or row.get("cell") != cell
                 or str(row.get("channel_id")) != str(channel_id)):
             return outcome
-        if (report.get("coverage_class_violations") or row.get("teardown_error")
+        violations = report.get("coverage_class_violations")
+        if (not isinstance(violations, list) or violations or row.get("teardown_error")
                 or row.get("dirty_active_residue")):
             return outcome
         passed, detail = (judge(report=report, scenario_id=scenario_id, markers=markers,
@@ -225,19 +226,24 @@ def classify(
         if designated and scenario_id == "E-50" and passed:
             classification, detail = "UNEXPECTED_PASS", "full judge passed on Herdr-configured channel"
         elif designated and row.get("status") == "fail" and driver_rc == 1:
+            assertion_rows = row.get("assertions")
+            if not isinstance(assertion_rows, list):
+                return outcome
             if (row.get("teardown_error") or row.get("wait_timeouts") or row.get("dirty_active_residue")
-                    or any(a.get("status") in {"fail", "unevaluable"} or a.get("passed") is False for a in row.get("assertions", []))):
+                    or any(a.get("status") in {"fail", "unevaluable"} or a.get("passed") is False for a in assertion_rows)):
                 return outcome
             reason = row.get("reason", "")
-            attribution = row.get("failure_attribution") or {}
-            if attribution and attribution.get("raw_reason") != reason.removeprefix("assertion: "):
+            attribution = row.get("failure_attribution")
+            raw_reason = reason.removeprefix("assertion: ") if scenario_id == "E-50" else reason
+            expected_source = {"E-1": "exception", "E-50": "assertion"}.get(scenario_id)
+            if (not isinstance(attribution, dict) or attribution.get("raw_reason") != raw_reason
+                    or attribution.get("source") != expected_source):
                 return outcome
             if scenario_id == "E-1":
                 match = re.fullmatch(r"RuntimeError: turn/start HTTP 422: (.+)", reason, re.DOTALL)
                 body = json.loads(match[1]) if match else None
                 if (isinstance(body, dict) and body.get("status") == "invalid_target"
-                        and body.get("error") == "herdr turn refused: executor_not_wired"
-                        and (not attribution or attribution.get("source") == "exception")):
+                        and body.get("error") == "herdr turn refused: executor_not_wired"):
                     classification, detail = "KNOWN_GAP", "HTTP 422 invalid_target/executor_not_wired"
             elif scenario_id == "E-50":
                 refusal = row.get("clear_refusal") or {}
@@ -246,10 +252,10 @@ def classify(
                 content = reply.get("content", "")
                 match = re.fullmatch(r"세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled\(([1-9][0-9]*)\)", content)
                 if (refusal.get("stage") != "clear_ack" or not after.isdigit() or int(after) <= 0 or not match
+                        or not reply.get("channel_id") or str(reply["channel_id"]) != str(channel_id)
                         or cell_driver.assertions.is_our_send(reply)
                         or not cell_driver.herdr.clear_refusal([reply], after=int(after), channel=channel_id)
-                        or reason != "assertion: text !clear refused by the server: " + content
-                        or (attribution and attribution.get("source") != "assertion")):
+                        or reason != "assertion: text !clear refused by the server: " + content):
                     return outcome
                 counts = row.get("marker_counts") or {}
                 if (sorted(_label(m) for m in markers) != ["AFTER_CLEAR", "T1", "T2"]

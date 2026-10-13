@@ -4631,27 +4631,31 @@ if _run_post_deploy_functional_smoke; then
     if [ -n "${POST_DEPLOY_SMOKE_KNOWN_GAPS[*]:-}" ]; then
         echo "△ Post-deploy functional smoke completed with known gaps (evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
         printf '  %s\n' "${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]}"
-    elif [ -n "${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[*]:-}" ]; then
+    fi
+    if [ -n "${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[*]:-}" ]; then
         echo "△ Post-deploy functional smoke completed with unexpected passes (evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
         printf '  %s\n' "${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]}"
-    elif case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_COVERAGE" in
-        "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE") true ;;
-        *) false ;;
-    esac
-    then
-    case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE" in
-        "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE")
-            echo "✓ Post-deploy functional smoke passed (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-            ;;
-        *)
-            echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-            ;;
-    esac
-            echo "  durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}"
-            echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
-    else
-            echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-            echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
+    fi
+    if [ -z "${POST_DEPLOY_SMOKE_KNOWN_GAPS[*]:-}${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[*]:-}" ]; then
+        if case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_COVERAGE" in
+            "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE") true ;;
+            *) false ;;
+        esac
+        then
+        case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE" in
+            "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE")
+                echo "✓ Post-deploy functional smoke passed (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+                ;;
+            *)
+                echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+                ;;
+        esac
+                echo "  durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}"
+                echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
+        else
+                echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+                echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
+        fi
     fi
 else
     echo "⚠ POST-DEPLOY FUNCTIONAL SMOKE FAILED — deploy remains healthy (fail-open)"
