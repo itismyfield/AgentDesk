@@ -1,6 +1,7 @@
 """Offline Herdr detail/status, local HTTP auth, and operator restart contracts."""
 
 import io
+import itertools
 import json
 import sys
 import tempfile
@@ -212,6 +213,125 @@ class HerdrObserve(unittest.TestCase):
                     herdr.observe(driver, self.args)
 
 
+# Shape of the shared release node's reasons; none names the target channel 41.
+NODE_REASONS = ["relay_verdict_unknown_codex_99", "provider:claude:pending_queue_depth:1",
+                "tui_o:content_transform", "tui_o:released:a", "tui_o:released:b"]
+WAIVE = [arg for pattern in ("relay_verdict_unknown_codex_*", "provider:claude:pending_queue_depth:1",
+                             "tui_o:content_transform", "tui_o:released*")
+         for arg in ("--herdr-allowed-degraded-reason", pattern)]
+
+
+def degraded(reasons=NODE_REASONS, **changes):
+    return {**health(), "status": "degraded", "degraded_reasons": list(reasons), **changes}
+
+
+class HerdrDegradedWaiver(unittest.TestCase):
+    def setUp(self):
+        self.args = arguments(*WAIVE)
+        self.enterContext(patch("urllib.request.urlopen", side_effect=AssertionError("offline only")))
+        self.http = self.enterContext(patch.object(driver, "_read_api_json", return_value=(200, degraded())))
+        self.cli = self.enterContext(patch.object(herdr.subprocess, "run", return_value=Namespace(stdout=json.dumps(status()))))
+
+    def refused(self, payload, reason="", code=200):
+        self.http.return_value = (code, payload)
+        with self.assertRaisesRegex(driver.assertions.AssertionError, reason) as caught:
+            herdr.observe(driver, self.args)
+        return caught.exception.herdr_observation
+
+    def test_without_flag_degraded_fails_and_evidence_says_no_waiver(self):
+        self.args = arguments()
+        readiness = self.refused(degraded(), "readiness failed")["readiness"]
+        self.assertEqual(readiness["degraded_reasons"], NODE_REASONS)
+        self.http.return_value = (200, health())
+        readiness = herdr.observe(driver, self.args)["readiness"]
+        self.assertEqual((readiness["degraded_reason_waiver"], readiness["allowed_degraded_reasons"],
+                          readiness["ignored_degraded_reasons"]), ("none", [], []))
+
+    def test_every_reason_waived_passes_and_is_recorded(self):
+        readiness = herdr.observe(driver, self.args)["readiness"]
+        self.assertEqual(readiness["status"], "degraded")
+        self.assertEqual(readiness["degraded_reason_waiver"], "applied")
+        self.assertEqual(readiness["allowed_degraded_reasons"], WAIVE[1::2])
+        self.assertEqual(readiness["ignored_degraded_reasons"], NODE_REASONS)
+        self.http.return_value = (200, degraded(ok=False, degraded=True))
+        self.assertTrue(herdr.observe(driver, self.args)["validated"])
+        self.http.return_value = (200, health())
+        self.assertEqual(herdr.observe(driver, self.args)["readiness"]["degraded_reason_waiver"], "unused")
+
+    def test_result_json_and_console_show_waiver(self):
+        client = Mock()
+        client.send_control.return_value = {"id": "100"}
+        client.fetch_messages.return_value = []
+        scenario = dict(id="E-1", agent_mode="real_live", coverage_class="live", steps=[], assertions=[])
+        with redirect_stdout(io.StringIO()) as out, patch.object(herdr.time, "sleep"):
+            result = driver.run_scenario(scenario, args=self.args, client=client, run_id="test")
+        self.assertEqual(result["status"], "pass", result)
+        self.assertEqual(result["herdr_readiness_waiver"],
+                         {"degraded_reason_waiver": "applied", "allowed_degraded_reasons": WAIVE[1::2],
+                          "ignored_degraded_reasons": sorted(NODE_REASONS)})
+        self.assertIn("herdr readiness waiver", out.getvalue())
+
+    def test_unmatched_herdr_or_target_channel_reason_is_never_waived(self):
+        for reasons, blocked in (([*NODE_REASONS, "disk_low_free_bytes:1"], "disk_low_free_bytes:1"),
+                                 (["tui_o:released:herdr_reconnect"], "tui_o:released:herdr_reconnect"),
+                                 (["tui_o:released:HERDR"], "tui_o:released:HERDR"),
+                                 (["relay_verdict_unknown_codex_41"], "relay_verdict_unknown_codex_41")):
+            with self.subTest(reasons=reasons):
+                readiness = self.refused(degraded(reasons), "not waived.*" + blocked)["readiness"]
+                self.assertEqual(readiness["ignored_degraded_reasons"], [])
+
+    def test_unready_or_malformed_detail_fails(self):
+        for payload, code in ((degraded(status="unhealthy"), 200), (degraded(status="starting"), 200),
+                              (degraded(fully_recovered=False), 200), (degraded(degraded_reasons="tui_o:released:a"), 200),
+                              (degraded([1]), 200), (degraded([]), 200), (health() | {"degraded_reasons": ["tui_o:released:a"]}, 200),
+                              (degraded(ok=True), 200), (degraded(degraded="yes"), 200), (health() | {"ok": False}, 200),
+                              (degraded(), 503)):
+            with self.subTest(payload=payload, code=code):
+                self.refused(payload, code=code)
+        self.cli.assert_not_called()
+
+    def test_waiver_keeps_every_herdr_block_and_row_check(self):
+        for herdr_change in ({"admission": "closed"}, {"restart_required": True}, {"input_holds": 1},
+                             {"configured_channels": ["99"]}):
+            payload = degraded()
+            payload["herdr"].update(herdr_change)
+            with self.subTest(herdr_change=herdr_change):
+                self.refused(payload)
+        self.http.return_value = (200, degraded())
+        for rows in ([{**row(), "provider": "codex"}], [{**row(), "channel": "99"}]):
+            with self.subTest(rows=rows):
+                self.cli.return_value.stdout = json.dumps(status(rows))
+                self.refused(degraded(), "target row")
+
+    def test_scenario_health_steps_withhold_waiver(self):
+        client = Mock()
+        client.send_control.return_value = {"id": "100"}
+        client.fetch_messages.return_value = []
+        detail = degraded()
+        detail["herdr"]["reconnect"].update(channels=1, published=1)
+        self.http.side_effect = lambda _base, path, **_: (200, detail if path.endswith("/detail") else {"status": "healthy"})
+        self.args.herdr_isolated_server = self.args.allow_destructive = True
+        clock = itertools.count(0, 100)
+        for step in ({"assert_health": {}}, {"restart_dcserver": {"target": "dev"}}):
+            scenario = dict(id="E-8", agent_mode="real_live", coverage_class="live", steps=[step], assertions=[])
+            with self.subTest(step=step), redirect_stdout(io.StringIO()), \
+                    patch.dict("os.environ", {"AGENTDESK_E2E_ALLOW_DESTRUCTIVE": "1"}), patch.object(herdr.time, "sleep"), \
+                    patch.object(herdr.time, "monotonic", side_effect=lambda: next(clock)):
+                result = driver.run_scenario(scenario, args=self.args, client=client, run_id="test")
+            self.assertEqual(result["status"], "fail", result)
+            self.assertIn("readiness failed", result["reason"])
+            self.assertEqual(result["herdr_observations"][-1]["readiness"]["degraded_reason_waiver"], "withheld")
+
+    def test_arguments_refuse_wildcard_and_non_herdr_cells(self):
+        for pattern in ("*", "", " * "):
+            with self.subTest(pattern=pattern), self.assertRaises(SystemExit), patch("sys.stderr", io.StringIO()):
+                arguments("--herdr-allowed-degraded-reason", pattern)
+        argv = ["driver", "--cell", "claude-tui", "--channel-id", "41", "--herdr-allowed-degraded-reason", "tui_o:released*"]
+        with patch.object(sys, "argv", argv), self.assertRaises(SystemExit), patch("sys.stderr", io.StringIO()) as err:
+            driver.parse_args()
+        self.assertIn("only to Herdr cells", err.getvalue())
+
+
 class RestartObserveOnly(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
@@ -367,6 +487,28 @@ class RestartObserveOnly(unittest.TestCase):
         self.args.base_url = "http://127.0.0.1:8797"
         self.set_mark(validated=False)
         self.assert_refused("observation missing")
+
+    def test_mark_and_verify_apply_the_same_waiver(self):
+        self.http.return_value = (200, degraded())
+        self.assertEqual(self.run_mode("mark")[0], 1)
+        self.args.herdr_allowed_degraded_reason = WAIVE[1::2]
+        self.assertEqual(self.run_mode("mark")[0], 0)
+        mark = json.loads(self.mark.read_text())["observation"]["readiness"]
+        self.assertEqual(mark["degraded_reason_waiver"], "applied")
+        self.set_mark()
+        payload = degraded()
+        payload["herdr"]["reconnect"].update(channels=1, published=1)
+        payload["uptime_secs"] = 3
+        self.http.return_value = (200, payload)
+        rc, report = self.run_mode("verify")
+        self.assertEqual(rc, 0, report)
+        self.assertEqual(report["restart_observation"]["after"]["readiness"]["ignored_degraded_reasons"], NODE_REASONS)
+        self.assertEqual(report["herdr_readiness_waiver"]["degraded_reason_waiver"], "applied")
+        self.assertIn("herdr readiness waiver", self.stdout)
+        self.args.herdr_allowed_degraded_reason = None
+        self.client.reset_mock()
+        self.scenario.reset_mock()
+        self.assert_refused("readiness failed")
 
     def test_unpublished_counts_and_restart_scenario_fail_before_input(self):
         self.marked()

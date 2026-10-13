@@ -1087,6 +1087,130 @@ mod spy {
     }
 }
 
+// A queued UI is confirmed only by a new exact enqueue in the same transcript.
+pub(super) struct SteeringReceipt {
+    binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    file: std::fs::File,
+    offset: u64,
+}
+
+impl SteeringReceipt {
+    pub(super) fn before(session: &str) -> Option<Self> {
+        use crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority;
+        use std::io::{Seek, SeekFrom};
+        crate::services::tmux_common::with_tmux_source_authority(session, |authority| {
+            let binding = runtime_binding_for_tmux_session_under_source_authority(authority)?;
+            if binding.runtime_kind
+                != crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+                || binding
+                    .session_id
+                    .as_deref()
+                    .is_none_or(|id| id.trim().is_empty())
+                || !std::fs::symlink_metadata(&binding.output_path)
+                    .ok()?
+                    .is_file()
+            {
+                return None;
+            }
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            }
+            let mut file = options.open(&binding.output_path).ok()?;
+            if !file.metadata().ok()?.is_file() {
+                return None;
+            }
+            let offset = file.seek(SeekFrom::End(0)).ok()?;
+            Some(Self {
+                binding,
+                file,
+                offset,
+            })
+        })
+    }
+
+    pub(super) fn confirmed(mut self, session: &str, frame: &str) -> bool {
+        use crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority;
+        use std::io::Read;
+        crate::services::tmux_common::with_tmux_source_authority(session, |authority| {
+            let Some(current) = runtime_binding_for_tmux_session_under_source_authority(authority)
+            else {
+                return false;
+            };
+            if current.runtime_kind != self.binding.runtime_kind
+                || current.output_path != self.binding.output_path
+                || current.session_id != self.binding.session_id
+                || !same_transcript(&self.file, &current.output_path)
+                || !self.file.metadata().is_ok_and(|m| m.len() >= self.offset)
+            {
+                return false;
+            }
+            let limit = crate::services::tui_input::actor::pane::MAX_PROMPT_BYTES * 8;
+            let mut appended = String::new();
+            if self
+                .file
+                .by_ref()
+                .take(limit as u64 + 1)
+                .read_to_string(&mut appended)
+                .is_err()
+                || appended.len() > limit
+                || !appended.ends_with('\n')
+                || !same_transcript(&self.file, &current.output_path)
+            {
+                return false;
+            }
+            let mut enqueues = 0;
+            let mut removed = false;
+            let mut attached = false;
+            for line in appended
+                .split_inclusive('\n')
+                .filter(|line| line.ends_with('\n'))
+            {
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+                    return false;
+                };
+                if record["sessionId"].as_str() != current.session_id.as_deref() {
+                    continue;
+                }
+                if record["type"] == "queue-operation" && record["content"].as_str() == Some(frame)
+                {
+                    if record["operation"] == "enqueue" {
+                        enqueues += 1;
+                    }
+                    if record["operation"] == "remove" {
+                        removed = true;
+                    }
+                }
+                let attachment = &record["attachment"];
+                attached |= record["type"] == "attachment"
+                    && attachment["type"] == "queued_command"
+                    && attachment["commandMode"] == "prompt"
+                    && attachment["prompt"].as_str() == Some(frame);
+            }
+            enqueues == 1 && (!removed || attached)
+        })
+    }
+}
+
+fn same_transcript(file: &std::fs::File, path: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (file.metadata(), std::fs::symlink_metadata(path)) {
+            (Ok(a), Ok(b)) => b.is_file() && a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+        false
+    }
+}
+
 pub(crate) mod guarded_submission;
 
 #[cfg(test)]

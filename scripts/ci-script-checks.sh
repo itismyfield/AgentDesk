@@ -259,6 +259,16 @@ if run_check guards "N1 native oracle contracts"; then
 "$PYTHON" tests/run_n1_canary_native_mutations.py
 fi
 
+if run_check guards "N1 canary final audit contracts"; then
+"$PYTHON" -m unittest tests.test_n1_canary_audit
+"$PYTHON" tests/run_n1_canary_audit_mutations.py
+fi
+
+if run_check guards "N1 canary producer capability contracts"; then
+"$PYTHON" -m unittest tests.test_n1_canary_producer
+"$PYTHON" tests/run_n1_canary_producer_mutations.py
+fi
+
 if run_check guards "Alert dedupe/authority/routing wiring contract (#4448/#4449)"; then
 "$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 fi
@@ -484,6 +494,11 @@ fi
 
 if run_check contracts "Script checks shard ownership + result mirror contract"; then
 "$PYTHON" -m unittest tests.test_ci_script_check_shards
+fi
+
+if run_check contracts "Giant deadline warning reporter contract"; then
+# Verbose output lets the shard contract confirm every acceptance test ran unskipped.
+"$PYTHON" -m unittest -v tests.test_report_giant_deadlines
 fi
 
 if run_check contracts "Rust test-lane coverage ratchet (#4846/#4910)"; then
