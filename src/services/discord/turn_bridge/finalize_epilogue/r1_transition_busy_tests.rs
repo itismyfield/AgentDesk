@@ -16,6 +16,13 @@ async fn t5_real_gateway_busy_never_arms_finalize_error_kick() {
         "AGENTDESK_ROOT_DIR",
         root.path(),
     );
+    let config = crate::runtime_layout::config_file_path(root.path());
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "server: {}\ndata: {dir: data}\n").unwrap();
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &config,
+    );
     let _routing = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "ADK_INTAKE_ROUTING_MODE",
         "disabled".as_ref(),

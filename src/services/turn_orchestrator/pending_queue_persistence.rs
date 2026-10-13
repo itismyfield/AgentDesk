@@ -14,6 +14,11 @@ use crate::services::provider::ProviderKind;
 
 mod queue_exit_debt;
 mod queued_recovery;
+#[cfg(test)]
+pub(super) use queue_exit_debt::{
+    ExitWithDebt, PreparedQueueExitTransition, QueueExitCommitError, QueueExitPrepareError,
+    commit_queue_exit, read_back_fault,
+};
 pub(super) use queue_exit_debt::{QueueExitDebt, check_queue_exit_debts};
 pub(crate) use queued_recovery::load_pending_queues_checked;
 
@@ -439,6 +444,10 @@ pub(crate) fn save_channel_queue(
     dispatch_role_override: Option<u64>,
 ) -> Result<(), String> {
     crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
+        // This writer carries no metadata, so it must not replace or remove a V1 snapshot.
+        if let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) {
+            queue_exit_debt::refuse_metadata_loss(&path)?;
+        }
         save_channel_queue_locked(
             provider,
             token_hash,

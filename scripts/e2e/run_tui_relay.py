@@ -250,6 +250,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--herdr-isolated-server", action="store_true", help="Operator attests restart target is a dedicated E2E server with no other channels.")
     parser.add_argument("--herdr-endpoint", help="Boot endpoint key for this channel; required for live Herdr observations.")
     parser.add_argument("--herdr-status-bin", default="agentdesk", help="AgentDesk CLI on the target node (read-only herdr status).")
+    parser.add_argument("--herdr-allowed-degraded-reason", action="append", metavar="PATTERN",
+                        help="Repeatable. Waive a detail degraded reason (exact or trailing-* prefix) for Herdr readiness; "
+                             "herdr or target-channel reasons are never waived and waivers are recorded in evidence.")
     parser.add_argument("--e36-intake-log", help="Explicit readable adk-tracing-text-v1 dcserver log for E36")
     parser.add_argument(
         "--cell",
@@ -361,6 +364,7 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
     herdr_restart.validate_arguments(parser, args)
+    herdr.validate_arguments(parser, args)
     args.turn_start_timeout_s = _bounded_value(
         args.turn_start_timeout_s,
         source="--turn-start-timeout-s",

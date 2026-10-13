@@ -1,6 +1,8 @@
 //! Decisions for a protected attempt's stale resume or terminal: keep the legacy path, retry the
 //! exact attempt once, classify it as ordinary, or hold it.
 
+#[cfg(unix)]
+pub(crate) mod injected;
 pub(crate) mod live;
 #[cfg(all(test, unix))]
 mod live_tests;
@@ -245,6 +247,14 @@ pub(in crate::services::discord) async fn stale_resume(
     token: &CancelToken,
     inflight: &InflightTurnState,
 ) -> StaleResume {
+    #[cfg(unix)]
+    if injected::protects(inflight.channel_id, token.turn_nonce()) {
+        bar_legacy_retry(inflight);
+        if let Some(live) = token.replay_attempt() {
+            live.record(live::Seen::Activity(live::Activity::InjectedInput));
+        }
+        return StaleResume::Hold;
+    }
     if ordinary_allowed(token, inflight) {
         return StaleResume::Legacy;
     }

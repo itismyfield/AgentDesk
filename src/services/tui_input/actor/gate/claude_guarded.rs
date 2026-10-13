@@ -18,6 +18,7 @@ impl<'a> DraftEvidence<'a> {
         permit: &'a crate::services::claude_tui::composer_lock::ComposerPermit<'_>,
         pane: &crate::services::tui_input::submission_tmux::guarded::GuardedPane,
         gate: &dyn crate::services::claude_tui::host_input::MutationGate,
+        context: crate::services::tui_input::submission::SubmitContext,
     ) -> Result<Self, crate::services::claude_tui::host_input::InputRefusal> {
         use crate::services::claude_tui::host_input::InputRefusal;
         use crate::services::tui_input::submission::Refusal;
@@ -28,10 +29,11 @@ impl<'a> DraftEvidence<'a> {
         let before = pane
             .capture_draft()
             .ok_or(InputRefusal::Composer(Refusal::CaptureUnavailable))?;
-        let pre_empty = super::judge_pane(
+        let pre_empty = super::submission_admits(
             crate::services::tui_o::shadow::ShadowProvider::Claude,
             &before,
-        ) == super::PaneVerdict::Ready;
+            context,
+        );
         if !pre_empty {
             return Err(InputRefusal::Composer(Refusal::NotReady));
         }
