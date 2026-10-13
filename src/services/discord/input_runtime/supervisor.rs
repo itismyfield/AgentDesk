@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use tokio::sync::{OwnedMutexGuard, watch};
@@ -30,6 +30,8 @@ pub(crate) mod admission;
 pub(crate) mod command;
 #[path = "external.rs"]
 pub(crate) mod external;
+#[path = "intake.rs"]
+pub(in crate::services::discord) mod intake;
 #[path = "mapping.rs"]
 pub(crate) mod mapping;
 #[path = "ordering.rs"]
@@ -70,6 +72,8 @@ struct Entry {
     health: BTreeMap<&'static str, String>,
     // The first mapping violation; no report, release or poison in this process removes it.
     latch: Option<HoldCause>,
+    overflow: Option<ordering::PendingOverflow>,
+    client: Option<Weak<intake::client::Client>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,7 +142,7 @@ impl Registry {
         }
         let order = AdmissionOrder::new(provider.clone(), channel, 1, 0)
             .map_err(|_| Refused::GenerationExhausted)?;
-        entries.insert(key.clone(), Entry::default());
+        entries.insert(key.clone(), Entry::with_overflow(order.pending_overflow()));
         self.used.store(true, Ordering::Release);
         Ok(Registration {
             registry: self,
@@ -419,6 +423,10 @@ pub(crate) trait Ports: Send + 'static {
     fn take_notices(host: &mut Self::Move) -> Vec<(Option<u64>, &'static str)>;
     /// False when delivery failed, so the same Notice may be sent again later.
     fn notice(&mut self, text: String) -> Step<'_, bool>;
+    /// Rechecks this source outside ledger loans; an unavailable policy never grants admission.
+    fn source_policy<'a>(&'a mut self, _source: &'a source::Source) -> Step<'a, bool> {
+        Box::pin(async { false })
+    }
 }
 
 pub(crate) struct Config {
@@ -509,19 +517,14 @@ impl<P: Ports> Supervisor<P> {
         let closed = self.closed;
         #[cfg(test)]
         let closed = closed && !mutant("close_allows_commit");
+        let exhausted = self.order.exhausted();
+        #[cfg(test)]
+        let exhausted = exhausted && !mutant("admission_ignores_order_exhaustion");
         self.admitted
             && !closed
-            && !self.order.exhausted()
+            && !exhausted
             && !self.slot.loaned()
             && self.registration.latched().is_none()
-    }
-
-    pub(crate) fn pending_overflow(&self) -> ordering::PendingOverflow {
-        self.order.pending_overflow()
-    }
-
-    pub(crate) fn pending_snapshot(&self) -> ordering::PendingSource {
-        self.order.pending_snapshot()
     }
 
     pub(crate) fn cursor(&mut self) -> Option<&mut Cursor> {
@@ -556,8 +559,11 @@ impl<P: Ports> Supervisor<P> {
                 let admit_new = receipt_open
                     && self.admission_open()
                     && !ordering::order_barrier(&self.config.provider, self.config.channel);
+                let policy = self.permits_source(&source).await;
                 let result = if source.identity().execution_channel_id != self.config.channel {
                     external::ExternalReceipt::Deferred(Deferred::Conflict)
+                } else if !policy {
+                    external::ExternalReceipt::Deferred(Deferred::Unknown)
                 } else {
                     loan(&mut self.slot, move |lease| {
                         external::submit(lease, *source, admit_new)
@@ -616,8 +622,11 @@ impl<P: Ports> Supervisor<P> {
                     .permits_sources(&capability, self.admission_gen, &sources)
                     .is_ok();
                 let mut attempted = false;
+                let policy = self.permits_source(&source).await;
                 let result = if !receipt_open || !self.admission_open() {
                     Receipt::Deferred(Deferred::Closed)
+                } else if !policy {
+                    Receipt::Deferred(Deferred::Unknown)
                 } else if source.identity().execution_channel_id != self.config.channel
                     || (!permits_new
                         && self

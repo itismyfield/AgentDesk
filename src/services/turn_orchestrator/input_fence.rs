@@ -139,6 +139,7 @@ fn persistence(msg: &ChannelMailboxMsg) -> Option<&QueuePersistenceContext> {
         | M::MergeRestoredQueueItems { persistence, .. }
         | M::MergeRestoredDispatchMarker { persistence, .. }
         | M::RestartDrain { persistence, .. } => Some(persistence),
+        M::PolicyClose { request, .. } => Some(&request.persistence),
         M::Injection(injection) => injection.persistence(),
         #[cfg(test)]
         M::ReplaceQueue { persistence, .. } => Some(persistence),
@@ -294,6 +295,10 @@ pub(super) fn refuse(state: &ChannelMailboxState, msg: ChannelMailboxMsg, failur
         }
         M::FinishTurnIfToken { reply, .. } => {
             let _ = reply.send(TokenFinish::Unavailable);
+        }
+        M::PolicyClose { reply, .. } => {
+            let refusal = policy_close::PolicyRetain::InputFence(failure);
+            let _ = reply.send(policy_close::PolicyMailboxOutcome::Retained(refusal));
         }
         M::CancelQueuedPrimaryMessage { reply, .. } => {
             let _ = reply.send(CancelQueuedMessageResult {

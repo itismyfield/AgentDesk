@@ -462,6 +462,7 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tui_relay.test_cell_resolution \
   scripts.e2e.tui_relay.test_discord_client \
   scripts.e2e.tui_relay.test_driver_health \
+  scripts.e2e.tui_relay.test_herdr_observe \
   scripts.e2e.tui_relay.test_durable_delivery \
   scripts.e2e.tui_relay.test_fixtures \
   scripts.e2e.tui_relay.test_known_gap \
@@ -483,6 +484,11 @@ fi
 
 if run_check contracts "Script checks shard ownership + result mirror contract"; then
 "$PYTHON" -m unittest tests.test_ci_script_check_shards
+fi
+
+if run_check contracts "Giant deadline warning reporter contract"; then
+# Verbose output lets the shard contract confirm every acceptance test ran unskipped.
+"$PYTHON" -m unittest -v tests.test_report_giant_deadlines
 fi
 
 if run_check contracts "Rust test-lane coverage ratchet (#4846/#4910)"; then

@@ -1,6 +1,7 @@
 //! #5996 — the active-turn anchor release, moved verbatim out of a registered giant.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use poise::serenity_prelude::ChannelId;
 
@@ -22,7 +23,7 @@ pub(super) fn release_active_turn_anchor(
     channel_id: ChannelId,
     provider: Option<&ProviderKind>,
 ) -> Option<Arc<CancelToken>> {
-    let removed_token = state.cancel_token.take();
+    let (removed_token, held) = detach_active_turn_anchor(state);
     tracing::debug!(
         channel_id = channel_id.get(),
         provider_measured = provider.is_some(),
@@ -30,10 +31,19 @@ pub(super) fn release_active_turn_anchor(
         released_token = removed_token.is_some(),
         "active-turn anchor release ran without consulting progress evidence"
     );
+    pause_inbound_stall_for_turn(state, held);
+    removed_token
+}
+
+/// The release's field moves alone, with no logging or clock arithmetic, so it cannot panic;
+/// returns the removed token and, when one was removed, when its turn started.
+pub(super) fn detach_active_turn_anchor(
+    state: &mut ChannelMailboxState,
+) -> (Option<Arc<CancelToken>>, Option<Instant>) {
+    let removed_token = state.cancel_token.take();
     let held = state
         .turn_started_instant
         .filter(|_| removed_token.is_some());
-    pause_inbound_stall_for_turn(state, held);
     state.active_request_owner = None;
     state.active_user_message_id = None;
     state.active_absorbed_source_ids.clear();
@@ -43,7 +53,7 @@ pub(super) fn release_active_turn_anchor(
     state.recovery_started_at = None;
     state.turn_started_at = None;
     state.turn_started_instant = None;
-    removed_token
+    (removed_token, held)
 }
 
 /// #5996 — these pin the ARRIVAL of I20's two terms, never that a release was earned.

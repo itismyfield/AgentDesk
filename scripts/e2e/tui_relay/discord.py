@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+
 import json
 import math
 import time
@@ -18,6 +19,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 from .assertions import relay_body
+from .http_auth import request_headers
 
 
 MESSAGE_FETCH_MAX_ATTEMPTS = 3
@@ -99,7 +101,7 @@ class DiscordClient:
         request = urllib.request.Request(
             f"{self.base_url}/api/discord/send",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=request_headers(self.base_url, {"Content-Type": "application/json"}),
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
@@ -114,7 +116,7 @@ class DiscordClient:
             f"{self.base_url.rstrip('/')}/api/agents/{urllib.parse.quote(str(agent), safe='')}/turn/deliver",
             data=json.dumps({"text": text, "author_discord_user_id": author,
                              "source": source, "origin_id": origin_id}).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST")
+            headers=request_headers(self.base_url, {"Content-Type": "application/json"}), method="POST")
         payload = self._read_json(request, operation="deliver")
         if payload.get("ok") is not True or payload.get("delivery") not in {"started", "queued", "injected", "unconfirmed"}:
             raise RuntimeError(f"deliver returned invalid/refused response: {payload!r}")
@@ -139,7 +141,7 @@ class DiscordClient:
         request = urllib.request.Request(
             f"{self.base_url}/api/discord/send",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=request_headers(self.base_url, {"Content-Type": "application/json"}),
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
@@ -159,7 +161,7 @@ class DiscordClient:
         request = urllib.request.Request(
             f"{self.base_url}/api/e2e/discord/channels/{channel_id}/messages/{message_id}",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=request_headers(self.base_url, {"Content-Type": "application/json"}),
             method="DELETE",
         )
         return self._read_json(request, operation="delete_message")
@@ -183,7 +185,7 @@ class DiscordClient:
         request = urllib.request.Request(
             f"{self.base_url}/api/e2e/discord/failures",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=request_headers(self.base_url, {"Content-Type": "application/json"}),
             method="POST",
         )
         return self._read_json(request, operation="inject_failure")
@@ -205,7 +207,7 @@ class DiscordClient:
         request = urllib.request.Request(
             f"{self.base_url}/api/e2e/discord/failures",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=request_headers(self.base_url, {"Content-Type": "application/json"}),
             method="DELETE",
         )
         return self._read_json(request, operation="clear_failure")
@@ -265,7 +267,7 @@ class DiscordClient:
             request = urllib.request.Request(
                 url,
                 data=body,
-                headers={"Content-Type": "application/json"},
+                headers=request_headers(self.base_url, {"Content-Type": "application/json"}),
                 method="POST",
             )
             try:
@@ -305,7 +307,7 @@ class DiscordClient:
         request = urllib.request.Request(
             url,
             method="GET",
-            headers={"Connection": "close"},
+            headers=request_headers(self.base_url, {"Connection": "close"}),
         )
         deadline = time.monotonic() + MESSAGE_FETCH_RETRY_BUDGET_S
         waited = 0.0

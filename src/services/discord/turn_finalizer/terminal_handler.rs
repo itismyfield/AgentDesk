@@ -78,23 +78,9 @@ pub(super) async fn handle_terminal(
     }
 
     let pending = take_exact_pending_completion_admission(pending_admission, ledger_key);
-    let entry = ledger.entry(ledger_key).or_insert(LedgerEntry {
-        // An orphan completion cannot borrow the current takeover's lease.
-        recovery_lease: None,
-        phase: Phase::Pending,
-        relay_owner: RelayOwnerKind::None,
-        provider,
-        turn_key: key,
-        terminal_deadline: None,
-        // Orphan/terminal-first entries (no prior `register_start`) finalize
-        // right here, so they never need the watcher far-backstop.
-        watcher_backstop_deadline: None,
-        watcher_backstop_probe_at: None,
-        watcher_backstop_terminal_streak: 0,
-        watcher_backstop_deadline_pulled: false,
-        completion_admission: CompletionAdmission::new(CompletionAdmissionPlan::Immediate),
-        finalized_at: None,
-    });
+    let entry = ledger
+        .entry(ledger_key)
+        .or_insert_with(|| LedgerEntry::orphan(key, provider));
     apply_pending_completion_admission(entry, pending);
 
     // A newly CAS-released lease may share a previously finalized episode.
@@ -198,6 +184,7 @@ pub(super) async fn handle_terminal(
         claim_snapshot.as_ref(),
         shared,
         released,
+        false,
     ))
     .catch_unwind()
     .await
@@ -227,4 +214,112 @@ pub(super) async fn handle_terminal(
         entry.terminal_deadline = None;
     }
     outcome
+}
+
+impl LedgerEntry {
+    /// A terminal-first entry with no prior `register_start`.
+    fn orphan(key: TurnKey, provider: ProviderKind) -> Self {
+        Self {
+            // An orphan completion cannot borrow the current takeover's lease.
+            recovery_lease: None,
+            phase: Phase::Pending,
+            relay_owner: RelayOwnerKind::None,
+            provider,
+            turn_key: key,
+            terminal_deadline: None,
+            // Orphan/terminal-first entries finalize right away, so they never need the
+            // watcher far-backstop.
+            watcher_backstop_deadline: None,
+            watcher_backstop_probe_at: None,
+            watcher_backstop_terminal_streak: 0,
+            watcher_backstop_deadline_pulled: false,
+            completion_admission: CompletionAdmission::new(CompletionAdmissionPlan::Immediate),
+            finalized_at: None,
+        }
+    }
+}
+
+/// The finalizer half of a policy close: it owns the exact ledger entry while the captured
+/// mailbox commits. Anything short of a commit restores the entry, so the close stays retryable.
+pub(super) async fn handle_policy_close(
+    ledger: &mut HashMap<LedgerKey, LedgerEntry>,
+    intent: super::episode::PolicyCloseIntent,
+    shared: &Arc<SharedData>,
+) -> PolicyCloseOutcome {
+    let key = intent.key;
+    if key.episode.is_none() || key.generation != shared.restart.current_generation {
+        return PolicyCloseOutcome::Superseded;
+    }
+    let exact = key.exact_key();
+    let entry = ledger
+        .entry(exact)
+        .or_insert_with(|| LedgerEntry::orphan(key, intent.provider.clone()));
+    let prior = std::mem::replace(&mut entry.phase, Phase::Finalizing);
+    let settled = AssertUnwindSafe(settle_policy_close(intent, shared))
+        .catch_unwind()
+        .await;
+    let (outcome, finalized) = settled.unwrap_or((
+        PolicyCloseOutcome::Unconfirmed(PolicyStage::FinalizerPanic),
+        None,
+    ));
+    if let Some(entry) = ledger.get_mut(&exact) {
+        if matches!(
+            outcome,
+            PolicyCloseOutcome::Settled | PolicyCloseOutcome::DuplicateConfirmed
+        ) {
+            entry.phase = Phase::Finalized;
+            entry.finalized_at = Some(Instant::now());
+            entry.terminal_deadline = None;
+        } else {
+            entry.phase = prior;
+        }
+        if let Some(finalized) = finalized.as_ref() {
+            note_mailbox_release_after_finalize(finalized, entry, shared);
+        }
+    }
+    outcome
+}
+
+/// The mailbox commit, then the bridge cancel's trailing cleanup on its receipt only; the
+/// commit already debited the active count, so the cleanup never debits again.
+async fn settle_policy_close(
+    intent: super::episode::PolicyCloseIntent,
+    shared: &Arc<SharedData>,
+) -> (PolicyCloseOutcome, Option<FinalizeOutcome>) {
+    use crate::services::turn_orchestrator::policy_close::PolicyMailboxOutcome as Mailbox;
+    let super::episode::PolicyCloseIntent {
+        key,
+        provider,
+        mailbox,
+        request,
+        snapshot,
+    } = intent;
+    let channel = key.channel_id;
+    let finish = match super::super::mailbox_finish::policy_close_on_captured(
+        shared, &mailbox, channel, request,
+    )
+    .await
+    {
+        Err(stage) => return (PolicyCloseOutcome::Unconfirmed(stage), None),
+        Ok(Mailbox::Duplicate) => return (PolicyCloseOutcome::DuplicateConfirmed, None),
+        Ok(Mailbox::Superseded) => return (PolicyCloseOutcome::Superseded, None),
+        Ok(Mailbox::Retained(reason)) => return (PolicyCloseOutcome::Retained(reason), None),
+        Ok(Mailbox::Committed(finish)) => finish,
+    };
+    let ctx = FinalizeContext {
+        clear_inflight: false,
+        ..FinalizeContext::bridge()
+    };
+    let finalized = super::finalize::do_finalize_with_release(
+        key,
+        provider,
+        &TerminalEvent::Cancel,
+        ctx,
+        Some(&snapshot),
+        shared,
+        Some(finish),
+        true,
+    )
+    .await;
+    (PolicyCloseOutcome::Settled, Some(finalized))
 }

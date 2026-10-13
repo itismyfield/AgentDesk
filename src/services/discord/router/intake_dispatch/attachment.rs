@@ -55,47 +55,70 @@ pub(crate) async fn prepare_admitted_live_attachments(
     if attachments.is_empty() {
         return Ok(Vec::new());
     }
-    if !local_permit.prepared_uploads.is_empty() {
-        record_upload_history(deps.shared, channel_id, &local_permit.prepared_uploads).await;
-        return Ok(local_permit.prepared_uploads.clone());
-    }
-    let ctx = deps.ctx_for_chained_dispatch.ok_or_else(|| {
-        std::io::Error::other("live attachment preparation requires a gateway context")
-    })?;
-
-    auto_restore_session_with_dm_hint(deps.shared, channel_id, ctx, Some(is_dm)).await;
-    if effective_channel_id != channel_id {
-        let needs_parent = {
-            let data = deps.shared.core.lock().await;
-            !data.sessions.contains_key(&channel_id)
-        };
-        if needs_parent {
-            auto_restore_session(deps.shared, effective_channel_id, ctx).await;
-            let parent_path = {
-                let data = deps.shared.core.lock().await;
-                data.sessions
-                    .get(&effective_channel_id)
-                    .and_then(|session| session.current_path.clone())
-            };
-            if let Some(path) = parent_path {
-                bootstrap_thread_session(deps.shared, channel_id, &path, deps.http, deps.cache)
-                    .await;
-            }
-        }
-    }
-
-    let attachment_permit =
-        super::super::message_handler::LocalAttachmentPreparationPermit::after_local_admission();
-    let upload_records = super::super::message_handler::prepare_admitted_local_attachment(
-        deps.http,
-        channel_id,
-        attachments,
+    super::super::intake_gate::ledger::legacy_allowed(
         deps.shared,
-        &attachment_permit,
+        deps.http,
+        &deps.shared.provider,
+        channel_id,
     )
     .await?;
-    record_upload_history(deps.shared, channel_id, &upload_records).await;
-    Ok(upload_records)
+    if effective_channel_id != channel_id {
+        super::super::intake_gate::ledger::legacy_allowed(
+            deps.shared,
+            deps.http,
+            &deps.shared.provider,
+            effective_channel_id,
+        )
+        .await?;
+    }
+    use crate::services::discord::input_runtime::fence::effect;
+    let permit = effect::admit(&deps.shared.provider, channel_id.get())
+        .map_err(|failure| format!("attachment input admission refused: {failure:?}"))?;
+    effect::scope(permit, async {
+        if !local_permit.prepared_uploads.is_empty() {
+            record_upload_history(deps.shared, channel_id, &local_permit.prepared_uploads).await;
+            return Ok(local_permit.prepared_uploads.clone());
+        }
+        let ctx = deps.ctx_for_chained_dispatch.ok_or_else(|| {
+            std::io::Error::other("live attachment preparation requires a gateway context")
+        })?;
+
+        auto_restore_session_with_dm_hint(deps.shared, channel_id, ctx, Some(is_dm)).await;
+        if effective_channel_id != channel_id {
+            let needs_parent = {
+                let data = deps.shared.core.lock().await;
+                !data.sessions.contains_key(&channel_id)
+            };
+            if needs_parent {
+                auto_restore_session(deps.shared, effective_channel_id, ctx).await;
+                let parent_path = {
+                    let data = deps.shared.core.lock().await;
+                    data.sessions
+                        .get(&effective_channel_id)
+                        .and_then(|session| session.current_path.clone())
+                };
+                if let Some(path) = parent_path {
+                    bootstrap_thread_session(deps.shared, channel_id, &path, deps.http, deps.cache)
+                        .await;
+                }
+            }
+        }
+
+        let attachment_permit =
+            super::super::message_handler::LocalAttachmentPreparationPermit::after_local_admission(
+            );
+        let upload_records = super::super::message_handler::prepare_admitted_local_attachment(
+            deps.http,
+            channel_id,
+            attachments,
+            deps.shared,
+            &attachment_permit,
+        )
+        .await?;
+        record_upload_history(deps.shared, channel_id, &upload_records).await;
+        Ok(upload_records)
+    })
+    .await
 }
 
 #[cfg(test)]
