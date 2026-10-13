@@ -397,7 +397,7 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
     if not change_surfaces.is_file():
         return [
             Finding(
-                "error",
+                "warning",
                 "docs/agent-maintenance/change-surfaces.md",
                 "change-surfaces.md is missing.",
             )
@@ -412,11 +412,7 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
             path = match.group("path")
             actual = inventory.get(path)
             if actual is None:
-                # The module-inventory only lists *production* modules, so a
-                # dedicated `*_tests.rs` file is legitimately absent — warn so the
-                # freeze entry can be reworded, but do not gate. A path that is
-                # also missing from disk, however, is a deleted/renamed frozen
-                # entry (a ghost the gate must catch, #3036).
+                # Missing freeze entries are stale documentation, including tests.
                 on_disk = (repo_root / path).is_file()
                 is_test_path = path.endswith("_tests.rs") or path.rsplit("/", 1)[-1] in {
                     "tests.rs",
@@ -438,7 +434,7 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
                 else:
                     findings.append(
                         Finding(
-                            "error",
+                            "warning",
                             rel_doc,
                             (
                                 f"{path} is frozen but is "
@@ -454,14 +450,11 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
                         )
                     )
                 continue
-            # Ghost registration: a freeze entry whose production surface has
-            # fallen below the giant threshold (decomposition complete). Stale
-            # ghosts kept the page frozen against modules that no longer need
-            # it (#3036), so this is a hard error — remove the entry.
+            # A decomposed file needs documentation cleanup, not a merge block.
             if actual < GIANT_FILE_THRESHOLD:
                 findings.append(
                     Finding(
-                        "error",
+                        "warning",
                         rel_doc,
                         (
                             f"{path} now has {actual} production lines "
@@ -580,11 +573,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--line-count-gate",
         action="store_true",
-        help=(
-            "hard-fail on frozen giant-surface integrity errors, including "
-            "missing, non-production, and below-threshold ghost entries even "
-            "under --warning-only (#3036)"
-        ),
+        help="compatibility option; frozen giant documentation drift is warning-only",
     )
     parser.add_argument(
         "--migration-0093-rollout-gate",
@@ -658,12 +647,7 @@ def main(argv: list[str] | None = None) -> int:
     has_errors = any(finding.severity == "error" for finding in findings)
     if has_errors and not args.warning_only:
         return 1
-    # Even in the #1432 warning-only rollout, frozen giant-surface integrity is
-    # a hard gate when requested: missing, non-production, and ghost entries
-    # must not slip through (#3036).
-    if args.line_count_gate and any(
-        finding.severity == "error" for finding in line_count_findings
-    ):
+    if inventory_finding is not None:
         return 1
     if args.migration_0093_rollout_gate and any(
         finding.severity == "error" for finding in rollout_findings

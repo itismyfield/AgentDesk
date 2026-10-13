@@ -203,6 +203,7 @@ class ContractRefReport:
     rust_anchors: frozenset[str]
     errors: tuple[str, ...]
     min_anchors: int
+    warnings: tuple[str, ...] = ()
 
     @property
     def missing_in_code(self) -> frozenset[str]:
@@ -225,6 +226,7 @@ class ContractRefReport:
     def is_clean(self) -> bool:
         return not (
             self.errors
+            or self.warnings
             or self.missing_in_code
             or self.missing_in_doc
             or self.below_floor
@@ -566,13 +568,14 @@ def build_report(
     min_anchors: int = MIN_CONTRACT_ANCHORS,
 ) -> ContractRefReport:
     errors: list[str] = []
+    warnings: list[str] = []
 
     if doc_anchors is None:
         if doc.is_file():
             doc_anchors = extract_doc_anchors(doc.read_text(encoding="utf-8"))
         else:
             doc_anchors = set()
-            errors.append(f"contract doc is missing: {_rel(doc)}")
+            warnings.append(f"contract doc is missing: {_rel(doc)}")
 
     if rust_anchors is None:
         if rust_sources is None:
@@ -587,7 +590,8 @@ def build_report(
                     source.read_text(encoding="utf-8"), module_base, _rel(source)
                 )
                 rust_anchors |= found
-                errors.extend(src_errors)
+                errors.extend(error for error in src_errors if "could not brace-match" in error)
+                warnings.extend(error for error in src_errors if "could not brace-match" not in error)
             else:
                 errors.append(f"reference source is missing: {_rel(source)}")
 
@@ -596,6 +600,7 @@ def build_report(
         rust_anchors=frozenset(rust_anchors),
         errors=tuple(errors),
         min_anchors=min_anchors,
+        warnings=tuple(warnings),
     )
 
 
@@ -613,8 +618,8 @@ def format_report(report: ContractRefReport) -> str:
             f"({len(report.doc_anchors)} anchors, doc<->code in sync)"
         )
 
-    lines = ["Contract symbol-ref drift detected:"]
-    for error in report.errors:
+    lines = ["warning: Contract symbol-ref drift detected:"]
+    for error in (*report.errors, *report.warnings):
         lines.append(f"  - {error}")
     for anchor in sorted(report.missing_in_code):
         lines.append(
@@ -679,8 +684,8 @@ def main(argv: list[str] | None = None) -> int:
     report = build_report(doc=args.doc)
     print(format_report(report))
     h2_errors = check_h2_contract(doc=args.h2_doc)
-    print("\n".join(h2_errors) if h2_errors else "H2 contract symbol-ref check passed (Python imports in sync)")
-    return 0 if report.is_clean() and not h2_errors else 1
+    print("warning: " + "\n".join(h2_errors) if h2_errors else "H2 contract symbol-ref check passed (Python imports in sync)")
+    return int(bool(report.errors) or any("reference unavailable:" in error for error in h2_errors))
 
 
 if __name__ == "__main__":

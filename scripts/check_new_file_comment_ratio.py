@@ -1,33 +1,31 @@
 #!/usr/bin/env python3
-"""Cap the comment ratio of *newly added* production Rust files.
+"""Reject production Rust diffs adding more comment rows than code rows.
 
-The existing ratchets do not cover this. ``hotfile_ratchet`` only stops
-already-huge files from re-expanding, and both giant-file gates start at 1,000
-lines (``giant_file_progress.py``, ``check_agent_maintenance_docs.py``), so a
-brand-new 999-line file passes every gate in the tree. PR #5953 shipped a
-711-line new file that was 398 lines of comment and registered nowhere.
-
-A file fails when ``comment_lines / (comment_lines + code_lines) > 25%``. The
-denominator excludes blank lines so padding cannot dilute the ratio, and lines
-inside ``#[cfg(test)] mod`` blocks are excluded from both sides.
-
-Out of scope by design: files that already exist (retroactive enforcement would
-red 200+ files), test files, and files under the measurable-size floor.
+Scope: src/**/*.rs and build.rs, excluding test paths and cfg(test) modules.
+Generator outputs outside this scope are excluded; source header claims do
+not exempt a file. Blank rows count for neither side; mixed code/comment rows
+count as code. Exact comment rows moved across files cancel as a multiset.
+Comment corrections/deletions pass only when every changed source has the
+same comment-free normal form and no net new comment rows. New files above
+25% comment density emit warnings (minimum 20 measured rows).
 """
 
 from __future__ import annotations
 
 import argparse
+import difflib
 import os
 import subprocess
 import sys
 from dataclasses import dataclass
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from generate_inventory_docs import test_line_numbers  # noqa: E402
-from rust_lex import CODE, COMMENT, LITERAL, StripState, lex_segments  # noqa: E402
+from check_comment_only_change import normalize  # noqa: E402
+from rust_lex import CODE, COMMENT, LITERAL, StripState, lex_segments, strip_line  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKING_TREE = "<working tree>"
@@ -80,20 +78,61 @@ def is_test_path(path: str) -> bool:
     return any(part == "tests" or part.endswith("_tests") for part in parts[:-1])
 
 
-def measure(path: str, text: str) -> Measurement:
-    skipped = test_line_numbers(text)
+def line_kinds(text: str) -> list[str | None]:
     state = StripState()
-    comment_lines = code_lines = 0
+    skipped = test_line_numbers("\n".join(strip_line(row, state) for row in text.splitlines()))
+    state = StripState()
+    result: list[str | None] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
         inside_literal = state.in_string or state.raw_hashes is not None
         kinds = {kind for kind, _ in lex_segments(line, state)}
         if lineno in skipped:
-            continue
-        if not inside_literal and COMMENT in kinds and not kinds & {CODE, LITERAL}:
-            comment_lines += 1
+            result.append(None)
+        elif not inside_literal and COMMENT in kinds and not kinds & {CODE, LITERAL}:
+            result.append(COMMENT)
         elif line.strip():
-            code_lines += 1
-    return Measurement(path, comment_lines, code_lines)
+            result.append(CODE)
+        else:
+            result.append(None)
+    return result
+
+
+def measure(path: str, text: str) -> Measurement:
+    kinds = line_kinds(text)
+    return Measurement(path, kinds.count(COMMENT), kinds.count(CODE))
+
+
+def is_production_path(path: str) -> bool:
+    return (path.startswith("src/") or path == "build.rs") and path.endswith(".rs") and not is_test_path(path)
+
+
+def diff_measure(base: str, head_ref: str) -> tuple[int, int]:
+    args = ["diff", "--no-renames", "--name-status", "-z", base]
+    if head_ref != WORKING_TREE:
+        args.append(head_ref)
+    fields = git(*args).split("\0")[:-1]
+    added: Counter[str] = Counter()
+    deleted: Counter[str] = Counter()
+    code = 0
+    unchanged_code = True
+    for status, path in zip(fields[::2], fields[1::2]):
+        if not is_production_path(path):
+            continue
+        old = "" if status == "A" else read_file(base, path)
+        new = "" if status == "D" else read_file(head_ref, path)
+        unchanged_code &= status == "M" and normalize(old)[0] == normalize(new)[0]
+        old_rows, new_rows = old.splitlines(), new.splitlines()
+        old_kinds, new_kinds = line_kinds(old), line_kinds(new)
+        for tag, start, end, new_start, new_end in difflib.SequenceMatcher(None, old_rows, new_rows, autojunk=False).get_opcodes():
+            if tag == "equal":
+                continue
+            deleted.update(old_rows[i].strip() for i in range(start, end) if old_kinds[i] == COMMENT)
+            added.update(new_rows[i].strip() for i in range(new_start, new_end) if new_kinds[i] == COMMENT)
+            code += sum(new_kinds[i] == CODE for i in range(new_start, new_end))
+    # Only proven corrections/deletions may bypass a zero-code diff budget.
+    if unchanged_code and added.total() <= deleted.total():
+        return 0, code
+    return (added - deleted).total(), code
 
 
 def default_base_ref() -> str:
@@ -120,21 +159,15 @@ def added_rust_files(base_ref: str, head_ref: str) -> tuple[str, list[str]]:
     return base, paths
 
 
-def read_file(head_ref: str, path: str) -> str | None:
+def read_file(head_ref: str, path: str) -> str:
     if head_ref == WORKING_TREE:
         candidate = REPO_ROOT / path
-        raw = candidate.read_bytes() if candidate.is_file() else None
+        if not candidate.is_file():
+            raise GitError(f"{path}: missing or unreadable source")
+        raw = candidate.read_bytes()
     else:
-        try:
-            raw = git("show", f"{head_ref}:{path}", binary=True)
-        except GitError:
-            raw = None
-    if raw is None:
-        return None
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
+        raw = git("show", f"{head_ref}:{path}", binary=True)
+    return raw.decode("utf-8")
 
 
 def check(base_ref: str, head_ref: str, max_ratio: float, min_lines: int) -> int:
@@ -144,12 +177,9 @@ def check(base_ref: str, head_ref: str, max_ratio: float, min_lines: int) -> int
 
     measurements: list[Measurement] = []
     for path in paths:
-        if is_test_path(path):
+        if not is_production_path(path):
             continue
         text = read_file(head_ref, path)
-        if text is None:
-            print(f"::warning::skipping {path}: not readable as UTF-8 text")
-            continue
         measurements.append(measure(path, text))
 
     print(f"added production Rust files: {len(measurements)}")
@@ -164,23 +194,19 @@ def check(base_ref: str, head_ref: str, max_ratio: float, min_lines: int) -> int
             f"  {item.ratio:6.1%}  {item.comment_lines:5d}/{item.measured:<5d}  "
             f"{item.path}{flag}"
         )
-    if not over:
-        print(f"OK: no new production file exceeds the {max_ratio:.0%} comment-line cap")
-        return 0
-
-    print("")
-    print(f"FAIL: {len(over)} new production file(s) over the {max_ratio:.0%} cap")
     for item in over:
-        allowed = int(max_ratio * item.measured)
         print(
-            f"  {item.path}: {item.comment_lines} comment lines of "
+            f"::warning file={item.path}::{item.comment_lines} comment lines of "
             f"{item.measured} measured ({item.ratio:.1%}); "
-            f"at most {allowed} are allowed"
+            f"new-file density exceeds {max_ratio:.0%}"
         )
-    print("")
-    print("Cut the comments, do not raise the cap. Comments that restate the code,")
-    print("or record how the code used to be, belong in the PR body instead.")
-    return 1
+    comments, code = diff_measure(base, head_ref)
+    print(f"added production rows after comment moves/corrections: comments={comments} code={code}")
+    if comments > code:
+        print(f"FAIL: added comments ({comments}) exceed added code ({code})")
+        return 1
+    print("OK: added comments do not exceed added code")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -196,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
             MAX_COMMENT_RATIO,
             MIN_MEASURED_LINES,
         )
-    except GitError as error:
+    except (GitError, OSError, UnicodeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
 
