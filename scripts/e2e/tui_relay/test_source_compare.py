@@ -9,10 +9,9 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from . import source_compare as sc
-from .assertions import OUR_BOT_ID
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tui_relay import source_compare as sc
+from tui_relay.assertions import OUR_BOT_ID
 import run_tui_relay as driver  # noqa: E402
 
 
