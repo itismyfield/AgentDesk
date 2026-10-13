@@ -24,6 +24,7 @@ use super::o_piece_attempts::{self, GrantOutcome, GrantRequest, Intent};
 use super::o_piece_delivery::{
     self, AdmitOutcome, Failure, LedgerError, PieceKey, ReceiptOutcome, kind_name, provider_name,
 };
+use super::projection::ReceiptOverlay;
 use super::provenance::{ProvenanceEntry, ProvenanceLog};
 use super::send::BoundedTransport;
 use crate::services::tui_o::ownership::GatewayOwnership;
@@ -366,6 +367,9 @@ pub(crate) trait RepostHook<W>: Send {
     /// Whether a fresh original at `serial` may go: off, always, reading nothing; on, never for an
     /// admitted key, not while admission is unknown, and only once its intent is written.
     fn original(&mut self, serial: u64, record: PieceRecord) -> Turned<'_, OriginalGate>;
+    /// The channel's shared receipts, read once before its writer starts; off, `Disabled` before
+    /// PostgreSQL. Every wrapper forwards it, so a wrapped turn never reads as off.
+    fn receipts(&mut self) -> Turned<'_, ReceiptOverlay>;
 }
 
 /// Builds a channel's re-post transport; asked only once re-post is on.
@@ -557,6 +561,15 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
         true
     }
 
+    async fn receipt_overlay(&mut self) -> ReceiptOverlay {
+        if !self.runner.allowed(self.channel) {
+            return ReceiptOverlay::Disabled;
+        }
+        let live = self.runner.switch.live_for(self.channel);
+        let (pool, sender) = (&self.runner.pool, self.runner.sender_id);
+        ReceiptOverlay::load(pool, self.channel, sender, live).await
+    }
+
     async fn original_gate(&mut self, serial: u64, record: PieceRecord) -> OriginalGate {
         let channel = self.channel;
         if !self.runner.allowed(channel) {
@@ -621,6 +634,10 @@ where
 
     fn original(&mut self, serial: u64, record: PieceRecord) -> Turned<'_, OriginalGate> {
         Box::pin(self.original_gate(serial, record))
+    }
+
+    fn receipts(&mut self) -> Turned<'_, ReceiptOverlay> {
+        Box::pin(self.receipt_overlay())
     }
 }
 

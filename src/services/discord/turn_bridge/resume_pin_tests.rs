@@ -2,6 +2,32 @@ use super::finalize_epilogue::resume_pinned_watcher;
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 
+pub(in crate::services::discord) fn resume_incident_watcher(
+    shared: &Arc<SharedData>,
+    row: &crate::services::discord::inflight::InflightTurnState,
+    pin: &WatcherClaimIncarnation,
+) -> bool {
+    // Seed the bridge handoff's ledger edges before unpausing the watcher.
+    // The held intake fixture ends before bridge guards are constructed.
+    let key = crate::services::discord::turn_finalizer::TurnKey::new(
+        ChannelId::new(row.channel_id),
+        row.effective_finalizer_turn_id(),
+        shared.restart.current_generation,
+    )
+    .with_episode_nonce(row.turn_nonce.as_deref());
+    shared.turn_finalizer.register_start_with_completion_admission(
+        key,
+        ProviderKind::Claude,
+        crate::services::discord::inflight::RelayOwnerKind::Watcher,
+        crate::services::discord::turn_finalizer::CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
+        shared,
+    );
+    shared
+        .turn_finalizer
+        .note_terminal_disposition_settled(key, true, shared.clone());
+    resume_pinned_watcher(&shared.tmux_watchers, Some(pin), 0)
+}
+
 fn handle() -> TmuxWatcherHandle {
     TmuxWatcherHandle {
         tmux_session_name: "C1-source".into(),
@@ -407,8 +433,8 @@ api_friction_reports: Vec::new(),
 cancelled: false,
 restart_followup_pending: None,
 bridge_skip_holder_owns_inflight: false,
-completion_guard: completion_guard,
-inflight_guard: inflight_guard,
+completion_guard,
+inflight_guard,
 inflight_state: durable.clone(), };
         if let Some(response) = response {
             ctx.turn_id = turn_id;
@@ -452,12 +478,13 @@ inflight_state: durable.clone(), };
 }
 
 // Per-channel rendezvous: only the real bridge capture site calls this hook.
+type BridgeCaptureRendezvous = (
+    ChannelId,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
 pub(in crate::services::discord) static BRIDGE_CAPTURE_PROBE: std::sync::Mutex<
-    Option<(
-        ChannelId,
-        tokio::sync::oneshot::Sender<()>,
-        tokio::sync::oneshot::Receiver<()>,
-    )>,
+    Option<BridgeCaptureRendezvous>,
 > = std::sync::Mutex::new(None);
 pub(super) async fn after_bridge_capture(channel: ChannelId) {
     let probe = {

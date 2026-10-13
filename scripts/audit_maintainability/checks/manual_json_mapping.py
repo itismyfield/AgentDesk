@@ -34,7 +34,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
             findings.append(
                 Finding(
                     rule="manual_json_row_mapping",
-                    severity="warn",
+                    severity="error",
                     file=rel,
                     line=line_of(text, match.start()),
                     message="manual row.try_get JSON mapping (use db::row helpers)",
