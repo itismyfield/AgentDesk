@@ -246,9 +246,12 @@ class RegistrySemantics(FixtureCase):
         sys.path.insert(0, str(REPO_ROOT / "scripts"))
         import generate_inventory_docs as inventory
 
-        stamp = json.loads((REPO_ROOT / reporter.METADATA_PATH).read_text(encoding="utf-8"))["refreshed_at"]
+        # A copy keeps a faulty entry point from writing into the repository under test.
+        live = {rel: (REPO_ROOT / rel).read_bytes() for rel in (reporter.REGISTRY_PATH, reporter.METADATA_PATH)}
+        root = write_root(self.tmp / "live", "", None, live)
+        stamp = json.loads(live[reporter.METADATA_PATH])["refreshed_at"]
         # Far future: every valid shrink registration is overdue and therefore listed.
-        self.assertEqual(run_main("--root", str(REPO_ROOT), "--out", str(self.tmp / "far"), "--now", "2200-01-01T00:00:00Z"), 0)
+        self.assertEqual(run_main("--root", str(root), "--out", str(self.tmp / "far"), "--now", "2200-01-01T00:00:00Z"), 0)
         report = read_report(self.tmp / "far")
         self.assertEqual(report["completeness"]["diagnostics"], [])
         _grandfathered, entries, _baseline = inventory.load_giant_file_registry()
@@ -257,7 +260,7 @@ class RegistrySemantics(FixtureCase):
         self.assertEqual({(r["path"], r["owner"], r["deadline"], r["issue"]) for r in report["deadlines"]["rows"]},
                          expected)
         self.assertEqual(report["deadlines"]["counts"]["keep"], sum(e.get("decision") == "keep" for e in entries))
-        self.assertEqual(run_main("--root", str(REPO_ROOT), "--out", str(self.tmp / "at"), "--now", stamp), 0)
+        self.assertEqual(run_main("--root", str(root), "--out", str(self.tmp / "at"), "--now", stamp), 0)
         at_stamp = read_report(self.tmp / "at")
         self.assertEqual((at_stamp["metadata"]["freshness"], at_stamp["completeness"]["status"]), ("FRESH", "complete"))
 
@@ -358,6 +361,7 @@ class ReadOnlyBoundary(FixtureCase):
 
     def test_c1_09_run_leaves_registry_metadata_and_ledgers_byte_identical(self) -> None:
         self.assertEqual(set(self.before), {reporter.REGISTRY_PATH, reporter.METADATA_PATH, *LEDGERS})
+        self.assertTrue(all(self.before.values()), "an empty ledger cannot show that it stayed unchanged")
         out = self.tmp / "out"
         self.assertEqual(run_main(*self.report_args(out)), 0)
         self.assertEqual(list(by_path(read_report(out))), ["src/a.rs"])
