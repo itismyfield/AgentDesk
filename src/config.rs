@@ -3016,7 +3016,7 @@ mod secret_bearing_config_file_tests {
              turn: {{channels: [41], all_owned: true}}\n\
              repost: {{enabled: true, channels: [41]}}\n\
              alert_channel_id: 42\n\
-             codex_history_adoption: true\n"
+             codex_history_adoption: false\n"
         );
         let expected: crate::services::tui_o::shadow::tap::TuiOConfig =
             serde_yaml::from_str(&settings).unwrap();
