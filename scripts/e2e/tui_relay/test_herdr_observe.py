@@ -1,6 +1,7 @@
 """Offline Herdr detail/status, local HTTP auth, and operator restart contracts."""
 
 import io
+import itertools
 import json
 import sys
 import tempfile
@@ -301,6 +302,25 @@ class HerdrDegradedWaiver(unittest.TestCase):
             with self.subTest(rows=rows):
                 self.cli.return_value.stdout = json.dumps(status(rows))
                 self.refused(degraded(), "target row")
+
+    def test_scenario_health_steps_withhold_waiver(self):
+        client = Mock()
+        client.send_control.return_value = {"id": "100"}
+        client.fetch_messages.return_value = []
+        detail = degraded()
+        detail["herdr"]["reconnect"].update(channels=1, published=1)
+        self.http.side_effect = lambda _base, path, **_: (200, detail if path.endswith("/detail") else {"status": "healthy"})
+        self.args.herdr_isolated_server = self.args.allow_destructive = True
+        clock = itertools.count(0, 100)
+        for step in ({"assert_health": {}}, {"restart_dcserver": {"target": "dev"}}):
+            scenario = dict(id="E-8", agent_mode="real_live", coverage_class="live", steps=[step], assertions=[])
+            with self.subTest(step=step), redirect_stdout(io.StringIO()), \
+                    patch.dict("os.environ", {"AGENTDESK_E2E_ALLOW_DESTRUCTIVE": "1"}), patch.object(herdr.time, "sleep"), \
+                    patch.object(herdr.time, "monotonic", side_effect=lambda: next(clock)):
+                result = driver.run_scenario(scenario, args=self.args, client=client, run_id="test")
+            self.assertEqual(result["status"], "fail", result)
+            self.assertIn("readiness failed", result["reason"])
+            self.assertEqual(result["herdr_observations"][-1]["readiness"]["degraded_reason_waiver"], "withheld")
 
     def test_arguments_refuse_wildcard_and_non_herdr_cells(self):
         for pattern in ("*", "", " * "):

@@ -141,7 +141,7 @@ def current_row(status, *, channel, provider, cold=False):
     return row
 
 
-def observe(driver, args, *, reconnected=False, cold=False):
+def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
     evidence = {"surface": "GET /api/health/detail", "status_surface": "agentdesk herdr status",
                 "observed_at": dt.datetime.now(dt.timezone.utc).isoformat()}
     try:
@@ -155,8 +155,10 @@ def observe(driver, args, *, reconnected=False, cold=False):
                                  ("status", "ok", "fully_recovered", "degraded", "degraded_reasons") if k in payload}
         evidence["server_values"] = {k: payload[k] for k in
                                      ("uptime_secs", "started_at", "process_started_at_unix", "incarnation", "boot_id") if k in payload}
-        allowed = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
-        evidence["readiness"].update(degraded_reason_waiver="unused" if allowed else "none",
+        # Scenario-declared health steps keep their strict meaning; the waiver is withheld there.
+        operator = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
+        allowed = operator if waivable else []
+        evidence["readiness"].update(degraded_reason_waiver=("unused" if waivable else "withheld") if operator else "none",
                                      allowed_degraded_reasons=allowed, ignored_degraded_reasons=[])
         ignored = detail_ready(driver, status, payload, allowed=allowed, channel=args.channel_id)
         if ignored:
@@ -487,7 +489,7 @@ def _run(driver, scenario, args, client, run_id, result):
                 deadline = time.monotonic() + 90
                 while True:
                     try:
-                        evidence = observe(driver, args, reconnected=True)
+                        evidence = observe(driver, args, reconnected=True, waivable=False)
                         if evidence["row"]["nonce"] != before[0]["nonce"]:
                             raise assertions.AssertionError("Herdr restart replaced execution nonce")
                         break
@@ -497,7 +499,7 @@ def _run(driver, scenario, args, client, run_id, result):
                         time.sleep(2)
                 result["herdr_observations"].append(evidence)
             elif "assert_health" in step:
-                result["herdr_observations"].append(observe(driver, args))
+                result["herdr_observations"].append(observe(driver, args, waivable=False))
             else:
                 raise ValueError(f"unsupported Herdr step: {step}")
         phase = "assertions"
