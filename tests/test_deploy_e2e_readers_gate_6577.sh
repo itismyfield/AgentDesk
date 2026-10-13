@@ -55,8 +55,14 @@ YAML
 echo "§1 the smoke cells resolve to their channels through the smoke's own resolver"
 
 ids=$(_deploy_e2e_smoke_channel_ids "$REPO_ROOT" "$CONFIG" claude-tui codex-tui)
-# claude-tui takes its tmux agent's channel, never the Herdr agent's 444.
-if [ "$ids" = "111|222" ]; then pass "both smoke cells resolve ($ids)"; else fail "expected '111|222', got '$ids'"; fi
+# claude-tui's tmux channel 111 plus 444, the Herdr worker channel it moved off.
+if [ "$ids" = "111|444|222" ]; then pass "both smoke cells resolve ($ids)"; else fail "expected '111|444|222', got '$ids'"; fi
+old_only="$TMP_ROOT/old-agent-only.yaml"
+printf 'agents:\n  - id: adk-claude-tui-e2e\n    channels:\n      claude: {id: "444"}\n  - id: adk-codex-tui-e2e\n    channels:\n      codex: {id: "222"}\n' > "$old_only"
+old_ids=$(_deploy_e2e_smoke_channel_ids "$REPO_ROOT" "$old_only" claude-tui codex-tui)
+if [ "$old_ids" = "444|222" ]; then pass "an old-agent-only config keeps 444 ($old_ids)"; else fail "expected '444|222', got '$old_ids'"; fi
+codex_ids=$(_deploy_e2e_smoke_channel_ids "$REPO_ROOT" "$CONFIG" codex-tui codex-tui)
+if [ "$codex_ids" = "222" ]; then pass "a Codex-only smoke adds no Claude channel"; else fail "expected '222', got '$codex_ids'"; fi
 
 echo "§2 a smoke E2E channel's reader-count alarm does not fail a deploy or a rollback"
 
@@ -64,6 +70,12 @@ DEPLOY_E2E_SMOKE_CHANNEL_IDS="$ids"
 INCIDENT="$(body '["tui_o:too_many_readers:111","tui_o:released:7"]')"
 expect_ready "the measured payload: E2E reader alarm plus a released channel" "$INCIDENT"
 expect_ready "the Codex smoke channel's reader alarm" "$(body '["tui_o:too_many_readers:222"]')"
+expect_ready "the Herdr worker channel's reader alarm" "$(body '["tui_o:too_many_readers:444"]')"
+DEPLOY_E2E_SMOKE_CHANNEL_IDS="$old_ids"
+expect_ready "the Herdr worker channel's reader alarm without the tmux agent" "$(body '["tui_o:too_many_readers:444"]')"
+DEPLOY_E2E_SMOKE_CHANNEL_IDS="$codex_ids"
+expect_blocked "a Codex-only smoke keeps the Herdr worker channel blocking" "$(body '["tui_o:too_many_readers:444"]')"
+DEPLOY_E2E_SMOKE_CHANNEL_IDS="$ids"
 
 echo "§3 any other channel, or a look-alike id, still blocks"
 
@@ -76,6 +88,7 @@ echo "§4 another alarm on a smoke E2E channel still blocks"
 
 for kind in binding_pending rotation_stalled halted blocked spool_full; do
     expect_blocked "tui_o:$kind:111 blocks" "$(body "[\"tui_o:$kind:111\"]")"
+    expect_blocked "tui_o:$kind:444 blocks" "$(body "[\"tui_o:$kind:444\"]")"
 done
 expect_blocked "an accepted reader alarm does not carry a halted one with it" \
     "$(body '["tui_o:too_many_readers:111","tui_o:halted:111"]')"
