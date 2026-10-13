@@ -12735,6 +12735,15 @@ services::tui_o::writer::tests::actor::host_start::readers_host::readers_s1b_hos
 services::tui_o::writer::tests::actor::host_start::readers_host::readers_s1b_host_installed_on_closes_fds_across_both_restarts
 services::tui_o::writer::tests::actor::host_start::readers_host::readers_s1b_host_on_real_unlink_retires_one_and_restart_keeps_it_retired
 services::tui_o::writer::tests::actor::host_start::readers_host::readers_s1b_host_on_restores_init_only_eof_pending_and_posts_latest
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_dormant_host_positive_controls_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_legacy_ledger_receipt_overlay_is_read_only_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipt_overlay_judges_the_recovered_writer_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipt_overlay_reads_nothing_off_or_unlisted
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipted_approval_is_never_owed_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_remote_receipt_overrides_local_serial_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_shared_receipt_settles_local_authorized_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_startup_blocked_reconciles_before_actor_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_stop_during_receipt_read_starts_no_actor
 services::tui_o::writer::tests::actor::host_start::reclaim::a_current_prompt_after_a_late_clear_reclaims_the_pane
 services::tui_o::writer::tests::actor::host_start::reclaim::a_first_pin_on_an_incomplete_history_does_not_reclaim_the_pane
 services::tui_o::writer::tests::actor::host_start::reclaim::a_launch_session_prompt_after_a_late_clear_reclaims_the_pane
