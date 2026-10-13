@@ -65,7 +65,7 @@ MUTANTS = [
     ("file-delete", "n1_turn_canary_oracle.py", '    print(json.dumps(result, sort_keys=True))',
      '    Path("/fixture-only-never-executed").unlink()\n    print(json.dumps(result, sort_keys=True))',
      "tests.test_n1_canary_collection.EffectBoundary.test_production_has_only_audited_io"),
-    ("cli-pass", "n1_turn_canary_oracle.py", "return 2\n", "return 0\n",
+    ("cli-pass", "n1_turn_canary_oracle.py", "code = finish(result)", "code = 0",
      "tests.test_n1_canary_oracle.Fixture.test_valid_inputs_still_cannot_pass"),
     ("remove-ci-wiring", "ci-script-checks.sh",
      '"$PYTHON" -m unittest tests.test_n1_canary_oracle tests.test_n1_canary_collection', "true",

@@ -2980,6 +2980,15 @@ services::codex_tui::rollout_tail::provenance::tests::t0d_two_named_openers_are_
 services::codex_tui::rollout_tail::provenance::tests::t5_eof_and_composer_ready_leave_span_open
 services::codex_tui::rollout_tail::tests::always_fresh_pane_signal_reaches_hard_veto_cap_and_emits_done
 services::codex_tui::rollout_tail::tests::assistant_response_deadline_emits_timeout_done
+services::codex_tui::rollout_tail::tests::codex_idle_deadline_native_terminal_preempts_confirmation
+services::codex_tui::rollout_tail::tests::codex_idle_deadline_reads_growth_during_confirmation
+services::codex_tui::rollout_tail::tests::codex_idle_deadline_resumes_after_alive_or_probe_error
+services::codex_tui::rollout_tail::tests::codex_idle_deadline_waits_for_each_death_confirmation
+services::codex_tui::rollout_tail::tests::codex_liveness_alive_or_unknown_before_threshold_resets_death
+services::codex_tui::rollout_tail::tests::codex_liveness_confirmed_death_requires_three_probes
+services::codex_tui::rollout_tail::tests::codex_liveness_explicit_final_completes_before_failed_probe
+services::codex_tui::rollout_tail::tests::codex_liveness_growth_during_final_probe_is_read_before_death
+services::codex_tui::rollout_tail::tests::codex_liveness_probe_timeout_and_spawn_failure_preserve_tail
 services::codex_tui::rollout_tail::tests::codex_stop_hook_emits_done_before_drain
 services::codex_tui::rollout_tail::tests::codex_terminal_frame_is_atomic_at_complete_boundary_5264
 services::codex_tui::rollout_tail::tests::codex_token_count_context_uses_last_usage_not_total_usage
@@ -8643,6 +8652,8 @@ services::discord::tui_direct_abort_marker::warning_tests::deferred_claim_probe_
 services::discord::tui_direct_pending_start::retirement_recheck_tests::retirement_after_cancel_mailbox_preserves_real_reclaim_and_pending_start
 services::discord::tui_direct_pending_start::retirement_recheck_tests::retirement_after_complete_mailbox_preserves_real_reclaim_and_pending_start
 services::discord::tui_direct_pending_start::retirement_recheck_tests::retirement_after_runtime_lookup_preserves_writing_loader
+services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1_boot_confirmation_stamps_the_insertion_not_the_event
+services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1_confirmation_result_ignores_observation_faults
 services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1a_retirement_covers_monitor_rebind_and_watcher_synthetics
 services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1a_retirement_delete_contention_returns_residue_for_retry
 services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1a_retirement_post_snapshot_io_error_is_retryable
@@ -12493,6 +12504,9 @@ services::tui_o::writer::input_facts::tests::claude_parent_tools_and_background_
 services::tui_o::writer::input_facts::tests::codex_parent_stays_open_during_child_completion_and_foreign_closer
 services::tui_o::writer::input_facts::tests::delayed_supply_replays_order_and_never_exposes_backlog_idle
 services::tui_o::writer::input_facts::tests::g0_discovery_install_and_o_binding_supply_only_the_new_parent
+services::tui_o::writer::input_facts::tests::n1_anonymous_turn_close_is_unknown_not_completed
+services::tui_o::writer::input_facts::tests::n1_halted_reader_reports_its_open_turn_unknown
+services::tui_o::writer::input_facts::tests::n1_observation_faults_leave_reader_results_unchanged
 services::tui_o::writer::input_facts::tests::ordered_events_keep_abort_start_and_input_in_record_order
 services::tui_o::writer::input_facts::tests::reactions_converge_on_replay_and_propagate_partial_failure
 services::tui_o::writer::input_facts::tests::strict_codex_parent_header_rejects_absence_mismatch_child_and_poll_changes

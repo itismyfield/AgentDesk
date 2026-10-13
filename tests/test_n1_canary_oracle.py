@@ -19,7 +19,8 @@ COUNTERS = {key: 0 for key in ("closed_events", "aborted_events", "unknown_outco
             "create_attempt", "create_committed", "attempt", "succeeded_post",
             "succeeded_patch", "failed_or_uncertain")}
 EXPECTED_REASONS = {"unknown_outcome_unproduced", "confirmation_boundary_unknown", "stages_pending:o3",
-                    "native_origin_unverified", "native_sample_under_50"}
+                    "native_origin_unverified", "native_sample_under_50", "audit_capture_incomplete:legacy",
+                    "audit_capture_incomplete:inflight", "o_init_unverified"}
 
 
 def digest(data):

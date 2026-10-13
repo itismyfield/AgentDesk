@@ -68,7 +68,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex.rs` |  |
 | `AGENTDESK_CODEX_SHADOW_TEST_MUTATION` | `src/services/codex_tui/session/source_observation.rs`, `src/services/tui_prompt_dedupe/runtime_binding/codex_hook.rs` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs` |  |
-| `AGENTDESK_CONFIG` | `src/config.rs`, `src/services/discord/settings.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/git/repo_resolver.rs`, `src/services/mcp_config.rs` | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
+| `AGENTDESK_CONFIG` | `src/config.rs`, `src/services/discord/router/intake_dispatch/queued.rs`, `src/services/discord/settings.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/git/repo_resolver.rs`, `src/services/mcp_config.rs` | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs` |  |
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs` |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs` |  |
