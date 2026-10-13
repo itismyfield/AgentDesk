@@ -338,6 +338,7 @@ jobs:
               - 'src/services/discord/commands/control/native_policy_tests.rs'
               - 'src/services/discord/commands/control/native_tests.rs'
               - 'src/services/discord/commands/restart.rs'
+              - 'src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs'
               - 'src/services/discord/commands/tui_passthrough.rs'
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'

@@ -1,4 +1,36 @@
+use std::num::NonZeroU64;
+
+use super::legacy_replay_coordinate::is_coordinate_hold_reason;
 use super::{Deserialize, InflightTurnState, Serialize};
+
+/// Transfer a numeric end only when both UTF-8 prefixes are identical.
+pub(in crate::services::discord) fn transfer_end(
+    source_body: &str,
+    end: usize,
+    target_body: &str,
+) -> Option<usize> {
+    let source = source_body.get(..end)?;
+    let target = target_body.get(..end)?;
+    (source == target).then_some(end)
+}
+
+/// Treat a zero persisted message id as an unanchored turn and skip its message operation.
+pub(in crate::services::discord) fn opt_message_id(
+    raw: u64,
+) -> Option<poise::serenity_prelude::MessageId> {
+    NonZeroU64::new(raw).map(|raw| poise::serenity_prelude::MessageId::new(raw.get()))
+}
+
+/// Skip a zero persisted channel id so recovery never constructs an invalid Discord id.
+pub(in crate::services::discord) fn opt_channel_id(
+    raw: u64,
+) -> Option<poise::serenity_prelude::ChannelId> {
+    let Some(raw) = NonZeroU64::new(raw) else {
+        tracing::warn!("skipping Discord channel operation because persisted id is zero");
+        return None;
+    };
+    Some(poise::serenity_prelude::ChannelId::new(raw.get()))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct InflightTurnIdentity {
@@ -71,8 +103,9 @@ impl InflightTurnIdentity {
 }
 
 impl InflightTurnState {
+    /// A held reason or an unfinished coordinate replay install forbids an automatic rerun.
     pub(in crate::services::discord) fn replay_rerun_blocked(&self) -> bool {
-        !self.replay_hold_reasons.is_empty()
+        !self.replay_hold_reasons.is_empty() || self.legacy_replay_coordinate.is_some()
     }
 
     /// Keep a held recovery request's body, session and delivery with its existing owner.
@@ -97,7 +130,8 @@ impl InflightTurnState {
     }
 
     /// Keep a projected episode's receipt and hold reasons; refuse a different projected episode
-    /// or a conflicting receipt before the guarded writer can persist anything.
+    /// or a conflicting receipt before the guarded writer can persist anything. `self` is the
+    /// durable row: its coordinate holds stand, and `other`'s coordinate holds are not unioned.
     pub(in crate::services::discord) fn merge_replay_projection(&mut self, other: &Self) -> bool {
         let has_projection = self.replay_receipt_id.or(other.replay_receipt_id).is_some()
             || self.replay_rerun_blocked()
@@ -114,7 +148,7 @@ impl InflightTurnState {
             self.replay_receipt_id = other.replay_receipt_id;
         }
         for reason in &other.replay_hold_reasons {
-            if !self.replay_hold_reasons.contains(reason) {
+            if !is_coordinate_hold_reason(reason) && !self.replay_hold_reasons.contains(reason) {
                 self.replay_hold_reasons.push(reason.clone());
             }
         }
