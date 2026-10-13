@@ -10260,6 +10260,7 @@ services::discord::turn_presence::admission::tests::b2b2_a_gateway_first_poll_ho
 services::discord::turn_presence::admission::tests::b2b2_an_unhomed_admission_before_any_home_holds_off_the_first_mount
 services::discord::turn_presence::admission::tests::b2b2_contended_gateway_rejects_without_waiting_and_a_fresh_reading_retries
 services::discord::turn_presence::admission::tests::b2b2_home_mount_replace_and_unmount_withdraw_the_displaced_owner
+services::discord::turn_presence::admission::tests::b2b3_a_late_home_notice_never_withdraws_the_approval_on_the_current_mount
 services::discord::turn_presence::admission::tests::fresh_busy_admits_one_first_poll_and_response_waits_outside_locks
 services::discord::turn_presence::admission::tests::gateway_epoch_unknown_and_loss_refuse_previously_approved_requests
 services::discord::turn_presence::admission::tests::home_epoch_loss_expiry_and_replacement_never_fall_back_to_gateway
@@ -10280,6 +10281,12 @@ services::discord::turn_presence::lifecycle::tests::b2_retire_then_prune_removes
 services::discord::turn_presence::lifecycle::tests::b2_suspend_refuses_admission_and_resume_is_fresh_unknown
 services::discord::turn_presence::lifecycle::tests::b2_ticket_capture_and_invalidation_serialize_in_both_orders
 services::discord::turn_presence::lifecycle::tests::b2b1_fence_withdraws_only_existing_registrations_and_never_revives_retired_ones
+services::discord::turn_presence::supervisor::strict_tests::b2b3_a_boot_owns_its_runtime_before_the_first_poll_and_a_restart_closes_the_first
+services::discord::turn_presence::supervisor::strict_tests::b2b3_a_home_change_clears_the_real_presence_and_only_a_fresh_reading_types_again
+services::discord::turn_presence::supervisor::strict_tests::b2b3_a_refused_approval_polls_no_request_and_is_no_send_error
+services::discord::turn_presence::supervisor::strict_tests::b2b3_a_send_returning_after_its_withdrawal_restores_no_schedule
+services::discord::turn_presence::supervisor::strict_tests::b2b3_production_spawn_installs_nothing_and_keeps_direct_typing_the_hold_and_the_wake
+services::discord::turn_presence::supervisor::strict_tests::b2b3_retire_and_runtime_end_take_down_only_their_own_display
 services::discord::turn_presence::supervisor::tests::a_mailbox_token_keeps_presence_from_typing
 services::discord::turn_presence::supervisor::tests::a_marker_left_on_disk_alone_is_woken_at_once_and_every_half_minute
 services::discord::turn_presence::supervisor::tests::a_new_supervisor_over_an_idle_channel_stays_silent
