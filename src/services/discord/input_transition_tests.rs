@@ -637,4 +637,26 @@ mod supported {
         assert_eq!(rows.owner(5), Owner::Legacy);
         assert_eq!(host.effects.actor_started, 1);
     }
+
+    #[test]
+    fn queue_snapshot_holding_exit_debt_stays_legacy_and_keeps_its_bytes() {
+        let root = sandbox();
+        let path = root
+            .path()
+            .join("discord_pending_queue/claude/token/9.json");
+        let debt = json!({"event_id": "exit-5", "episode": "episode-5", "kind": "cancelled",
+            "intervention": item(5), "state": "unacked"});
+        save(
+            &path,
+            &json!({"version": 1, "items": [item(8)], "queue_exit_debts": [debt]}),
+        );
+        let original = fs::read(&path).unwrap();
+        let mut host = files(root.path());
+        let mut lease = LedgerLease::new(root.path(), 9);
+        let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+        assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Legacy);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(host.effects.legacy.is_empty());
+        assert_eq!(host.effects.actor_started, 0);
+    }
 }
