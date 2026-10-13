@@ -190,7 +190,11 @@ fn policy_intent(
             &shared.provider,
             channel,
         ),
+        trace: Default::default(),
     };
+    // Tests bind the request's own probe and settlement switch to it here.
+    #[cfg(test)]
+    let request = crate::services::turn_orchestrator::policy_close::test_hooks::bind(request);
     Some(PolicyCloseIntent {
         key,
         provider: shared.provider.clone(),

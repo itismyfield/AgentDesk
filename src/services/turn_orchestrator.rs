@@ -2579,7 +2579,9 @@ fn input_mailbox_step(
             }
         }
         ChannelMailboxMsg::PolicyClose { request, reply } => {
-            let _ = reply.send(policy_close::step(&mut state, channel_id, *request));
+            let authority = _step.policy_authority();
+            let outcome = policy_close::step(&mut state, channel_id, *request, authority);
+            let _ = reply.send(outcome);
         }
         ChannelMailboxMsg::HardStop { reply } => {
             let persistence = state.last_persistence.clone();

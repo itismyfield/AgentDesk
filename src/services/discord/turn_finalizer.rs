@@ -29,7 +29,7 @@ use tokio::time::Instant;
 
 use crate::services::discord::inflight::RelayOwnerKind;
 use crate::services::provider::{CancelToken, ProviderKind};
-use crate::services::turn_orchestrator::policy_close::{PolicyRetain, PolicyStage};
+use crate::services::turn_orchestrator::policy_close::{Point, PolicyRetain, PolicyStage};
 
 use super::SharedData;
 // #3041 P1-0: dormant lease types for the *Delivery messages below (mod.rs §2-§3).
@@ -369,17 +369,6 @@ impl TurnFinalizer {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(actor_loop(rx));
         }
-        Arc::new(Self {
-            tx,
-            guarded_finish_residues: Default::default(),
-        })
-    }
-
-    /// A finalizer that accepts each message and drops it unprocessed, its ACK with it.
-    #[cfg(test)]
-    pub(in crate::services::discord) fn spawn_dropping_for_test() -> Arc<Self> {
-        let (tx, mut rx) = mpsc::unbounded_channel::<FinalizeMsg>();
-        tokio::spawn(async move { while rx.recv().await.is_some() {} });
         Arc::new(Self {
             tx,
             guarded_finish_residues: Default::default(),
@@ -785,6 +774,13 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         shared,
                         ack,
                     } => {
+                        let trace = intent.request.trace.clone();
+                        trace.note(Point::Dequeued, 1);
+                        // Test seam: the dequeued close is lost before processing, its ACK with it.
+                        #[cfg(test)]
+                        if trace.lost(crate::services::turn_orchestrator::policy_close::test_hooks::Loss::Dequeued) {
+                            continue;
+                        }
                         cached_shared = Some(Arc::downgrade(&shared));
                         let mut owned_ledger = std::mem::take(&mut ledger);
                         let work = async move {
@@ -792,9 +788,16 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                                 handle_policy_close(&mut owned_ledger, *intent, &shared).await;
                             (owned_ledger, outcome)
                         };
+                        #[cfg(test)]
+                        let work = trace.settled(work);
                         let (next_ledger, outcome) =
                             super::input_runtime::fence::effect::run(input_permit, work).await;
                         ledger = next_ledger;
+                        // Test seam: the committed close's ACK alone is lost.
+                        #[cfg(test)]
+                        if trace.lost(crate::services::turn_orchestrator::policy_close::test_hooks::Loss::Ack) {
+                            continue;
+                        }
                         let _ = ack.send(outcome);
                     }
                     // #3041 §2-§3 P1-0 (DORMANT, UNREACHABLE today). Routing these

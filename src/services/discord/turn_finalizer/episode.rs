@@ -758,6 +758,9 @@ impl TurnFinalizer {
         intent: PolicyCloseIntent,
         shared: Arc<SharedData>,
     ) -> PolicyCloseOutcome {
+        use crate::services::turn_orchestrator::policy_close::Point;
+        let trace = intent.request.trace.clone();
+        trace.note(Point::SubmitAttempt, 1);
         let (ack, rx) = oneshot::channel();
         let msg = FinalizeMsg::PolicyClose {
             intent: Box::new(intent),
@@ -765,11 +768,14 @@ impl TurnFinalizer {
             shared,
             ack,
         };
-        if self.tx.send(msg).is_err() {
+        let sent = self.tx.send(msg).is_ok();
+        trace.note(Point::SendAccepted, u64::from(sent));
+        if !sent {
             return PolicyCloseOutcome::Unconfirmed(PolicyStage::FinalizerSend);
         }
-        rx.await
-            .unwrap_or(PolicyCloseOutcome::Unconfirmed(PolicyStage::FinalizerAck))
+        let acked = rx.await;
+        trace.note(Point::AckObserved, u64::from(acked.is_ok()));
+        acked.unwrap_or(PolicyCloseOutcome::Unconfirmed(PolicyStage::FinalizerAck))
     }
 }
 

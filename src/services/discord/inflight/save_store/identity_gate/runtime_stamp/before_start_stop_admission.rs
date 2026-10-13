@@ -94,21 +94,29 @@ fn notice_delivered(sent: &Result<ReplaceLongMessageOutcome, String>) -> bool {
     )
 }
 
-/// Runs a lock-held transition on the blocking pool, so no inflight lock spans an await. Tests
-/// carry this thread's settlement switch over, since it is thread-local.
+/// Runs a lock-held transition on an input-effect worker with this task's permit, so no inflight
+/// lock spans an await. A worker panic or cancelled join is `None`, as is any refusal.
 async fn off_scheduler<T: Send + 'static>(
     transition: impl FnOnce() -> Option<T> + Send + 'static,
 ) -> Option<T> {
+    use futures::FutureExt;
+    // Tests carry this thread's settlement switch to the worker and restore the worker's own.
     #[cfg(all(test, unix))]
     let settlement =
         crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE
             .with(std::cell::Cell::get);
-    tokio::task::spawn_blocking(move || {
+    let work = move || {
         #[cfg(all(test, unix))]
-        crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE
-            .set(settlement);
+        let _settlement =
+            crate::services::turn_orchestrator::policy_close::test_hooks::Settlement::set(
+                settlement,
+            );
         transition()
-    })
+    };
+    std::panic::AssertUnwindSafe(crate::services::discord::input_runtime::fence::effect::io(
+        work,
+    ))
+    .catch_unwind()
     .await
     .ok()
     .flatten()

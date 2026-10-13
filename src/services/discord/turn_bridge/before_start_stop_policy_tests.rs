@@ -2,26 +2,31 @@
 //! Any other outcome keeps the turn held with its receipt row, its +1 and the queued input.
 use super::*;
 use crate::services::discord::turn_finalizer::{PolicyCloseIntent, PolicyCloseOutcome};
+use crate::services::turn_orchestrator::policy_close::test_hooks::{self as step, Loss, Probe};
 use crate::services::turn_orchestrator::policy_close::{
-    PolicyClear, PolicyRetain, PolicyStage, test_hooks as step,
+    Point, PolicyClear, PolicyRetain, PolicyStage,
 };
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::Mutex;
 
-type Seen = Rc<RefCell<Vec<&'static str>>>;
+pub(super) type Seen = Arc<Mutex<Vec<&'static str>>>;
 
-/// Records each stage the mailbox step reaches on this thread; panics once at `panic_at`.
-fn stages(panic_at: Option<&'static str>) -> Seen {
+/// Arms the next request built on this thread to record each stage its step reaches.
+pub(super) fn armed() -> Seen {
     let seen = Seen::default();
-    let (slot, fired) = (seen.clone(), Cell::new(false));
-    step::observe(Some(Box::new(move |stage| {
-        slot.borrow_mut().push(stage);
-        if Some(stage) == panic_at && !fired.replace(true) {
+    let slot = seen.clone();
+    step::arm(Box::new(move |stage| slot.lock().unwrap().push(stage)));
+    seen
+}
+
+/// Makes the request's own step panic once at `at`.
+pub(super) fn panic_once_at(probe: &Probe, at: &'static str) {
+    let fired = std::sync::atomic::AtomicBool::new(false);
+    probe.on_stage(Box::new(move |stage| {
+        if stage == at && !fired.swap(true, Ordering::Relaxed) {
             panic!("injected policy close panic at {stage}");
         }
-    })));
-    seen
+    }));
 }
 
 /// A queued successor input: its id, payload and source ids must survive every close.
@@ -48,27 +53,37 @@ fn successor_input(id: u64) -> Intervention {
 type Queued = Vec<(MessageId, String, Vec<MessageId>)>;
 
 impl Close {
-    fn channel(&self) -> ChannelId {
+    pub(super) fn channel(&self) -> ChannelId {
         ChannelId::new(self.row.channel_id)
     }
 
-    fn active(&self) -> usize {
+    fn other_channel(&self) -> ChannelId {
+        ChannelId::new(self.row.channel_id + 1_000_000_000)
+    }
+
+    /// Whether the other channel's live turn still holds its slot.
+    pub(super) async fn other_holds(&self) -> bool {
+        let mailbox = self.shared.mailbox_peek(self.other_channel()).unwrap();
+        mailbox.snapshot().await.cancel_token.is_some()
+    }
+
+    pub(super) fn active(&self) -> usize {
         self.shared.restart.global_active.load(Ordering::Relaxed)
     }
 
-    async fn slot(&self) -> Option<Arc<CancelToken>> {
+    pub(super) async fn slot(&self) -> Option<Arc<CancelToken>> {
         let mailbox = self.shared.mailbox_peek(self.channel()).unwrap();
         mailbox.snapshot().await.cancel_token
     }
 
     /// Whether the slot is still this close's own actor.
-    async fn actor_holds(&self) -> bool {
+    pub(super) async fn actor_holds(&self) -> bool {
         self.slot()
             .await
             .is_some_and(|slot| Arc::ptr_eq(&slot, &self.actor))
     }
 
-    async fn queued(&self) -> Queued {
+    pub(super) async fn queued(&self) -> Queued {
         let mailbox = self.shared.mailbox_peek(self.channel()).unwrap();
         let queue = mailbox.snapshot().await.intervention_queue;
         queue
@@ -77,8 +92,20 @@ impl Close {
             .collect()
     }
 
-    /// Another live turn's +1 and one queued successor input, both of which a close must keep.
-    async fn other_turn_and_queue(&self) -> Queued {
+    /// Another channel's live turn, on a real actor of the same `SharedData`, with its +1, and one
+    /// queued successor input here; a close must keep all of them.
+    pub(super) async fn other_turn_and_queue(&self) -> Queued {
+        assert!(
+            discord::mailbox_try_start_turn_kinded(
+                &self.shared,
+                self.other_channel(),
+                Arc::new(CancelToken::new()),
+                UserId::new(4),
+                MessageId::new(self.row.user_msg_id + 60),
+                crate::services::turn_orchestrator::ActiveTurnKind::UserOrAgent
+            )
+            .await
+        );
         discord::increment_global_active(&self.shared, "other_turn");
         let provider = self.shared.provider.clone();
         let input = successor_input(self.row.user_msg_id + 50);
@@ -89,7 +116,7 @@ impl Close {
     }
 
     /// Writes the receipt and acks a shown notice, as `consume` does before it submits.
-    async fn acked(&self) -> InflightTurnState {
+    pub(super) async fn acked(&self) -> InflightTurnState {
         let generation = self.shared.restart.current_generation;
         let admitted = self
             .row
@@ -103,7 +130,7 @@ impl Close {
     }
 
     /// The intent `consume` submits for `acked`, on the actor it captured.
-    fn intent(&self, acked: InflightTurnState) -> PolicyCloseIntent {
+    pub(super) fn intent(&self, acked: InflightTurnState) -> PolicyCloseIntent {
         let mailbox = self.shared.mailbox_peek(self.channel()).unwrap();
         policy_intent(
             &self.shared,
@@ -116,14 +143,14 @@ impl Close {
         .unwrap()
     }
 
-    async fn submit(&self, intent: PolicyCloseIntent) -> PolicyCloseOutcome {
+    pub(super) async fn submit(&self, intent: PolicyCloseIntent) -> PolicyCloseOutcome {
         self.fin
             .submit_policy_close(intent, self.shared.clone())
             .await
     }
 
     /// Mailbox-release events published for this channel since `events` subscribed.
-    fn released(
+    pub(super) fn released(
         &self,
         events: &mut tokio::sync::broadcast::Receiver<
             crate::services::discord::turn_completion_events::TurnCompletionEvent,
@@ -140,7 +167,7 @@ impl Close {
         count
     }
 
-    fn events(
+    pub(super) fn events(
         &self,
     ) -> tokio::sync::broadcast::Receiver<
         crate::services::discord::turn_completion_events::TurnCompletionEvent,
@@ -153,7 +180,12 @@ impl Close {
 
 /// The held state: actor in the slot, the delivered receipt row's exact bytes, this turn's +1
 /// beside the other turn's, and the successor input unchanged.
-async fn assert_held(close: &Close, bytes: &Option<Vec<u8>>, queued: &Queued, case: &str) {
+pub(super) async fn assert_held(
+    close: &Close,
+    bytes: &Option<Vec<u8>>,
+    queued: &Queued,
+    case: &str,
+) {
     assert!(
         close.actor_holds().await,
         "{case}: the actor keeps the slot"
@@ -164,6 +196,7 @@ async fn assert_held(close: &Close, bytes: &Option<Vec<u8>>, queued: &Queued, ca
         "{case}: the receipt row keeps its bytes"
     );
     assert_eq!(close.active(), 2, "{case}: nothing debited");
+    assert!(close.other_holds().await, "{case}: the other turn stays");
     assert_eq!(
         close.queued().await,
         *queued,
@@ -172,10 +205,11 @@ async fn assert_held(close: &Close, bytes: &Option<Vec<u8>>, queued: &Queued, ca
 }
 
 /// The released state: no row, no slot, exactly this turn's debit, the successor input kept.
-async fn assert_released(close: &Close, queued: &Queued, case: &str) {
+pub(super) async fn assert_released(close: &Close, queued: &Queued, case: &str) {
     assert!(close.slot().await.is_none(), "{case}: the slot is free");
     assert!(close.durable().is_none(), "{case}: the receipt row is gone");
     assert_eq!(close.active(), 1, "{case}: exactly one debit");
+    assert!(close.other_holds().await, "{case}: the other turn stays");
     assert_eq!(
         close.queued().await,
         *queued,
@@ -194,7 +228,7 @@ async fn p10_fin_notice_or_durable_ack_failure_retains() {
     ] {
         let close = Close::open(5_340_971, |_| {}).await;
         let queued = close.other_turn_and_queue().await;
-        let seen = stages(None);
+        step::arm(Box::new(|_| {}));
         let submitted = test_hooks::submitted();
         if let Some(rename) = ack_fault {
             test_hooks::observe(Some(Box::new(move |step, row: &InflightTurnState| {
@@ -211,7 +245,7 @@ async fn p10_fin_notice_or_durable_ack_failure_retains() {
                 .await
         };
         test_hooks::observe(None);
-        step::observe(None);
+        let unbuilt = step::disarm();
         assert!(!settled, "{case}");
         assert!(
             InflightTurnState::before_start_receipt_faults_consumed(close.row.channel_id),
@@ -223,7 +257,7 @@ async fn p10_fin_notice_or_durable_ack_failure_retains() {
             submitted,
             "{case}: nothing submitted"
         );
-        assert!(seen.borrow().is_empty(), "{case}: no mailbox step");
+        assert!(unbuilt, "{case}: no policy request was built");
         assert!(close.actor_holds().await, "{case}");
         assert_eq!(close.active(), 2, "{case}");
         assert_eq!(close.queued().await, queued, "{case}");
@@ -237,35 +271,47 @@ async fn p10_fin_send_failure_keeps_delivered_row() {
     let queued = close.other_turn_and_queue().await;
     // Built off any runtime, its actor never runs and its channel is closed.
     close.fin = std::thread::spawn(TurnFinalizer::spawn).join().unwrap();
-    let seen = stages(None);
+    let seen = armed();
     let mut events = close.events();
     assert!(!close.consume(shown()).await);
-    step::observe(None);
+    assert!(!step::disarm(), "the request was built");
     assert_eq!(close.receipt_pending(), Some(false), "delivered");
     assert!(close.actor_holds().await);
     assert_eq!(close.active(), 2);
     assert_eq!(close.queued().await, queued);
-    assert!(seen.borrow().is_empty());
+    assert!(seen.lock().unwrap().is_empty());
     assert_eq!(close.released(&mut events), 0);
     let acked = close.durable().unwrap();
+    let intent = close.intent(acked);
+    let probe = intent.request.trace.probe();
     assert!(matches!(
-        close.submit(close.intent(acked)).await,
+        close.submit(intent).await,
         PolicyCloseOutcome::Unconfirmed(PolicyStage::FinalizerSend)
     ));
+    let read = probe
+        .snapshot()
+        .judge(probe.request, &[Point::SubmitAttempt]);
+    assert_eq!(read, Ok(vec![1]));
+    assert_eq!(
+        probe
+            .snapshot()
+            .judge(probe.request, &[Point::SendAccepted]),
+        Ok(vec![0])
+    );
 }
 
-/// An accepted close whose ACK is lost before it runs is `Unconfirmed`, never settled; nothing
-/// ran, and the same close on a live finalizer is a first commit, not a duplicate.
+/// A close the real finalizer actor dequeues and loses before processing is `Unconfirmed`, never
+/// settled; nothing ran, and the same close asked again is a first commit, not a duplicate.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_ack_pre_commit_unconfirmed() {
     let close = Close::open(5_340_973, |_| {}).await;
     let queued = close.other_turn_and_queue().await;
     let acked = close.acked().await;
     let before = close.bytes();
-    let dropping = TurnFinalizer::spawn_dropping_for_test();
-    let outcome = dropping
-        .submit_policy_close(close.intent(acked.clone()), close.shared.clone())
-        .await;
+    let intent = close.intent(acked.clone());
+    let lost = intent.request.trace.probe();
+    lost.lose(Loss::Dequeued);
+    let outcome = close.submit(intent).await;
     assert!(
         matches!(
             outcome,
@@ -292,34 +338,58 @@ async fn p10_fin_ack_pre_commit_unconfirmed() {
         "{outcome:?}"
     );
     assert_released(&close, &queued, "first commit").await;
+    // Read after a commit reached every point: the lost one was dequeued and never committed.
+    let points = [Point::Dequeued, Point::MailboxCommitted, Point::AckObserved];
+    let read = lost.snapshot().judge(lost.request, &points);
+    assert_eq!(read, Ok(vec![1, 0, 0]));
+    assert!(lost.stages().is_empty(), "no mailbox step ran");
 }
 
-/// A commit whose ACK alone is lost released once; the same actor's witness confirms a re-ask with
-/// no second debit or event, and never confirms another episode's key.
+/// A commit whose ACK alone the real finalizer actor loses is `Unconfirmed` to its caller and
+/// released once; the witness confirms a re-ask with no second debit, event or finalize, and never
+/// another episode's key.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_ack_post_commit_exact_witness() {
     let close = Close::open(5_340_974, |_| {}).await;
     let queued = close.other_turn_and_queue().await;
     let acked = close.acked().await;
     let mut events = close.events();
-    {
-        let submit = close.submit(close.intent(acked.clone()));
-        tokio::pin!(submit);
-        assert!(futures::poll!(submit.as_mut()).is_pending(), "accepted");
-    }
-    // The finalizer serves messages in order, so this answer follows the dropped close.
-    let generation = close.shared.restart.current_generation;
-    close
-        .fin
-        .has_live_watcher_pending(close.channel(), generation)
-        .await;
+    let intent = close.intent(acked.clone());
+    let lost = intent.request.trace.probe();
+    lost.lose(Loss::Ack);
+    let outcome = close.submit(intent).await;
+    assert!(
+        matches!(
+            outcome,
+            PolicyCloseOutcome::Unconfirmed(PolicyStage::FinalizerAck)
+        ),
+        "{outcome:?}"
+    );
     assert_released(&close, &queued, "ack lost after commit").await;
     assert_eq!(close.released(&mut events), 1);
-    let again = close.submit(close.intent(acked.clone())).await;
+    let points = [
+        Point::MailboxCommitted,
+        Point::QueueExit,
+        Point::FinalizeEntered,
+        Point::AckObserved,
+    ];
+    let read = lost.snapshot().judge(lost.request, &points);
+    assert_eq!(read, Ok(vec![1, 1, 1, 0]));
+    // The open gate and input fence pass, so the witness answers: not a finalize or queue exit.
+    let intent = close.intent(acked.clone());
+    let asked = intent.request.trace.probe();
+    let again = close.submit(intent).await;
     assert!(
         matches!(again, PolicyCloseOutcome::DuplicateConfirmed),
         "{again:?}"
     );
+    let points = [
+        Point::MailboxCommitted,
+        Point::QueueExit,
+        Point::FinalizeEntered,
+    ];
+    let read = asked.snapshot().judge(asked.request, &points);
+    assert_eq!(read, Ok(vec![0, 0, 0]));
     let mut other = close.intent(acked);
     other.request.turn_nonce.push('x');
     let other = close.submit(other).await;
@@ -379,15 +449,14 @@ async fn p10_fin_clear_refusal_is_nonreleasing() {
             }
         }
         let bytes = close.bytes();
-        let seen = stages(None);
+        let probe = intent.request.trace.probe();
         let outcome = close.submit(intent).await;
-        step::observe(None);
         assert!(
             matches!(&outcome, PolicyCloseOutcome::Retained(PolicyRetain::Clear(clear)) if *clear == expected),
             "{case}: {outcome:?}"
         );
         assert_eq!(
-            *seen.borrow(),
+            probe.stages(),
             ["before_claim", "before_clear", "clear_refused"],
             "{case}"
         );
@@ -448,23 +517,27 @@ async fn p10_fin_lock_busy_snapshot_remains_responsive() {
     });
     held_rx.recv().unwrap();
     // The snapshot request is queued while the close's step is running, so it waits behind it.
-    let snapshot = Rc::new(RefCell::new(None));
+    let snapshot = Arc::new(Mutex::new(None));
     let (slot, mailbox) = (
         snapshot.clone(),
         close.shared.mailbox_peek(close.channel()).unwrap(),
     );
-    step::observe(Some(Box::new(move |stage| {
-        if stage == "before_clear" {
-            let mailbox = mailbox.clone();
-            *slot.borrow_mut() = Some(queue_now(async move { mailbox.snapshot().await }));
-        }
-    })));
+    let intent = close.intent(acked.clone());
+    intent
+        .request
+        .trace
+        .probe()
+        .on_stage(Box::new(move |stage| {
+            if stage == "before_clear" {
+                let mailbox = mailbox.clone();
+                *slot.lock().unwrap() = Some(queue_now(async move { mailbox.snapshot().await }));
+            }
+        }));
     let started = std::time::Instant::now();
-    let outcome = close.submit(close.intent(acked.clone())).await;
-    let snapshot = snapshot.borrow_mut().take();
+    let outcome = close.submit(intent).await;
+    let snapshot = snapshot.lock().unwrap().take();
     let snapshot = snapshot.expect("queued behind the close").await;
     let elapsed = started.elapsed();
-    step::observe(None);
     // The holder may already have let go on its own deadline if the clear waited for it.
     let _ = release_tx.send(());
     holder.join().unwrap();
@@ -633,14 +706,13 @@ async fn p10_fin_successor_or_actor_mismatch() {
             .restore_active_turn(successor.clone(), UserId::new(1), MessageId::new(message))
             .await;
         let bytes = close.bytes();
-        let seen = stages(None);
+        let probe = intent.request.trace.probe();
         let outcome = close.submit(intent).await;
-        step::observe(None);
         assert!(
             matches!(outcome, PolicyCloseOutcome::Superseded),
             "{outcome:?}"
         );
-        assert_eq!(*seen.borrow(), ["before_claim"], "no clear was tried");
+        assert_eq!(probe.stages(), ["before_claim"], "no clear was tried");
         assert!(
             close
                 .slot()
@@ -670,9 +742,8 @@ async fn p10_fin_panic_before_clear() {
             };
         }
         let before = close.bytes();
-        let _seen = stages(Some(at));
+        panic_once_at(&intent.request.trace.probe(), at);
         let outcome = close.submit(intent).await;
-        step::observe(None);
         assert!(
             matches!(
                 outcome,
@@ -698,9 +769,9 @@ async fn p10_fin_panic_after_clear_commits() {
         let close = Close::open(5_340_982, |_| {}).await;
         let queued = close.other_turn_and_queue().await;
         let acked = close.acked().await;
-        let _seen = stages(Some(at));
-        let outcome = close.submit(close.intent(acked.clone())).await;
-        step::observe(None);
+        let intent = close.intent(acked.clone());
+        panic_once_at(&intent.request.trace.probe(), at);
+        let outcome = close.submit(intent).await;
         assert!(
             matches!(outcome, PolicyCloseOutcome::Settled),
             "{at}: {outcome:?}"
@@ -722,9 +793,9 @@ async fn p10_fin_panic_after_debit_before_fence() {
     let close = Close::open(5_340_983, |_| {}).await;
     let queued = close.other_turn_and_queue().await;
     let acked = close.acked().await;
-    let _seen = stages(Some("after_debit"));
-    let outcome = close.submit(close.intent(acked)).await;
-    step::observe(None);
+    let intent = close.intent(acked);
+    panic_once_at(&intent.request.trace.probe(), "after_debit");
+    let outcome = close.submit(intent).await;
     assert!(
         matches!(outcome, PolicyCloseOutcome::Settled),
         "{outcome:?}"
@@ -761,7 +832,9 @@ async fn p10_fin_after_commit_feedback_panic() {
     let acked = close.acked().await;
     let mut events = close.events();
     TurnFinalizer::arm_finalize_panic_for_test();
-    let outcome = close.submit(close.intent(acked.clone())).await;
+    let intent = close.intent(acked.clone());
+    let probe = intent.request.trace.probe();
+    let outcome = close.submit(intent).await;
     assert!(
         matches!(
             outcome,
@@ -770,6 +843,11 @@ async fn p10_fin_after_commit_feedback_panic() {
         "{outcome:?}"
     );
     assert_released(&close, &queued, "cleanup panic").await;
+    // The finalize entered and never returned, so its zero is not read as no effect.
+    let read = probe
+        .snapshot()
+        .judge(probe.request, &[Point::FinalizeReturned]);
+    assert_eq!(read, Err(step::Judged::Incomplete));
     let _ = close.released(&mut events);
     let again = close.submit(close.intent(acked)).await;
     assert!(
@@ -781,10 +859,10 @@ async fn p10_fin_after_commit_feedback_panic() {
 }
 
 /// Polls `work` once so its mailbox request is queued now, keeping it to await later.
-fn queue_now<T>(
-    work: impl std::future::Future<Output = T> + 'static,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = T>>> {
-    let mut work: std::pin::Pin<Box<dyn std::future::Future<Output = T>>> = Box::pin(work);
+pub(super) fn queue_now<T>(
+    work: impl std::future::Future<Output = T> + Send + 'static,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>> {
+    let mut work: std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>> = Box::pin(work);
     let waker = futures::task::noop_waker();
     let mut cx = std::task::Context::from_waker(&waker);
     assert!(
@@ -815,26 +893,22 @@ async fn p10_fin_actor_serialization() {
                 .await
             })
         };
-        let trace = Seen::default();
-        let competitor = Rc::new(RefCell::new(None));
+        let probe = intent.request.trace.probe();
+        let competitor = Arc::new(Mutex::new(None));
         if close_first {
-            let (slot, trace) = (competitor.clone(), trace.clone());
+            let slot = competitor.clone();
             let mut finish = Some(finish);
-            step::observe(Some(Box::new(move |stage| {
-                trace.borrow_mut().push(stage);
+            probe.on_stage(Box::new(move |stage| {
                 if stage == "before_clear" {
-                    *slot.borrow_mut() = finish.take().map(|finish| finish());
+                    *slot.lock().unwrap() = finish.take().map(|finish| finish());
                 }
-            })));
+            }));
         } else {
-            *competitor.borrow_mut() = Some(finish());
-            let trace = trace.clone();
-            step::observe(Some(Box::new(move |stage| trace.borrow_mut().push(stage))));
+            *competitor.lock().unwrap() = Some(finish());
         }
         let bytes = close.bytes();
         let outcome = close.submit(intent).await;
-        step::observe(None);
-        let finished = competitor.borrow_mut().take();
+        let finished = competitor.lock().unwrap().take();
         let finished = finished.unwrap().await;
         if close_first {
             assert!(
@@ -845,7 +919,7 @@ async fn p10_fin_actor_serialization() {
                 finished.removed_token.is_none(),
                 "the finish ran after the release"
             );
-            assert_eq!(trace.borrow().last(), Some(&"after_commit"));
+            assert_eq!(probe.stages().last(), Some(&"after_commit"));
             assert_released(&close, &queued, "close first").await;
         } else {
             assert!(
@@ -857,7 +931,7 @@ async fn p10_fin_actor_serialization() {
                     .removed_token
                     .is_some_and(|t| Arc::ptr_eq(&t, &close.actor))
             );
-            assert_eq!(*trace.borrow(), ["before_claim"]);
+            assert_eq!(probe.stages(), ["before_claim"]);
             assert_eq!(close.bytes(), bytes, "the receipt row was not cleared");
             assert_eq!(
                 close.active(),
@@ -921,7 +995,7 @@ async fn p10_fin_ordinary_identity_clear_preserves_receipt() {
 }
 
 /// The input fence refuses the close by type before any clear: closing gate, foreign permit, broken
-/// population. On an open protected gate the clear stops at the lock its own scope holds.
+/// population. On an open protected gate the blocking worker clears under its own scope.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_input_fence_typed_refusals() {
     use crate::services::discord::input_runtime::fence::{self, Failure, Gate, Mode};
@@ -953,11 +1027,10 @@ async fn p10_fin_input_fence_typed_refusals() {
             _ => None,
         };
         let bytes = close.bytes();
-        let seen = stages(None);
+        let probe = intent.request.trace.probe();
         let (fin, shared) = (close.fin.clone(), close.shared.clone());
         let work = async move { fin.submit_policy_close(intent, shared).await };
         let outcome = fence::effect::run(permit, work).await;
-        step::observe(None);
         let expected = match case {
             "closing" => Some(Failure::Mode(Mode::Closing)),
             "stale permit" => Some(Failure::StalePermit),
@@ -968,11 +1041,20 @@ async fn p10_fin_input_fence_typed_refusals() {
             (Some(failure), PolicyCloseOutcome::Retained(PolicyRetain::InputFence(seen))) => {
                 assert_eq!(*seen, failure, "{case}")
             }
-            (None, PolicyCloseOutcome::Retained(PolicyRetain::Clear(PolicyClear::Io))) => {}
+            (None, PolicyCloseOutcome::Settled) => {
+                let here = std::thread::current().id();
+                let threads = probe.threads();
+                assert!(!threads.is_empty(), "the step ran");
+                assert!(threads.iter().all(|t| *t != here), "on a blocking worker");
+                assert_released(&close, &queued, case).await;
+                continue;
+            }
             _ => panic!("{case}: {outcome:?}"),
         }
-        // The fenced step runs on a blocking worker: this thread's seam sees none of it.
-        assert!(seen.borrow().is_empty(), "{case}");
+        assert!(
+            probe.stages().is_empty(),
+            "{case}: the fence refused before the step"
+        );
         assert!(close.actor_holds().await, "{case}");
         assert_eq!(close.bytes(), bytes, "{case}");
         assert_eq!(close.active(), 2, "{case}");
@@ -1033,10 +1115,13 @@ async fn p10_fin_strict_boundaries() {
         }),
     ];
     let bytes = close.bytes();
+    let mut compared = None;
     for (case, tamper) in tampers {
         let mut intent = close.intent(acked.clone());
         tamper(&close, &acked, &axes, &mut intent);
+        let probe = intent.request.trace.probe();
         let outcome = close.submit(intent).await;
+        compared = probe.started().or(compared);
         assert!(
             matches!(
                 outcome,
@@ -1049,7 +1134,7 @@ async fn p10_fin_strict_boundaries() {
     }
     // A cutoff equal to the slot's own start instant is not before it.
     let mut intent = close.intent(acked.clone());
-    intent.request.observed_before = step::started().expect("the step compared a start");
+    intent.request.observed_before = compared.expect("a step compared a start");
     let outcome = close.submit(intent).await;
     assert!(
         matches!(outcome, PolicyCloseOutcome::Superseded),
@@ -1105,3 +1190,6 @@ async fn p10_fin_off_and_legacy() {
     );
     assert_held(&close, &Some(unknown), &queued, "unknown").await;
 }
+
+#[path = "before_start_stop_protected_tests.rs"]
+mod protected;

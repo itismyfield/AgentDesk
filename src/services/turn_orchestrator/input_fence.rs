@@ -120,6 +120,15 @@ pub(super) struct StepGuard {
     _effect: Option<fence::effect::WorkerScope>,
     _permit: Option<Permit>,
 }
+impl StepGuard {
+    /// The policy close's write authority: the held population scope, or legacy without a gate.
+    pub(super) fn policy_authority(&self) -> policy_close::PolicyAuthority<'_> {
+        match &self._population {
+            Some(scope) => policy_close::PolicyAuthority::protected(scope),
+            None => policy_close::PolicyAuthority::legacy(),
+        }
+    }
+}
 fn persistence(msg: &ChannelMailboxMsg) -> Option<&QueuePersistenceContext> {
     use ChannelMailboxMsg as M;
     match msg {
@@ -200,12 +209,13 @@ pub(super) fn enter(
     let mut population = None;
     if let Some(context) = persistence(msg).or(state.last_persistence.as_ref()) {
         let root = fence::population_root().ok_or(Failure::Persistence)?;
-        population = Some(fence::PopulationScope::writer(
-            &root,
-            &context.provider,
-            channel.get(),
-            &permit,
-        )?);
+        // The policy close never waits on the row lock; contention answers `Busy`.
+        let scope = if matches!(msg, M::PolicyClose { .. }) {
+            fence::PopulationScope::try_writer
+        } else {
+            fence::PopulationScope::writer
+        };
+        population = Some(scope(&root, &context.provider, channel.get(), &permit)?);
     }
     Ok(StepGuard {
         _population: population,
