@@ -795,6 +795,7 @@ jobs:
               - 'src/services/discord/idle_relay_drift.rs'
               - 'src/services/discord/inflight.rs'
               - 'src/services/discord/inflight/**'
+              - 'src/services/discord/ingress_shadow.rs'
               - 'src/services/discord/inject_disposition_test_support.rs'
               - 'src/services/discord/inject_disposition_tests.rs'
               - 'src/services/discord/input_runtime/**'
