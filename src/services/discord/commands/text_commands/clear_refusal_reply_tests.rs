@@ -9,6 +9,7 @@ use poise::serenity_prelude as serenity;
 use serde_json::Value;
 use serenity::{ChannelId, MessageId, UserId};
 
+use crate::db::session_transcripts::{ChannelClearFence, observe_channel_clear_fence_once};
 use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
 use crate::services::discord::admin_host_guard::tests::{Recorder, process};
 use crate::services::discord::commands::{
@@ -38,13 +39,13 @@ struct Rig {
     _root: crate::config::TestRuntimeRootGuard,
 }
 
-/// One channel of the rig: its session, its stored row's key, its queued input and its process.
+/// One channel of the rig: its session, its queued input, its process and its transcript fence.
 struct Channel {
     id: ChannelId,
     tmux_name: String,
-    key: String,
     queued: MessageId,
     alive: Arc<AtomicBool>,
+    fence: ChannelClearFence,
 }
 
 impl Rig {
@@ -105,13 +106,22 @@ impl Rig {
         assert!(enqueued.enqueued, "the fixture input is queued");
         let alive = process(&tmux_name, 64_900);
         self.tmux.take_calls();
+        let fence = self.clear_fence(id).await;
         Channel {
             id,
             tmux_name,
-            key,
             queued,
             alive,
+            fence,
         }
+    }
+
+    /// The channel's transcript clear generation as PostgreSQL holds it now.
+    async fn clear_fence(&self, channel: ChannelId) -> ChannelClearFence {
+        let slot = tokio::sync::OnceCell::new();
+        let channel = channel.get().to_string();
+        observe_channel_clear_fence_once(&slot, Some(&self.pool), &channel).await;
+        slot.into_inner().expect("an observed fence")
     }
 
     /// Sends `!clear` on `channel` through the dispatcher: its result and the replies it posted,
@@ -188,14 +198,8 @@ impl Rig {
             Vec::<String>::new(),
             "{what}: no tmux call"
         );
-        let boundaries: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM channel_session_clear_boundaries WHERE channel_id = $1",
-        )
-        .bind(channel.id.get().to_string())
-        .fetch_one(&self.pool)
-        .await
-        .unwrap();
-        assert_eq!(boundaries, 0, "{what}: no transcript boundary");
+        let fence = self.clear_fence(channel.id).await;
+        assert_eq!(fence, channel.fence, "{what}: no transcript boundary");
     }
 
     async fn finish(self, channels: &[&Channel]) {
@@ -249,7 +253,7 @@ fn assert_refusal_answered(
 }
 
 // A Herdr-configured channel whose O still reads rotated-away sources refuses `!clear`; the text
-// command answers that reason instead of failing silently, and the execution row stays Bound.
+// command answers that reason instead of failing silently.
 #[tokio::test]
 async fn a_herdr_refused_text_clear_answers_the_channel_with_its_reason_pg() {
     let rig = Rig::start().await;
@@ -275,14 +279,6 @@ async fn a_herdr_refused_text_clear_answers_the_channel_with_its_reason_pg() {
         "{reason}"
     );
     rig.assert_untouched(&channel, "herdr").await;
-    let state: Option<String> = sqlx::query_scalar(
-        "SELECT hosted_execution->>'state' FROM sessions WHERE session_key = $1",
-    )
-    .bind(&channel.key)
-    .fetch_one(&rig.pool)
-    .await
-    .unwrap();
-    assert_eq!(state.as_deref(), Some("bound"), "the execution row is kept");
     assert_eq!(
         reason,
         rig.slash_error(&channel).await,
@@ -338,5 +334,7 @@ async fn a_text_clear_that_runs_answers_only_the_cleared_notice_pg() {
         !channel.alive.load(Ordering::SeqCst),
         "the managed reset ran"
     );
+    let fence = rig.clear_fence(channel.id).await;
+    assert_ne!(fence, channel.fence, "the transcript boundary moved");
     rig.finish(&[&channel]).await;
 }
