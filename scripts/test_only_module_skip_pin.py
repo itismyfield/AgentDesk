@@ -46,6 +46,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_input/actor/gate/claude_guarded/acceptance_tests.rs",
         "src/services/tui_input/submission_tmux/guarded/protocol_tests.rs",
         "src/services/tui_input/submission_tmux/guarded/transport_tests.rs",
+        "src/services/discord/input_runtime/intake/admit_tests.rs",
+        "src/services/discord/input_runtime/intake/client_tests.rs",
         "src/services/discord/input_runtime/runtime/dormant_tests.rs",
         "src/services/discord/input_runtime/runtime/drive_tests.rs",
         "src/services/discord/input_runtime/runtime/notice_tests.rs",
@@ -598,6 +600,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/judged_stop_tests.rs",
         "src/services/discord/tmux_watcher/judged_stop_harness_tests.rs",
+        "src/services/discord/router/intake_gate/ledger_io_tests.rs",
+        "src/services/discord/router/intake_gate/ledger_tests.rs",
         "src/services/discord/router/intake_gate/stale_turn_host_tests.rs",
         "src/cli/herdr_tests.rs",
         "src/services/discord/recovery_engine/herdr_reader_tests.rs",
@@ -640,6 +644,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/before_start_stop_tests.rs",
         "src/services/discord/turn_bridge/before_start_stop_disk_gate_tests.rs",
         "src/services/discord/turn_bridge/before_start_stop_clear_order_tests.rs",
+        "src/services/discord/turn_bridge/before_start_stop_policy_tests.rs",
         "src/services/discord/inflight/managed_submission_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_submission_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/cohort_tests.rs",
@@ -689,6 +694,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
         "src/services/discord/turn_bridge/replay_policy.rs",
+        "src/services/discord/router/intake_dispatch/tests/final_guards.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
         "src/services/discord/queue_io/cancel_reclaim_support_test.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests/autoheal.rs",

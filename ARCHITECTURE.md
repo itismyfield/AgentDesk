@@ -1123,7 +1123,12 @@ src/
 │   │   │   │   ├── modes.rs
 │   │   │   │   └── modes_tests.rs
 │   │   │   ├── intake/
+│   │   │   │   ├── admit.rs
+│   │   │   │   ├── admit_tests.rs
 │   │   │   │   ├── classify.rs
+│   │   │   │   ├── client.rs
+│   │   │   │   ├── client_tests.rs
+│   │   │   │   ├── skills.rs
 │   │   │   │   └── source.rs
 │   │   │   ├── runtime/
 │   │   │   │   ├── dormant_tests.rs
@@ -1411,6 +1416,7 @@ src/
 │   │   │   │   │   │   └── retry_tests.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
+│   │   │   │   │   ├── final_guards.rs
 │   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── home_order_tests.rs
@@ -1427,6 +1433,9 @@ src/
 │   │   │   │   ├── busy_inject_test_support.rs
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
+│   │   │   │   ├── ledger.rs
+│   │   │   │   ├── ledger_io_tests.rs
+│   │   │   │   ├── ledger_tests.rs
 │   │   │   │   ├── queue_effects.rs
 │   │   │   │   ├── stale_turn.rs
 │   │   │   │   └── stale_turn_host_tests.rs
@@ -1979,6 +1988,7 @@ src/
 │   │   │   ├── before_start_stop.rs
 │   │   │   ├── before_start_stop_clear_order_tests.rs
 │   │   │   ├── before_start_stop_disk_gate_tests.rs
+│   │   │   ├── before_start_stop_policy_tests.rs
 │   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
@@ -2887,6 +2897,7 @@ src/
 │   │   ├── overflow.rs
 │   │   ├── overflow_s2b_tests.rs
 │   │   ├── pending_queue_persistence.rs
+│   │   ├── policy_close.rs
 │   │   ├── queue_cancellation.rs
 │   │   ├── queue_enqueue.rs
 │   │   ├── queued_head.rs
