@@ -6,6 +6,15 @@ that condition always prevents PASS. The hypothetical supported profile lives on
 test-created temporary CLI copies. They execute the same checks with a separate pinned table.
 There is no production support-table option or environment override.
 
+`PYTHONPATH=scripts python3 -m n1_canary.producer --process-proof <capture>
+--executable <captured-proc-exe> --release-source <attestation> --verification-log <jsonl>`
+prints a candidate only after matching the captured executable hash, clean build SHA and
+positive schema 2 unknown/actual-confirmation events in a separate verification run.
+It reads captures without running the binary or modifying the table. The coordinator must
+review the trusted build/deployment attestation and raw capture provenance before registration;
+the tool cannot attest the origin of supplied files. See the
+[runbook](../../docs/tui-o-writer-canary-runbook.md#52-register-the-deployed-producer-before-using-pass).
+
 `producer_capabilities` approves an exact `build_commit` and `executable_sha256` pair,
 `event_schema: 2`, `unknown_outcome_produced: true` and `actual_confirmation_produced: true`.
 The captured process and executable must independently match that identity. Unknown events
@@ -65,5 +74,6 @@ over incomplete unrelated evidence. Exact effect totals become null while any un
 remains; confirmed effects are retained as lower bounds. The result file and stdout use the
 same composed verdict. Before enabling a production profile, its capture/provenance producers
 and compatibility must be verified alongside the separate observation producer work.
-The unconditional shipped observation guard also needs a reviewed update when that
-producer support is introduced; flipping the table alone does not enable production PASS.
+An approved pair still requires complete independent capture, origin, observation and audit
+evidence; registration alone cannot establish PASS. Recompute the pinned oracle bundle hash
+after changing the support table.
