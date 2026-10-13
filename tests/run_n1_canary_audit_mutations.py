@@ -45,6 +45,8 @@ MUTANTS = [
      "test_past_unresolved_then_posted_retains_reason"),
     ("individual-human-origin-excluded", "audit.py", 'values["discord"].get("individual", {}).items()', '{}.items()',
      "test_past_discord_input_lookup_supports_current_tty_fifty"),
+    ("prefix-input-as-current-inventory", "audit.py", 'and turn["physical_observation_key"]["end_offset"] > scope["baseline_offset"]', '',
+     "test_prefix_input_cannot_satisfy_current_human_inventory"),
 ]
 
 

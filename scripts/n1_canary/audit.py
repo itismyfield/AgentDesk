@@ -38,7 +38,8 @@ def origins(native, legacy, values, manifest):
         if proof["input_kind"] == "discord":
             require(snowflake(proof["discord_message_id"]) and proof["discord_message_id"] in origin_ids, "native_origin_unverified")
             inputs.add(proof["discord_message_id"])
-            if proof["discord_message_id"] in human_ids:
+            if (proof["discord_message_id"] in human_ids
+                    and turn["physical_observation_key"]["end_offset"] > scope["baseline_offset"]):
                 window_inputs.add(proof["discord_message_id"])
         else:
             require(proof["discord_message_id"] is None, "native_origin_conflict")
