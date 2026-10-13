@@ -75,7 +75,7 @@ class LiveShapedDiscord:
         floor = int(after_id or 0)
         return [dict(m) for m in self.messages if int(m["id"]) > floor][:limit]
 
-    def wait_for_message(self, channel_id, *, predicate, after_id, timeout_s, debug_label):  # noqa: ARG002
+    def wait_for_message(self, channel_id, *, predicate, after_id, timeout_s, debug_label=None):  # noqa: ARG002
         observed = self.fetch_messages(channel_id, after_id=after_id)
         return next((m for m in observed if predicate(m)), None), observed
 
@@ -213,6 +213,61 @@ class TurnSmokeFromCollectedEvidence(unittest.TestCase):
         passed, detail = verdict(unobserved, "E-51", "codex-tui", "turns-clean.dcserver.log")
         self.assertFalse(passed)
         self.assertIn("AFTER_CLEAR delivery count unobserved", detail)
+
+
+class HerdrTurnSmoke(unittest.TestCase):
+    def evidence(self):
+        return {"surface": "GET /api/health/detail", "status_surface": "agentdesk herdr status",
+                "validated": True, "current_input_holds": 0, "herdr": {"input_holds": 0},
+                "row": dict(channel="41", provider="claude", state="bound", nonce="same",
+                            pane="provider_running", launch_evidence="recorded", input_hold=None)}
+
+    def collect(self, after_clear="deliver"):
+        scenario = next(s for s in driver.load_scenarios(SCENARIOS, cell="claude-herdr") if s["id"] == "E-50")
+        args = Namespace(cell="claude-herdr", channel_id="41", base_url="http://127.0.0.1:8797",
+                         dry_run=False, hard_reset_session_each=False, reset_before_each=False,
+                         allow_destructive=False, final_refetches=1)
+        with patch.object(driver.herdr, "observe", return_value=self.evidence()), patch.object(driver.herdr.time, "sleep"):
+            return driver.run_scenario(scenario, args=args, client=LiveShapedDiscord(after_clear=after_clear), run_id=RUN_ID)
+
+    def judge(self, result):
+        return turn_smoke.judge(report={"run_id": RUN_ID, "channel_id": "41", "cell": "claude-herdr", "scenarios": [result]},
+                                scenario_id="E-50", markers=turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID),
+                                log_counts=None, driver_rc=0)
+
+    def test_herdr_preflight_never_reads_legacy_queue_or_tmux(self):
+        with patch.object(driver, "_read_health_detail", side_effect=AssertionError("legacy detail")), \
+             patch.object(driver, "_runtime_queue_violations", side_effect=AssertionError("legacy queue")), \
+             patch.object(driver, "cell_session_name", side_effect=AssertionError("tmux")), \
+             patch.object(driver.herdr, "observe", return_value=self.evidence()) as observe:
+            self.assertEqual(turn_smoke.preflight_busy_reasons(base_url="http://127.0.0.1:8797", cell="claude-herdr",
+                             channel_id="41", herdr_endpoint="test", herdr_status_bin="/test/agentdesk"), [])
+        args = observe.call_args.args[1]
+        self.assertEqual((args.herdr_endpoint, args.herdr_status_bin), ("test", "/test/agentdesk"))
+        self.assertTrue(observe.call_args.kwargs["cold"])
+
+    def test_herdr_delivery_counts_and_missing_observations_fail_closed(self):
+        for behavior, expected in (("deliver", True), ("withhold", False), ("duplicate", False)):
+            result = self.collect(behavior)
+            passed, detail = self.judge(result)
+            self.assertEqual(passed, expected, detail)
+        result = self.collect()
+        result.pop("herdr_observations")
+        self.assertFalse(self.judge(result)[0])
+        for label in ("T1", "T2", "AFTER_CLEAR"):
+            for hits in (0, 2, -1, True):
+                result = self.collect()
+                result["marker_counts"][f"[E2E:E50:{RUN_ID}:{label}]"] = hits
+                self.assertFalse(self.judge(result)[0])
+
+    def test_herdr_judge_cli_ignores_tmux_log_surface(self):
+        report = {"run_id": RUN_ID, "scenarios": [self.collect()]}
+        with patch.object(turn_smoke, "_load_report", return_value=report), \
+             patch.object(driver, "cell_session_name", side_effect=ValueError("no tmux")), \
+             patch.object(turn_smoke, "open", side_effect=AssertionError("legacy log"), create=True):
+            self.assertEqual(turn_smoke.main(["judge", "--report", "/unused", "--scenarios", str(SCENARIOS),
+                             "--scenario", "E-50", "--cell", "claude-herdr", "--channel-id", "41",
+                             "--log-excerpt", "/unused", "--driver-rc", "0"]), 0)
 
 
 if __name__ == "__main__":

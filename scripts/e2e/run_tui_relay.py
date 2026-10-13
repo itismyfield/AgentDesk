@@ -52,6 +52,7 @@ import yaml  # type: ignore[import-untyped]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tui_relay import assertions, discord, durable_delivery, feature_accounting, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
+from tui_relay import herdr_restart, http_auth  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -245,6 +246,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--run-id", default=uuid.uuid4().hex, help="Explicit run identity shared with source comparison")
     parser.add_argument("--base-url", default="http://127.0.0.1:8791")
+    herdr_restart.add_arguments(parser)
     parser.add_argument("--herdr-isolated-server", action="store_true", help="Operator attests restart target is a dedicated E2E server with no other channels.")
     parser.add_argument("--herdr-endpoint", help="Boot endpoint key for this channel; required for live Herdr observations.")
     parser.add_argument("--herdr-status-bin", default="agentdesk", help="AgentDesk CLI on the target node (read-only herdr status).")
@@ -358,6 +360,7 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     args = parser.parse_args()
+    herdr_restart.validate_arguments(parser, args)
     args.turn_start_timeout_s = _bounded_value(
         args.turn_start_timeout_s,
         source="--turn-start-timeout-s",
@@ -2049,7 +2052,7 @@ def _read_api_json(base_url: str, path: str, *, timeout: float = 5.0) -> tuple[i
     request = urllib.request.Request(
         url,
         method="GET",
-        headers={"Connection": "close"},
+        headers=http_auth.request_headers(base_url, {"Connection": "close"}),
     )
     try:
         try:
@@ -5090,6 +5093,8 @@ def coverage_class_violations(results: list[dict[str, Any]]) -> list[dict[str, A
 
 def main() -> int:
     args = parse_args()
+    if getattr(args, "herdr_restart_observe_only", None):
+        return herdr_restart.run(sys.modules[__name__], args)
     cell = args.cell
     scenarios_dir = Path(args.scenarios)
     if not scenarios_dir.is_dir():

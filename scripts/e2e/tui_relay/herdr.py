@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import json
 import os
 import subprocess
@@ -10,7 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 
-from . import assertions, known_gap
+from . import assertions, http_auth, known_gap
 
 TMUX_STEPS = {
     "kill_pane", "capture_session_identity", "assert_session_preserved",
@@ -44,42 +45,89 @@ def clean_turn(block):
         raise assertions.AssertionError("Herdr input_holds must be measured zero")
 
 
-def published_row(block, status, *, channel, provider):
+def reconnect_counts(block):
     counts = block.get("reconnect")
     keys = ("channels", "published", "withheld", "unknown", "pending")
     if not isinstance(counts, dict) or any(type(counts.get(k)) is not int or counts[k] < 0 for k in keys):
         raise assertions.AssertionError("Herdr reconnect counts missing or invalid")
+    return counts
+
+
+def published_row(block, status, *, channel, provider):
+    counts = reconnect_counts(block)
     if counts["withheld"] or counts["unknown"] or counts["pending"] or not counts["published"]:
         raise assertions.AssertionError("Herdr reconnect has unpublished rows")
     if counts["channels"] != counts["published"]:
         raise assertions.AssertionError("Herdr reconnect did not publish every row")
+    return current_row(status, channel=channel, provider=provider)
+
+
+def current_row(status, *, channel, provider, cold=False):
     rows = status.get("executions") if isinstance(status, dict) else None
-    if not isinstance(rows, list):
-        raise assertions.AssertionError("Herdr status executions missing")
-    matches = [r for r in rows if isinstance(r, dict) and str(r.get("channel")) == str(channel)
-               and r.get("provider") == provider and r.get("state") != "retired"]
+    holds = status.get("other_input_holds") if isinstance(status, dict) else None
+    if not isinstance(rows, list) or not isinstance(holds, list):
+        raise assertions.AssertionError("Herdr status executions/other_input_holds missing")
+    if holds:
+        raise assertions.AssertionError("Herdr current CLI status has other input holds")
+    for row in rows:
+        if (not isinstance(row, dict) or row.get("record") == "unreadable"
+                or any(key not in row for key in ("channel", "provider", "state", "input_hold"))
+                or not isinstance(row.get("channel"), (str, int)) or isinstance(row.get("channel"), bool)
+                or not str(row["channel"]) or not row.get("provider") or not row.get("state")):
+            raise assertions.AssertionError("Herdr status row unreadable or incomplete")
+        if row["input_hold"] is not None:
+            raise assertions.AssertionError("Herdr current CLI status has an input hold")
+    matches = [r for r in rows if str(r["channel"]) == str(channel) and r["state"] != "retired"]
+    if not matches and cold:
+        return None
     if len(matches) != 1:
         raise assertions.AssertionError("Herdr target row missing or ambiguous")
     row = matches[0]
-    if (row.get("state") != "bound" or row.get("pane") != "provider_running"
-            or row.get("launch_evidence") != "recorded" or not row.get("nonce")
-            or "input_hold" not in row or row["input_hold"] is not None):
-        raise assertions.AssertionError("Herdr target row is not a published running execution")
+    if (row["provider"] != provider or row["state"] != "bound" or row.get("pane") != "provider_running"
+            or row.get("launch_evidence") != "recorded"
+            or not isinstance(row.get("nonce"), str) or not row["nonce"]):
+        raise assertions.AssertionError("Herdr target row is not a verified running execution")
     return row
 
 
-def observe(driver, args, *, clean=False, reconnected=False):
-    _, payload = driver._read_api_json(args.base_url, "/api/health", timeout=5)
-    block = ready(payload, endpoint=getattr(args, "herdr_endpoint", None), channel=args.channel_id)
-    if clean:
+def observe(driver, args, *, clean=False, reconnected=False, cold=False):
+    evidence = {"surface": "GET /api/health/detail", "status_surface": "agentdesk herdr status",
+                "observed_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    try:
+        if not http_auth.loopback_origin(args.base_url):
+            raise assertions.AssertionError("Herdr observations require target-node loopback API and local CLI")
+        status, payload = driver._read_api_json(args.base_url, "/api/health/detail", timeout=5)
+        evidence["http_status"] = status
+        if not isinstance(payload, dict):
+            raise assertions.AssertionError("Herdr detail health must be an object")
+        evidence["readiness"] = {k: payload[k] for k in
+                                 ("status", "ok", "fully_recovered", "degraded", "degraded_reasons") if k in payload}
+        evidence["server_values"] = {k: payload[k] for k in
+                                     ("uptime_secs", "started_at", "process_started_at_unix", "incarnation", "boot_id") if k in payload}
+        if (status != 200 or payload.get("status") != "healthy"
+                or payload.get("fully_recovered") is not True
+                or ("ok" in payload and payload["ok"] is not True)
+                or ("degraded" in payload and payload["degraded"] is not False)
+                or payload.get("degraded_reasons") != []):
+            raise assertions.AssertionError("Herdr detail health readiness failed or incomplete")
+        block = ready(payload, endpoint=getattr(args, "herdr_endpoint", None), channel=args.channel_id)
+        evidence["herdr"] = {k: block[k] for k in
+                             ("admission", "restart_required", "configured_channels", "endpoints", "input_holds", "reconnect") if k in block}
         clean_turn(block)
-    evidence = {"surface": "GET /api/health", "herdr": block}
-    if reconnected:
+        reconnect_counts(block)
         proc = subprocess.run([getattr(args, "herdr_status_bin", "agentdesk"), "herdr", "status"],
                               capture_output=True, text=True, check=True, timeout=30)
-        evidence["row"] = published_row(block, json.loads(proc.stdout), channel=args.channel_id,
-                                          provider=driver.cell_provider(args.cell))
-    return evidence
+        current = json.loads(proc.stdout)
+        evidence["row"] = current_row(current, channel=args.channel_id,
+                                      provider=driver.cell_provider(args.cell), cold=cold and not reconnected)
+        evidence["current_input_holds"] = 0
+        if reconnected:
+            published_row(block, current, channel=args.channel_id, provider=driver.cell_provider(args.cell))
+        evidence["validated"] = True
+        return evidence
+    except Exception as error:
+        error.herdr_observation = evidence
+        raise
 
 
 def expected_cancel_refusal(error):
@@ -177,7 +225,7 @@ def _run(driver, scenario, args, client, run_id, result):
         result.update(status="fail", reason=str(error))
         return result
     if args.dry_run:
-        print(f"[dry-run] {scenario['id']} ({args.cell}): GET /api/health preflight; setup")
+        print(f"[dry-run] {scenario['id']} ({args.cell}): GET /api/health/detail + local CLI status preflight; setup")
         for step in scenario.get("steps", []):
             state = "not_applicable" if TMUX_STEPS.intersection(step) else "planned"
             print(f"[dry-run] {state}: {json.dumps(step, ensure_ascii=False)}")
@@ -221,7 +269,7 @@ def _run(driver, scenario, args, client, run_id, result):
     # Reset/cancel and queue truncation are deliberately never used as Herdr setup.
     result["reset_policy"] = "preserve Herdr session; reset-before-each not executed"
     try:
-        result["herdr_observations"].append(observe(driver, args, clean=True))
+        result["herdr_observations"].append(observe(driver, args, clean=True, cold=True))
         phase = "setup"
         sent = client.send_control(args.channel_id, f"### E2E SETUP {scenario['id']} cell={args.cell} run={run_id}")
         setup_id = str(sent.get("message_id") or sent.get("id") or "")
@@ -438,6 +486,8 @@ def _run(driver, scenario, args, client, run_id, result):
         if profile and gap_trials:
             known_gap.apply_herdr_result(result, profile, passed=True)
     except Exception as error:
+        if hasattr(error, "herdr_observation"):
+            result["herdr_observations"].append(error.herdr_observation)
         result.update(status="fail", reason=f"{type(error).__name__}: {error}")
         result["failure_attribution"] = {"source": phase, "raw_reason": str(error)}
         if profile and gap_failure:
