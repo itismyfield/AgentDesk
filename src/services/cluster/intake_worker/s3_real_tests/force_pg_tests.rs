@@ -51,11 +51,7 @@ async fn th9_force_orphan_holds_every_consumer_pg() {
         "a live holder"
     );
     holder.kill();
-    // Fast boundary only: the lease is aged in SQL, not waited out in wall-clock time.
-    sqlx::query("UPDATE o_channel_homes SET renewed_at = NOW() - INTERVAL '201 seconds'")
-        .execute(&scene.pool)
-        .await
-        .unwrap();
+    age_lease(&scene).await;
     let forced: serde_json::Value = serde_json::from_str(&force(&scene).await.unwrap()).unwrap();
     assert_eq!(forced["state"], "orphaned");
     let orphan = scene.row().await.unwrap();
@@ -83,6 +79,14 @@ async fn th9_force_orphan_holds_every_consumer_pg() {
     );
     assert_eq!(claim_state(&scene.pool, stranded).await, unclaimed());
     scene.drop_db().await;
+}
+
+/// Fast boundary only: the lease is aged in SQL, not waited out in wall-clock time.
+async fn age_lease(scene: &Scene) {
+    sqlx::query("UPDATE o_channel_homes SET renewed_at = NOW() - INTERVAL '201 seconds'")
+        .execute(&scene.pool)
+        .await
+        .unwrap();
 }
 
 /// Status and claim owner of outbox row `id`.
@@ -194,10 +198,7 @@ async fn reclaiming_with_owed_tail(scene: &Scene, epoch: i64) -> Node {
 
 /// With the holder dead, ages its lease in SQL and forces: the row is orphaned at a new epoch.
 async fn force_orphan(scene: &Scene, epoch: i64) -> i64 {
-    sqlx::query("UPDATE o_channel_homes SET renewed_at = NOW() - INTERVAL '201 seconds'")
-        .execute(&scene.pool)
-        .await
-        .unwrap();
+    age_lease(scene).await;
     let forced: serde_json::Value = serde_json::from_str(&force(scene).await.unwrap()).unwrap();
     assert_eq!(forced["state"], "orphaned");
     let orphan = scene.row().await.unwrap();
