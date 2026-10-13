@@ -466,6 +466,8 @@ async fn start_reserved_headless_turn_admitted(
     let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
     let retry_context = session_retry_context.as_ref();
     let reply_context = retry_context.map(|c| c.formatted_context.clone());
+    let lead = crate::services::imsg_reply::with_started_contract;
+    let reply_context = lead(reply_context, source, metadata.as_ref());
     let goal_fresh = matches!(headless_goal_kind, GoalCommandKind::FreshStart);
     // Routine metadata reasserts the fresh boundary on every routine run, while
     // later user-authored turns carry no routine marker. Persist both deliberate

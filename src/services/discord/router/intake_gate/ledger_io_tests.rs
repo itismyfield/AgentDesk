@@ -176,6 +176,54 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
+fn isolated_io_fixture(test: &str) -> bool {
+    const CHILD: &str = "ADK_G2C_IO_FIXTURE_CHILD";
+    if runtime::supervisor::mutant("c2b_io_runs_in_parent")
+        || std::env::var(CHILD).as_deref() == Ok(test)
+    {
+        return true;
+    }
+    // Global registration is sticky, so exercise the real lookup in a fresh process.
+    let before = runtime::runtime::registry().used();
+    let qualified = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &qualified, "--nocapture"])
+        .env(CHILD, test)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("IO fixture exceeded its deadline");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    let summary = stdout
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("test result: "));
+    assert!(
+        summary.is_some_and(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("G2C_IO_FIXTURE_CONFIRMED {test}")),
+        "fixture body did not complete: {stdout}"
+    );
+    assert_eq!(runtime::runtime::registry().used(), before);
+    print!("{stdout}");
+    eprint!("{stderr}");
+    false
+}
+
 fn run_hold_case(root: &std::path::Path, channel: u64, mode: Mode, cancel: bool) {
     let runtime = runtime();
     let transport = runtime.block_on(Transport::new(channel, mode));
@@ -307,6 +355,11 @@ async fn hold_case(
 
 #[test]
 fn c2b_actual_reply_and_download_cancellation_keep_original_pending_without_success_effects() {
+    let test =
+        "c2b_actual_reply_and_download_cancellation_keep_original_pending_without_success_effects";
+    if !isolated_io_fixture(test) {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     let config = root.path().join("voice-fixture.yml");
@@ -319,10 +372,17 @@ fn c2b_actual_reply_and_download_cancellation_keep_original_pending_without_succ
     );
     run_hold_case(root.path(), 6_328_420, Mode::PauseReply, true);
     run_hold_case(root.path(), 6_328_421, Mode::PauseDownload, true);
+    assert!(runtime::runtime::registry().used());
+    println!("G2C_IO_FIXTURE_CONFIRMED {test}");
 }
 
 #[test]
 fn c2b_actual_reply_and_download_failure_keep_original_pending_without_success_effects() {
+    let test =
+        "c2b_actual_reply_and_download_failure_keep_original_pending_without_success_effects";
+    if !isolated_io_fixture(test) {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     let config = root.path().join("voice-fixture.yml");
@@ -335,6 +395,8 @@ fn c2b_actual_reply_and_download_failure_keep_original_pending_without_success_e
     );
     run_hold_case(root.path(), 6_328_422, Mode::FailReply, false);
     run_hold_case(root.path(), 6_328_423, Mode::FailDownload, false);
+    assert!(runtime::runtime::registry().used());
+    println!("G2C_IO_FIXTURE_CONFIRMED {test}");
 }
 
 #[test]
@@ -416,4 +478,92 @@ fn c2b_actual_enrich_fetches_two_attachments_and_retains_whole_source_after_kind
         );
         assert_eq!(Ledger::probe(root.path(), channel), Presence::Absent);
     });
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn c2b_io_fixtures_keep_global_registry_unused_before_standby_health() {
+    const TEST: &str = "c2b_io_fixtures_keep_global_registry_unused_before_standby_health";
+    const CHILD: &str = "ADK_G2C_STANDBY_HEALTH_CHILD";
+    const CONFIRMED: &str = "G2C_STANDBY_HEALTH_ISOLATION_CONFIRMED";
+    if std::env::var(CHILD).as_deref() != Ok(TEST) {
+        // A fresh process lets the existing fixture IDs run without concurrent copies.
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("runtime");
+        let temporary = sandbox.path().join("tmp");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&temporary).unwrap();
+        let config = sandbox.path().join("fixture.yml");
+        let fixture: crate::config::Config =
+            serde_json::from_value(serde_json::json!({"server": {}, "agents": []})).unwrap();
+        std::fs::write(&config, serde_yaml::to_string(&fixture).unwrap()).unwrap();
+        let qualified = format!("{}::{TEST}", module_path!().split_once("::").unwrap().1);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &qualified, "--nocapture"])
+            .env(CHILD, TEST)
+            .env("AGENTDESK_CONFIG", &config)
+            .env("AGENTDESK_ROOT_DIR", &root)
+            .env("TMPDIR", &temporary)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                let _ = child.wait();
+                panic!("standby health isolation fixture exceeded its deadline");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        let summary = stdout
+            .lines()
+            .rev()
+            .find(|line| line.starts_with("test result: "));
+        assert!(
+            summary.is_some_and(
+                |line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")
+            ),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(CONFIRMED),
+            "fixture body did not complete: {stdout}"
+        );
+        print!("{stdout}");
+        eprint!("{stderr}");
+        return;
+    }
+
+    let registry = crate::services::discord::input_runtime::runtime::registry();
+    let before = registry.used();
+    assert!(
+        !before,
+        "the isolated child must start with an unused registry"
+    );
+    crate::services::discord::input_runtime::clear::tests::a_reused_key_or_regressed_ledger_holds_without_cutting();
+    let unresolved = crate::services::discord::input_runtime::clear::health_reasons();
+    for channel in [6_325_415, 6_325_416] {
+        assert!(
+            unresolved.contains(&format!(
+                "clear_unresolved provider=claude channel={channel} reason=Mismatch"
+            )),
+            "the existing clear fixture must leave its held obligation: {unresolved:?}"
+        );
+    }
+    c2b_actual_reply_and_download_cancellation_keep_original_pending_without_success_effects();
+    c2b_actual_reply_and_download_failure_keep_original_pending_without_success_effects();
+    let after = registry.used();
+    eprintln!("G2C_R1C_REGISTRY_USED before={before} after={after} unresolved={unresolved:?}");
+    crate::services::discord::runtime_bootstrap::c2b_standby_health_fixture_for_test();
+    assert!(
+        !after,
+        "the IO fixtures must leave the process registry unused"
+    );
+    println!("{CONFIRMED}");
 }

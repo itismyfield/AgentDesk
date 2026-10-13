@@ -35,6 +35,7 @@ mod mailbox_unreachable_tests;
 pub(crate) use mailbox_observation::MailboxObservationFailure;
 mod overflow;
 mod pending_queue_persistence;
+pub(crate) mod policy_close;
 mod queue_cancellation;
 mod queue_enqueue;
 mod queued_head;
@@ -112,6 +113,12 @@ use queue_enqueue::enqueue_behind;
 #[cfg(test)]
 pub(crate) use queue_enqueue::enqueue_intervention;
 pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim};
+#[derive(Clone, Debug)]
+pub(crate) enum TakeHeadCondition {
+    #[cfg(test)]
+    Unchecked,
+    Observed(Option<QueueIdentity>),
+}
 pub(crate) use recovery_kickoff::RecoveryKickoffResult;
 use recovery_kickoff::{kickoff_refusal, reset_activation_signals};
 pub(crate) use reply_results::{
@@ -834,16 +841,21 @@ impl ChannelMailboxHandle {
         persistence: QueuePersistenceContext,
         primary_message_id: Option<MessageId>,
     ) -> TakeNextSoftResult {
-        self.take_soft_matching_or_refused(persistence, primary_message_id)
-            .await
-            .unwrap_or(TakeNextSoftResult {
-                intervention: None,
-                dispatch_lease: None,
-                has_more: false,
-                queue_len_after: 0,
-                queue_exit_events: Vec::new(),
-                persistence_error: None,
-            })
+        self.take_soft_matching_or_refused(
+            persistence,
+            primary_message_id,
+            TakeHeadCondition::Unchecked,
+        )
+        .await
+        .unwrap_or(TakeNextSoftResult {
+            selection_stale: false,
+            intervention: None,
+            dispatch_lease: None,
+            has_more: false,
+            queue_len_after: 0,
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        })
     }
 
     pub(crate) async fn requeue_front(
@@ -1238,6 +1250,7 @@ impl ChannelMailboxRegistry {
 // Once `CloseIfIdle` sets `state.closed`, the exhaustive `registry_purge::gate_closed_arm` passes
 // reads and refuses every other arm; CommitCapturedReadyDelivery refuses closed actors in its own arm.
 pub(crate) mod installed_actor_handoff;
+mod scoped_claim;
 
 enum ChannelMailboxMsg {
     FreezeInput {
@@ -1348,6 +1361,8 @@ enum ChannelMailboxMsg {
     },
     #[cfg(test)]
     InstalledActorHandoff(installed_actor_handoff::Request),
+    #[cfg(test)]
+    ScopedClaim(scoped_claim::ScopedMsg),
     ClearRecoveryMarker {
         reply: closed_verdict::VerdictReply<()>,
     },
@@ -1365,6 +1380,7 @@ enum ChannelMailboxMsg {
     TakeNextSoft {
         persistence: QueuePersistenceContext,
         primary_message_id: Option<MessageId>,
+        head_condition: TakeHeadCondition,
         reply: closed_verdict::VerdictReply<TakeNextSoftResult>,
     },
     RequeueFront {
@@ -1410,6 +1426,12 @@ enum ChannelMailboxMsg {
         turn_nonce_guard: TurnNonceGuard,
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<FinishTurnResult>,
+    },
+    /// A before-start policy close: one step claims the exact episode, clears its receipt and
+    /// releases it (see `policy_close.rs`).
+    PolicyClose {
+        request: Box<policy_close::PolicyCloseRequest>,
+        reply: oneshot::Sender<policy_close::PolicyMailboxOutcome>,
     },
     HardStop {
         reply: oneshot::Sender<FinishTurnResult>,
@@ -1604,8 +1626,16 @@ struct ChannelMailboxState {
     turn_started_instant: Option<Instant>,
     /// Which persisted episode a recovery re-mint may still re-open.
     remint_fence: remint_fence::FenceCell,
+    /// The latest policy close this actor committed; see `policy_close.rs`.
+    policy_witness: Option<policy_close::PolicyWitness>,
     /// The queue snapshot's head reservation and submitted sources; see `queued_head.rs`.
     queued_head: queued_head::HeadLedger,
+    /// What an actor a scoped claim installed still owes; see `scoped_claim.rs`.
+    #[cfg(test)]
+    installed_pending: Option<scoped_claim::InstalledPending>,
+    /// Namespaces whose claim left a file holding neither snapshot; scoped claims refuse them.
+    #[cfg(test)]
+    scoped_undecided: Vec<(ProviderKind, String)>,
 }
 
 fn finalize_turn_state(
@@ -2109,6 +2139,8 @@ fn input_mailbox_step(
         ChannelMailboxMsg::InstalledActorHandoff(request) => {
             installed_actor_handoff::step(&mut state, channel_id, own_recovery_done, request);
         }
+        #[cfg(test)]
+        ChannelMailboxMsg::ScopedClaim(msg) => scoped_claim::step(&mut state, channel_id, msg),
         ChannelMailboxMsg::ClearRecoveryMarker { reply } => {
             state.recovery_started_at = None;
             let _ = reply.send(());
@@ -2202,6 +2234,7 @@ fn input_mailbox_step(
         ChannelMailboxMsg::TakeNextSoft {
             persistence,
             primary_message_id,
+            head_condition,
             reply,
         } => {
             state.last_persistence = Some(persistence.clone());
@@ -2221,6 +2254,18 @@ fn input_mailbox_step(
                 &persistence,
             ) {
                 let _ = reply.send(result);
+                return state;
+            }
+            // Recovery may change the physical head after the selector's snapshot.
+            let selection_stale = match head_condition {
+                TakeHeadCondition::Observed(expected) => {
+                    state.intervention_queue.first().map(QueueIdentity::of) != expected
+                }
+                #[cfg(test)]
+                TakeHeadCondition::Unchecked => false,
+            };
+            if selection_stale {
+                let _ = reply.send(TakeNextSoftResult::stale(&state.intervention_queue));
                 return state;
             }
             let previous_queue = state.intervention_queue.clone();
@@ -2258,6 +2303,7 @@ fn input_mailbox_step(
                     &error,
                 );
                 TakeNextSoftResult {
+                    selection_stale: false,
                     intervention: None,
                     dispatch_lease: None,
                     has_more: state
@@ -2281,6 +2327,7 @@ fn input_mailbox_step(
                 // durable backstop for this head until the queue-without-head
                 // write succeeds.
                 TakeNextSoftResult {
+                    selection_stale: false,
                     intervention: None,
                     dispatch_lease: None,
                     has_more: state
@@ -2299,6 +2346,7 @@ fn input_mailbox_step(
                     let dispatch_lease =
                         set_pending_user_dispatch(&mut state, head, &dispatched_head_sources);
                     TakeNextSoftResult {
+                        selection_stale: false,
                         intervention: next_result.intervention,
                         dispatch_lease: Some(dispatch_lease),
                         has_more: next_result.has_more,
@@ -2308,6 +2356,7 @@ fn input_mailbox_step(
                     }
                 } else {
                     TakeNextSoftResult {
+                        selection_stale: false,
                         intervention: next_result.intervention,
                         dispatch_lease: None,
                         has_more: next_result.has_more,
@@ -2539,6 +2588,9 @@ fn input_mailbox_step(
                     persistence_error: None,
                 });
             }
+        }
+        ChannelMailboxMsg::PolicyClose { request, reply } => {
+            let _ = reply.send(policy_close::step(&mut state, channel_id, *request));
         }
         ChannelMailboxMsg::HardStop { reply } => {
             let persistence = state.last_persistence.clone();

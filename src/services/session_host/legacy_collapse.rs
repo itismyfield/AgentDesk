@@ -16,6 +16,40 @@ pub(crate) fn dead_only_if_dead_or_absent(liveness: HostLiveness) -> bool {
     liveness == HostLiveness::DeadOrAbsent
 }
 
+// Three EOF probes span two 100ms waits, filtering one transient clean negative without delaying real death for seconds.
+const DEAD_PANE_CONFIRMATIONS: usize = 3;
+
+#[derive(Default)]
+pub(crate) struct ConfirmedDeadPane(usize);
+
+impl ConfirmedDeadPane {
+    pub(crate) fn reset(&mut self) {
+        self.0 = 0;
+    }
+
+    pub(crate) fn is_confirming_death(&self) -> bool {
+        self.0 > 0 && self.0 < DEAD_PANE_CONFIRMATIONS
+    }
+
+    pub(crate) fn observe(
+        &mut self,
+        liveness: crate::services::platform::tmux::PaneLiveness,
+        rollout: Option<(&std::fs::File, u64)>,
+    ) -> bool {
+        // Recheck the opened file after the probe, which may have blocked while the writer appended.
+        let quiet = rollout.is_none_or(|(file, offset)| {
+            file.metadata()
+                .is_ok_and(|metadata| metadata.len() <= offset)
+        });
+        if liveness == crate::services::platform::tmux::PaneLiveness::DeadOrAbsent && quiet {
+            self.0 = self.0.saturating_add(1);
+        } else {
+            self.reset();
+        }
+        self.0 >= DEAD_PANE_CONFIRMATIONS
+    }
+}
+
 /// The existing bool probe unchanged, including its unbounded `list-panes`.
 /// A Herdr ref never reaches tmux and reads as not-dead.
 pub(crate) fn has_live_pane_bool(session: HostSessionRef<'_>) -> bool {

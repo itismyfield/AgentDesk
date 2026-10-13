@@ -659,7 +659,7 @@ async fn superseded_foreign_or_mismatched_tickets_hold_without_effects() {
 }
 
 #[tokio::test]
-async fn a_reused_key_or_regressed_ledger_holds_without_cutting() {
+pub(crate) async fn a_reused_key_or_regressed_ledger_holds_without_cutting() {
     let (root, channel) = (sandbox(), 6_325_415);
     let mut ledger = open(root.path(), channel, &[11]);
     let mut host = Fake::new("claude", channel);

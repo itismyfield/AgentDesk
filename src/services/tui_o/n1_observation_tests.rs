@@ -45,6 +45,14 @@ pub(crate) fn fixture(capacity: usize) -> (Arc<Observer>, Receiver<Event>) {
     (Arc::new(Observer::new(tx)), rx)
 }
 
+pub(crate) fn healthy(observer: &Observer) -> bool {
+    observer.health() == (0, 0)
+}
+
+pub(crate) fn clock(observer: &Observer) -> u64 {
+    observer.at_us()
+}
+
 pub(crate) fn snapshot_value(observer: &Observer, channel: u64) -> serde_json::Value {
     serde_json::to_value(observer.snapshot(channel)).unwrap()
 }
@@ -185,7 +193,7 @@ fn n1_closed_only_preserves_physical_and_logical_keys_across_readers() {
                 .unwrap();
             assert_eq!(on, off);
         }
-        // Opening at a closer yields EdgeTurn, not another measured completion.
+        // Opening at a closer yields EdgeTurn: an unknown outcome, not another completion.
         let offset = format!("{}\n{}\n", records[0], records[1]).len() as u64;
         InputFacts::open_at(binding, offset)
             .unwrap()
@@ -196,7 +204,7 @@ fn n1_closed_only_preserves_physical_and_logical_keys_across_readers() {
         .try_iter()
         .map(|e| serde_json::to_value(e).unwrap())
         .collect();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 3);
     assert_eq!(events[0]["logical_turn_key"], events[1]["logical_turn_key"]);
     assert_eq!(
         events[0]["physical_observation_key"],
@@ -214,6 +222,14 @@ fn n1_closed_only_preserves_physical_and_logical_keys_across_readers() {
             .contains("private text")
     );
     assert_eq!(json(&observer)["counters"]["closed_events"], 2);
+    let offset = format!("{}\n{}\n", records[0], records[1]).len() as u64;
+    let unknown = &events[2];
+    assert_eq!(unknown["event"], "n1_outcome_unknown");
+    assert_eq!(unknown["reason"], "edge_turn");
+    assert_eq!(unknown["witness_offset"], offset);
+    assert_eq!(unknown["source_id"]["dev"], dev);
+    assert_eq!(unknown["logical_turn_key"], serde_json::Value::Null);
+    assert_eq!(json(&observer)["counters"]["unknown_outcome_events"], 1);
 }
 
 #[test]
@@ -286,9 +302,9 @@ fn n1_confirmation_event_is_later_than_transition_and_preserves_first_window() {
         let before = confirmation_boundary(7);
         // A request after actual confirm but before the caller receives the returned list.
         let request = placeholder_attempt(context(), 7, "post_placeholder", None, None);
-        mode_confirmed("codex", 7, before);
+        mode_confirmed("codex", 7, before, None);
         let later = confirmation_boundary(7);
-        mode_confirmed("codex", 7, later);
+        mode_confirmed("codex", 7, later, None);
         placeholder_result(request, Ok(99));
         let events: Vec<_> = rx
             .try_iter()

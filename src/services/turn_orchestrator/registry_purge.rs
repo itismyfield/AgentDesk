@@ -39,6 +39,7 @@ use std::sync::Arc;
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 pub(crate) use super::closed_verdict::MailboxRefusal;
+use super::policy_close::{PolicyMailboxOutcome, PolicyRetain};
 use super::{
     ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxSnapshot,
     ChannelMailboxState, ClaimObservation, EnqueueInterventionResult, EnqueueRefusalReason,
@@ -72,6 +73,11 @@ pub(super) fn close_if_idle_verdict(state: &mut ChannelMailboxState) -> Result<(
     }
     if super::injected_inputs::holds_order(state) {
         return Err("injection_reserved");
+    }
+    // An installed actor's unacknowledged exits and driver outlive its slot.
+    #[cfg(test)]
+    if state.installed_pending.is_some() {
+        return Err("installed_pending");
     }
     state.closed = true;
     Ok(())
@@ -114,6 +120,13 @@ pub(super) fn gate_closed_arm(
             "RestoreActiveTurn"
         }
         #[cfg(test)]
+        M::ScopedClaim(super::scoped_claim::ScopedMsg::Pending { .. }) => return Some(msg),
+        #[cfg(test)]
+        M::ScopedClaim(scoped) => {
+            scoped.refuse(super::scoped_claim::ScopedClaimRefusal::ActorClosed);
+            "ScopedClaim"
+        }
+        #[cfg(test)]
         M::InstalledActorHandoff(request) => {
             request.refuse(crate::services::cluster::channel_home_port::RestoreFailure::Rejected("handoff actor closed".into()));
             "InstalledActorHandoff"
@@ -137,6 +150,11 @@ pub(super) fn gate_closed_arm(
                 persistence_error: None,
             });
             "RequeueFront"
+        }
+        // A policy close commits only on its captured actor; the successor is never retried.
+        M::PolicyClose { reply, .. } => {
+            let _ = reply.send(PolicyMailboxOutcome::Retained(PolicyRetain::ActorClosed));
+            "PolicyClose"
         }
         // Reply dropped: the handle's offline fallback is the refusal, and what an idle closed
         // actor would answer anyway; finish wrappers read `mailbox_online: false` and stop.

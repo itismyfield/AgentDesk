@@ -35,6 +35,9 @@ pub(crate) mod idle_recap;
 mod idle_recap_interaction;
 mod idle_relay_drift;
 mod inflight;
+pub(crate) use inflight::read_only_owner_snapshot::{
+    CodexEpisodeOwnerSnapshot, codex_episode_snapshot,
+};
 mod inflight_heartbeat_sweeper;
 pub(crate) mod inject_disposition;
 pub(crate) mod internal_api;
@@ -104,6 +107,10 @@ pub use runtime_bootstrap::boot_retirement;
 pub(in crate::services::discord) mod semantic_boundaries;
 mod skills_scan;
 mod turn_presence;
+pub(crate) use turn_presence::entrypoints::{
+    Lease as PresenceLease, withdraw_target as presence_withdraw_target,
+    withdraw_unmounted as presence_withdraw_unmounted,
+};
 #[cfg(all(test, unix))]
 pub(crate) use turn_presence::lifecycle::Runtime as PresenceRuntime;
 mod turn_teardown_clearance;
@@ -318,12 +325,13 @@ use placeholder_controller::queued_card_gate::{self, QueuedCardDisposition, Queu
 pub(in crate::services::discord) use prompt_builder::load_channel_recent_context;
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};
 pub(in crate::services::discord) use queue_dispatch::MailboxEnqueueOutcome;
+#[cfg(test)]
+use queue_dispatch::mailbox_take_next_soft_intervention;
 use queue_dispatch::{
     AutomaticQueueProgression, MailboxTakeNextSoftOutcome,
     automatic_progression as automatic_queue_progression,
     mailbox_abandon_unclaimed_dispatch_after_success, mailbox_requeue_intervention_front,
     mailbox_restore_dequeued_head, mailbox_take_next_automatic_intervention,
-    mailbox_take_next_soft_intervention,
 };
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
@@ -3506,3 +3514,6 @@ pub(crate) use recovery_engine::{codex_rebind_spawn_for_tests, codex_restart_out
 pub(crate) use tmux::tmux_output_stream::{
     codex_native_read_for_tests, codex_source_witness_present_for_tests,
 };
+
+#[cfg(test)]
+pub(crate) use inflight::read_only_owner_snapshot::save_actual_episode_for_tests;

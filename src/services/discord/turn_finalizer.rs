@@ -29,6 +29,7 @@ use tokio::time::Instant;
 
 use crate::services::discord::inflight::RelayOwnerKind;
 use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::turn_orchestrator::policy_close::{PolicyRetain, PolicyStage};
 
 use super::SharedData;
 // #3041 P1-0: dormant lease types for the *Delivery messages below (mod.rs §2-§3).
@@ -63,7 +64,7 @@ pub(in crate::services::discord) use self::completion_signal::{
     CompletionSignal, completion_signal_from_transcript,
 };
 use self::episode::TerminalEvidence;
-pub(in crate::services::discord) use self::episode::claim_normal_episode;
+pub(in crate::services::discord) use self::episode::{PolicyCloseIntent, claim_normal_episode};
 pub(in crate::services::discord) use self::guarded_finish_residue::GuardedFinishResidue;
 pub(in crate::services::discord) use self::guarded_finish_residue::handle_idle_queue_guard_skip;
 // #3479 r9: dormant delivery-lease handlers extracted to the child module; the
@@ -90,7 +91,7 @@ pub(in crate::services::discord) use self::finalize::do_finalize_with_release as
 // #3894: the timer-driven reconcile/backstop cluster extracted; re-imported so
 // the actor loop's reconcile `select!` arm stays byte-identical.
 use self::reconcile::reconcile;
-use self::terminal_handler::handle_terminal;
+use self::terminal_handler::{handle_policy_close, handle_terminal};
 
 /// How often the reconciler `Tick` fires to re-check deadline-armed
 /// gate-timeout entries and garbage-collect the ledger.
@@ -337,6 +338,16 @@ pub(in crate::services::discord) enum FinalizeOutcome {
     Deferred,
 }
 
+/// Result of a policy close; only `Settled` and `DuplicateConfirmed` mean its turn was released.
+#[derive(Debug)]
+pub(in crate::services::discord) enum PolicyCloseOutcome {
+    Settled,
+    DuplicateConfirmed,
+    Superseded,
+    Retained(PolicyRetain),
+    Unconfirmed(PolicyStage),
+}
+
 /// A per-runtime actor, held as `Arc<TurnFinalizer>` on `SharedData`. One
 /// owning task drains the `mpsc`; all public methods are cheap
 /// submit-or-await wrappers.
@@ -362,6 +373,23 @@ impl TurnFinalizer {
             tx,
             guarded_finish_residues: Default::default(),
         })
+    }
+
+    /// A finalizer that accepts each message and drops it unprocessed, its ACK with it.
+    #[cfg(test)]
+    pub(in crate::services::discord) fn spawn_dropping_for_test() -> Arc<Self> {
+        let (tx, mut rx) = mpsc::unbounded_channel::<FinalizeMsg>();
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        Arc::new(Self {
+            tx,
+            guarded_finish_residues: Default::default(),
+        })
+    }
+
+    /// Arms the next finalize side-effect run on this thread to panic.
+    #[cfg(test)]
+    pub(in crate::services::discord) fn arm_finalize_panic_for_test() {
+        test_panic_hook::arm_in_finalize_once();
     }
 
     pub(in crate::services::discord) fn note_mailbox_released(
@@ -749,6 +777,24 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                             super::input_runtime::fence::effect::run(input_permit, work).await;
                         ledger = next_ledger;
                         pending_admission = next_pending;
+                        let _ = ack.send(outcome);
+                    }
+                    FinalizeMsg::PolicyClose {
+                        intent,
+                        input_permit,
+                        shared,
+                        ack,
+                    } => {
+                        cached_shared = Some(Arc::downgrade(&shared));
+                        let mut owned_ledger = std::mem::take(&mut ledger);
+                        let work = async move {
+                            let outcome =
+                                handle_policy_close(&mut owned_ledger, *intent, &shared).await;
+                            (owned_ledger, outcome)
+                        };
+                        let (next_ledger, outcome) =
+                            super::input_runtime::fence::effect::run(input_permit, work).await;
+                        ledger = next_ledger;
                         let _ = ack.send(outcome);
                     }
                     // #3041 §2-§3 P1-0 (DORMANT, UNREACHABLE today). Routing these

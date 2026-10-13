@@ -386,7 +386,8 @@ impl TmuxWatcherRegistry {
         self.owner_channel_by_tmux_session.remove(tmux_session_name);
         self.tmux_session_by_channel.remove(&owner_channel_id);
         // Every removal and displacement unpairs here, under the lock a typing first poll holds.
-        super::turn_presence::entrypoints::withdraw(owner_channel_id.get(), "watcher_unpaired");
+        let withdraw = super::turn_presence::entrypoints::withdraw_watched;
+        withdraw(self, owner_channel_id.get(), "watcher_unpaired");
         Some(UnpairedWatcher {
             owner_channel_id,
             handle,

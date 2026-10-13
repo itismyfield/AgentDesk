@@ -186,6 +186,107 @@ pub(crate) async fn settle_admission(
     Ok(changed.rows_affected() == 1)
 }
 
+/// Before a start or busy paste: the delivering admission names its episode candidate, once.
+/// Each guarded UPDATE autocommits, so `true` means exactly one committed row.
+pub(crate) async fn bind_episode(
+    pool: &PgPool,
+    origin_id: &str,
+    episode: &str,
+    nonce: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let changed = sqlx::query(
+        "UPDATE imsg_reply_obligations SET episode_key = $2,
+             inject_nonce = COALESCE($3, inject_nonce)
+         WHERE origin_id = $1 AND admission = 'admitting'
+           AND episode_key IS NULL AND queued_message_id IS NULL",
+    )
+    .bind(origin_id)
+    .bind(episode)
+    .bind(nonce)
+    .execute(pool)
+    .await?;
+    Ok(changed.rows_affected() == 1)
+}
+
+/// Before a queue write: the delivering admission names the queue entry it becomes.
+pub(crate) async fn bind_queued(
+    pool: &PgPool,
+    origin_id: &str,
+    queued_message_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let changed = sqlx::query(
+        "UPDATE imsg_reply_obligations SET queued_message_id = $2
+         WHERE origin_id = $1 AND admission = 'admitting'
+           AND episode_key IS NULL AND queued_message_id IS NULL",
+    )
+    .bind(origin_id)
+    .bind(queued_message_id)
+    .execute(pool)
+    .await?;
+    Ok(changed.rows_affected() == 1)
+}
+
+/// A start refused before any effect gives its candidate up, so no turn ever claims it.
+pub(crate) async fn release_episode(
+    pool: &PgPool,
+    origin_id: &str,
+    episode: &str,
+) -> Result<bool, sqlx::Error> {
+    let changed = sqlx::query(
+        "UPDATE imsg_reply_obligations SET episode_key = NULL
+         WHERE origin_id = $1 AND admission = 'admitting' AND episode_key = $2
+           AND inject_nonce IS NULL AND terminal_seen_at IS NULL",
+    )
+    .bind(origin_id)
+    .bind(episode)
+    .execute(pool)
+    .await?;
+    Ok(changed.rows_affected() == 1)
+}
+
+/// A paste the pane refused leaves its busy episode: the GUID waits as queue entry `queued`, and
+/// no end of that episode can count for it. The nonce stays for diagnosis.
+pub(crate) async fn hand_back_busy(
+    pool: &PgPool,
+    origin_id: &str,
+    (episode, nonce): (&str, &str),
+    queued_message_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let changed = sqlx::query(
+        "UPDATE imsg_reply_obligations SET episode_key = NULL,
+             queued_message_id = $4, terminal_seen_at = NULL
+         WHERE origin_id = $1 AND admission = 'admitting'
+           AND episode_key = $2 AND inject_nonce = $3 AND queued_message_id IS NULL",
+    )
+    .bind(origin_id)
+    .bind(episode)
+    .bind(nonce)
+    .bind(queued_message_id)
+    .execute(pool)
+    .await?;
+    Ok(changed.rows_affected() == 1)
+}
+
+/// When a local turn actually claims queue entry `queued`, its GUIDs join that turn's episode.
+pub async fn bind_consumed(
+    pool: &PgPool,
+    channel_id: &str,
+    queued_message_id: &str,
+    episode: &str,
+) -> Result<u64, sqlx::Error> {
+    let changed = sqlx::query(
+        "UPDATE imsg_reply_obligations SET episode_key = $3, terminal_seen_at = NULL
+         WHERE channel_id = $1 AND queued_message_id = $2 AND episode_key IS NULL
+           AND admission <> 'refused'",
+    )
+    .bind(channel_id)
+    .bind(queued_message_id)
+    .bind(episode)
+    .execute(pool)
+    .await?;
+    Ok(changed.rows_affected())
+}
+
 const CLAIM_SQL: &str = r#"
 WITH slot AS (
     UPDATE imsg_reply_obligations AS o SET active_send_action = $2

@@ -125,7 +125,9 @@ impl TurnGateway for EffectGateway {
 }
 
 /// Installs a Discord REST mock for this thread that records every request body.
-async fn rest_bodies() -> (
+async fn rest_bodies(
+    channel: u64,
+) -> (
     Arc<Mutex<Vec<String>>>,
     crate::services::discord::shared_state::test_rest::Guard,
 ) {
@@ -136,7 +138,7 @@ async fn rest_bodies() -> (
         async move {
             recorded.lock().unwrap().push(body);
             axum::Json(serde_json::json!({
-                "id": "4700001", "channel_id": DRIVER_CHANNEL_ID.to_string(), "content": "",
+                "id": "4700001", "channel_id": channel.to_string(), "content": "",
                 "author": {"id":"1", "username":"bot", "discriminator":"0001", "avatar":null},
                 "timestamp":"2026-10-01T00:00:00+00:00", "edited_timestamp":null,
                 "tts":false, "mention_everyone":false, "mentions":[], "mention_roles":[],
@@ -178,19 +180,28 @@ enum Request<'a> {
     ProtectedHeldElsewhere(&'a [Seen]),
 }
 
+fn case_hash(case: &str) -> u64 {
+    case.bytes().fold(0u64, |hash, byte| {
+        hash.wrapping_mul(31).wrapping_add(u64::from(byte))
+    }) % 1_000_000
+}
+
 /// A user message of its own per case: a held request bars its source for the whole process.
 fn case_message(case: &str) -> u64 {
-    6_008_000_000
-        + case.bytes().fold(0u64, |hash, byte| {
-            hash.wrapping_mul(31).wrapping_add(u64::from(byte))
-        }) % 1_000_000
+    6_008_000_000 + case_hash(case)
+}
+
+/// A channel of its own per case: the history retry's dedup lockout is keyed by channel alone
+/// for the whole process, so a shared channel lets one test's pending retry leak into another.
+fn case_channel(case: &str) -> u64 {
+    6_009_000_000 + case_hash(case)
 }
 
 async fn start_attempt(pool: &sqlx::PgPool, case: &str) -> write::ExactAttempt {
     let request = CanonicalInput {
         request_key: format!("replay-turn-{case}"),
         provider: "claude".into(),
-        channel: DRIVER_CHANNEL_ID.to_string(),
+        channel: case_channel(case).to_string(),
         sources: vec![case_message(case).to_string()],
         original_text: "driver prompt".into(),
         owner_id: "1".into(),
@@ -226,12 +237,12 @@ async fn bridge_turn_with(
 ) -> TurnEnd {
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
-    let (rest, _rest) = rest_bodies().await;
+    let (rest, _rest) = rest_bodies(case_channel(case)).await;
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     Arc::get_mut(&mut driver.shared).unwrap().pg_pool = Some(pool.clone());
     let shared = driver.shared.clone();
-    let channel = ChannelId::new(DRIVER_CHANNEL_ID);
+    let channel = ChannelId::new(case_channel(case));
     let user = MessageId::new(case_message(case));
     // The bridge itself owns the turn's output, so every body it shows reaches this gateway.
     shared.tmux_watchers.remove(&channel);
@@ -245,13 +256,8 @@ async fn bridge_turn_with(
         None,
     );
     let key = key.await.expect("channel session key");
-    crate::services::discord::inflight::seed_session_row_keyed(
-        &pool,
-        &key,
-        DRIVER_CHANNEL_ID,
-        None,
-    )
-    .await;
+    crate::services::discord::inflight::seed_session_row_keyed(&pool, &key, channel.get(), None)
+        .await;
     let exit_reason =
         crate::services::tmux_common::session_temp_path(DRIVER_TMUX_SESSION, "exit_reason");
     let _ = std::fs::remove_file(&exit_reason);
@@ -274,6 +280,7 @@ async fn bridge_turn_with(
         }
         assert!(cancel.attach_replay_attempt(Arc::new(live)));
     }
+    driver.inflight.channel_id = channel.get();
     driver.inflight.user_msg_id = user.get();
     prepare(&mut driver.inflight);
     crate::services::discord::inflight::save_inflight_state(&driver.inflight).unwrap();
@@ -367,7 +374,7 @@ async fn bridge_turn_with(
         core_sid,
         killed: std::path::Path::new(&exit_reason).exists(),
         barred: crate::services::discord::replay_policy::legacy_retry_barred(
-            DRIVER_CHANNEL_ID,
+            channel.get(),
             user.get(),
         ),
         started,
@@ -619,7 +626,7 @@ async fn held_request_refuses_the_legacy_history_retry_pg() {
     assert!(end.barred, "{end:?}");
     let shared = crate::services::discord::make_shared_data_for_tests();
     let http = poise::serenity_prelude::Http::new("");
-    let channel = ChannelId::new(DRIVER_CHANNEL_ID);
+    let channel = ChannelId::new(case_channel("history"));
     let user = MessageId::new(case_message("history"));
     let retry = auto_retry_with_history(&http, &shared, &ProviderKind::Claude, channel, user, "x");
     tokio::time::timeout(std::time::Duration::from_secs(5), retry)
@@ -699,9 +706,8 @@ async fn legacy_and_protected_retries_claim_a_request_once_pg() {
     use crate::services::discord::turn_bridge::recovery_text::{
         auto_retry_with_history, release_retry_pending,
     };
-    let channel = ChannelId::new(DRIVER_CHANNEL_ID);
     assert!(claim_legacy_retry(
-        DRIVER_CHANNEL_ID,
+        case_channel("claimed"),
         case_message("claimed")
     ));
     let quiet = seen(&[Seen::Terminal(TerminalKind::Error)]);
@@ -737,6 +743,7 @@ async fn legacy_and_protected_retries_claim_a_request_once_pg() {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let shared = crate::services::discord::make_shared_data_for_tests();
     for (case, held) in [("unheld", false), ("raced", true)] {
+        let channel = ChannelId::new(case_channel(case));
         release_retry_pending(channel);
         let user = MessageId::new(case_message(case));
         let retry = {

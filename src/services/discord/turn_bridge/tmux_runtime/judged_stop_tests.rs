@@ -859,8 +859,8 @@ fn b2b1_watch(shared: &SharedData, channel: ChannelId, session: &str) {
     );
 }
 
-// Only a published cancel withdraws: a refused host or a turn replaced before the cancel keeps
-// the channel's approval.
+// Only a published cancel withdraws, and only in its own runtime: a refused host, a turn replaced
+// before the cancel or another runtime on the same channel keeps the approval.
 #[test]
 fn b2b1_a_user_stop_withdraws_only_when_its_cancel_is_published() {
     use crate::services::discord::turn_presence::entrypoints::tests::Probe;
@@ -886,9 +886,16 @@ fn b2b1_a_user_stop_withdraws_only_when_its_cancel_is_published() {
         start(&shared, admitted, &Arc::new(CancelToken::new())).await;
         inflight_row(&provider, admitted, name, false);
         let ticket = probe.arm(admitted.get());
+        let other = crate::services::discord::make_shared_data_for_tests();
+        let elsewhere = Probe::install(&other);
+        let foreign = elsewhere.arm(admitted.get());
         let stop = begin_user_stop(&shared, &provider, admitted, true, "/stop").await;
         assert!(matches!(stop, CommandStop::Stop(_)));
         assert!(!Probe::current(&ticket), "the published cancel withdraws");
+        assert!(
+            Probe::current(&foreign),
+            "another runtime keeps the channel"
+        );
 
         let replaced = ChannelId::new(5_340_690_030);
         let name = "AgentDesk-claude-b2b1-replaced";
