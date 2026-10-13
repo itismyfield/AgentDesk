@@ -2721,6 +2721,7 @@ services::cluster::watcher_supervisor::tests::shutdown_observation_sites_are_bra
 services::cluster::watcher_supervisor::tests::shutdown_observation_waits_before_reporting
 services::cluster::watcher_supervisor::tests::supervisor_publishes_producer_for_each_spawn
 services::cluster::watcher_supervisor::tests::supervisor_teardown_completes_with_outliving_producer_clone
+services::codex::actual_submit_tests::s2b1b_actual_driver_missing_episode_refuses_before_transport
 services::codex::c1_teardown_tests::a_cleared_existing_session_is_relaunched_exactly_once
 services::codex::c1_teardown_tests::an_existing_session_is_recreated_only_under_its_clearance
 services::codex::codex_fifo_followup_transport_tests::reused_fifo_wrapper_buffer_keeps_protocol_line_terminated
@@ -4439,6 +4440,9 @@ services::discord::inflight::orphan_relay_reclaim::tests::orphan_shape_still_mat
 services::discord::inflight::orphan_relay_reclaim::tests::pinned_watcherless_episode_downgrades_a_fresh_orphan_without_the_age_gate
 services::discord::inflight::orphan_relay_reclaim::tests::watcher_attaching_after_the_absence_check_keeps_the_session_bound_owner
 services::discord::inflight::post_loop_identity_guard_tests::post_loop_finalize_saves_require_matching_identity
+services::discord::inflight::read_only_owner_snapshot::tests::s2b1a_row_snapshot_reads_legacy_bytes_without_backfill_or_generation_change
+services::discord::inflight::read_only_owner_snapshot::tests::s2b1a_row_snapshot_refuses_unknown_owner_nonce_and_unreadable_rows
+services::discord::inflight::read_only_owner_snapshot::tests::s2b1a_row_snapshot_rejects_same_nonce_different_arc_and_successor_mailbox
 services::discord::inflight::rebind_origin_reap_tests::active_or_unknown_watcher_rebind_not_reaped_readopt_preserved_3879
 services::discord::inflight::rebind_origin_reap_tests::boot_path_preserves_dead_watcher_rebind
 services::discord::inflight::rebind_origin_reap_tests::dead_watcher_reap_respects_structural_conjunction
@@ -12300,6 +12304,10 @@ services::tui_o::store::codex_provenance::submit_floor::tests::s2a_prepare_and_c
 services::tui_o::store::codex_provenance::submit_floor::tests::s2a_prepare_rejects_corrupt_foreign_unknown_and_conflicting_floors_without_repair
 services::tui_o::store::codex_provenance::submit_floor::tests::s2a_readback_revalidates_bytes_and_closed_native_identity
 services::tui_o::store::codex_provenance::submit_floor::tests::s2a_schema2_rejects_unknown_floor_context_fields_and_identity_loss
+services::tui_o::store::codex_provenance::submit_floor::tests::s2b1a_prepare_rejects_forged_or_stale_native_floor_before_writing
+services::tui_o::store::codex_provenance::submit_floor::tests::s2b1a_real_parent_sync_failure_prevents_prepare_and_close_ack
+services::tui_o::store::codex_provenance::submit_floor::tests::s2b1a_strict_old_reader_rejects_schema2_and_unknown_schema1_without_writes
+services::tui_o::store::codex_provenance::submit_floor::tests::s2b1b_p2_strict_schema1_reader_rejects_nested_unknown_fields_without_writes
 services::tui_o::store::codex_provenance::tests::a_failed_span_replace_publishes_no_closed_range_and_fails_the_store
 services::tui_o::store::codex_provenance::tests::a_foreign_partial_or_conflicting_deny_is_refused_and_unreadable_when_written_directly
 services::tui_o::store::codex_provenance::tests::an_old_boundary_with_codex_fields_reads_rewrites_and_is_never_imported
@@ -12624,6 +12632,12 @@ services::tui_o::writer::tests::actor::host_start::rotation_unsettled::consecuti
 services::tui_o::writer::tests::actor::host_start::rotation_unsettled::resume::a_resumed_actor_publishes_its_unretired_predecessor_and_never_an_unread_zero
 services::tui_o::writer::tests::actor::host_start::rotation_unsettled::the_readiness_map_reports_a_running_actors_projection_only
 services::tui_o::writer::tests::actor::host_start::s2a::s2a_same_claim_restart_rejects_delayed_close_reply_before_issue_and_attach
+services::tui_o::writer::tests::actor::host_start::s2a::s2b1a_dropping_command_sender_does_not_stop_hosted_actor
+services::tui_o::writer::tests::actor::host_start::s2a::s2b1a_same_claim_restart_rejects_delayed_typed_prepare_before_submit
+services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_delivery_gate_off_keeps_closed_evidence_without_post
+services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_failures_cancel_and_stale_evidence_issue_nothing
+services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_issued_record_fences_cancellation_during_first_poll
+services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_two_warm_turns_share_execution_and_post_once_each
 services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
 services::tui_o::writer::tests::actor::operator_resume::operator_resume_empty_spool_is_owed_before_wait_observation_at_300_seconds
 services::tui_o::writer::tests::actor::operator_resume::operator_resume_lease_wait_preserves_readiness_and_drain_owing
@@ -13041,6 +13055,8 @@ services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::resolved_sam
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::restart_refuses_unlinked_or_foreign_proof_cursors_and_replaced_relay_identity
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::restart_restores_native_and_relay_checkpoints_in_their_own_namespaces
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::revoked_permission_blocks_both_getters_with_an_intact_proof_and_marker
+services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::s2b1a_owned_source_snapshot_is_read_only_without_delivery_permission_and_rechecks_descriptor
+services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::s2b1b_p2_snapshot_rejects_a_valid_successor_incarnation
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::same_native_hook_retries_with_optional_path_hints_do_not_append
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::unresolved_two_native_parents_and_stop_do_not_publish_a_winner
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::verified_source_less_equal_command_initial_ups_uses_exact_utf8
