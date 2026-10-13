@@ -20,6 +20,57 @@ TMUX_STEPS = {
 }
 
 
+def validate_arguments(parser, args):
+    allowed = args.herdr_allowed_degraded_reason or []
+    if allowed and not args.cell.endswith("-herdr"):
+        parser.error("--herdr-allowed-degraded-reason applies only to Herdr cells")
+    if any(pattern.strip() in ("", "*") for pattern in allowed):
+        parser.error("--herdr-allowed-degraded-reason must name a reason or prefix; empty or bare '*' waives everything")
+
+
+def detail_ready(driver, http_status, payload, *, allowed, channel):
+    """Return the degraded reasons waived by the operator allowlist; raise unless detail health is ready."""
+    if not allowed:
+        if (http_status != 200 or payload.get("status") != "healthy"
+                or payload.get("fully_recovered") is not True
+                or ("ok" in payload and payload["ok"] is not True)
+                or ("degraded" in payload and payload["degraded"] is not False)
+                or payload.get("degraded_reasons") != []):
+            raise assertions.AssertionError("Herdr detail health readiness failed or incomplete")
+        return []
+    state, reasons = payload.get("status"), payload.get("degraded_reasons")
+    if not isinstance(reasons, list) or any(not isinstance(r, str) for r in reasons):
+        raise assertions.AssertionError("Herdr detail degraded_reasons must be a list of strings")
+    # Detail omits ok/degraded on the registry path; standalone sets ok only when healthy.
+    healthy = state == "healthy"
+    if (http_status != 200 or state not in ("healthy", "degraded")
+            or payload.get("fully_recovered") is not True
+            or ("ok" in payload and payload["ok"] is not healthy)
+            or ("degraded" in payload and payload["degraded"] is not (state == "degraded"))
+            or healthy == bool(reasons)):
+        raise assertions.AssertionError("Herdr detail health readiness failed or incomplete")
+    hard = [r for r in reasons if "herdr" in r.lower() or str(channel) in r]
+    unmatched = [r for r in reasons if r not in hard and not driver._health_reason_allowed(r, tuple(allowed))]
+    if hard or unmatched:
+        raise assertions.AssertionError(
+            f"Herdr detail degraded_reasons not waived: never_waived={hard} unmatched={unmatched}")
+    return reasons
+
+
+def waiver_summary(args, observations):
+    allowed = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
+    ignored = sorted({r for o in observations if isinstance(o, dict)
+                      for r in (o.get("readiness") or {}).get("ignored_degraded_reasons", [])})
+    return {"degraded_reason_waiver": "applied" if ignored else ("unused" if allowed else "none"),
+            "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": ignored}
+
+
+def report_waiver(args, result):
+    result["herdr_readiness_waiver"] = summary = waiver_summary(args, result.get("herdr_observations", []))
+    if summary["allowed_degraded_reasons"]:
+        print(f"[e2e]   herdr readiness waiver: {json.dumps(summary, ensure_ascii=False)}")
+
+
 def ready(payload, *, endpoint, channel):
     block = payload.get("herdr") if isinstance(payload, dict) else None
     if not isinstance(block, dict):
@@ -104,12 +155,12 @@ def observe(driver, args, *, reconnected=False, cold=False):
                                  ("status", "ok", "fully_recovered", "degraded", "degraded_reasons") if k in payload}
         evidence["server_values"] = {k: payload[k] for k in
                                      ("uptime_secs", "started_at", "process_started_at_unix", "incarnation", "boot_id") if k in payload}
-        if (status != 200 or payload.get("status") != "healthy"
-                or payload.get("fully_recovered") is not True
-                or ("ok" in payload and payload["ok"] is not True)
-                or ("degraded" in payload and payload["degraded"] is not False)
-                or payload.get("degraded_reasons") != []):
-            raise assertions.AssertionError("Herdr detail health readiness failed or incomplete")
+        allowed = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
+        evidence["readiness"].update(degraded_reason_waiver="unused" if allowed else "none",
+                                     allowed_degraded_reasons=allowed, ignored_degraded_reasons=[])
+        ignored = detail_ready(driver, status, payload, allowed=allowed, channel=args.channel_id)
+        if ignored:
+            evidence["readiness"].update(degraded_reason_waiver="applied", ignored_degraded_reasons=list(ignored))
         block = ready(payload, endpoint=getattr(args, "herdr_endpoint", None), channel=args.channel_id)
         evidence["herdr"] = {k: block[k] for k in
                              ("admission", "restart_required", "configured_channels", "endpoints", "input_holds", "reconnect") if k in block}
@@ -200,6 +251,7 @@ def run(driver, scenario, args, client, run_id, result):
     for key in ("not_applicable", "known_gaps", "herdr_observations", "assertions"):
         result[key] = [item for case in (http, stop) for item in case.get(key, [])]
     result["real_provider_contacted"] = http["real_provider_contacted"] or stop["real_provider_contacted"]
+    result["herdr_readiness_waiver"] = waiver_summary(args, result["herdr_observations"])
     result["status"] = next((s for s in ("fail", "unexpected_pass", "known_gap", "not_applicable", "dry_run")
                              if s in {http["status"], stop["status"]}), "pass")
     result["reason"] = "; ".join(f"{c['id']}: {c['status']} {c.get('reason') or ''}" for c in (http, stop))
@@ -240,6 +292,7 @@ def _run(driver, scenario, args, client, run_id, result):
             print("[dry-run] Herdr override: HTTP cancel force=false (HostOwned follow-up, not P10-3); P11 force=true is E-12")
         if any("restart_dcserver" in step for step in scenario.get("steps", [])):
             print("[dry-run] restart: isolated-server attestation; read-only status before/after; same nonce; all rows published")
+        report_waiver(args, result)
         result.update(status="dry_run", reason="plan only; no observed passes")
         return result
     if args.hard_reset_session_each:
@@ -499,6 +552,7 @@ def _run(driver, scenario, args, client, run_id, result):
                 driver.send_teardown_marker(client=client, channel_id=args.channel_id, scenario_id=scenario["id"], cell=args.cell, run_id=run_id)
             except Exception as error:
                 result.update(status="fail", reason=f"Herdr teardown failed: {error}")
+        report_waiver(args, result)
         driver._update_record_window_snapshot(result, window)
         driver._record_marker_counts(result, window, [m.replace("{run_id}", run_id) for m in scenario.get("report_marker_counts", [])])
         driver._refresh_agent_mode_record(result, scenario=scenario, declared_agent_mode=result["agent_mode"], dry_run=False)
