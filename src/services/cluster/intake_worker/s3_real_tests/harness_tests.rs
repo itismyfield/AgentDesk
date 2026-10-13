@@ -414,13 +414,18 @@ struct DiscordState {
 pub(super) struct Discord {
     state: Arc<DiscordState>,
     valve: watch::Sender<bool>,
+    history_unavailable: bool,
 }
+
+/// What every history read of [`Discord::history_unavailable`] fails with.
+pub(super) const HISTORY_UNAVAILABLE: &str = "test history unavailable";
 
 impl Default for Discord {
     fn default() -> Self {
         Self {
             state: Arc::default(),
             valve: watch::channel(true).0,
+            history_unavailable: false,
         }
     }
 }
@@ -452,6 +457,12 @@ impl Discord {
             state: Arc::new(state),
             ..Self::default()
         }
+    }
+
+    /// As this Discord, with every history read failing as an outage would.
+    pub(super) fn history_unavailable(mut self) -> Self {
+        self.history_unavailable = true;
+        self
     }
 
     /// What earlier generations accepted.
@@ -590,6 +601,9 @@ impl DiscordPort for Discord {
         channel: u64,
         after: u64,
     ) -> impl Future<Output = Result<Vec<SeenMessage>, String>> + Send {
+        if self.history_unavailable {
+            return std::future::ready(Err(HISTORY_UNAVAILABLE.into()));
+        }
         let created = locked(&self.state.created);
         let page = (self.state.kept.iter().chain(created.iter()))
             .filter(|(c, m)| *c == channel && m.id > after);

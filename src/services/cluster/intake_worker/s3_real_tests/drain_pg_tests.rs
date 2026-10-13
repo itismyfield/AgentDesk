@@ -28,7 +28,7 @@ use crate::services::tui_o::writer::deliver::{self, ChannelWriter, Step};
 use crate::services::tui_o::writer::host::test_io::Alarms;
 use crate::services::tui_o::writer::host::{self, HostIo};
 use crate::services::tui_o::writer::pieces::{Derived, PieceWork};
-use crate::services::tui_o::writer::{DiscordPort, PostOutcome};
+use crate::services::tui_o::writer::{DiscordPort, PostOutcome, WriterAlarm};
 
 const WITHIN: Duration = Duration::from_secs(60);
 /// Two drain rounds of the boot watch (`RENEW_EVERY` apart) and a margin.
@@ -52,22 +52,7 @@ async fn reclaim_after(
     scenario: &str,
     within: Duration,
 ) -> (Scene, i64) {
-    let epoch = scene.worker_home().await;
-    put(scene.dir(), "epoch", epoch);
-    if let Some(seed) = seed {
-        Node::spawn(&scene, seed, MINI).finish(WITHIN).await;
-    }
-    let mut node = Node::spawn(&scene, scenario, MINI);
-    node.wait_signal("owed_seen", WITHIN).await;
-    let channel = C.to_string();
-    applied(o_channel_homes::begin_reclaim(&scene.pool, &channel, epoch, GW).await);
-    // The gateway's router takes nothing new for the channel while it drains.
-    let routed = route_as(&scene.pool, GW, scene.provider, "2001").await;
-    assert!(
-        matches!(routed, IntakeRouterDecision::Blocked { .. }),
-        "{routed:?}"
-    );
-    signal(scene.dir(), "reclaim_begun");
+    let (node, epoch) = reclaim_begun(&scene, seed, scenario).await;
     node.finish(within).await;
     let row = scene.row().await.unwrap();
     assert_eq!(
@@ -81,6 +66,27 @@ async fn reclaim_after(
         .unwrap();
     assert_eq!(rows, 0, "no intake was taken while it drained");
     (scene, epoch)
+}
+
+/// The parent's side up to the gateway's reclaim, with the node that holds the channel still running.
+async fn reclaim_begun(scene: &Scene, seed: Option<&str>, scenario: &str) -> (Node, i64) {
+    let epoch = scene.worker_home().await;
+    put(scene.dir(), "epoch", epoch);
+    if let Some(seed) = seed {
+        Node::spawn(scene, seed, MINI).finish(WITHIN).await;
+    }
+    let mut node = Node::spawn(scene, scenario, MINI);
+    node.wait_signal("owed_seen", WITHIN).await;
+    let channel = C.to_string();
+    applied(o_channel_homes::begin_reclaim(&scene.pool, &channel, epoch, GW).await);
+    // The gateway's router takes nothing new for the channel while it drains.
+    let routed = route_as(&scene.pool, GW, scene.provider, "2001").await;
+    assert!(
+        matches!(routed, IntakeRouterDecision::Blocked { .. }),
+        "{routed:?}"
+    );
+    signal(scene.dir(), "reclaim_begun");
+    (node, epoch)
 }
 
 /// A booted holder at `epoch` with its writer taking work and a baseline already delivered.
@@ -411,11 +417,10 @@ async fn th7_prepared_alone_blocks_reclaim_pg() {
     scene.drop_db().await;
 }
 
-/// First generation: the activated store, the Prepared a writer appends before its POST, and
-/// Discord accepting that POST; the reply is lost as this generation ends.
-pub(super) async fn prepared_seed_node(env: &Env) {
+/// The activated store with the Prepared a writer appends before its POST, at serial 0.
+fn prepared_store() -> (OStore, ChannelStore) {
     let root = crate::config::runtime_root().expect("node root");
-    let (_store, mut channel) = activated_store(&root);
+    let (store, mut channel) = activated_store(&root);
     let ledger = channel.ledger();
     let prepared = LedgerEntry::Prepared {
         serial: ledger.next_serial(),
@@ -426,6 +431,13 @@ pub(super) async fn prepared_seed_node(env: &Env) {
         epoch: 1,
     };
     channel.append_ledger(prepared).unwrap();
+    (store, channel)
+}
+
+/// First generation: the Prepared and Discord accepting its POST; the reply is lost as this
+/// generation ends.
+pub(super) async fn prepared_seed_node(env: &Env) {
+    let (_store, channel) = prepared_store();
     let discord = Discord::kept_in(&env.dir.join(HISTORY));
     let outcome = discord.post(C, MAYBE_SENT.into()).await;
     assert!(matches!(outcome, PostOutcome::Created(_)), "{outcome:?}");
@@ -434,12 +446,29 @@ pub(super) async fn prepared_seed_node(env: &Env) {
 }
 
 pub(super) async fn prepared_node(env: &Env) {
-    let epoch = epoch_of(env);
     let discord = Discord::kept_in(&env.dir.join(HISTORY));
     let kept = discord.kept();
     assert_eq!(kept.len(), 1, "the history Discord kept across the restart");
     let ours = (discord.bot_id(), MAYBE_SENT);
     assert_eq!((kept[0].author_id, kept[0].content.as_str()), ours);
+    let node = holds_on_prepared(env, discord).await;
+    append(&node.transcript, &row("m1", MAYBE_SENT));
+    let clear = || async { node.owed().await == Some(Owed::default()) };
+    until_async("the replayed piece settles the Prepared", WITHIN, clear).await;
+    until_left(&node).await;
+    assert_eq!(
+        node.discord().posts(),
+        Vec::<String>::new(),
+        "no POST after the restart"
+    );
+    assert_eq!(node.discord().seen(), Vec::<Seen>::new());
+    node.stop().await;
+}
+
+/// The restarted holder on the seed's root: through two drain rounds after the reclaim, its open
+/// Prepared alone keeps the row Reclaiming, before any row derives its unit again.
+async fn holds_on_prepared(env: &Env, discord: Discord) -> Booted {
+    let epoch = epoch_of(env);
     let node = Booted::boot_on(env, discord).await;
     until("the lease opens the home", WITHIN, || {
         node.home_epoch() == Some(epoch)
@@ -468,17 +497,124 @@ pub(super) async fn prepared_node(env: &Env) {
     assert_eq!(owed, Some(alone), "the Prepared is the only responsibility");
     assert_eq!(blocker.as_deref(), Some("owed"));
     assert_eq!(running, Some(0));
+    node
+}
+
+/// An unsent Prepared alone: Discord's history keeps no candidate for it.
+pub(super) async fn unsent_seed_node(_: &Env) {
+    let (_store, channel) = prepared_store();
+    let (serial, open) = channel.ledger().unresolved().expect("the Prepared is open");
+    assert_eq!((serial, open.payload.as_str()), (0, MAYBE_SENT));
+}
+
+/// T-H7 Prepared alone, NotFound: an unsent Prepared keeps the reclaim draining until the replayed
+/// row settles it NotFound from a readable history with no candidate; nothing is posted.
+#[tokio::test(flavor = "current_thread")]
+async fn th7_prepared_alone_settles_not_found_pg() {
+    unsent_settles("th7_settles_not_found")
+        .await
+        .drop_db()
+        .await;
+}
+
+/// T-H7 Prepared alone, Unresolved: as the NotFound case with every history read failing; the
+/// Prepared settles Unresolved for that reason and nothing is posted or retried.
+#[tokio::test(flavor = "current_thread")]
+async fn th7_prepared_alone_settles_unresolved_pg() {
+    unsent_settles("th7_settles_unresolved")
+        .await
+        .drop_db()
+        .await;
+}
+
+/// The parent's side of an unsent Prepared: the row leaves, no generation posted and the ledger
+/// keeps the one Prepared, settled.
+async fn unsent_settles(scenario: &str) -> Scene {
+    let (scene, seed) = (Scene::new().await, Some("th7_unsent_seed"));
+    let (scene, _) = reclaim_after(scene, seed, scenario, Duration::from_secs(180)).await;
+    let history = std::fs::read_to_string(scene.dir().join(HISTORY)).unwrap();
+    assert_eq!(history, "", "Discord accepted no POST in any generation");
+    let root = scene.dir().join(format!("root-{MINI}"));
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root);
+    let store = store.unwrap().unwrap();
+    let era = store.read_era().unwrap().unwrap();
+    let channel = store.open_channel(&era, C).unwrap().unwrap();
+    assert_eq!(
+        channel.ledger().next_serial(),
+        1,
+        "no Prepared after the seed"
+    );
+    assert!(channel.ledger().unresolved().is_none());
+    scene
+}
+
+pub(super) async fn settles_not_found_node(env: &Env) {
+    let node = settled_on_replay(env, Discord::kept_in(&env.dir.join(HISTORY))).await;
+    assert_eq!(settled(&node), [LedgerEntry::NotFound { serial: 0 }]);
+    assert_eq!(settle_alarms(&node), [WriterAlarm::NotFound { serial: 0 }]);
+    node.stop().await;
+}
+
+pub(super) async fn settles_unresolved_node(env: &Env) {
+    let discord = Discord::kept_in(&env.dir.join(HISTORY)).history_unavailable();
+    let node = settled_on_replay(env, discord).await;
+    let outcomes = settled(&node);
+    let [LedgerEntry::Unresolved { serial: 0, reason }] = &outcomes[..] else {
+        panic!("settled {outcomes:?}");
+    };
+    assert!(reason.contains(HISTORY_UNAVAILABLE), "{reason}");
+    let alarm = WriterAlarm::Unresolved {
+        serial: 0,
+        reason: reason.clone(),
+    };
+    assert_eq!(settle_alarms(&node), [alarm]);
+    node.stop().await;
+}
+
+/// Holds on the unsent Prepared, then appends the row that derives its unit again, which is what
+/// starts the settlement; waits for it and the leave, with nothing posted.
+async fn settled_on_replay(env: &Env, discord: Discord) -> Booted {
+    let node = holds_on_prepared(env, discord).await;
+    assert_eq!(settled(&node), [], "settled before the row came again");
+    assert_eq!(settle_alarms(&node), []);
+    let replayed = tokio::time::Instant::now();
     append(&node.transcript, &row("m1", MAYBE_SENT));
     let clear = || async { node.owed().await == Some(Owed::default()) };
-    until_async("the replayed piece settles the Prepared", WITHIN, clear).await;
+    until_async("the replayed row settles the Prepared", WITHIN, clear).await;
+    let took = replayed.elapsed();
+    eprintln!("[s3] settled {took:?} after the row came again");
+    put(&env.dir, "settled_after_ms", took.as_millis());
     until_left(&node).await;
-    assert_eq!(
-        node.discord().posts(),
-        Vec::<String>::new(),
-        "no POST after the restart"
-    );
-    assert_eq!(node.discord().seen(), Vec::<Seen>::new());
-    node.stop().await;
+    assert_eq!(node.discord().seen(), Vec::<Seen>::new(), "no POST started");
+    assert!(!node.halted(), "{:?}", node.raised());
+    node
+}
+
+/// The ledger's entries other than Prepared, read from its file while the actor holds the store.
+fn settled(node: &Booted) -> Vec<LedgerEntry> {
+    let path = node.root.join(STORE_DIR_NAME).join(C.to_string());
+    let ledger = std::fs::read_to_string(path.join("ledger.jsonl")).unwrap();
+    let entries = ledger.lines().map(|line| {
+        let line: serde_json::Value = serde_json::from_str(line).unwrap();
+        serde_json::from_value::<LedgerEntry>(line["entry"].clone()).unwrap()
+    });
+    let settled = entries.filter(|entry| !matches!(entry, LedgerEntry::Prepared { .. }));
+    settled.collect()
+}
+
+/// The raw alarms that settle a Prepared or halt the writer.
+fn settle_alarms(node: &Booted) -> Vec<WriterAlarm> {
+    let raised = node.raised().into_iter();
+    let settling = |alarm: &WriterAlarm| {
+        matches!(
+            alarm,
+            WriterAlarm::NotFound { .. }
+                | WriterAlarm::Unresolved { .. }
+                | WriterAlarm::Ambiguous { .. }
+                | WriterAlarm::Halted { .. }
+        )
+    };
+    raised.filter(settling).collect()
 }
 
 /// The Codex rollout line announcing `msg_c1` before its text is written, and the one sealing it.
@@ -720,6 +856,85 @@ pub(super) async fn binding_node(env: &Env) {
     );
     none_dropped(&node);
     assert!(!node.halted());
+    node.stop().await;
+}
+
+/// T-H7 waiting boundary alone: a bind applied to a fresh source whose start nothing decides waits
+/// on the operator, and that wait alone keeps the reclaim draining.
+#[tokio::test(flavor = "current_thread")]
+async fn th7_waiting_boundary_alone_blocks_reclaim_pg() {
+    let scene = Scene::new().await;
+    let (node, epoch) = reclaim_begun(&scene, None, "th7_waiting_boundary").await;
+    node.finish(Duration::from_secs(120)).await;
+    let row = scene.row().await.unwrap();
+    let kept = (row.state, row.holder.as_deref(), row.target.as_deref());
+    assert_eq!(kept, (HomeState::Reclaiming, Some(MINI), Some(GW)));
+    assert!(row.epoch >= epoch);
+    scene.drop_db().await;
+}
+
+pub(super) async fn waiting_boundary_node(env: &Env) {
+    let (node, epoch) = holder_with_baseline(env).await;
+    let clear = || async { node.owed().await == Some(Owed::default()) };
+    until_async("the baseline source is drained", WITHIN, clear).await;
+    let log = node.host.bindings(C, ShadowProvider::Claude);
+    let BindingRecord::Bound {
+        new: BindingTarget::Source(first),
+        ..
+    } = log.first().record
+    else {
+        panic!("seq 1 binds the baseline source");
+    };
+    // Empty before the bind: its id reads file metadata, and no row leaves anything to capture.
+    let path = node.root.join("s2.jsonl");
+    std::fs::write(&path, b"").unwrap();
+    let second = source_id_for("s2", &path).unwrap();
+    let evidence = BindingEvidence {
+        hook_event: "SessionStart".into(),
+        received_at: chrono::Utc::now(),
+        reclaims: false,
+    };
+    let bound = BindingRecord::Bound {
+        old: Some(first),
+        new: BindingTarget::Source(second.clone()),
+        cause: BindingCause::Unknown,
+        parent_hint: None,
+        evidence,
+    };
+    assert_eq!(log.commit(bound), 2);
+    until("the actor read the bind", WITHIN, || log.served() >= 2).await;
+    signal(&env.dir, "owed_seen");
+    wait_signal(&env.dir, "reclaim_begun", WITHIN).await;
+    let gate = node.gate().expect("registered");
+    let ran = || node.drain_blocker().is_some() || gate.final_closed(epoch);
+    until("the drain runs a round", WITHIN, ran).await;
+    tokio::time::sleep(TWO_ROUNDS).await;
+    let (blocker, running) = (node.drain_blocker(), deliver::posts_in_flight(C));
+    let owed = node.owed().await;
+    assert_eq!(
+        node.state().await,
+        Some(HomeState::Reclaiming),
+        "the row left while the boundary waited: blocker {blocker:?}, projection {owed:?}"
+    );
+    assert_eq!(checkpoint(&node), Some(2), "the bind is applied");
+    let link = rotation(&node).link(&second).cloned().expect("s2's link");
+    let waiting = Boundary::Pending {
+        candidates: vec![0],
+    };
+    assert_eq!(link.boundary, waiting);
+    let alone = Owed {
+        binding_pending: 1,
+        ..Owed::default()
+    };
+    assert_eq!(
+        owed,
+        Some(alone),
+        "the waiting boundary is the only responsibility"
+    );
+    assert_eq!(blocker.as_deref(), Some("owed"));
+    assert_eq!(running, Some(0));
+    assert_eq!(node.discord().posts(), ["base"]);
+    assert!(!node.halted(), "{:?}", node.raised());
     node.stop().await;
 }
 
