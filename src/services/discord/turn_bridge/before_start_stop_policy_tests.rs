@@ -19,6 +19,15 @@ pub(super) fn armed() -> Seen {
     seen
 }
 
+/// The threads the request's mailbox step ran its stages on, without the finalizer's own seam.
+pub(super) fn step_threads(probe: &Probe) -> Vec<std::thread::ThreadId> {
+    let stages = probe.stages().into_iter();
+    let threads = stages
+        .zip(probe.threads())
+        .filter(|(stage, _)| *stage != "before_finalize");
+    threads.map(|(_, thread)| thread).collect()
+}
+
 /// Makes the request's own step panic once at `at`.
 pub(super) fn panic_once_at(probe: &Probe, at: &'static str) {
     let fired = std::sync::atomic::AtomicBool::new(false);
@@ -345,9 +354,8 @@ async fn p10_fin_ack_pre_commit_unconfirmed() {
     assert!(lost.stages().is_empty(), "no mailbox step ran");
 }
 
-/// A commit whose ACK alone the real finalizer actor loses is `Unconfirmed` to its caller and
-/// released once; the witness confirms a re-ask with no second debit, event or finalize, and never
-/// another episode's key.
+/// A commit whose ACK alone the real finalizer actor loses is `Unconfirmed` and released once; a
+/// re-ask is a witnessed duplicate with no second debit, event or finalize, and no other key.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_ack_post_commit_exact_witness() {
     let close = Close::open(5_340_974, |_| {}).await;
@@ -919,7 +927,11 @@ async fn p10_fin_actor_serialization() {
                 finished.removed_token.is_none(),
                 "the finish ran after the release"
             );
-            assert_eq!(probe.stages().last(), Some(&"after_commit"));
+            assert!(
+                probe
+                    .stages()
+                    .ends_with(&["after_commit", "before_finalize"])
+            );
             assert_released(&close, &queued, "close first").await;
         } else {
             assert!(
@@ -1042,9 +1054,9 @@ async fn p10_fin_input_fence_typed_refusals() {
                 assert_eq!(*seen, failure, "{case}")
             }
             (None, PolicyCloseOutcome::Settled) => {
-                let here = std::thread::current().id();
-                let threads = probe.threads();
+                let threads = step_threads(&probe);
                 assert!(!threads.is_empty(), "the step ran");
+                let here = std::thread::current().id();
                 assert!(threads.iter().all(|t| *t != here), "on a blocking worker");
                 assert_released(&close, &queued, case).await;
                 continue;

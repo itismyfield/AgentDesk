@@ -9255,6 +9255,15 @@ services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_panic_
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_send_failure_keeps_delivered_row
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_strict_boundaries
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_successor_or_actor_mismatch
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_admission_and_ack_carry_the_permit_into_closing
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_authority_names_one_row
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_authority_spans_the_commit
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_late_protection_is_typed_busy
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_probes_and_counts_per_request
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_protected_bridge_end_to_end
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_protected_open_commit
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_sidecar_contention_refuses_without_waiting
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_worker_settlement_switch_restored
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::a_pending_or_failing_refusal_notice_never_holds_the_unwind
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::c1_actual_spawn_bridge_retains_effect_until_future_disposal
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::cold_error::cold_error_does_not_clear_successor

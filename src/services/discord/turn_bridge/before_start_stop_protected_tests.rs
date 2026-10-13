@@ -1,6 +1,5 @@
-//! A protected channel's policy close: the mailbox worker clears the receipt under the population
-//! scope its own step holds, a held sidecar refuses by type at once, and the bridge's admission and
-//! ACK run on input-effect workers with the caller's permit.
+//! A protected channel's policy close: the worker clears the receipt under its step's own scope,
+//! a held sidecar refuses at once, and admission and ACK carry the caller's permit to a worker.
 use super::*;
 use crate::services::discord::input_runtime::fence::{
     self, Failure, Gate, PopulationScope, effect,
@@ -48,6 +47,9 @@ fn sidecar_held_at_each_stage(
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (slot, lock) = (seen.clone(), sidecar(close));
     probe.on_stage(Box::new(move |stage| {
+        if stage == "before_finalize" {
+            return;
+        }
         let held = held_elsewhere(&lock);
         slot.lock().unwrap().push((stage, held));
         if Some(stage) == panic_at {
@@ -57,9 +59,8 @@ fn sidecar_held_at_each_stage(
     seen
 }
 
-/// An open protected channel: the blocking worker clears the exact receipt and commits once. The
-/// other channel's turn, the queue and every observation point stay exact; a re-ask is a
-/// duplicate and the next turn starts and saves its row.
+/// An open protected channel: the worker clears the exact receipt and commits once, keeping the
+/// other turn and the queue; every point reads once, a re-ask is a duplicate, the next turn saves.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_s2_protected_open_commit() {
     let close = Close::open(5_341_101, |_| {}).await;
@@ -79,7 +80,8 @@ async fn p10_fin_s2_protected_open_commit() {
     );
     let here = std::thread::current().id();
     assert!(probe.stages().contains(&"after_commit"));
-    assert!(probe.threads().iter().all(|thread| *thread != here));
+    let threads = step_threads(&probe);
+    assert!(!threads.is_empty() && threads.iter().all(|thread| *thread != here));
     assert_released(&close, &queued, "protected").await;
     assert_eq!(
         probe.snapshot().judge(probe.request, &ALL),
@@ -266,9 +268,8 @@ fn p10_fin_s2_worker_settlement_switch_restored() {
     });
 }
 
-/// The authority lent to the clear names one row: a scope over another channel, provider or
-/// root refuses without touching the row; nested and stale writers are refused; a legacy step on a
-/// channel protected meanwhile is refused by type.
+/// The lent authority names one row: another channel, provider or root refuses untouched; nested
+/// and stale writers refuse; a legacy step on a protected row is refused by type.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_s2_authority_names_one_row() {
     let close = Close::open(5_341_106, |_| {}).await;
@@ -280,14 +281,14 @@ async fn p10_fin_s2_authority_names_one_row() {
     let elsewhere = tempfile::tempdir().unwrap();
     let (gate, _health) = protect(&close);
     let permit = gate.admit().unwrap();
-    let neighbour = Gate::protect(provider.clone(), channel + 1).unwrap();
+    let neighbour = Gate::protect(provider.clone(), channel + 800).unwrap();
     let codex = Gate::protect(ProviderKind::Codex, channel).unwrap();
     let foreign = [
         (
             "channel",
             root.clone(),
             provider.clone(),
-            channel + 1,
+            channel + 800,
             &neighbour,
         ),
         (
