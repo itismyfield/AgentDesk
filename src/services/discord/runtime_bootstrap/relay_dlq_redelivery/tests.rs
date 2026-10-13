@@ -70,6 +70,52 @@ fn write_witness(path: &Path, channel: u64, body: &str, generation: i64, deliver
     assert_eq!(delivery_record::read_record_at(path), Some(record));
 }
 
+#[test]
+fn dlq_witness_rejects_unknown_generation_without_changing_live_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    let _root_guard = crate::config::set_agentdesk_root_for_test(root.path());
+    let path = delivery_record::delivery_record_path(&ProviderKind::Claude, 5551).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let known = witness_plan();
+    let slice = &known.slices[0];
+    write_witness(&path, slice.channel_id, &slice.body, 42, now);
+    assert!(
+        slice_has_witness(slice),
+        "the known-generation control must match"
+    );
+
+    let unknown = build_plan(vec![row(
+        3,
+        "5551",
+        Some("7001"),
+        "가나",
+        reason_for(0, 6, 0),
+    )]);
+    assert_eq!(unknown.slices.len(), 1);
+    let slice = &unknown.slices[0];
+    assert_eq!(slice.generation_mtime_ns, 0);
+    write_witness(&path, slice.channel_id, &slice.body, 0, now);
+    assert_eq!(delivery_record::current_generation_mtime_ns(SESSION), 0);
+    let dlq_matches = slice_has_witness(slice);
+    let live_matches = delivery_record::recent_delivered_content_matches(
+        &ProviderKind::Claude,
+        ChannelId::new(slice.channel_id),
+        &slice.tmux_session,
+        &slice.body,
+    );
+    assert!(
+        !dlq_matches,
+        "unknown generation cannot prove delivery; live={live_matches}"
+    );
+    assert!(
+        live_matches,
+        "the live wrapper must retain its existing zero-generation fallback"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn dlq_witness_uses_row_generation_after_current_generation_changes() {

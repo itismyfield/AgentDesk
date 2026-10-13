@@ -39,13 +39,7 @@
 //! `inflight::save_inflight_state`; the sweeper / recovery read via the inflight
 //! loaders) knows these paths exist.
 //!
-//! ## B0 is a pure add (no production caller)
-//!
-//! Like the A1 controller skeleton, B0 ships the types + the store API fully
-//! implemented and tested but wired by NOBODY — B1 adds the shadow-write, B2
-//! flips read-authority, B3 hydrates on restart. So every public item is
-//! `#[allow(dead_code)]` until B1, and the store is behaviorally a no-op in this
-//! PR.
+//! Relay consumers use this sidecar for durable delivery state.
 //!
 //! ## Conservatism (invariants I2 / I3)
 //!
@@ -1932,12 +1926,7 @@ fn recent_delivered_content_matches_at(
         .is_some_and(|record| recent_content_fingerprint_matches(record, &fingerprint, now_ms))
 }
 
-// #4046 S1r-1 P3-2: module-local only — every caller is in this file. Reverted
-// from the transient `pub(in ...::outbound)` widening (no caller outside this
-// module; behavior unchanged). #5264 PR-B: there are now three call sites —
-// `record_delivered_content_fingerprint` and `shadow_mirror_delivered_frontier_inner`
-// (the two fresh-send record sites) plus `record_pinned_delivery_metadata`, which
-// keys the pinned bridge's fingerprint by the offset-authority channel.
+// Record a content fingerprint under the supplied channel and generation.
 fn record_delivered_content_fingerprint_for_generation(
     provider: &ProviderKind,
     channel_id: u64,
@@ -2027,21 +2016,29 @@ pub(in crate::services::discord) fn recent_delivered_content_matches(
     tmux_session_name: &str,
     body: &str,
 ) -> bool {
-    recent_delivered_content_matches_for_generation(
-        provider,
-        channel,
-        current_generation_mtime_ns(tmux_session_name),
-        body,
-    )
+    let generation = current_generation_mtime_ns(tmux_session_name);
+    if generation != 0 {
+        return recent_delivered_content_matches_for_generation(
+            provider, channel, generation, body,
+        );
+    }
+    // Preserve the live path's existing lookup when its generation is unknown.
+    let Some(path) = delivery_record_path(provider, channel.get()) else {
+        return false;
+    };
+    recent_delivered_content_matches_at(&path, channel.get(), body, generation, now_epoch_ms())
 }
 
-/// Match a retained content witness using the generation captured by its source.
+/// Match a retained content witness only for a known source generation.
 pub(in crate::services::discord) fn recent_delivered_content_matches_for_generation(
     provider: &ProviderKind,
     channel: ChannelId,
     generation_mtime_ns: i64,
     body: &str,
 ) -> bool {
+    if generation_mtime_ns == 0 {
+        return false;
+    }
     let Some(path) = delivery_record_path(provider, channel.get()) else {
         return false;
     };
@@ -2054,14 +2051,7 @@ pub(in crate::services::discord) fn recent_delivered_content_matches_for_generat
     )
 }
 
-/// I2 outcome map (pure, testable): the confirmed-delivery funnel fires ONLY for
-/// `Delivered`. The historical function name is retained for hotfile callers.
-/// Every other outcome means the controller did NOT advance the
-/// offset — `NotDelivered` (identity gate refused), `Transient`/`Unknown`
-/// (ambiguous), `Skipped` (no-op) — so the durable frontier must NOT advance
-/// (I2, the #3143/#3416 class). This pins the owner call-site's outcome decision
-/// (a frozen-file `matches!` was previously untested — broadening it to include
-/// `NotDelivered` slipped through; the variant test now catches it).
+/// Only `Delivered` permits the confirmed-delivery funnel to advance durable offsets.
 pub(in crate::services::discord) fn outcome_is_shadow_delivered(outcome: &DeliveryOutcome) -> bool {
     matches!(outcome, DeliveryOutcome::Delivered { .. })
 }
