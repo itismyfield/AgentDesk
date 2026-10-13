@@ -95,6 +95,21 @@ fn e1_production_effects_move_population_and_request_one_actor() {
         &busy,
         &json!({"notice_message_id": 108, "busy_retry_count": 1, "first_busy_retry_at_ms": 100}),
     );
+    // A spent retry budget cannot ride the moved input, so the move keeps every file.
+    let read = || [&queue, &marker, &placeholder, &busy].map(|path| fs::read(path).unwrap());
+    let before = read();
+    {
+        let mut host = files(root.path(), effects(root.path(), frozen(), &rt));
+        let mut lease = LedgerLease::new(root.path(), CHANNEL);
+        let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+        assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Legacy);
+        assert_eq!(host.effects_mut().actor_requests(), 0);
+    }
+    assert_eq!(read(), before);
+    save(
+        &busy,
+        &json!({"notice_message_id": 108, "busy_retry_count": 0, "first_busy_retry_at_ms": 100}),
+    );
     let mut host = files(root.path(), effects(root.path(), frozen(), &rt));
     let mut lease = LedgerLease::new(root.path(), CHANNEL);
     let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
