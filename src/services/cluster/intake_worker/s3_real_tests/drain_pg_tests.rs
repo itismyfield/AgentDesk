@@ -1182,15 +1182,13 @@ impl DrainPort for FirstCheck {
         self.reads.turn_running()
     }
 
-    fn owed(&self) -> impl Future<Output = Option<Owed>> + Send {
-        async move {
-            if !self.entered.swap(true, Ordering::SeqCst) {
-                while !self.go.load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
+    async fn owed(&self) -> Option<Owed> {
+        if !self.entered.swap(true, Ordering::SeqCst) {
+            while !self.go.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
-            self.reads.owed().await
         }
+        self.reads.owed().await
     }
 
     fn posts_in_flight(&self) -> impl Future<Output = Option<usize>> + Send {

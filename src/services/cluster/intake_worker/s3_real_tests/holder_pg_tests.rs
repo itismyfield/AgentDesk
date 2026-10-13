@@ -338,9 +338,8 @@ async fn from_both(nodes: [&mut Node; 2], name: &str, generation: u32) {
     }
 }
 
-/// T-H6 both restart: the two nodes boot together on one PG, and again on the same roots after
-/// both were killed; each time only the PG holder opens and posts, and no two processes' POSTs
-/// overlap in the shared lifecycle.
+/// T-H6 both restart: both nodes boot together on one PG, then again on the same roots after a
+/// kill; each time only the PG holder opens and posts, and no two processes' POSTs overlap.
 #[tokio::test(flavor = "current_thread")]
 async fn th6_both_restart_only_one_owner_pg() {
     let scene = Scene::new().await;
