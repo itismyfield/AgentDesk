@@ -429,3 +429,48 @@ async fn merged_runtime_refusal_has_only_plus_effects() {
     probe.assert_queue_only(MERGED);
     assert!(h.provider_inputs().is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn placeholder_release_during_arrival_notification_completes_post() {
+    use std::future::Future;
+    use std::task::{Context, Wake, Waker};
+
+    struct ReleaseOnArrival(Arc<Notify>);
+    impl Wake for ReleaseOnArrival {
+        fn wake(self: Arc<Self>) {
+            self.0.notify_waiters();
+        }
+    }
+
+    let mock = super::discord_mock::DiscordMockState::new();
+    let (proxy, _, server) = super::discord_mock::start(mock.clone()).await;
+    let _server = AbortOnDrop(Some(server));
+    let arrived = mock.first_placeholder_arrived.notified();
+    tokio::pin!(arrived);
+    // Release inside the arrival wakeup to exercise the earliest possible observer.
+    let waker = Waker::from(Arc::new(ReleaseOnArrival(
+        mock.release_first_placeholder.clone(),
+    )));
+    assert!(
+        arrived
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+
+    let response = tokio::time::timeout(
+        DEADLINE,
+        reqwest::Client::new()
+            .post(format!("{proxy}/api/v10/channels/{CHANNEL_ID}/messages"))
+            .json(&serde_json::json!({"content": "..."}))
+            .send(),
+    )
+    .await
+    .expect("placeholder release must complete the POST")
+    .expect("mock POST response");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(mock.placeholder_posts.load(Ordering::SeqCst), 1);
+}
