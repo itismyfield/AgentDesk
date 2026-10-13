@@ -1169,3 +1169,103 @@ pub(super) async fn release_node(env: &Env) {
     assert_eq!(node.discord().posts(), ["tail-1"]);
     node.stop().await;
 }
+
+/// Reads through the real port; the drain's first owed read waits until `go`, after `entered`.
+struct FirstCheck {
+    reads: ChannelHomePort,
+    entered: Arc<AtomicBool>,
+    go: Arc<AtomicBool>,
+}
+
+impl DrainPort for FirstCheck {
+    fn turn_running(&self) -> impl Future<Output = Option<bool>> + Send {
+        self.reads.turn_running()
+    }
+
+    fn owed(&self) -> impl Future<Output = Option<Owed>> + Send {
+        async move {
+            if !self.entered.swap(true, Ordering::SeqCst) {
+                while !self.go.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }
+            self.reads.owed().await
+        }
+    }
+
+    fn posts_in_flight(&self) -> impl Future<Output = Option<usize>> + Send {
+        self.reads.posts_in_flight()
+    }
+
+    fn reset_legacy_source(&self) -> impl Future<Output = Result<(), ResetRefused>> + Send {
+        self.reads.reset_legacy_source()
+    }
+}
+
+/// T-H7 first check: the drain's first responsibility check runs with intake closed and delivery
+/// still admitted, so the owed tail posts during it and the row leaves only after.
+#[tokio::test(flavor = "current_thread")]
+async fn th7_first_check_still_admits_delivery_pg() {
+    let (scene, _) = reclaim_while("th7_first_check", Duration::from_secs(180)).await;
+    scene.drop_db().await;
+}
+
+pub(super) async fn first_check_node(env: &Env) {
+    let epoch = epoch_of(env);
+    let (entered, go) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let latch = (Arc::clone(&entered), Arc::clone(&go));
+    let node = Booted::boot_with(env, move |id| FirstCheck {
+        reads: ChannelHomePort::new(id, host::process_readiness(), worker_restored()),
+        entered: Arc::clone(&latch.0),
+        go: Arc::clone(&latch.1),
+    })
+    .await;
+    until("the lease opens the home", WITHIN, || {
+        node.home_epoch() == Some(epoch)
+    })
+    .await;
+    until("the writer takes work", WITHIN, || node.accepts()).await;
+    append(&node.transcript, &row("m0", "base"));
+    node.until_posts(&["base"]).await;
+    let clear = || async { node.owed().await == Some(Owed::default()) };
+    until_async("nothing owed before the tail", WITHIN, clear).await;
+    node.lease().withhold();
+    append(&node.transcript, &row("t1", "tail-1"));
+    let tail = Owed {
+        owed: 1,
+        ..Owed::default()
+    };
+    until_async("the actor owes the tail", WITHIN, || async {
+        node.owed().await == Some(tail)
+    })
+    .await;
+    signal(&env.dir, "owed_seen");
+    wait_signal(&env.dir, "reclaim_begun", WITHIN).await;
+    let checking = || entered.load(Ordering::SeqCst);
+    until("the drain's first owed check", WITHIN, checking).await;
+    let gate = node.gate().expect("registered");
+    let closed = matches!(gate.ownership(), HomeOwnership::Owned { home_epoch, intake: HomeIntake::Closed, .. }
+        if home_epoch == epoch);
+    assert!(closed, "intake closes first: {:?}", gate.ownership());
+    let admitted = gate.admit_post(|_| ()).is_some();
+    assert!(
+        admitted,
+        "delivery is still admitted while the drain checks"
+    );
+    assert_eq!(node.state().await, Some(HomeState::Reclaiming));
+    node.lease().grant();
+    node.until_posts(&["base", "tail-1"]).await;
+    assert_eq!(
+        node.state().await,
+        Some(HomeState::Reclaiming),
+        "left mid-check"
+    );
+    go.store(true, Ordering::SeqCst);
+    until_left(&node).await;
+    assert_eq!(tail_epochs(&node, "tail"), [Some(epoch)]);
+    none_dropped(&node);
+    node.stop().await;
+}

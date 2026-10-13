@@ -41,6 +41,7 @@ fn s3_node_child() {
             "th7_settles_not_found" => drain_pg::settles_not_found_node(&env).await,
             "th7_settles_unresolved" => drain_pg::settles_unresolved_node(&env).await,
             "th7_waiting_boundary" => drain_pg::waiting_boundary_node(&env).await,
+            "th7_first_check" => drain_pg::first_check_node(&env).await,
             "th6_restart_first" => holder_pg::first_generation_node(&env).await,
             "th6_restart_second" => holder_pg::second_generation_node(&env).await,
             "th6_role_holder" => holder_pg::role_holder_node(&env).await,
