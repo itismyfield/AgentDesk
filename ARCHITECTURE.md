@@ -1811,6 +1811,7 @@ src/
 │   │   │   │   ├── busy_inject_thread_e2e_tests.rs
 │   │   │   │   ├── cancel_backstop_e2e_tests.rs
 │   │   │   │   ├── catch_up_pagination_e2e.rs
+│   │   │   │   ├── cold_start_incident_e2e_tests.rs
 │   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── herdr_terminate_e2e_tests.rs
@@ -2667,8 +2668,11 @@ src/
 │   │   │   ├── identity.rs
 │   │   │   ├── matcher.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── pg_statements_tests.rs
 │   │   │   ├── probe.rs
 │   │   │   ├── probe_tests.rs
+│   │   │   ├── projection.rs
+│   │   │   ├── projection_tests.rs
 │   │   │   ├── provenance.rs
 │   │   │   ├── rollback_rehearsal_tests.rs
 │   │   │   ├── runner.rs

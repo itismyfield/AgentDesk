@@ -227,6 +227,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::tui_o::repost::runner_tests
   --skip services::tui_o::writer::tests::actor::host_start::deferred::pg
   --skip services::tui_o::writer::tests::actor::host_start::late_delegated
+  --skip services::tui_o::writer::tests::actor::host_start::receipt_projection
   --skip services::tui_o::writer::tests::actor::repost_turn
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
@@ -704,6 +705,10 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::active_q_reinsert_and_real_kick_leave_one_provider_input_and_answer
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::autoheal::periodic_orphan_token_refusal_preserves_q_then_cancel_backstop_runs_it_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::bang_stop_with_dead_bridge_parks_then_owner_runs_q_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_legacy_result_without_native_turn_runs_q_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_stale_terminal_preserves_same_message_new_nonce
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_stale_terminal_preserves_successor
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_terminal_releases_before_panel_and_runs_q_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::live_foreign_row_survives_sweep_and_backstop
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::reclaimable_foreign_row_is_swept_then_backstop_runs_q_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::released_anchor_preserves_prior_tail_and_runs_q_exactly_once
@@ -875,6 +880,8 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::repost::runner_tests::f5_admission_mapping_is_exhaustive
   services::tui_o::repost::runner_tests::f5_default_off_tick_executes_zero_pg_statements
   services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
+  services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipt_overlay_reads_nothing_off_or_unlisted
+  services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_stop_during_receipt_read_starts_no_actor
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
   services::tui_o::writer::tests::actor::repost_turn::allowlist::d4b_off_approved_piece_still_posts_once_through_actor
   services::tui_o::writer::tests::actor::repost_turn::d4b_old_config_without_channels_denies_real_channel_turn
@@ -1113,6 +1120,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::tui_o::repost::runner_tests
   services::tui_o::writer::tests::actor::host_start::deferred::pg
   services::tui_o::writer::tests::actor::host_start::late_delegated
+  services::tui_o::writer::tests::actor::host_start::receipt_projection
   services::tui_o::writer::tests::actor::repost_turn
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests
