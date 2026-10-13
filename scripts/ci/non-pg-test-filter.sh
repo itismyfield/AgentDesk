@@ -577,6 +577,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_superscript_reserved_basenames
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_windows_forbidden_characters
   services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
+  services::discord::router::intake_dispatch::tests::final_guards::c2b_legacy_guard_keeps_a_small_caller_future
   services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_cached_attachment_permit_does_not_write_history
   services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_final_admission_never_returns_false_local_or_nonlocal_success
   services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_live_dispatch_does_not_checkpoint_or_consume_the_original

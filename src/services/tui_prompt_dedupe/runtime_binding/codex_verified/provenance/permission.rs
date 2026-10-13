@@ -1,20 +1,25 @@
-//! Test-only native coordinates preserve historical proof and the store's cursor identity.
+//! Native coordinates preserve the proven source and the store's cursor identity.
 
 use super::ExecutionProofRef;
 use crate::services::codex_tui::rollout_index::strict_parent_session;
 use crate::services::tui_o::shadow::capture::{SourceCapture, same_file};
 use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource, MAX_READ_BYTES, SourceId};
 use crate::services::tui_o::store::spool::Cursor;
+#[cfg(test)]
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
+#[cfg(test)]
 use crate::services::tui_prompt_dedupe::binding_events;
+#[cfg(test)]
 use crate::services::tui_prompt_dedupe::runtime_binding::codex_policy;
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub(crate) struct HistoricalNativeIdentity {
     execution: ExecutionProofRef,
     cursor: Cursor,
 }
 
+#[cfg(test)]
 impl HistoricalNativeIdentity {
     pub(crate) fn from_historical(
         context: &BindingContext,
@@ -53,6 +58,7 @@ impl HistoricalNativeIdentity {
         &self.execution
     }
 
+    #[cfg(test)]
     pub(crate) fn canonical_source(&self) -> &SourceId {
         &self.cursor.source
     }
@@ -119,6 +125,7 @@ impl NativeSubmitFloor {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn verify_for(&self, execution: &ExecutionProofRef) -> Result<u64, &'static str> {
         if self.execution != *execution {
             return Err("native_floor_execution_mismatch");
@@ -127,6 +134,7 @@ impl NativeSubmitFloor {
         Ok(self.through)
     }
 
+    #[cfg(test)]
     pub(crate) fn canonical_source(&self) -> &SourceId {
         &self.canonical_source
     }

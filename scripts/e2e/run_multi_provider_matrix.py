@@ -208,10 +208,12 @@ def resolve_output_dir(arg: str | None) -> Path:
 
 def evidence_status(totals):
     totals = totals or {}
+    if totals.get("unevaluable", 0):
+        return "fail"
     for status in ("fail", "unexpected_pass"):
         if totals.get(status, 0):
             return status
-    if any(totals.get(s, 0) for s in ("known_gap", "not_applicable", "skipped")):
+    if any(totals.get(s, 0) for s in ("known_gap", "not_applicable", "skipped", "dormant", "skipped_assertions")):
         return "partial"
     if totals.get("dry_run", 0):
         return "dry_run"

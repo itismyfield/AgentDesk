@@ -507,10 +507,10 @@ class HerdrCells(unittest.TestCase):
         scenario = next(s for s in driver.load_scenarios(ROOT / 'tests/e2e/tui_relay/scenarios', cell='claude-herdr') if s['id'] == 'E-19')
         before = {'channel': '41', 'provider': 'claude', 'state': 'bound', 'nonce': 'same',
                   'pane': 'provider_running', 'launch_evidence': 'recorded', 'input_hold': None}
-        health = {'status': 'healthy', 'herdr': {'admission': 'open', 'restart_required': False,
+        health = {'status': 'healthy', 'fully_recovered': True, 'degraded_reasons': [], 'herdr': {'admission': 'open', 'restart_required': False,
                   'configured_channels': ['41'], 'endpoints': {'test': {'local': True}}, 'input_holds': 0,
                   'reconnect': dict(channels=1, published=1, withheld=0, unknown=0, pending=0)}}
-        args = Namespace(cell='claude-herdr', channel_id='41', base_url='http://unused.test', dry_run=False,
+        args = Namespace(cell='claude-herdr', channel_id='41', base_url='http://127.0.0.1:8797', dry_run=False,
                          hard_reset_session_each=False, reset_before_each=False, allow_destructive=True,
                          restart_script=None, restart_target_override='dev', herdr_isolated_server=True,
                          herdr_endpoint='test', herdr_status_bin='/test/agentdesk', final_refetches=1)
@@ -525,13 +525,16 @@ class HerdrCells(unittest.TestCase):
         client.wait_for_message.side_effect = wait
         client.fetch_messages.side_effect = lambda *a, **k: list(rows)
         with patch.object(driver, 'tmux', None), patch.object(driver, '_read_api_json', return_value=(200, health)) as get, \
-             patch.object(driver.herdr.subprocess, 'run', return_value=Namespace(stdout=json.dumps({'executions': [before]}))) as run, \
+             patch.object(driver.herdr.subprocess, 'run', return_value=Namespace(stdout=json.dumps({'executions': [before], 'other_input_holds': []}))) as run, \
              patch.object(driver.herdr.time, 'sleep'), patch.dict('os.environ', {'AGENTDESK_E2E_ALLOW_DESTRUCTIVE': '1'}):
             result = driver.run_scenario(scenario, args=args, client=client, run_id='restart')
         self.assertEqual(result['status'], 'not_applicable', result)
         self.assertEqual([c.args[0][:2] for c in run.call_args_list],
-                         [['/test/agentdesk', 'herdr'], ['launchctl', 'kickstart'], ['/test/agentdesk', 'herdr']])
-        self.assertTrue(all(c.args[1] == '/api/health' for c in get.call_args_list))
+                         [['/test/agentdesk', 'herdr'], ['/test/agentdesk', 'herdr'], ['launchctl', 'kickstart'],
+                          ['/test/agentdesk', 'herdr'], ['/test/agentdesk', 'herdr'], ['/test/agentdesk', 'herdr']])
+        self.assertEqual([c.args[1] for c in get.call_args_list],
+                         ['/api/health/detail', '/api/health', '/api/health/detail',
+                          '/api/health/detail', '/api/health/detail'])
         self.assertEqual(result['herdr_observations'][1]['row']['nonce'], 'same')
 
     def test_e36_executes_twelve_normal_discord_prompts_without_legacy_evidence(self):

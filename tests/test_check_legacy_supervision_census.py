@@ -3,8 +3,73 @@ import unittest
 import re
 import subprocess
 import sys
+from unittest.mock import patch
 from pathlib import Path
 from scripts import check_legacy_supervision_census as guard
+
+
+class SkipPromotionTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        (self.root / 'src').mkdir()
+        (self.root / 'scripts').mkdir()
+        (self.root / 'src/lib.rs').write_text(
+            'mod promoted;\n#[cfg(test)] mod still_test;\n')
+        for name in ('promoted.rs', 'still_test.rs', 'fixture_tests.rs'):
+            (self.root / 'src' / name).write_text('fn fixture() {}\n')
+        self.path = self.root / 'scripts/test_only_module_skip_pin.py'
+        self.original = (
+            'PINNED_BASENAME_TEST_FILES = frozenset(\n    {\n'
+            '        "src/fixture_tests.rs",\n    }\n)\n'
+            'PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(\n    {\n'
+            '        "src/promoted.rs",\n        "src/still_test.rs",\n    }\n)\n')
+        self.path.write_text(self.original)
+        pinned = frozenset(('src/fixture_tests.rs', 'src/promoted.rs', 'src/still_test.rs'))
+        patched = patch.object(guard.classifier._SKIP_PIN, 'PINNED_TEST_ONLY_MODULE_FILES', pinned)
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def outcome(self, promoted=()):
+        try:
+            guard.sync_skips(self.root, promoted)
+        except RuntimeError as error:
+            return str(error)
+        return None
+
+    def test_explicit_promotion_removes_only_its_pin(self):
+        self.assertIsNone(self.outcome(('src/promoted.rs',)))
+        self.assertNotIn('"src/promoted.rs"', self.path.read_text())
+        self.assertIn('"src/still_test.rs"', self.path.read_text())
+        self.assertIn('"src/fixture_tests.rs"', self.path.read_text())
+
+    def test_omitted_promotion_refuses_removal_without_writing(self):
+        self.assertEqual(self.outcome(), 'refusing pin removal')
+        self.assertEqual(self.path.read_text(), self.original)
+
+    def test_missing_promotion_path_refuses_without_writing(self):
+        original = self.original.replace('"src/promoted.rs",',
+                                         '"src/promoted.rs",\n        "src/missing.rs",')
+        self.path.write_text(original)
+        pin = guard.classifier._SKIP_PIN
+        with patch.object(pin, 'PINNED_TEST_ONLY_MODULE_FILES',
+                          pin.PINNED_TEST_ONLY_MODULE_FILES | {'src/missing.rs'}):
+            self.assertEqual(self.outcome(('src/promoted.rs', 'src/missing.rs')),
+                             'promotion path missing: src/missing.rs')
+        self.assertEqual(self.path.read_text(), original)
+
+    def test_still_test_only_promotion_refuses_without_writing(self):
+        self.assertEqual(self.outcome(('src/still_test.rs',)),
+                         'promotion remains test-only: src/still_test.rs')
+        self.assertEqual(self.path.read_text(), self.original)
+
+    def test_addition_stays_next_to_its_directory_without_removing_existing_pins(self):
+        (self.root / 'src/new_tests.rs').write_text('fn fixture() {}\n')
+        self.assertIsNone(self.outcome(('src/promoted.rs',)))
+        source = self.path.read_text()
+        self.assertLess(source.index('"src/new_tests.rs"'), source.index('"src/fixture_tests.rs"'))
+        self.assertIn('"src/still_test.rs"', source)
 
 
 class N4DInstallerDormancyTests(unittest.TestCase):

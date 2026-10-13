@@ -209,6 +209,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs",
         "src/services/discord/tui_prompt_relay/claude_idle_tail_host_tests.rs",
         "src/services/claude/c1_teardown_tests.rs",
+        "src/services/codex/actual_submit_tests.rs",
         "src/services/codex/c1_teardown_tests.rs",
         "src/services/codex/startup_update_tests.rs",
         "src/services/codex_tui/input/tests/startup_update_tests.rs",
@@ -641,6 +642,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/before_start_stop_tests.rs",
         "src/services/discord/turn_bridge/before_start_stop_disk_gate_tests.rs",
         "src/services/discord/turn_bridge/before_start_stop_clear_order_tests.rs",
+        "src/services/discord/turn_bridge/before_start_stop_policy_tests.rs",
         "src/services/discord/inflight/managed_submission_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_submission_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/cohort_tests.rs",
@@ -689,7 +691,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
-        "src/services/tui_o/store/codex_provenance/submit_floor.rs",
         "src/services/discord/turn_bridge/replay_policy.rs",
         "src/services/discord/router/intake_dispatch/tests/final_guards.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
@@ -697,9 +698,6 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests/autoheal.rs",
         "src/services/discord/turn_bridge/cancel_backstop_test_support.rs",
         "src/services/discord/zombie_foreground_release/cancel_backstop_test_support.rs",
-        "src/services/codex_tui/rollout_tail/provenance.rs",
-        "src/services/tui_o/store/codex_provenance/mutation.rs",
-        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/dormant_construction.rs",
         "src/services/discord/relay_recovery/tests/retirement.rs",
         "src/services/discord/recovery_engine/o_cut_recorder.rs",
         "src/services/tui_o/channel_policy/adoption/body_check.rs",
@@ -757,7 +755,6 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/test_env_panic_probe.rs",
         "src/services/tui_o/gates_m1.rs",
         "src/services/tui_o/gates_m1_support.rs",
-        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/permission.rs",
         "src/services/discord/health/legacy_supervision/boot_status.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/cohort.rs",

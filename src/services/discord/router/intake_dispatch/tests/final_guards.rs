@@ -258,3 +258,24 @@ async fn c2b_protected_skill_refuses_both_local_permit_and_unadmitted_dispatch()
         );
     }
 }
+
+#[test]
+fn c2b_legacy_guard_keeps_a_small_caller_future() {
+    fn future_bytes<F>(
+        _: impl FnOnce(
+            &'static Arc<crate::services::discord::SharedData>,
+            &'static Arc<serenity::Http>,
+            &'static ProviderKind,
+            ChannelId,
+        ) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    let bytes = future_bytes(super::super::legacy_allowed);
+    println!("G2C_LEGACY_GUARD_FUTURE_BYTES={bytes}");
+    assert!(
+        bytes <= 1024,
+        "legacy guard embeds {bytes} bytes in each caller future"
+    );
+}

@@ -370,6 +370,7 @@ async fn operator_release_cas_then_successor_keeps_new_turn_and_row() {
             None,
             &shared,
             Some(finish),
+            false,
         )
         .await;
         assert_eq!(
