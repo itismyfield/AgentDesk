@@ -99,6 +99,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::native::herdr_tests
   --skip services::discord::commands::control::native::tests
   --skip services::discord::commands::restart::host_guard_tests
+  --skip services::discord::commands::text_commands::clear_refusal_reply_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
   --skip services::discord::health::recovery::stall_alert::tests
@@ -132,6 +133,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::recovery_engine::restore_inflight::replay_hold_tests
   --skip services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests
   --skip services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
+  --skip services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests
   --skip services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests
   --skip services::discord::recovery_engine::routing_orphan::host_guard_tests
   --skip services::discord::relay_recovery::apply::host_deferred_tests
@@ -170,6 +172,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::terminal_ui_obligation::tests
   --skip services::discord::tmux::tmux_watcher::path_b_record::tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
+  --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::injected_watcher_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
@@ -225,6 +228,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::tui_o::repost::runner_tests
   --skip services::tui_o::writer::tests::actor::host_start::deferred::pg
   --skip services::tui_o::writer::tests::actor::host_start::late_delegated
+  --skip services::tui_o::writer::tests::actor::host_start::receipt_projection
   --skip services::tui_o::writer::tests::actor::repost_turn
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
@@ -492,6 +496,10 @@ NON_PG_FILTER_REPLAY=(
   services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_freeze_failure_preserves_legacy_and_closing
   services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_reject_unresolved_resources_without_effects
   services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_sources_are_read_only_and_unreadable_is_not_empty
+  services::discord::input_runtime::supervisor::runtime::ports::tests::c2_runtime_source_policy_reads_current_author_provider_routing_and_holds_unknown_voice
+  services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_fresh_thread_parent_route_blocks_changed_foreign_target_and_http_errors
+  services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_policy_revocation_during_route_lookup_never_approves_stale_authority
+  services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_source_disposition_uses_live_commands_skill_origins_and_missing_kind
   services::discord::placeholder_sweeper::abandon_guard::tests::blocking_probe_join_failure_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_live_process_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_missing_or_legacy_identity_preserves_retry
@@ -573,6 +581,11 @@ NON_PG_FILTER_REPLAY=(
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_superscript_reserved_basenames
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_windows_forbidden_characters
   services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
+  services::discord::router::intake_dispatch::tests::final_guards::c2b_legacy_guard_keeps_a_small_caller_future
+  services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_cached_attachment_permit_does_not_write_history
+  services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_final_admission_never_returns_false_local_or_nonlocal_success
+  services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_live_dispatch_does_not_checkpoint_or_consume_the_original
+  services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_skill_refuses_both_local_permit_and_unadmitted_dispatch
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_direct_execution_body_has_no_external_producer_callsites
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_enforce_without_postgres_blocks_owner_unknown
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_before_finish
@@ -693,6 +706,10 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::active_q_reinsert_and_real_kick_leave_one_provider_input_and_answer
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::autoheal::periodic_orphan_token_refusal_preserves_q_then_cancel_backstop_runs_it_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::bang_stop_with_dead_bridge_parks_then_owner_runs_q_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_legacy_result_without_native_turn_runs_q_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_stale_terminal_preserves_same_message_new_nonce
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_stale_terminal_preserves_successor
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_terminal_releases_before_panel_and_runs_q_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::live_foreign_row_survives_sweep_and_backstop
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::reclaimable_foreign_row_is_swept_then_backstop_runs_q_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::released_anchor_preserves_prior_tail_and_runs_q_exactly_once
@@ -864,6 +881,8 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::repost::runner_tests::f5_admission_mapping_is_exhaustive
   services::tui_o::repost::runner_tests::f5_default_off_tick_executes_zero_pg_statements
   services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
+  services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipt_overlay_reads_nothing_off_or_unlisted
+  services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_stop_during_receipt_read_starts_no_actor
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
   services::tui_o::writer::tests::actor::repost_turn::allowlist::d4b_off_approved_piece_still_posts_once_through_actor
   services::tui_o::writer::tests::actor::repost_turn::d4b_old_config_without_channels_denies_real_channel_turn
@@ -974,6 +993,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::commands::control::native::herdr_tests
   services::discord::commands::control::native::tests
   services::discord::commands::restart::host_guard_tests
+  services::discord::commands::text_commands::clear_refusal_reply_tests
   services::discord::commands::tui_passthrough::host_guard_tests
   services::discord::health::recovery::live_agent_recovery::host_guard_tests
   services::discord::health::recovery::stall_alert::tests
@@ -1007,6 +1027,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::recovery_engine::restore_inflight::replay_hold_tests
   services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests
   services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
+  services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests
   services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests
   services::discord::recovery_engine::routing_orphan::host_guard_tests
   services::discord::relay_recovery::apply::host_deferred_tests
@@ -1045,6 +1066,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::terminal_ui_obligation::tests
   services::discord::tmux::tmux_watcher::path_b_record::tests
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
+  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::injected_watcher_tests
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
@@ -1100,6 +1122,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::tui_o::repost::runner_tests
   services::tui_o::writer::tests::actor::host_start::deferred::pg
   services::tui_o::writer::tests::actor::host_start::late_delegated
+  services::tui_o::writer::tests::actor::host_start::receipt_projection
   services::tui_o::writer::tests::actor::repost_turn
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests

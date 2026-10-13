@@ -12,6 +12,10 @@ use crate::services::cluster::channel_home_port::{
         mutant as scoped_mutant,
     },
 };
+#[cfg(all(test, unix))]
+use crate::services::turn_orchestrator::installed_actor_handoff::{
+    ClaimResult, HandoffOutcome, Intent,
+};
 
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) struct InstalledInflight {
@@ -321,17 +325,17 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
                 .try_snapshot()
                 .await
                 .map_err(|e| format!("mailbox unavailable: {e:?}"))?;
+            let ours = match &before.cancel_token {
+                Some(token) => (shared.mailbox(channel))
+                    .holds_installation(token, &birth_key(&state))
+                    .await
+                    .map_err(|e| format!("mailbox unavailable: {e:?}"))?,
+                None => false,
+            };
             verify_snapshot(provider, &snapshot)?;
             check_restore_context(context, provider)?;
             if before.cancel_token.is_some()
-                && ((state.turn_nonce.as_deref().is_none_or(str::is_empty)
-                    && !before.cancel_token.as_ref().is_some_and(|token| {
-                        crate::services::turn_orchestrator::installed_actor_handoff::belongs(
-                            channel,
-                            token,
-                            &birth_key(&state),
-                        )
-                    }))
+                && ((state.turn_nonce.as_deref().is_none_or(str::is_empty) && !ours)
                     || before.active_request_owner
                         != Some(UserId::new(state.request_owner_user_id))
                     || before.active_turn_nonce != state.turn_nonce
@@ -359,33 +363,16 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
                     &token,
                     "scoped installation",
                 );
-                let claim = shared
-                    .mailbox(channel)
-                    .try_start_turn_adopting(
-                        token.clone(),
-                        UserId::new(state.request_owner_user_id),
-                        inflight::opt_message_id(state.effective_finalizer_turn_id())
-                            .ok_or("invalid finalizer id")?,
-                        crate::services::turn_orchestrator::ActiveTurnKind::UserOrAgent,
-                        state.turn_nonce.clone(),
-                        queue_persistence_context(shared, provider, channel),
-                    )
-                    .await;
+                let proof = actor_proof(context, &state, token)?;
+                let persistence = queue_persistence_context(shared, provider, channel);
+                let mailbox = shared.mailbox(channel);
+                match mailbox.claim_installation(proof.clone(), persistence).await {
+                    ClaimResult::Installed => activated = true,
+                    ClaimResult::Refused(reason) => return Err(reason.into()),
+                    _ => return Err("active claim refused".into()),
+                }
                 verify_snapshot(provider, &snapshot)?;
                 check_restore_context(context, provider)?;
-                if !claim.started || claim.persistence_error.is_some() {
-                    return Err("active claim or queue persistence refused".into());
-                }
-                let proof = actor_proof(context, &state, token)?;
-                if scoped_mutant("install-feedback") {
-                    apply_queue_exit_feedback(shared, channel, &claim.queue_exit_events).await;
-                    verify_snapshot(provider, &snapshot)?;
-                }
-                activated = crate::services::turn_orchestrator::installed_actor_handoff::remember(
-                    &proof,
-                    true,
-                    claim.queue_exit_events,
-                )?;
                 actor = Some(proof);
             }
             // The existing helper now sees our actor; it only reseeds the ledger and binding.
@@ -403,7 +390,10 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
                 .map_err(|e| format!("mailbox unavailable: {e:?}"))?;
             verify_snapshot(provider, &snapshot)?;
             check_restore_context(context, provider)?;
-            if after.cancel_token.is_none()
+            let expected = actor.as_ref().map(|proof| &proof.token);
+            let expected = expected.or(before.cancel_token.as_ref());
+            let slot = after.cancel_token.as_ref().zip(expected);
+            if !slot.is_some_and(|(slot, expected)| Arc::ptr_eq(slot, expected))
                 || after.active_request_owner != Some(UserId::new(state.request_owner_user_id))
                 || after.active_turn_nonce != state.turn_nonce
                 || after.active_user_message_id
@@ -417,11 +407,16 @@ pub(in crate::services::discord) async fn install_inflight_scoped(
                     &state,
                     after.cancel_token.clone().expect("confirmed actor"),
                 )?;
-                activated = crate::services::turn_orchestrator::installed_actor_handoff::remember(
-                    &proof,
-                    false,
-                    Vec::new(),
-                )?;
+                let persistence = queue_persistence_context(shared, provider, channel);
+                let mailbox = shared.mailbox(channel);
+                activated = match mailbox.claim_installation(proof.clone(), persistence).await {
+                    ClaimResult::Inherited { owes_driver } => owes_driver,
+                    ClaimResult::Observed => false,
+                    ClaimResult::Refused(reason) => return Err(reason.into()),
+                    ClaimResult::Installed => return Err("an occupied slot was claimed".into()),
+                };
+                verify_snapshot(provider, &snapshot)?;
+                check_restore_context(context, provider)?;
                 actor = Some(proof);
             }
             InflightObservation::Active
@@ -560,16 +555,22 @@ pub(in crate::services::discord) async fn resume_inflight_scoped(
         // A policy receipt settles before any handoff, replay, native or provider path.
         if effect == RestoreEffect::PolicySettlement {
             let settle = policy.unwrap_or(BeforeStartRestart::Held("no policy receipt to settle"));
-            return Ok(policy_observation(settle.settle(http, shared, &state).await));
+            return Ok(policy_observation(
+                settle.settle(http, shared, &state).await,
+            ));
         }
         if installed.activated {
-            let proof = installed.actor.clone().ok_or("installed actor proof absent")?;
-            match checked_handoff(shared, provider, &state, proof, false).await {
-                crate::services::turn_orchestrator::installed_actor_handoff::HandoffOutcome::Ready(events) => {
-                    apply_queue_exit_feedback(shared, ChannelId::new(state.channel_id), &events).await;
+            let proof = installed
+                .actor
+                .clone()
+                .ok_or("installed actor proof absent")?;
+            // A reservation keeps every exit owed; applying and acknowledging them is not done here.
+            match checked_handoff(shared, provider, &state, proof, Intent::Feedback).await {
+                HandoffOutcome::Reserved(_) => {}
+                HandoffOutcome::Ready | HandoffOutcome::AlreadyDriven => {
+                    return Ok(InflightObservation::Active);
                 }
-                crate::services::turn_orchestrator::installed_actor_handoff::HandoffOutcome::AlreadyDriven => return Ok(InflightObservation::Active),
-                crate::services::turn_orchestrator::installed_actor_handoff::HandoffOutcome::Refused(reason) => return Err(reason.into()),
+                HandoffOutcome::Refused(reason) => return Err(reason.into()),
             }
         }
         check_restore_context(context, provider)?;
@@ -621,16 +622,26 @@ pub(in crate::services::discord) async fn resume_inflight_scoped(
             });
         }
         if effect != RestoreEffect::ProviderExecution {
-            return Ok(InflightObservation::Deferred("output-only recovery retained the row".into()));
+            return Ok(InflightObservation::Deferred(
+                "output-only recovery retained the row".into(),
+            ));
         }
         // An actor this installation merely observed retains its existing driver.
         if installed.observation == InflightObservation::Active && !installed.activated {
             return Ok(InflightObservation::Active);
         }
-        let restore = Box::pin(restore_inflight_states(http, shared, provider, vec![state], installed.activated));
+        let restore = Box::pin(restore_inflight_states(
+            http,
+            shared,
+            provider,
+            vec![state],
+            installed.activated,
+        ));
         if let Some(proof) = installed.actor.clone() {
             let report = Arc::new(std::sync::Mutex::new(None));
-            RESUME_REPORT.scope(report.clone(), RESUME_ACTOR.scope(proof, restore)).await;
+            RESUME_REPORT
+                .scope(report.clone(), RESUME_ACTOR.scope(proof, restore))
+                .await;
             if let Some(outcome) = report.lock().unwrap().take() {
                 outcome.map_err(String::from)?;
                 return Ok(InflightObservation::Active);
@@ -657,11 +668,9 @@ pub(super) async fn installed_token(
         && snapshot.active_user_message_id
             == inflight::opt_message_id(state.effective_finalizer_turn_id())
         && let Some(token) = snapshot.cancel_token
-        && crate::services::turn_orchestrator::installed_actor_handoff::belongs(
-            channel_id,
-            &token,
-            &birth_key(state),
-        )
+        && let Ok(true) = (shared.mailbox(channel_id))
+            .holds_installation(&token, &birth_key(state))
+            .await
     {
         return token;
     }
@@ -738,9 +747,8 @@ async fn checked_handoff(
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
     proof: crate::services::turn_orchestrator::installed_actor_handoff::Installation,
-    drive: bool,
-) -> crate::services::turn_orchestrator::installed_actor_handoff::HandoffOutcome {
-    use crate::services::turn_orchestrator::installed_actor_handoff::HandoffOutcome;
+    intent: Intent,
+) -> HandoffOutcome {
     if proof.episode != episode_key(state)
         || proof.channel.get() != state.channel_id
         || provider.as_str() != state.provider
@@ -758,7 +766,7 @@ async fn checked_handoff(
     let channel = proof.channel;
     shared
         .mailbox(channel)
-        .handoff_installed(proof, drive, move || {
+        .handoff_installed(proof, intent, move || {
             if crate::services::discord::input_runtime::fence::lookup(&provider, channel.get())
                 .is_some()
             {
@@ -769,8 +777,17 @@ async fn checked_handoff(
                 &provider,
                 channel.get(),
             );
-            let guard = inflight::try_lock_inflight_state_path(&path)
-                .map_err(|error| format!("retryable: {error}"))?;
+            let guard =
+                inflight::try_lock_inflight_state_path_typed(&path).map_err(
+                    |refusal| match refusal {
+                        inflight::TryLockRefusal::Contended => {
+                            "retryable: canonical row locked".into()
+                        }
+                        inflight::TryLockRefusal::Failed(error) => {
+                            format!("canonical row lock: {error}")
+                        }
+                    },
+                )?;
             let fresh: inflight::InflightTurnState = serde_json::from_slice(
                 &std::fs::read(&path).map_err(|error| format!("retryable: {error}"))?,
             )
@@ -820,21 +837,21 @@ pub(super) async fn checked_kickoff(
             });
             return RecoveryKickoffResult::Unavailable;
         }
-        match checked_handoff(shared, provider, state, proof, true).await {
-            crate::services::turn_orchestrator::installed_actor_handoff::HandoffOutcome::Ready(events) => {
-                apply_queue_exit_feedback(shared, channel, &events).await;
-                let _ = RESUME_REPORT.try_with(|report| *report.lock().unwrap() = Some(Ok(true)));
-                RecoveryKickoffResult::Activated
-            }
-            crate::services::turn_orchestrator::installed_actor_handoff::HandoffOutcome::AlreadyDriven => {
-                let _ = RESUME_REPORT.try_with(|report| *report.lock().unwrap() = Some(Ok(false)));
-                RecoveryKickoffResult::Unavailable
-            }
-            crate::services::turn_orchestrator::installed_actor_handoff::HandoffOutcome::Refused(reason) => {
-                let _ = RESUME_REPORT.try_with(|report| *report.lock().unwrap() = Some(Err(reason)));
-                RecoveryKickoffResult::Unavailable
-            }
-        }
+        // A reserved driver resumes the same episode; only its ready confirm activates recovery.
+        let (report, kickoff) =
+            match checked_handoff(shared, provider, state, proof, Intent::Driver).await {
+                HandoffOutcome::Reserved(_) => {
+                    (Ok(true), RecoveryKickoffResult::AlreadyActiveSameEpisode)
+                }
+                HandoffOutcome::Ready | HandoffOutcome::AlreadyDriven => {
+                    (Ok(false), RecoveryKickoffResult::Unavailable)
+                }
+                HandoffOutcome::Refused(reason) => {
+                    (Err(reason), RecoveryKickoffResult::Unavailable)
+                }
+            };
+        let _ = RESUME_REPORT.try_with(|slot| *slot.lock().unwrap() = Some(report));
+        kickoff
     }
     #[cfg(not(all(test, unix)))]
     mailbox_recovery_kickoff(
@@ -851,6 +868,8 @@ pub(super) async fn checked_kickoff(
 #[cfg(test)]
 mod b3a1_tests {
     use super::*;
+    use crate::services::turn_orchestrator::RecoveryKickoffResult;
+    use crate::services::turn_orchestrator::installed_actor_handoff::{OwedRecord, PendingDriver};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     pub(super) fn context(
@@ -911,6 +930,7 @@ mod b3a1_tests {
         let state = row(5340401, Some("pending"));
         inflight::save_inflight_state_create_new(&state).unwrap();
         queued(&shared, &state).await;
+        let channel = ChannelId::new(state.channel_id);
         let current = Arc::new(AtomicU64::new(1));
         let first = context(state.channel_id, 1, current.clone());
         let http = Arc::new(serenity::Http::new("test"));
@@ -918,48 +938,56 @@ mod b3a1_tests {
             .await
             .unwrap();
         assert!(installed.activated);
-        let actor = shared
-            .mailbox(ChannelId::new(state.channel_id))
-            .snapshot()
-            .await
-            .cancel_token
-            .unwrap();
+        let reserved = drive(&shared, &installed).await;
+        assert_eq!(reserved, RecoveryKickoffResult::AlreadyActiveSameEpisode);
+        let mailbox = shared.mailbox(channel);
+        let actor = mailbox.snapshot().await.cancel_token.unwrap();
+        let record = mailbox.owed_record().await.expect("installed record");
+        assert_eq!(
+            (record.driver, record.exits.len()),
+            (PendingDriver::Reserved, 1)
+        );
+        let path = crate::services::turn_orchestrator::installed_actor_handoff::queue_file(
+            &queue_persistence_context(&shared, &ProviderKind::Claude, channel),
+            channel,
+        );
+        let file = std::fs::read(&path).unwrap();
         drop(installed);
         current.store(2, Ordering::Release);
         let second = context(state.channel_id, 2, current);
         let installed = install_inflight_scoped(&http, &shared, &ProviderKind::Claude, &second)
             .await
             .unwrap();
-        let outcome = drive(&shared, &installed).await;
         assert!(
-            !shared.queued.queued_placeholders.contains_key(&(
-                ChannelId::new(state.channel_id),
-                MessageId::new(state.user_msg_id)
-            )),
-            "feedback from the dropped ticket must be handed over exactly once"
+            installed.activated,
+            "a reserved driver is still owed after re-entry"
+        );
+        let inherited = OwedRecord {
+            generation: 2,
+            ..record
+        };
+        assert_eq!(mailbox.owed_record().await, Some(inherited));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            file,
+            "re-entry issues no debt"
         );
         assert!(
             shared
-                .mailbox(ChannelId::new(state.channel_id))
-                .snapshot()
-                .await
-                .recovery_started_at
-                .is_some()
+                .queued
+                .queued_placeholders
+                .contains_key(&(channel, MessageId::new(state.user_msg_id))),
+            "a reservation applies no feedback"
         );
-        assert_eq!(
-            outcome,
-            crate::services::turn_orchestrator::RecoveryKickoffResult::Activated
-        );
-        assert!(
-            installed.activated,
-            "a merely installed actor still needs a driver after re-entry"
-        );
-        let after = shared
-            .mailbox(ChannelId::new(state.channel_id))
-            .snapshot()
-            .await
-            .cancel_token
-            .unwrap();
+        let again = drive(&shared, &installed).await;
+        assert_eq!(again, RecoveryKickoffResult::AlreadyActiveSameEpisode);
+        assert!(mailbox.snapshot().await.recovery_started_at.is_none());
+        assert!(matches!(
+            confirm_ready(&shared, &installed).await,
+            HandoffOutcome::Ready
+        ));
+        assert!(mailbox.snapshot().await.recovery_started_at.is_some());
+        let after = mailbox.snapshot().await.cancel_token.unwrap();
         assert!(Arc::ptr_eq(&actor, &after));
         assert!(
             install_inflight_scoped(&http, &shared, &ProviderKind::Claude, &first)
@@ -1018,19 +1046,16 @@ mod b3a1_tests {
                 ),
             )
             .await;
-
+        assert_eq!(outcome, RecoveryKickoffResult::AlreadyActiveSameEpisode);
         assert!(
-            shared
-                .mailbox(channel)
-                .snapshot()
-                .await
-                .recovery_started_at
-                .is_some()
+            started(&shared, channel).await.is_none(),
+            "a reserved driver is not active"
         );
-        assert_eq!(
-            outcome,
-            crate::services::turn_orchestrator::RecoveryKickoffResult::Activated
-        );
+        assert!(matches!(
+            confirm_ready(&shared, &installed).await,
+            HandoffOutcome::Ready
+        ));
+        assert!(started(&shared, channel).await.is_some());
         assert!(
             Arc::ptr_eq(&actor, &resumed),
             "legacy resume must carry the installation's actual actor"
@@ -1131,7 +1156,7 @@ mod b3a1_tests {
         pool.close().await;
         db.drop().await;
     }
-    async fn queued(shared: &Arc<SharedData>, state: &inflight::InflightTurnState) {
+    pub(super) async fn queued(shared: &Arc<SharedData>, state: &inflight::InflightTurnState) {
         use crate::services::turn_orchestrator::{Intervention, InterventionMode};
         let channel = ChannelId::new(state.channel_id);
         let id = MessageId::new(state.user_msg_id);
@@ -1164,10 +1189,28 @@ mod b3a1_tests {
             .queued_placeholders
             .insert((channel, id), MessageId::new(state.channel_id + 3));
     }
-    async fn drive(
+    async fn started(shared: &Arc<SharedData>, channel: ChannelId) -> Option<std::time::Instant> {
+        shared.mailbox(channel).snapshot().await.recovery_started_at
+    }
+    /// The driver's ready confirm the restore runtime does not send yet.
+    pub(super) async fn confirm_ready(
         shared: &Arc<SharedData>,
         installed: &InstalledInflight,
-    ) -> crate::services::turn_orchestrator::RecoveryKickoffResult {
+    ) -> HandoffOutcome {
+        let (state, proof) = (installed.state.as_ref().unwrap(), installed.actor.clone());
+        checked_handoff(
+            shared,
+            &ProviderKind::Claude,
+            state,
+            proof.unwrap(),
+            Intent::Ready,
+        )
+        .await
+    }
+    pub(super) async fn drive(
+        shared: &Arc<SharedData>,
+        installed: &InstalledInflight,
+    ) -> RecoveryKickoffResult {
         let state = installed.state.as_ref().unwrap();
         let proof = installed.actor.clone().unwrap();
         let token = proof.token.clone();
@@ -1186,7 +1229,6 @@ mod b3a1_tests {
     }
     #[tokio::test]
     async fn s3act_b3a1_handoff_checks_actual_actor_before_feedback_pg() {
-        use crate::services::turn_orchestrator::installed_actor_handoff::HandoffOutcome;
         let _root = crate::config::TestRuntimeRootGuard::new();
         let (db, pool, shared) = fixture().await;
         let state = row(5340410, Some("same-nonce"));
@@ -1206,6 +1248,7 @@ mod b3a1_tests {
             state.turn_nonce.clone(),
         ));
         let channel = ChannelId::new(state.channel_id);
+        let held = shared.mailbox(channel).owed_record().await;
         shared
             .mailbox(channel)
             .restore_active_turn_kinded(
@@ -1215,22 +1258,22 @@ mod b3a1_tests {
                 crate::services::turn_orchestrator::ActiveTurnKind::UserOrAgent,
             )
             .await;
-        let outcome =
-            checked_handoff(&shared, &ProviderKind::Claude, fresh, proof.clone(), false).await;
-        if let HandoffOutcome::Ready(events) = &outcome {
-            apply_queue_exit_feedback(&shared, channel, events).await;
-        }
+        let outcome = checked_handoff(
+            &shared,
+            &ProviderKind::Claude,
+            fresh,
+            proof.clone(),
+            Intent::Feedback,
+        )
+        .await;
         let snap = shared.mailbox(channel).snapshot().await;
         assert!(Arc::ptr_eq(snap.cancel_token.as_ref().unwrap(), &successor));
         assert!(snap.recovery_started_at.is_none());
-        assert!(
-            shared
-                .queued
-                .queued_placeholders
-                .contains_key(&(channel, MessageId::new(state.user_msg_id)))
-        );
+        let placeholder = (channel, MessageId::new(state.user_msg_id));
+        assert!(shared.queued.queued_placeholders.contains_key(&placeholder));
         assert!(discord.calls().is_empty());
         assert!(matches!(outcome, HandoffOutcome::Refused(_)));
+        assert_eq!(shared.mailbox(channel).owed_record().await, held);
         shared
             .mailbox(channel)
             .restore_active_turn_kinded(
@@ -1240,39 +1283,35 @@ mod b3a1_tests {
                 crate::services::turn_orchestrator::ActiveTurnKind::UserOrAgent,
             )
             .await;
-        let HandoffOutcome::Ready(events) =
-            checked_handoff(&shared, &ProviderKind::Claude, fresh, proof, false).await
+        let HandoffOutcome::Reserved(owed) = checked_handoff(
+            &shared,
+            &ProviderKind::Claude,
+            fresh,
+            proof,
+            Intent::Feedback,
+        )
+        .await
         else {
             panic!("original actor must retain pending feedback")
         };
-        assert_eq!(events.len(), 1);
-        apply_queue_exit_feedback(&shared, channel, &events).await;
+        let record = shared.mailbox(channel).owed_record().await.unwrap();
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[0].event_id, record.exits[0].0);
         assert!(
-            !shared
-                .queued
-                .queued_placeholders
-                .contains_key(&(channel, MessageId::new(state.user_msg_id)))
+            shared.queued.queued_placeholders.contains_key(&placeholder),
+            "a reservation applies no feedback"
         );
-        assert!(
-            shared
-                .mailbox(channel)
-                .snapshot()
-                .await
-                .recovery_started_at
-                .is_none()
-        );
+        assert!(started(&shared, channel).await.is_none());
         assert_eq!(
             drive(&shared, &installed).await,
-            crate::services::turn_orchestrator::RecoveryKickoffResult::Activated
+            RecoveryKickoffResult::AlreadyActiveSameEpisode
         );
-        assert!(
-            shared
-                .mailbox(channel)
-                .snapshot()
-                .await
-                .recovery_started_at
-                .is_some()
-        );
+        assert!(started(&shared, channel).await.is_none());
+        assert!(matches!(
+            confirm_ready(&shared, &installed).await,
+            HandoffOutcome::Ready
+        ));
+        assert!(started(&shared, channel).await.is_some());
         pool.close().await;
         db.drop().await;
     }
@@ -1285,7 +1324,6 @@ mod b3a1_tests {
         stale_handoff("row", 5340412).await;
     }
     async fn stale_handoff(change: &str, channel: u64) {
-        use crate::services::turn_orchestrator::installed_actor_handoff::HandoffOutcome;
         let _root = crate::config::TestRuntimeRootGuard::new();
         let (db, pool, shared) = fixture().await;
         let state = row(channel, Some("pending"));
@@ -1303,6 +1341,7 @@ mod b3a1_tests {
             channel,
         );
         let bytes = std::fs::read(&path).unwrap();
+        let held = shared.mailbox(ChannelId::new(channel)).owed_record().await;
         if change == "generation" {
             current.store(2, Ordering::Release);
         } else {
@@ -1315,13 +1354,11 @@ mod b3a1_tests {
             &ProviderKind::Claude,
             installed.state.as_ref().unwrap(),
             installed.actor.clone().unwrap(),
-            false,
+            Intent::Feedback,
         )
         .await;
         let channel = ChannelId::new(channel);
-        if let HandoffOutcome::Ready(events) = &outcome {
-            apply_queue_exit_feedback(&shared, channel, events).await;
-        }
+        assert_eq!(shared.mailbox(channel).owed_record().await, held);
         assert!(
             shared
                 .mailbox(channel)
@@ -1342,37 +1379,40 @@ mod b3a1_tests {
         );
         std::fs::write(&path, bytes).unwrap();
         current.store(1, Ordering::Release);
-        let HandoffOutcome::Ready(events) = checked_handoff(
+        let HandoffOutcome::Reserved(owed) = checked_handoff(
             &shared,
             &ProviderKind::Claude,
             installed.state.as_ref().unwrap(),
             installed.actor.clone().unwrap(),
-            false,
+            Intent::Feedback,
         )
         .await
         else {
             panic!("refusal must preserve responsibility")
         };
-        assert_eq!(events.len(), 1);
+        assert_eq!(owed.len(), 1);
         assert_eq!(
             drive(&shared, &installed).await,
-            crate::services::turn_orchestrator::RecoveryKickoffResult::Activated
+            RecoveryKickoffResult::AlreadyActiveSameEpisode
         );
         pool.close().await;
         db.drop().await;
     }
     #[tokio::test]
-    async fn s3act_b3a1_fresh_progress_can_transfer_only_pending_responsibility_pg() {
+    async fn s3act_b3a1_fresh_progress_cannot_inherit_pending_responsibility_pg() {
         let _root = crate::config::TestRuntimeRootGuard::new();
         let (db, pool, shared) = fixture().await;
         let state = row(5340413, None);
         inflight::save_inflight_state_create_new(&state).unwrap();
+        let channel = ChannelId::new(state.channel_id);
         let current = Arc::new(AtomicU64::new(1));
         let first = context(state.channel_id, 1, current.clone());
         let http = Arc::new(serenity::Http::new("test"));
         let installed = install_inflight_scoped(&http, &shared, &ProviderKind::Claude, &first)
             .await
             .unwrap();
+        let held = shared.mailbox(channel).owed_record().await;
+        assert!(held.is_some());
         let mut progress = installed.state.clone().unwrap();
         progress.current_msg_id += 1;
         let path = inflight::inflight_state_path(
@@ -1380,41 +1420,42 @@ mod b3a1_tests {
             &ProviderKind::Claude,
             state.channel_id,
         );
-        std::fs::write(path, serde_json::to_vec(&progress).unwrap()).unwrap();
+        let unprogressed = std::fs::read(&path).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&progress).unwrap()).unwrap();
         current.store(2, Ordering::Release);
         let second = context(state.channel_id, 2, current.clone());
-        let inherited = install_inflight_scoped(&http, &shared, &ProviderKind::Claude, &second)
+        let progressed = install_inflight_scoped(&http, &shared, &ProviderKind::Claude, &second);
+        assert!(progressed.await.is_err(), "another episode never inherits");
+        assert_eq!(shared.mailbox(channel).owed_record().await, held);
+        assert_eq!(
+            drive(&shared, &installed).await,
+            RecoveryKickoffResult::Unavailable
+        );
+        assert!(started(&shared, channel).await.is_none());
+
+        // The same episode at a newer generation inherits; once driven, it keeps its driver.
+        std::fs::write(&path, unprogressed).unwrap();
+        current.store(3, Ordering::Release);
+        let third = context(state.channel_id, 3, current.clone());
+        let inherited = install_inflight_scoped(&http, &shared, &ProviderKind::Claude, &third)
             .await
             .unwrap();
         assert!(inherited.activated);
         assert_eq!(
-            drive(&shared, &installed).await,
-            crate::services::turn_orchestrator::RecoveryKickoffResult::Unavailable
-        );
-        assert!(
-            shared
-                .mailbox(ChannelId::new(state.channel_id))
-                .snapshot()
-                .await
-                .recovery_started_at
-                .is_none()
-        );
-        assert_eq!(
             drive(&shared, &inherited).await,
-            crate::services::turn_orchestrator::RecoveryKickoffResult::Activated
+            RecoveryKickoffResult::AlreadyActiveSameEpisode
         );
-        let marker = shared
-            .mailbox(ChannelId::new(state.channel_id))
-            .snapshot()
-            .await
-            .recovery_started_at
-            .unwrap();
-        current.store(3, Ordering::Release);
+        assert!(matches!(
+            confirm_ready(&shared, &inherited).await,
+            HandoffOutcome::Ready
+        ));
+        let marker = started(&shared, channel).await.unwrap();
+        current.store(4, Ordering::Release);
         let observed = install_inflight_scoped(
             &http,
             &shared,
             &ProviderKind::Claude,
-            &context(state.channel_id, 3, current),
+            &context(state.channel_id, 4, current),
         )
         .await
         .unwrap();
@@ -1422,18 +1463,15 @@ mod b3a1_tests {
             !observed.activated,
             "a handed-off actor must retain its existing driver"
         );
-        assert_eq!(
-            shared
-                .mailbox(ChannelId::new(state.channel_id))
-                .snapshot()
-                .await
-                .recovery_started_at,
-            Some(marker)
-        );
+        assert_eq!(started(&shared, channel).await, Some(marker));
         pool.close().await;
         db.drop().await;
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "scoped_restore_claim_tests.rs"]
+mod claim_tests;
 
 #[cfg(all(test, unix))]
 #[cfg(test)]

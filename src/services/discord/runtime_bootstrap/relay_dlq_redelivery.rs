@@ -27,6 +27,7 @@ pub(super) struct RedeliverySlice {
     pub anchor_message_id: u64,
     pub provider: String,
     pub tmux_session: String,
+    pub generation_mtime_ns: i64,
     pub body: String,
 }
 
@@ -126,6 +127,7 @@ pub(super) fn build_plan(rows: Vec<dlq::ClaimedDeadLetter>) -> RedeliveryPlan {
                 anchor_message_id: anchor,
                 provider: span.provider,
                 tmux_session: tmux_session.clone(),
+                generation_mtime_ns: span.generation_mtime_ns,
                 body: body.to_string(),
             });
         }

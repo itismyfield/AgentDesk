@@ -259,6 +259,12 @@ impl<W, H: RepostHook<W>> RepostHook<W> for Counted<H> {
     fn original(&mut self, serial: u64, record: PieceRecord) -> Turned<'_, OriginalGate> {
         self.inner.original(serial, record)
     }
+
+    fn receipts(
+        &mut self,
+    ) -> Turned<'_, crate::services::tui_o::repost::projection::ReceiptOverlay> {
+        self.inner.receipts()
+    }
 }
 
 /// Off, the actor's turn stops at the switch: the piece posts as without one and nothing reads

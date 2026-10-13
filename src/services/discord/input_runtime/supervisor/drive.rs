@@ -10,6 +10,7 @@ use crate::services::discord::input_runtime::supervisor::admission::Admission;
 pub(crate) use crate::services::discord::input_runtime::supervisor::command::SupervisorCmd;
 
 use super::{BUDGET, Cursor, Landing, Ports, Supervisor, clear_loan, held, loan};
+use crate::services::discord::PresenceLease;
 use crate::services::discord::input_runtime::clear::{self, ClearHost, Outcome, Unresolved};
 use crate::services::discord::input_runtime::fence::{self, Closing};
 use crate::services::discord::input_runtime::reconcile::{self, HoldCause};
@@ -270,6 +271,8 @@ pub(crate) struct ChannelDrive<D: DrivePorts> {
     lost: bool,
     pub(super) clearing: Option<Clearing>,
     hold: Option<(&'static str, Instant)>,
+    /// Withdrawn at Close and at every end; a presence registration made later is not its own.
+    presence: PresenceLease,
     #[cfg(test)]
     pub(crate) counts: Counts,
 }
@@ -284,6 +287,7 @@ impl<D: DrivePorts> ChannelDrive<D> {
 /// open gate. A loan it abandoned keeps the slot lent, so that worker's writes stay its own.
 impl<D: DrivePorts> Drop for ChannelDrive<D> {
     fn drop(&mut self) {
+        self.presence.withdraw("input_drive_ended");
         if self.ready {
             let _ = self.closing.hold();
         }
@@ -378,6 +382,13 @@ impl<P: Ports> Supervisor<P> {
             Vec::new()
         };
         probe.adopt(expected, runtimes);
+        #[cfg(test)]
+        let publish = !super::mutant("c2_skip_ready_publish");
+        #[cfg(not(test))]
+        let publish = true;
+        if publish {
+            self.publish_intake();
+        }
         loop {
             let landing = self.boot().await;
             self.retry_notices().await;
@@ -523,6 +534,7 @@ impl<P: Ports> Supervisor<P> {
             lost: false,
             clearing: None,
             hold: None,
+            presence: PresenceLease::take(&self.config.provider, self.config.channel),
             #[cfg(test)]
             counts: Counts::default(),
         };
@@ -567,6 +579,8 @@ impl<P: Ports> Supervisor<P> {
                 }
                 Some(SupervisorCmd::Clear) => self.clear(&mut drive, Instant::now()).await,
                 Some(SupervisorCmd::Close { ack }) => {
+                    // Not a parent Idle: only the presence lease this drive holds is taken back.
+                    drive.presence.withdraw("input_close");
                     self.close_command(ack).await;
                     drive.ready = false;
                 }
@@ -719,8 +733,45 @@ impl<P: Ports> Supervisor<P> {
         if drive.life.view().key().is_none() {
             drive.counts.held_steps += 1;
         }
+        let material = rows.receipt_identity(key).and_then(|identity| {
+            super::source::Source::new(key, identity, row.input.clone(), vec![]).ok()
+        });
+        // Policy IO runs before the WAL loan; a changed policy keeps the accepted row intact.
+        let approval = material
+            .as_ref()
+            .zip(row.received_seq)
+            .map(|(source, seq)| {
+                actor::PolicyOffer::new(source.key(), source.identity().clone(), seq)
+            });
+        let permitted = match material.as_ref() {
+            Some(source) => self.ports.source_policy(source).await,
+            None => false,
+        };
+        #[cfg(test)]
+        let permitted = permitted || super::mutant("c2_skip_offer_policy");
+        if !permitted {
+            drive.life.restore(instance);
+            return self
+                .hold(drive, cause("source_policy_not_target"), now)
+                .await;
+        }
+        let overflow = self.pending_overflow();
+        let generation = overflow.generation();
+        let ready = self.admission_open() && self.order.offer_ready() && approval.is_some();
+        #[cfg(test)]
+        let ready = ready || super::mutant("c2b_skip_policy_order_recheck");
+        if !ready {
+            drive.life.restore(instance);
+            return;
+        }
         let guard = self.guard();
         let stepped = loan(&mut self.slot, move |lease| {
+            let unchanged = overflow.generation() == generation;
+            #[cfg(test)]
+            let unchanged = unchanged || super::mutant("c2b_skip_policy_order_recheck");
+            if !unchanged {
+                return (instance, Err(held("pending_changed")));
+            }
             // A late edge stops the actor before it can submit; the row keeps its responsibility.
             if let Err(cause) = guard.check("offer") {
                 return (instance, Err(cause));
@@ -737,9 +788,12 @@ impl<P: Ports> Supervisor<P> {
             let actor = built.actor.as_mut().expect("actor built before the step");
             let fact = instance.fact.as_ref();
             // The actor's tmux and file IO is blocking, so it runs only on this worker.
-            let step = lease
-                .get()
-                .and_then(|ledger| futures::executor::block_on(actor.step(ledger, fact, now)));
+            let step = lease.get().and_then(|ledger| match approval.as_ref() {
+                Some(approval) => {
+                    futures::executor::block_on(actor.step_for_source(ledger, fact, now, approval))
+                }
+                None => Ok(Step::Wait("source_policy_changed")),
+            });
             lease.needs_reopen |= step.is_err();
             (instance, Ok(step))
         })

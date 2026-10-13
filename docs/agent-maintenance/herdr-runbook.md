@@ -16,7 +16,7 @@ Herdr 로 띄운 Claude 채널(P9 대상: adk-dash-cc)의 운영 절차다. 5a�
 ## 2. 확인
 
 - 전용 env 로 `herdr status server --json` 을 실행해 버전 0.9.3 을 확인한다.
-- AgentDesk health(`/api/health`) 의 `herdr` 블록:
+- AgentDesk 상세 health(`/api/health/detail`) 의 `herdr` 블록(공개 `/api/health`에는 없음):
   - `endpoints.<key>.local = true`: 이 노드의 endpoint 다.
   - `admission = "open"`: 새 Herdr 작업을 받는다.
   - `reconnect`: 가장 최근 재시작 재접속 패스의 결과다. 이 노드에 local endpoint 가 있을 때만 나온다.
@@ -39,6 +39,51 @@ Herdr 로 띄운 Claude 채널(P9 대상: adk-dash-cc)의 운영 절차다. 5a�
   - Retired row 인데 그 nonce 의 hold 가 남아 있으면 그 row 도 `state: retired` 로 나온다.
   - 어느 row 에도 속하지 않는 hold 는 `other_input_holds` 에 nonce·기록 시각으로 나온다.
   - 경로와 입력 원문은 출력하지 않는다.
+
+## 2a. 첫 E2E gate와 운영자 재시작 관측
+
+- 하네스와 `--herdr-status-bin` CLI는 API 대상 노드에서 실행한다. `--base-url`은 그 노드 loopback이고 지정 endpoint는 `local=true`여야 한다.
+- `--herdr-status-bin`은 `--base-url`과 **같은 runtime**의 바이너리·환경이어야 한다. 한 노드에 dev(8797)와 release(8791)가 함께 있으면 다른 runtime의 row를 읽는다.
+- `<common-args>` = `--cell claude-herdr --channel-id <channel> --base-url http://127.0.0.1:<port> --herdr-endpoint <endpoint> --herdr-status-bin <cli>`.
+- health·Discord 요청에는 같은 scheme·host·port의 loopback `Origin`을 자동 적용한다. 토큰 인자·환경변수나 설정 파일 탐색은 사용하지 않는다.
+- detail의 readiness·admission·필수 필드와 캐시 `input_holds=0`을 확인한 뒤, 현재 CLI row·hold도 검사한다. 관측 실패 시 SETUP/프롬프트를 보내지 않는다.
+- cold에서는 row가 없어도 되지만 응답 뒤에는 대상 channel/provider의 유일한 정상 row·launch 증거·hold 0이 필요하다. 최초 실행에 `published>0`은 요구하지 않는다.
+- 첫 gate는 `claude-herdr`로 **E-1 → E-3 → E-2 → E-15 → E-50**을 각각 한 번씩 실행한다. 하나라도 `status=pass`가 아니면 다음 입력을 보내지 않는다.
+- 아래 명령에서 `<scenario>`는 위 순서로 하나씩 바꾸고 `<run>`·`<output>`은 실행마다 고유하게 지정한다.
+  `python3 scripts/e2e/run_tui_relay.py <common-args> --no-reset-before-each --filter <scenario> --run-id <run> --output <output>`
+- E-50 판정: `python3 scripts/e2e/post_deploy_turn_smoke.py judge --report <output>/report.claude-herdr.json --scenarios tests/e2e/tui_relay/scenarios --scenario E-50 --cell claude-herdr --channel-id <channel> --driver-rc <rc>`
+- 관측은 노드 전체 상태에 묶여 있어 대상 채널과 무관하게 멈출 수 있다: detail `status≠healthy`, `degraded_reasons` 비어 있지 않음, 다른 채널 row의 hold·unreadable 또는 `other_input_holds`.
+  멈추면 report의 `herdr_observations[-1].readiness`와 `reason`을 보고, 원인을 정리한 뒤 같은 시나리오부터 다시 실행한다.
+- 공유 노드의 무관한 사유는 `--herdr-allowed-degraded-reason <패턴>`(반복, 정확 일치 또는 끝 `*` 접두)으로 그 실행에서만 넘길 수 있다. 예: `--herdr-allowed-degraded-reason 'tui_o:released*'`.
+  `status`가 `healthy`/`degraded`이고 **모든** 사유가 패턴에 맞을 때만 통과한다. `herdr`(대소문자 무시)나 대상 channel id를 담은 사유, 빈 패턴·`*` 단독은 거부하고, `fully_recovered`·herdr block·row 검사는 그대로다. Herdr 셀 밖에서는 인자 오류다.
+  시나리오가 선언한 `assert_health`·`restart_dcserver` 단계의 관측에는 적용하지 않는다(`withheld`).
+  각 관측의 `readiness`에 `degraded_reason_waiver`(`none`/`unused`/`applied`/`withheld`)·`allowed_degraded_reasons`·`ignored_degraded_reasons`가 요청 전 거절·요청 실패에도 남는다.
+  결과 JSON의 `herdr_readiness_waiver`(observe-only는 report 최상위)는 조기 거절·skip을 포함한 모든 종료에 남고, 무시 목록은 그 실행 관측 전체의 합집합이다.
+  실행 직전 detail의 `degraded_reasons`를 읽어 허용할 사유가 대상 채널 것이 아님을 확인한 뒤 넘긴다. id 부재는 무관함의 증명이 아니다.
+  `provider:…:pending_queue_depth:N`처럼 채널을 담지 않는 집계 사유는 실행 직전 대상 mailbox로 따로 확인하고, 확인할 수 없으면 허용하지 않는다.
+  `ignored_degraded_reasons_unattributed`는 허용된 사유 중 채널 id(17자리 이상 숫자)가 없거나 provider·전역 카운터 집계인 것이다. 여기 든 사유는 문자열로 대상과 무관함을 보일 수 없었다는 뜻이며, 위 mailbox 확인 기록과 대조한다.
+- 종료 코드 0만으로 수용하지 않는다. **첫 gate는 시나리오별 `status=pass`를 직접 확인해야 한다**. `known_gap`·`unexpected_pass`·`not_applicable`은 gate 통과가 아니다.
+- E-50 smoke judge는 T1·T2·AFTER_CLEAR가 각각 1회이고 detail/CLI 관측이 있어야 통과한다. Herdr에서는 tmux 로그·legacy queue 파일을 읽지 않는다.
+- E-50의 텍스트 `!clear` 뒤에 지원하는 거부 접두사(`세션을 초기화하지 못했어요:`, `세션 전환 중이라 초기화하지 못했어요`)의 답장을 관측하면 완료 대기를 중단하고 그 사유와 함께 실패한다(예: `rotation_unsettled(59)`). 다른 문구나 무응답은 기존 확인 제한시간 실패다.
+  거부와 완료 모두 그 `!clear` 송신 응답의 message id 뒤에 같은 채널에 올라온 bot 답장만 본다. 송신 응답에 양의 숫자 id가 없으면 기다리지 않고 측정 실패한다.
+- 재시작(E-8/19)·stop(E-18)·terminate(E-12)·E-35/36 원래 수용 기준은 이 첫 gate 밖이다.
+- 공유 운영 dcserver에는 `--herdr-isolated-server`를 쓰지 않는다. 재시작은 운영자가 수행하고 하네스는 아래 두 관측만 담당한다.
+- mark·verify도 실행마다 고유한 `--output`을 준다. gate 출력 디렉터리를 쓰면 gate의 `report.claude-herdr.json`을 덮어쓴다.
+- 첫 gate 뒤 정상 row가 있는 상태에서 공통 인자를 유지하고 표식을 만든다(Discord 전송 없음, 기존 표식 덮어쓰기 거부).
+  `python3 scripts/e2e/run_tui_relay.py <common-args> --herdr-restart-observe-only mark --herdr-restart-mark <mark.json> --output <mark-output>`
+- 표식에는 실행 run ID·target row/nonce·UTC 관측 시각·detail herdr 요약·서버가 제공한 시각/uptime 값과, mark 응답을 받은 뒤의 완료 시각(`completed_at`)·부팅 기준 시계 값(`boot_clock`)이 저장된다.
+- 운영자가 dcserver 재시작을 마친 다음 같은 노드·channel·endpoint와 같은 표식으로 검증한다.
+  `python3 scripts/e2e/run_tui_relay.py <common-args> --herdr-restart-observe-only verify --herdr-restart-mark <mark.json> --output <verify-output>`
+- verify는 일반 실행과 같은 셀 lease를 잡고, reconnect의 published>0, channels=published, withheld/unknown/pending=0, row nonce 연속성, 현재 hold 0, admission open을 확인한 뒤 후속 턴을 보낸다.
+- detail에 `uptime_secs`(0 이상 정수)가 있으면 `uptime_secs < 경과 − 2초`일 때만 재시작으로 보고(`restart_evidence: server_uptime`), 아니면 후속 턴 없이 실패한다(`not_observed`).
+  경과(`elapsed_secs`)는 표식 완료 시각부터 verify 요청 직전까지이며 벽시계와 부팅 기준 시계 중 작은 값이다. 부팅 기준 시계는 서버 uptime과 같은 시계(macOS `CLOCK_UPTIME_RAW`, Linux `CLOCK_MONOTONIC`)라 벽시계 보정·잠자기로 경과가 부풀지 않는다.
+  구형 mark(`completed_at` 없음)나 공유 시계가 없는 mark는 재시작 확인이 되지 않는다 — 다시 mark한다.
+  표식은 읽지만 후속 턴 전에 `take a new mark` 사유로 실패한다. 해당하는 경우: 부팅 시계가 없는 플랫폼, 표식·verify 시계 이름 불일치, 유한한 0 이상 값이 아닌 시계 값.
+  부팅 기준 시계를 지원하지 않는 플랫폼(macOS·Linux 밖)에서는 다시 mark해도 공유 시계가 생기지 않으므로 observe-only 재시작 확인 자체가 지원되지 않는다.
+  `uptime_secs`가 없거나 형식이 다르면 `not_proven`으로 기록하고 나머지 판정만 한다.
+- 기본 후속 턴은 `E-19-observe-only`로 기록한다. `--filter E-1`처럼 재시작 단계가 없는 시나리오를 지정할 수도 있다. 원래 E-19의 비밀값 회상 기준을 충족했다고 주장하지 않는다.
+- mark/verify에는 launchctl·재시작 명령이 없다. `--herdr-isolated-server`·`--restart-script` 병용 및 재시작 단계가 포함된 후속 시나리오는 거부한다.
+- report는 전후 관측 시각과 서버 제공 값을 보존한다. `server_uptime`도 시계 기반 추정이라 boot id 수준의 incarnation 증명은 아니다. `not_proven`이면 운영자의 별도 재시작 증거가 필요하다.
 
 ## 3. 비상 정지
 

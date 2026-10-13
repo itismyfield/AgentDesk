@@ -1,0 +1,79 @@
+# N1 oracle evidence
+
+The CLI reads the pinned manifest and captured inputs. It never repairs stores or sends
+Discord messages. Its shipped support table has no approved producer capabilities;
+that condition always prevents PASS. The hypothetical supported profile lives only in
+test-created temporary CLI copies. They execute the same checks with a separate pinned table.
+There is no production support-table option or environment override.
+
+`PYTHONPATH=scripts python3 -m n1_canary.producer --process-proof <capture>
+--executable <captured-proc-exe> --release-source <attestation> --verification-log <jsonl>`
+prints a candidate only after matching the captured executable hash, clean build SHA and
+positive schema 2 unknown/actual-confirmation events in a separate verification run.
+It reads captures without running the binary or modifying the table. The coordinator must
+review the trusted build/deployment attestation and raw capture provenance before registration;
+the tool cannot attest the origin of supplied files. See the
+[runbook](../../docs/tui-o-writer-canary-runbook.md#52-register-the-deployed-producer-before-using-pass).
+
+`producer_capabilities` approves an exact `build_commit` and `executable_sha256` pair,
+`event_schema: 2`, `unknown_outcome_produced: true` and `actual_confirmation_produced: true`.
+The captured process and executable must independently match that identity. Unknown events
+carry `source_id`, `witness_offset`, nullable `logical_turn_key` and `reason`; the common
+boot/channel/provider/seq fields still apply. Raw counter deltas must equal logged emissions.
+Distinct witnesses use boot/source/offset/reason/native ID, so rereads never create new turns.
+An unresolved witness in the canary interval survives Resume and keeps the verdict `[U]`.
+
+The native transcript, O init and ledger retain their independent native/store formats.
+Unknown ledger variants, malformed rows and incomplete results yield `[U]`. Existing init
+records may belong to an earlier build. The current process/build proof is a separate input.
+
+Every past Posted ID needs captured message evidence. Missing past lookups and uncertain
+past attempts remain unresolved debt; a later Posted receipt does not settle an earlier
+Ambiguous or Unresolved attempt. Candidate IDs and unresolved reasons remain in the report.
+When that audit is incomplete, `duplicates` is null and `duplicates_confirmed` gives the
+observed lower bound. Historical input provenance can use consistent individual human
+message lookups; current input inventory still covers only messages in the current window.
+
+The Legacy, debt and residue inputs use capture schema 1. Each capture has exactly
+`schema_version`, `complete`, `scope` and the fields below. Scope binds the boot, channel,
+provider, full SourceId, closing observation seq and closing source offset. `complete` must
+be true. Captures whose inventory or observation boundaries cannot be established must
+report incompleteness; a bare empty list is insufficient evidence of absence.
+
+| Input | Capture fields |
+|---|---|
+| Legacy | `inputs`, `confirmed_deliveries`, `delivered_frontier`, `owner`, `allowed_messages` |
+| Debt | `undelivered`, `abandoned`, `baseline_messages`, `ledger_sha256` |
+| Inflight/pending/abort | `records` |
+
+Input provenance records bind a physical native observation, its normalized record digest,
+the execution identity, a positive input kind (`tty`, `monitor`, `autonomous`, `discord`)
+and the Discord input ID when applicable. They are input-ledger evidence, not an origin
+inferred from a missing PG row. Every physical observation must have matching provenance;
+every in-window human Discord input and PG intake row must be explained. Native completion
+and publication expectations always come from the transcript, never these records or O.
+`owner` records the observed O writer and N1 mode under the same execution identity.
+
+Legacy receipts and the frontier retain their delivery-record fields. A receipt must bind
+one independently derived piece and an actual bot message with the same digest. Shared
+O/Legacy receipt identity remains uncertain rather than proving an extra POST. The supported
+allowed-message capture is a tool panel with an excluded native Tool key, empty text and
+a matching embed footer identity. Other card/panel formats remain `[U]`.
+
+Debt ranges record SourceId, start/end offsets and a reason. Known prefix units and historical
+O outcomes are also audited even without an inventory alarm. Old missing/duplicate pieces
+are reported separately and prevent PASS while unresolved. A new duplicate of an old unit
+inside the observation window is a current violation. Unknown source genealogies cannot be
+settled by this profile. Baseline message records bind an individually fetched message ID,
+digest and last changed seq preceding confirmation; baseline membership does not excuse
+later placeholder effects. The complete debt inventory pins the full O ledger digest.
+
+Closure needs successful native/origin, delivery, effects, reverse and debt stages plus all
+input/observation/collection guards. A definite independently proved violation takes priority
+over incomplete unrelated evidence. Exact effect totals become null while any uncertainty
+remains; confirmed effects are retained as lower bounds. The result file and stdout use the
+same composed verdict. Before enabling a production profile, its capture/provenance producers
+and compatibility must be verified alongside the separate observation producer work.
+An approved pair still requires complete independent capture, origin, observation and audit
+evidence; registration alone cannot establish PASS. Recompute the pinned oracle bundle hash
+after changing the support table.

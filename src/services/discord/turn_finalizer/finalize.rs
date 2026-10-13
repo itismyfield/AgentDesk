@@ -25,7 +25,17 @@ pub(super) async fn do_finalize(
     submit_snapshot: Option<&super::cleanup::SyntheticClaimSnapshot>,
     shared: &Arc<SharedData>,
 ) -> FinalizeOutcome {
-    do_finalize_with_release(key, provider, event, ctx, submit_snapshot, shared, None).await
+    do_finalize_with_release(
+        key,
+        provider,
+        event,
+        ctx,
+        submit_snapshot,
+        shared,
+        None,
+        false,
+    )
+    .await
 }
 
 pub(in crate::services::discord) async fn do_finalize_with_release(
@@ -36,6 +46,7 @@ pub(in crate::services::discord) async fn do_finalize_with_release(
     submit_snapshot: Option<&super::cleanup::SyntheticClaimSnapshot>,
     shared: &Arc<SharedData>,
     released: Option<crate::services::turn_orchestrator::FinishTurnResult>,
+    active_debited: bool,
 ) -> FinalizeOutcome {
     let mute_settlement = event.is_mute_settlement();
     #[cfg(test)]
@@ -188,8 +199,8 @@ pub(in crate::services::discord) async fn do_finalize_with_release(
     // (C) #3019 active-counter — decrement ONLY here, ONLY when this submission
     //     actually removed the active turn. Gating on `removed_token.is_some()`
     //     is what guarantees no underflow even under a transitional
-    //     double-call.
-    if finish.removed_token.is_some() {
+    //     double-call. A policy commit debited in the mailbox step that removed the token.
+    if finish.removed_token.is_some() && !active_debited {
         let decremented = crate::services::discord::saturating_decrement_global_active(shared);
         let global_active = shared
             .restart

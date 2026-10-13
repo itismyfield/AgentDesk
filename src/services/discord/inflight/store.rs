@@ -164,8 +164,30 @@ pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileL
 
 // Contention is retryable; scheduler callers must not wait for another open handle.
 pub(crate) fn try_lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
+    try_lock_inflight_state_path_typed(path).map_err(TryLockRefusal::detail)
+}
+
+/// Why a non-blocking acquire took no lock: another open handle holds it, or anything else.
+pub(crate) enum TryLockRefusal {
+    Contended,
+    Failed(String),
+}
+
+impl TryLockRefusal {
+    fn detail(self) -> String {
+        match self {
+            Self::Contended => fs::TryLockError::WouldBlock.to_string(),
+            Self::Failed(detail) => detail,
+        }
+    }
+}
+
+/// `try_lock_inflight_state_path` with contention told apart from IO, without parsing its text.
+pub(crate) fn try_lock_inflight_state_path_typed(
+    path: &Path,
+) -> Result<InflightStateFileLock, TryLockRefusal> {
     if let Some(population) = crate::services::discord::input_runtime::fence::inflight_writer(path)
-        .map_err(|failure| format!("input fence: {failure:?}"))?
+        .map_err(|failure| TryLockRefusal::Failed(format!("input fence: {failure:?}")))?
     {
         return Ok(InflightStateFileLock {
             file: None,
@@ -173,8 +195,12 @@ pub(crate) fn try_lock_inflight_state_path(path: &Path) -> Result<InflightStateF
             state_path: path.to_owned(),
         });
     }
-    let file = open_inflight_lock_file(path)?;
-    file.try_lock().map_err(|e| e.to_string())?;
+    let file = open_inflight_lock_file(path).map_err(TryLockRefusal::Failed)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => return Err(TryLockRefusal::Contended),
+        Err(error) => return Err(TryLockRefusal::Failed(error.to_string())),
+    }
     Ok(InflightStateFileLock {
         file: Some(file),
         _population: None,
@@ -641,16 +667,30 @@ pub(super) fn load_inflight_state_unlocked(path: &Path) -> Option<InflightTurnSt
 /// of a proven-dead orphan (#3982) preserves the old, already-stale timestamp so
 /// downstream ownerless-stale filters drop the row immediately on the next read
 /// instead of after another 300 s window.
+/// `coordinate_change` grants only the replay RMW namespace changes and a source rebase;
+/// general writers preserve the durable coordinate group and same-source monotonic checks.
 fn persist_under_lock_inner(
     root: &Path,
     path: &Path,
     state: &InflightTurnState,
     caller: &'static str,
     bump_updated_at: bool,
+    coordinate_change: Option<bool>,
 ) -> Result<Option<InflightTurnState>, String> {
     let mut updated = state.clone();
     updated.ensure_finalizer_turn_id();
-    if !validate_inflight_state_for_save(root, path, &updated, caller) {
+    if coordinate_change.is_none() && !durable_coordinate_group_kept(path, &updated, caller)? {
+        return Ok(None);
+    }
+    let valid = if coordinate_change == Some(true) {
+        updated.response_sent_offset <= updated.full_response.len()
+            && updated
+                .full_response
+                .is_char_boundary(updated.response_sent_offset)
+    } else {
+        validate_inflight_state_for_save(root, path, &updated, caller)
+    };
+    if !valid {
         return Ok(None);
     }
     if bump_updated_at {
@@ -664,6 +704,38 @@ fn persist_under_lock_inner(
     Ok(Some(updated))
 }
 
+/// Whether a general write leaves the durable coordinate group as it is: it may not add, drop
+/// or resurrect the install marker or a `p5925_coordinate:` hold. Unreadable rows fail closed.
+fn durable_coordinate_group_kept(
+    path: &Path,
+    candidate: &InflightTurnState,
+    caller: &'static str,
+) -> Result<bool, String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("read durable coordinate group: {error}")),
+    };
+    // A row naming neither key carries no group, so the common case skips the parse.
+    let durable_may_carry = content.contains("legacy_replay_coordinate")
+        || content.contains(super::model::COORDINATE_HOLD_PREFIX);
+    let kept = if durable_may_carry {
+        parse_inflight_state_content(&content)
+            .map_err(|error| format!("parse durable coordinate group: {error}"))?
+            .coordinate_group_eq(candidate)
+    } else {
+        !candidate.has_coordinate_group()
+    };
+    if !kept {
+        tracing::warn!(
+            channel_id = candidate.channel_id,
+            caller,
+            "general inflight write refused because it would change the coordinate replay group"
+        );
+    }
+    Ok(kept)
+}
+
 /// Shared lock-held persist tail: validate, stamp `updated_at`, atomic-write.
 /// Caller must already hold `lock_inflight_state_path`.
 pub(super) fn persist_under_lock(
@@ -672,7 +744,20 @@ pub(super) fn persist_under_lock(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<(), String> {
-    persist_under_lock_inner(root, path, state, caller, true).map(|_| ())
+    persist_under_lock_inner(root, path, state, caller, true, None).map(|_| ())
+}
+
+/// The coordinate replay RMW's lock-held write: the only path that may change the coordinate
+/// group. The caller has verified the exact episode and snapshot under the same lock.
+#[cfg(test)]
+pub(super) fn persist_coordinate_change_under_lock(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    caller: &'static str,
+    source_rebase: bool,
+) -> Result<Option<InflightTurnState>, String> {
+    persist_under_lock_inner(root, path, state, caller, true, Some(source_rebase))
 }
 
 /// Persists while returning the exact stamped row written under the lock.
@@ -684,7 +769,7 @@ pub(super) fn persist_under_lock_with_snapshot(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<Option<InflightTurnState>, String> {
-    persist_under_lock_inner(root, path, state, caller, true)
+    persist_under_lock_inner(root, path, state, caller, true, None)
 }
 
 /// Complete a successful restart readoption while the caller owns the canonical
@@ -716,7 +801,7 @@ pub(super) fn persist_under_lock_preserving_updated_at(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<(), String> {
-    persist_under_lock_inner(root, path, state, caller, false).map(|_| ())
+    persist_under_lock_inner(root, path, state, caller, false, None).map(|_| ())
 }
 
 #[cfg(test)]

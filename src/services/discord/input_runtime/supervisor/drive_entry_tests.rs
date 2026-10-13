@@ -37,6 +37,7 @@ const REAL: u64 = 1_300_000_000_000_000_000;
 // The next submit signals `entered` and waits on `latch`; a dropped pane signals `dropped`.
 #[derive(Default)]
 struct Screen {
+    captures: AtomicUsize,
     busy: AtomicBool,
     draft: AtomicBool,
     refuse: AtomicBool,
@@ -66,6 +67,7 @@ impl Drop for TestPane {
 
 impl Pane for TestPane {
     fn capture(&mut self) -> Result<String, String> {
+        self.0.captures.fetch_add(1, Ordering::SeqCst);
         assert!(!self.0.panic.load(Ordering::SeqCst), "the pane worker died");
         if fence::require_worker().is_err() {
             self.0.off_worker.fetch_add(1, Ordering::SeqCst);
@@ -242,7 +244,15 @@ async fn admitted(rig: &Rig, keys: &[u64]) -> Supervisor<Fake> {
     assert_eq!(supervisor.boot().await, Landing::Admitted);
     let ledger = supervisor.slot().get().unwrap();
     for &key in keys {
-        let input = json!({ "text": format!("input {key}") });
+        let identity = crate::services::tui_input::rows::receipt_identity::ReceiptIdentity::new(
+            key,
+            vec![key],
+            7,
+            rig.channel,
+            rig.channel,
+        )
+        .unwrap();
+        let input = json!({ "text": format!("input {key}"), "receipt_identity": identity });
         ledger
             .append_entry(&Entry::Received { key, input }, &[])
             .unwrap();
@@ -569,7 +579,10 @@ async fn held_readiness_closes_the_gate_once_and_reopens_it_once_on_recovery() {
     recording.arm(Some(1));
     let entry = Entry::Received {
         key: 42,
-        input: json!({ "text": "42" }),
+        input: json!({ "text": "42", "receipt_identity":
+            crate::services::tui_input::rows::receipt_identity::ReceiptIdentity::new(
+                42, vec![42], 7, rig.channel, rig.channel,
+            ).unwrap() }),
     };
     let ledger = driven.supervisor.slot().get().unwrap();
     assert!(ledger.append_entry(&entry, &[]).is_err());
@@ -591,6 +604,570 @@ async fn held_readiness_closes_the_gate_once_and_reopens_it_once_on_recovery() {
     assert_eq!((counts.opens, counts.holds), (2, 1));
     assert_eq!(rig.gate.mode(), Mode::LedgerOpen);
     assert!(!rig.health().contains(&line));
+    assert!(driven.release());
+}
+
+#[tokio::test]
+async fn c2b_policy_approval_stays_bound_when_tracked_close_changes_the_offer_head() {
+    use crate::services::discord::input_runtime::supervisor::receipt::Receipt;
+    use crate::services::tui_input::actor::{token, witness};
+    use crate::services::tui_input::attempt::{
+        AttemptMeta, Effect, Tracking, WitnessKind, fresh_token,
+    };
+    use crate::services::tui_input::rows::AttemptEvidence;
+    use crate::services::tui_o::shadow::SourceBinding;
+    let rig = Rig::new(6_328_401);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let binding = SourceBinding {
+        channel_id: rig.channel,
+        provider: ShadowProvider::Claude,
+        source: a.clone(),
+    };
+    let mut supervisor = admitted(&rig, &[41, 42]).await;
+    let ledger = supervisor.slot().get().unwrap();
+    let anchor = std::fs::metadata(&a.path).unwrap().len();
+    let token = fresh_token();
+    let frame = token::render(&token, "input 41");
+    let profile = token::profile(ShadowProvider::Claude);
+    let meta = AttemptMeta {
+        generation: 1,
+        token: token.clone(),
+        frame_digest: token::digest(profile, &frame).unwrap(),
+        frame_profile: Some(profile.into()),
+        execution_nonce: "n1".into(),
+        source: a.clone(),
+        anchor,
+        effect: Effect::Intent,
+        incarnation: None,
+        queue_end: None,
+    };
+    let evidence = AttemptEvidence {
+        binding: binding.clone(),
+        execution_nonce: "n1".into(),
+        eof: anchor,
+        rendered_prompt: frame.clone(),
+        source_ids: vec![41],
+        record_end: None,
+        native_turn_id: None,
+    };
+    ledger
+        .append_tracked(
+            41,
+            RowState::Injecting,
+            Some(evidence),
+            &Tracking {
+                attempt: Some(meta),
+                ..Tracking::default()
+            },
+        )
+        .unwrap();
+    ledger
+        .append_entry(
+            &Entry::Transition {
+                key: 41,
+                state: RowState::AwaitTurn,
+                attempt: None,
+            },
+            &[],
+        )
+        .unwrap();
+    user(&a.path, &frame);
+    turn_end(&a);
+    let seen = witness::scan_tracked(&binding, &ledger.rows().unwrap()).unwrap();
+    assert!(seen.complete && seen.foreign == 0 && seen.altered.is_empty());
+    assert_eq!(
+        seen.closed,
+        [(41, false)],
+        "the registered turn has a matched close before the pass"
+    );
+    assert_eq!(seen.witnesses.len(), 1);
+    let (key, observed) = seen.witnesses.into_iter().next().unwrap();
+    assert_eq!(
+        (key, observed.kind, observed.token.as_str()),
+        (41, WitnessKind::User, token.as_str())
+    );
+    ledger.append_witness(key, observed).unwrap();
+    assert_eq!(
+        ledger.rows().unwrap().row(41).unwrap().state,
+        RowState::Running
+    );
+    let before_b = ledger.rows().unwrap().row(42).unwrap().clone();
+    let identity_b = ledger.rows().unwrap().receipt_identity(42).unwrap();
+    rig.world
+        .source_policy_by_key
+        .lock()
+        .unwrap()
+        .extend([(41, true), (42, false)]);
+    let screen = Arc::new(Screen::default());
+    *screen.record.lock().unwrap() = Some(a.path.clone());
+    let mut driven = Driven::start(supervisor, &screen).await;
+    let after = driven.supervisor.slot().get().unwrap().rows().unwrap();
+    assert_eq!(
+        after.row(41).unwrap().state,
+        RowState::Done(DoneReason::Completed)
+    );
+    assert_eq!(
+        driven.sent(),
+        0,
+        "A's policy approval cannot offer the newly selected B"
+    );
+    assert_eq!(after.row(42), Some(&before_b));
+    assert_eq!(after.receipt_identity(42), Some(identity_b));
+    assert_eq!(*rig.world.source_policy_keys.lock().unwrap(), [41]);
+    driven.idle(1).await;
+    assert_eq!(
+        *rig.world.source_policy_keys.lock().unwrap(),
+        [41, 42],
+        "the next tick checks B's own policy"
+    );
+    assert_eq!(driven.sent(), 0);
+    assert_eq!(state(&rig, 42), RowState::Received);
+    rig.world
+        .source_policy_by_key
+        .lock()
+        .unwrap()
+        .insert(42, true);
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(SupervisorCmd::FetchTicket { reply }, true)
+        .await;
+    let ticket = response.await.unwrap().unwrap();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(
+            SupervisorCmd::BeginScan {
+                ticket,
+                sources: vec![41, 42],
+                horizon: 42,
+                complete_fetch: true,
+                reply,
+            },
+            true,
+        )
+        .await;
+    let mut capability = response.await.unwrap().unwrap();
+    for key in [41, 42] {
+        let rows = driven.supervisor.slot().get().unwrap().rows().unwrap();
+        let source = super::super::source::Source::new(
+            key,
+            rows.receipt_identity(key).unwrap(),
+            rows.row(key).unwrap().input.clone(),
+            vec![],
+        )
+        .unwrap();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        driven
+            .supervisor
+            .input_command(
+                SupervisorCmd::CommitFromScan {
+                    source: Box::new(source),
+                    capability,
+                    reply,
+                },
+                true,
+            )
+            .await;
+        let committed = response.await.unwrap();
+        assert!(matches!(committed.receipt, Receipt::DuplicateQueued(_)));
+        assert_eq!(committed.settlement, Ok(()));
+        capability = committed.capability;
+    }
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(SupervisorCmd::CompleteScan { capability, reply }, true)
+        .await;
+    assert!(response.await.unwrap().is_ok());
+    driven.idle(2).await;
+    assert_eq!(
+        driven.sent(),
+        1,
+        "B's own approval and settled scan allow its offer"
+    );
+    assert_eq!(driven.drive.counts.builds, 1);
+    assert!(driven.release());
+}
+
+#[tokio::test]
+async fn c2b_cancelled_pending_during_policy_wait_blocks_offer_until_actual_rescan() {
+    use crate::services::discord::input_runtime::supervisor::command::FinalDisposition;
+    let rig = Rig::new(6_328_402);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let screen = Arc::new(Screen::default());
+    screen.busy.store(true, Ordering::SeqCst);
+    *screen.record.lock().unwrap() = Some(a.path.clone());
+    let mut driven = Driven::start(admitted(&rig, &[41]).await, &screen).await;
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    let client = driven.supervisor.bind_intake(sender).unwrap();
+    driven.supervisor.adopt_task(rig.channel).unwrap();
+    driven.supervisor.publish_intake();
+    assert!(driven.supervisor.admission_open());
+    assert!(driven.supervisor.order.offer_ready());
+    let overflow = driven.supervisor.pending_overflow();
+    let generation = overflow.generation();
+    let before = driven.supervisor.slot().get().unwrap().rows().unwrap();
+    let captures = screen.captures.load(Ordering::SeqCst);
+    let builds = driven.drive.counts.builds;
+    assert_eq!(builds, 1);
+    assert!(before.row(41).unwrap().attempt.is_none());
+    let (entered, inside) = tokio::sync::oneshot::channel();
+    let (resume, continuation) = tokio::sync::oneshot::channel();
+    *rig.world.source_policy_wait.lock().unwrap() = Some((entered, continuation));
+    screen.busy.store(false, Ordering::SeqCst);
+    let cancel = async {
+        inside.await.unwrap();
+        let mut pending = Box::pin(client.pending(vec![42]));
+        let command = tokio::select! {
+            command = receiver.recv() => command.unwrap(),
+            result = &mut pending => panic!("the actual PendingSource reply is not yet produced: {result:?}"),
+        };
+        assert!(
+            matches!(&command, SupervisorCmd::PendingSource { sources, .. } if sources == &[42])
+        );
+        drop(pending);
+        assert_eq!(
+            overflow.generation(),
+            generation + 1,
+            "cancellation dirties the same supervisor overflow inside policy IO"
+        );
+        resume.send(()).unwrap();
+        command
+    };
+    let ((), pending) = tokio::join!(driven.idle(1), cancel);
+    assert_eq!(
+        driven.sent(),
+        0,
+        "policy approval cannot reuse readiness from before the await"
+    );
+    assert_eq!(
+        driven.supervisor.slot().get().unwrap().rows().unwrap(),
+        before
+    );
+    assert_eq!(screen.captures.load(Ordering::SeqCst), captures);
+    assert_eq!(driven.drive.counts.builds, builds);
+    assert!(!driven.supervisor.slot.loaned());
+    assert!(!driven.supervisor.order.offer_ready());
+    driven.supervisor.input_command(pending, true).await;
+    assert_eq!(driven.supervisor.pending_snapshot().sources, [42]);
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(SupervisorCmd::FetchTicket { reply }, true)
+        .await;
+    let ticket = response.await.unwrap().unwrap();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(
+            SupervisorCmd::BeginScan {
+                ticket,
+                sources: vec![42],
+                horizon: 42,
+                complete_fetch: true,
+                reply,
+            },
+            true,
+        )
+        .await;
+    let capability = response.await.unwrap().unwrap();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(
+            SupervisorCmd::SettleFromScan {
+                source: 42,
+                disposition: FinalDisposition::NonTarget,
+                capability,
+                reply,
+            },
+            true,
+        )
+        .await;
+    let capability = response.await.unwrap().unwrap();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(SupervisorCmd::CompleteScan { capability, reply }, true)
+        .await;
+    assert!(response.await.unwrap().is_ok());
+    assert!(driven.supervisor.order.offer_ready());
+    assert!(driven.supervisor.pending_snapshot().sources.is_empty());
+    driven.idle(2).await;
+    assert_eq!(
+        driven.sent(),
+        1,
+        "the existing actor proceeds after the actual current scan"
+    );
+    assert_eq!(driven.drive.counts.builds, builds);
+    assert!(driven.release());
+}
+
+#[tokio::test]
+async fn c2_policy_before_receipt_defers_unknown_scan_without_ack_or_source_loss() {
+    use crate::services::discord::input_runtime::intake::{Classification, Retry};
+    use crate::services::discord::input_runtime::supervisor::receipt::{Deferred, Receipt};
+    use crate::services::tui_input::rows::receipt_identity::{ReceiptIdentity, Responsibility};
+    let rig = Rig::new(6_326_976);
+    let screen = Arc::new(Screen::default());
+    let mut driven = Driven::start(admitted(&rig, &[]).await, &screen).await;
+    let identity = ReceiptIdentity::new(41, vec![41], 7, rig.channel, rig.channel).unwrap();
+    let input = json!({"text":"request", "original_text":"request", "author_is_bot":false});
+    let before = driven
+        .supervisor
+        .slot()
+        .get()
+        .unwrap()
+        .rows()
+        .unwrap()
+        .folded_seq();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(
+            SupervisorCmd::PendingSource {
+                sources: vec![41],
+                reply,
+            },
+            true,
+        )
+        .await;
+    assert_eq!(response.await.unwrap().unwrap().sources, [41]);
+    for accepted in [false, true] {
+        *rig.world.source_policy.lock().unwrap() = Some(if accepted {
+            Classification::Target
+        } else {
+            Classification::Retry(Retry::Unknown)
+        });
+        let (reply, response) = tokio::sync::oneshot::channel();
+        driven
+            .supervisor
+            .input_command(SupervisorCmd::FetchTicket { reply }, true)
+            .await;
+        let ticket = response.await.unwrap().unwrap();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        driven
+            .supervisor
+            .input_command(
+                SupervisorCmd::BeginScan {
+                    ticket,
+                    sources: vec![41],
+                    horizon: 41,
+                    complete_fetch: true,
+                    reply,
+                },
+                true,
+            )
+            .await;
+        let capability = response.await.unwrap().unwrap();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let source =
+            super::super::source::Source::new(41, identity.clone(), input.clone(), vec![]).unwrap();
+        driven
+            .supervisor
+            .input_command(
+                SupervisorCmd::CommitFromScan {
+                    source: Box::new(source),
+                    capability,
+                    reply,
+                },
+                true,
+            )
+            .await;
+        let result = response.await.unwrap();
+        let rows = driven.supervisor.slot().get().unwrap().rows().unwrap();
+        if accepted {
+            assert!(matches!(result.receipt, Receipt::Accepted(_)));
+            assert_eq!(rows.open_rows().count(), 1);
+            assert_eq!(rows.receipt_identity(41), Some(identity.clone()));
+            assert_eq!(rows.row(41).unwrap().input["original_text"], "request");
+            assert!(driven.supervisor.pending_snapshot().sources.is_empty());
+        } else {
+            assert_eq!(result.receipt, Receipt::Deferred(Deferred::Unknown));
+            assert_eq!(
+                rows.folded_seq(),
+                before,
+                "Unknown cannot append or acknowledge a receipt"
+            );
+            assert_eq!(rows.open_rows().count(), 0);
+            assert_eq!(rows.responsibility(&identity), Responsibility::Absent);
+            assert_eq!(driven.supervisor.pending_snapshot().sources, [41]);
+        }
+        assert_eq!(result.settlement, Ok(()));
+        assert_eq!(driven.sent(), 0);
+    }
+    assert!(driven.release());
+}
+
+#[tokio::test]
+async fn c2_policy_before_receipt_defers_unknown_external_and_retries_same_origin() {
+    use crate::services::discord::input_runtime::intake::{Classification, Retry};
+    use crate::services::discord::input_runtime::supervisor::{external, receipt::Deferred};
+    use crate::services::tui_input::rows::receipt_identity::Responsibility;
+    let rig = Rig::new(6_326_977);
+    let screen = Arc::new(Screen::default());
+    let mut driven = Driven::start(admitted(&rig, &[]).await, &screen).await;
+    let source =
+        external::source(rig.channel, 7, "request", Some("policy"), "actual-origin").unwrap();
+    let identity = source.identity().clone();
+    let original = source.input().clone();
+    let before = driven
+        .supervisor
+        .slot()
+        .get()
+        .unwrap()
+        .rows()
+        .unwrap()
+        .folded_seq();
+    *rig.world.source_policy.lock().unwrap() = Some(Classification::Retry(Retry::Unknown));
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(
+            SupervisorCmd::SubmitExternal {
+                source: Box::new(source),
+                reply,
+            },
+            true,
+        )
+        .await;
+    assert_eq!(
+        response.await.unwrap(),
+        external::ExternalReceipt::Deferred(Deferred::Unknown)
+    );
+    let rows = driven.supervisor.slot().get().unwrap().rows().unwrap();
+    assert_eq!(rows.folded_seq(), before);
+    assert_eq!(rows.open_rows().count(), 0);
+    assert_eq!(rows.responsibility(&identity), Responsibility::Absent);
+    *rig.world.source_policy.lock().unwrap() = Some(Classification::Target);
+    let source =
+        external::source(rig.channel, 7, "request", Some("policy"), "actual-origin").unwrap();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(
+            SupervisorCmd::SubmitExternal {
+                source: Box::new(source),
+                reply,
+            },
+            true,
+        )
+        .await;
+    assert!(matches!(
+        response.await.unwrap(),
+        external::ExternalReceipt::Received {
+            duplicate: false,
+            ..
+        }
+    ));
+    let rows = driven.supervisor.slot().get().unwrap().rows().unwrap();
+    assert_eq!(rows.open_rows().count(), 1);
+    assert_eq!(rows.row(identity.source_ids[0]).unwrap().input, original);
+    assert_eq!(
+        rows.receipt_identity(identity.source_ids[0]),
+        Some(identity)
+    );
+    assert_eq!(driven.sent(), 0);
+    assert!(driven.release());
+}
+
+#[tokio::test]
+async fn c2_policy_change_after_receipt_keeps_identity_and_blocks_offer_until_rechecked() {
+    use crate::services::discord::input_runtime::intake::{Classification, Refusal, Retry};
+    for (index, (policy, reason)) in [
+        (
+            Classification::Rejected(Refusal::Unauthorized),
+            "source_policy_not_target",
+        ),
+        (
+            Classification::Rejected(Refusal::ProviderMismatch),
+            "source_policy_not_target",
+        ),
+        (
+            Classification::Retry(Retry::Unknown),
+            "source_policy_not_target",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rig = Rig::new(6_326_970 + index as u64);
+        let a = idle_transcript(&rig, "a", false);
+        push(&rig, "n1", source(None, &a));
+        let screen = Arc::new(Screen::default());
+        screen.busy.store(true, Ordering::SeqCst);
+        *screen.record.lock().unwrap() = Some(a.path.clone());
+        let mut driven = Driven::start(admitted(&rig, &[41]).await, &screen).await;
+        let before = rows(&rig.root, rig.channel);
+        let input = before.row(41).unwrap().input.clone();
+        let identity = before.receipt_identity(41).unwrap();
+        let responsibility = before.responsibility(&identity);
+        rig.world.source_policy_inputs.lock().unwrap().clear();
+        *rig.world.source_policy.lock().unwrap() = Some(policy);
+        screen.busy.store(false, Ordering::SeqCst);
+        driven.wait(2 * HOLD_GRACE).await;
+        let after = rows(&rig.root, rig.channel);
+        assert_eq!(
+            driven.sent(),
+            0,
+            "receipt-time permission cannot survive a policy change"
+        );
+        assert_eq!(after.row(41).unwrap().input, input);
+        assert_eq!(after.receipt_identity(41), Some(identity));
+        assert_eq!(
+            after.responsibility(&before.receipt_identity(41).unwrap()),
+            responsibility
+        );
+        assert!(!after.row(41).unwrap().state.is_terminal());
+        assert_eq!(input_lines(&rig), [held_line(&rig, reason, 41, 1)]);
+        let inputs = rig.world.source_policy_inputs.lock().unwrap().clone();
+        assert!(!inputs.is_empty(), "every held pass rereads the policy");
+        assert!(inputs.iter().all(|seen| seen == &input));
+        *rig.world.source_policy.lock().unwrap() = Some(Classification::Target);
+        driven.wait(2 * HOLD_GRACE).await;
+        assert_eq!(
+            driven.sent(),
+            1,
+            "fresh normal policy and actual Idle facts permit one offer"
+        );
+        assert!(input_lines(&rig).is_empty());
+        assert!(driven.release());
+    }
+}
+
+#[tokio::test]
+async fn c2_closed_ack_certifies_flush_before_later_clear_not_ledger_immutability() {
+    let rig = Rig::new(6_326_975);
+    push(&rig, "n1", pending("next", &rig.root.join("next.jsonl")));
+    let screen = Arc::new(Screen::default());
+    let mut driven = Driven::start(admitted(&rig, &[41]).await, &screen).await;
+    let (ack, response) = tokio::sync::oneshot::channel();
+    driven
+        .supervisor
+        .input_command(SupervisorCmd::Close { ack }, true)
+        .await;
+    assert!(
+        response.await.unwrap().is_ok(),
+        "the typed close ACK confirms the current flush"
+    );
+    let before = driven.supervisor.slot().get().unwrap().rows().unwrap();
+    rig.world
+        .durable_ticket(rig.channel, driven.supervisor.slot().get().unwrap(), &[41]);
+    driven.supervisor.clear(&mut driven.drive, driven.at).await;
+    let after = driven.supervisor.slot().get().unwrap().rows().unwrap();
+    assert!(
+        after.folded_seq() > before.folded_seq(),
+        "a later Clear may write after a Close ACK"
+    );
+    assert_eq!(
+        after.row(41).unwrap().state,
+        RowState::Abandoned(AbandonReason::UserClear)
+    );
+    assert!(!driven.supervisor.admission_open());
+    assert_eq!(driven.sent(), 0);
     assert!(driven.release());
 }
 
@@ -1052,4 +1629,73 @@ async fn x13_mapping_late_violation_stops_ledger_open_and_offer_in_the_drive() {
         "the row keeps its responsibility"
     );
     assert!(!driven.supervisor.admission_open());
+}
+
+/// A live loop over a busy pane with an armed presence registration on its channel.
+async fn presence_rig(channel: u64, probe: &PresenceProbe) -> (Rig, Supervisor<Fake>, Arc<Screen>) {
+    let rig = Rig::new(channel);
+    let a = idle_transcript(&rig, "a", false);
+    push(&rig, "n1", source(None, &a));
+    let screen = Arc::new(Screen::default());
+    screen.busy.store(true, Ordering::SeqCst);
+    probe.arm(channel);
+    let supervisor = admitted(&rig, &[41]).await;
+    (rig, supervisor, screen)
+}
+
+type PresenceProbe = crate::services::discord::turn_presence::entrypoints::tests::Probe;
+
+// Close, the loop's end and its cancellation withdraw the presence registration the drive
+// started under, an approval adopted since included; one registered after a reset stays.
+#[cfg(unix)]
+#[tokio::test]
+async fn b2b2_close_and_drive_end_withdraw_only_the_presence_the_drive_started_under() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let probe = PresenceProbe::install(&shared);
+    let gate = crate::services::tui_o::ownership::gate("b2b2-drive");
+    let current = PresenceProbe::current;
+    {
+        let (rig, mut supervisor, screen) = presence_rig(6_325_891, &probe).await;
+        let (commands, received) = tokio::sync::mpsc::channel(1);
+        let mut run = Box::pin(supervisor.run(DriveFake(screen), received));
+        until(&mut run, || rig.gate.mode() == Mode::LedgerOpen).await;
+        let adopted = probe.arm_gateway(rig.channel, gate.clone());
+        let (ack, closed) = tokio::sync::oneshot::channel();
+        commands.send(SupervisorCmd::Close { ack }).await.unwrap();
+        let closed = async {
+            tokio::select! {
+                () = run.as_mut() => panic!("the live loop ended before Close ACK"),
+                closed = closed => closed.expect("Close ACK sender").expect("Close flushed"),
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), closed)
+            .await
+            .expect("Close completed");
+        assert!(!current(&adopted), "Close withdraws before its ACK");
+        let later = probe.arm(rig.channel);
+        drop(commands);
+        run.await;
+        assert!(
+            current(&later),
+            "a registration made after the drive's own stays"
+        );
+    }
+    for cancelled in [false, true] {
+        let channel = 6_325_892 + u64::from(cancelled);
+        let (rig, mut supervisor, screen) = presence_rig(channel, &probe).await;
+        let (commands, received) = tokio::sync::mpsc::channel(1);
+        let mut run = Box::pin(supervisor.run(DriveFake(screen), received));
+        until(&mut run, || rig.gate.mode() == Mode::LedgerOpen).await;
+        let adopted = probe.arm_gateway(rig.channel, gate.clone());
+        if cancelled {
+            drop(run);
+        } else {
+            drop(commands);
+            run.await;
+        }
+        assert!(
+            !current(&adopted),
+            "cancelled={cancelled}: the drive's end withdraws"
+        );
+    }
 }

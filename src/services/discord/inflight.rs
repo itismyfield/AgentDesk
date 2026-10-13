@@ -21,6 +21,7 @@ pub(in crate::services::discord) use host_recovery_guard::{
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;
+pub(crate) mod read_only_owner_snapshot;
 #[cfg(test)]
 #[path = "inflight/restart_mark_fence_tests.rs"]
 mod restart_mark_fence_tests;
@@ -29,6 +30,8 @@ pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 // #3479: the pure domain model moved to `model.rs`; re-export every public
 // item at its original visibility so existing `inflight::*` / `super::*`
 // references across the discord module resolve unchanged.
+#[cfg(test)]
+pub(in crate::services::discord) use model::{COORDINATE_HOLD_PREFIX, RawTurnWitness};
 pub(in crate::services::discord) use model::{
     InflightTurnIdentity, InflightTurnState, RelayOwnerKind, TurnSource, opt_channel_id,
     opt_message_id, optional_message_id, transfer_end,
@@ -75,6 +78,8 @@ pub(crate) use store::lock_inflight_state_path;
 use store::second_handle_try_lock;
 pub(crate) use store::try_lock_inflight_state_path;
 pub(in crate::services::discord) use store::{BorrowedInflightRow, inflight_state_path};
+#[cfg(all(test, unix))]
+pub(crate) use store::{TryLockRefusal, try_lock_inflight_state_path_typed};
 
 // #3715 / #3835: the rebind-origin dead-watcher helpers, staleness predicates,
 // and stale data-row cleanup live in this capped sibling. Canonical lock sidecars

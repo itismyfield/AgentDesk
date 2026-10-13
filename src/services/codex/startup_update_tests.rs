@@ -100,6 +100,13 @@ fn codex_tui_script_snapshot_preserves_env_and_command_shape() {
 
 #[cfg(unix)]
 fn assert_codex_capacity_cold_chain(advance_rollout: bool) {
+    assert_codex_capacity_cold_chain_with(advance_rollout, false);
+}
+
+/// `probe_handoff`: the fake tmux pauses at the warm submit and the cold launch while the
+/// test reads the Discord handoff reservation.
+#[cfg(unix)]
+fn assert_codex_capacity_cold_chain_with(advance_rollout: bool, probe_handoff: bool) {
     use crate::config::TestEnvVarGuard as Guard;
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::codex_tui::warm_followup::{
@@ -180,6 +187,9 @@ fn assert_codex_capacity_cold_chain(advance_rollout: bool) {
     if advance_rollout {
         std::fs::write(root.path().join("advance-at-geometry"), "").unwrap();
     }
+    if probe_handoff {
+        std::fs::write(root.path().join("probe"), "").unwrap();
+    }
     let ready = format!(
         "╭{}╮\n│ ▌{}│\n╰{}╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send",
         "─".repeat(78),
@@ -249,6 +259,12 @@ set -eu
 root="$ADK_CODEX_COLD_CHAIN_ROOT"
 if [ "${1-}" = -u ]; then shift; fi
 printf '%s\n' "$*" >> "$root/tmux.calls"
+pause() {
+    if [ -f "$root/probe" ] && [ ! -f "$root/at-$1" ]; then
+        : > "$root/at-$1"
+        while [ ! -f "$root/go-$1" ]; do sleep 0.01; done
+    fi
+}
 case "${1-}" in
 has-session) exit 0 ;;
 list-panes) printf '0\n' ;;
@@ -256,6 +272,7 @@ capture-pane) cat "$root/ready" ;;
 display-message)
     case "${@: -1}" in
     '#{pane_width} #{pane_height}')
+        pause geometry
         printf 'geometry\n' >> "$root/geometry.calls"
         if [ -f "$root/advance-at-geometry" ] && [ ! -f "$root/advanced" ]; then
             printf '{"type":"event_msg","payload":{"type":"token_count"}}\n' >> "$ADK_CODEX_COLD_CHAIN_ROLLOUT"
@@ -269,6 +286,7 @@ display-message)
 kill-session)
     cat "$ADK_CODEX_COLD_CHAIN_EXIT_REASON" > "$root/kill.reason" ;;
 new-session)
+    pause launch
     cp "$ADK_CODEX_COLD_CHAIN_SCRIPT" "$root/cold.script"
     /bin/bash -c "${@: -1}" ;;
 load-buffer|paste-buffer|send-keys) exit 0 ;;
@@ -284,7 +302,19 @@ esac
     let watchdog_fired = AtomicBool::new(false);
     let (sender, receiver) = std::sync::mpsc::channel();
     // A malformed completion must fail the assertions instead of hanging the suite.
+    let reserved_at = |point: &str| {
+        let at = root.path().join(format!("at-{point}"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !at.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let reserved = dedupe::held_handoff_inputs_for_tests("codex", tmux).is_some();
+        std::fs::write(root.path().join(format!("go-{point}")), "").unwrap();
+        reserved
+    };
     let result = std::thread::scope(|scope| {
+        let probed =
+            probe_handoff.then(|| scope.spawn(|| (reserved_at("geometry"), reserved_at("launch"))));
         scope.spawn(|| {
             let deadline = Instant::now() + Duration::from_secs(10);
             while !finished.load(Ordering::Acquire) && Instant::now() < deadline {
@@ -314,6 +344,15 @@ esac
             false,
         );
         finished.store(true, Ordering::Release);
+        if let Some(probed) = probed {
+            let (warm, cold) = probed.join().unwrap();
+            assert!(warm, "the warm submit runs under a reserved handoff");
+            assert!(cold, "the cold launch runs under a reserved handoff");
+            assert!(
+                dedupe::held_handoff_inputs_for_tests("codex", tmux).is_none(),
+                "the reservation ends with the turn"
+            );
+        }
         result
     });
     assert!(
@@ -412,6 +451,12 @@ esac
 #[test]
 fn codex_capacity_preflight_replays_oversize_multiline_once_with_identical_bytes() {
     assert_codex_capacity_cold_chain(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_warm_submit_and_cold_launch_hold_a_discord_handoff_reservation() {
+    assert_codex_capacity_cold_chain_with(false, true);
 }
 
 #[cfg(unix)]

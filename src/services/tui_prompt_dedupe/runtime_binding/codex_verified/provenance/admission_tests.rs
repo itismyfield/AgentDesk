@@ -113,8 +113,10 @@ fn cancellation_before_or_after_attach_withholds_every_later_admission() {
     let before = origin(584_603, "before");
     let cancelled = token("before");
     cancelled.publish_cancel("user stop");
-    let record = issue(&before, &cancelled).unwrap();
-    assert_eq!(record.admit(&before, || ()), Err("cancelled_before_attach"));
+    assert!(matches!(
+        issue(&before, &cancelled),
+        Err("cancelled_before_attach")
+    ));
     let after = origin(584_603, "after");
     let live = token("after");
     let record = issue(&after, &live).unwrap();

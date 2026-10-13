@@ -194,7 +194,7 @@ impl ChannelStop {
         };
         if cancelled_now {
             let withdraw = crate::services::discord::turn_presence::entrypoints::withdraw;
-            withdraw(self.channel.get(), "channel_stop");
+            withdraw(&self.shared, self.channel.get(), "channel_stop");
         }
         let name = self.tombstone_name.as_deref();
         let record = crate::services::discord::record_turn_stop_tombstone;

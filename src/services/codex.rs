@@ -1,3 +1,5 @@
+#[cfg(all(test, unix))]
+pub(crate) mod actual_submit_tests;
 #[cfg(unix)]
 use crate::services::codex_tui::verified_hold;
 mod process_session_launch;
@@ -78,7 +80,7 @@ static CODEX_TUI_SESSION_TURN_LOCKS: LazyLock<dashmap::DashMap<String, CodexTuiS
     LazyLock::new(dashmap::DashMap::new);
 
 #[cfg(unix)]
-fn codex_tui_session_turn_lock(tmux_session_name: &str) -> CodexTuiSessionTurnLock {
+pub(crate) fn codex_tui_session_turn_lock(tmux_session_name: &str) -> CodexTuiSessionTurnLock {
     CODEX_TUI_SESSION_TURN_LOCKS
         .entry(tmux_session_name.to_string())
         .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -1581,6 +1583,8 @@ struct CodexTuiLaunchScript {
     script_path: String,
     owner_path: String,
     rollout_modified_since: std::time::SystemTime,
+    /// The Discord handoff reserved before launch, held until the tail returns.
+    handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
 }
 
 /// Wire the cancel token to the freshly created tmux session: record the
@@ -1627,7 +1631,7 @@ fn dispatch_codex_tui_rollout_tail(
             rollout_modified_since,
             sender,
             cancel_token,
-            || tmux_live_pane_bool(tmux_session_name),
+            || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
             tmux_session_name,
             Some(prompt),
         )
@@ -1637,7 +1641,7 @@ fn dispatch_codex_tui_rollout_tail(
             rollout_modified_since,
             sender,
             cancel_token,
-            || tmux_live_pane_bool(tmux_session_name),
+            || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
             tmux_session_name,
             Some(prompt),
         )
@@ -1667,6 +1671,34 @@ fn execute_streaming_local_tui_tmux(
     // A Herdr channel is refused before the turn lock, warm follow-up or any session cleanup.
     if crate::services::herdr_launch::herdr_configured_for_tui_launch(report_channel_id) {
         return Err(crate::services::herdr_launch::HERDR_NOT_ADMITTED.to_string());
+    }
+    if verified_hold::existing_incarnation(tmux_session_name)
+        && !force_fresh_provider_session
+        && crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled()
+        && let (Some(session_id), Some(channel), Some(token)) =
+            (session_id, report_channel_id, cancel_token.as_ref())
+    {
+        return crate::services::codex_tui::warm_followup::verified_warm(
+            crate::services::codex_tui::warm_followup::VerifiedWarmRequest {
+                tmux: tmux_session_name,
+                channel,
+                session_id,
+                cwd: std::path::Path::new(working_dir),
+                prompt,
+                options: &CodexLaunchOptions::new(prompt)
+                    .with_resume_session_id(Some(session_id))
+                    .with_developer_instructions(developer_instructions)
+                    .with_model(model)
+                    .with_reasoning_effort(codex_reasoning_effort_from_env().as_deref())
+                    .with_compact_token_limit(compact_token_limit)
+                    .with_readonly_mode(readonly_mode)
+                    .with_fast_mode_enabled(fast_mode_enabled)
+                    .with_goals_enabled(goals_enabled)
+                    .with_cwd(Some(working_dir)),
+                token: std::sync::Arc::clone(token),
+                sender,
+            },
+        );
     }
     let warm_followup_enabled =
         match verified_hold::preflight(tmux_session_name, cancel_token.as_ref()) {
@@ -1811,6 +1843,7 @@ fn execute_streaming_local_tui_tmux(
         script_path,
         owner_path,
         rollout_modified_since,
+        handoff: _handoff,
     } = publish_codex_tui_launch_script(
         tmux_session_name,
         session_id,

@@ -139,9 +139,13 @@ fn persistence(msg: &ChannelMailboxMsg) -> Option<&QueuePersistenceContext> {
         | M::MergeRestoredQueueItems { persistence, .. }
         | M::MergeRestoredDispatchMarker { persistence, .. }
         | M::RestartDrain { persistence, .. } => Some(persistence),
+        M::PolicyClose { request, .. } => Some(&request.persistence),
         M::Injection(injection) => injection.persistence(),
         #[cfg(test)]
         M::ReplaceQueue { persistence, .. } => Some(persistence),
+        // The claim names its own namespace; the actor's last one may be another.
+        #[cfg(test)]
+        M::ScopedClaim(scoped) => scoped.persistence(),
         _ => None,
     }
 }
@@ -174,6 +178,15 @@ pub(super) fn enter(
             | M::FreezeInput { .. }
             | M::CommitCapturedReadyDelivery { .. }
     ) {
+        return Ok(StepGuard {
+            _population: None,
+            _effect: None,
+            _permit: None,
+        });
+    }
+    // A scoped claim is a mutation; only its pending read passes like the reads above.
+    #[cfg(test)]
+    if matches!(msg, M::ScopedClaim(scoped) if scoped.is_read()) {
         return Ok(StepGuard {
             _population: None,
             _effect: None,
@@ -247,6 +260,10 @@ pub(super) fn refuse(state: &ChannelMailboxState, msg: ChannelMailboxMsg, failur
                 )),
             );
         }
+        #[cfg(test)]
+        M::ScopedClaim(scoped) => {
+            scoped.refuse(super::scoped_claim::ScopedClaimRefusal::InputFence(failure));
+        }
         M::RecoveryKickoff { reply, .. } => {
             let _ = reply.send(match failure {
                 Failure::Mode(mode) => RecoveryKickoffResult::InputModeFenced(mode),
@@ -294,6 +311,10 @@ pub(super) fn refuse(state: &ChannelMailboxState, msg: ChannelMailboxMsg, failur
         }
         M::FinishTurnIfToken { reply, .. } => {
             let _ = reply.send(TokenFinish::Unavailable);
+        }
+        M::PolicyClose { reply, .. } => {
+            let refusal = policy_close::PolicyRetain::InputFence(failure);
+            let _ = reply.send(policy_close::PolicyMailboxOutcome::Retained(refusal));
         }
         M::CancelQueuedPrimaryMessage { reply, .. } => {
             let _ = reply.send(CancelQueuedMessageResult {

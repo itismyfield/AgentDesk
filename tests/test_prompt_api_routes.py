@@ -2,6 +2,8 @@ import contextlib
 import io
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -193,20 +195,153 @@ class PromptRoutes(unittest.TestCase):
         self.assertFalse(any(route.fullmatch('/api/send') for route in routes))
         self.assertIn('.route("/discord/send",', (REPO / 'src/server/routes/domains/ops.rs').read_text())
 
-    def test_staging_seam(self):
-        deploy = (REPO / 'scripts/deploy-release.sh').read_text()
+    def run_staging(self, *, strict=False, boundary='direct', source='configured', deploy=None):
+        deploy = deploy or Path(os.environ.get('AGENTDESK_TEST_DEPLOY_SH', REPO / 'scripts/deploy-release.sh')).read_text()
+        parser = deploy.split('# Parse flags non-destructively', 1)[1].split('case "$DEPLOY_FAST"', 1)[0]
+        parser = parser[parser.index('\n'):]
         seam = deploy.split('# Stage agent prompt files atomically', 1)[1].split('# Stage managed skills', 1)[0]
         seam = seam[seam.index('OBSIDIAN_DEFAULT_VAULT_ROOT='):]
+        release = self.root / 'release'
+        staged = release / 'config/agents.new'
+        for directory in (staged, release / 'runtime/self_hosted_deploy'):
+            if directory.exists():
+                shutil.rmtree(directory)
+        scripts = self.root / 'scripts'
+        scripts.mkdir(exist_ok=True)
+        shutil.copyfile(REPO / 'scripts/check_prompt_api_routes.py', scripts / 'check_prompt_api_routes.py')
+        events = self.root / 'events'
+        events.write_text('')
+        variables = dict(ADK_REL=release, REPO=self.root, SCRIPT_DIR=scripts, DEPLOY_FAST='0',
+                         DEPLOY_LOCK_FILE=release / 'deploy.lock', DEPLOY_LOCK_TIMEOUT_SECS='1',
+                         REPORT_CHANNEL_ID='fixture', REPORT_PROVIDER='fixture', DEPLOY_DELAY_SECS='0',
+                         DEPLOY_TEST_MODE='1', POST_DEPLOY_SMOKE_SCOPE='api', BUNDLE_ID='fixture',
+                         PLIST_REL='fixture', DEPLOY_PEER_VERDICT_TIMEOUT_SECS='1',
+                         DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS='1')
+        script = '#!/bin/bash\nset -euo pipefail\n'
+        script += ''.join(f'{key}={shlex.quote(str(value))}\n' for key, value in variables.items())
+        script += parser + '\n'
+        for name in ('_acquire_release_deploy_lock', '_spawn_detached_helper'):
+            script += name + '() {' + deploy.split(name + '() {', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
+        script += '''
+rm() { [ "$*" = "-rf $ADK_REL/config/agents.new" ]; }
+rsync() { printf 'STAGED\n' >> "$REPO/events"; cp "$2"/*.prompt.md "$3"; }
+date() { printf 'fixture-time\n'; }
+tmux() {
+    [ "$#" = 5 ] && [ "$1 $2 $3" = 'new-session -d -s' ]
+    printf 'HELPER\n' >> "$REPO/events"
+    env -i HOME="$HOME" PATH="$PATH" /bin/bash "$5"
+}
+'''
+        lock = 'flock' if boundary == 'flock' else 'lockf'
+        script += f'''command() {{
+    if [ "$1" = -v ] && {{ [ "$2" = lockf ] || [ "$2" = flock ]; }}; then
+        [ "$2" = {lock} ]; return
+    fi
+    builtin command "$@"
+}}
+'''
+        for name, count in (('lockf', 4), ('flock', 3)):
+            stub = scripts / name
+            stub.write_text(f'#!/bin/bash\nprintf "{name}\\n" >> {shlex.quote(str(events))}\nshift {count}\nexec "$@"\n')
+            stub.chmod(0o755)
+        if boundary == 'helper':
+            script += 'if [ "${AGENTDESK_DEPLOY_DETACHED_CHILD:-0}" != 1 ]; then\n_spawn_detached_helper "$@"\nexit 0\nfi\n'
+        if boundary != 'direct':
+            script += '_acquire_release_deploy_lock "$@"\n'
+        script += seam + '\nprintf "ACTIVATE\\nRESTART\\n" >> "$REPO/events"\necho SENTINEL\n'
+        fixture = scripts / 'deploy-release.sh'
+        fixture.write_text(script)
+        fixture.chmod(0o755)
+        env = dict(PATH=str(scripts) + os.pathsep + os.environ['PATH'], HOME=str(self.root))
+        if source == 'configured':
+            env['AGENTDESK_OBSIDIAN_AGENTS_SRC'] = str(self.prompts)
+        elif source == 'missing':
+            env['AGENTDESK_OBSIDIAN_AGENTS_SRC'] = str(self.root / 'absent')
+        elif source == 'empty':
+            env['AGENTDESK_OBSIDIAN_AGENTS_SRC'] = ''
+        result = subprocess.run(['bash', str(fixture), *(['--strict-prompts'] if strict else [])],
+                                env=env, capture_output=True, timeout=10)
+        if boundary == 'helper':
+            result.stdout += b''.join(p.read_bytes() for p in sorted(release.glob('runtime/self_hosted_deploy/*.log')))
+        self.events = events.read_text().splitlines()
+        return result
+
+    def test_staging_seam(self):
+        for contents, diagnostic in (
+            (b'http://localhost:1/api/send', 'agent.prompt.md:1: unknown_path /api/send\n'
+             'inspected_files=1 candidate_urls=1 unknown_paths=1 skipped_files=0\n'),
+            (b'\xff', 'inspection_unavailable\n'),
+        ):
+            with self.subTest(contents=contents):
+                self.prompt.write_bytes(contents)
+                result = self.run_staging()
+                expected = ('▸ Staging agent prompts from Obsidian vault...\n' + diagnostic
+                            + '⚠ Prompt API route inspection warning; core release deploy will continue.\nSENTINEL\n')
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, expected.encode(), b''))
+                self.assertEqual(self.events, ['STAGED', 'ACTIVATE', 'RESTART'])
+
+    def test_strict_staging_failures(self):
+        for contents, rc, diagnostic, reason in (
+            (b'http://localhost:1/api/send', 1, b'unknown_path /api/send', b'unknown paths'),
+            (b'\xff', 2, b'inspection_unavailable', b'inspection unavailable'),
+        ):
+            with self.subTest(rc=rc):
+                self.prompt.write_bytes(contents)
+                result = self.run_staging(strict=True)
+                self.assertEqual(result.returncode, rc, result)
+                self.assertIn(diagnostic, result.stdout)
+                self.assertIn(reason, result.stdout)
+                self.assertIn(b'--strict-prompts', result.stdout)
+                self.assertNotIn(b'will continue', result.stdout)
+                self.assertEqual(self.events, ['STAGED'])
+                self.assertEqual((self.root / 'release/config/agents.new/agent.prompt.md').read_bytes(), contents)
+
+    def test_strict_staging_success(self):
+        for contents, summary in (('http://localhost:1/api/discord/send', b'candidate_urls=1'),
+                                  ('no local URL', b'no_applicable_urls')):
+            with self.subTest(contents=contents):
+                self.prompt.write_text(contents)
+                result = self.run_staging(strict=True)
+                self.assertEqual(result.returncode, 0, result)
+                self.assertIn(summary, result.stdout)
+                self.assertEqual(self.events, ['STAGED', 'ACTIVATE', 'RESTART'])
+
+    def test_strict_flag_survives_reexec_and_helper(self):
         self.prompt.write_text('http://localhost:1/api/send')
-        script = 'set -eu\nrsync() { cp "$2"/*.prompt.md "$3"; }\n' + seam + '\necho SENTINEL\n'
-        env = dict(os.environ, HOME=str(self.root), ADK_REL=str(self.root / 'release'), REPO=str(REPO), AGENTDESK_OBSIDIAN_AGENTS_SRC=str(self.prompts))
-        result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('unknown_path /api/send', result.stdout)
-        self.assertIn('Prompt API route inspection warning', result.stdout)
-        self.assertIn('SENTINEL', result.stdout)
-        env['AGENTDESK_OBSIDIAN_AGENTS_SRC'] = str(self.root / 'absent')
-        result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0)
-        self.assertNotIn('inspected_files=', result.stdout)
-        self.assertIn('SENTINEL', result.stdout)
+        for boundary, events in (('lockf', ['lockf', 'STAGED']), ('flock', ['flock', 'STAGED']),
+                                 ('helper', ['HELPER', 'lockf', 'STAGED'])):
+            with self.subTest(boundary=boundary):
+                result = self.run_staging(strict=True, boundary=boundary)
+                self.assertEqual(result.returncode, 1, result)
+                self.assertIn(b'unknown_path /api/send', result.stdout)
+                self.assertIn(b'--strict-prompts', result.stdout)
+                self.assertEqual(self.events, events)
+
+    def test_optional_prompt_source_skip(self):
+        mirror = self.root / 'release/config/agents/old.prompt.md'
+        mirror.parent.mkdir(parents=True)
+        mirror.write_bytes(b'original mirror')
+        self.part.unlink()
+        for strict in (False, True):
+            for source in ('unset', 'empty', 'missing'):
+                with self.subTest(strict=strict, source=source):
+                    result = self.run_staging(strict=strict, source=source)
+                    explicit = source == 'missing'
+                    path = self.root / ('absent' if explicit else 'ObsidianVault/RemoteVault/adk-config/agents')
+                    state = 'missing_path' if explicit else 'missing_config'
+                    prefix = '⚠ Optional connector obsidian_agent_prompts invalid' if explicit else 'ℹ Optional connector obsidian_agent_prompts skipped'
+                    expected = (f'{prefix}: {path}\n  state={state} reason={state}; core release deploy will continue.\n'
+                                f'  Existing {mirror.parent}/ will be retained.\nSENTINEL\n')
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), (0, expected.encode(), b''))
+                    self.assertEqual(self.events, ['ACTIVATE', 'RESTART'])
+                    self.assertEqual(mirror.read_bytes(), b'original mirror')
+                    self.assertFalse((mirror.parent.parent / 'agents.new').exists())
+
+    def test_unset_prompt_override_checks_existing_fallback(self):
+        fallback = self.root / 'ObsidianVault/RemoteVault/adk-config/agents'
+        fallback.mkdir(parents=True)
+        (fallback / 'agent.prompt.md').write_text('http://localhost:1/api/send')
+        result = self.run_staging(strict=True, source='unset')
+        self.assertEqual(result.returncode, 1, result)
+        self.assertIn(b'unknown_path /api/send', result.stdout)
+        self.assertEqual(self.events, ['STAGED'])

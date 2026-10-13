@@ -866,3 +866,188 @@ async fn b2b1_watcher_unpair_waits_for_a_first_poll_and_then_withdraws_its_appro
     assert!(attempt.await.is_none());
     assert_eq!(polls.load(Ordering::SeqCst), 0);
 }
+
+// A Gateway first poll holds the Home registry, so no Home mounts between its check and the poll.
+#[tokio::test(flavor = "current_thread")]
+async fn b2b2_a_gateway_first_poll_holds_off_a_home_mount() {
+    let fixture = Fixture::new();
+    channel_home::unregister_if_same(&fixture.home);
+    let gateway = ownership::gate("claude");
+    gateway.acquired();
+    let seated = fixture
+        .incarnation
+        .replace(&fixture.ticket(), fixture.identity.clone());
+    assert!(seated);
+    let started = fixture
+        .approval()
+        .await
+        .start(42, fixture.identity.channel, || {
+            let waits = crate::services::cluster::channel_home::tests::mount_waits();
+            assert!(waits, "a Home could mount inside the first poll");
+            std::future::ready(())
+        });
+    assert!(started.await.is_some());
+    gateway.lost();
+}
+
+// Re-post's gate-to-Home wait cannot stall a first poll; a fresh Reading retries after it leaves.
+#[tokio::test(flavor = "current_thread")]
+async fn b2b2_contended_gateway_rejects_without_waiting_and_a_fresh_reading_retries() {
+    use crate::services::cluster::channel_home::tests::{SharedHomes, at_unhomed_poll};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Barrier, mpsc};
+    let homes = SharedHomes::default();
+    let _homes = homes.enter();
+    let fixture = Fixture::new();
+    channel_home::unregister_if_same(&fixture.home);
+    let gateway = ownership::gate("claude");
+    gateway.acquired();
+    assert!(
+        fixture
+            .incarnation
+            .replace(&fixture.ticket(), fixture.identity.clone())
+    );
+    let first = fixture.approval().await;
+    let polls = AtomicUsize::new(0);
+    let mounted = Arc::new(Barrier::new(2));
+    let waiting = Arc::new(Barrier::new(3));
+    let release_wait = Arc::new(AtomicBool::new(false));
+    let (held, acquired) = mpsc::channel();
+    let (finished, completion) = mpsc::channel();
+    let channel = fixture.identity.channel;
+    let callback = {
+        let (homes, gate) = (homes.clone(), gateway.clone());
+        let (mounted, waiting, release_wait) =
+            (mounted.clone(), waiting.clone(), release_wait.clone());
+        std::thread::spawn(move || {
+            let _homes = homes.enter();
+            gate.admit(|_| {
+                held.send(()).unwrap();
+                mounted.wait();
+                assert!(!homes.available(), "the live callback waits for HOMES");
+                waiting.wait();
+                // Releasable Home wait lets the blocking mutant release its gate before assertions.
+                while !homes.available() && !release_wait.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                if !release_wait.load(Ordering::SeqCst) {
+                    assert!(channel_home::registered_channel(channel).is_none());
+                }
+            })
+        })
+    };
+    acquired.recv().unwrap();
+    let controller = {
+        let (waiting, release_wait) = (waiting.clone(), release_wait.clone());
+        std::thread::spawn(move || {
+            waiting.wait();
+            let completed = completion.recv_timeout(std::time::Duration::from_secs(1));
+            if completed.is_err() {
+                release_wait.store(true, Ordering::SeqCst);
+            }
+            completed == Ok(true)
+        })
+    };
+    at_unhomed_poll(Some(Box::new(move || {
+        mounted.wait();
+        waiting.wait();
+    })));
+    let rejected = first
+        .start(42, channel, || {
+            polls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(())
+        })
+        .await
+        .is_none();
+    at_unhomed_poll(None);
+    let _ = finished.send(rejected);
+    let completed_under_contention = controller.join().unwrap();
+    assert!(
+        callback.join().unwrap().is_some(),
+        "the live callback completes"
+    );
+    assert!(
+        completed_under_contention,
+        "admission completes with rejection while the gate is held"
+    );
+    assert!(rejected, "contention rejects admission");
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        0,
+        "no first poll while contended"
+    );
+    let fresh = fixture
+        .approval()
+        .await
+        .start(42, channel, || {
+            polls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(())
+        })
+        .await;
+    assert!(
+        fresh.is_some(),
+        "a fresh Reading admits after the callback ends"
+    );
+    assert_eq!(polls.load(Ordering::SeqCst), 1);
+    gateway.lost();
+}
+
+// A Home mounting over a Gateway approval, replacing an older Home or leaving withdraws the
+// approval resting on the owner it displaced.
+#[tokio::test(flavor = "current_thread")]
+async fn b2b2_home_mount_replace_and_unmount_withdraw_the_displaced_owner() {
+    let fixture = Fixture::new();
+    let fence =
+        Arc::downgrade(&fixture.runtime) as std::sync::Weak<dyn super::super::entrypoints::Fence>;
+    let _installed = super::super::entrypoints::tests::install(&fixture.shared, fence);
+    let channel = fixture.identity.channel.to_string();
+    let home = |epoch| {
+        let home = Arc::new(HomeGate::new(&channel, "b1-worker"));
+        let held = HeldHome::for_test(&channel, "b1-worker", epoch, HomeState::Worker);
+        home.confirm(&held, tokio::time::Instant::now()).unwrap();
+        home
+    };
+    let seat = || {
+        let ticket = fixture.ticket();
+        let incarnation = ticket.incarnation().unwrap();
+        assert!(incarnation.replace(&ticket, fixture.identity.clone()));
+        fixture.ticket()
+    };
+    let on_old = fixture.ticket();
+    let replacement = home(8);
+    channel_home::register(replacement.clone());
+    assert!(
+        on_old.incarnation().is_none(),
+        "the replaced Home's approval"
+    );
+    let on_replacement = seat();
+    channel_home::unregister_if_same(&replacement);
+    assert!(
+        on_replacement.incarnation().is_none(),
+        "the unmounted Home's approval"
+    );
+    let ticket = fixture.ticket();
+    let gateway = ownership::gate("b2b2-home-mount");
+    let incarnation = ticket.incarnation().unwrap();
+    assert!(incarnation.seat_gateway_for_tests(&ticket, fixture.identity.clone(), gateway));
+    let on_gateway = fixture.ticket();
+    channel_home::register(home(9));
+    assert!(
+        on_gateway.incarnation().is_none(),
+        "the Gateway approval a Home mounted over"
+    );
+    channel_home::unregister(&channel);
+}
+
+// Before any Home was ever registered, an unhomed admission still holds off the first mount.
+#[test]
+fn b2b2_an_unhomed_admission_before_any_home_holds_off_the_first_mount() {
+    use crate::services::cluster::channel_home::tests::mount_waits;
+    std::thread::spawn(|| {
+        let held = channel_home::admit_unhomed(6_325_950, mount_waits);
+        assert_eq!(held, Some(true));
+        assert!(!mount_waits(), "released when the admission returns");
+    })
+    .join()
+    .unwrap();
+}

@@ -145,7 +145,8 @@ impl LedgerClear {
         if let Some(reason) = refusal(shared, provider, channel_id, true, false, target).await {
             return Err(reason);
         }
-        super::super::super::turn_presence::entrypoints::withdraw(channel_id.get(), "ledger_clear");
+        let withdraw = super::super::super::turn_presence::entrypoints::withdraw;
+        withdraw(shared, channel_id.get(), "ledger_clear");
         let clear = super::super::super::inflight::clear_channel_session;
         let pool = shared.pg_pool.as_ref();
         let (id, key) = (channel_id.get(), Some(self.session_key.as_str()));
@@ -237,7 +238,7 @@ impl ClearHost for LedgerClear {
             };
             // A replayed reset changes the execution as well, even when admitted before a restart.
             let withdraw = super::super::super::turn_presence::entrypoints::withdraw;
-            withdraw(self.channel_id.get(), "ledger_reset");
+            withdraw(&self.shared, self.channel_id.get(), "ledger_reset");
             if !self.effects.clear_selector(&self.session_key).await {
                 return false;
             }

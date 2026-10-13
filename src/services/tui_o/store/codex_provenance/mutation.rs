@@ -2,8 +2,12 @@
 
 use super::super::{ChannelStore, StoreError, durable};
 use super::submit_floor::{DurableClosedEpisode, Schema2, SubmitFloor};
-use super::{CODEX_PROVENANCE_FILE, CodexEpisodeDeny, CodexEpisodeSpan, CodexProvenance, SCHEMA};
-use super::{Sidecar, retained, valid};
+#[cfg(test)]
+use super::valid;
+use super::{CODEX_PROVENANCE_FILE, CodexEpisodeSpan};
+#[cfg(test)]
+use super::{CodexEpisodeDeny, CodexProvenance, SCHEMA};
+use super::{Sidecar, retained};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CommitStage {
@@ -12,16 +16,24 @@ pub(super) enum CommitStage {
     ReadBack,
 }
 
+#[cfg(test)]
 type CommitHook = Box<dyn FnMut(CommitStage) -> std::io::Result<()>>;
+#[cfg(test)]
 thread_local! {
     pub(super) static COMMIT_HOOK: std::cell::RefCell<Option<CommitHook>> = const { std::cell::RefCell::new(None) };
 }
 
 fn stage(stage: CommitStage) -> std::io::Result<()> {
-    COMMIT_HOOK.with(|hook| match hook.borrow_mut().as_mut() {
+    #[cfg(test)]
+    return COMMIT_HOOK.with(|hook| match hook.borrow_mut().as_mut() {
         Some(hook) => hook(stage),
         None => Ok(()),
-    })
+    });
+    #[cfg(not(test))]
+    {
+        let _ = stage;
+        Ok(())
+    }
 }
 
 fn sync_parent(path: &std::path::Path) -> std::io::Result<()> {
@@ -31,14 +43,26 @@ fn sync_parent(path: &std::path::Path) -> std::io::Result<()> {
 
 impl ChannelStore {
     pub(crate) fn prepare_codex_floor(&mut self, floor: SubmitFloor) -> Result<(), StoreError> {
+        if !crate::services::discord::runtime_store::PARENT_DIR_FSYNC_FLUSHES {
+            return Err(StoreError::Rejected(
+                "durable Codex floors unsupported".into(),
+            ));
+        }
         let current = self.codex_provenance();
+        if let SubmitFloor::NativeFloor(native) = &floor
+            && !matches!(&current, Sidecar::Present(read) if read.1.as_ref().is_some_and(|saved| saved.floors.contains(&floor)))
+        {
+            native
+                .verify_before_prepare()
+                .map_err(|reason| StoreError::Rejected(reason.into()))?;
+        }
         if let Sidecar::Present(read) = &current
             && read.1.is_none()
         {
             let raw =
                 durable::read_json::<serde_json::Value>(&self.dir.join(CODEX_PROVENANCE_FILE))?
                     .ok_or_else(|| StoreError::Rejected("Codex provenance changed".into()))?;
-            if !super::submit_floor::known_fields(&raw, &serde_json::to_value(&read.0)?) {
+            if !super::known_fields(&raw, &serde_json::to_value(&read.0)?) {
                 return Err(StoreError::Rejected(
                     "unknown Codex provenance field".into(),
                 ));
@@ -111,11 +135,8 @@ impl ChannelStore {
             };
             use crate::services::tui_o::shadow::capture::SourceCapture;
             use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource};
-            let mut capture = SourceCapture::reopen(
-                floor.canonical_source.clone(),
-                floor.through,
-                &floor.prefix_hash,
-            )?;
+            let (source, through, hash) = floor.checkpoint();
+            let mut capture = SourceCapture::reopen(source.clone(), through, hash)?;
             let end = span
                 .end
                 .ok_or_else(|| StoreError::Rejected("native terminal unavailable".into()))?;
@@ -178,6 +199,7 @@ impl ChannelStore {
             ".codex_provenance.{}.tmp",
             uuid::Uuid::new_v4().simple()
         ));
+        #[cfg(test)]
         super::SIDECAR_IO.with(|io| io.set((io.get().0, io.get().1 + 1)));
         self.mutate(|store| {
             durable::create_once(&temp, &bytes)?;
@@ -193,6 +215,7 @@ impl ChannelStore {
     }
 
     /// Test seam for a new execution's empty sidecar; its real caller belongs to P4-2.
+    #[cfg(test)]
     pub(crate) fn init_codex_provenance(&mut self) -> Result<(), StoreError> {
         if self.codex_provenance() != Sidecar::Missing {
             return Err(StoreError::Rejected("codex provenance exists".into()));
@@ -207,11 +230,13 @@ impl ChannelStore {
         };
         let bytes = serde_json::to_vec(&empty)?;
         let path = self.dir.join(CODEX_PROVENANCE_FILE);
+        #[cfg(test)]
         super::SIDECAR_IO.with(|io| io.set((io.get().0, io.get().1 + 1)));
         self.mutate(|_| Ok(durable::create_once(&path, &bytes)?))
     }
 
     /// Publish the returned span only after its durable replace succeeds.
+    #[cfg(test)]
     pub(crate) fn persist_codex_span(
         &mut self,
         span: CodexEpisodeSpan,
@@ -228,6 +253,7 @@ impl ChannelStore {
         Ok(span)
     }
 
+    #[cfg(test)]
     pub(crate) fn persist_codex_deny(&mut self, deny: CodexEpisodeDeny) -> Result<(), StoreError> {
         self.change_codex_provenance(|next| {
             if !next.denies.contains(&deny) {
@@ -238,6 +264,7 @@ impl ChannelStore {
 
     /// A conflict or an unreadable sidecar is Rejected and leaves the store writable; only a
     /// failed write marks it failed.
+    #[cfg(test)]
     pub(super) fn change_codex_provenance(
         &mut self,
         change: impl FnOnce(&mut CodexProvenance),
@@ -260,6 +287,7 @@ impl ChannelStore {
         }
         let bytes = serde_json::to_vec(&next)?;
         let path = self.dir.join(CODEX_PROVENANCE_FILE);
+        #[cfg(test)]
         super::SIDECAR_IO.with(|io| io.set((io.get().0, io.get().1 + 1)));
         self.mutate(|_| Ok(durable::replace(&path, &bytes)?))
     }

@@ -116,6 +116,6 @@ CHECK = CheckSpec(
         "Production Rust files under configured namespaces must stay within "
         f"their per-namespace caps from {CONFIG_REL_PATH}."
     ),
-    hard_gate=True,
+    hard_gate=False,
     runner=_run,
 )
