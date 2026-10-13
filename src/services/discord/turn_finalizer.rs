@@ -779,9 +779,9 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         // Test seam: the dequeued close is lost before processing, its ACK with it.
                         #[cfg(test)]
                         {
-                            use crate::services::turn_orchestrator::policy_close::test_hooks as probe;
-                            if trace.lost(probe::Loss::Dequeued) {
-                                trace.not_run(probe::Branch::Lost);
+                            use crate::services::turn_orchestrator::policy_close::test_hooks;
+                            if trace.lost(test_hooks::Loss::Dequeued) {
+                                trace.not_run(test_hooks::Branch::Lost);
                                 continue;
                             }
                         }

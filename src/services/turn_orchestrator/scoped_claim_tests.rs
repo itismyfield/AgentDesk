@@ -255,7 +255,7 @@ fn refused(outcome: ScopedClaimOutcome) -> ScopedClaimRefusal {
 /// receipt clear would; the returned flag tells whether that panic was injected.
 fn panic_at(stage: Option<test_hooks::Stage>) -> Arc<std::sync::atomic::AtomicBool> {
     let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    test_hooks::disarm();
+    assert!(!test_hooks::disarm(), "stale policy-close hook");
     if let Some(stage) = stage {
         let flag = fired.clone();
         test_hooks::arm(Box::new(move |seen| {
