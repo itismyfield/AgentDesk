@@ -139,14 +139,16 @@ async fn admission_refuses_every_fresh_row_that_is_not_this_bridge_turn() {
         assert_eq!(fixture.bytes(), before, "{case}");
     }
     // The receipt names its own row's turn: a close carrying another nonce is refused.
-    let fixture = Fixture::new();
-    let before = fixture.bytes();
-    let other = fixture
-        .row
-        .admit_before_start_receipt("other-turn", CloseBasis::NoAttempt, ADMITTED)
-        .await;
-    assert!(other.is_none());
-    assert_eq!(fixture.bytes(), before);
+    {
+        let fixture = Fixture::new();
+        let before = fixture.bytes();
+        let other = fixture
+            .row
+            .admit_before_start_receipt("other-turn", CloseBasis::NoAttempt, ADMITTED)
+            .await;
+        assert!(other.is_none());
+        assert_eq!(fixture.bytes(), before);
+    }
     // A nameless turn's finalizer id is the only axis that tells two of them apart.
     let fixture = Fixture::with(|row| {
         row.user_msg_id = 0;
