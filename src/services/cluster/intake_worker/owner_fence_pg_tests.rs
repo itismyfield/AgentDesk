@@ -90,11 +90,11 @@ async fn owner_fence_tick_legacy_and_current_success_failure_restart_hold_pg() {
             let _health = test_health::Clear::new(&gate);
             let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let close = Arc::new(Mutex::new(None::<Closing>));
-            let (cancel, closed) = (cancelled.clone(), close.clone());
+            let (shutdown_requested, closed) = (cancelled.clone(), close.clone());
             let _hook = test_executor::hook(Box::new(move |point| {
                 if point == Checkpoint::AfterClaim {
                     if mode == 2 {
-                        cancel.store(true, Ordering::SeqCst);
+                        shutdown_requested.store(true, Ordering::SeqCst);
                     }
                     if mode == 3 {
                         *closed.lock().unwrap() = Some(gate.close().unwrap());
