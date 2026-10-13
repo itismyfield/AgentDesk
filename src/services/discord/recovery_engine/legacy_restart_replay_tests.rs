@@ -131,6 +131,51 @@ fn proof_keeps_the_stored_native_turn_when_a_later_turn_repeats_the_prompt() {
 
 #[cfg(unix)]
 #[test]
+fn proof_uses_the_shared_decoders_terminal_fallback_and_body_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let raw = dir.path().join("rollout.jsonl");
+    for streamed in [None, Some("TAIL\n")] {
+        let mut records = vec![session_meta("s1"), task_started("cur"), user("prompt")];
+        if let Some(text) = streamed {
+            records.push(assistant(text));
+        }
+        records.push(json!({"type": "event_msg", "payload": {
+            "type": "task_complete", "turn_id": "cur",
+            "last_agent_message": "FROZEN\nBODY 가나다\nTAIL\n"
+        }}));
+        let ends = write_records(&raw, &records);
+        let plan = prove(&request(&raw, "FROZEN\nBODY 가"))
+            .unwrap_or_else(|hold| panic!("shared terminal fallback must align: {hold:?}"));
+        assert_eq!(plan.witness.prefix_record_end, *ends.last().unwrap());
+        assert_eq!(plan.decoder.response(), "FROZEN\nBODY 가나다\nTAIL\n");
+        assert_eq!(plan.residual_text, "나다\nTAIL\n");
+        assert!(matches!(
+            plan.residual_messages.as_slice(),
+            [StreamMessage::Done { result, session_id }]
+                if result == "FROZEN\nBODY 가나다\nTAIL\n"
+                    && session_id.as_deref() == Some("s1")
+        ));
+    }
+    write_records(
+        &raw,
+        &[
+            session_meta("s1"),
+            task_started("cur"),
+            user("prompt"),
+            json!({"type": "event_msg", "payload": {
+                "type": "task_complete", "turn_id": "old",
+                "last_agent_message": "FROZEN\nBODY 가나다\nTAIL\n"
+            }}),
+        ],
+    );
+    assert_eq!(
+        hold(&raw, "FROZEN\nBODY 가"),
+        CoordinateHold::NeedsEvidence("terminal_turn_mismatch")
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn incomplete_evidence_holds_until_the_record_is_complete() {
     let dir = tempfile::tempdir().unwrap();
     let raw = dir.path().join("rollout.jsonl");
@@ -320,6 +365,11 @@ fn classification_owns_only_coordinate_targets_and_yields_to_existing_authority(
     assert_eq!(
         classify(&with_marker(&row, "preparing", false), Present, legacy),
         D::RetryInstall
+    );
+    assert_eq!(
+        classify(&with_marker(&row, "preparing", true), Present, legacy),
+        D::RetryInstall,
+        "a preserved source witness does not finish a replacement install"
     );
     let installed = with_marker(&row, "installed", true);
     assert_eq!(

@@ -1,5 +1,36 @@
+use std::num::NonZeroU64;
+
 use super::legacy_replay_coordinate::is_coordinate_hold_reason;
 use super::{Deserialize, InflightTurnState, Serialize};
+
+/// Transfer a numeric end only when both UTF-8 prefixes are identical.
+pub(in crate::services::discord) fn transfer_end(
+    source_body: &str,
+    end: usize,
+    target_body: &str,
+) -> Option<usize> {
+    let source = source_body.get(..end)?;
+    let target = target_body.get(..end)?;
+    (source == target).then_some(end)
+}
+
+/// Treat a zero persisted message id as an unanchored turn and skip its message operation.
+pub(in crate::services::discord) fn opt_message_id(
+    raw: u64,
+) -> Option<poise::serenity_prelude::MessageId> {
+    NonZeroU64::new(raw).map(|raw| poise::serenity_prelude::MessageId::new(raw.get()))
+}
+
+/// Skip a zero persisted channel id so recovery never constructs an invalid Discord id.
+pub(in crate::services::discord) fn opt_channel_id(
+    raw: u64,
+) -> Option<poise::serenity_prelude::ChannelId> {
+    let Some(raw) = NonZeroU64::new(raw) else {
+        tracing::warn!("skipping Discord channel operation because persisted id is zero");
+        return None;
+    };
+    Some(poise::serenity_prelude::ChannelId::new(raw.get()))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct InflightTurnIdentity {

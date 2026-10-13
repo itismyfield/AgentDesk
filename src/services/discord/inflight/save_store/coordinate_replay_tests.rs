@@ -372,3 +372,60 @@ fn a_watcher_patch_from_the_replaced_source_is_refused_after_install() {
         Ok(())
     );
 }
+
+#[test]
+fn repreparing_an_installed_row_does_not_reopen_the_legacy_source_witness() {
+    let root = tempfile::tempdir().unwrap();
+    let channel = CHANNEL + 4;
+    let before_install = seed(root.path(), &legacy_row(channel));
+    let replaced_source = CoordinateSourceWitness::of(&before_install);
+    install(root.path(), channel);
+    assert_eq!(
+        change(
+            root.path(),
+            channel,
+            CoordinateChange::Prepare {
+                install_id: "install-2".to_string(),
+                raw: raw_witness(),
+            },
+        ),
+        CoordinateRmwOutcome::Saved
+    );
+
+    let path = row_path(root.path(), channel);
+    let before = fs::read(&path).unwrap();
+    let prepared = load(root.path(), channel);
+    let apply_patch = |source: &CoordinateSourceWitness| {
+        let durable = load(root.path(), channel);
+        let mut locked = lock_inflight_episode_in_root(
+            root.path(),
+            &ProviderKind::Codex,
+            channel,
+            &InflightEpisodePin::from_state(&durable),
+        )
+        .unwrap();
+        admit_source_patch(locked.state(), source)?;
+        let mut patched = locked.state().clone();
+        patched.full_response.push_str(" TAIL");
+        patched.last_offset = 20;
+        patched.last_watcher_relayed_offset = Some(20);
+        patched.last_watcher_relayed_generation_mtime_ns = Some(77);
+        patched.terminal_delivery_committed = true;
+        Ok(locked.persist_verified_under_guard(&patched, "test witnessed watcher patch"))
+    };
+    assert_eq!(
+        apply_patch(&replaced_source),
+        Err(CoordinateRefusal::SourceChanged),
+        "preparing a replacement keeps the installed namespace distinct from the legacy source"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(
+        apply_patch(&CoordinateSourceWitness::of(&prepared)),
+        Ok(GuardedSaveOutcome::Saved)
+    );
+    let progressed = load(root.path(), channel);
+    assert_eq!(progressed.full_response, "FROZEN BODY TAIL");
+    assert_eq!(progressed.last_offset, 20);
+    assert_eq!(progressed.last_watcher_relayed_offset, Some(20));
+    assert!(progressed.terminal_delivery_committed);
+}

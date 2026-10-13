@@ -45,6 +45,10 @@ def complete_survey():
                 "host": "mac-mini",
                 "role": "primary",
                 "pid": 101,
+                "pgid": 101,
+                "started_at": "2026-10-13T15:00:00+09:00",
+                "executable_realpath": "/Users/op/.adk/release/bin/agentdesk-old",
+                "root_realpath": "/Users/op/.adk/release",
                 "supervisor_label": "com.agentdesk.release",
                 "alive": False,
                 "restartable": False,
@@ -55,6 +59,7 @@ def complete_survey():
                 "host": "mac-mini",
                 "role": "primary",
                 "pid": 202,
+                "pgid": 202,
                 "started_at": "2026-10-13T16:00:00+09:00",
                 "executable_realpath": "/Users/op/.adk/release/bin/agentdesk",
                 "executable_sha256": BIN,
@@ -139,6 +144,111 @@ class ActivationValidatorTests(unittest.TestCase):
             s["declared_hosts"].append("mac-book")
 
         self.assert_refused(mutate, "host mac-book: declared but not surveyed")
+
+    def test_a_malformed_record_is_not_silently_discarded(self):
+        for key in ("hosts", "roots", "writers_stopped", "writers_restarted", "sources", "artifacts"):
+            with self.subTest(key=key):
+                self.assert_refused(lambda s, key=key: s[key].append("unconfirmed-record"), "malformed record")
+
+    def test_stopped_and_restarted_writer_identities_are_required(self):
+        for section in ("writers_stopped", "writers_restarted"):
+            for key in ("pid", "pgid", "started_at", "executable_realpath", "root_realpath"):
+                with self.subTest(section=section, key=key):
+                    self.assert_refused(
+                        lambda s, section=section, key=key: s[section][0].pop(key), "not recorded"
+                    )
+            for key in ("pid", "pgid"):
+                for value in (0, -1, True, "202"):
+                    with self.subTest(section=section, key=key, value=value):
+                        self.assert_refused(
+                            lambda s, section=section, key=key, value=value: s[section][0].__setitem__(key, value),
+                            "not recorded",
+                        )
+
+    def test_a_restarted_writer_on_an_undeclared_host_is_refused(self):
+        self.assert_refused(
+            lambda s: s["writers_restarted"][0].__setitem__("host", "unknown-host"),
+            "host outside the declared scope",
+        )
+
+    def test_a_surveyed_host_without_writer_coverage_is_refused(self):
+        def mutate(s):
+            s["declared_hosts"].append("mac-book")
+            s["hosts"].append({"host": "mac-book", "surveyed": True})
+
+        self.assert_refused(mutate, "host mac-book: writer coverage")
+
+    def test_a_resolved_root_without_writer_coverage_is_refused(self):
+        def mutate(s):
+            s["declared_roots"].append("standby")
+            s["roots"].append({"declared": "standby", "realpath": "/standby", "fs_id": "disk4", "accessible": True})
+
+        self.assert_refused(mutate, "root standby: writer coverage")
+
+    def test_writer_free_scopes_need_explicit_nonempty_evidence(self):
+        survey = complete_survey()
+        survey["declared_hosts"].append("mac-book")
+        survey["hosts"].append({"host": "mac-book", "surveyed": True, "writer_free_evidence": "inventory/mac-book"})
+        survey["declared_roots"].append("standby")
+        survey["roots"].append({
+            "declared": "standby", "realpath": "/standby", "fs_id": "disk4", "accessible": True,
+            "writer_free_evidence": "inventory/standby",
+        })
+        self.assertEqual(activation.check(survey), [])
+        for section in ("hosts", "roots"):
+            for value in ("", " ", True):
+                with self.subTest(section=section, value=value):
+                    invalid = copy.deepcopy(survey)
+                    invalid[section][-1]["writer_free_evidence"] = value
+                    self.assertTrue(any("writer coverage" in reason for reason in activation.check(invalid)))
+
+    def test_writer_free_evidence_must_not_contradict_writer_records(self):
+        for section in ("hosts", "roots"):
+            with self.subTest(section=section):
+                self.assert_refused(
+                    lambda s, section=section: s[section][0].__setitem__("writer_free_evidence", "inventory/empty"),
+                    "writer-free evidence contradicts",
+                )
+
+    def test_both_stop_and_restart_writer_coverage_are_required(self):
+        for section in ("writers_stopped", "writers_restarted"):
+            with self.subTest(section=section):
+                def mutate(s, section=section):
+                    s["declared_hosts"].append("mac-book")
+                    s["hosts"].append({"host": "mac-book", "surveyed": True})
+                    s[section].append(dict(s[section][0], host="mac-book", pid=303, pgid=303))
+
+                self.assert_refused(mutate, "host mac-book: writer coverage")
+        for section in ("writers_stopped", "writers_restarted"):
+            with self.subTest(section=section, scope="root"):
+                def mutate(s, section=section):
+                    s["declared_roots"].append("standby")
+                    s["roots"].append({"declared": "standby", "realpath": "/standby", "fs_id": "disk4", "accessible": True})
+                    s[section].append(dict(s[section][0], root_realpath="/standby", pid=303, pgid=303))
+
+                self.assert_refused(mutate, "root standby: writer coverage")
+
+    def test_duplicate_or_undeclared_roots_are_refused(self):
+        self.assert_refused(
+            lambda s: s["roots"].append(dict(s["roots"][0], realpath="/unrelated")), "duplicate root"
+        )
+        self.assert_refused(
+            lambda s: s["roots"].append(dict(s["roots"][0], declared="undeclared", realpath="/other")),
+            "outside the declared scope",
+        )
+
+    def test_source_channel_and_tmux_are_required(self):
+        for key in ("channel", "tmux"):
+            with self.subTest(key=key):
+                self.assert_refused(lambda s, key=key: s["sources"][0].pop(key), "channel or tmux not recorded")
+
+    def test_opened_raw_file_identity_must_have_device_and_inode(self):
+        for value in (True, "file", {"dev": 1}, [1], [1, 2, 3], [True, 2], [1, -2]):
+            with self.subTest(value=value):
+                self.assert_refused(
+                    lambda s, value=value: s["sources"][0].__setitem__("raw_file_identity", value),
+                    "opened raw source unconfirmed",
+                )
 
     def test_a_mixed_sha_artifact_is_refused(self):
         def mutate(s):

@@ -23,39 +23,101 @@ POLICIES = {"Legacy", "VerifiedCurrent", "VerifiedUnavailable"}
 def _items(survey, key, refuse):
     value = survey.get(key)
     records = [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+    if isinstance(value, list) and len(records) != len(value):
+        refuse(f"{key}: malformed record in survey section")
     if not records:
         refuse(f"{key}: survey section is missing or empty")
     return records
 
 
+def _text(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _scope(survey, key, refuse):
+    value = survey.get(key)
+    if not isinstance(value, list) or not value or not all(_text(item) for item in value):
+        refuse(f"{key}: declared scope is missing or malformed")
+        return set()
+    if len(set(value)) != len(value):
+        refuse(f"{key}: duplicate scope entry")
+    return set(value)
+
+
+def _writer_identity(writer, label, hosts, roots, refuse):
+    if not _text(writer.get("host")) or writer["host"] not in hosts:
+        refuse(f"{label}: host outside the declared scope")
+    if not _text(writer.get("role")) or writer["role"] not in WRITER_ROLES:
+        refuse(f"{label}: role unknown")
+    if any(type(writer.get(key)) is not int or writer[key] <= 0 for key in ("pid", "pgid")):
+        refuse(f"{label}: positive PID/PGID not recorded")
+    if not _text(writer.get("executable_realpath")) or not _text(writer.get("started_at")):
+        refuse(f"{label}: executable realpath or start time not recorded")
+    if not _text(writer.get("root_realpath")):
+        refuse(f"{label}: root identity not recorded")
+    elif writer["root_realpath"] not in roots:
+        refuse(f"{label}: runs against an unresolved root")
+
+
+def _coverage(label, record, key, identity, phases, refuse):
+    present = [any(writer.get(key) == identity for writer in writers) for writers in phases]
+    evidence = record.get("writer_free_evidence")
+    if _text(evidence):
+        if any(present):
+            refuse(f"{label}: writer-free evidence contradicts writer records")
+    elif not all(present):
+        refuse(f"{label}: writer coverage missing for stop or restart without writer-free evidence")
+    elif "writer_free_evidence" in record:
+        refuse(f"{label}: writer-free evidence is malformed")
+
+
 def check(survey):
     reasons = []
     refuse = reasons.append
-    approved = str(survey.get("approved_source_sha", ""))
-    if not SHA1.match(approved):
+    approved = survey.get("approved_source_sha")
+    if not _text(approved) or not SHA1.fullmatch(approved):
         refuse("approved_source_sha: not a full 40-hex source SHA")
     artifacts = _items(survey, "artifacts", refuse)
     approved_hashes = set()
     for artifact in artifacts:
+        if not _text(artifact.get("path")):
+            refuse("artifact: path not recorded")
         if artifact.get("source_sha") != approved:
             refuse(f"artifact {artifact.get('path')}: built from {artifact.get('source_sha')}, not the approved SHA")
-        elif not SHA256.match(str(artifact.get("sha256", ""))):
+        elif not _text(artifact.get("sha256")) or not SHA256.fullmatch(artifact["sha256"]):
             refuse(f"artifact {artifact.get('path')}: sha256 missing")
         else:
             approved_hashes.add(artifact["sha256"])
 
-    declared_hosts = set(survey.get("declared_hosts") or [])
-    declared_roots = set(survey.get("declared_roots") or [])
+    declared_hosts = _scope(survey, "declared_hosts", refuse)
+    declared_roots = _scope(survey, "declared_roots", refuse)
     if not declared_hosts or not declared_roots:
         refuse("declared_hosts/declared_roots: the writer set has no declared scope")
-    surveyed = {h.get("host") for h in _items(survey, "hosts", refuse) if h.get("surveyed") is True}
+    hosts = {}
+    for host in _items(survey, "hosts", refuse):
+        name = host.get("host")
+        if not _text(name) or name not in declared_hosts:
+            refuse(f"host {name}: outside the declared scope")
+        elif name in hosts:
+            refuse(f"host {name}: duplicate host survey")
+        else:
+            hosts[name] = host
+    surveyed = {name for name, host in hosts.items() if host.get("surveyed") is True}
     for host in sorted(declared_hosts - surveyed):
         refuse(f"host {host}: declared but not surveyed")
 
     resolved = {}
+    roots = {}
     for root in _items(survey, "roots", refuse):
         name = root.get("declared")
-        if root.get("accessible") is not True or not root.get("realpath") or not root.get("fs_id"):
+        if not _text(name) or name not in declared_roots:
+            refuse(f"root {name}: outside the declared scope")
+            continue
+        if name in roots:
+            refuse(f"root {name}: duplicate root survey")
+            continue
+        roots[name] = root
+        if root.get("accessible") is not True or not _text(root.get("realpath")) or not _text(root.get("fs_id")):
             refuse(f"root {name}: realpath, filesystem id or access not confirmed")
             continue
         resolved[name] = (root["realpath"], root["fs_id"])
@@ -68,43 +130,48 @@ def check(survey):
         if len(names) > 1:
             refuse(f"roots {sorted(names)}: different declared roots resolve to one root")
 
-    for writer in _items(survey, "writers_stopped", refuse):
+    stopped = _items(survey, "writers_stopped", refuse)
+    restarted = _items(survey, "writers_restarted", refuse)
+    root_paths = {target[0] for target in resolved.values()}
+    for writer in stopped:
         label = f"stopped writer {writer.get('host')}:{writer.get('pid')}"
-        if writer.get("host") not in declared_hosts:
-            refuse(f"{label}: host outside the declared scope")
-        if writer.get("role") not in WRITER_ROLES:
-            refuse(f"{label}: role unknown")
-        if not writer.get("supervisor_label") and writer.get("supervisor_confirmed_none") is not True:
+        _writer_identity(writer, label, declared_hosts, root_paths, refuse)
+        if not _text(writer.get("supervisor_label")) and writer.get("supervisor_confirmed_none") is not True:
             refuse(f"{label}: auto-restart supervisor not confirmed")
         if writer.get("alive") is not False or writer.get("restartable") is not False:
             refuse(f"{label}: still alive or restartable after the stop")
 
-    root_paths = {target[0] for target in resolved.values()}
-    for writer in _items(survey, "writers_restarted", refuse):
+    for writer in restarted:
         label = f"restarted writer {writer.get('host')}:{writer.get('pid')}"
-        if writer.get("role") not in WRITER_ROLES:
-            refuse(f"{label}: role unknown")
-        if not writer.get("executable_realpath") or not writer.get("started_at"):
-            refuse(f"{label}: executable realpath or start time not recorded")
-        if writer.get("executable_sha256") not in approved_hashes:
+        _writer_identity(writer, label, declared_hosts, root_paths, refuse)
+        if not _text(writer.get("executable_sha256")) or writer["executable_sha256"] not in approved_hashes:
             refuse(f"{label}: running executable is not an approved artifact")
-        if writer.get("root_realpath") not in root_paths:
-            refuse(f"{label}: runs against an unresolved root")
+    for name, host in hosts.items():
+        _coverage(f"host {name}", host, "host", name, (stopped, restarted), refuse)
+    for name, target in resolved.items():
+        _coverage(f"root {name}", roots[name], "root_realpath", target[0], (stopped, restarted), refuse)
 
     for source in _items(survey, "sources", refuse):
         label = f"source {source.get('channel')}/{source.get('tmux')}"
+        if not _text(source.get("channel")) or not _text(source.get("tmux")):
+            refuse(f"{label}: channel or tmux not recorded")
         policy = source.get("policy")
-        if policy not in POLICIES:
+        if not _text(policy) or policy not in POLICIES:
             refuse(f"{label}: pinned policy unknown")
         elif policy == "VerifiedUnavailable":
             refuse(f"{label}: VerifiedUnavailable is never downgraded to Legacy")
-        if source.get("policy_evidence") != "source_authority" or not source.get("incarnation"):
+        if source.get("policy_evidence") != "source_authority" or not _text(source.get("incarnation")):
             refuse(f"{label}: policy not taken from the tmux source authority with its incarnation")
-        if not source.get("session_id") or not source.get("raw_path") or not source.get("raw_file_identity"):
+        identity = source.get("raw_file_identity")
+        if (
+            not _text(source.get("session_id")) or not _text(source.get("raw_path"))
+            or not isinstance(identity, list) or len(identity) != 2
+            or any(type(value) is not int or value < 0 for value in identity)
+        ):
             refuse(f"{label}: session or opened raw source unconfirmed")
         if source.get("recovery_target") is True and (
             policy != "Legacy"
-            or not all(source.get(key) for key in ("native_turn_id", "nonce", "body_msg_id"))
+            or not all(_text(source.get(key)) for key in ("native_turn_id", "nonce", "body_msg_id"))
             or source.get("proof") != "planned"
         ):
             refuse(f"{label}: selected for recovery without Legacy policy, identity and a planned proof")

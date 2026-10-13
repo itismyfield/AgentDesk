@@ -1,9 +1,5 @@
-//! Strict raw proof for a legacy restart replay. It opens the rollout once, verifies the stored
-//! session and native turn in that open file, and aligns the stored composed response with the
-//! turn's decoded prefix. The open reader, decoder and residual text continue the same turn.
-//!
-//! EOF, pane readiness and raw markers are not terminal evidence here, and no record is
-//! skipped: a partial or malformed record stops the proof instead of moving a cursor past it.
+//! Strict proof aligns the stored response with one opened rollout's session and native turn.
+//! Partial/malformed records stop proof; the reader, decoder and residual continue that turn.
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -31,6 +27,8 @@ pub(in crate::services::discord::recovery_engine) struct ProofPlan {
     pub(in crate::services::discord::recovery_engine) reader: BufReader<std::fs::File>,
     pub(in crate::services::discord::recovery_engine) decoder: RolloutRecordDecoder,
     pub(in crate::services::discord::recovery_engine) residual_text: String,
+    /// Non-text events from the crossing record follow the residual text, including completion.
+    pub(in crate::services::discord::recovery_engine) residual_messages: Vec<StreamMessage>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -95,6 +93,9 @@ pub(in crate::services::discord::recovery_engine) fn prove(
         if read == 0 || line.last() != Some(&b'\n') {
             return Err(match scan {
                 _ if read != 0 => AwaitEvidence("partial_record"),
+                TurnScan::Selected { .. } if !prefix.starts_with(composed.as_str()) => {
+                    NeedsEvidence("prefix_mismatch")
+                }
                 TurnScan::Selected { .. } => AwaitEvidence("incomplete_prefix"),
                 TurnScan::Before if unopened_records && !named_turn => {
                     NeedsEvidence("turns_unnamed")
@@ -146,20 +147,30 @@ pub(in crate::services::discord::recovery_engine) fn prove(
             continue;
         }
         scan = TurnScan::Selected { opener_run: false };
-        for message in decoder.decode(&record).unwrap_or_default() {
-            if let StreamMessage::Text { content } = message {
-                composed.push_str(&content);
-            }
+        if record.pointer("/payload/type").and_then(Value::as_str) == Some("task_complete")
+            && record
+                .pointer("/payload/turn_id")
+                .and_then(Value::as_str)
+                .is_some_and(|turn| turn != native_turn)
+        {
+            return Err(NeedsEvidence("terminal_turn_mismatch"));
         }
-        if composed.len() < prefix.len() {
-            if !prefix.starts_with(composed.as_str()) {
+        let messages = decoder.decode(&record).unwrap_or_default();
+        composed = decoder.response().to_owned();
+        let completed = messages
+            .iter()
+            .any(|message| matches!(message, StreamMessage::Done { .. }));
+        if !composed.starts_with(prefix) {
+            // The shared decoder may supersede streamed text with an explicit terminal body.
+            if completed {
                 return Err(NeedsEvidence("prefix_mismatch"));
             }
             continue;
         }
-        if !composed.starts_with(prefix) {
-            return Err(NeedsEvidence("prefix_mismatch"));
-        }
+        let residual_messages = messages
+            .into_iter()
+            .filter(|message| !matches!(message, StreamMessage::Text { .. }))
+            .collect();
         return Ok(ProofPlan {
             witness: RawTurnWitness {
                 path: request.raw_path.to_string_lossy().into_owned(),
@@ -173,6 +184,7 @@ pub(in crate::services::discord::recovery_engine) fn prove(
             reader,
             decoder,
             residual_text: composed.split_off(prefix.len()),
+            residual_messages,
         });
     }
 }

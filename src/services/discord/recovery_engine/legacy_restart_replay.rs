@@ -1,8 +1,5 @@
-//! Typed contract of the legacy restart replay: which rows coordinate recovery owns, the hold
-//! states it may leave, how attempts are tallied, and the last recheck before a watcher claim.
-//!
-//! A row this classifier owns never falls through to output-completed, ready-without-output,
-//! captured-response completion or a numeric-offset watcher in the same pass.
+//! Coordinate recovery classification, holds, attempt tally and final watcher-claim recheck.
+//! Owned rows cannot enter general completion or numeric-offset restoration in the same pass.
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::inflight::{InflightEpisodePin, InflightTurnState};
@@ -73,6 +70,7 @@ const NEEDS_EVIDENCE_SLUGS: &[&str] = &[
     "prefix_mismatch",
     "source_not_regular",
     "source_identity_unavailable",
+    "terminal_turn_mismatch",
 ];
 
 /// Decides whether coordinate recovery owns `state` before any general restore path runs.
@@ -111,7 +109,7 @@ pub(super) fn classify(
     {
         return D::RefusedByExistingAuthority;
     }
-    if marker.is_some_and(|marker| marker.installed.is_some()) {
+    if marker.is_some_and(|marker| marker.is_installed()) {
         return match output {
             NormalizedOutputProbe::Present => D::ResumeManagedSource,
             _ => D::NeedsProof,
@@ -164,9 +162,8 @@ pub(super) enum ClaimRecheck {
     Refuse(&'static str),
 }
 
-/// The last durable check before a lifecycle scan candidate takes the watcher claim. A row that
-/// became a coordinate recovery target, or whose coordinate group moved since the scan, is left
-/// to the coordinate recovery owner.
+/// Rechecks a lifecycle candidate before watcher claim; changed coordinate groups and newly
+/// owned rows stay with coordinate recovery.
 pub(super) fn recheck_before_claim(
     scanned: &InflightTurnState,
     durable_now: Option<&InflightTurnState>,

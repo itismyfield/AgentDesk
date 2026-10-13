@@ -667,10 +667,8 @@ pub(super) fn load_inflight_state_unlocked(path: &Path) -> Option<InflightTurnSt
 /// of a proven-dead orphan (#3982) preserves the old, already-stale timestamp so
 /// downstream ownerless-stale filters drop the row immediately on the next read
 /// instead of after another 300 s window.
-///
-/// `coordinate_change` is `None` for every general writer, which must leave the durable
-/// coordinate group untouched. `Some(rebase)` is the coordinate replay RMW's authority;
-/// `rebase` installs a new normalized byte namespace, so same-source monotonic checks do not apply.
+/// `coordinate_change` grants only the replay RMW namespace changes and a source rebase;
+/// general writers preserve the durable coordinate group and same-source monotonic checks.
 fn persist_under_lock_inner(
     root: &Path,
     path: &Path,
@@ -721,9 +719,12 @@ fn durable_coordinate_group_kept(
     // A row naming neither key carries no group, so the common case skips the parse.
     let durable_may_carry = content.contains("legacy_replay_coordinate")
         || content.contains(super::model::COORDINATE_HOLD_PREFIX);
-    let kept = match (durable_may_carry, parse_inflight_state_content(&content)) {
-        (true, Ok(durable)) => durable.coordinate_group_eq(candidate),
-        _ => !candidate.has_coordinate_group(),
+    let kept = if durable_may_carry {
+        parse_inflight_state_content(&content)
+            .map_err(|error| format!("parse durable coordinate group: {error}"))?
+            .coordinate_group_eq(candidate)
+    } else {
+        !candidate.has_coordinate_group()
     };
     if !kept {
         tracing::warn!(

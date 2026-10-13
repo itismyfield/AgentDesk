@@ -177,7 +177,10 @@ pub(in crate::services::discord) fn apply_coordinate_change(
                 phase: CoordinateInstallPhase::Preparing,
                 prior,
                 raw: Some(raw),
-                installed: None,
+                installed: durable
+                    .legacy_replay_coordinate
+                    .as_ref()
+                    .and_then(|marker| marker.installed.clone()),
             });
             set_coordinate_hold(&mut next, Some("pending"));
             false

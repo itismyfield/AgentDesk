@@ -1,11 +1,11 @@
-//! Real completion and runtime-stamp writers against a coordinate install: stale snapshots keep
-//! neither a released coordinate hold nor the replaced source's cursor, runtime or terminal flag,
-//! and rows without a coordinate group are written exactly as before.
+//! Real completion and stamp writers preserve coordinate authority and reject stale sources.
+//! Rows without a coordinate group keep their existing serialization and progress semantics.
 
 use super::coordinate_replay::{CoordinateChange, CoordinateRmwOutcome};
 use super::coordinate_replay_tests::{CHANNEL, change, install, legacy_row, load, row_path, seed};
 use super::identity_gate::runtime_stamp::stamp_runtime_handoff_if_matches_identity_in_root;
 use super::*;
+use crate::services::discord::inflight::episode_guard::lock_inflight_episode_in_root;
 use crate::services::discord::inflight::model::{CoordinateInstallPhase, RawTurnWitness};
 
 fn json(root: &Path, channel_id: u64) -> serde_json::Map<String, serde_json::Value> {
@@ -152,6 +152,13 @@ fn rows_without_a_coordinate_group_are_written_as_before() {
     expected.insert("full_response".into(), "FROZEN BODY TAIL".into());
     expected.insert("last_offset".into(), 60.into());
     assert_eq!(without(after_completion.clone(), &volatile), expected);
+    let durable = load(root.path(), channel);
+    completion.updated_at = durable.updated_at;
+    completion.save_generation = durable.save_generation;
+    assert_eq!(
+        fs::read_to_string(row_path(root.path(), channel)).unwrap(),
+        serde_json::to_string_pretty(&completion).unwrap()
+    );
 
     let mut stamp = load(root.path(), channel);
     stamp.current_tool_line = Some("tool".to_string());
@@ -165,4 +172,34 @@ fn rows_without_a_coordinate_group_are_written_as_before() {
     expected.insert("current_tool_line".into(), "tool".into());
     expected.insert("last_offset".into(), 70.into());
     assert_eq!(without(json(root.path(), channel), &volatile), expected);
+    let durable = load(root.path(), channel);
+    stamp.updated_at = durable.updated_at;
+    stamp.save_generation = durable.save_generation;
+    assert_eq!(
+        fs::read_to_string(row_path(root.path(), channel)).unwrap(),
+        serde_json::to_string_pretty(&stamp).unwrap()
+    );
+}
+
+#[test]
+fn a_general_write_cannot_replace_an_unreadable_coordinate_group() {
+    let root = tempfile::tempdir().unwrap();
+    let channel = CHANNEL + 13;
+    let original = seed(root.path(), &legacy_row(channel));
+    let path = row_path(root.path(), channel);
+    let mut locked = lock_inflight_episode_in_root(
+        root.path(),
+        &ProviderKind::Codex,
+        channel,
+        &InflightEpisodePin::from_state(&original),
+    )
+    .unwrap();
+    let corrupt = b"{\"legacy_replay_coordinate\": {";
+    fs::write(&path, corrupt).unwrap();
+    assert_eq!(
+        locked.persist_verified_under_guard(&original, "test corrupt coordinate group"),
+        GuardedSaveOutcome::IoError,
+        "an unreadable tagged row cannot authorize an unmarked general write"
+    );
+    assert_eq!(fs::read(&path).unwrap(), corrupt);
 }

@@ -1,7 +1,5 @@
-//! Durable marker naming the coordinate origin and install state of a legacy restart replay.
-//!
-//! The row's numeric offsets keep naming whatever byte namespace this marker says they belong
-//! to. Only the coordinate replay RMW in `save_store::coordinate_replay` creates or changes it.
+//! Durable coordinate origin and install state. Only the coordinate replay RMW changes the
+//! marker; numeric offsets name the byte namespace it identifies.
 
 use super::{Deserialize, InflightTurnState, Serialize};
 
@@ -61,18 +59,24 @@ pub(in crate::services::discord) struct LegacyReplayCoordinate {
     pub installed: Option<InstalledSourceWitness>,
 }
 
+#[cfg(test)]
+impl LegacyReplayCoordinate {
+    pub(in crate::services::discord) fn is_installed(&self) -> bool {
+        self.phase == CoordinateInstallPhase::Installed && self.installed.is_some()
+    }
+}
+
 impl InflightTurnState {
-    /// The source incarnation whose byte namespace the offsets name; `None` is the prior source.
+    /// The source incarnation whose byte namespace the offsets name, including during replacement
+    /// preparation; `None` is the prior legacy source.
     pub(in crate::services::discord) fn coordinate_source(
         &self,
     ) -> Option<(&str, &InstalledSourceWitness)> {
         let marker = self.legacy_replay_coordinate.as_ref()?;
-        match (marker.phase, marker.installed.as_ref()) {
-            (CoordinateInstallPhase::Installed, Some(installed)) => {
-                Some((marker.install_id.as_str(), installed))
-            }
-            _ => None,
-        }
+        marker
+            .installed
+            .as_ref()
+            .map(|installed| (marker.install_id.as_str(), installed))
     }
 
     /// Offsets, watermarks and terminal flags of one source incarnation never merge into another.
