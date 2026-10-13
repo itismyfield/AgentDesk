@@ -161,7 +161,7 @@ pub(crate) enum Unclear {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
     /// Every condition holds; the draft is what the retirement would record.
-    Eligible(TransitionCleanup),
+    Eligible(Box<TransitionCleanup>),
     /// This job retired it, and the cursor and file still match what it verified.
     AlreadyDone,
     Refused(Refusal),
@@ -311,7 +311,7 @@ fn check(
     let ended = ended(request, hop_seq, pane.as_deref()).map_err(unclear)?;
     nothing_owed(snapshot, key)?;
     let fingerprint = settled_file(cursor, facts, reader)?;
-    Ok(Verdict::Eligible(TransitionCleanup {
+    Ok(Verdict::Eligible(Box::new(TransitionCleanup {
         job_id: request.job_id.clone(),
         operator: request.operator.clone(),
         at: request.at,
@@ -324,7 +324,7 @@ fn check(
             fingerprint,
         },
         ended,
-    }))
+    })))
 }
 
 fn unclear(reason: Unclear) -> Verdict {

@@ -282,7 +282,7 @@ fn transition_cleanup_synthetic_59_hops_are_eligible_with_drafts_bound_to_each_c
             },
             ended: ended(),
         };
-        assert_eq!(draft, &expected, "hop {n}");
+        assert_eq!(**draft, expected, "hop {n}");
     }
     let summary = Summary {
         unsettled: 59,
@@ -624,7 +624,7 @@ fn transition_cleanup_past_audit_settles_only_its_own_job_on_an_unchanged_snapsh
     let done = |fixture: &mut Fixture| {
         let cursor = fixture.cursor(6);
         cursor.retired = true;
-        cursor.transition_cleanup = Some(draft.clone());
+        cursor.transition_cleanup = Some(*draft.clone());
     };
     let mut fixture = Fixture::synthetic();
     done(&mut fixture);
