@@ -191,6 +191,9 @@ pub trait AlarmSink: Send + Sync {
 mod historical_hops;
 mod past_bind;
 mod renumbered;
+/// Dormant: no production caller yet, so it compiles only with the tests.
+#[cfg(test)]
+mod transition_cleanup;
 
 #[cfg(test)]
 #[path = "writer_tests.rs"]

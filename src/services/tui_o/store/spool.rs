@@ -670,6 +670,10 @@ impl ChannelStore {
     }
 }
 
+#[cfg(all(test, unix))]
+#[path = "spool_transition_tests.rs"]
+mod transition_tests;
+
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {
