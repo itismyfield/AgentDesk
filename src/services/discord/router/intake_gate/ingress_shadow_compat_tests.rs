@@ -40,6 +40,7 @@ enum Case {
     Thread,
     Duplicate,
     Queued,
+    ThreadQueued,
     Image,
     File,
     AttachmentOnly,
@@ -355,7 +356,7 @@ fn events(case: Case) -> Vec<serenity::FullEvent> {
     let new = |new_message| serenity::FullEvent::Message { new_message };
     match case {
         Case::Message | Case::Queued => vec![new(text(CHANNEL))],
-        Case::Thread => vec![new(text(THREAD))],
+        Case::Thread | Case::ThreadQueued => vec![new(text(THREAD))],
         Case::Duplicate => vec![new(text(CHANNEL)), new(text(CHANNEL))],
         Case::Image => vec![new(attached(text(CHANNEL), "shot.png", "image/png"))],
         Case::File => vec![new(attached(text(CHANNEL), "notes.txt", "text/plain"))],
@@ -516,9 +517,14 @@ async fn invoke(case: Case, run: Run, root: &Path, shared: Arc<SharedData>) -> O
         let session = core.sessions.get_mut(&channel).unwrap();
         session.current_path = Some(root.join("workspace").display().to_string());
     }
-    if case == Case::Queued {
+    let busy = match case {
+        Case::Queued => Some(channel),
+        Case::ThreadQueued => Some(serenity::ChannelId::new(THREAD)),
+        _ => None,
+    };
+    if let Some(busy) = busy {
         let claimed = shared
-            .mailbox(channel)
+            .mailbox(busy)
             .try_start_turn(
                 Arc::new(CancelToken::new()),
                 serenity::UserId::new(USER),
@@ -788,10 +794,23 @@ fn expect_off(case: Case, off: &Effects) -> Vec<String> {
     let reacted = writes
         .iter()
         .any(|(method, path)| *method == "PUT" && path.contains("/reactions/"));
+    // The queued text as written to the durable queue: the input's payload bytes.
+    let durable = |channel: u64| {
+        let name = format!("runtime/discord_pending_queue/claude/test-token-hash/{channel}.json");
+        let bytes = off
+            .files
+            .get(&name)
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+        bytes.is_some_and(|text| text.contains("\"text\": \"shadow live input\""))
+    };
     let held = match case {
         Case::Queued => {
-            reacted && off.checkpoint == Some(MESSAGE) && off.queue.contains("shadow live input")
+            reacted
+                && durable(CHANNEL)
+                && off.checkpoint == Some(MESSAGE)
+                && off.queue.contains("shadow live input")
         }
+        Case::ThreadQueued => reacted && durable(THREAD),
         Case::PendingDmReply => {
             off.dm_reply[4] == "consumed"
                 && off.dm_reply[3]
@@ -869,7 +888,13 @@ fn compare(test: &str, cases: &[Case], runner: Runner) {
 fn ingress_shadow_keeps_live_messages_byte_identical() {
     compare(
         "ingress_shadow_keeps_live_messages_byte_identical",
-        &[Case::Message, Case::Thread, Case::Duplicate, Case::Queued],
+        &[
+            Case::Message,
+            Case::Thread,
+            Case::Duplicate,
+            Case::Queued,
+            Case::ThreadQueued,
+        ],
         without_storage,
     );
 }
