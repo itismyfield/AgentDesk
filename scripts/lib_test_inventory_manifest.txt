@@ -2421,6 +2421,16 @@ services::cluster::channel_home_port::tests::hosted::a_halted_writer_reads_as_un
 services::cluster::channel_home_port::tests::hosted::a_hosted_herdr_actor_reads_what_it_owes_only_while_a_drain_waits
 services::cluster::channel_home_port::tests::no_mailbox_is_unknown_until_restored_and_an_inflight_row_alone_still_runs
 services::cluster::channel_home_port::tests::the_turn_comes_from_the_mailbox_and_nothing_unknown_reads_as_zero
+services::cluster::channel_ingress::tests::a_routed_input_keeps_its_original_epoch_and_never_compares_the_gate_epoch
+services::cluster::channel_ingress::tests::an_earlier_candidate_admits_nothing_after_a_handoff
+services::cluster::channel_ingress::tests::home_authority_inventory_lists_every_direct_consumer
+services::cluster::channel_ingress::tests::identity_is_the_provider_and_the_actual_channel
+services::cluster::channel_ingress::tests::observing_leaves_every_existing_home_entry_point_unchanged
+services::cluster::channel_ingress::tests::only_a_worker_holder_takes_ingress_never_a_released_target
+services::cluster::channel_ingress::tests::own_foreign_and_unknown_homes_stay_apart
+services::cluster::channel_ingress::tests::own_worker_row_holds_without_an_open_unexpired_local_lease
+services::cluster::channel_ingress::tests::row_freshness_counts_the_whole_read_and_ends_at_hold_for
+services::cluster::channel_ingress::tests::two_nodes_never_both_observe_a_candidate_for_one_row
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
 services::cluster::execution_requirements::tests::execution_requirements_are_strict_and_share_dispatch_matching

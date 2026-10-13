@@ -687,6 +687,8 @@ src/
 │   │   │   ├── temporary.rs
 │   │   │   ├── tests.rs
 │   │   │   └── uploads.rs
+│   │   ├── channel_ingress/
+│   │   │   └── tests.rs
 │   │   ├── execution_capacity/
 │   │   │   ├── store.rs
 │   │   │   └── tests.rs
@@ -750,6 +752,7 @@ src/
 │   │   ├── channel_home_port.rs
 │   │   ├── channel_home_port_tests.rs
 │   │   ├── channel_home_tests.rs
+│   │   ├── channel_ingress.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
 │   │   ├── home_availability.rs

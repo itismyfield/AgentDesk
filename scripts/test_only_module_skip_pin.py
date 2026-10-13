@@ -335,6 +335,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/router/message_handler/provider_dispatch_codex_herdr_followup_tests.rs",
         "src/services/tui_o/writer/codex_herdr_drive_tests.rs",
         "src/services/cluster/channel_home_claim_tests.rs",
+        "src/services/cluster/channel_ingress/tests.rs",
         "src/services/discord/router/intake_dispatch/home_order_tests.rs",
         "src/services/cluster/readiness/tests.rs",
         "src/services/cluster/stream_relay/tests/shutdown_tests.rs",
@@ -763,6 +764,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/health/recovery/self_watchdog/policy/tests/mod.rs",
         "src/services/discord/health/recovery/self_watchdog/tests/mod.rs",
         "src/services/hang_forensics/tests/mod.rs",
+        "src/services/cluster/channel_ingress.rs",
     }
 )
 
