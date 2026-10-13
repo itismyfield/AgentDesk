@@ -35,12 +35,9 @@ pub(crate) mod idle_recap;
 mod idle_recap_interaction;
 mod idle_relay_drift;
 mod inflight;
-#[cfg(test)]
-pub(crate) use inflight::policy_op_unlink_hook;
 pub(crate) use inflight::read_only_owner_snapshot::{
     CodexEpisodeOwnerSnapshot, codex_episode_snapshot,
 };
-pub(crate) use inflight::{PolicyOpRemoveOutcome, remove_inflight_row_for_policy_op};
 mod inflight_heartbeat_sweeper;
 pub(crate) mod inject_disposition;
 pub(crate) mod internal_api;
@@ -323,7 +320,7 @@ use formatting::{format_for_discord, format_tool_input, send_long_message_raw, t
 #[cfg(test)]
 use inflight::save_inflight_state;
 use inflight::{InflightTurnState, load_inflight_states};
-pub(crate) use inflight::{clear_inflight_state, lock_inflight_state_path};
+pub(crate) use inflight::{clear_inflight_state, lock_inflight_state_path, policy_op};
 use placeholder_controller::queued_card_gate::{self, QueuedCardDisposition, QueuedCardTeardown};
 pub(in crate::services::discord) use prompt_builder::load_channel_recent_context;
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};

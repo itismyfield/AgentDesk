@@ -189,6 +189,17 @@ impl PolicyCloseRequest {
     }
 }
 
+/// The mailbox arm of one close: runs the step under the guard's own authority and answers.
+pub(super) fn answer(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    request: PolicyCloseRequest,
+    guard: &super::input_fence::StepGuard,
+    reply: tokio::sync::oneshot::Sender<PolicyMailboxOutcome>,
+) {
+    let _ = reply.send(step(state, channel_id, request, guard.policy_authority()));
+}
+
 /// Runs one close inside the actor under the step's own authority. A panic stops here; one after
 /// the receipt clear still answers `Committed`, as the completion guard finished while unwinding.
 pub(super) fn step(

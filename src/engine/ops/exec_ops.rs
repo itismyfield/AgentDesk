@@ -317,12 +317,12 @@ fn register_exec_ops_with_runner<'js>(
                         .join(&provider)
                         .join(format!("{channel_id}.json"));
                     if path.exists() {
-                        use crate::services::discord::PolicyOpRemoveOutcome as Outcome;
+                        use crate::services::discord::policy_op::RemoveOutcome as Outcome;
                         let refused = |error: &str, reason: &str| {
                             serde_json::json!({"ok": false, "error": error, "reason": reason})
                                 .to_string()
                         };
-                        match crate::services::discord::remove_inflight_row_for_policy_op(&path) {
+                        match crate::services::discord::policy_op::remove_row(&path) {
                             Outcome::Removed => {
                                 // Same removal log shape as the store's clears; the policy layer has no
                                 // user_msg_id, so it logs 0.
@@ -720,17 +720,17 @@ mod inflight_list_tests {
         drop(holder);
 
         let (path, before) = row("906", "");
-        crate::services::discord::policy_op_unlink_hook::install(|path| {
+        crate::services::discord::policy_op::unlink_hook::install(|path| {
             let parent = path.parent().unwrap();
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o555)).unwrap();
         });
         let failed = js_remove("906");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
-            crate::services::discord::policy_op_unlink_hook::attempts(),
+            crate::services::discord::policy_op::unlink_hook::attempts(),
             1
         );
-        crate::services::discord::policy_op_unlink_hook::install(|_| {});
+        crate::services::discord::policy_op::unlink_hook::install(|_| {});
         assert_eq!(failed["ok"], false, "{failed}");
         assert_eq!(failed["reason"], "Io", "{failed}");
         assert!(
@@ -745,7 +745,7 @@ mod inflight_list_tests {
             serde_json::json!({"ok": true, "removed": path.display().to_string()})
         );
         assert_eq!(
-            crate::services::discord::policy_op_unlink_hook::attempts(),
+            crate::services::discord::policy_op::unlink_hook::attempts(),
             1
         );
         assert!(!path.exists());
