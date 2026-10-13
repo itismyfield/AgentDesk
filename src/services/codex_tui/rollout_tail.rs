@@ -21,13 +21,15 @@ use super::rollout_index::rollout_files_under;
 
 mod legacy_selection;
 mod parser;
-#[cfg(test)]
 pub(crate) mod provenance;
+
 pub use legacy_selection::{
     latest_rollout_for_cwd_since, latest_unclaimed_rollout_for_cwd_since,
     rollout_candidates_for_cwd_since,
 };
 use legacy_selection::{wait_for_latest_rollout_for_cwd, wait_for_resumed_rollout_for_session};
+#[cfg(unix)]
+pub(crate) use provenance::{submitted_native_span, tail_closed_episode};
 
 #[cfg(test)]
 use parser::{
@@ -852,6 +854,9 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
         .metadata()
         .map_err(|error| format!("stat Codex rollout {}: {error}", rollout_path.display()))?
         .len();
+    if source_pin.is_some() && start_offset > file_len {
+        return Err("verified start is beyond the pinned native source".into());
+    }
     let seek_offset = start_offset.min(file_len);
     file.seek(SeekFrom::Start(seek_offset))
         .map_err(|error| format!("seek Codex rollout {}: {error}", rollout_path.display()))?;

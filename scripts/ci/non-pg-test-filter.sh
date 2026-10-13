@@ -492,6 +492,10 @@ NON_PG_FILTER_REPLAY=(
   services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_freeze_failure_preserves_legacy_and_closing
   services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_reject_unresolved_resources_without_effects
   services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_sources_are_read_only_and_unreadable_is_not_empty
+  services::discord::input_runtime::supervisor::runtime::ports::tests::c2_runtime_source_policy_reads_current_author_provider_routing_and_holds_unknown_voice
+  services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_fresh_thread_parent_route_blocks_changed_foreign_target_and_http_errors
+  services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_policy_revocation_during_route_lookup_never_approves_stale_authority
+  services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_source_disposition_uses_live_commands_skill_origins_and_missing_kind
   services::discord::placeholder_sweeper::abandon_guard::tests::blocking_probe_join_failure_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_live_process_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_missing_or_legacy_identity_preserves_retry
@@ -573,6 +577,11 @@ NON_PG_FILTER_REPLAY=(
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_superscript_reserved_basenames
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_windows_forbidden_characters
   services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
+  services::discord::router::intake_dispatch::tests::final_guards::c2b_legacy_guard_keeps_a_small_caller_future
+  services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_cached_attachment_permit_does_not_write_history
+  services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_final_admission_never_returns_false_local_or_nonlocal_success
+  services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_live_dispatch_does_not_checkpoint_or_consume_the_original
+  services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_skill_refuses_both_local_permit_and_unadmitted_dispatch
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_direct_execution_body_has_no_external_producer_callsites
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_enforce_without_postgres_blocks_owner_unknown
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_before_finish

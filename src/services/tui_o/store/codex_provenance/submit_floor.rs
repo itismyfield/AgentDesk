@@ -1,5 +1,6 @@
 //! Dormant submit coordinates; reading a floor never grants input or delivery permission.
 
+use super::known_fields;
 use super::{CodexEpisodeSpan, CodexProvenance, ExecutionProofRef, TurnEpisodeRef, whole};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::same_file;
@@ -57,19 +58,6 @@ fn strict_context<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Binding
     Ok(context)
 }
 
-pub(super) fn known_fields(read: &serde_json::Value, model: &serde_json::Value) -> bool {
-    use serde_json::Value::{Array, Object};
-    match (read, model) {
-        (Object(read), Object(model)) => read.iter().all(|(key, value)| {
-            model
-                .get(key)
-                .is_some_and(|expected| known_fields(value, expected))
-        }),
-        (Array(read), Array(model)) => read.iter().zip(model).all(|(a, b)| known_fields(a, b)),
-        _ => true,
-    }
-}
-
 fn hash(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -77,15 +65,40 @@ fn hash(value: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeFloor {
-    pub launch: PreparedLaunch,
-    pub execution: ExecutionProofRef,
-    pub canonical_source: SourceId,
-    pub through: u64,
-    pub prefix_hash: String,
-    pub generation_mtime_ns: i64,
+    launch: PreparedLaunch,
+    execution: ExecutionProofRef,
+    canonical_source: SourceId,
+    through: u64,
+    prefix_hash: String,
+    generation_mtime_ns: i64,
 }
 
 impl NativeFloor {
+    pub(crate) fn generation(&self) -> i64 {
+        self.generation_mtime_ns
+    }
+
+    pub(crate) fn execution(&self) -> &ExecutionProofRef {
+        &self.execution
+    }
+
+    pub(crate) fn checkpoint(&self) -> (&SourceId, u64, &str) {
+        (&self.canonical_source, self.through, &self.prefix_hash)
+    }
+
+    pub(crate) fn verify_before_prepare(&self) -> Result<(), &'static str> {
+        let cursor = Cursor {
+            source: self.canonical_source.clone(),
+            captured_through: self.through,
+            prefix_hash: self.prefix_hash.clone(),
+            retired: false,
+        };
+        let current = NativeSubmitFloor::capture_before_submit(&self.execution, &cursor)?;
+        (self.valid(self.launch.episode.channel_id) && current.checkpoint() == self.checkpoint())
+            .then_some(())
+            .ok_or("native_floor_changed_before_prepare")
+    }
+
     pub(crate) fn capture(
         launch: PreparedLaunch,
         execution: ExecutionProofRef,
@@ -246,6 +259,6 @@ impl DurableClosedEpisode {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 #[path = "submit_floor_tests.rs"]
 pub(crate) mod tests;

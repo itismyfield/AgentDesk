@@ -14,6 +14,7 @@ async fn acquire(
     message: u64,
     uploads: &[crate::services::cluster::attachment_transfer::uploads::Upload],
 ) -> Option<IntakeRuntimeTransition> {
+    let mut owned = uploads.to_vec();
     acquire_after_redirect_or_requeue(
         (
             http,
@@ -29,8 +30,8 @@ async fn acquire(
             "held prompt",
         ),
         (&None, false, false),
-        (uploads, &None),
-        (false, &None, None, false),
+        (&mut owned, &None),
+        (false, &None, None, false, false),
         (Some("old".into()), false, String::new()),
     )
     .await

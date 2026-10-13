@@ -21,6 +21,54 @@ use std::{io, path::Path};
 
 pub(crate) mod provenance;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VerifiedSourceSnapshot {
+    context: BindingContext,
+    execution: provenance::ExecutionProofRef,
+}
+
+impl VerifiedSourceSnapshot {
+    pub(crate) fn capture(authority: &TmuxSourceAuthority<'_>) -> io::Result<Self> {
+        let context = current_context(authority)?
+            .ok_or_else(|| invalid("Codex current context unavailable"))?;
+        let proof = binding_events::codex::read_ownership(&context)?
+            .verified
+            .ok_or_else(|| invalid("Codex current proof unavailable"))?;
+        let binding = TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::CodexTui,
+            output_path: proof.source.path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(proof.source.session_id.clone()),
+            last_offset: 0,
+            relay_last_offset: Some(0),
+        };
+        let proof = proof_for_binding(authority, &context, &binding)?;
+        let execution = provenance::ExecutionProofRef {
+            owner_runtime_root: context.owner_runtime_root.clone(),
+            tmux_session: context.tmux_session.clone(),
+            execution_nonce: context.execution_nonce.clone(),
+            proof_seq: proof.seq,
+            source: proof.source,
+        };
+        Ok(Self { context, execution })
+    }
+
+    pub(crate) fn context(&self) -> &BindingContext {
+        &self.context
+    }
+
+    pub(crate) fn execution(&self) -> &provenance::ExecutionProofRef {
+        &self.execution
+    }
+
+    pub(crate) fn recheck(&self, authority: &TmuxSourceAuthority<'_>) -> io::Result<()> {
+        (Self::capture(authority)? == *self)
+            .then_some(())
+            .ok_or_else(|| invalid("Codex captured source changed"))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeliveryPermission {
     Allowed,

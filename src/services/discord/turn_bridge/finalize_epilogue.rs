@@ -862,3 +862,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "finalize_epilogue/r1_transition_busy_tests.rs"]
+mod r1_transition_busy_tests;

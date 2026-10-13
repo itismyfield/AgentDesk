@@ -144,6 +144,7 @@ use crate::services::discord::router::{TurnKind, admit_queued_intake};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
+mod final_guards;
 mod replay_hold;
 
 struct ScopedIntakeTestEnv {
@@ -740,7 +741,7 @@ async fn queued_foreign_owner_forwards_without_local_body_pg() {
             panic!("live foreign owner should forward")
         }
     };
-    super::finish_admitted_queued_intake(&deps, admitted, &intervention)
+    super::finish_admitted_queued_intake(&deps, admitted)
         .await
         .expect("forwarded queued finish is a no-op");
 
