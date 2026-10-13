@@ -565,3 +565,40 @@ fn handback_refuses_a_debt_bearing_snapshot_without_rewriting_it() {
     assert_eq!(bytes(channel), before);
     assert_eq!(read(channel), [value(&debt)]);
 }
+
+/// The test writer, which carries no metadata, refuses a V1 snapshot or an unparseable file
+/// instead of replacing or removing it; a missing file and a legacy array are written as before.
+#[test]
+fn the_metadata_free_test_writer_refuses_v1_and_unparseable_files() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(5_341_101);
+    let (x, y) = (human(121, 7, "x", 5), human(122, 8, "y", 5));
+    let meta = SnapshotMeta {
+        queue_exit_debts: vec![QueueExitDebt::new(
+            EPISODE,
+            &exit(&x, QueueExitKind::Cancelled),
+            channel,
+        )],
+        ..SnapshotMeta::default()
+    };
+    let v1 = snapshot_json(Vec::new(), Some(&meta)).unwrap();
+    fs::create_dir_all(path(channel).parent().unwrap()).unwrap();
+    let save = |queue: &[Intervention]| {
+        super::super::save_channel_queue(&ProviderKind::Claude, TOKEN, channel, queue, None)
+    };
+    for content in [v1.as_bytes(), b"{\"version\":1,\"items\":[".as_slice()] {
+        fs::write(path(channel), content).unwrap();
+        for queue in [vec![y.clone()], Vec::new()] {
+            assert!(save(&queue).is_err());
+            assert_eq!(bytes(channel).unwrap(), content);
+        }
+    }
+
+    fs::remove_file(path(channel)).unwrap();
+    save(&[y.clone()]).unwrap();
+    assert_eq!(disk(channel)[0]["message_id"], 122);
+    save(&[x, y]).unwrap();
+    assert_eq!(disk(channel)[1]["message_id"], 122);
+    save(&[]).unwrap();
+    assert!(bytes(channel).is_none());
+}
