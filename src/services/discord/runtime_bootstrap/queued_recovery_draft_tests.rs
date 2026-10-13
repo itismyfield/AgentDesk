@@ -28,11 +28,17 @@ async fn a_restored_legacy_draft_hold_without_a_pane_binding_keeps_its_input_and
     restored_draft_hold(HeldRecord::LegacyUnbound).await;
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_restored_legacy_draft_hold_waits_for_the_startup_watcher_claim() {
+    restored_draft_hold(HeldRecord::LegacyLateBound).await;
+}
+
 #[derive(Clone, Copy)]
 enum HeldRecord {
     Current,
     LegacyBound,
     LegacyUnbound,
+    LegacyLateBound,
 }
 
 /// Restore through the runtime: a bound pane releases its held input once, while an unbound
@@ -49,6 +55,7 @@ async fn restored_draft_hold(held_record: HeldRecord) {
         HeldRecord::Current => 6_897_501,
         HeldRecord::LegacyBound => 6_897_511,
         HeldRecord::LegacyUnbound => 6_897_521,
+        HeldRecord::LegacyLateBound => 6_897_531,
     });
     let (held_id, busy_id) = (
         MessageId::new(channel.get() + 1),
@@ -100,7 +107,7 @@ async fn restored_draft_hold(held_record: HeldRecord) {
                 retries::record_attempt(&provider, ids(held_id), &[], five_minutes, Some(&session));
             assert!(held.unwrap().capped);
         }
-        HeldRecord::LegacyBound | HeldRecord::LegacyUnbound => {
+        HeldRecord::LegacyBound | HeldRecord::LegacyUnbound | HeldRecord::LegacyLateBound => {
             std::fs::create_dir_all(retry_path.parent().unwrap()).unwrap();
             std::fs::write(
                 &retry_path,
@@ -160,7 +167,50 @@ async fn restored_draft_hold(held_record: HeldRecord) {
     let busy_before = budget(busy_id);
     let bytes_before = std::fs::read(&retry_path).unwrap();
     assert!(held_before.exhausted());
-    restore_queued_and_inflight_work(&http, &shared, &provider).await;
+    if matches!(
+        held_record,
+        HeldRecord::LegacyBound | HeldRecord::LegacyLateBound
+    ) {
+        let initially_unbound = matches!(held_record, HeldRecord::LegacyLateBound);
+        if initially_unbound {
+            assert_eq!(shared.tmux_watchers.len(), 0);
+            assert!(!crate::services::claude_tui::composer_lock::draft_guarded(
+                &session
+            ));
+        }
+        let _claim = startup_order::pending_claim(channel, held_id, &session, initially_unbound);
+        shared
+            .restart
+            .reconcile_done
+            .store(false, std::sync::atomic::Ordering::Release);
+        startup_order::run(&http, &shared, &provider);
+        for _ in 0..30 {
+            if shared
+                .restart
+                .reconcile_done
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        assert!(
+            shared
+                .restart
+                .reconcile_done
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert_eq!(
+            shared
+                .tmux_watchers
+                .channel_binding(&channel)
+                .unwrap()
+                .tmux_session_name,
+            session
+        );
+    } else {
+        restore_queued_and_inflight_work(&http, &shared, &provider).await;
+    }
     let queued = || async {
         let snapshot = shared.mailbox(channel).snapshot().await;
         let mut ids: Vec<_> = snapshot
@@ -233,4 +283,208 @@ async fn restored_draft_hold(held_record: HeldRecord) {
     assert!(busy_before.capped);
     assert_eq!(queued().await, [busy_id]);
     shared.mailboxes.remove_fixture_for_test(channel);
+}
+
+// Compile the startup orchestration source with adapters for unrelated effects;
+// queue restoration and the watcher claim still execute their production paths.
+mod startup_order {
+    use super::{Arc, ChannelId, Duration, MessageId, ProviderKind, SharedData};
+    use crate::services::discord::{health, tmux as watcher_claim, turn_bridge};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{LazyLock, Mutex};
+
+    struct PendingClaim {
+        channel: ChannelId,
+        held_input: MessageId,
+        session: String,
+        initially_unbound: bool,
+    }
+
+    static PENDING_CLAIM: LazyLock<Mutex<Option<PendingClaim>>> = LazyLock::new(Mutex::default);
+    static STARTUP_THREAD_MAP_VALIDATION_STARTED: AtomicBool = AtomicBool::new(false);
+    const RESTART_REPORT_FLUSH_INTERVAL: Duration = Duration::from_secs(60);
+
+    pub(super) struct ClaimGuard;
+
+    impl Drop for ClaimGuard {
+        fn drop(&mut self) {
+            PENDING_CLAIM.lock().unwrap().take();
+        }
+    }
+
+    pub(super) fn pending_claim(
+        channel: ChannelId,
+        held_input: MessageId,
+        session: &str,
+        initially_unbound: bool,
+    ) -> ClaimGuard {
+        assert!(
+            PENDING_CLAIM
+                .lock()
+                .unwrap()
+                .replace(PendingClaim {
+                    channel,
+                    held_input,
+                    session: session.to_owned(),
+                    initially_unbound,
+                })
+                .is_none()
+        );
+        ClaimGuard
+    }
+
+    mod serenity {
+        pub(super) use poise::serenity_prelude::Http;
+
+        #[derive(Clone)]
+        pub(super) struct Context {
+            pub(super) http: std::sync::Arc<Http>,
+        }
+    }
+
+    mod recovery_flush {
+        include!("recovery_flush.rs");
+    }
+
+    pub(super) fn run(
+        http: &Arc<serenity::Http>,
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+    ) {
+        let ctx = serenity::Context { http: http.clone() };
+        recovery_flush::run_bot_spawn_recovery_and_flush_restart_reports(
+            &ctx,
+            shared,
+            "fixture-token",
+            provider,
+            &Arc::new(AtomicUsize::new(1)),
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(health::HealthRegistry::new()),
+            0,
+        );
+    }
+
+    async fn catch_up_missed_messages(
+        _: &Arc<serenity::Http>,
+        _: &Arc<SharedData>,
+        _: &ProviderKind,
+    ) {
+    }
+    async fn gc_stale_fixed_working_sessions(_: &Arc<SharedData>) {}
+    async fn cleanup_orphan_tmux_sessions(_: &Arc<SharedData>) {}
+    fn purge_legacy_durable_handoffs() {}
+    async fn recover_orphan_pending_dispatches(_: &Arc<SharedData>) {}
+    async fn kickoff_idle_queues(
+        _: &serenity::Context,
+        _: &Arc<SharedData>,
+        _: &str,
+        _: &ProviderKind,
+    ) {
+    }
+    async fn delete_stale_queued_placeholder_cards(
+        _: &Arc<serenity::Http>,
+        _: &Arc<SharedData>,
+        _: &[(ChannelId, MessageId, MessageId)],
+    ) {
+    }
+    fn mark_reconcile_complete(shared: &Arc<SharedData>) {
+        shared.restart.reconcile_done.store(true, Ordering::Release);
+    }
+    fn spawn_startup_thread_map_validation(_: Option<sqlx::PgPool>, _: String) {}
+    async fn run_startup_diagnostic_after_reconcile_barrier_for_provider(
+        _: &ProviderKind,
+        _: Arc<AtomicUsize>,
+        _: Arc<AtomicBool>,
+        _: Arc<health::HealthRegistry>,
+        _: u16,
+    ) {
+    }
+    async fn flush_restart_reports(_: &Arc<serenity::Http>, _: &Arc<SharedData>, _: &ProviderKind) {
+    }
+
+    mod queued_recovery {
+        use super::*;
+
+        pub(super) async fn restore_queued_and_inflight_work(
+            http: &Arc<serenity::Http>,
+            shared: &Arc<SharedData>,
+            provider: &ProviderKind,
+        ) -> Vec<(ChannelId, MessageId, MessageId)> {
+            crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests(
+                http, shared, provider,
+            )
+            .await
+        }
+    }
+
+    mod tmux {
+        use super::*;
+
+        pub(super) async fn store_recovery_handled_channels(_: &Arc<SharedData>, _: &[u64]) {}
+        pub(super) async fn clear_recovery_handled_channels(_: &Arc<SharedData>) {}
+    }
+
+    async fn restore_tmux_watchers(_: &Arc<serenity::Http>, shared: &Arc<SharedData>) {
+        let claim = PENDING_CLAIM
+            .lock()
+            .unwrap()
+            .take()
+            .expect("startup watcher claim fixture");
+        if claim.initially_unbound {
+            assert_eq!(
+                shared.tmux_watchers.len(),
+                0,
+                "binding appears only during watcher restoration"
+            );
+        } else {
+            assert_eq!(
+                shared
+                    .tmux_watchers
+                    .channel_binding(&claim.channel)
+                    .unwrap()
+                    .tmux_session_name,
+                claim.session
+            );
+        }
+        assert_eq!(
+            crate::services::claude_tui::composer_lock::draft_guarded(&claim.session),
+            !claim.initially_unbound,
+            "early rewatch guards only an already bound legacy hold"
+        );
+        assert!(
+            shared
+                .mailbox(claim.channel)
+                .snapshot()
+                .await
+                .intervention_queue
+                .iter()
+                .any(|input| input.message_id == claim.held_input),
+            "production queue restoration precedes the claim"
+        );
+        let handle = crate::services::discord::TmuxWatcherHandle {
+            tmux_session_name: claim.session.clone(),
+            output_path: format!("/tmp/{}.jsonl", claim.session),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_offset: Arc::new(Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: Arc::new(AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+        };
+        let provider = shared.settings.read().await.provider.clone();
+        let claimed = watcher_claim::claim_or_reuse_watcher_for_host(
+            &shared.tmux_watchers,
+            claim.channel,
+            handle,
+            &provider,
+            "startup_draft_hold_fixture",
+            None,
+            watcher_claim::WatchHost::Legacy,
+        )
+        .expect("production watcher claim");
+        assert_eq!(claimed.owner_channel_id(), claim.channel);
+        assert_eq!(shared.tmux_watchers.len(), 1);
+    }
 }

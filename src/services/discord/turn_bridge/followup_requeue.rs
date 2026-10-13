@@ -370,9 +370,35 @@ pub(in crate::services::discord) fn rewatch_draft_holds(
     provider: &ProviderKind,
     live_queue_ids: &std::collections::HashMap<ChannelId, std::collections::HashSet<u64>>,
 ) {
+    rewatch_matching_draft_holds(shared, provider, live_queue_ids, false);
+}
+
+/// Legacy holds can acquire their current pane binding only after watcher restoration.
+#[cfg(unix)]
+pub(in crate::services::discord) async fn rewatch_legacy_draft_holds(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+) {
+    let mut live_queue_ids =
+        super::super::runtime_bootstrap::collect_live_queue_message_ids(shared).await;
+    live_queue_ids.retain(|channel, _| {
+        super::super::input_runtime::fence::lookup(provider, channel.get()).is_none()
+    });
+    rewatch_matching_draft_holds(shared, provider, &live_queue_ids, true);
+}
+
+fn rewatch_matching_draft_holds(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    live_queue_ids: &std::collections::HashMap<ChannelId, std::collections::HashSet<u64>>,
+    legacy_only: bool,
+) {
     use crate::services::claude_tui::composer_lock::{DraftGuard, guard_draft};
     let held = super::super::busy_followup_retry_store::draft_held_inputs(provider);
     for (channel, input, session) in held {
+        if legacy_only && session.is_some() {
+            continue;
+        }
         let channel_id = ChannelId::new(channel);
         if live_queue_ids
             .get(&channel_id)

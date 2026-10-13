@@ -7145,6 +7145,7 @@ services::discord::runtime_bootstrap::queued_placeholders::tests::restore_rows_a
 services::discord::runtime_bootstrap::queued_placeholders::tests::restore_waits_for_channel_lock_and_keeps_other_channel
 services::discord::runtime_bootstrap::queued_recovery::draft_tests::a_restored_draft_hold_lifts_only_when_its_pane_shows_the_draft_gone
 services::discord::runtime_bootstrap::queued_recovery::draft_tests::a_restored_legacy_draft_hold_lifts_only_when_its_bound_pane_shows_the_draft_gone
+services::discord::runtime_bootstrap::queued_recovery::draft_tests::a_restored_legacy_draft_hold_waits_for_the_startup_watcher_claim
 services::discord::runtime_bootstrap::queued_recovery::draft_tests::a_restored_legacy_draft_hold_without_a_pane_binding_keeps_its_input_and_budget
 services::discord::runtime_bootstrap::queued_recovery::fence_tests::c2_boot_restore_installs_nothing_for_an_input_protected_channel
 services::discord::runtime_bootstrap::queued_recovery::s2a_tests::s2a_actual_boot_reports_quarantined_channels_with_no_restorable_queue
