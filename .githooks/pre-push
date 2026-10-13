@@ -33,7 +33,11 @@ done
 [ "$regen_needed" -eq 1 ] || exit 0
 
 for generator in generate_inventory_docs.py generate_env_reference.py generate_cli_reference.py; do
-  if ! regen_output=$(agentdesk_run_python "scripts/$generator" 2>&1); then
+  set -- "scripts/$generator"
+  if [ "$generator" = generate_inventory_docs.py ]; then
+    set -- "$@" --review-docs-only
+  fi
+  if ! regen_output=$(agentdesk_run_python "$@" 2>&1); then
     printf '%s\n' "$regen_output" >&2
     exit 1
   fi

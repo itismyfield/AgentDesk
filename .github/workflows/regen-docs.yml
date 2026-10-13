@@ -31,7 +31,7 @@ jobs:
 
       - name: Generate inventory docs
         run: |
-          python3 scripts/generate_inventory_docs.py
+          python3 scripts/generate_inventory_docs.py --review-docs-only
           python3 scripts/generate_env_reference.py
           python3 scripts/generate_cli_reference.py
 

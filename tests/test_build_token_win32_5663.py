@@ -6,6 +6,7 @@ import inspect
 import io
 import os
 from pathlib import Path
+import shlex
 import signal
 import subprocess
 import sys
@@ -50,14 +51,6 @@ def wait_path(path: Path, timeout: float = 5.0) -> None:
             return
         time.sleep(0.02)
     raise AssertionError(f"timed out waiting for {path}")
-def _workflow_block(text: str, exact_header: str) -> str:
-    lines = text.splitlines()
-    matches = [index for index, line in enumerate(lines) if line == exact_header]
-    assert len(matches) == 1, f"expected one workflow header {exact_header!r}, found {len(matches)}"
-    start, indent = matches[0], len(exact_header) - len(exact_header.lstrip())
-    end = next((index for index in range(start + 1, len(lines)) if lines[index].strip() and len(lines[index]) - len(lines[index].lstrip()) <= indent), len(lines))
-    while end > start + 1 and not lines[end - 1].strip(): end -= 1
-    return "\n".join(lines[start:end])
 class _CoreApi:
     def __init__(self, fail: str | None = None) -> None:
         self.fail, self.closed, self.released = fail, [], 0
@@ -204,35 +197,125 @@ class PortableWin32BuildTokenContractTests(unittest.TestCase):
             with mock.patch.object(module, "_prepare_process_inputs", return_value=("x", object(), object())):
                 self.assertEqual(module._supervise_windows(["x"], {}, cancelled, relay=relay, trace=[]), 128 + signal.SIGTERM)
             self.assertEqual(cancelled.closed, [1]); self.assertEqual(cancelled.released, releases)
+@unittest.skipIf(sys.platform == "win32", "YAML wiring runs in the required Script checks lane")
+class Win32BuildTokenWorkflowContractTests(unittest.TestCase):
+    def _assert_workflow_contract(self, text):
+        import yaml
+        document = yaml.safe_load(text)
+        self.assertIsInstance(document, dict)
+        jobs = document.get("jobs")
+        self.assertIsInstance(jobs, dict)
+        changes = jobs["changes"]
+        self.assertEqual(changes["outputs"]["win32_build_token"], "${{ steps.filter.outputs.win32_build_token }}")
+        filter_steps = [step for step in changes["steps"] if step.get("id") == "filter"]
+        self.assertEqual(len(filter_steps), 1)
+        self.assertEqual(filter_steps[0]["uses"], "dorny/paths-filter@v3")
+        filters = yaml.safe_load(filter_steps[0]["with"]["filters"])
+        self.assertEqual(filters["win32_build_token"], [
+            "scripts/build_token.py", "scripts/build_token_win32.py",
+            "tests/test_build_token_win32_5663.py", ".github/workflows/ci-pr.yml",
+        ])
+        native = jobs["win32_build_token"]
+        self.assertEqual(native["needs"], "changes")
+        self.assertEqual(native["if"], "needs.changes.outputs.win32_build_token == 'true'")
+        self.assertEqual(native["runs-on"], "windows-latest")
+        self.assertIs(native.get("continue-on-error", False), False)
+        setup = [step for step in native["steps"] if step.get("uses") == "actions/setup-python@v5"]
+        self.assertEqual(len(setup), 1)
+        self.assertEqual(setup[0]["with"]["python-version"], "3.11")
+        self.assertNotIn("if", setup[0])
+        self.assertIs(setup[0].get("continue-on-error", False), False)
+        execution = [step for step in native["steps"] if "run" in step]
+        self.assertEqual(len(execution), 1)
+        step = execution[0]
+        self.assertNotIn("if", step)
+        self.assertIs(step.get("continue-on-error", False), False)
+        self.assertEqual(step["shell"], "pwsh")
+        self.assertEqual(shlex.split(step["run"]), [
+            "git", "cat-file", "-e", "HEAD:scripts/build_token_win32.py", "&&",
+            "git", "cat-file", "-e", "HEAD:tests/test_build_token_win32_5663.py", "&&",
+            "python", "-m", "unittest", "-v", "tests.test_build_token_win32_5663",
+        ])
+        mirror = jobs["win32_build_token_required_context"]
+        self.assertEqual(mirror["needs"], ["changes", "win32_build_token"])
+        self.assertEqual(mirror["if"], "${{ !cancelled() }}")
+        self.assertEqual(mirror["runs-on"], "ubuntu-latest")
+        self.assertIs(mirror.get("continue-on-error", False), False)
+        execution = [step for step in mirror["steps"] if "run" in step]
+        self.assertEqual(len(execution), 1)
+        step = execution[0]
+        self.assertNotIn("if", step)
+        self.assertIs(step.get("continue-on-error", False), False)
+        self.assertEqual(shlex.split(step["run"]), ["./scripts/required-check-mirror.sh"])
+        self.assertEqual(step["env"], {
+            "CHANGED_PATHS_RESULT": "${{ needs.changes.result }}",
+            "FILTER_NAME": "win32_build_token",
+            "FILTER_OUTPUT": "${{ needs.changes.outputs.win32_build_token }}",
+            "UPSTREAM_JOB_NAME": "win32_build_token",
+            "UPSTREAM_RESULT": "${{ needs.win32_build_token.result }}",
+        })
+
     def test_helper_only_change_selects_windows_required_lane(self):
-        text = WORKFLOW.read_text(encoding="utf-8")
-        changes = _workflow_block(text, "  changes:")
-        outputs = _workflow_block(changes, "    outputs:")
-        filters = _workflow_block(changes, "          filters: |")
-        native = _workflow_block(text, "  win32_build_token:")
-        mirror = _workflow_block(text, "  win32_build_token_required_context:")
-        for block, line in ((outputs, "      win32_build_token: ${{ steps.filter.outputs.win32_build_token }}"), (filters, "            win32_build_token: ['scripts/build_token.py', 'scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']"), (native, "    runs-on: windows-latest"), (mirror, "    if: ${{ !cancelled() }}")):
-            self.assertEqual(block.count(line), 1)
-        self.assertIn("    if: needs.changes.outputs.win32_build_token == 'true'", native)
-        self.assertIn("python -m unittest -v tests.test_build_token_win32_5663", native)
-        self.assertNotIn("continue-on-error:", native)
-        self.assertIn("    needs: [changes, win32_build_token]", mirror)
-        self.assertIn("'${{ needs.win32_build_token.result }}'", mirror)
-        self.assertIn("        run: ./scripts/required-check-mirror.sh", mirror)
+        self._assert_workflow_contract(WORKFLOW.read_text(encoding="utf-8"))
+
     def test_workflow_comment_edit_preserves_required_lane_contract(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            workflow = Path(tmp) / "ci-pr.yml"
-            workflow.write_text(WORKFLOW.read_text().replace(
-                "  win32_build_token:\n", "  win32_build_token:\n    # Native execution evidence.\n", 1))
-            with mock.patch.dict(globals(), {"WORKFLOW": workflow}):
-                self.test_helper_only_change_selects_windows_required_lane()
+        text = WORKFLOW.read_text(encoding="utf-8").replace(
+            "  win32_build_token:\n", "  win32_build_token:\n    # Native execution evidence.\n", 1)
+        self._assert_workflow_contract(text)
+
+    def test_workflow_format_edit_preserves_required_lane_contract(self):
+        import yaml
+        document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        document["on"] = document.pop(True)
+        self._assert_workflow_contract(yaml.safe_dump(document, indent=4, width=100))
+
+    def _reject_workflow_change(self, change):
+        import yaml
+        document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        change(document["jobs"])
+        with self.assertRaises(AssertionError):
+            self._assert_workflow_contract(yaml.safe_dump(document))
+
     def test_required_lane_execution_removal_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            workflow = Path(tmp) / "ci-pr.yml"
-            workflow.write_text(WORKFLOW.read_text().replace(
-                "python -m unittest -v tests.test_build_token_win32_5663", "true", 1))
-            with mock.patch.dict(globals(), {"WORKFLOW": workflow}), self.assertRaises(AssertionError):
-                self.test_helper_only_change_selects_windows_required_lane()
+        self._reject_workflow_change(lambda jobs: jobs["win32_build_token"]["steps"][-1].pop("run"))
+        self._reject_workflow_change(lambda jobs: jobs["win32_build_token"]["steps"][-1].update(run="true"))
+
+    def test_required_lane_zero_selection_argument_fails(self):
+        def change(jobs):
+            step = jobs["win32_build_token"]["steps"][-1]
+            step["run"] += " -k ABSENT_GATE_REVIEW_TEST"
+        self._reject_workflow_change(change)
+
+    def test_required_lane_step_skip_and_error_ignore_fail(self):
+        for condition in (False, "false", "${{ false }}", "runner.os == 'Linux'"):
+            with self.subTest(condition=condition):
+                self._reject_workflow_change(lambda jobs: jobs["win32_build_token"]["steps"][-1].update({"if": condition}))
+        for value in (True, "${{ true }}"):
+            with self.subTest(continue_on_error=value):
+                self._reject_workflow_change(lambda jobs: jobs["win32_build_token"]["steps"][-1].update({"continue-on-error": value}))
+
+    def test_required_lane_duplicate_execution_fails(self):
+        self._reject_workflow_change(lambda jobs: jobs["win32_build_token"]["steps"].append(dict(jobs["win32_build_token"]["steps"][-1])))
+
+    def test_required_lane_job_selection_runner_and_python_version_drift_fail(self):
+        for key, value in (("if", False), ("runs-on", "ubuntu-latest"), ("continue-on-error", True)):
+            with self.subTest(key=key):
+                self._reject_workflow_change(lambda jobs: jobs["win32_build_token"].update({key: value}))
+        self._reject_workflow_change(lambda jobs: jobs["win32_build_token"]["steps"][1]["with"].update({"python-version": "3.14"}))
+
+    def test_required_context_mirror_execution_removal_and_skip_fail(self):
+        self._reject_workflow_change(lambda jobs: jobs["win32_build_token_required_context"]["steps"].pop())
+        self._reject_workflow_change(lambda jobs: jobs["win32_build_token_required_context"]["steps"][-1].update(run="true"))
+        for key, value in (("if", False), ("continue-on-error", True)):
+            with self.subTest(key=key):
+                self._reject_workflow_change(lambda jobs: jobs["win32_build_token_required_context"]["steps"][-1].update({key: value}))
+        self._reject_workflow_change(lambda jobs: jobs["win32_build_token_required_context"]["steps"].append(dict(jobs["win32_build_token_required_context"]["steps"][-1])))
+
+    def test_required_context_mirror_inputs_must_match_the_selected_native_lane(self):
+        for key in ("CHANGED_PATHS_RESULT", "FILTER_NAME", "FILTER_OUTPUT", "UPSTREAM_JOB_NAME", "UPSTREAM_RESULT"):
+            with self.subTest(key=key):
+                self._reject_workflow_change(lambda jobs: jobs["win32_build_token_required_context"]["steps"][-1]["env"].update({key: "wrong"}))
+
 @unittest.skipUnless(sys.platform == "win32", "native Win32 contract")
 class NativeWin32BuildTokenContractTests(unittest.TestCase):
     def nonce(self) -> str:

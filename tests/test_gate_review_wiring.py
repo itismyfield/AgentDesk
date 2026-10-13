@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -8,6 +9,9 @@ import sys
 import tempfile
 import unittest
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import generate_inventory_docs as inventory
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ("ARCHITECTURE.md", "docs/generated/route-inventory.md",
@@ -142,6 +146,92 @@ class HarnessCli(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("fixture scanner crashed", result.stderr + result.stdout)
         self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), head)
+
+    def real_generator_fixture(self, *, existing_snapshots):
+        for relative in (".githooks/pre-push", "scripts/resolve-python-runner.sh",
+                         "scripts/check_generated_doc_drift.py", "scripts/generate_inventory_docs.py",
+                         "scripts/generate_env_reference.py", "scripts/generate_cli_reference.py"):
+            target = self.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, target)
+        for name in inventory.TOP_LEVEL_MODULE_PURPOSES:
+            if name.endswith("/"):
+                (self.root / "src" / name).mkdir(parents=True, exist_ok=True)
+            else:
+                self.write("src/" + name, "")
+        self.write("src/lib.rs", "pub mod server;\npub mod cli;\n")
+        self.write("src/server/mod.rs", "pub mod routes;\npub mod worker_registry;\n")
+        self.write("src/server/routes/mod.rs",
+                   "pub fn compose_api_router() -> Router { Router::new().merge(fixture::router()) }\n")
+        self.write("src/server/routes/fixture.rs", """pub fn router() -> Router {
+    Router::new().route("/fixture", get(handler))
+}
+async fn handler() {}
+""")
+        self.write("src/server/web_surface.rs", "pub fn router() -> Router { Router::new() }\n")
+        self.write("src/server/worker_registry.rs", "pub(crate) const WORKER_SPECS: &[WorkerSpec] = [\n];\n")
+        self.write("src/cli/mod.rs", "pub mod args;\n")
+        self.write("src/cli/args.rs", """#[derive(Parser)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+#[derive(Subcommand)]
+pub enum Commands { Fixture }
+""")
+        self.write("scripts/giant_file_registry.toml",
+                   "grandfathered = []\ngrandfathered_baseline_paths = []\n")
+        self.write("scripts/giant_file_closed_issue_transition_list.txt", "")
+        self.write("scripts/giant_file_issue_metadata.json", json.dumps({
+            "schema_version": 2, "refreshed_at": "2026-10-13T00:00:00Z", "issues": [],
+            "ratchets": {name: 0 for name in inventory.GIANT_FILE_ISSUE_RATCHET_KEYS},
+        }))
+        self.write("ARCHITECTURE.md", "\n".join(("# Reviewed architecture", "",
+                   inventory.ARCHITECTURE_SRC_TREE_START, "stale", inventory.ARCHITECTURE_SRC_TREE_END,
+                   inventory.ARCHITECTURE_TOP_LEVEL_MAP_START, "stale",
+                   inventory.ARCHITECTURE_TOP_LEVEL_MAP_END, "")))
+        for name in DOCS[1:]:
+            self.write(name, "stale\n")
+        if existing_snapshots:
+            for name in ("module-inventory.md", "giant-file-registry.md"):
+                self.write("docs/generated/" + name, "preserve checkout-local snapshot\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "real generator fixture")
+
+    def all_file_bytes(self):
+        return {path.relative_to(self.root).as_posix(): path.read_bytes()
+                for path in self.root.rglob("*")
+                if path.is_file() and ".git" not in path.relative_to(self.root).parts}
+
+    def assert_real_output_scope(self, *, weekly):
+        for existing in (False, True):
+            with self.subTest(existing_snapshots=existing):
+                self.real_generator_fixture(existing_snapshots=existing)
+                before = self.all_file_bytes()
+                env = {**os.environ, "PYTHON": sys.executable, "PYTHONDONTWRITEBYTECODE": "1"}
+                if weekly:
+                    workflow = yaml.safe_load((ROOT / ".github/workflows/regen-docs.yml").read_text())
+                    step = next(step for step in workflow["jobs"]["regen"]["steps"]
+                                if step.get("name") == "Generate inventory docs")
+                    result = subprocess.run(["bash", "-euo", "pipefail", "-c", step["run"]],
+                                            cwd=self.root, env=env, capture_output=True, text=True)
+                else:
+                    head = self.git("rev-parse", "HEAD").stdout.strip()
+                    result = subprocess.run(["bash", str(self.root / ".githooks/pre-push")],
+                                            input=f"refs/heads/topic {head} refs/heads/topic {self.base}\n",
+                                            cwd=self.root, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                after = self.all_file_bytes()
+                changed = {path for path in before.keys() | after.keys()
+                           if before.get(path) != after.get(path)}
+                self.assertEqual(changed, set(DOCS), result.stdout)
+                self.assertEqual(self.git("diff", "--cached", "--name-only").stdout, "")
+
+    def test_push_hook_real_generators_write_only_five_docs(self):
+        self.assert_real_output_scope(weekly=False)
+
+    def test_weekly_real_generators_write_only_five_docs(self):
+        self.assert_real_output_scope(weekly=True)
 
 
 if __name__ == "__main__":

@@ -122,6 +122,15 @@ class HotfileRatchetTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("grew to 91 lines", err)
 
+    def test_git_source_equal_shrink_and_one_line_growth_boundary(self):
+        self.init_git()
+        for size, expected in ((100, 0), (99, 0), (101, 1)):
+            self.write_size(self.grown, size)
+            self.git("add", "-A")
+            self.git("commit", "--allow-empty", "-qm", f"candidate size {size}")
+            rc, _, err = self.run_check()
+            self.assertEqual(rc, expected, err)
+
     def test_cap_raise_fails_even_if_file_shrinks(self):
         self.init_git()
         self.write_size(self.grown, 99)
@@ -172,6 +181,87 @@ class HotfileRatchetTest(unittest.TestCase):
         rc, _, err = self.run_check()
         self.assertEqual(rc, 1)
         self.assertIn("ceiling removed", err)
+
+    def extra_base(self, paths=("src/extra.rs",)):
+        for path in paths:
+            self.caps[path] = 100
+            self.write_size(path, 100)
+        self.write_caps()
+        self.init_git()
+
+    def remove_extra_pin(self, *, delete_source=True, commit=True):
+        del self.caps["src/extra.rs"]
+        self.write_caps()
+        if delete_source:
+            (self.root / "src/extra.rs").unlink()
+        if commit:
+            self.git("add", "-A")
+            self.git("commit", "-qm", "retire extra pin")
+        return self.git("rev-parse", "HEAD")
+
+    def test_nonrequired_source_and_pin_retirement_passes(self):
+        self.extra_base()
+        self.remove_extra_pin()
+        rc, out, err = self.run_check()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("retired hotfile: src/extra.rs", out)
+
+    def test_committed_pin_only_removal_keeps_file_blocked(self):
+        self.extra_base()
+        self.remove_extra_pin(delete_source=False)
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 1)
+        self.assertIn("ceiling removed", err)
+
+    def test_worktree_only_source_and_pin_deletion_is_not_retirement(self):
+        self.extra_base()
+        self.remove_extra_pin(commit=False)
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 1)
+        self.assertIn("ceiling removed", err)
+
+    def test_each_missing_key_requires_its_own_source_retirement(self):
+        self.extra_base(("src/extra.rs", "src/still_here.rs"))
+        del self.caps["src/still_here.rs"]
+        self.remove_extra_pin()
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 1)
+        self.assertIn("src/still_here.rs", err)
+
+    def test_retirement_candidate_tree_lookup_failure_is_not_absence(self):
+        self.extra_base()
+        self.remove_extra_pin()
+        tree = self.git("rev-parse", "HEAD^{tree}")
+        loose_tree = self.root / ".git/objects" / tree[:2] / tree[2:]
+        self.assertTrue(loose_tree.is_file())
+        loose_tree.unlink()
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 1)
+        self.assertIn("git could not read", err)
+
+    def test_pr_nonrequired_source_and_pin_retirement_passes(self):
+        self.extra_base()
+        self.git("checkout", "-qb", "pr")
+        head = self.remove_extra_pin()
+        self.git("checkout", "-q", "main")
+        self.git("merge", "--no-ff", "-qm", "candidate", "pr")
+        env = {"GFP_EVENT_NAME": "pull_request", "GFP_CANDIDATE_SHA": self.git("rev-parse", "HEAD"),
+               "GFP_BASE_SHA": self.base, "GFP_HEAD_SHA": head}
+        with mock.patch.dict(os.environ, env, clear=True):
+            rc, out, err = self.run_check()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("retired hotfile: src/extra.rs", out)
+
+    def test_required_pin_retirement_is_still_blocked(self):
+        self.init_git()
+        del self.caps[self.grown]
+        self.write_caps()
+        (self.root / self.grown).unlink()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "remove required pin")
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 1)
+        self.assertIn("every required hotfile ceiling", err)
 
     def test_invalid_explicit_base_does_not_fall_back(self):
         self.init_git()

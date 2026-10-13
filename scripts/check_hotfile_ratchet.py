@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -29,7 +30,7 @@ if sys.version_info < MIN_PYTHON:
 
 import tomllib
 
-from ratchet_admission import audit_repository_admissions, parse_cap_table, _git_text
+from ratchet_admission import audit_repository_admissions, parse_cap_table, _git_text, _run_git
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = REPO_ROOT / "scripts" / "hotfile_ratchet.toml"
@@ -58,8 +59,18 @@ def check() -> int:
     if audit.base_sha:
         prior_text, exists = _git_text(REPO_ROOT, audit.base_sha, "scripts/hotfile_ratchet.toml")
         prior_caps = parse_cap_table(prior_text, "hotfile_ratchet") if exists else {}
-        if prior_caps.keys() - ceilings.keys():
-            raise ValueError("ratcheted hotfile ceiling removed: " + ", ".join(sorted(prior_caps.keys() - ceilings.keys())))
+        removed = prior_caps.keys() - ceilings.keys()
+        if removed:
+            ref = os.environ.get("GFP_CANDIDATE_SHA", "") if os.environ.get("GFP_EVENT_NAME") == "pull_request" else "HEAD"
+            resolved = _run_git(REPO_ROOT, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
+            if resolved.returncode or not resolved.stdout.strip():
+                raise ValueError("cannot resolve hotfile retirement candidate object")
+            candidate_sha = resolved.stdout.strip()
+            for rel in sorted(removed):
+                _, exists = _git_text(REPO_ROOT, candidate_sha, rel)
+                if exists:
+                    raise ValueError(f"ratcheted hotfile ceiling removed while source remains: {rel}")
+                print(f"OK: retired hotfile: {rel} (candidate {candidate_sha}).")
     for rel, ceiling in sorted(ceilings.items()):
         current = line_count(REPO_ROOT / rel)
         limit, label = ceiling, "ceiling"
