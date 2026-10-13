@@ -59,11 +59,16 @@ def metadata_text(issues: list[dict] | None = None, refreshed_at: str | None = S
     return json.dumps(payload)
 
 
-def build(registry: str, metadata: str | None = None, now: datetime = NOW) -> dict:
-    inputs = {"registry": reporter.InputFile(reporter.REGISTRY_PATH, registry.encode(), None),
-              "metadata": reporter.InputFile(reporter.METADATA_PATH,
-                                             (metadata_text() if metadata is None else metadata).encode(), None)}
-    return reporter.build_report(inputs, now=now, provenance={})
+def run_report(registry: str, metadata: str | None = None, now: datetime = NOW) -> tuple[int, dict]:
+    """Run the script entry point on a fixture checkout and return (exit code, report.json)."""
+    with tempfile.TemporaryDirectory(prefix="giant-deadlines-main-") as tmp:
+        root = write_root(Path(tmp) / "root", registry, metadata_text() if metadata is None else metadata)
+        rc = run_main("--root", str(root), "--out", str(Path(tmp) / "out"), "--now", now.isoformat())
+        return rc, read_report(Path(tmp) / "out")
+
+
+def main_report(registry: str, metadata: str | None = None, now: datetime = NOW) -> dict:
+    return run_report(registry, metadata, now)[1]
 
 
 def by_path(report: dict) -> dict[str, dict]:
@@ -122,8 +127,9 @@ class Classification(FixtureCase):
     def test_c1_01_boundaries_are_inclusive_and_old_overdue_stays_visible(self) -> None:
         offsets = {"src/ancient.rs": -400, "src/m1.rs": -1, "src/d0.rs": 0, "src/d14.rs": 14,
                    "src/d15.rs": 15, "src/d60.rs": 60, "src/d61.rs": 61}
-        report = build(registry_text([shrink(p, (NOW.date() + timedelta(days=d)).isoformat())
-                                      for p, d in offsets.items()]))
+        rc, report = run_report(registry_text([shrink(p, (NOW.date() + timedelta(days=d)).isoformat())
+                                               for p, d in offsets.items()]))
+        self.assertEqual(rc, 0)
         rows = by_path(report)
         self.assertEqual({p: r["severity"] for p, r in rows.items()}, {
             "src/ancient.rs": "OVERDUE", "src/m1.rs": "OVERDUE", "src/d0.rs": "URGENT", "src/d14.rs": "URGENT",
@@ -141,7 +147,7 @@ class Classification(FixtureCase):
                           ("2026-11-01T08:59:59+09:00", 0), ("2026-10-31T23:59:59.999999+00:00", 0),
                           ("2026-11-01T00:00:00+00:00", -1), ("2026-11-01T09:00:00+09:00", -1)):
             with self.subTest(now=now):
-                report = build(registry, now=datetime.fromisoformat(now))
+                report = main_report(registry, now=datetime.fromisoformat(now))
                 self.assertEqual(by_path(report)["src/a.rs"]["days_remaining"], days)
                 self.assertEqual(report["run"]["observed_utc_date"], "2026-10-31" if days == 0 else "2026-11-01")
 
@@ -201,19 +207,19 @@ class RegistrySemantics(FixtureCase):
     def test_c1_05_omitted_decision_is_shrink_and_valid_keep_is_excluded(self) -> None:
         legacy = {key: value for key, value in shrink("src/legacy.rs", "2026-10-20").items() if key != "decision"}
         keep = {"file": "src/kept.rs", "decision": "keep", "owner": "relay", "keep_reason": "cohesive durable contract"}
-        report = build(registry_text([legacy, keep]))
+        report = main_report(registry_text([legacy, keep]))
         self.assertEqual(list(by_path(report)), ["src/legacy.rs"])
         self.assertEqual(report["deadlines"]["counts"]["keep"], 1)
         self.assertEqual(report["completeness"]["status"], "complete")
 
     def test_c1_05_unknown_decision_and_keep_with_deadline_are_errors(self) -> None:
-        report = build(registry_text([
+        rc, report = run_report(registry_text([
             shrink("src/near.rs", "2026-10-20"),
             {**shrink("src/odd.rs", "2026-10-20"), "decision": "defer"},
             {"file": "src/kd.rs", "decision": "keep", "owner": "relay", "keep_reason": "cohesive", "deadline": "2026-10-20"},
         ]))
-        self.assertEqual(list(by_path(report)), ["src/near.rs"])
-        drifted = build(registry_text([shrink("src/near.rs", "2026-10-20", extension="2027-01-01")]) + "[policy]\nmode = 1\n")
+        self.assertEqual((rc, list(by_path(report))), (2, ["src/near.rs"]))
+        drifted = main_report(registry_text([shrink("src/near.rs", "2026-10-20", extension="2027-01-01")]) + "[policy]\nmode = 1\n")
         self.assertEqual(list(by_path(drifted)), ["src/near.rs"])
         self.assertIn("unknown field(s) not interpreted: extension", problems(drifted))
         self.assertIn("unknown top-level key(s) not interpreted: policy", problems(drifted))
@@ -240,10 +246,10 @@ class RegistrySemantics(FixtureCase):
         sys.path.insert(0, str(REPO_ROOT / "scripts"))
         import generate_inventory_docs as inventory
 
-        inputs = reporter.read_inputs(REPO_ROOT)
-        stamp = json.loads(inputs["metadata"].data)["refreshed_at"]
+        stamp = json.loads((REPO_ROOT / reporter.METADATA_PATH).read_text(encoding="utf-8"))["refreshed_at"]
         # Far future: every valid shrink registration is overdue and therefore listed.
-        report = reporter.build_report(inputs, now=datetime(2200, 1, 1, tzinfo=timezone.utc), provenance={})
+        self.assertEqual(run_main("--root", str(REPO_ROOT), "--out", str(self.tmp / "far"), "--now", "2200-01-01T00:00:00Z"), 0)
+        report = read_report(self.tmp / "far")
         self.assertEqual(report["completeness"]["diagnostics"], [])
         _grandfathered, entries, _baseline = inventory.load_giant_file_registry()
         expected = {(e["file"], e["owner"], e["deadline"], e["decompose_issue"])
@@ -251,8 +257,8 @@ class RegistrySemantics(FixtureCase):
         self.assertEqual({(r["path"], r["owner"], r["deadline"], r["issue"]) for r in report["deadlines"]["rows"]},
                          expected)
         self.assertEqual(report["deadlines"]["counts"]["keep"], sum(e.get("decision") == "keep" for e in entries))
-        at_stamp = reporter.build_report(inputs, now=datetime.strptime(stamp, reporter.STAMP_FORMAT).replace(
-            tzinfo=timezone.utc), provenance={})
+        self.assertEqual(run_main("--root", str(REPO_ROOT), "--out", str(self.tmp / "at"), "--now", stamp), 0)
+        at_stamp = read_report(self.tmp / "at")
         self.assertEqual((at_stamp["metadata"]["freshness"], at_stamp["completeness"]["status"]), ("FRESH", "complete"))
 
     def test_c1_06_closed_rows_stay_and_metadata_scope_never_creates_rows(self) -> None:
@@ -261,12 +267,25 @@ class RegistrySemantics(FixtureCase):
             {"number": 4712, "state": "closed", "title": "relay", "owners": ["discord-relay"],
              "files": ["src/a.rs", "src/retired.rs"]},
             {"number": 5000, "state": "open", "title": "x", "owners": ["x"], "files": ["src/only_in_metadata.rs"]}])
-        rows = by_path(build(registry, metadata))
+        rc, report = run_report(registry, metadata)
+        self.assertEqual(rc, 0)
+        rows = by_path(report)
         self.assertEqual({p: r["snapshot_issue_state"] for p, r in rows.items()}, {"src/a.rs": "CLOSED", "src/b.rs": "UNKNOWN"})
-        unavailable = build(registry, "{not json")
+        unavailable = main_report(registry, "{not json")
         self.assertEqual({p: r["snapshot_issue_state"] for p, r in by_path(unavailable).items()},
                          {"src/a.rs": "UNKNOWN", "src/b.rs": "UNKNOWN"})
         self.assertEqual(unavailable["completeness"]["metadata_coverage"], "unavailable")
+
+    def test_c1_06_malformed_issue_state_types_leave_rows_unknown(self) -> None:
+        registry = registry_text([shrink("src/a.rs", "2026-10-31")])
+        for label, record in (("array", {"state": []}), ("object", {"state": {}}), ("null", {"state": None}),
+                              ("number", {"state": 7}), ("missing", {})):
+            with self.subTest(state=label):
+                rc, report = run_report(registry, metadata_text([{"number": 4712, **record}]))
+                self.assertEqual(rc, 2)
+                self.assertEqual(by_path(report)["src/a.rs"]["snapshot_issue_state"], "UNKNOWN")
+                self.assertEqual(report["completeness"]["status"], "partial")
+                self.assertIn("issue #4712 record", problems(report))
 
     def test_c1_07_malformed_rows_are_isolated_and_diagnosed_beyond_the_horizon(self) -> None:
         root = write_root(self.tmp / "root", registry_text([
@@ -284,18 +303,18 @@ class RegistrySemantics(FixtureCase):
         self.assertEqual(report["completeness"]["status"], "partial")
 
     def test_c1_08_duplicate_paths_and_issue_records_are_conflicts_not_overrides(self) -> None:
-        report = build(registry_text([shrink("src/dup.rs", "2026-10-20"), shrink("src/dup.rs", "2026-12-20"),
+        rc, report = run_report(registry_text([shrink("src/dup.rs", "2026-10-20"), shrink("src/dup.rs", "2026-12-20"),
                                       shrink("src/b.rs", "2026-10-20", decompose_issue="#5000")],
                                      grandfathered=["src/b.rs"]),
                        metadata_text([{"number": 4712, "state": "closed"}, {"number": 4712, "state": "open"},
                                       {"number": 5000, "state": "open"}]))
-        self.assertEqual(by_path(report), {})
+        self.assertEqual((rc, by_path(report)), (2, {}))
         self.assertEqual(report["deadlines"]["counts"]["invalid"], 4)
         self.assertIn("issue #4712 is recorded more than once", problems(report))
-        repeated_key = build(registry_text([shrink("src/a.rs", "2026-10-20")]),
+        repeated_key = main_report(registry_text([shrink("src/a.rs", "2026-10-20")]),
                              metadata_text().replace('"state": "closed"', '"state": "closed", "state": "open"'))
         self.assertEqual(by_path(repeated_key)["src/a.rs"]["snapshot_issue_state"], "UNKNOWN")
-        top_level = build(registry_text([shrink("src/a.rs", "2026-10-20")]),
+        top_level = main_report(registry_text([shrink("src/a.rs", "2026-10-20")]),
                           metadata_text().replace('"schema_version": 2', '"schema_version": 2, "refreshed_at": "2026-10-13T00:00:00Z"'))
         self.assertEqual(top_level["metadata"]["freshness"], "INVALID")
         self.assertIn("repeats top-level key(s): refreshed_at", problems(top_level))
@@ -308,9 +327,17 @@ class RegistrySemantics(FixtureCase):
         self.assertEqual((report["completeness"]["status"], report["deadlines"]["counts"]), ("unavailable", None))
         self.assertEqual(report["metadata"]["freshness"], "FRESH")
         self.assertIn("not produced", (self.tmp / "out/report.md").read_text(encoding="utf-8"))
-        empty = build(registry_text([]))
-        self.assertEqual(empty["completeness"]["status"], "complete")
-        self.assertEqual(set(empty["deadlines"]["counts"].values()), {0})
+        for label, text in (("empty file", ""), ("comment only", "# registry\n"),
+                            ("baseline only", 'grandfathered_baseline_paths = ["src/x.rs"]\n')):
+            with self.subTest(registry=label):
+                rc, report = run_report(text)
+                self.assertEqual((rc, report["completeness"]["status"], report["deadlines"]["counts"]),
+                                 (2, "unavailable", None))
+        for label, text in (("explicit grandfathered", "grandfathered = []\n"), ("explicit entry", "entry = []\n")):
+            with self.subTest(registry=label):
+                rc, report = run_report(text)
+                self.assertEqual((rc, report["completeness"]["status"]), (0, "complete"))
+                self.assertEqual(set(report["deadlines"]["counts"].values()), {0})
 
 
 class ReadOnlyBoundary(FixtureCase):
@@ -450,7 +477,7 @@ class WorkflowStructure(unittest.TestCase):
         self.assertEqual(steps["setup"]["with"], {"python-version": "3.11"})
         self.assertEqual(steps["upload"]["with"], {
             "name": "giant-deadlines-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}",
-            "path": "${{ runner.temp }}/giant-deadlines/${{ github.run_id }}/${{ github.run_attempt }}",
+            "path": "${{ steps.execution.outputs.dir }}",
             "retention-days": 90, "if-no-files-found": "error"})
 
 
@@ -477,28 +504,39 @@ class WorkflowSimulation(FixtureCase):
                         GITHUB_REPOSITORY="itismyfield/AgentDesk", GITHUB_EVENT_NAME="schedule",
                         GITHUB_STEP_SUMMARY=str(summary))
         outcomes: dict[str, str] = {}
-        failed = False
+        context = {"steps.upload.outputs.artifact-id": artifact_id}
+        failed, artifact = False, None
         for step in load_workflow()["jobs"]["report"]["steps"]:
+            def expand(value: object) -> str:
+                return EXPR.sub(lambda m: context.get(m.group(1), ""), str(value))
+
             if not self.condition(step.get("if", "success()"), outcomes, failed):
                 outcomes[step["id"]] = "skipped"
-                continue
-            if "uses" in step:
+            elif "uses" in step:
                 outcomes[step["id"]] = actions.get(step["id"], "success")
+                if step["id"] == "upload":
+                    artifact = Path(expand(step["with"]["path"]))
             else:
-                context = {f"steps.{name}.outcome": value for name, value in outcomes.items()}
-                context["steps.upload.outputs.artifact-id"] = artifact_id
-                step_env = {key: EXPR.sub(lambda m: context.get(m.group(1), ""), str(value))
-                            for key, value in step.get("env", {}).items()}
+                output = self.tmp / f"output-{step['id']}"
+                output.write_text("", encoding="utf-8")
+                step_env = {key: expand(value) for key, value in step.get("env", {}).items()}
                 done = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
-                                      cwd=root, env={**env, **step_env}, capture_output=True, text=True, timeout=60)
+                                      cwd=root, env={**env, **step_env, "GITHUB_OUTPUT": str(output)},
+                                      capture_output=True, text=True, timeout=60)
                 outcomes[step["id"]] = "success" if done.returncode == 0 else "failure"
+                for line in output.read_text(encoding="utf-8").splitlines():
+                    key, _, value = line.partition("=")
+                    context[f"steps.{step['id']}.outputs.{key}"] = value
+            context[f"steps.{step['id']}.outcome"] = outcomes[step["id"]]
             if outcomes[step["id"]] == "failure" and not step.get("continue-on-error"):
                 failed = True
         out = self.tmp / "runner/giant-deadlines/777" / attempt
         text = summary.read_text(encoding="utf-8") if summary.is_file() else ""
-        execution = (out / "execution.txt").read_text(encoding="utf-8") if (out / "execution.txt").is_file() else ""
+        published = artifact if artifact is not None else out
+        execution = (published / "execution.txt").read_text(encoding="utf-8") \
+            if (published / "execution.txt").is_file() else ""
         return {"outcomes": outcomes, "conclusion": "failure" if failed else "success", "out": out,
-                "summary": text, "execution": execution}
+                "artifact": artifact, "summary": text, "execution": execution}
 
     @staticmethod
     def condition(expression: str, outcomes: dict[str, str], failed: bool) -> bool:
@@ -561,7 +599,18 @@ class WorkflowSimulation(FixtureCase):
         root, sha = self.workspace(registry_text([shrink("src/a.rs", "2099-12-31")]))
         first, second = self.simulate(root, sha, attempt="1"), self.simulate(root, sha, attempt="2")
         self.assertEqual((first["conclusion"], second["conclusion"]), ("success", "success"), second)
-        self.assertEqual([read_report(run["out"])["run"]["run_attempt"] for run in (first, second)], ["1", "2"])
+        self.assertEqual([read_report(run["artifact"])["run"]["run_attempt"] for run in (first, second)], ["1", "2"])
+
+    def test_c1_11_reused_run_directory_does_not_republish_the_earlier_report(self) -> None:
+        root, sha = self.workspace(registry_text([shrink("src/a.rs", "2099-12-31")]))
+        first = self.simulate(root, sha)
+        again = self.simulate(root, sha, summary=self.tmp / "summary-again.md")
+        self.assertEqual((first["conclusion"], again["outcomes"]["bootstrap"]), ("success", "failure"))
+        self.assertIn("**Report not generated.**", again["summary"])
+        self.assertNotIn("Completeness:", again["summary"])
+        self.assertIn("report_generated=no", again["execution"])
+        self.assertNotEqual(again["artifact"], first["artifact"])
+        self.assertFalse((again["artifact"] / "report.json").exists())
 
     def test_c1_13_retention_and_receipt_are_reported_separately(self) -> None:
         root, sha = self.workspace(registry_text([shrink("src/a.rs", "2099-12-31")]))

@@ -97,7 +97,12 @@ jobs:
           POSTCHECK_OUTCOME: ${{ steps.postcheck.outcome }}
         run: |
           out="$RUNNER_TEMP/giant-deadlines/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
+          # Without a successful bootstrap the run directory may hold an earlier report; publish diagnostics apart.
+          if [ "$BOOTSTRAP_OUTCOME" != success ]; then
+            out="$(mktemp -d "$RUNNER_TEMP/giant-deadlines-unowned.XXXXXX")"
+          fi
           mkdir -p "$out"
+          echo "dir=$out" >> "$GITHUB_OUTPUT"
           generated=no
           if [ -f "$out/report.json" ]; then generated=yes; fi
           {
@@ -113,9 +118,11 @@ jobs:
       - name: Publish summary
         id: summary
         if: always()
+        env:
+          RUN_DIR: ${{ steps.execution.outputs.dir }}
         run: |
-          out="$RUNNER_TEMP/giant-deadlines/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
-          if [ -f "$out/report.json" ] && [ -f "$out/report.md" ]; then
+          out="$RUN_DIR"
+          if [ -n "$out" ] && [ -f "$out/report.json" ] && [ -f "$out/report.md" ]; then
             cat "$out/report.md" >> "$GITHUB_STEP_SUMMARY"
           else
             {
@@ -139,7 +146,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: giant-deadlines-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/giant-deadlines/${{ github.run_id }}/${{ github.run_attempt }}
+          path: ${{ steps.execution.outputs.dir }}
           retention-days: 90
           if-no-files-found: error
 

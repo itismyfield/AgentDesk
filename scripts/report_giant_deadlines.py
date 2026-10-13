@@ -148,6 +148,10 @@ def _registry_population(source: InputFile, diagnostics: list[dict]) -> dict | N
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         problem(None, f"registry does not parse: {error}")
         return None
+    # An empty or comment-only file declares no population; only explicit arrays count as empty.
+    if not {"entry", "grandfathered"} & set(document):
+        problem(None, "registry declares neither `entry` nor `grandfathered`")
+        return None
     entries = document.get("entry", [])
     grandfathered = document.get("grandfathered", [])
     if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
@@ -260,7 +264,7 @@ def _metadata_view(source: InputFile, now: datetime, diagnostics: list[dict]) ->
         if type(number) is not int or number <= 0:
             problem(f"issue record {index} has no positive integer number")
             continue
-        if record.duplicates or state not in {"open", "closed"}:
+        if record.duplicates or not isinstance(state, str) or state not in {"open", "closed"}:
             problem(f"issue #{number} record has repeated keys or an unknown state")
             conflicted.add(number)
         elif number in states or number in conflicted:
