@@ -131,7 +131,11 @@ def run(driver, args):
         restart.update(status="fail", reason=f"{type(error).__name__}: {error}")
         if hasattr(error, "herdr_observation"):
             restart["failed_observation"] = error.herdr_observation
+    report["herdr_readiness_waiver"] = herdr.waiver_summary(
+        args, [restart.get(k) for k in ("before", "after", "failed_observation")])
     path = output / f"report.{args.cell}.json"
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"[e2e] observe-only {restart['status']}; {restart['limitation']}; report → {path}")
+    if getattr(args, "herdr_allowed_degraded_reason", None):
+        print(f"[e2e] herdr readiness waiver: {json.dumps(report['herdr_readiness_waiver'], ensure_ascii=False)}")
     return int(restart["status"] == "fail" or any(r["status"] != "pass" for r in report["scenarios"]))
