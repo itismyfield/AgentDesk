@@ -131,6 +131,7 @@ src/services/discord/commands/control/native_herdr_tests.rs
 src/services/discord/commands/control/native_policy_tests.rs
 src/services/discord/commands/control/native_tests.rs
 src/services/discord/commands/restart.rs
+src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs
 src/services/discord/commands/tui_passthrough.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/live_agent_recovery.rs
@@ -442,6 +443,7 @@ services::discord::commands::control::native::herdr_tests::e2e::o_actor
 services::discord::commands::control::native::tests
 services::discord::commands::control::native::tests::policy_tests
 services::discord::commands::restart::host_guard_tests
+services::discord::commands::text_commands::clear_refusal_reply_tests
 services::discord::commands::tui_passthrough::host_guard_tests
 services::discord::health::recovery::live_agent_recovery::host_guard_tests
 services::discord::health::recovery::stall_alert::tests
@@ -1472,6 +1474,9 @@ services::discord::commands::control::native::tests::restart_admission_holds_und
 services::discord::commands::control::native::tests::restart_admission_settles_each_unresolved_native_clear_row_pg
 services::discord::commands::control::native::tests::switched_off_or_unowned_clear_keeps_the_managed_reset_pg
 services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_and_process_of_a_refused_session_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::a_herdr_refused_text_clear_answers_the_channel_with_its_reason_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_that_runs_answers_only_the_cleared_notice_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::a_tmux_refused_text_clear_answers_the_channel_with_its_reason_pg
 services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
 services::discord::health::recovery::live_agent_recovery::host_guard_tests::recovery_fence_stops_only_a_found_legacy_row_and_keeps_the_intent_pg
 services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_alerts_and_dedupes_without_synthetic_owner_mentions

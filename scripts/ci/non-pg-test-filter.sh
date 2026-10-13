@@ -99,6 +99,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::native::herdr_tests
   --skip services::discord::commands::control::native::tests
   --skip services::discord::commands::restart::host_guard_tests
+  --skip services::discord::commands::text_commands::clear_refusal_reply_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
   --skip services::discord::health::recovery::stall_alert::tests
@@ -983,6 +984,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::commands::control::native::herdr_tests
   services::discord::commands::control::native::tests
   services::discord::commands::restart::host_guard_tests
+  services::discord::commands::text_commands::clear_refusal_reply_tests
   services::discord::commands::tui_passthrough::host_guard_tests
   services::discord::health::recovery::live_agent_recovery::host_guard_tests
   services::discord::health::recovery::stall_alert::tests

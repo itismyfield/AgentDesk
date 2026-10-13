@@ -3475,6 +3475,9 @@ services::discord::commands::response_wording_tests::owner_error_detail_is_folde
 services::discord::commands::response_wording_tests::shared_command_states_use_korean_responses
 services::discord::commands::restart::home_command_tests::command_restart_refuses_before_warn_or_mailbox_cancel
 services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_and_process_of_a_refused_session_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::a_herdr_refused_text_clear_answers_the_channel_with_its_reason_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_that_runs_answers_only_the_cleared_notice_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::a_tmux_refused_text_clear_answers_the_channel_with_its_reason_pg
 services::discord::commands::text_commands::command_dispatch_contract_tests::production_selection_drives_the_same_exhaustive_dispatch_id
 services::discord::commands::text_commands::command_dispatch_contract_tests::skill_alias_branches_match_intake_and_preserve_canonical_actions
 services::discord::commands::text_commands::home_command_tests::command_text_and_alias_dispatch_refuse_before_stop_publication
