@@ -92,7 +92,7 @@ impl SessionStop {
             // Withdrawn at each delivery recheck that lets the interrupt go, not at the judgment.
             if open {
                 let withdraw = crate::services::discord::turn_presence::entrypoints::withdraw;
-                withdraw(channel.get(), "session_stop");
+                withdraw(&shared, channel.get(), "session_stop");
             }
             open
         });

@@ -5,6 +5,7 @@ pub(crate) mod admission;
 pub(crate) mod config;
 pub(crate) mod dispatch;
 pub(crate) mod identity;
+pub(crate) mod projection;
 pub(crate) mod provenance;
 pub(crate) mod runner;
 #[cfg(test)]

@@ -19,6 +19,9 @@ import run_tui_relay as driver
 from tui_relay import herdr, herdr_restart, http_auth
 
 real_run_scenario = driver.run_scenario
+real_boot_clock = herdr_restart.boot_clock
+# A supported boot clock name; the restart tests drive its readings through a patched boot_clock.
+CLOCK = "CLOCK_MONOTONIC"
 
 
 def health():
@@ -268,7 +271,8 @@ class HerdrDegradedWaiver(unittest.TestCase):
         self.assertEqual(result["status"], "pass", result)
         self.assertEqual(result["herdr_readiness_waiver"],
                          {"degraded_reason_waiver": "applied", "allowed_degraded_reasons": WAIVE[1::2],
-                          "ignored_degraded_reasons": sorted(NODE_REASONS)})
+                          "ignored_degraded_reasons": sorted(NODE_REASONS),
+                          "ignored_degraded_reasons_unattributed": sorted(NODE_REASONS)})
         self.assertIn("herdr readiness waiver", out.getvalue())
 
     def test_unmatched_herdr_or_target_channel_reason_is_never_waived(self):
@@ -280,6 +284,27 @@ class HerdrDegradedWaiver(unittest.TestCase):
                 readiness = self.refused(degraded(reasons), "not waived.*" + blocked)["readiness"]
                 self.assertEqual(readiness["ignored_degraded_reasons"], [])
 
+    def test_waived_reasons_without_a_channel_id_are_marked_unattributed(self):
+        other = "relay_verdict_unknown_codex_1509350490565180999"
+        aggregate = ["provider:claude:pending_queue_depth:1", "tui_o:content_transform",
+                     "global_active_counter_out_of_bounds:raw=18446744073709551615:provider_active_turns=0:global_finalizing=0"]
+        self.args = arguments(*WAIVE, "--herdr-allowed-degraded-reason", "global_active_counter_out_of_bounds*")
+        self.http.return_value = (200, degraded([*aggregate, other]))
+        readiness = herdr.observe(driver, self.args)["readiness"]
+        self.assertEqual(readiness["ignored_degraded_reasons"], [*aggregate, other])
+        self.assertEqual(readiness["ignored_degraded_reasons_unattributed"], aggregate)
+        self.assertEqual(herdr.waiver_summary(self.args, [{"readiness": readiness}])["ignored_degraded_reasons_unattributed"],
+                         sorted(aggregate))
+        # An observation from an older mark carries ignored reasons but no marker field.
+        legacy = {"readiness": {"ignored_degraded_reasons": ["provider:claude:pending_queue_depth:1", other]}}
+        summary = herdr.waiver_summary(self.args, [legacy])
+        self.assertEqual((summary["ignored_degraded_reasons"], summary["ignored_degraded_reasons_unattributed"]),
+                         (sorted(["provider:claude:pending_queue_depth:1", other]), ["provider:claude:pending_queue_depth:1"]))
+        for reasons in (["relay_verdict_unknown_codex_41"], ["tui_o:released:herdr"]):
+            with self.subTest(reasons=reasons):
+                self.assertEqual(self.refused(degraded(reasons), "never_waived")["readiness"]
+                                 ["ignored_degraded_reasons_unattributed"], [])
+
     def test_unready_or_malformed_detail_fails(self):
         for payload, code in ((degraded(status="unhealthy"), 200), (degraded(status="starting"), 200),
                               (degraded(fully_recovered=False), 200), (degraded(degraded_reasons="tui_o:released:a"), 200),
@@ -290,7 +315,7 @@ class HerdrDegradedWaiver(unittest.TestCase):
                 self.refused(payload, code=code)
         self.cli.assert_not_called()
 
-    def test_waiver_keeps_every_herdr_block_and_row_check(self):
+    def test_waiver_keeps_herdr_block_and_target_row_checks(self):
         for herdr_change in ({"admission": "closed"}, {"restart_required": True}, {"input_holds": 1},
                              {"configured_channels": ["99"]}):
             payload = degraded()
@@ -302,6 +327,52 @@ class HerdrDegradedWaiver(unittest.TestCase):
             with self.subTest(rows=rows):
                 self.cli.return_value.stdout = json.dumps(status(rows))
                 self.refused(degraded(), "target row")
+
+    def test_waiver_keeps_each_guard_failing_on_its_own(self):
+        def changed(herdr_block=None, reconnect=None, **top):
+            payload = degraded(**top)
+            payload["herdr"]["reconnect"].update({"channels": 1, "published": 1, **(reconnect or {})})
+            payload["herdr"].update(herdr_block or {})
+            return payload
+        other_hold = {**row(), "channel": "99", "nonce": "other", "input_hold": {"recorded_at": "now"}}
+        # (label, argument change, detail, HTTP code, CLI status, reconnected, waiver at refusal, reason)
+        cases = (("endpoint not selected", {"herdr_endpoint": "other"}, changed(), 200, status(), True, "applied", "explicitly selected and local"),
+                 ("endpoint remote", {}, changed({"endpoints": {"test": {"local": False}}}), 200, status(), True, "applied", "explicitly selected and local"),
+                 ("mixed endpoints", {}, changed({"endpoints": {"test": {"local": True}, "far": {"local": False}}}), 200, status(), True, "applied", "mixed/remote"),
+                 ("reconnect missing", {}, changed({"reconnect": None}), 200, status(), False, "applied", "reconnect counts missing"),
+                 ("reconnect negative", {}, changed(reconnect={"pending": -1}), 200, status(), False, "applied", "reconnect counts missing"),
+                 ("reconnect not int", {}, changed(reconnect={"published": "1"}), 200, status(), False, "applied", "reconnect counts missing"),
+                 ("published zero", {}, changed(reconnect={"published": 0, "channels": 0}), 200, status(), True, "applied", "unpublished"),
+                 ("withheld", {}, changed(reconnect={"withheld": 1}), 200, status(), True, "applied", "unpublished"),
+                 ("unknown", {}, changed(reconnect={"unknown": 1}), 200, status(), True, "applied", "unpublished"),
+                 ("pending", {}, changed(reconnect={"pending": 1}), 200, status(), True, "applied", "unpublished"),
+                 ("unpublished channel", {}, changed(reconnect={"channels": 2}), 200, status(), True, "applied", "publish every row"),
+                 ("other row hold", {}, changed(), 200, status([row(), other_hold]), False, "applied", "input hold"),
+                 ("orphan hold", {}, changed(), 200, {**status(), "other_input_holds": [{"nonce": "x"}]}, False, "applied", "other input holds"),
+                 ("not fully recovered", {}, changed(fully_recovered=False), 200, status(), True, "unused", "readiness failed"),
+                 ("HTTP 503", {}, changed(), 503, status(), True, "unused", "readiness failed"),
+                 ("unknown status", {}, changed(status="starting"), 200, status(), True, "unused", "readiness failed"))
+        for label, arg_change, payload, code, current, reconnected, waiver, reason in cases:
+            with self.subTest(label=label):
+                self.args = arguments(*WAIVE)
+                self.http.return_value = (200, changed())
+                self.cli.return_value.stdout = json.dumps(status())
+                self.assertTrue(herdr.observe(driver, self.args, reconnected=reconnected)["validated"])
+                vars(self.args).update(arg_change)
+                self.http.return_value = (code, payload)
+                self.cli.return_value.stdout = json.dumps(current)
+                with self.assertRaisesRegex(driver.assertions.AssertionError, reason) as caught:
+                    herdr.observe(driver, self.args, reconnected=reconnected)
+                self.assertEqual(caught.exception.herdr_observation["readiness"]["degraded_reason_waiver"], waiver)
+
+    def test_flag_with_healthy_detail_still_fails_on_herdr_block(self):
+        for change, reason in (({"admission": "closed"}, "admission closed"), ({"restart_required": None}, "restart required"),
+                               ({"input_holds": 1}, "input_holds")):
+            payload = health()
+            payload["herdr"].update(change)
+            with self.subTest(change=change):
+                readiness = self.refused(payload, reason)["readiness"]
+                self.assertEqual((readiness["degraded_reason_waiver"], readiness["ignored_degraded_reasons"]), ("unused", []))
 
     def test_scenario_health_steps_withhold_waiver(self):
         client = Mock()
@@ -322,6 +393,54 @@ class HerdrDegradedWaiver(unittest.TestCase):
             self.assertIn("readiness failed", result["reason"])
             self.assertEqual(result["herdr_observations"][-1]["readiness"]["degraded_reason_waiver"], "withheld")
 
+    def test_early_exits_and_text_stop_composite_record_waiver_summary(self):
+        plain = dict(id="E-1", agent_mode="real_live", coverage_class="live", steps=[], assertions=[])
+        cases = (("agent mode", dict(plain, agent_mode="controlled"), {"required_agent_mode": "real_live"}, "fail"),
+                 ("coverage", dict(plain, coverage_class="fixture"), {"required_coverage_class": "live"}, "fail"),
+                 ("restart binding", dict(plain, steps=[{"restart_dcserver": {"target": "release"}}]), {}, "fail"),
+                 ("hard reset", plain, {"hard_reset_session_each": True}, "fail"),
+                 ("destructive skip", dict(plain, destructive=True), {}, "skipped"),
+                 ("feature skip", dict(plain, requires_features=["absent"]), {}, "skipped"),
+                 ("E36 arguments", dict(plain, e36_normal_intake=True), {"reset_before_each": True}, "fail"),
+                 ("E-18 composite refusal", dict(plain, id="E-18", herdr_text_stop=True, agent_mode="controlled"),
+                  {"required_agent_mode": "real_live"}, "fail"),
+                 ("E-18 composite dry-run", dict(plain, id="E-18", herdr_text_stop=True), {"dry_run": True}, "dry_run"))
+        for flagged in (True, False):
+            for label, scenario, changes, expected in cases:
+                with self.subTest(label=label, flagged=flagged), redirect_stdout(io.StringIO()) as out, \
+                        patch.dict("os.environ", {"AGENTDESK_E2E_ALLOW_DESTRUCTIVE": "", "AGENTDESK_E2E_FEATURES": ""}):
+                    self.args = arguments(*WAIVE) if flagged else arguments()
+                    vars(self.args).update(changes)
+                    client = Mock()
+                    result = driver.run_scenario(dict(scenario), args=self.args, client=client, run_id="test")
+                    self.assertEqual(result["status"], expected, result)
+                    client.send_control.assert_not_called()
+                    self.assertEqual(result["herdr_readiness_waiver"],
+                                     {"degraded_reason_waiver": "unused" if flagged else "none",
+                                      "allowed_degraded_reasons": WAIVE[1::2] if flagged else [],
+                                      "ignored_degraded_reasons": [], "ignored_degraded_reasons_unattributed": []})
+                    self.assertEqual("herdr readiness waiver" in out.getvalue(), flagged)
+        self.http.assert_not_called()
+
+    def test_refused_requests_record_waiver_metadata(self):
+        failures = (("loopback", "http://remote.invalid:8797", None, "loopback"),
+                    ("request", None, OSError("connection refused"), "connection refused"),
+                    ("non-object", None, (200, []), "must be an object"))
+        for flagged, waivable, expected in ((True, True, "unused"), (True, False, "withheld"), (False, True, "none")):
+            for label, base_url, response, reason in failures:
+                with self.subTest(label=label, flagged=flagged, waivable=waivable):
+                    self.args = arguments(*WAIVE) if flagged else arguments()
+                    self.args.base_url = base_url or self.args.base_url
+                    self.http.side_effect = response if isinstance(response, Exception) else None
+                    self.http.return_value = response if isinstance(response, tuple) else (200, degraded())
+                    with self.assertRaisesRegex(Exception, reason) as caught:
+                        herdr.observe(driver, self.args, waivable=waivable)
+                    readiness = caught.exception.herdr_observation["readiness"]
+                    self.assertEqual((readiness["degraded_reason_waiver"], readiness["allowed_degraded_reasons"],
+                                      readiness["ignored_degraded_reasons"]),
+                                     (expected, WAIVE[1::2] if flagged and waivable else [], []))
+        self.cli.assert_not_called()
+
     def test_arguments_refuse_wildcard_and_non_herdr_cells(self):
         for pattern in ("*", "", " * "):
             with self.subTest(pattern=pattern), self.assertRaises(SystemExit), patch("sys.stderr", io.StringIO()):
@@ -330,6 +449,141 @@ class HerdrDegradedWaiver(unittest.TestCase):
         with patch.object(sys, "argv", argv), self.assertRaises(SystemExit), patch("sys.stderr", io.StringIO()) as err:
             driver.parse_args()
         self.assertIn("only to Herdr cells", err.getvalue())
+
+
+CLEARED = "세션을 초기화했어요."
+REFUSED = "세션을 초기화하지 못했어요: rotation_unsettled(59)"
+
+
+def bot(message_id, content, **extra):
+    return {"id": str(message_id), "content": content, "author": {"id": "7", "bot": True}, **extra}
+
+
+class HerdrTextClear(unittest.TestCase):
+    """E-50's text !clear: a server refusal fails at once; silence keeps the acknowledgement timeout."""
+
+    def setUp(self):
+        self.args = arguments()
+        self.enterContext(patch("urllib.request.urlopen", side_effect=AssertionError("offline only")))
+        self.enterContext(patch.object(driver, "_read_api_json", return_value=(200, health())))
+        self.enterContext(patch.object(herdr.subprocess, "run", return_value=Namespace(stdout=json.dumps(status()))))
+        self.enterContext(patch.object(driver, "post_send_sleep"))
+        self.sleep = self.enterContext(patch.object(herdr.time, "sleep"))
+        clock = itertools.count(0, 5)
+        self.enterContext(patch.object(herdr.time, "monotonic", side_effect=lambda: next(clock)))
+        self.client = Mock()
+        self.client.send_control.return_value = {"id": "100"}
+        after = bot(300, "[E2E:AFTER]")
+        self.client.wait_for_message.return_value = (after, [after])
+
+    def run_clear(self, *fetches, before=(), sent=None):
+        # The send response shape of POST /api/discord/send; the !clear message id bounds its replies.
+        self.client.send.return_value = sent if sent is not None else {"ok": True, "message_id": "160" if before else "101"}
+        steps = [*({"wait_for_raw_discord_text": "READY", "timeout_s": 5} for _ in before),
+                 {"send_discord_prompt": "!clear [E2E:CLEAR]"}, {"wait_for_raw_discord_text": CLEARED, "timeout_s": 20},
+                 {"send_discord_prompt": "Reply with [E2E:AFTER]"}, {"wait_for_discord_text": "[E2E:AFTER]"}]
+        self.client.fetch_messages.side_effect = [*before, *fetches] + [list(fetches[-1])] * 20 if fetches else [*before] + [[]] * 20
+        scenario = dict(id="E-50", agent_mode="real_live", coverage_class="live", steps=steps, assertions=[])
+        with redirect_stdout(io.StringIO()):
+            return driver.run_scenario(scenario, args=self.args, client=self.client, run_id="test")
+
+    def test_refusal_reply_fails_at_once_with_its_reason(self):
+        for refusal in (REFUSED, "세션 전환 중이라 초기화하지 못했어요"):
+            with self.subTest(refusal=refusal):
+                self.client.reset_mock()
+                self.sleep.reset_mock()
+                self.client.send_control.return_value = {"id": "100"}
+                result = self.run_clear([bot(101, "!clear [E2E:CLEAR]"), bot(102, refusal)])
+                self.assertEqual(result["status"], "fail", result)
+                self.assertIn(f"text !clear refused by the server: {refusal}", result["reason"])
+                self.assertEqual(self.client.send.call_count, 1)
+                self.assertEqual(self.client.fetch_messages.call_count, 1)
+                self.sleep.assert_not_called()
+
+    def test_completion_reply_continues_to_the_next_turn(self):
+        result = self.run_clear([bot(101, "!clear [E2E:CLEAR]"), bot(102, CLEARED)])
+        self.assertEqual(result["status"], "pass", result)
+        self.assertEqual(self.client.send.call_args.args[1], "Reply with [E2E:AFTER]")
+
+    def test_silence_or_unrelated_refusal_text_keeps_the_timeout(self):
+        stale = [bot(150, "READY"), bot(140, REFUSED)]
+        for label, rows, before in (("silence", [], ()),
+                                    ("other channel", [bot(102, REFUSED, channel_id="99")], ()),
+                                    ("user message", [{**bot(102, REFUSED), "author": {"id": "8", "bot": False}}], ()),
+                                    ("quoted in a reply", [bot(102, f"> {REFUSED}")], ()),
+                                    ("sent before the clear", stale, (stale,))):
+            with self.subTest(label=label):
+                self.client.reset_mock()
+                self.client.send_control.return_value = {"id": "100"}
+                result = self.run_clear(rows, before=before) if rows else self.run_clear(before=before)
+                self.assertEqual(result["status"], "fail", result)
+                self.assertIn(f"acknowledgement missing: {CLEARED}", result["reason"])
+                self.assertEqual(self.client.send.call_count, 1)
+        # Server wording that drifted from the prefixes loses only the fail-fast, never reads as cleared.
+        with patch.object(herdr, "CLEAR_REFUSAL_PREFIXES", ("세션을 비우지 못했어요:",)):
+            self.client.reset_mock()
+            self.client.send_control.return_value = {"id": "100"}
+            result = self.run_clear([bot(102, REFUSED)])
+        self.assertEqual(result["status"], "fail", result)
+        self.assertIn(f"acknowledgement missing: {CLEARED}", result["reason"])
+
+    def test_clear_replies_are_bounded_by_the_clear_message_id(self):
+        # Last observed 140, an unseen older refusal 149, this clear 150, then its own reply.
+        old, cleared, refused = bot(149, REFUSED), bot(151, CLEARED), bot(152, REFUSED)
+        with_id = {"ok": True, "message_id": "150"}
+        for label, sent, rows, expected, reason in (
+                ("older refusal, then completion", with_id, [old, cleared], "pass", None),
+                ("older refusal, then completion (id key)", {"id": "150"}, [old, cleared], "pass", None),
+                ("older refusal, then completion (integer id)", {"message_id": 150}, [old, cleared], "pass", None),
+                ("this clear refused", with_id, [old, refused], "fail", "refused by the server: " + REFUSED)):
+            with self.subTest(label=label):
+                self.client.reset_mock()
+                self.client.send_control.return_value = {"id": "100"}
+                result = self.run_clear([bot(140, "READY"), *rows], before=([bot(140, "READY")],), sent=sent)
+                self.assertEqual(result["status"], expected, (label, result))
+                if reason:
+                    self.assertIn(reason, result["reason"])
+
+    def test_clear_without_a_usable_send_id_fails_before_waiting(self):
+        responses = ({"ok": True}, {}, "150", {"message_id": 0}, {"message_id": -1}, {"message_id": True},
+                     {"message_id": "abc"}, {"message_id": "0"}, {"message_id": "-5"}, {"id": " 150"}, {"id": "１５０"})
+        for sent in responses:
+            for label, rows in (("completion", [bot(151, CLEARED)]), ("refusal", [bot(152, REFUSED)]), ("silence", [])):
+                with self.subTest(sent=sent, reply=label):
+                    self.client.reset_mock()
+                    self.client.send_control.return_value = {"id": "100"}
+                    result = self.run_clear(rows, sent=sent) if rows else self.run_clear(sent=sent)
+                    self.assertEqual(result["status"], "fail", result)
+                    self.assertIn("send returned no message id", result["reason"])
+                    self.assertEqual((self.client.send.call_count, self.client.fetch_messages.call_count), (1, 0))
+
+    def test_clear_completion_shares_the_refusal_boundary(self):
+        # This clear is message 150; only a bot reply after it in this channel counts, either way.
+        missing = f"acknowledgement missing: {CLEARED}"
+        for label, rows, expected, reason in (
+                ("older completion only", [bot(149, CLEARED)], "fail", missing),
+                ("new completion", [bot(151, CLEARED)], "pass", None),
+                ("older and new completion", [bot(149, CLEARED), bot(151, CLEARED)], "pass", None),
+                ("this clear refused", [bot(149, CLEARED), bot(152, REFUSED)], "fail", "refused by the server: " + REFUSED),
+                ("completion in another channel", [bot(151, CLEARED, channel_id="99")], "fail", missing),
+                ("completion typed by a user", [{**bot(151, CLEARED), "author": {"id": "8", "bot": False}}], "fail", missing),
+                ("completion quoted", [bot(151, f"> {CLEARED}")], "fail", missing)):
+            with self.subTest(label=label):
+                self.client.reset_mock()
+                self.client.send_control.return_value = {"id": "100"}
+                result = self.run_clear([bot(140, "READY"), *rows], before=([bot(140, "READY")],),
+                                        sent={"ok": True, "message_id": "150"})
+                self.assertEqual(result["status"], expected, (label, result))
+                if reason:
+                    self.assertIn(reason, result["reason"])
+                    self.assertEqual(self.client.send.call_count, 1)
+
+    def test_refusal_prefixes_match_the_server_wording(self):
+        # The server answers a refused text !clear with these error strings; keep them in step.
+        root = Path(__file__).resolve().parents[3] / "src/services/discord/commands"
+        first, second = herdr.CLEAR_REFUSAL_PREFIXES
+        self.assertIn(f'"{first} {{reason}}"', (root / "control/native.rs").read_text(encoding="utf-8"))
+        self.assertIn(f'"{second}"', (root / "control.rs").read_text(encoding="utf-8"))
 
 
 class RestartObserveOnly(unittest.TestCase):
@@ -346,6 +600,9 @@ class RestartObserveOnly(unittest.TestCase):
         self.cli = self.enterContext(patch.object(herdr.subprocess, "run", return_value=Namespace(stdout=json.dumps(status()))))
         self.client = self.enterContext(patch.object(driver.discord, "DiscordClient"))
         self.scenario = self.enterContext(patch.object(driver, "run_scenario", return_value={"id": "E-19-observe-only", "status": "pass"}))
+        self.boot_now = 1000.0
+        self.clock = self.enterContext(patch.object(herdr_restart, "boot_clock",
+                                                    side_effect=lambda: {"clock": CLOCK, "seconds": self.boot_now}))
 
     def run_mode(self, mode):
         self.args.herdr_restart_observe_only = mode
@@ -361,10 +618,14 @@ class RestartObserveOnly(unittest.TestCase):
         payload.update({} if uptime is None else {"uptime_secs": uptime})
         self.http.return_value = (200, payload)
 
-    def set_mark(self, observed_at=None, **observation):
+    def set_mark(self, observed_at=None, *, boot_age=None, **observation):
+        """Age the whole mark: observation, completion and boot clock moved back together."""
         mark = json.loads(self.mark.read_text())
         moment = observed_at or datetime.now(timezone.utc) - timedelta(seconds=60)
         mark["observation"].update(observed_at=moment.isoformat(), **observation)
+        mark["completed_at"] = moment.isoformat()
+        age = (datetime.now(timezone.utc) - moment).total_seconds() if boot_age is None else boot_age
+        mark["boot_clock"] = {"clock": CLOCK, "seconds": self.boot_now - age}
         self.mark.write_text(json.dumps(mark))
 
     def marked(self, uptime=3):
@@ -413,12 +674,106 @@ class RestartObserveOnly(unittest.TestCase):
         with patch.object(herdr, "dt", SimpleNamespace(datetime=clock, timezone=timezone)):
             for mark_age, uptime in ((60, 60), (60, 59), (60, 58), (0, 0), (-10, 0)):
                 with self.subTest(mark_age=mark_age, uptime=uptime):
-                    self.set_mark(now - timedelta(seconds=mark_age))
+                    self.set_mark(now - timedelta(seconds=mark_age), boot_age=mark_age)
                     self.publishable(uptime)
                     self.assert_refused("restart not observed")
-            self.set_mark(now - timedelta(seconds=60))
+            self.set_mark(now - timedelta(seconds=60), boot_age=60)
             self.publishable(57)
             self.assertEqual(self.run_mode("verify")[0], 0)
+
+    def edit_mark(self, drop=(), **changes):
+        mark = json.loads(self.mark.read_text())
+        mark.update(changes)
+        for key in drop:
+            del mark[key]
+        self.mark.write_text(json.dumps(mark))
+
+    def test_mark_records_completion_after_its_response(self):
+        self.assertEqual(self.run_mode("mark")[0], 0)
+        mark = json.loads(self.mark.read_text())
+        self.assertGreaterEqual(datetime.fromisoformat(mark["completed_at"]),
+                                datetime.fromisoformat(mark["observation"]["observed_at"]))
+        self.assertEqual(mark["boot_clock"], {"clock": CLOCK, "seconds": 1000.0})
+
+    def test_restart_during_mark_request_is_measured_from_mark_completion(self):
+        # Mark request ran 63 s..57 s ago and the server restarted inside it; nothing restarted since.
+        now = datetime.now(timezone.utc)
+        self.marked()
+        self.set_mark(now - timedelta(seconds=63), boot_age=57)
+        self.edit_mark(completed_at=(now - timedelta(seconds=57)).isoformat())
+        self.publishable(59)
+        restart = self.assert_refused("restart not observed")["restart_observation"]
+        self.assertEqual(restart["restart_evidence"], "not_observed")
+        self.assertLess(restart["elapsed_secs"], 58)
+        self.assertLess(restart["wall_elapsed_secs"], 58)
+
+    def test_wall_clock_step_forward_uses_the_smaller_boot_clock_elapsed(self):
+        # 60 s really passed, the wall clock stepped 20 s forward, and the server never restarted.
+        self.marked()
+        self.set_mark(datetime.now(timezone.utc) - timedelta(seconds=80), boot_age=60)
+        self.publishable(72)
+        restart = self.assert_refused("restart not observed")["restart_observation"]
+        self.assertEqual((restart["boot_clock"], restart["boot_clock_elapsed_secs"], restart["elapsed_secs"]),
+                         (CLOCK, 60.0, 60.0))
+        self.assertGreaterEqual(restart["wall_elapsed_secs"], 80)
+        self.set_mark(datetime.now(timezone.utc) - timedelta(seconds=40), boot_age=60)
+        self.publishable(39)
+        self.assertLess(self.assert_refused("restart not observed")["restart_observation"]["elapsed_secs"], 41)
+        self.publishable(10)
+        self.assertEqual(self.run_mode("verify")[0], 0)
+
+    def test_restart_is_not_confirmed_without_completion_time_and_one_shared_boot_clock(self):
+        now = datetime.now(timezone.utc)
+        other = "CLOCK_UPTIME_RAW"
+        # (label, mark age, mark boot age, mark edit, dropped mark keys, verify clock, uptime)
+        cases = (("older mark, restart inside its request", 63, 57, {}, ("completed_at", "boot_clock"), CLOCK, 59),
+                 ("no completion time, real restart", 60, 60, {}, ("completed_at",), CLOCK, 3),
+                 ("no mark boot clock", 60, 60, {}, ("boot_clock",), CLOCK, 3),
+                 ("null mark boot clock (unsupported platform)", 60, 60, {"boot_clock": None}, (), CLOCK, 3),
+                 ("clock names differ, wall +20 s", 80, 60, {"boot_clock": {"clock": other, "seconds": 940.0}}, (), CLOCK, 72),
+                 ("verify NaN", 80, 60, {}, (), float("nan"), 72),
+                 ("verify +inf", 80, 60, {}, (), float("inf"), 72),
+                 ("verify -inf", 80, 60, {}, (), float("-inf"), 72),
+                 ("verify negative", 80, 60, {}, (), -1.0, 72),
+                 ("verify bool", 80, 60, {}, (), True, 72),
+                 ("verify unsupported platform", 80, 60, {}, (), None, 72),
+                 ("negative mark", 80, 60, {"boot_clock": {"clock": CLOCK, "seconds": -5.0}}, (), CLOCK, 72),
+                 ("mark bool", 80, 60, {"boot_clock": {"clock": CLOCK, "seconds": True}}, (), CLOCK, 72),
+                 ("mark NaN", 80, 60, {"boot_clock": {"clock": CLOCK, "seconds": float("nan")}}, (), CLOCK, 72),
+                 ("mark unsupported name", 80, 60, {"boot_clock": {"clock": "test_clock", "seconds": 940.0}}, (), CLOCK, 72),
+                 ("mark not an object", 80, 60, {"boot_clock": CLOCK}, (), CLOCK, 72))
+        self.marked()
+        for label, age, boot_age, edit, drop, verify, uptime in cases:
+            with self.subTest(label=label):
+                self.set_mark(now - timedelta(seconds=age), boot_age=boot_age)
+                self.edit_mark(drop=drop, **edit)
+                self.clock.side_effect = (lambda: None) if verify is None else (
+                    lambda: {"clock": CLOCK, "seconds": self.boot_now if verify == CLOCK else verify})
+                self.publishable(uptime)
+                restart = self.assert_refused("take a new mark")["restart_observation"]
+                self.assertNotIn("restart_evidence", restart)
+
+    def test_malformed_completion_time_refuses_verify(self):
+        self.marked()
+        now = datetime.now(timezone.utc)
+        for completed in ((now + timedelta(seconds=30)).isoformat(), (now - timedelta(seconds=90)).isoformat(),
+                          (now - timedelta(seconds=30)).replace(tzinfo=None).isoformat()):
+            with self.subTest(completed=completed):
+                self.set_mark()
+                self.edit_mark(completed_at=completed)
+                self.assert_refused("restart mark time invalid")
+
+    def test_unsupported_platform_marks_without_a_boot_clock(self):
+        self.clock.side_effect, self.clock.return_value = None, None
+        self.assertEqual(self.run_mode("mark")[0], 0)
+        self.assertIsNone(json.loads(self.mark.read_text())["boot_clock"])
+
+    def test_boot_clock_follows_the_server_uptime_clock_per_platform(self):
+        for platform, expected in (("darwin", "CLOCK_UPTIME_RAW"), ("linux", "CLOCK_MONOTONIC"), ("win32", None)):
+            with self.subTest(platform=platform), patch.object(herdr_restart.sys, "platform", platform), \
+                    patch.object(herdr_restart.time, "clock_gettime", return_value=5.0), \
+                    patch.object(herdr_restart.time, "CLOCK_UPTIME_RAW", 8, create=True):
+                self.assertEqual(real_boot_clock(), expected and {"clock": expected, "seconds": 5.0})
 
     def test_unusable_uptime_keeps_unproven_limitation(self):
         self.run_mode("mark")
@@ -509,6 +864,55 @@ class RestartObserveOnly(unittest.TestCase):
         self.client.reset_mock()
         self.scenario.reset_mock()
         self.assert_refused("readiness failed")
+
+    def test_restart_summary_is_union_of_mark_and_verify_reasons(self):
+        self.args.herdr_allowed_degraded_reason = WAIVE[1::2]
+        self.http.return_value = (200, degraded(["tui_o:released:a"]))
+        self.assertEqual(self.run_mode("mark")[0], 0)
+        self.set_mark()
+        for verify_reasons, expected_rc, after_key in ((["provider:claude:pending_queue_depth:1"], 0, "after"),
+                                                       (["disk_low_free_bytes:1"], 1, "failed_observation")):
+            with self.subTest(verify_reasons=verify_reasons):
+                payload = degraded(verify_reasons, uptime_secs=3)
+                payload["herdr"]["reconnect"].update(channels=1, published=1)
+                self.http.return_value = (200, payload)
+                rc, report = self.run_mode("verify")
+                self.assertEqual(rc, expected_rc, report)
+                restart = report["restart_observation"]
+                self.assertEqual(restart["before"]["readiness"]["ignored_degraded_reasons"], ["tui_o:released:a"])
+                after = verify_reasons if expected_rc == 0 else []
+                self.assertEqual(restart[after_key]["readiness"]["ignored_degraded_reasons"], after)
+                # The report summary is the union over mark and verify, not either moment alone.
+                self.assertEqual(report["herdr_readiness_waiver"]["ignored_degraded_reasons"], sorted(["tui_o:released:a", *after]))
+
+    def test_report_summary_includes_follow_up_turn_observations(self):
+        self.args.herdr_allowed_degraded_reason = WAIVE[1::2]
+        self.marked()
+        client = self.client.return_value
+        client.send_control.return_value = {"id": "100"}
+        marker = f"[E2E:E19:{self.args.run_id}:POST]"
+        message = {"id": "101", "content": marker, "author": {"id": "42", "bot": True}}
+        client.wait_for_message.return_value = (message, [message])
+        client.fetch_messages.return_value = [message]
+
+        def detail(reasons, **block):
+            payload = degraded(reasons, uptime_secs=3) if reasons else {**health(), "uptime_secs": 3}
+            payload["herdr"]["reconnect"].update(channels=1, published=1)
+            payload["herdr"].update(block)
+            return 200, payload
+        # mark and verify are healthy; only the follow-up turn's own observations waive reasons.
+        for later, expected_rc, ignored in (([detail(["tui_o:released:a"])] * 2, 0, ["tui_o:released:a"]),
+                                            ([detail(["tui_o:released:a"]), detail(["provider:claude:pending_queue_depth:1"], input_holds=1)],
+                                             1, ["provider:claude:pending_queue_depth:1", "tui_o:released:a"])):
+            with self.subTest(expected_rc=expected_rc):
+                self.http.side_effect = [detail(None), *later]
+                with patch.object(driver, "run_scenario", real_run_scenario), patch.object(herdr.time, "sleep"):
+                    rc, report = self.run_mode("verify")
+                self.assertEqual(rc, expected_rc, report)
+                self.assertEqual(report["restart_observation"]["after"]["readiness"]["degraded_reason_waiver"], "unused")
+                self.assertEqual(report["herdr_readiness_waiver"]["degraded_reason_waiver"], "applied")
+                self.assertEqual(report["herdr_readiness_waiver"]["ignored_degraded_reasons"], ignored)
+                self.assertIn("herdr readiness waiver", self.stdout)
 
     def test_unpublished_counts_and_restart_scenario_fail_before_input(self):
         self.marked()
