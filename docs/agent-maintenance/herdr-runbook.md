@@ -54,6 +54,11 @@ Herdr 로 띄운 Claude 채널(P9 대상: adk-dash-cc)의 운영 절차다. 5a�
 - E-50 판정: `python3 scripts/e2e/post_deploy_turn_smoke.py judge --report <output>/report.claude-herdr.json --scenarios tests/e2e/tui_relay/scenarios --scenario E-50 --cell claude-herdr --channel-id <channel> --driver-rc <rc>`
 - 관측은 노드 전체 상태에 묶여 있어 대상 채널과 무관하게 멈출 수 있다: detail `status≠healthy`, `degraded_reasons` 비어 있지 않음, 다른 채널 row의 hold·unreadable 또는 `other_input_holds`.
   멈추면 report의 `herdr_observations[-1].readiness`와 `reason`을 보고, 원인을 정리한 뒤 같은 시나리오부터 다시 실행한다.
+- 공유 노드의 무관한 사유는 `--herdr-allowed-degraded-reason <패턴>`(반복, 정확 일치 또는 끝 `*` 접두)으로 그 실행에서만 넘길 수 있다. 예: `--herdr-allowed-degraded-reason 'tui_o:released*'`.
+  `status`가 `healthy`/`degraded`이고 **모든** 사유가 패턴에 맞을 때만 통과한다. `herdr`(대소문자 무시)나 대상 channel id를 담은 사유, 빈 패턴·`*` 단독은 거부하고, `fully_recovered`·herdr block·row 검사는 그대로다. Herdr 셀 밖에서는 인자 오류다.
+  시나리오가 선언한 `assert_health`·`restart_dcserver` 단계의 관측에는 적용하지 않는다(`withheld`).
+  각 관측의 `readiness`에 `degraded_reason_waiver`(`none`/`unused`/`applied`/`withheld`)·`allowed_degraded_reasons`·`ignored_degraded_reasons`가, 결과 JSON에 `herdr_readiness_waiver`가 남는다.
+  실행 직전 detail의 `degraded_reasons`를 읽어 허용할 사유가 대상 채널 것이 아님을 확인한 뒤 넘긴다.
 - 종료 코드 0만으로 수용하지 않는다. **첫 gate는 시나리오별 `status=pass`를 직접 확인해야 한다**. `known_gap`·`unexpected_pass`·`not_applicable`은 gate 통과가 아니다.
 - E-50 smoke judge는 T1·T2·AFTER_CLEAR가 각각 1회이고 detail/CLI 관측이 있어야 통과한다. Herdr에서는 tmux 로그·legacy queue 파일을 읽지 않는다.
 - 재시작(E-8/19)·stop(E-18)·terminate(E-12)·E-35/36 원래 수용 기준은 이 첫 gate 밖이다.

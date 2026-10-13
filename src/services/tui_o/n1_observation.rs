@@ -62,6 +62,14 @@ pub(crate) enum Kind {
         autonomous: bool,
         outcome: &'static str,
     },
+    /// A close whose completed/aborted result this reader cannot attribute; never a completion.
+    #[serde(rename = "n1_outcome_unknown")]
+    OutcomeUnknown {
+        source_id: SourceId,
+        witness_offset: u64,
+        logical_turn_key: Option<LogicalKey>,
+        reason: &'static str,
+    },
     #[serde(rename = "n1_synthetic_create")]
     SyntheticCreate {
         phase: &'static str,
@@ -85,7 +93,7 @@ pub(crate) enum Kind {
     #[serde(rename = "n1_mode_confirmed")]
     ModeConfirmed {
         confirmation_window_start: Option<Boundary>,
-        // Confirmation happened inside this window, not at the event's timestamp.
+        // Read when the channel entered the confirmed set, never at this event's timestamp.
         actual_confirmed_at_us: Option<u64>,
         boundary_rule: &'static str,
     },
@@ -212,6 +220,7 @@ impl Observer {
                 channel.counters.aborted_events += u64::from(*outcome == "aborted");
                 channel.counters.unknown_outcome_events += u64::from(*outcome == "unknown");
             }
+            Kind::OutcomeUnknown { .. } => channel.counters.unknown_outcome_events += 1,
             Kind::SyntheticCreate { phase, .. } => match *phase {
                 "attempt" => channel.counters.create_attempt += 1,
                 _ => channel.counters.create_committed += 1,
@@ -317,13 +326,38 @@ pub(crate) fn confirmation_boundary(channel_id: u64) -> Option<Boundary> {
     })
 }
 
-pub(crate) fn mode_confirmed(provider: &str, channel: u64, before: Option<Boundary>) {
-    emit(
+/// Observer clock reading taken when a channel entered the confirmed set.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ConfirmStamp {
+    boot_id: Uuid,
+    at_us: u64,
+}
+
+pub(crate) fn confirmation_stamp() -> Option<ConfirmStamp> {
+    let o = observer()?;
+    Some(ConfirmStamp {
+        boot_id: o.boot_id,
+        at_us: o.at_us(),
+    })
+}
+
+pub(crate) fn mode_confirmed(
+    provider: &str,
+    channel: u64,
+    before: Option<Boundary>,
+    actual: Option<ConfirmStamp>,
+) {
+    let Some(o) = observer() else {
+        return;
+    };
+    // A stamp from another observer boot is not on this event's clock.
+    let actual = actual.filter(|s| s.boot_id == o.boot_id).map(|s| s.at_us);
+    o.emit(
         provider,
         channel,
         Kind::ModeConfirmed {
             confirmation_window_start: before,
-            actual_confirmed_at_us: None,
+            actual_confirmed_at_us: actual,
             boundary_rule: "overlap_or_missing_boundary_is_unknown;never_shrink_first_window",
         },
     );
@@ -345,29 +379,47 @@ pub(crate) fn bounded_id(value: Option<&str>) -> Option<Option<String>> {
     Some(value.map(String::from))
 }
 
+// Source identity and native id are carried whole or the observation counts as lost.
+fn source_keys(
+    o: &Observer,
+    binding: &SourceBinding,
+    native: Option<&str>,
+) -> Option<(Option<String>, Option<LogicalKey>)> {
+    let Some(path) = binding.source.path.to_str() else {
+        o.lost();
+        return None;
+    };
+    if path.len() > ID_CAP || binding.source.session_id.len() > ID_CAP {
+        o.lost();
+        return None;
+    }
+    let native = bounded_id(native)?;
+    let logical = native.as_ref().map(|id| LogicalKey {
+        provider: binding.provider,
+        channel_id: binding.channel_id,
+        provider_session_id: binding.source.session_id.clone(),
+        native_turn_id: id.clone(),
+    });
+    Some((native, logical))
+}
+
+fn provider_name(provider: ShadowProvider) -> &'static str {
+    match provider {
+        ShadowProvider::Claude => "claude",
+        ShadowProvider::Codex => "codex",
+    }
+}
+
 pub(crate) fn turn_closed(binding: &SourceBinding, turn: &TurnSpan, aborted: bool) {
     let Some(o) = observer() else {
         return;
     };
-    let Some(path) = binding.source.path.to_str() else {
-        o.lost();
-        return;
-    };
-    if path.len() > ID_CAP || binding.source.session_id.len() > ID_CAP {
-        o.lost();
-        return;
-    }
-    let Some(native) = bounded_id(turn.native_turn_id.as_deref()) else {
+    let Some((native, logical_turn_key)) = source_keys(&o, binding, turn.native_turn_id.as_deref())
+    else {
         return;
     };
     let provider = binding.provider;
     let channel_id = binding.channel_id;
-    let logical_turn_key = native.as_ref().map(|id| LogicalKey {
-        provider,
-        channel_id,
-        provider_session_id: binding.source.session_id.clone(),
-        native_turn_id: id.clone(),
-    });
     let physical_observation_key = PhysicalKey {
         provider,
         channel_id,
@@ -377,16 +429,38 @@ pub(crate) fn turn_closed(binding: &SourceBinding, turn: &TurnSpan, aborted: boo
         native_turn_id: native,
     };
     o.emit(
-        match provider {
-            ShadowProvider::Claude => "claude",
-            ShadowProvider::Codex => "codex",
-        },
+        provider_name(provider),
         channel_id,
         Kind::TurnClosed {
             physical_observation_key,
             logical_turn_key,
             autonomous: turn.autonomous,
             outcome: if aborted { "aborted" } else { "completed" },
+        },
+    );
+}
+
+/// `witness_offset` is the record that left the outcome unresolved; `native` names the turn if known.
+pub(crate) fn turn_unknown(
+    binding: &SourceBinding,
+    witness_offset: u64,
+    native: Option<&str>,
+    reason: &'static str,
+) {
+    let Some(o) = observer() else {
+        return;
+    };
+    let Some((_, logical_turn_key)) = source_keys(&o, binding, native) else {
+        return;
+    };
+    o.emit(
+        provider_name(binding.provider),
+        binding.channel_id,
+        Kind::OutcomeUnknown {
+            source_id: binding.source.clone(),
+            witness_offset,
+            logical_turn_key,
+            reason,
         },
     );
 }

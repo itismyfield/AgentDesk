@@ -14,6 +14,7 @@ use crate::services::tmux_common::{
     tmux_capture_indicates_claude_tui_prompt_draft,
     tmux_capture_indicates_claude_tui_ready_for_input,
 };
+use crate::services::tui_input::submission::SubmitContext;
 use crate::services::tui_o::shadow::ShadowProvider;
 
 pub(crate) mod claude_guarded;
@@ -35,6 +36,29 @@ pub fn judge_pane(provider: ShadowProvider, capture: &str) -> PaneVerdict {
         ShadowProvider::Claude => judge_claude(capture),
         ShadowProvider::Codex => judge_codex(capture),
     }
+}
+
+pub(crate) fn submission_admits(
+    provider: ShadowProvider,
+    capture: &str,
+    context: SubmitContext,
+) -> bool {
+    if judge_pane(provider, capture) == PaneVerdict::Ready {
+        return true;
+    }
+    let plain = strip_ansi_escape_sequences(capture);
+    context.permits_busy(provider)
+        && judge_pane(provider, capture) != PaneVerdict::Modal
+        && tmux_capture_indicates_claude_tui_busy(&plain)
+        && tmux_capture_indicates_claude_tui_exact_empty_composer(&plain)
+        && claude_composer_empty_when_present(capture)
+        && !tmux_capture_indicates_claude_tui_prompt_draft(&plain)
+}
+
+pub(crate) fn own_steering_draft(capture: &str, frame: &str) -> bool {
+    let plain = strip_ansi_escape_sequences(capture);
+    claude_composer_not_known_empty(capture)
+        && claude_composer_rows(&plain).is_some_and(|rows| rows.join("\n") == frame)
 }
 
 fn judge_claude(capture: &str) -> PaneVerdict {
