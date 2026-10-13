@@ -216,9 +216,8 @@ pub(super) async fn second_generation_node(env: &Env) {
     node.stop().await;
 }
 
-/// T-H6 gateway role: with the PG row held by MINI, the gateway role going from MINI to a newly
-/// booted GW moves no holder or epoch; the new gateway routes a message and MINI posts the reply.
-/// This checks the role input against PG home authority, not a real gateway lease election.
+/// T-H6 gateway role: moving the role from MINI to a new GW keeps PG holder and epoch and MINI posts
+/// GW's routed message; this is role input against PG home authority, not a lease election.
 #[tokio::test(flavor = "current_thread")]
 async fn th6_gateway_role_move_keeps_holder_pg() {
     let scene = Scene::new().await;
