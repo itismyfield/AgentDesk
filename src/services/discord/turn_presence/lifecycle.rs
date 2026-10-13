@@ -332,7 +332,7 @@ impl super::entrypoints::Fence for Runtime {
     ) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         // A late notice names a mount the registry has since moved past; only the current one counts.
-        let current = crate::services::cluster::channel_home::registered_channel(channel);
+        let current = super::entrypoints::current_mount(channel);
         if mount.map(Arc::as_ptr) != current.as_ref().map(Arc::as_ptr) {
             return;
         }

@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 pub(super) use crate::services::cluster::channel_home::HomeGate;
+#[cfg(all(test, unix))]
+pub(super) use crate::services::cluster::channel_home::registered_channel as current_mount;
 use crate::services::discord::SharedData;
 use crate::services::discord::tmux_watcher_registry::TmuxWatcherRegistry;
 use crate::services::provider::ProviderKind;
@@ -67,6 +69,12 @@ impl Drop for Installation {
         installed.retain(|(_, fence)| !Weak::ptr_eq(fence, &self.0));
         INSTALLED_COUNT.fetch_sub(before - installed.len(), Ordering::AcqRel);
     }
+}
+
+/// How many runtimes are installed for `shared`.
+#[cfg(all(test, unix))]
+pub(super) fn installed_for(shared: &SharedData) -> usize {
+    owned_by(shared).count()
 }
 
 fn owned_by(shared: &SharedData) -> impl Iterator<Item = Arc<dyn Fence>> + '_ {
