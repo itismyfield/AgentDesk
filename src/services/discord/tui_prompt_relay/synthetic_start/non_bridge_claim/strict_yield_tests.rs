@@ -264,15 +264,22 @@ fn refused_watcher_turn_is_reowned_for_the_bridge_after_its_watcher_dies() {
                 hook_lease.generation,
             ),
         );
+        // A bridge-owned copy reaches the exact-lease compare whatever the session-bound flag is.
         for older in [&turn.lease, &hook_lease] {
-            drop(
-                super::super::super::relay_ownership::TuiDirectExternalInputLeaseGuard::new(
-                    ProviderKind::Claude,
-                    &turn.tmux,
-                    turn.channel,
-                    older,
-                ),
-            );
+            let bridge_owned = ExternalInputRelayLease {
+                relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+                ..older.clone()
+            };
+            for held in [older, &bridge_owned] {
+                drop(
+                    super::super::super::relay_ownership::TuiDirectExternalInputLeaseGuard::new(
+                        ProviderKind::Claude,
+                        &turn.tmux,
+                        turn.channel,
+                        held,
+                    ),
+                );
+            }
         }
         assert_eq!(turn.live_lease(), Some(current.clone()));
         let claim = turn.capture(&b, &current).await;
