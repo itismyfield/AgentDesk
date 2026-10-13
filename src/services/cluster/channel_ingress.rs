@@ -1,6 +1,5 @@
-//! Whether this node may take a channel's own ingress, judged from the channel's home row and this
-//! node's renewal-confirmed gate. The result is an observation, never a permit: a turn, command or
-//! POST still passes the gate's own admission. No runtime caller reads it yet.
+//! Whether this node may take a channel's own ingress, from its home row and its own confirmed gate.
+//! An observation, never a permit: execution still passes the gate's admission; no caller reads it.
 
 use std::num::NonZeroU64;
 use std::time::Duration;
@@ -65,9 +64,14 @@ pub(crate) struct LocalLeaseSample {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum IngressObservation {
-    LocalCandidate { home_epoch: i64 },
+    LocalCandidate {
+        home_epoch: i64,
+    },
     /// This node is not a candidate; it does not vouch that the holder can run.
-    IgnoreForeign { holder: String, home_epoch: i64 },
+    IgnoreForeign {
+        holder: String,
+        home_epoch: i64,
+    },
     Hold(IngressHoldReason),
 }
 
