@@ -5,6 +5,13 @@ use crate::services::discord::tmux_lifecycle::DispatchTmuxProtection;
 use crate::services::session_host::HostLiveness;
 use crate::services::tmux_common::current_tmux_owner_marker;
 
+#[cfg(all(test, unix))]
+#[path = "n3bc_restore_tests.rs"]
+mod n3bc_restore_tests;
+
+#[path = "restore_core.rs"]
+mod restore_core;
+
 /// On startup, scan for surviving tmux sessions (AgentDesk-*) and restore watchers.
 /// This handles the case where AgentDesk was restarted but tmux sessions are still alive.
 pub(in crate::services::discord) async fn restore_tmux_watchers(
@@ -220,15 +227,19 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             continue;
         }
 
+        #[cfg(all(test, unix))]
+        n3bc_restore_tests::at(channel_id.get(), "scan").await;
         if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
-            owned_sessions.insert(*channel_id, channel_name.clone()); // protected: owner only
             continue;
         }
 
-        if let Some(started) = super::super::super::mailbox_snapshot(&shared, *channel_id)
-            .await
-            .recovery_started_at
-        {
+        let recovery = super::super::super::mailbox_snapshot(&shared, *channel_id).await;
+        #[cfg(all(test, unix))]
+        n3bc_restore_tests::at(channel_id.get(), "recovery_snapshot").await;
+        if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
+            continue;
+        }
+        if let Some(started) = recovery.recovery_started_at {
             // #2443 — `recovery_done.wait()` is the deterministic graduation
             // signal for this skip. `restore_tmux_watchers` is a one-shot
             // caller (the loop body simply `continue`s and the upper
@@ -258,6 +269,9 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 false
             };
 
+            if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
+                continue;
+            }
             if recovery_completed {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
@@ -443,6 +457,13 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             // touched `.generation` mtime, the regression check classifies
             // as fresh wrapper, clears `last_relayed_offset`, and a rotated
             // jsonl re-relays surviving content.
+            #[cfg(all(test, unix))]
+            n3bc_restore_tests::at(channel_id.get(), "generation").await;
+            if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
+                continue;
+            }
+            #[cfg(all(test, unix))]
+            n3bc_restore_tests::attempt(channel_id.get(), "generation_rewrite");
             preserve_session_generation_mtime_after_write(
                 session_name,
                 &gen_marker_path,
@@ -451,8 +472,11 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             );
         }
 
-        let dead = DeadSessionCleanup::probe(channel_id.get(), &channel_name, session_name);
-        if let Some(dc) = dead.await {
+        let dead = DeadSessionCleanup::probe(channel_id.get(), &channel_name, session_name).await;
+        if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
+            continue;
+        }
+        if let Some(dc) = dead {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let observed = dc.observed;
             if let Some(diag) = build_tmux_death_diagnostic(session_name, Some(&output_path)) {
@@ -492,6 +516,9 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             {
                 let rebound =
                     rebind_restored_dispatch_if_missing(shared.pg_pool.as_ref(), &state).await;
+                if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
+                    continue;
+                }
                 if rebound == RestoreDispatchRebindOutcome::NotRebound
                     && consume_dispatched_origin_ghost_if_current(shared.pg_pool.as_ref(), &state)
                         .await
@@ -502,6 +529,13 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     );
                     continue;
                 }
+                #[cfg(all(test, unix))]
+                n3bc_restore_tests::at(channel_id.get(), "mailbox").await;
+                if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
+                    continue;
+                }
+                #[cfg(all(test, unix))]
+                n3bc_restore_tests::attempt(channel_id.get(), "mailbox_register");
                 let finish_mailbox_on_completion =
                     super::super::super::recovery::reregister_active_turn_from_inflight(
                         &shared, &state,
@@ -552,97 +586,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
 
     // Register sessions in CoreState so cleanup_orphan_tmux_sessions recognizes them
     // and message handlers find an active session with current_path
-    if !owned_sessions.is_empty() {
-        let mut data = shared.core.lock().await;
-        for (channel_id, channel_name) in &owned_sessions {
-            let persisted_path = load_last_session_path(
-                shared.pg_pool.as_ref(),
-                &shared.token_hash,
-                channel_id.get(),
-            );
-            let persisted_session_id = load_restored_provider_session_id(
-                shared.pg_pool.as_ref(),
-                &shared.token_hash,
-                &provider,
-                channel_name,
-            );
-            let configured_path = super::super::super::settings::resolve_workspace(
-                *channel_id,
-                Some(channel_name.as_str()),
-            );
-            let tmux_name = provider.build_tmux_session_name(channel_name);
-            let session_keys = super::super::super::adk_session::build_session_key_candidates(
-                &shared.token_hash,
-                &provider,
-                &tmux_name,
-            );
-            let db_cwd =
-                load_restored_session_cwd(shared.pg_pool.as_ref(), &session_keys, channel_id.get());
-
-            let session = data.sessions.entry(*channel_id).or_insert_with(|| {
-                super::super::super::DiscordSession {
-                    session_id: persisted_session_id.clone(),
-                    memento_context_loaded:
-                        super::super::super::session_runtime::restored_memento_context_loaded(
-                            false,
-                            None,
-                            persisted_session_id.as_deref(),
-                        ),
-                    memento_reflected: false,
-                    current_path: None,
-                    history: Vec::new(),
-                    pending_uploads: Vec::new(),
-                    cleared: false,
-                    channel_name: Some(channel_name.clone()),
-                    category_name: None,
-                    remote_profile_name: None,
-                    channel_id: Some(channel_id.get()),
-
-                    last_active: tokio::time::Instant::now(),
-                    worktree: None,
-
-                    born_generation: super::super::super::runtime_store::process_generation(),
-                }
-            });
-
-            if session.session_id.is_none() && persisted_session_id.is_some() {
-                session.restore_provider_session(persisted_session_id.clone());
-            }
-
-            // Restore current_path: DB cwd (worktree-aware) > last_sessions (yaml, main workspace)
-            if session.current_path.is_none() {
-                // #3219: prefer the channel's own reusable managed worktree over
-                // the configured base; only log "ignoring" when it is NOT reused.
-                let reusable_worktree =
-                    super::super::super::session_runtime::db_cwd_is_reusable_worktree(
-                        configured_path.as_deref(),
-                        db_cwd.as_deref(),
-                    );
-                if let (Some(configured), Some(restored)) =
-                    (configured_path.as_ref(), db_cwd.as_ref())
-                {
-                    if configured != restored && !reusable_worktree {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] ⚠ Ignoring restored DB cwd for channel {}: {} (configured workspace: {})",
-                            channel_id,
-                            restored,
-                            configured
-                        );
-                    }
-                }
-                let effective_path = super::super::super::select_restored_session_path(
-                    configured_path,
-                    db_cwd,
-                    persisted_path,
-                    reusable_worktree,
-                );
-                if let Some(path) = effective_path {
-                    session.current_path = Some(path);
-                }
-            }
-        }
-    }
+    restore_core::register_restored_core(shared, &provider, owned_sessions).await;
 
     // Spawn watchers
     // #226: Use try_claim_watcher for atomic check-and-insert. The pending list
@@ -677,6 +621,12 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             .await;
         }
 
+        #[cfg(all(test, unix))]
+        n3bc_restore_tests::at(pw.channel_id.get(), "placeholder").await;
+        if boot_skip(BootTarget::Channel(&provider, pw.channel_id.get())) {
+            continue;
+        }
+
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
@@ -696,7 +646,17 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             turn_delivered: turn_delivered.clone(),
             last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
         };
+        #[cfg(all(test, unix))]
+        n3bc_restore_tests::attempt(pw.channel_id.get(), "host_probe");
         let host = watch_host_of(shared, &provider, pw.channel_id.get(), &pw.session_name).await;
+        #[cfg(all(test, unix))]
+        n3bc_restore_tests::at(pw.channel_id.get(), "host").await;
+        if boot_skip(BootTarget::Channel(&provider, pw.channel_id.get())) {
+            continue;
+        }
+        #[cfg(all(test, unix))]
+        n3bc_restore_tests::attempt(pw.channel_id.get(), "watcher_claim");
+
         let claimed = codex_restore::commit_live_direct_resume_fallback(
             &pw.session_name,
             pw.channel_id,
@@ -802,6 +762,9 @@ impl DeadSessionCleanup {
     async fn probe(channel_id: u64, channel_name: &str, session_name: &str) -> Option<Self> {
         let probe = crate::services::tmux_diagnostics::probe_tmux_session_pane_liveness;
         let observed = HostLiveness::from(probe(session_name).await);
+        #[cfg(all(test, unix))]
+        n3bc_restore_tests::at(channel_id, "dead_probe").await;
+
         let marker = crate::services::tmux_common::session_dead_marker_path(session_name);
         if observed != HostLiveness::Live {
             let (channel_name, session_name) = (channel_name.into(), session_name.into());
@@ -812,11 +775,16 @@ impl DeadSessionCleanup {
                 observed,
             });
         }
+        if boot_skip(BootTarget::AnyProvider(channel_id)) {
+            return None;
+        }
         if std::path::Path::new(&marker).exists() {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 🧹 clearing stale .pane_dead marker for {session_name} — tmux session is alive"
             );
+            #[cfg(all(test, unix))]
+            n3bc_restore_tests::attempt(channel_id, "pane_dead_unlink");
             let _ = std::fs::remove_file(&marker);
         }
         None
@@ -909,6 +877,9 @@ async fn clean_dead_startup_session(
         caller,
     );
     let teardown = teardown.await;
+    if boot_skip(BootTarget::Channel(provider, dc.channel_id)) {
+        return false;
+    }
     if matches!(teardown, KeyedTeardown::Kept) {
         return false;
     }
@@ -917,6 +888,9 @@ async fn clean_dead_startup_session(
         Some(protection) => effects.fail_dispatch(protection, name).await,
         None => false,
     };
+    if boot_skip(BootTarget::Channel(provider, dc.channel_id)) {
+        return false;
+    }
     let cleanup_plan = dead_session_cleanup_plan(
         dispatch_protection.is_some() && !dispatch_failed_for_dead_session,
     );
@@ -940,6 +914,9 @@ async fn clean_dead_startup_session(
 
     if cleanup_plan.report_idle_status {
         effects.report_idle(dc, &session_key).await;
+    }
+    if boot_skip(BootTarget::Channel(provider, dc.channel_id)) {
+        return false;
     }
     if cleanup_plan.preserve_tmux_session {
         return false;

@@ -454,6 +454,7 @@ jobs:
               - 'src/services/discord/turn_bridge/voice_completion_tests.rs'
               - 'src/services/discord/turn_teardown_clearance_tests.rs'
               - 'src/services/discord/watchers/dispatched_origin_ghost_tests.rs'
+              - 'src/services/discord/watchers/lifecycle/n3bc_restore_tests.rs'
               - 'src/services/discord/watchers/lifecycle/n4d2_restore_tests.rs'
               - 'src/services/discord/watchers/lifecycle/restore.rs'
               - 'src/services/discord/watchers/lifecycle/restore_tests.rs'

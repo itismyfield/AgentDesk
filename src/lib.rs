@@ -300,7 +300,7 @@ pub mod watcher_restore {
 /// Dormant iMessage reply contracts for admission and claim/ACK integration.
 pub mod imsg_reply {
     pub use crate::db::imsg_reply::{
-        AckOutcome, Action, ActionAck, ClaimAction, Obligation, Purpose, ack_action, claim_action,
-        read_action, read_obligation,
+        AckOutcome, Action, ActionAck, ClaimAction, Obligation, Purpose, ack_action, bind_consumed,
+        claim_action, read_action, read_obligation,
     };
 }

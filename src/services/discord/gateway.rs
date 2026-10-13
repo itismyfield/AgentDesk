@@ -835,7 +835,7 @@ impl TurnGateway for DiscordGateway {
                 }
             }
 
-            let result = router::finish_admitted_queued_intake(&deps, admitted, intervention)
+            let result = router::finish_admitted_queued_intake(&deps, admitted)
                 .await
                 .map_err(|e| e.to_string())?;
             if late_settlement && result == router::IntakeExecution::Executed {
