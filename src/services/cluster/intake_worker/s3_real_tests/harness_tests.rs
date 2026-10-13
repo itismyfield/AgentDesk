@@ -1,10 +1,11 @@
 //! Two simulated nodes over one PG. Each node is a child test process with its own runtime root,
 //! home-gate registry, writer readiness and Discord recorder; the parent owns the database.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -28,7 +29,8 @@ use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_for};
 use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::adoption::LegacyView;
-use crate::services::tui_o::writer::host::test_io::{Alarms, Startup, TestHost};
+use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents, BindingRecord};
+use crate::services::tui_o::writer::host::test_io::{Alarms, TestHost};
 use crate::services::tui_o::writer::host::{self, Custody, HostIo, HostParts};
 use crate::services::tui_o::writer::{
     DeliveryLease, DiscordPort, PostOutcome, SeenMessage, WriterAlarm,
@@ -47,6 +49,14 @@ const ENV_SPAWN: &str = "ADK_S3_SPAWN";
 
 fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The provider name the DB rows, config and intake router use for `provider`.
+pub(super) fn provider_name(provider: ShadowProvider) -> &'static str {
+    match provider {
+        ShadowProvider::Claude => "claude",
+        ShadowProvider::Codex => "codex",
+    }
 }
 
 pub(super) fn applied(write: Result<HomeWrite<ChannelHome>, HomeError>) -> ChannelHome {
@@ -155,11 +165,19 @@ pub(super) struct Scene {
     db: Option<TestPostgresDb>,
     pub(super) pool: PgPool,
     spawned: AtomicUsize,
+    /// The provider of the channel's agent, worker capability and home row.
+    pub(super) provider: ShadowProvider,
 }
 
 impl Scene {
     /// A migrated database with the channel's agent and both nodes registered as live workers.
     pub(super) async fn new() -> Self {
+        Self::for_provider(ShadowProvider::Claude).await
+    }
+
+    /// As [`Scene::new`], with the channel's agent and both workers on `provider`.
+    pub(super) async fn for_provider(provider: ShadowProvider) -> Self {
+        let name = provider_name(provider);
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         for node in [GW, MINI] {
@@ -169,17 +187,18 @@ impl Scene {
                  VALUES ($1, 'online', 'worker', 'worker', '[]', $2, NOW(), NOW(), NOW())",
             )
             .bind(node)
-            .bind(serde_json::json!({"intake_worker": {"enabled": true, "providers": ["claude"]}}))
+            .bind(serde_json::json!({"intake_worker": {"enabled": true, "providers": [name]}}))
             .execute(&pool)
             .await
             .unwrap();
         }
         sqlx::query(
             "INSERT INTO agents (id, name, provider, discord_channel_id)
-             VALUES ($1, 'Writer', 'claude', $2)",
+             VALUES ($1, 'Writer', $3, $2)",
         )
         .bind(format!("writer-{C}"))
         .bind(C.to_string())
+        .bind(name)
         .execute(&pool)
         .await
         .unwrap();
@@ -188,6 +207,7 @@ impl Scene {
             db: Some(db),
             pool,
             spawned: AtomicUsize::new(0),
+            provider,
         }
     }
 
@@ -201,9 +221,9 @@ impl Scene {
 
     /// A worker-owned home held by MINI: the gateway released it and MINI adopted it.
     pub(super) async fn worker_home(&self) -> i64 {
-        let channel = C.to_string();
+        let (channel, provider) = (C.to_string(), provider_name(self.provider));
         let home =
-            applied(o_channel_homes::delegate(&self.pool, &channel, "claude", GW, MINI).await);
+            applied(o_channel_homes::delegate(&self.pool, &channel, provider, GW, MINI).await);
         let home =
             applied(o_channel_homes::finish_release(&self.pool, &channel, GW, home.epoch).await);
         applied(o_channel_homes::adopt(&self.pool, &channel, MINI, home.epoch).await).epoch
@@ -574,18 +594,85 @@ impl DeliveryLease for Lease {
     }
 }
 
+/// A channel's binding event log, one per host: [`TestHost`]'s Startup bind as seq 1, then what
+/// a scenario commits.
+pub(super) struct EventLog {
+    events: Mutex<Vec<BindingEvent>>,
+    notice: watch::Sender<u64>,
+    /// The highest seq any read returned.
+    served: AtomicU64,
+}
+
+impl EventLog {
+    fn new(events: Vec<BindingEvent>) -> Self {
+        let latest = events.last().map_or(0, |event| event.seq);
+        Self {
+            events: Mutex::new(events),
+            notice: watch::channel(latest).0,
+            served: AtomicU64::new(0),
+        }
+    }
+
+    /// Seq 1, whose channel, provider and pane every committed event carries.
+    pub(super) fn first(&self) -> BindingEvent {
+        locked(&self.events)[0].clone()
+    }
+
+    /// Stores `record` as the next seq, then publishes it, so a notified reader finds it.
+    pub(super) fn commit(&self, record: BindingRecord) -> u64 {
+        let seq = {
+            let mut events = locked(&self.events);
+            let first = events[0].clone();
+            let seq = events.last().unwrap().seq + 1;
+            let committed_at = chrono::Utc::now();
+            events.push(BindingEvent {
+                seq,
+                record,
+                committed_at,
+                ..first
+            });
+            seq
+        };
+        self.notice.send_replace(seq);
+        seq
+    }
+
+    pub(super) fn served(&self) -> u64 {
+        self.served.load(Ordering::SeqCst)
+    }
+}
+
+impl BindingEvents for EventLog {
+    fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
+        let events = locked(&self.events);
+        let due = events
+            .iter()
+            .filter(|e| e.channel_id == channel && e.seq > after);
+        let due: Vec<_> = due.cloned().collect();
+        if let Some(last) = due.last() {
+            self.served.fetch_max(last.seq, Ordering::SeqCst);
+        }
+        Ok(due)
+    }
+
+    fn subscribe(&self, _: u64) -> watch::Receiver<u64> {
+        self.notice.subscribe()
+    }
+}
+
 /// The real writer host's gateway IO with the recording Discord in place of [`TestHost`]'s.
 pub(super) struct S3Host {
     inner: Arc<TestHost>,
     pub(super) discord: Arc<Discord>,
     pub(super) lease: Lease,
+    logs: Mutex<BTreeMap<u64, Arc<EventLog>>>,
 }
 
 impl HostIo for S3Host {
     type Port = Discord;
     type Lease = Lease;
     type Alarms = Alarms;
-    type Bindings = Startup;
+    type Bindings = EventLog;
 
     fn port(&self) -> impl Future<Output = Arc<Discord>> + Send {
         std::future::ready(Arc::clone(&self.discord))
@@ -599,8 +686,16 @@ impl HostIo for S3Host {
         self.inner.alarms()
     }
 
-    fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Startup> {
-        self.inner.bindings(channel, provider)
+    /// Every caller, the host and the actor alike, gets the channel's one log.
+    fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<EventLog> {
+        let mut logs = locked(&self.logs);
+        let log = logs.entry(channel).or_insert_with(|| {
+            let startup = self.inner.bindings(channel, provider);
+            Arc::new(EventLog::new(
+                startup.binding_events_since(channel, 0).unwrap(),
+            ))
+        });
+        Arc::clone(log)
     }
 
     fn activation_facts(
@@ -646,14 +741,14 @@ pub(super) fn append(path: &Path, bytes: &[u8]) {
 }
 
 /// The boot config a node reads: clustered, the gateway as O home, `C` selected for the writer.
-fn node_config(role: &str) -> crate::config::Config {
+fn node_config(role: &str, provider: ShadowProvider) -> crate::config::Config {
     serde_json::from_value(serde_json::json!({
         "server": {},
         "cluster": {"enabled": true, "instance_id": role, "gateway_preferred_instance_id": GW},
         "runtime": {"channel_home_delegation_enabled": true},
         "tui_o": {"writer": {"channels": [C]}},
         "agents": [{"id": format!("writer-{C}"), "name": "Writer",
-            "channels": {"claude": {"id": C.to_string(), "runtime": "tui"}}}],
+            "channels": {provider_name(provider): {"id": C.to_string(), "runtime": "tui"}}}],
     }))
     .unwrap()
 }
@@ -689,7 +784,13 @@ impl Booted {
     /// As [`Booted::boot`], posting to `discord`.
     pub(super) async fn boot_on(env: &Env, discord: Discord) -> Self {
         let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
-        Self::boot_with_on(env, reads, discord).await
+        Self::boot_with_on(env, reads, discord, ShadowProvider::Claude).await
+    }
+
+    /// As [`Booted::boot`], with the config, boot and writer host on `provider`.
+    pub(super) async fn boot_as(env: &Env, provider: ShadowProvider) -> Self {
+        let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
+        Self::boot_with_on(env, reads, Discord::default(), provider).await
     }
 
     /// As [`Booted::boot`], with the drain reading through `reads`.
@@ -697,17 +798,22 @@ impl Booted {
     where
         R: DrainPort + Send + Sync + 'static,
     {
-        Self::boot_with_on(env, reads, Discord::default()).await
+        Self::boot_with_on(env, reads, Discord::default(), ShadowProvider::Claude).await
     }
 
-    async fn boot_with_on<R>(env: &Env, reads: impl Fn(u64) -> R, discord: Discord) -> Self
+    async fn boot_with_on<R>(
+        env: &Env,
+        reads: impl Fn(u64) -> R,
+        discord: Discord,
+        provider: ShadowProvider,
+    ) -> Self
     where
         R: DrainPort + Send + Sync + 'static,
     {
         let role = env.role.clone();
         let root = crate::config::runtime_root().expect("node root");
         let hosts = crate::config::session_hosts::force_for_test(Some(&role), &[(C, &role)]);
-        let config = node_config(&role);
+        let config = node_config(&role, provider);
         crate::services::tui_o::channel_policy::install(&config).expect("boot snapshot");
         let pool = env.pool().await;
         let rows = channel_home_boot::listed(&pool);
@@ -715,7 +821,7 @@ impl Booted {
         let port = move |id| BootPort::new(reads(id), no_reset());
         let prepare = move || {
             Some(Boot {
-                provider: "claude".into(),
+                provider: provider_name(provider).into(),
                 local,
                 pool: boot_pool,
                 rows,
@@ -733,11 +839,12 @@ impl Booted {
             inner: TestHost::new([(C, source)]),
             discord: Arc::new(discord),
             lease: Lease::default(),
+            logs: Mutex::default(),
         });
         let owned = channel_home_boot::delegated_boot_ownership(|_| true);
         let io = Arc::clone(&host);
         let parts_root = root.clone();
-        let writers = host::start_delegated(ShadowProvider::Claude, owned, move || HostParts {
+        let writers = host::start_delegated(provider, owned, move || HostParts {
             io,
             runtime_root: Some(parts_root),
             gate: Arc::new(OwnershipGate::default()),
@@ -829,13 +936,33 @@ impl Booted {
 
 /// One router decision for message `message` of `C` as node `leader` runs it.
 pub(super) async fn route(pool: &PgPool, leader: &str, message: &str) -> IntakeRouterDecision {
+    route_as(pool, leader, ShadowProvider::Claude, message).await
+}
+
+/// As [`route`], for an intake of `provider`.
+pub(super) async fn route_as(
+    pool: &PgPool,
+    leader: &str,
+    provider: ShadowProvider,
+    message: &str,
+) -> IntakeRouterDecision {
     let channel = C.to_string();
-    let ctx = IntakeRouterContext {
+    try_route_intake(pool, &router_context(leader, provider, &channel, message)).await
+}
+
+/// The intake [`route_as`] asks the router about: message `message` of `channel` on `provider`.
+fn router_context<'a>(
+    leader: &'a str,
+    provider: ShadowProvider,
+    channel: &'a str,
+    message: &'a str,
+) -> IntakeRouterContext<'a> {
+    IntakeRouterContext {
         mode: IntakeRoutingMode::Enforce,
         leader_instance_id: leader,
-        provider: "claude",
-        channel_id: &channel,
-        policy_channel_id: &channel,
+        provider: provider_name(provider),
+        channel_id: channel,
+        policy_channel_id: channel,
         user_msg_id: message,
         replay_source_message_ids: None,
         request_owner_id: "100",
@@ -854,8 +981,18 @@ pub(super) async fn route(pool: &PgPool, leader: &str, message: &str) -> IntakeR
         owner_authority: OwnerAuthorityChannelOptIn::NotOptedIn,
         has_nonportable_uploads: false,
         attachment_refs: &[],
-    };
-    try_route_intake(pool, &ctx).await
+    }
+}
+
+#[test]
+fn route_as_asks_for_the_given_provider() {
+    let channel = C.to_string();
+    for (provider, name) in [
+        (ShadowProvider::Claude, "claude"),
+        (ShadowProvider::Codex, "codex"),
+    ] {
+        assert_eq!(router_context(GW, provider, &channel, "1").provider, name);
+    }
 }
 
 /// A pending row for MINI routed at `home_epoch`, as the gateway's router would insert it.

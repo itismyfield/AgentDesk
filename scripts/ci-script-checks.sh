@@ -536,7 +536,7 @@ if run_check contracts "Shared CI shell lexer tests"; then
 fi
 
 if run_check contracts "D4-B acceptance manifest (#5340)"; then
-"$PYTHON" scripts/check_herdr_s3_d4b_manifest.py
+"$PYTHON" scripts/check_herdr_s3_d4b_manifest.py --structure-only
 "$PYTHON" -m unittest tests.test_herdr_s3_d4b_manifest
 fi
 

@@ -113,12 +113,12 @@ pub(crate) use turn_deliver::inject_tests::{
     InjectPane, claim_kinded, end_turn, inject_hook, queue_texts, register_inject_runtime,
     send_meanwhile, start_without_gateway,
 };
-pub(crate) use turn_deliver::preflight_human_input;
 pub use turn_deliver::{
     ExternalHold, HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
     external_turn_hold_for_start,
 };
 pub(crate) use turn_deliver::{InjectAttempt, InjectOrigin, SOURCE_OWNED, inject_human_input};
+pub(crate) use turn_deliver::{deliver_with_reply, preflight_human_input};
 #[cfg(test)]
 pub(crate) use turn_deliver::{
     inflight_rows_for_tests, register_bot_auth_for_tests, seed_external_turn_row_for_tests,

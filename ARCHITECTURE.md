@@ -984,6 +984,8 @@ src/
 │   │   │   ├── stall_liveness/
 │   │   │   │   └── redrive_grace.rs
 │   │   │   ├── turn_deliver/
+│   │   │   │   ├── inject/
+│   │   │   │   │   └── names.rs
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   └── inject_tests.rs
@@ -1638,7 +1640,8 @@ src/
 │   │   │   ├── finalize.rs
 │   │   │   ├── host_guard.rs
 │   │   │   ├── host_guard_tests.rs
-│   │   │   └── retirement_await_tests.rs
+│   │   │   ├── retirement_await_tests.rs
+│   │   │   └── stale_busy_identity.rs
 │   │   ├── tmux_session_files/
 │   │   │   └── input_fence_tests.rs
 │   │   ├── tmux_watcher/
@@ -2083,6 +2086,7 @@ src/
 │   │   │   │   ├── claude_restore.rs
 │   │   │   │   ├── liveness.rs
 │   │   │   │   ├── liveness_tests.rs
+│   │   │   │   ├── n3bc_restore_tests.rs
 │   │   │   │   ├── n4d2_boundary_tests.rs
 │   │   │   │   ├── n4d2_entry_test.rs
 │   │   │   │   ├── n4d2_o_writer_test.rs
@@ -2094,6 +2098,7 @@ src/
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
 │   │   │   │   ├── restore.rs
+│   │   │   │   ├── restore_core.rs
 │   │   │   │   ├── restore_mapping.rs
 │   │   │   │   ├── restore_support.rs
 │   │   │   │   ├── restore_tests.rs
@@ -2318,6 +2323,8 @@ src/
 │   ├── health_diagnostics/
 │   │   └── session_state.rs
 │   ├── imsg_reply/
+│   │   ├── contract.rs
+│   │   ├── episode.rs
 │   │   └── mod.rs
 │   ├── kakao/
 │   │   ├── account.rs
@@ -2715,6 +2722,8 @@ src/
 │   │   │   ├── deliver_home_tests.rs
 │   │   │   ├── drain_projection_tests.rs
 │   │   │   ├── fork_lineage.rs
+│   │   │   ├── fork_lineage_tests.rs
+│   │   │   ├── fork_mask_tests.rs
 │   │   │   ├── fork_tests.rs
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
