@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fnmatch
+import hashlib
 import importlib.util
+import json
 import os
 import re
 import shlex
@@ -34,11 +36,28 @@ NON_PG_SELECTION_END = "# END generated non-PG lane selection"
 # Kept because removing one could newly run a PG test whose module the manifest
 # does not name. The module skips below are what make the set honest.
 NON_PG_NAME_SKIPS = ("_pg", "pg_", "postgres")
-# Main's PG lane runs as two shards: shard 0 selects these include values and
-# shard 1 the rest with them skipped, so the shards partition the selection.
-PG_SHARD_0_SELECTORS = ("pg_", "postgres")
-PG_SHARD_JOB = ".github/workflows/ci-main.yml:postgres"
+PG_SHARD_COUNT = 2
+PG_SHARD_JOBS = (".github/workflows/ci-main.yml:postgres", ".github/workflows/ci-pr.yml:test_fast")
 PG_SHARD_RECIPE = "test-postgres-shard"
+PG_INCLUDE_DERIVATION = tuple('''\
+readonly -a NON_PG_SKIP_ARGS
+readonly -a NON_PG_FILTER_REPLAY
+PG_INCLUDE_ARGS=()
+for ((index = 1; index < ${#NON_PG_SKIP_ARGS[@]}; index += 2)); do
+PG_INCLUDE_ARGS+=("${NON_PG_SKIP_ARGS[$index]}")
+done
+unset index
+case "${PG_INCLUDE_SHARD-}" in
+"") ;;
+*)
+python3 scripts/check_pg_test_lane_membership.py --validate-pg-shard "$PG_INCLUDE_SHARD" || return 1
+PG_SELECTED_TESTS="$(set -o pipefail; cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --list | python3 scripts/check_pg_test_lane_membership.py --partition-pg-list "$PG_INCLUDE_SHARD")" || return 1
+mapfile -t PG_INCLUDE_ARGS <<< "$PG_SELECTED_TESTS"
+PG_INCLUDE_ARGS=(--exact "${PG_INCLUDE_ARGS[@]}")
+unset PG_SELECTED_TESTS
+;;
+esac
+readonly -a PG_INCLUDE_ARGS'''.splitlines())
 ALLOWLIST_REL = Path("scripts/pg_test_lane_allowlist.txt")
 NON_PG_FILTER_REL = Path("scripts/ci/non-pg-test-filter.sh")
 LIB_TEST_INVENTORY_REL = Path("scripts/lib_test_inventory_manifest.txt")
@@ -1703,24 +1722,19 @@ def non_pg_filter_contract_errors(
 
 
 def load_pg_include_shards(repo_root: Path) -> tuple[tuple[str, ...], ...]:
-    text = (repo_root / NON_PG_FILTER_REL).read_text("utf-8")
-    shards = []
-    for index in range(2):
-        match = re.search(
-            rf"^PG_INCLUDE_ARGS_SHARD_{index}=\((.*?)^\)$", text, re.MULTILINE | re.DOTALL
-        )
-        if match is None:
-            raise ValueError(f"{NON_PG_FILTER_REL}: missing PG_INCLUDE_ARGS_SHARD_{index}")
-        words = shell_lexer().shell_words(match.group(1))
-        if words is None:
-            raise ValueError(f"{NON_PG_FILTER_REL}: PG_INCLUDE_ARGS_SHARD_{index} is not plain words")
-        shards.append(words)
-    return tuple(shards)
+    lines = (repo_root / NON_PG_FILTER_REL).read_text("utf-8").splitlines()
+    stop = lines.index(NON_PG_SELECTION_END)
+    code = [" ".join(line.split()) for line in lines[stop + 1:]
+            if line.strip() and not line.lstrip().startswith("#")]
+    size = len(PG_INCLUDE_DERIVATION)
+    if tuple(code[:size]) != PG_INCLUDE_DERIVATION or any("PG_INCLUDE" in line or "PG_SELECTED" in line for line in code[size:]):
+        raise ValueError(f"{NON_PG_FILTER_REL}: PG shard derivation is not canonical")
+    return pg_include_shards(load_non_pg_skip_args(repo_root)[1::2], load_lib_test_inventory(repo_root))
 
 
 def pg_shard_contract_errors(repo_root: Path, jobs: Iterable[Job]) -> list[str]:
     """Each test the unsharded PG selection runs must run in exactly one shard,
-    and only the sharded main job may narrow the selection, from its matrix."""
+    and only the declared PG jobs may narrow the selection, from their matrix."""
     try:
         shards = load_pg_include_shards(repo_root)
     except ValueError as error:
@@ -1749,22 +1763,21 @@ def pg_shard_contract_errors(repo_root: Path, jobs: Iterable[Job]) -> list[str]:
     if len(wrong) > 20:
         errors.append(f"{NON_PG_FILTER_REL}: {len(wrong) - 20} more PG shard partition error(s)")
 
-    shard_job = next((job for job in jobs if job.key == PG_SHARD_JOB), None)
-    owned = shard_job.code.count("PG_INCLUDE_SHARD") if shard_job else 0
-    if owned and (
-        owned != 1
-        or not re.search(
+    owned_by_workflow: dict[str, int] = {}
+    for shard_job in (job for job in jobs if job.key in PG_SHARD_JOBS):
+        owned = shard_job.code.count("PG_INCLUDE_SHARD")
+        if owned != 1 or not re.search(
             r"(?m)^\s+PG_INCLUDE_SHARD:\s*\$\{\{\s*matrix\.shard\s*\}\}\s*$",
             shard_job.code,
-        )
-    ):
-        errors.append(f"{PG_SHARD_JOB}: PG_INCLUDE_SHARD must be set once, from matrix.shard")
+        ):
+            errors.append(f"{shard_job.key}: PG_INCLUDE_SHARD must be set once, from matrix.shard")
+        owned_by_workflow[shard_job.workflow] = owned
     workflows = (repo_root / ".github/workflows")
     for path in sorted([*workflows.glob("*.yml"), *workflows.glob("*.yaml")]):
         rel = path.relative_to(repo_root).as_posix()
         count = _strip_comments(path.read_text("utf-8")).count("PG_INCLUDE_SHARD")
-        if count != (owned if shard_job and shard_job.workflow == rel else 0):
-            errors.append(f"{rel}: PG_INCLUDE_SHARD is used outside {PG_SHARD_JOB}")
+        if count != owned_by_workflow.get(rel, 0):
+            errors.append(f"{rel}: PG_INCLUDE_SHARD is used outside the declared PG shard jobs")
     justfile = repo_root / "justfile"
     if justfile.is_file():
         # Only the shard recipe main's job runs may read the shard; no recipe may set it.
@@ -1810,31 +1823,46 @@ def non_pg_selection(repo_root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]
     return skips, tuple(sorted(replay))
 
 
-def pg_include_shards(skips: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """libtest arguments for the two PG shards; a test matching a shard 0
-    selector is skipped by shard 1, so each selected test runs exactly once."""
-    missing = [value for value in PG_SHARD_0_SELECTORS if value not in skips]
-    if missing:
-        raise ValueError(f"PG shard 0 selectors are not include values: {missing}")
-    shard_1 = tuple(value for value in skips if value not in PG_SHARD_0_SELECTORS)
-    skipped = tuple(arg for value in PG_SHARD_0_SELECTORS for arg in ("--skip", value))
-    return PG_SHARD_0_SELECTORS, shard_1 + skipped
+def pg_test_shard(test_id: str) -> int:
+    return int.from_bytes(hashlib.sha256(test_id.encode("utf-8")).digest(), "big") % PG_SHARD_COUNT
+
+
+def validate_pg_shard(value: str) -> int:
+    if value not in tuple(str(index) for index in range(PG_SHARD_COUNT)):
+        raise ValueError(f"PG_INCLUDE_SHARD must be one of {list(range(PG_SHARD_COUNT))}, got: {value!r}")
+    return int(value)
+
+
+def partition_pg_test_list(text: str, shard: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+    index = validate_pg_shard(shard)
+    lines = text.splitlines()
+    if not lines or not re.fullmatch(r"\d+ tests?, 0 benchmarks?", lines[-1]):
+        raise ValueError("PG --list summary is missing or malformed")
+    ids = [line.removesuffix(": test") for line in lines[:-1] if line]
+    if any(not line.endswith(": test") for line in lines[:-1] if line) \
+            or any(not test_id or test_id.startswith("-") or re.search(r"\s", test_id) for test_id in ids) \
+            or len(ids) != len(set(ids)) or len(ids) != int(lines[-1].split()[0]):
+        raise ValueError("PG --list IDs are malformed, duplicated or incomplete")
+    selected = tuple(test_id for test_id in sorted(ids) if pg_test_shard(test_id) == index)
+    if not selected and not allow_empty:
+        raise ValueError(f"PG shard {index} selects 0 tests")
+    return selected
+
+
+def pg_include_shards(skips: tuple[str, ...], inventory: Iterable[str]) -> tuple[tuple[str, ...], ...]:
+    selected = sorted(test_id for test_id in inventory if any(value in test_id for value in skips))
+    listed = "".join(test_id + ": test\n" for test_id in selected) + f"\n{len(selected)} tests, 0 benchmarks\n"
+    return tuple(("--exact", *partition_pg_test_list(listed, str(index), allow_empty=True))
+                 for index in range(PG_SHARD_COUNT))
 
 
 def render_non_pg_selection(skips: tuple[str, ...], replay: tuple[str, ...]) -> list[str]:
-    shard_0, shard_1 = pg_include_shards(skips)
     lines = [NON_PG_SELECTION_BEGIN, "NON_PG_SKIP_ARGS=("]
     lines.extend(f"  --skip {value}" for value in skips)
     lines.append(")")
     lines.append("NON_PG_FILTER_REPLAY=(")
     lines.extend(f"  {test}" for test in replay)
     lines.append(")")
-    for name, args in (("PG_INCLUDE_ARGS_SHARD_0", shard_0), ("PG_INCLUDE_ARGS_SHARD_1", shard_1)):
-        lines.append(f"{name}=(")
-        lines.extend(f"  {shlex.join(args[index:index + 2])}" if arg == "--skip" else f"  {arg}"
-                     for index, arg in enumerate(args)
-                     if index == 0 or args[index - 1] != "--skip")
-        lines.append(")")
     lines.append(NON_PG_SELECTION_END)
     return lines
 
@@ -2202,6 +2230,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--pg-shard-matrix", action="store_true")
+    mode.add_argument("--pg-job-names", action="store_true")
+    mode.add_argument("--validate-pg-shard")
+    mode.add_argument("--partition-pg-list")
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--allowlist", type=Path)
@@ -2223,6 +2256,22 @@ def main(argv: list[str] | None = None) -> int:
         help="rewrite the generated pg_db region in ci-pr.yml from the manifest [files] section",
     )
     args = parser.parse_args(argv)
+    try:
+        if args.pg_shard_matrix:
+            print(json.dumps({"shard": list(range(PG_SHARD_COUNT))}, separators=(",", ":")))
+            return 0
+        if args.pg_job_names:
+            print("\n".join(f"PostgreSQL tests (shard {index})" for index in range(PG_SHARD_COUNT)))
+            return 0
+        if args.validate_pg_shard is not None:
+            validate_pg_shard(args.validate_pg_shard)
+            return 0
+        if args.partition_pg_list is not None:
+            print("\n".join(partition_pg_test_list(sys.stdin.read(), args.partition_pg_list)))
+            return 0
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
     if args.manifest_only and not args.write_snapshots:
         parser.error("--manifest-only requires --write-snapshots")
     if args.write_snapshots and args.write_pg_db_paths:

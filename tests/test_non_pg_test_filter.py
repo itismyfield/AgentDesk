@@ -30,6 +30,59 @@ def load_membership_module():
 
 
 class NonPgTestFilter(unittest.TestCase):
+    def test_pg_matrix_comes_from_the_partition_count(self) -> None:
+        import json
+        result = subprocess.run([sys.executable, str(MEMBERSHIP), "--pg-shard-matrix"],
+                                check=True, capture_output=True, text=True)
+        membership = load_membership_module()
+        self.assertEqual(json.loads(result.stdout), {"shard": list(range(membership.PG_SHARD_COUNT))})
+
+    def test_failed_list_cannot_run_an_unsharded_selection(self) -> None:
+        membership = load_membership_module()
+        ids = [next(f"suite::case_{i}" for i in range(100) if membership.pg_test_shard(f"suite::case_{i}") == shard)
+               for shard in range(membership.PG_SHARD_COUNT)]
+        listed = "".join(name + ": test\n" for name in ids) + f"\n{len(ids)} tests, 0 benchmarks\n"
+        script = 'cargo() { printf "%s" "$PG_LIST_TEXT"; return 7; }; source "$1" && printf "UNSAFE\\n"'
+        result = subprocess.run(["bash", "-c", script, "bash", str(FILTER)],
+                                capture_output=True, text=True,
+                                env={**os.environ, "PG_INCLUDE_SHARD": "0", "PG_LIST_TEXT": listed})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("UNSAFE", result.stdout)
+
+    def test_incomplete_duplicate_and_empty_lists_fail_closed(self) -> None:
+        membership = load_membership_module()
+        for listed in ("", "suite::a: test\n", "suite::a: test\n\n2 tests, 0 benchmarks\n",
+                       "suite::a: test\nsuite::a: test\n\n2 tests, 0 benchmarks\n",
+                       ": test\n\n1 test, 0 benchmarks\n", "--ignored: test\n\n1 test, 0 benchmarks\n",
+                       "\n0 tests, 0 benchmarks\n"):
+            with self.subTest(listed=listed):
+                with self.assertRaises(ValueError):
+                    membership.partition_pg_test_list(listed, "0")
+
+    def test_new_tests_do_not_move_existing_assignments(self) -> None:
+        from unittest.mock import patch
+        membership = load_membership_module()
+        old = {f"suite::case_{index}" for index in range(50)}
+        for count in (2, 3):
+            with patch.object(membership, "PG_SHARD_COUNT", count):
+                before = membership.pg_include_shards(("suite::",), old)
+                after = membership.pg_include_shards(("suite::",), old | {"suite::new_pg_case"})
+                for left, right in zip(before, after):
+                    self.assertEqual(set(left[1:]), set(right[1:]) & old)
+                self.assertEqual(set().union(*(set(args[1:]) for args in after)), old | {"suite::new_pg_case"})
+                self.assertEqual(sum(len(args) - 1 for args in after), len(old) + 1)
+
+    def test_both_workflows_use_the_shared_matrix_and_existing_mirror(self) -> None:
+        for filename, job_id in (("ci-main.yml", "postgres"), ("ci-pr.yml", "test_fast")):
+            jobs = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text("utf-8"))["jobs"]
+            self.assertEqual(jobs[job_id]["strategy"], {
+                "fail-fast": False, "matrix": "${{ fromJSON(needs.pg_shards.outputs.matrix) }}"})
+            self.assertEqual(jobs[job_id]["env"]["PG_INCLUDE_SHARD"], "${{ matrix.shard }}")
+            self.assertIn("--pg-shard-matrix", jobs["pg_shards"]["steps"][1]["run"])
+        mirror = jobs["fast_targeted_tests_required_context"]
+        self.assertEqual(mirror["name"], "Fast targeted tests (ubuntu-latest)")
+        self.assertEqual(mirror["steps"][1]["env"]["UPSTREAM_RESULT"], "${{ needs.test_fast.result }}")
+
     def test_source_exports_filter_and_replays_the_generated_selection(self) -> None:
         script = r'''
 cargo() {
@@ -73,16 +126,22 @@ run_non_pg_filter_replay
         membership = load_membership_module()
         coverage = membership._load_coverage_module(ROOT)
         inventory = membership.load_lib_test_inventory(ROOT)
-        script = 'source "$1" && printf "%s\\n" "${PG_INCLUDE_ARGS[@]}"'
+        skips = membership.load_non_pg_skip_args(ROOT)[1::2]
+        script = 'cargo() { cat "$PG_LIST"; }; source "$1" && printf "%s\\n" "${PG_INCLUDE_ARGS[@]}"'
 
         def selection(shard: str | None) -> set[str]:
             env = {key: value for key, value in os.environ.items() if key != "PG_INCLUDE_SHARD"}
             if shard is not None:
                 env["PG_INCLUDE_SHARD"] = shard
-            result = subprocess.run(
-                ["bash", "-c", script, "bash", str(FILTER)],
-                check=True, capture_output=True, text=True, env=env,
-            )
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as listed:
+                ids = sorted(name for name in inventory if any(value in name for value in skips))
+                listed.write("".join(name + ": test\n" for name in ids) + f"\n{len(ids)} tests, 0 benchmarks\n")
+                listed.flush()
+                env["PG_LIST"] = listed.name
+                result = subprocess.run(
+                    ["bash", "-c", script, "bash", str(FILTER)],
+                    check=True, capture_output=True, text=True, env=env,
+                )
             command = shlex.join(["cargo", "test", "--lib", "--", *result.stdout.splitlines()])
             return coverage.cargo_test_filter(command).selected_tests(inventory)
 
@@ -99,7 +158,7 @@ run_non_pg_filter_replay
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(result.stdout, "")
-                self.assertIn("PG_INCLUDE_SHARD must be 0 or 1", result.stderr)
+                self.assertIn("PG_INCLUDE_SHARD must be one of", result.stderr)
 
     def test_static_pg_restoration_is_what_bash_sources(self) -> None:
         """The integrity gate judges, per shard, the PG arguments Bash really builds."""
@@ -115,9 +174,15 @@ run_non_pg_filter_replay
             env = {key: value for key, value in os.environ.items() if key != "PG_INCLUDE_SHARD"}
             if shard:
                 env["PG_INCLUDE_SHARD"] = shard
-            result = subprocess.run(
-                ["bash", "-c", 'source "$1" && printf "%s\\n" "${PG_INCLUDE_ARGS[@]}"',
-                 "bash", str(FILTER)], check=True, capture_output=True, text=True, env=env)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as listed:
+                ids = sorted(name for name in load_membership_module().load_lib_test_inventory(ROOT)
+                             if any(value in name for value in restored[""]))
+                listed.write("".join(name + ": test\n" for name in ids) + f"\n{len(ids)} tests, 0 benchmarks\n")
+                listed.flush()
+                env["PG_LIST"] = listed.name
+                result = subprocess.run(
+                    ["bash", "-c", 'cargo() { cat "$PG_LIST"; }; source "$1" && printf "%s\\n" "${PG_INCLUDE_ARGS[@]}"',
+                     "bash", str(FILTER)], check=True, capture_output=True, text=True, env=env)
             with self.subTest(shard=shard):
                 self.assertEqual(restored[shard], tuple(result.stdout.splitlines()))
 
@@ -129,7 +194,7 @@ run_non_pg_filter_replay
         coverage = membership._load_coverage_module(ROOT)
         justfile = (ROOT / "justfile").read_text("utf-8")
         script = r'''
-cargo() { printf '%s\n' "$*" >> "$LOG"; }
+cargo() { if [[ "${!#}" == --list ]]; then cat "$PG_LIST"; else printf '%s\n' "$*" >> "$LOG"; fi; }
 just() {
   local line
   while IFS= read -r line; do bash -euo pipefail -c "$line" || return 1; done < "$RECIPES/$1"
@@ -139,6 +204,10 @@ bash -euo pipefail -c "$1"
 '''
         with tempfile.TemporaryDirectory() as temp:
             recipes = Path(temp)
+            skips = membership.load_non_pg_skip_args(ROOT)[1::2]
+            ids = sorted(name for name in membership.load_lib_test_inventory(ROOT)
+                         if any(value in name for value in skips))
+            (recipes / "list.txt").write_text("".join(name + ": test\n" for name in ids) + f"\n{len(ids)} tests, 0 benchmarks\n", "utf-8")
             for name in re.findall(r"(?m)^([A-Za-z0-9_-]+):", justfile):
                 lines = [line.removeprefix("@") for line in coverage.just_recipe_commands(justfile, name)]
                 (recipes / name).write_text("".join(line + "\n" for line in lines), "utf-8")
@@ -147,7 +216,7 @@ bash -euo pipefail -c "$1"
                 log = recipes / "cargo.log"
                 log.write_text("", "utf-8")
                 env = {key: value for key, value in os.environ.items() if key != "PG_INCLUDE_SHARD"}
-                env.update(LOG=str(log), RECIPES=str(recipes), POSTGRES_TEST_DATABASE_URL_BASE="postgresql://stub:1")
+                env.update(LOG=str(log), RECIPES=str(recipes), PG_LIST=str(recipes / "list.txt"), POSTGRES_TEST_DATABASE_URL_BASE="postgresql://stub:1")
                 if shard is not None:
                     env["PG_INCLUDE_SHARD"] = shard
                 result = subprocess.run(["bash", "-c", script, "bash", shell_command],

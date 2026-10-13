@@ -378,10 +378,11 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 
 ### Serial execution
 
-- `just test-postgres` recipe(PR `test_fast`·로컬)는 `cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1`로 생성 필터의 PG 선택을 한 번에 실행하고 **단일 스레드**를 강제한다.
-- main 은 이 선택을 matrix 샤드 두 개로 나눈다. `PG_INCLUDE_SHARD` 가 `scripts/ci/non-pg-test-filter.sh` 의 생성 배열 `PG_INCLUDE_ARGS_SHARD_0`(`pg_`, `postgres`)·`PG_INCLUDE_ARGS_SHARD_1`(나머지 include 값 + 두 값의 `--skip`) 중 하나를 고른다. 각 샤드 안에서는 여전히 `--test-threads=1` 이다(스레드를 늘리지 않는다).
-- main 샤드 step 은 `just test-postgres-shard` 를 실행한다. shard 0 은 자기 선택으로 `test-postgres` 전체(뒤의 targeted 명령 포함)를, shard 1 은 자기 선택만(`test-postgres-selection`) 실행하므로 targeted 명령은 push 마다 한 번 돈다. 0/1 이 아닌 값이면 cargo 실행 전에 실패한다.
-- main 샤드 step 과 PR `test_fast` 의 `just test-postgres` step 은 같은 예산 `timeout-minutes: 60` 을 쓰고, job 수준 timeout 은 두지 않는다. 두 값은 `check-ci-runner-hardening.sh` 가 고정한다. 2026-10-11 main 실측(#6836)에서 shard 1 은 39분 성공·41분 시간 초과·40분 시간 초과(run 38136295861)·34분+ 취소, shard 0 은 16~31분이었고, 40분 예산이 shard 1 의 정상 실행을 끊어 60분으로 올렸다.
+- main·PR `test_fast`는 같은 `pg_shards` 계획으로 PG matrix를 실행한다. shard 수는 `scripts/check_pg_test_lane_membership.py`의 `PG_SHARD_COUNT` 하나에서 정한다(현재 2). 이 값으로 matrix와 SHA256 modulus 및 허용 job 이름을 만든다. required `Fast targeted tests (ubuntu-latest)` mirror는 기존 `needs.test_fast.result`를 유지하여 모든 shard 결과를 확인한다.
+- `PG_INCLUDE_SHARD`가 있으면 `scripts/ci/non-pg-test-filter.sh`는 기존 단일 PG 선택을 실제 lib harness `--list`로 조회하고, 전체 ID의 `int(SHA256(id), 16) % PG_SHARD_COUNT`가 자기 번호인 시험만 `--exact`로 실행한다. 새 PG 시험은 기존 등록만으로 자동 배정된다. 목록 실패·중복·불완전 summary·빈 shard·잘못된 번호는 source 단계에서 실패한다. env unset은 기존 단일 선택을 유지한다.
+- main·PR shard step은 `just test-postgres-shard`를 실행한다. shard 0만 `test-postgres`의 추가 targeted 명령을 실행하고 나머지는 `test-postgres-selection`만 실행한다. 각 shard 안에서는 `--test-threads=1`을 유지한다.
+- main·PR shard step은 같은 `timeout-minutes: 60` 예산을 유지하고 job timeout을 두지 않는다. `check-ci-runner-hardening.sh`가 planner·matrix·env 출처·step 예산을 고정하고 membership 검사는 전체 lib inventory에서 단일 PG 선택과 shard union 동일·교집합 0을 검사한다. integrity 검사는 canonical 셸 파생 코드를 검증하고 같은 exact 선택을 복원한다.
+- PR infra retry는 planner가 열거한 실제 shard 이름만 PG로 인정한다. unknown·실제 회귀·불완전 API 응답이면 재시도를 막고, 나머지는 infra로 판정한 shard job만 각각 한 번 재시도한다(최초 attempt에서만 요청). 두 shard가 모두 infra여도 둘 다 대상으로 삼으며, default branch checkout과 요청 전 stale-attempt 검사는 유지한다.
 - PR `check_fast_cross_os_targets`(`Windows exact targets`)의 `Writer namespace exact Windows targets` step 예산은 `timeout-minutes: 45` 이고 job 수준 timeout 은 두지 않는다. 값은 `check-ci-runner-hardening.sh` 가 고정한다. 2026-10-12 PR CI 실측에서 성공 9회가 16~26.5분이었고 30분 예산에서 #6864·#6872 두 건이 시간 초과로 끊겼다. p90 이 40분을 넘으면 step 분할을 검토한다.
 - 두 샤드의 합집합이 미분할 선택과 같고 교집합이 없다는 것은 `check_pg_test_lane_membership.py` 의 filter contract 가 lib inventory 로 검사한다.
 - `high-risk-recovery` job의 `High-risk recovery lane` step은 `cargo test --lib high_risk_recovery:: -- --test-threads=1`을 실행한다 — 동일.

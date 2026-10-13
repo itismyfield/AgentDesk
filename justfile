@@ -195,10 +195,9 @@ test-postgres:
     cargo test --lib dispatched_sessions::kill_tmux_resume_tests -- --nocapture --test-threads=1
     cargo test --lib services::routines::session_control::tests -- --nocapture --test-threads=1
 
-# Main's PG matrix job: shard 0 runs the whole recipe on its part of the
-# selection and shard 1 only its part, so the targeted commands run once.
+# Both PG matrices run the targeted commands only on shard 0.
 test-postgres-shard:
-    @case "${PG_INCLUDE_SHARD:-}" in 0|1) ;; *) echo "PG_INCLUDE_SHARD must be 0 or 1" >&2; exit 1 ;; esac
+    @python3 scripts/check_pg_test_lane_membership.py --validate-pg-shard "${PG_INCLUDE_SHARD:-}"
     if [ "$PG_INCLUDE_SHARD" = 0 ]; then just test-postgres; else just test-postgres-selection; fi
 
 # The first command of test-postgres alone.
