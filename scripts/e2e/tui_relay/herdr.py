@@ -142,8 +142,14 @@ def current_row(status, *, channel, provider, cold=False):
 
 
 def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
+    # Scenario-declared health steps keep their strict meaning; the waiver is withheld there.
+    operator = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
+    allowed = operator if waivable else []
+    # Waiver metadata precedes the request so refused or failed requests still record it.
     evidence = {"surface": "GET /api/health/detail", "status_surface": "agentdesk herdr status",
-                "observed_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+                "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "readiness": {"degraded_reason_waiver": ("unused" if waivable else "withheld") if operator else "none",
+                              "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": []}}
     try:
         if not http_auth.loopback_origin(args.base_url):
             raise assertions.AssertionError("Herdr observations require target-node loopback API and local CLI")
@@ -151,15 +157,10 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
         evidence["http_status"] = status
         if not isinstance(payload, dict):
             raise assertions.AssertionError("Herdr detail health must be an object")
-        evidence["readiness"] = {k: payload[k] for k in
-                                 ("status", "ok", "fully_recovered", "degraded", "degraded_reasons") if k in payload}
+        evidence["readiness"].update({k: payload[k] for k in
+                                      ("status", "ok", "fully_recovered", "degraded", "degraded_reasons") if k in payload})
         evidence["server_values"] = {k: payload[k] for k in
                                      ("uptime_secs", "started_at", "process_started_at_unix", "incarnation", "boot_id") if k in payload}
-        # Scenario-declared health steps keep their strict meaning; the waiver is withheld there.
-        operator = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
-        allowed = operator if waivable else []
-        evidence["readiness"].update(degraded_reason_waiver=("unused" if waivable else "withheld") if operator else "none",
-                                     allowed_degraded_reasons=allowed, ignored_degraded_reasons=[])
         ignored = detail_ready(driver, status, payload, allowed=allowed, channel=args.channel_id)
         if ignored:
             evidence["readiness"].update(degraded_reason_waiver="applied", ignored_degraded_reasons=list(ignored))
@@ -263,6 +264,14 @@ def run(driver, scenario, args, client, run_id, result):
 
 
 def _run(driver, scenario, args, client, run_id, result):
+    """Every exit, early refusals and skips included, records the waiver summary."""
+    try:
+        return _run_checked(driver, scenario, args, client, run_id, result)
+    finally:
+        report_waiver(args, result)
+
+
+def _run_checked(driver, scenario, args, client, run_id, result):
     result["not_applicable"] = omissions(scenario)
     result["coverage_scope"] = "Discord relay + Herdr health/status; not legacy disk/native evidence"
     profile = known_gap.herdr_profile(scenario["id"], args.cell)
@@ -294,7 +303,6 @@ def _run(driver, scenario, args, client, run_id, result):
             print("[dry-run] Herdr override: HTTP cancel force=false (HostOwned follow-up, not P10-3); P11 force=true is E-12")
         if any("restart_dcserver" in step for step in scenario.get("steps", [])):
             print("[dry-run] restart: isolated-server attestation; read-only status before/after; same nonce; all rows published")
-        report_waiver(args, result)
         result.update(status="dry_run", reason="plan only; no observed passes")
         return result
     if args.hard_reset_session_each:
@@ -554,7 +562,6 @@ def _run(driver, scenario, args, client, run_id, result):
                 driver.send_teardown_marker(client=client, channel_id=args.channel_id, scenario_id=scenario["id"], cell=args.cell, run_id=run_id)
             except Exception as error:
                 result.update(status="fail", reason=f"Herdr teardown failed: {error}")
-        report_waiver(args, result)
         driver._update_record_window_snapshot(result, window)
         driver._record_marker_counts(result, window, [m.replace("{run_id}", run_id) for m in scenario.get("report_marker_counts", [])])
         driver._refresh_agent_mode_record(result, scenario=scenario, declared_agent_mode=result["agent_mode"], dry_run=False)

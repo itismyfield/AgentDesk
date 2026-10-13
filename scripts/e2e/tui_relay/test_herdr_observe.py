@@ -322,6 +322,54 @@ class HerdrDegradedWaiver(unittest.TestCase):
             self.assertIn("readiness failed", result["reason"])
             self.assertEqual(result["herdr_observations"][-1]["readiness"]["degraded_reason_waiver"], "withheld")
 
+    def test_early_exits_and_text_stop_composite_record_waiver_summary(self):
+        plain = dict(id="E-1", agent_mode="real_live", coverage_class="live", steps=[], assertions=[])
+        cases = (("agent mode", dict(plain, agent_mode="controlled"), {"required_agent_mode": "real_live"}, "fail"),
+                 ("coverage", dict(plain, coverage_class="fixture"), {"required_coverage_class": "live"}, "fail"),
+                 ("restart binding", dict(plain, steps=[{"restart_dcserver": {"target": "release"}}]), {}, "fail"),
+                 ("hard reset", plain, {"hard_reset_session_each": True}, "fail"),
+                 ("destructive skip", dict(plain, destructive=True), {}, "skipped"),
+                 ("feature skip", dict(plain, requires_features=["absent"]), {}, "skipped"),
+                 ("E36 arguments", dict(plain, e36_normal_intake=True), {"reset_before_each": True}, "fail"),
+                 ("E-18 composite refusal", dict(plain, id="E-18", herdr_text_stop=True, agent_mode="controlled"),
+                  {"required_agent_mode": "real_live"}, "fail"),
+                 ("E-18 composite dry-run", dict(plain, id="E-18", herdr_text_stop=True), {"dry_run": True}, "dry_run"))
+        for flagged in (True, False):
+            for label, scenario, changes, expected in cases:
+                with self.subTest(label=label, flagged=flagged), redirect_stdout(io.StringIO()) as out, \
+                        patch.dict("os.environ", {"AGENTDESK_E2E_ALLOW_DESTRUCTIVE": "", "AGENTDESK_E2E_FEATURES": ""}):
+                    self.args = arguments(*WAIVE) if flagged else arguments()
+                    vars(self.args).update(changes)
+                    client = Mock()
+                    result = driver.run_scenario(dict(scenario), args=self.args, client=client, run_id="test")
+                    self.assertEqual(result["status"], expected, result)
+                    client.send_control.assert_not_called()
+                    self.assertEqual(result["herdr_readiness_waiver"],
+                                     {"degraded_reason_waiver": "unused" if flagged else "none",
+                                      "allowed_degraded_reasons": WAIVE[1::2] if flagged else [],
+                                      "ignored_degraded_reasons": []})
+                    self.assertEqual("herdr readiness waiver" in out.getvalue(), flagged)
+        self.http.assert_not_called()
+
+    def test_refused_requests_record_waiver_metadata(self):
+        failures = (("loopback", "http://remote.invalid:8797", None, "loopback"),
+                    ("request", None, OSError("connection refused"), "connection refused"),
+                    ("non-object", None, (200, []), "must be an object"))
+        for flagged, waivable, expected in ((True, True, "unused"), (True, False, "withheld"), (False, True, "none")):
+            for label, base_url, response, reason in failures:
+                with self.subTest(label=label, flagged=flagged, waivable=waivable):
+                    self.args = arguments(*WAIVE) if flagged else arguments()
+                    self.args.base_url = base_url or self.args.base_url
+                    self.http.side_effect = response if isinstance(response, Exception) else None
+                    self.http.return_value = response if isinstance(response, tuple) else (200, degraded())
+                    with self.assertRaisesRegex(Exception, reason) as caught:
+                        herdr.observe(driver, self.args, waivable=waivable)
+                    readiness = caught.exception.herdr_observation["readiness"]
+                    self.assertEqual((readiness["degraded_reason_waiver"], readiness["allowed_degraded_reasons"],
+                                      readiness["ignored_degraded_reasons"]),
+                                     (expected, WAIVE[1::2] if flagged and waivable else [], []))
+        self.cli.assert_not_called()
+
     def test_arguments_refuse_wildcard_and_non_herdr_cells(self):
         for pattern in ("*", "", " * "):
             with self.subTest(pattern=pattern), self.assertRaises(SystemExit), patch("sys.stderr", io.StringIO()):
