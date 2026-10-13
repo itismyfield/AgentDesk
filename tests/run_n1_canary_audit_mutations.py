@@ -22,7 +22,7 @@ MUTANTS = [
      "test_real_prewindow_duplicates_are_retained_without_current_failure"),
     ("search-call-id-unchecked", "native.py", 'require(payload.get("call_id") is None or isinstance(payload["call_id"], str))', 'pass',
      "test_search_call_id_is_typed_before_exclusion"),
-    ("shipped-unproduced-guard-removed", "evidence.py", 'reasons = ["unknown_outcome_unproduced"]', 'reasons = []',
+    ("shipped-unproduced-guard-removed", "evidence.py", 'reasons = [] if producer_supported else ["unknown_outcome_unproduced"]', 'reasons = []',
      "test_supported_fifty_pass_and_shipped_profile_stays_unknown"),
     ("forward-absence-ignored", "delivery.py", 'failures.append("delivery_missing")', 'pass', "test_forward_loss_duplicate_and_order_are_failures"),
     ("audit-ci-disconnected", "ci-script-checks.sh", '"$PYTHON" -m unittest tests.test_n1_canary_audit', 'true',

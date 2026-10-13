@@ -95,27 +95,15 @@ class AuditCLI(unittest.TestCase):
         if supported:
             table_path = self.copy / "n1_canary/compatibility.json"
             table = json.loads(self.shipped["compatibility.json"])
-            table.update(unknown_outcome_produced=True, pending_stages=[])
+            runtime = self.manifest["runtime"]
+            approved = dict(build_commit=runtime["build_commit"], executable_sha256=runtime["executable_sha256"],
+                            event_schema=2, unknown_outcome_produced=True, actual_confirmation_produced=True)
+            table.update(producer_capabilities=getattr(self, "producer_capabilities", [approved]), pending_stages=[])
             table_path.write_bytes(canonical(table))
             paths = [self.copy / ENTRY.name, *sorted((self.copy / "n1_canary").glob("*.py")), table_path]
             self.manifest["oracle"]["bundle_sha256"] = digest(b"".join(p.name.encode()+b"\0"+p.read_bytes()+b"\0" for p in paths))
             self.path.write_bytes(canonical(self.manifest))
-            shim = '''import runpy, sys
-sys.path.insert(0, sys.argv[1])
-from n1_canary import evidence, loads
-from n1_canary.manifest import PACKAGE
-original = evidence.observation_checks
-def supported_observation(manifest, values):
-    summary, confirmation, reasons = original(manifest, values)
-    if loads((PACKAGE / "compatibility.json").read_bytes())["unknown_outcome_produced"]:
-        reasons = [r for r in reasons if r != "unknown_outcome_unproduced"]
-        summary["unknown_outcome_events"] = 0
-    return summary, confirmation, reasons
-evidence.observation_checks = supported_observation
-sys.argv = [sys.argv[1] + "/n1_turn_canary_oracle.py", "--manifest", sys.argv[2], *sys.argv[3:]]
-runpy.run_path(sys.argv[0], run_name="__main__")
-'''
-            command = [sys.executable, "-c", shim, str(self.copy), str(self.path), *extra]
+            command = [sys.executable, str(self.copy / ENTRY.name), "--manifest", str(self.path), *extra]
         else:
             paths = [ENTRY, *sorted(PACKAGE.glob("*.py")), PACKAGE / "compatibility.json"]
             self.manifest["oracle"]["bundle_sha256"] = digest(b"".join(p.name.encode()+b"\0"+p.read_bytes()+b"\0" for p in paths))

@@ -35,7 +35,7 @@ def main(argv=None):
     try:
         raw_manifest = manifest_path.read_bytes()
         candidate = loads(raw_manifest)
-        validate(candidate)
+        producer_supported = validate(candidate)
         manifest = candidate
         result["manifest_digest"] = digest(raw_manifest)
         base = manifest_path.resolve().parent
@@ -51,7 +51,8 @@ def main(argv=None):
         result["evidence"] = refs
         identity_reasons = input_checks(manifest, values, raw)
         result["reasons"].extend(reasons + identity_reasons)
-        observation, confirmation, reasons = observation_checks(manifest, values)
+        observation, confirmation, reasons = observation_checks(
+            manifest, values, producer_supported and "build_identity_unverified" not in identity_reasons)
         result.update(observation=observation, confirmation=confirmation)
         result["reasons"].extend(reasons)
         try:

@@ -6,6 +6,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from . import Unknown, loads
 from .manifest import RUNTIME, digest, shape, uint
+from .outcomes import unknown_checks
 
 JSONL = {"transcript", "bindings", "log", "o_ledger"}
 COUNTERS = ("closed_events", "aborted_events", "unknown_outcome_events", "create_attempt",
@@ -128,10 +129,11 @@ def input_checks(manifest, values, raw):
     return reasons
 
 
-def observation_checks(manifest, values):
-    reasons = ["unknown_outcome_unproduced"]
+def observation_checks(manifest, values, producer_supported=False):
+    reasons = [] if producer_supported else ["unknown_outcome_unproduced"]
     summary = dict(snapshot_status="unavailable", dropped_events=None, sink_errors=None,
-                   open_placeholder_attempts=None, unknown_outcome_events=None, sequence_complete=False)
+                   open_placeholder_attempts=None, unknown_outcome_events=None,
+                   unknown_witnesses_distinct=None, sequence_complete=False)
     keys = {"status", "schema_version", "boot_id", "channel_id", "seq_high_water", "counters",
             "dropped_events", "sink_errors", "observer_unhealthy", "open_attempts",
             "open_attempts_complete", "first_confirmation", "confirmation_observed"}
@@ -187,4 +189,9 @@ def observation_checks(manifest, values):
         reasons.append("confirmation_boundary_unknown")
     else:
         confirmation["actual_confirmed_at_us"] = actual
+    if producer_supported and valid:
+        unknown, extra = unknown_checks(manifest, values)
+        reasons.extend(extra)
+        if healthy and complete and valid and not any(r != "unknown_outcome_present" and r != "unknown_outcome_conflict" for r in extra):
+            summary.update(unknown)
     return summary, confirmation, reasons

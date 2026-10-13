@@ -1,10 +1,18 @@
 # N1 oracle evidence
 
 The CLI reads the pinned manifest and captured inputs. It never repairs stores or sends
-Discord messages. Its shipped support table still declares unknown outcomes unproduced;
+Discord messages. Its shipped support table has no approved producer capabilities;
 that condition always prevents PASS. The hypothetical supported profile lives only in
-`tests/test_n1_canary_audit.py`, in a temporary CLI copy and a subprocess observation shim.
+test-created temporary CLI copies. They execute the same checks with a separate pinned table.
 There is no production support-table option or environment override.
+
+`producer_capabilities` approves an exact `build_commit` and `executable_sha256` pair,
+`event_schema: 2`, `unknown_outcome_produced: true` and `actual_confirmation_produced: true`.
+The captured process and executable must independently match that identity. Unknown events
+carry `source_id`, `witness_offset`, nullable `logical_turn_key` and `reason`; the common
+boot/channel/provider/seq fields still apply. Raw counter deltas must equal logged emissions.
+Distinct witnesses use boot/source/offset/reason/native ID, so rereads never create new turns.
+An unresolved witness in the canary interval survives Resume and keeps the verdict `[U]`.
 
 The native transcript, O init and ledger retain their independent native/store formats.
 Unknown ledger variants, malformed rows and incomplete results yield `[U]`. Existing init

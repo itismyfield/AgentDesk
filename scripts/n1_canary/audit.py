@@ -83,6 +83,9 @@ def effects(native, values, manifest, messages, observation, confirmation, failu
                 if delta:
                     counts["closed_events"] += 1
                     counts["aborted_events"] += int(row["outcome"] == "aborted")
+            elif event == "n1_outcome_unknown":
+                if observation.get("unknown_outcome_events") is None:
+                    reasons.append("unknown_observation_incomplete")
             elif event == "n1_synthetic_create":
                 require(row.get("phase") in {"attempt", "committed"} and text(row.get("site"))
                         and row.get("synthetic_kind") in {"watcher", "tui_direct", "rebind"}
