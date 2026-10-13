@@ -535,6 +535,7 @@ mod tests {
     fn session_fixture(updated_at: Option<&str>, attached: bool) -> SessionEnrichment {
         let inflight = updated_at.map(inflight_fixture);
         SessionEnrichment {
+            tail_observation: Default::default(),
             inflight,
             attached,
             watcher_attached: attached,
@@ -574,6 +575,7 @@ mod tests {
 
     fn watcher_fixture() -> WatcherStateSnapshot {
         WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: ProviderKind::Codex.as_str().to_string(),
             attached: true,
             tmux_session: Some("AgentDesk-codex-fixture".to_string()),
@@ -1363,6 +1365,7 @@ mod tests {
     #[test]
     fn health_detail_mailbox_serializes_unavailable_shadow_verdict_as_null() {
         let mailbox = MailboxHealthSnapshot {
+            tail_observation: Default::default(),
             provider: ProviderKind::Codex.as_str().to_string(),
             channel_id: 42,
             has_cancel_token: false,

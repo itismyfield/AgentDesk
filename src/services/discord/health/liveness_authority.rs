@@ -582,6 +582,7 @@ mod tests {
         };
 
         WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: key.provider.clone(),
             attached: true,
             tmux_session: key.tmux_session_name.clone(),

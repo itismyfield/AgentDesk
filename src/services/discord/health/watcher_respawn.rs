@@ -970,6 +970,7 @@ mod tests {
         mailbox_active: Option<u64>,
     ) -> WatcherStateSnapshot {
         WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: ProviderKind::Codex.as_str().to_string(),
             attached: false,
             tmux_session: tmux_session.map(str::to_string),

@@ -60,6 +60,8 @@ mod session_enrichment;
 mod snapshot;
 mod stall_liveness;
 mod stall_verdict;
+pub(in crate::services::discord) mod tail_evidence;
+pub(in crate::services::discord) use tail_evidence::TailObservation;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
 mod transcript_binding_stall;
 // Dormant until the input supervisor publishes views for channels it retires.

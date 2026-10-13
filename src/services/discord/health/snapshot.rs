@@ -27,15 +27,13 @@ use super::redaction;
 use super::session_enrichment::{self, ExecutorWitness, HealthSnapshotOptions, SessionEnrichment};
 use super::stall_verdict;
 use super::transcript_binding_stall::{self, resolve_bound_selector};
-use super::unpaired_active_token;
-use super::unpaired_active_token::{RelayHealthBuildInput, build_relay_health_snapshot};
+use super::unpaired_active_token::{self, RelayHealthBuildInput, build_relay_health_snapshot};
 use super::{BotTokenReloadScopes, HealthRegistry, bot_token_reload_scopes};
-use crate::services::discord;
-use crate::services::discord::SharedData;
 use crate::services::discord::relay_health::{
     DurableFrontierObservation, FrontierProvenanceReport, RelayActiveTurn, RelayHealthSnapshot,
     RelayStallClassifier, RelayStallState,
 };
+use crate::services::discord::{self, SharedData};
 use crate::services::provider::ProviderKind;
 #[cfg(unix)]
 use relay_probe::{
@@ -83,6 +81,8 @@ pub struct WatcherStateSnapshot {
     /// Bytes present in the capture file but not yet confirmed as relayed.
     /// `null` when `last_capture_offset` is unknown.
     pub unread_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "super::TailObservation::is_unmeasured")]
+    pub(in crate::services::discord) tail_observation: super::TailObservation,
     /// True when a live tmux-backed turn appears detached/cross-owned or its
     /// capture file diverges from relay telemetry after
     /// `WATCHER_STATE_DESYNC_STALE_MS`. Never-relayed turns use the inflight
@@ -729,6 +729,7 @@ async fn watcher_state_snapshot_for_shared(
         last_capture_offset: session.last_capture_offset,
         capture_coordinate: session.capture_coordinate.clone(),
         unread_bytes: session.unread_bytes,
+        tail_observation: session.tail_observation,
         desynced,
         reconnect_count: session.reconnect_count,
         inflight_started_at: session.inflight_started_at(),
@@ -1029,6 +1030,7 @@ pub(super) async fn build_health_snapshot_with_options(
                     reachability,
                     frontier_provenance,
                     relay_stall_state,
+                    tail_observation: session.tail_observation,
                     relay_health,
                 });
             }

@@ -849,6 +849,7 @@ mod tests {
     ) -> WatcherStateSnapshot {
         let unread = capture_offset.saturating_sub(relay_offset);
         WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: ProviderKind::Codex.as_str().to_string(),
             attached: true,
             tmux_session: Some(tmux_session.to_string()),

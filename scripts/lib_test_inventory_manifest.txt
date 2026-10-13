@@ -4089,6 +4089,9 @@ services::discord::health::stall_verdict::tests::raw_hung_producer_with_fresh_wa
 services::discord::health::stall_verdict::tests::truth_table_covers_frontier_desync_dead_and_desync_only
 services::discord::health::stall_verdict::tests::unknown_watcher_ownership_skips_phantom_rule_and_records_reason
 services::discord::health::stall_verdict::tests::verdict_serializes_for_health_detail
+services::discord::health::tail_evidence::tests::dormant_carriers_preserve_real_snapshot_and_manual_apply
+services::discord::health::tail_evidence::tests::measured_wire_round_trip_cannot_restore_authority
+services::discord::health::tail_evidence::tests::old_default_missing_and_invalid_grades_are_unmeasured
 services::discord::health::tests::registered_token_hashes_are_the_providers_own_in_any_role
 services::discord::health::tests::reload_bot_tokens_keeps_previous_client_when_credential_is_missing
 services::discord::health::tests::reload_bot_tokens_reports_success_and_invalidates_user_id_cache
