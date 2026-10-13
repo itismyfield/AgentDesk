@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,10 +46,6 @@ class SourceContractTests(unittest.TestCase):
                 "remove_locked_helper": 2,
             },
         )
-        comment = self.payload["categories"]["registry_remove"]["comment"]
-        self.assertIn("8/3/3/2 (total 16)", comment)
-        self.assertIn("10/2/3/2=17", comment)
-        self.assertIn("health/recovery.rs remove_locked", comment)
         watcher_backstop = ROOT / "src/services/discord/turn_finalizer/watcher_backstop.rs"
         production = ratchet.RUST_LEXER._production_text(watcher_backstop)
         self.assertNotRegex(production, ratchet.REGISTRY_PATTERNS["direct_channel_remove"])
@@ -69,8 +66,6 @@ class SourceContractTests(unittest.TestCase):
         self.assertNotIn(ratchet.REGISTRY_OWNER, self.actual["identity_fence_bind"])
         owner_production = ratchet.RUST_LEXER._production_text(ROOT / ratchet.REGISTRY_OWNER)
         self.assertRegex(owner_production, ratchet.IDENTITY_FENCE_PATTERN)
-        comment = self.payload["categories"]["identity_fence_bind"]["comment"]
-        self.assertIn("does not fence those", comment)
 
     def test_every_fenced_site_binds_both_s4_conjuncts(self) -> None:
         # #5071 relay-tail S4 r2 (P1-2 ①): the delivery conjunct rides on a
@@ -89,12 +84,22 @@ class SourceContractTests(unittest.TestCase):
         owner_production = ratchet.RUST_LEXER._production_text(ROOT / ratchet.REGISTRY_OWNER)
         self.assertRegex(owner_production, ratchet.DELIVERY_FENCE_PATTERN)
         self.assertEqual(ratchet.pairing_errors(self.actual), [])
-        comment = self.payload["categories"]["delivery_fence_bind"]["comment"]
-        self.assertIn("the SAME per-file set", comment)
 
     def test_ci_wiring_runs_scanner(self) -> None:
         wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("check_destructive_call_site_ratchet.py --check", wiring)
+
+    def test_baseline_prose_is_advisory(self) -> None:
+        original = self.payload
+        self.payload = copy.deepcopy(original)
+        for category in self.payload["categories"].values():
+            category["comment"] = "Updated explanation."
+        try:
+            self.test_registry_remeasurement_and_p2_1_classification_are_explicit()
+            self.test_fenced_binders_are_exactly_the_two_production_call_sites()
+            self.test_every_fenced_site_binds_both_s4_conjuncts()
+        finally:
+            self.payload = original
 
 
 class RatchetDiscriminationTests(unittest.TestCase):

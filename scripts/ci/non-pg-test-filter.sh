@@ -99,6 +99,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::native::herdr_tests
   --skip services::discord::commands::control::native::tests
   --skip services::discord::commands::restart::host_guard_tests
+  --skip services::discord::commands::text_commands::clear_refusal_reply_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
   --skip services::discord::health::recovery::stall_alert::tests
@@ -705,6 +706,10 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::active_q_reinsert_and_real_kick_leave_one_provider_input_and_answer
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::autoheal::periodic_orphan_token_refusal_preserves_q_then_cancel_backstop_runs_it_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::bang_stop_with_dead_bridge_parks_then_owner_runs_q_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_legacy_result_without_native_turn_runs_q_once
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_stale_terminal_preserves_same_message_new_nonce
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_stale_terminal_preserves_successor
+  services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_terminal_releases_before_panel_and_runs_q_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::live_foreign_row_survives_sweep_and_backstop
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::reclaimable_foreign_row_is_swept_then_backstop_runs_q_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::released_anchor_preserves_prior_tail_and_runs_q_exactly_once
@@ -988,6 +993,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::commands::control::native::herdr_tests
   services::discord::commands::control::native::tests
   services::discord::commands::restart::host_guard_tests
+  services::discord::commands::text_commands::clear_refusal_reply_tests
   services::discord::commands::tui_passthrough::host_guard_tests
   services::discord::health::recovery::live_agent_recovery::host_guard_tests
   services::discord::health::recovery::stall_alert::tests
