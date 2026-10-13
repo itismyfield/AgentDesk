@@ -175,6 +175,8 @@ mod restart_report_tests {
 
     #[test]
     fn restart_report_alive_watcher_uses_rebased_output_path_and_offset() {
+        // Session paths use the process-wide root shared with parallel redrive fixtures.
+        let _root = crate::config::TestRuntimeRootGuard::new();
         let temp = tempfile::TempDir::new().expect("tempdir");
         let transcript_path = temp.path().join("transcript.jsonl");
         std::fs::write(&transcript_path, vec![b't'; 512_000]).expect("write transcript");
