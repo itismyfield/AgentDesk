@@ -658,9 +658,8 @@ fn transition_cleanup_past_audit_settles_only_its_own_job_on_an_unchanged_snapsh
 
 #[cfg(unix)]
 mod operations_shape {
-    //! The e2e channel as measured: 59 unproven hops of one pane (startup 55, resume 2,
-    //! unknown 2, no hook), every file present at its end, no reader FD, a witness for each, and
-    //! the oldest old source an init source that never wrote a cursor file.
+    //! The measured e2e channel: 59 unproven hops of one pane, all files at their end, no reader FD,
+    //! a witness each, and the oldest an init source without a cursor file.
 
     use sha2::{Digest, Sha256};
 
