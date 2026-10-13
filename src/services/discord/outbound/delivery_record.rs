@@ -1822,23 +1822,8 @@ pub(in crate::services::discord) fn range_committed_after_edit_failure(
     )
 }
 
-/// #3593 JSONL-space monotonic dedup predicate (pure, testable). `range_end` is the
-/// END of the consumed JSONL byte range a watcher pass is about to relay;
-/// `committed` is the already-delivered committed JSONL offset (the relay coord's
-/// `confirmed_end_offset`, via [`effective_committed_offset`] — which also fuses the
-/// current-generation durable frontier when read-authority is enabled). Returns `true` iff this range was ALREADY
-/// delivered (`range_end <= committed`), i.e. a re-send would re-post text already
-/// relayed (the #3593 synthetic-resume duplicate, where range_end=422855 sits at or
-/// below committed=443154). MUST be the SAME JSONL byte-offset space on both sides
-/// (never `response_sent_offset`, which is assistant-text-byte space — mixing them
-/// is the category error warned about at the watcher resend site).
-///
-/// `range_end == 0` (empty/zero range) and `committed == 0` (e.g. just reset by a
-/// generation change / pane reset, so nothing is known-delivered) both return
-/// `false` — suppress NOTHING in those cases, so a genuinely-new answer is never
-/// dropped (message-loss prevention dominates duplicate-suppression). Mirror of the
-/// `already_relayed` decision both relay consumers make, with an explicit non-zero
-/// `range_end` guard so an empty range can never be treated as "already committed".
+/// A nonzero JSONL range is already delivered when its end is at or below the committed offset.
+/// Both offsets must use JSONL bytes, never assistant-text bytes; either zero suppresses nothing.
 pub(in crate::services::discord) fn range_already_committed(
     range_end: u64,
     committed: u64,
@@ -2042,6 +2027,21 @@ pub(in crate::services::discord) fn recent_delivered_content_matches(
     tmux_session_name: &str,
     body: &str,
 ) -> bool {
+    recent_delivered_content_matches_for_generation(
+        provider,
+        channel,
+        current_generation_mtime_ns(tmux_session_name),
+        body,
+    )
+}
+
+/// Match a retained content witness using the generation captured by its source.
+pub(in crate::services::discord) fn recent_delivered_content_matches_for_generation(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    generation_mtime_ns: i64,
+    body: &str,
+) -> bool {
     let Some(path) = delivery_record_path(provider, channel.get()) else {
         return false;
     };
@@ -2049,7 +2049,7 @@ pub(in crate::services::discord) fn recent_delivered_content_matches(
         &path,
         channel.get(),
         body,
-        current_generation_mtime_ns(tmux_session_name),
+        generation_mtime_ns,
         now_epoch_ms(),
     )
 }
