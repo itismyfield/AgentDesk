@@ -545,6 +545,27 @@ class HerdrTextClear(unittest.TestCase):
                 if reason:
                     self.assertIn(reason, result["reason"])
 
+    def test_clear_completion_shares_the_refusal_boundary(self):
+        # This clear is message 150; only a bot reply after it in this channel counts, either way.
+        missing = f"acknowledgement missing: {CLEARED}"
+        for label, rows, expected, reason in (
+                ("older completion only", [bot(149, CLEARED)], "fail", missing),
+                ("new completion", [bot(151, CLEARED)], "pass", None),
+                ("older and new completion", [bot(149, CLEARED), bot(151, CLEARED)], "pass", None),
+                ("this clear refused", [bot(149, CLEARED), bot(152, REFUSED)], "fail", "refused by the server: " + REFUSED),
+                ("completion in another channel", [bot(151, CLEARED, channel_id="99")], "fail", missing),
+                ("completion typed by a user", [{**bot(151, CLEARED), "author": {"id": "8", "bot": False}}], "fail", missing),
+                ("completion quoted", [bot(151, f"> {CLEARED}")], "fail", missing)):
+            with self.subTest(label=label):
+                self.client.reset_mock()
+                self.client.send_control.return_value = {"id": "100"}
+                result = self.run_clear([bot(140, "READY"), *rows], before=([bot(140, "READY")],),
+                                        sent={"ok": True, "message_id": "150"})
+                self.assertEqual(result["status"], expected, (label, result))
+                if reason:
+                    self.assertIn(reason, result["reason"])
+                    self.assertEqual(self.client.send.call_count, 1)
+
     def test_refusal_prefixes_match_the_server_wording(self):
         # The server answers a refused text !clear with these error strings; keep them in step.
         root = Path(__file__).resolve().parents[3] / "src/services/discord/commands"

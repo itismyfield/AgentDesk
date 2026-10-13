@@ -200,14 +200,16 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
         raise
 
 
+def clear_reply(row, prefixes, *, after, channel):
+    """A bot message in this channel, after the !clear message `after`, starting with one of `prefixes`."""
+    content = row.get("content") or ""
+    return bool((row.get("author") or {}).get("bot") and str(row.get("id", "")).isdigit() and int(row["id"]) > after
+                and str(row.get("channel_id", channel)) == str(channel) and content.startswith(prefixes))
+
+
 def clear_refusal(rows, *, after, channel):
-    """The bot reply refusing the pending text !clear, posted in this channel after it was sent."""
-    for row in rows:
-        content = row.get("content") or ""
-        if ((row.get("author") or {}).get("bot") and str(row.get("id", "")).isdigit() and int(row["id"]) > after
-                and str(row.get("channel_id", channel)) == str(channel) and content.startswith(CLEAR_REFUSAL_PREFIXES)):
-            return content
-    return None
+    """The bot reply refusing the pending text !clear; refusal and completion share one boundary."""
+    return next((r["content"] for r in rows if clear_reply(r, CLEAR_REFUSAL_PREFIXES, after=after, channel=channel)), None)
 
 
 def expected_cancel_refusal(error):
@@ -470,7 +472,8 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                             f"text !clear send returned no message id, so a refusal reply cannot be attributed: {refusal}")
                     if refusal:
                         raise assertions.AssertionError(f"text !clear refused by the server: {refusal}")
-                    if any(marker in r.get("content", "") for r in rows):
+                    if any(clear_reply(r, marker, after=clear_after, channel=args.channel_id) if clear_after is not None
+                           else marker in r.get("content", "") for r in rows):
                         clear_after = None
                         break
                     if time.monotonic() >= deadline:
