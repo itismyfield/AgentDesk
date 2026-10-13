@@ -1631,7 +1631,7 @@ fn dispatch_codex_tui_rollout_tail(
             rollout_modified_since,
             sender,
             cancel_token,
-            || tmux_live_pane_bool(tmux_session_name),
+            || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
             tmux_session_name,
             Some(prompt),
         )
@@ -1641,7 +1641,7 @@ fn dispatch_codex_tui_rollout_tail(
             rollout_modified_since,
             sender,
             cancel_token,
-            || tmux_live_pane_bool(tmux_session_name),
+            || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
             tmux_session_name,
             Some(prompt),
         )

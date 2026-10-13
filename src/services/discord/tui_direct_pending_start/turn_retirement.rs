@@ -205,14 +205,19 @@ pub(in crate::services::discord) fn confirm_turn_channels(
         }
     };
     let confirmed = crate::services::tui_o::turn_mode::confirm_selected(config, owned, retire);
-    for &channel in &confirmed {
+    for &(channel, actual) in &confirmed {
         let before = boundaries
             .iter()
             .find(|(c, _)| *c == channel)
             .and_then(|(_, b)| *b);
-        crate::services::tui_o::n1_observation::mode_confirmed(provider.as_str(), channel, before);
+        crate::services::tui_o::n1_observation::mode_confirmed(
+            provider.as_str(),
+            channel,
+            before,
+            actual,
+        );
     }
-    confirmed
+    confirmed.into_iter().map(|(channel, _)| channel).collect()
 }
 
 /// Boot confirmation over the channels whose O adoption this provider's boot policy committed.

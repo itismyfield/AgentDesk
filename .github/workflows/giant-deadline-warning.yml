@@ -1,0 +1,170 @@
+name: Giant deadline warning
+
+# Read-only daily report of registered giant-file deadlines and metadata freshness.
+# Independent of CI gates and triage subscribers so a red gate cannot suppress it.
+on:
+  schedule:
+    - cron: "17 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    name: Giant deadline report
+    if: github.repository == 'itismyfield/AgentDesk' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Bootstrap run directory
+        id: bootstrap
+        run: |
+          out="$RUNNER_TEMP/giant-deadlines/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
+          if [ -e "$out" ]; then
+            echo "run directory already exists; refusing to reuse an earlier report" >&2
+            exit 1
+          fi
+          mkdir -p "$out"
+          {
+            echo "event_sha=$GITHUB_SHA"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "event_name=$GITHUB_EVENT_NAME"
+            echo "source_sha=unverified"
+          } > "$out/run.txt"
+
+      - name: Check out event commit
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        id: setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify checkout provenance
+        id: provenance
+        run: |
+          out="$RUNNER_TEMP/giant-deadlines/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "checkout HEAD $head does not match event SHA $GITHUB_SHA" >&2
+            exit 1
+          fi
+          git diff --quiet HEAD -- scripts/giant_file_registry.toml scripts/giant_file_issue_metadata.json
+          echo "source_sha=$head" >> "$out/run.txt"
+
+      - name: Generate deadline report
+        id: report
+        run: |
+          out="$RUNNER_TEMP/giant-deadlines/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
+          # Output stays in the run directory: input text never reaches the log as a workflow command.
+          set +e
+          python3 scripts/report_giant_deadlines.py --root "$GITHUB_WORKSPACE" --out "$out" \
+            --expect-sha "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --event-name "$GITHUB_EVENT_NAME" > "$out/reporter.log" 2>&1
+          rc=$?
+          set -e
+          echo "reporter_exit=$rc" >> "$out/run.txt"
+          exit "$rc"
+
+      - name: Verify inputs stayed read-only
+        id: postcheck
+        if: always() && steps.checkout.outcome == 'success'
+        run: |
+          out="$RUNNER_TEMP/giant-deadlines/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
+          python3 scripts/report_giant_deadlines.py --verify --root "$GITHUB_WORKSPACE" --out "$out" \
+            --expect-sha "$GITHUB_SHA"
+
+      - name: Record execution diagnostics
+        id: execution
+        if: always()
+        env:
+          BOOTSTRAP_OUTCOME: ${{ steps.bootstrap.outcome }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          PROVENANCE_OUTCOME: ${{ steps.provenance.outcome }}
+          REPORT_OUTCOME: ${{ steps.report.outcome }}
+          POSTCHECK_OUTCOME: ${{ steps.postcheck.outcome }}
+        run: |
+          out="$RUNNER_TEMP/giant-deadlines/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
+          # Without a successful bootstrap the run directory may hold an earlier report; publish diagnostics apart.
+          if [ "$BOOTSTRAP_OUTCOME" != success ]; then
+            out="$(mktemp -d "$RUNNER_TEMP/giant-deadlines-unowned.XXXXXX")"
+          fi
+          mkdir -p "$out"
+          echo "dir=$out" >> "$GITHUB_OUTPUT"
+          generated=no
+          if [ -f "$out/report.json" ]; then generated=yes; fi
+          {
+            echo "bootstrap=$BOOTSTRAP_OUTCOME"
+            echo "checkout=$CHECKOUT_OUTCOME"
+            echo "setup=$SETUP_OUTCOME"
+            echo "provenance=$PROVENANCE_OUTCOME"
+            echo "report=$REPORT_OUTCOME"
+            echo "postcheck=$POSTCHECK_OUTCOME"
+            echo "report_generated=$generated"
+          } > "$out/execution.txt"
+
+      - name: Publish summary
+        id: summary
+        if: always()
+        env:
+          RUN_DIR: ${{ steps.execution.outputs.dir }}
+        run: |
+          out="$RUN_DIR"
+          if [ -n "$out" ] && [ -f "$out/report.json" ] && [ -f "$out/report.md" ]; then
+            cat "$out/report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "# Giant deadline warning"
+              echo
+              echo "**Report not generated.** This run has no deadline or freshness result."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          {
+            echo
+            echo "## Execution"
+            echo
+            echo '```text'
+            cat "$out/execution.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report artifact
+        id: upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: giant-deadlines-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.execution.outputs.dir }}
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Record retention and receipt
+        id: retention
+        if: always()
+        env:
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: |
+          {
+            echo
+            echo "## Retention and receipt"
+            echo
+            if [ "$UPLOAD_OUTCOME" = success ] && [ -n "$ARTIFACT_ID" ]; then
+              echo "- Artifact retention: uploaded (artifact id $ARTIFACT_ID)"
+            else
+              echo "- Artifact retention: NOT confirmed (upload outcome ${UPLOAD_OUTCOME:-unknown})"
+            fi
+            echo "- Consumer receipt: UNVERIFIED (this workflow collects no receipt evidence)"
+          } >> "$GITHUB_STEP_SUMMARY"

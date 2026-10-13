@@ -9,7 +9,7 @@ use tokio::sync::Notify;
 pub use super::guarded_outcome::{send_followup_prompt_or_idle_transcript, send_fresh_prompt};
 use super::{
     guarded_outcome::{self, SubmissionError},
-    host_input,
+    host_input::{self, guarded_submission as guarded},
 };
 
 mod literal_chunks;
@@ -435,15 +435,14 @@ pub(crate) fn send_prompt_with_readiness(
     readiness: PromptReadinessKind,
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), SubmissionError> {
-    guarded_outcome::held_result(session_name)?;
+    let selected = guarded::capture_request(session_name)?;
     let actions = plan_prompt_submit(prompt)?;
     // Readiness can wait for a busy prior turn, but it must not hold the narrow
     // composer lock while doing so. Revalidate only after acquiring that lock so
     // `/compact` and a normal follow-up cannot interleave their key mutations.
     wait_for_prompt_ready(session_name, readiness, cancel_token)
-        .map_err(|error| guarded_outcome::readiness_error(session_name, error))?;
-    if let Some(run) = host_input::guarded_submission::selected(session_name, prompt, cancel_token)
-    {
+        .map_err(|error| guarded::readiness_error(session_name, error, &selected))?;
+    if let Some(run) = guarded::selected(session_name, prompt, cancel_token, selected.clone()) {
         return SubmissionError::from_run(run);
     }
 
@@ -479,7 +478,7 @@ pub(crate) fn send_prompt_with_readiness(
             }
         }
     })
-    .map_err(|error| guarded_outcome::readiness_error(session_name, error))
+    .map_err(|error| guarded::readiness_error(session_name, error, &selected))
 }
 
 /// Submit `/compact` into a busy Claude pane without the generic readiness wait.
@@ -633,7 +632,7 @@ pub(crate) fn steering_snapshot_decision(
 }
 
 pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
-    if let Some(run) = host_input::guarded_submission::steering_selected(session_name) {
+    if let Some(run) = guarded::steering_selected(session_name, prompt) {
         return SubmissionError::from_run(run).map_err(SubmissionError::into_legacy);
     }
     let actions = plan_prompt_submit(prompt)?;
@@ -1192,7 +1191,7 @@ pub(crate) fn send_followup_prompt_or_idle_transcript_owned(
     cancel_token: Option<&CancelToken>,
     transcript_path: &std::path::Path,
 ) -> Result<(), SubmissionError> {
-    guarded_outcome::held_result(session_name)?;
+    let selected = guarded::capture_request(session_name)?;
     let actions = plan_prompt_submit(prompt)?;
     // The potentially long warm-follow-up readiness wait must not hold the
     // narrow composer lock: a busy-pane `/compact` still needs to steer while
@@ -1205,9 +1204,8 @@ pub(crate) fn send_followup_prompt_or_idle_transcript_owned(
         cancel_token,
         transcript_path,
     )
-    .map_err(|error| guarded_outcome::readiness_error(session_name, error))?;
-    if let Some(run) = host_input::guarded_submission::selected(session_name, prompt, cancel_token)
-    {
+    .map_err(|error| guarded::readiness_error(session_name, error, &selected))?;
+    if let Some(run) = guarded::selected(session_name, prompt, cancel_token, selected.clone()) {
         return SubmissionError::from_run(run);
     }
 
@@ -1241,7 +1239,7 @@ pub(crate) fn send_followup_prompt_or_idle_transcript_owned(
             }
         }
     })
-    .map_err(|error| guarded_outcome::readiness_error(session_name, error))
+    .map_err(|error| guarded::readiness_error(session_name, error, &selected))
 }
 
 fn wait_for_prompt_ready_inner(

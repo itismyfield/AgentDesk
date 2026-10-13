@@ -107,6 +107,10 @@ pub use runtime_bootstrap::boot_retirement;
 pub(in crate::services::discord) mod semantic_boundaries;
 mod skills_scan;
 mod turn_presence;
+pub(crate) use turn_presence::entrypoints::{
+    Lease as PresenceLease, withdraw_target as presence_withdraw_target,
+    withdraw_unmounted as presence_withdraw_unmounted,
+};
 #[cfg(all(test, unix))]
 pub(crate) use turn_presence::lifecycle::Runtime as PresenceRuntime;
 mod turn_teardown_clearance;
