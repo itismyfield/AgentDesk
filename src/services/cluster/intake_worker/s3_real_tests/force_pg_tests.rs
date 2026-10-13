@@ -238,7 +238,9 @@ async fn th6_force_live_target_then_reboot_orphan_holds_pg() {
     signal(scene.dir(), "force_done");
     target.finish(Duration::from_secs(120)).await;
     let samples = get(scene.dir(), &format!("samples.{GW}")).unwrap();
-    eprintln!("[s3] live target {pid} shut over {samples} samples after the force");
+    eprintln!(
+        "[s3] live target {pid} shut over {samples} samples, from before it was alive to its end"
+    );
     let gw = Node::spawn(&scene, "th9_consumer", GW);
     let mini = Node::spawn(&scene, "th9_consumer", MINI);
     gw.finish(Duration::from_secs(120)).await;
