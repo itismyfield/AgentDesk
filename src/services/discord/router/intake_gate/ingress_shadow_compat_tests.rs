@@ -457,13 +457,13 @@ async fn record_error(error: poise::FrameworkError<'_, Data, crate::services::di
 }
 
 /// One run inside a child process, given the shared state its test built.
-type Runner = fn(Case, Run, PathBuf) -> futures::future::BoxFuture<'static, Outcome>;
+type Runner = fn(Case, Run, PathBuf) -> futures::future::LocalBoxFuture<'static, Outcome>;
 
 fn without_storage(
     case: Case,
     run: Run,
     root: PathBuf,
-) -> futures::future::BoxFuture<'static, Outcome> {
+) -> futures::future::LocalBoxFuture<'static, Outcome> {
     Box::pin(async move {
         let shared = crate::services::discord::make_shared_data_for_tests();
         invoke(case, run, &root, shared).await
@@ -475,7 +475,7 @@ fn with_pending_dm_reply(
     case: Case,
     run: Run,
     root: PathBuf,
-) -> futures::future::BoxFuture<'static, Outcome> {
+) -> futures::future::LocalBoxFuture<'static, Outcome> {
     Box::pin(async move {
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
@@ -694,12 +694,20 @@ fn spawn_run(test: &str, case: Case, run: Run) -> Outcome {
     std::fs::create_dir_all(&root).unwrap();
     let out = root.with_extension("outcome.json");
     let _ = std::fs::remove_file(&out);
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", &qualified(test), "--nocapture"])
-        .env(RUN_ENV, serde_json::to_string(&(case, run)).unwrap())
-        .env(OUT_ENV, &out)
-        .output()
-        .unwrap();
+    let child = {
+        // Spawned under the env lock, so no other test's temporary variables reach the child.
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &qualified(test), "--nocapture"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env(RUN_ENV, serde_json::to_string(&(case, run)).unwrap())
+            .env(OUT_ENV, &out)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
