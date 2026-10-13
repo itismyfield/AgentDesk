@@ -12760,6 +12760,11 @@ services::tui_o::writer::tests::actor::host_start::rotation_unsettled::clears_re
 services::tui_o::writer::tests::actor::host_start::rotation_unsettled::consecutive_pending_clears_stay_settled_until_the_latest_resolves
 services::tui_o::writer::tests::actor::host_start::rotation_unsettled::resume::a_resumed_actor_publishes_its_unretired_predecessor_and_never_an_unread_zero
 services::tui_o::writer::tests::actor::host_start::rotation_unsettled::the_readiness_map_reports_a_running_actors_projection_only
+services::tui_o::writer::tests::actor::host_start::s2a::s1w_actual_warm_missing_endpoint_refuses_before_capture
+services::tui_o::writer::tests::actor::host_start::s2a::s1w_actual_warm_rechecks_before_enter_without_claiming_no_attempt
+services::tui_o::writer::tests::actor::host_start::s2a::s1w_actual_warm_rechecks_eligibility_after_prepare_ack
+services::tui_o::writer::tests::actor::host_start::s2a::s1w_actual_warm_support_refusal_is_not_an_empty_fixture_pass
+services::tui_o::writer::tests::actor::host_start::s2a::s1w_pinned_verified_warm_cannot_skip_checks_after_launch_mode_rollback
 services::tui_o::writer::tests::actor::host_start::s2a::s2a_same_claim_restart_rejects_delayed_close_reply_before_issue_and_attach
 services::tui_o::writer::tests::actor::host_start::s2a::s2b1a_dropping_command_sender_does_not_stop_hosted_actor
 services::tui_o::writer::tests::actor::host_start::s2a::s2b1a_same_claim_restart_rejects_delayed_typed_prepare_before_submit

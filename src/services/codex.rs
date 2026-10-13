@@ -21,7 +21,9 @@ mod tui_session_launch;
 #[cfg(unix)]
 pub(crate) use tui_session_launch::emit_codex_tui_post_tail_handoff;
 #[cfg(unix)]
-pub(crate) use tui_session_launch::{CodexTuiLaunchRefused, tui_preflight};
+pub(crate) use tui_session_launch::{
+    CodexTuiLaunchRefused, pinned_verified_warm_preflight, tui_preflight,
+};
 #[cfg(unix)]
 use tui_session_launch::{prepare_codex_tui_incarnation, publish_codex_tui_launch_script};
 
