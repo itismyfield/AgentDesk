@@ -319,10 +319,30 @@ fn busy_channel(fixture: &Fixture, channel: u64) -> (TestConfirmation, InjectedL
     (confirmed, host)
 }
 
-// The production spawn installs no runtime: its direct send still runs on its own client and a
-// channel whose mailbox holds a token still gets no typing from it.
+fn queued(message: u64) -> crate::services::turn_orchestrator::Intervention {
+    crate::services::turn_orchestrator::Intervention {
+        author_id: UserId::new(4_162_001),
+        author_is_bot: false,
+        message_id: MessageId::new(message),
+        queued_generation: 0,
+        source_message_ids: vec![MessageId::new(message)],
+        source_message_queued_generations: Vec::new(),
+        source_text_segments: Vec::new(),
+        text: "queued".to_string(),
+        mode: crate::services::turn_orchestrator::InterventionMode::Soft,
+        created_at: std::time::Instant::now(),
+        reply_context: None,
+        has_reply_boundary: false,
+        merge_consecutive: false,
+        pending_uploads: Vec::new(),
+        voice_announcement: None,
+    }
+}
+
+// The production spawn installs no runtime: its direct send still runs on its own client, a channel
+// whose mailbox holds a token gets no typing from it, and an idle queue is still woken.
 #[tokio::test(flavor = "current_thread")]
-async fn b2b3_production_spawn_installs_nothing_and_keeps_direct_typing_and_the_mailbox_hold() {
+async fn b2b3_production_spawn_installs_nothing_and_keeps_direct_typing_the_hold_and_the_wake() {
     let _serial = SERIAL.lock().await;
     let fixture = busy_fixture().await;
     let channel = fixture.identity.channel;
@@ -348,8 +368,19 @@ async fn b2b3_production_spawn_installs_nothing_and_keeps_direct_typing_and_the_
         )
         .await
     );
-    register(&ProviderKind::Claude, &[held]);
-    spawn(fixture.shared.clone(), ProviderKind::Claude);
+    let idle = NEXT.fetch_add(1, Ordering::SeqCst);
+    let _idle = TestConfirmation::new(idle);
+    let enqueue = crate::services::discord::mailbox_enqueue_intervention;
+    let provider = ProviderKind::Claude;
+    enqueue(
+        &fixture.shared,
+        &provider,
+        ChannelId::new(idle),
+        queued(idle),
+    )
+    .await;
+    register(&provider, &[held, idle]);
+    spawn(fixture.shared.clone(), provider);
     let direct = || status(channel).is_some_and(|s| s["typing"]["last_error"] == "no http");
     assert!(
         within(5000, direct).await,
@@ -360,6 +391,8 @@ async fn b2b3_production_spawn_installs_nothing_and_keeps_direct_typing_and_the_
         0,
         "production installs nothing"
     );
+    let woken = || status(idle).is_some_and(|s| s["kickoffs_total"] == 1);
+    assert!(within(5000, woken).await, "the idle queue was woken");
     let held = status(held).unwrap();
     assert_eq!(held["activity"], "busy");
     assert!(
