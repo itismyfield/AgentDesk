@@ -78,6 +78,8 @@ fn wait_for_tmux_output(
 }
 
 mod availability;
+#[cfg(all(test, unix))]
+pub(crate) mod session_inventory;
 mod sized;
 
 pub use availability::{

@@ -844,3 +844,5 @@ pub(in crate::services::discord) mod tests;
 
 #[cfg(all(test, unix))]
 mod tail;
+#[cfg(all(test, unix))]
+mod unbound;

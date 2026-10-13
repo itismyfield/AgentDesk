@@ -695,6 +695,10 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/repost/pg_statements_tests.rs",
         "src/services/discord/turn_presence/activity/tail_tests.rs",
         "src/services/tui_o/shadow/capture/observation/observation_tests.rs",
+        "src/services/discord/turn_presence/activity/unbound/unit_tests.rs",
+        "src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs",
+        "src/services/platform/tmux/session_inventory/unit_tests.rs",
+        "src/services/platform/tmux/session_inventory/real_tests.rs",
     }
 )
 
@@ -780,7 +784,9 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/health/recovery/self_watchdog/policy/tests/mod.rs",
         "src/services/discord/health/recovery/self_watchdog/tests/mod.rs",
         "src/services/hang_forensics/tests/mod.rs",
+        "src/services/discord/turn_presence/activity/unbound.rs",
         "src/services/discord/turn_presence/activity/tail.rs",
+        "src/services/platform/tmux/session_inventory.rs",
     }
 )
 

@@ -1,0 +1,422 @@
+//! Dormant, read-only Unbound evidence; no result here grants a start capability.
+use std::collections::BTreeMap;
+
+use crate::config::{Config, session_hosts::BootSessionHosts};
+use crate::db::dispatched_sessions::hosted_execution::{
+    HostedLookup, HostedOwner, HostedRecord, HostedState,
+};
+use crate::services::discord::{
+    adk_session,
+    inflight::{InflightTurnState, marker_witness, with_inflight_row},
+    settings::RegisteredChannelBinding,
+};
+use crate::services::platform::tmux::session_inventory::Inventory;
+use crate::services::provider::ProviderKind;
+use crate::services::provider_hosting::channel_effective_tui_request;
+use crate::services::session_host::{
+    HostKind, HostWitness, SessionTargetEvidence, SessionTargetEvidenceSource, SessionTargetInput,
+    TargetHost, resolve_session_target, session_record_witness,
+};
+use crate::services::tmux_common::host_marker::HostKindMarker;
+use crate::services::tui_o::{
+    shadow::ShadowProvider,
+    writer::binding::{BindingEvent, BindingEvents, BindingRecord},
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Origin {
+    Core,
+    Fallback,
+    Binding(u64),
+    Inflight,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Candidate {
+    name: String,
+    origin: Origin,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Candidates {
+    channel: u64,
+    provider: ProviderKind,
+    current: Option<String>,
+    names: Vec<Candidate>,
+    conflict: bool,
+    inflight: bool,
+}
+
+pub(super) fn observe_candidates(
+    channel: u64,
+    provider: &ProviderKind,
+    core: Option<&str>,
+    fallback: &[RegisteredChannelBinding],
+    log: &dyn BindingEvents,
+) -> Result<Candidates, String> {
+    let inflight =
+        crate::services::discord::inflight::load_inflight_state_read_only_result(provider, channel);
+    unbound_candidates(
+        channel,
+        provider,
+        core,
+        fallback,
+        log.binding_events_since(channel, 0),
+        &inflight,
+    )
+}
+
+fn unbound_candidates(
+    channel: u64,
+    provider: &ProviderKind,
+    core: Option<&str>,
+    fallback: &[RegisteredChannelBinding],
+    events: Result<Vec<BindingEvent>, String>,
+    inflight: &Result<Option<InflightTurnState>, String>,
+) -> Result<Candidates, String> {
+    dormancy_tests::reached(channel);
+    let events = events?;
+    let row = inflight.as_ref().map_err(Clone::clone)?;
+    let shadow = match provider {
+        ProviderKind::Claude => ShadowProvider::Claude,
+        ProviderKind::Codex => ShadowProvider::Codex,
+        _ => return Err("provider unsupported".into()),
+    };
+    let mut names = Vec::new();
+    if let Some(basis) = core {
+        if basis.trim().is_empty() {
+            return Err("blank core basis".into());
+        }
+        names.push(Candidate {
+            name: provider.build_tmux_session_name(basis),
+            origin: Origin::Core,
+        });
+    }
+    for registered in fallback
+        .iter()
+        .filter(|r| r.channel_id == channel && r.owner_provider == *provider)
+    {
+        if let Some(basis) = &registered.fallback_name {
+            if basis.trim().is_empty() {
+                return Err("blank fallback basis".into());
+            }
+            names.push(Candidate {
+                name: provider.build_tmux_session_name(basis),
+                origin: Origin::Fallback,
+            });
+        }
+    }
+    let current = names.first().map(|c| c.name.clone());
+    let conflict = names.iter().any(|c| Some(&c.name) != current.as_ref());
+    let mut previous = 0;
+    for event in &events {
+        if event.channel_id != channel || event.provider != shadow || event.seq <= previous {
+            return Err("foreign or unordered binding".into());
+        }
+        previous = event.seq;
+    }
+    if let Some(event) = events
+        .iter()
+        .rev()
+        .find(|e| !matches!(e.record, BindingRecord::Rejected { .. }))
+    {
+        names.push(Candidate {
+            name: event.tmux_session.clone(),
+            origin: Origin::Binding(event.seq),
+        });
+    }
+    if let Some(row) = row {
+        if row.channel_id != channel
+            || row.provider != provider.as_str()
+            || row.runtime_kind_unknown_on_disk
+        {
+            return Err("foreign or unreadable inflight".into());
+        }
+        if let Some(name) = &row.tmux_session_name {
+            names.push(Candidate {
+                name: name.clone(),
+                origin: Origin::Inflight,
+            });
+        }
+    }
+    if names.iter().any(|c| c.name.trim().is_empty()) {
+        return Err("blank candidate".into());
+    }
+    Ok(Candidates {
+        channel,
+        provider: provider.clone(),
+        current,
+        names,
+        conflict,
+        inflight: row.is_some(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Scope {
+    LocalInventory,
+    HerdrFirstCreate,
+    HerdrRetired,
+    Hold(&'static str),
+}
+struct HostScope {
+    channel: u64,
+    provider: ProviderKind,
+    name: String,
+    result: Scope,
+}
+struct HostReads<'a> {
+    channel: u64,
+    provider: &'a ProviderKind,
+    token_hash: &'a str,
+    name: &'a str,
+    config: &'a Config,
+    expected_owner: &'a HostedOwner,
+    exact_key: &'a str,
+    exact: &'a HostedLookup,
+    canonical: &'a HostedLookup,
+    evidence: Result<SessionTargetEvidence, String>,
+    marker: HostKindMarker,
+    inflight: &'a Result<Option<InflightTurnState>, String>,
+}
+struct Evidence(SessionTargetEvidence);
+impl SessionTargetEvidenceSource for Evidence {
+    fn read_evidence(&self, _: &SessionTargetInput) -> SessionTargetEvidence {
+        self.0.clone()
+    }
+}
+fn host_scope(reads: HostReads<'_>) -> HostScope {
+    let (channel, provider, name) = (reads.channel, reads.provider.clone(), reads.name.to_owned());
+    HostScope {
+        channel,
+        provider,
+        name,
+        result: host_scope_result(reads),
+    }
+}
+fn host_scope_result(reads: HostReads<'_>) -> Scope {
+    dormancy_tests::reached(reads.channel);
+    let hold = Scope::Hold;
+    let (Ok(mut evidence), Ok(row)) = (reads.evidence, reads.inflight.as_ref()) else {
+        return hold("probe_failed");
+    };
+    let witnesses = [
+        &evidence.session_record,
+        &evidence.inflight_locator,
+        &evidence.host_marker,
+    ];
+    if witnesses
+        .iter()
+        .any(|w| matches!(w, HostWitness::ReadFailed(_)))
+        || matches!(reads.exact, HostedLookup::Unknown(_))
+        || matches!(reads.canonical, HostedLookup::Unknown(_))
+    {
+        return hold("probe_failed");
+    }
+    let marker = marker_witness(reads.marker);
+    if matches!(marker, HostWitness::ReadFailed(_)) {
+        return hold("probe_failed");
+    }
+    if evidence.host_marker != marker {
+        return hold("identity_unresolved");
+    }
+    let key =
+        adk_session::build_namespaced_session_key(reads.token_hash, reads.provider, reads.name);
+    if reads.exact_key != key
+        || evidence.session_key.as_deref().is_some_and(|k| k != key)
+        || evidence
+            .session_name
+            .as_deref()
+            .is_some_and(|n| n != reads.name)
+        || reads.exact != reads.canonical
+    {
+        return hold("identity_unresolved");
+    }
+    evidence.session_key = Some(key.clone());
+    evidence.session_name = Some(reads.name.into());
+    if evidence.session_record != session_record_witness(reads.exact) {
+        return hold("identity_unresolved");
+    }
+    if let Some(row) = row {
+        evidence = with_inflight_row(evidence, row);
+    }
+    if evidence.name_conflict.is_some()
+        || evidence.runtime_kind_unrecognized
+        || [
+            &evidence.session_record,
+            &evidence.inflight_locator,
+            &evidence.host_marker,
+        ]
+        .iter()
+        .any(|w| {
+            matches!(
+                w,
+                HostWitness::Unrecognized(_) | HostWitness::RowConflict(_)
+            )
+        })
+    {
+        return hold("identity_unresolved");
+    }
+    let bindings: Vec<_> = reads
+        .config
+        .agents
+        .iter()
+        .flat_map(|a| a.channels.iter())
+        .filter(|(_, b)| {
+            b.channel_id().and_then(|id| id.parse::<u64>().ok()) == Some(reads.channel)
+        })
+        .collect();
+    if bindings.is_empty()
+        || bindings.iter().any(|(provider, binding)| {
+            let provider = binding
+                .provider()
+                .unwrap_or_else(|| (*provider).into())
+                .trim()
+                .to_ascii_lowercase();
+            provider != reads.provider.as_str()
+                || !channel_effective_tui_request(reads.config, binding, &provider)
+        })
+    {
+        return hold("host_unsupported");
+    }
+    let Ok(boot) = BootSessionHosts::from_config(reads.config) else {
+        return hold("probe_failed");
+    };
+    let quiet = row.is_none()
+        && evidence.inflight_locator == HostWitness::Absent
+        && evidence.durable_runtime_kind.is_none()
+        && evidence.inflight_runtime_kind.is_none()
+        && evidence.runtime_kind_marker.is_none()
+        && !evidence.process_registry_hit;
+    let clean = quiet && evidence.host_marker == HostWitness::Absent;
+    let retired_marker = matches!(
+        evidence.host_marker,
+        HostWitness::Absent
+            | HostWitness::Known {
+                kind: HostKind::Herdr,
+                target: None
+            }
+    );
+    if let Some(endpoint) = boot.herdr_endpoint(reads.channel) {
+        let owner = reads.expected_owner;
+        if owner.provider != reads.provider.as_str()
+            || owner.channel_id != reads.channel.to_string()
+            || owner.discord_token_hash != reads.token_hash
+            || owner.logical_key != reads.name
+            || Some(owner.owner_node.as_str()) != boot.local_node()
+            || owner.runtime_root.trim().is_empty()
+        {
+            return hold("identity_unresolved");
+        }
+        return match reads.exact {
+            HostedLookup::Missing if clean => Scope::HerdrFirstCreate,
+            HostedLookup::Found(found) => match &found.record {
+                HostedRecord::Known(record)
+                    if quiet
+                        && retired_marker
+                        && HostedRecord::decode(serde_json::to_value(record).ok().as_ref())
+                            == found.record
+                        && record.state == HostedState::Retired
+                        && record.owner == *owner
+                        && record.location.as_ref().is_some_and(|at| {
+                            at.host == "herdr"
+                                && at.execution_node == endpoint.execution_node
+                                && at.endpoint_config_key == endpoint.key
+                                && at.socket_addr == endpoint.socket_path.to_string_lossy()
+                                && at.named_session == endpoint.herdr_session
+                        }) =>
+                {
+                    Scope::HerdrRetired
+                }
+                _ => hold("hosted_active_or_unknown"),
+            },
+            _ => hold("hosted_active_or_unknown"),
+        };
+    }
+    if row.is_some() {
+        return hold("inflight_present");
+    }
+    if matches!(reads.exact, HostedLookup::Missing) && clean {
+        return Scope::LocalInventory;
+    }
+    let resolved = resolve_session_target(SessionTargetInput::SessionKey(key), &Evidence(evidence));
+    match resolved.host {
+        TargetHost::Known {
+            kind: HostKind::Tmux,
+            name,
+            ..
+        } if name == reads.name => Scope::LocalInventory,
+        _ => hold("host_unresolved"),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Absence {
+    LocalInventory,
+    HerdrFirstCreate,
+    HerdrRetired,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Verdict {
+    Absent(Absence),
+    Hold(&'static str),
+}
+fn decide_unbound(
+    candidates: Result<Candidates, String>,
+    scope: HostScope,
+    inventory: &Inventory,
+    owners: &BTreeMap<String, Option<u64>>,
+) -> Verdict {
+    let Ok(candidates) = candidates else {
+        return Verdict::Hold("probe_failed");
+    };
+    dormancy_tests::reached(candidates.channel);
+    if candidates.conflict || candidates.inflight {
+        return Verdict::Hold("identity_unresolved");
+    }
+    if scope.channel != candidates.channel
+        || scope.provider != candidates.provider
+        || candidates
+            .current
+            .as_ref()
+            .is_some_and(|name| name != &scope.name)
+    {
+        return Verdict::Hold("identity_unresolved");
+    }
+    if candidates.current.is_none()
+        && !matches!(scope.result, Scope::LocalInventory | Scope::Hold(_))
+    {
+        return Verdict::Hold("candidate_unresolved");
+    }
+    match scope.result {
+        Scope::Hold(reason) => return Verdict::Hold(reason),
+        Scope::HerdrFirstCreate => return Verdict::Absent(Absence::HerdrFirstCreate),
+        Scope::HerdrRetired => return Verdict::Absent(Absence::HerdrRetired),
+        Scope::LocalInventory => {}
+    }
+    let names = match inventory {
+        Inventory::Sessions(names) => names.as_slice(),
+        Inventory::Empty(_) => &[],
+        Inventory::ProbeFailed(_) => return Verdict::Hold("probe_failed"),
+    };
+    if names.iter().any(|name| {
+        candidates.names.iter().any(|c| c.name == *name)
+            || owners.get(name) == Some(&Some(candidates.channel))
+    }) {
+        return Verdict::Hold("watcher_unbound");
+    }
+    if names
+        .iter()
+        .any(|name| !matches!(owners.get(name), Some(Some(owner)) if *owner != candidates.channel))
+    {
+        return Verdict::Hold("owner_unresolved");
+    }
+    if candidates.current.is_none() {
+        return Verdict::Hold("candidate_unresolved");
+    }
+    Verdict::Absent(Absence::LocalInventory)
+}
+
+#[cfg(test)]
+mod dormancy_tests;
+#[cfg(test)]
+#[path = "unbound/unit_tests.rs"]
+mod tests;

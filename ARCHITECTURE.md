@@ -2067,8 +2067,12 @@ src/
 │   │   │   └── registry.rs
 │   │   ├── turn_presence/
 │   │   │   ├── activity/
+│   │   │   │   ├── unbound/
+│   │   │   │   │   ├── dormancy_tests.rs
+│   │   │   │   │   └── unit_tests.rs
 │   │   │   │   ├── tail.rs
-│   │   │   │   └── tail_tests.rs
+│   │   │   │   ├── tail_tests.rs
+│   │   │   │   └── unbound.rs
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── admission.rs
@@ -2427,8 +2431,12 @@ src/
 │   │   ├── tmux/
 │   │   │   ├── liveness/
 │   │   │   │   └── tests.rs
+│   │   │   ├── session_inventory/
+│   │   │   │   ├── real_tests.rs
+│   │   │   │   └── unit_tests.rs
 │   │   │   ├── availability.rs
 │   │   │   ├── liveness.rs
+│   │   │   ├── session_inventory.rs
 │   │   │   ├── sized.rs
 │   │   │   └── sized_cleanup_tests.rs
 │   │   ├── binary_resolver.rs
