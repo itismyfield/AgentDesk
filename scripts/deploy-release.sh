@@ -4385,7 +4385,7 @@ _post_deploy_smoke_run_turn_scenario() {
     if [ "$scenario" = E-50 ]; then
         classification_args=(--config "$ADK_REL/config/agentdesk.yaml" --run-id "$run_id")
     fi
-    verdict=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py judge "${classification_args[@]}" \
+    verdict=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py judge ${classification_args[@]+"${classification_args[@]}"} \
         --report "$output/report.${cell}.json" \
         --scenarios "$REPO/tests/e2e/tui_relay/scenarios" \
         --scenario "$scenario" --cell "$cell" --channel-id "$channel_id" \
@@ -4540,11 +4540,11 @@ _report_post_deploy_smoke_failure() {
             printf -- '- %s\n' "$finding"
         done
         printf '\n## Known gaps\n\n'
-        for finding in "${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]}"; do
+        for finding in ${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]+"${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]}"}; do
             printf -- '- %s\n' "$finding"
         done
         printf '\n## Unexpected passes\n\n'
-        for finding in "${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]}"; do
+        for finding in ${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]+"${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]}"}; do
             printf -- '- %s\n' "$finding"
         done
         printf '\n## Deploy disposition\n\n'
@@ -4630,11 +4630,11 @@ echo "▸ Running post-deploy functional smoke (#4262)..."
 if _run_post_deploy_functional_smoke; then
     if [ -n "${POST_DEPLOY_SMOKE_KNOWN_GAPS[*]:-}" ]; then
         echo "△ Post-deploy functional smoke completed with known gaps (evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-        printf '  %s\n' "${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]}"
+        printf '  %s\n' ${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]+"${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]}"}
     fi
     if [ -n "${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[*]:-}" ]; then
         echo "△ Post-deploy functional smoke completed with unexpected passes (evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-        printf '  %s\n' "${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]}"
+        printf '  %s\n' ${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]+"${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]}"}
     fi
     if [ -z "${POST_DEPLOY_SMOKE_KNOWN_GAPS[*]:-}${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[*]:-}" ]; then
         if case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_COVERAGE" in
