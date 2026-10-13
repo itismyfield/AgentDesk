@@ -19,7 +19,10 @@ fn user(text: &str, turn: Option<&str>, created: Option<chrono::DateTime<chrono:
         meta.insert("turn_id".into(), json!(turn));
     }
     if let Some(created) = created {
-        meta.insert("create_time".into(), json!(created.timestamp_millis() as f64 / 1000.0));
+        meta.insert(
+            "create_time".into(),
+            json!(created.timestamp_millis() as f64 / 1000.0),
+        );
     }
     let mut payload = json!({"type": "message", "role": "user",
         "content": [{"type": "input_text", "text": text}]});

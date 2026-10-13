@@ -1,3 +1,4 @@
+use super::extract::{Decision, Observation, decide_observation};
 use super::*;
 
 pub fn record_discord_originated_prompt(provider: &str, tmux_session_name: &str, prompt: &str) {
@@ -263,7 +264,7 @@ pub(crate) fn observe_prompt_candidates_by_tmux_for_relay_lease(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PromptObservationEffect {
+pub(super) enum PromptObservationEffect {
     NotifyAndLease,
     RelayLeaseOnly,
 }
@@ -280,7 +281,15 @@ fn observe_prompt_candidates_by_tmux_inner(
 ) -> PromptObservation {
     let ids = (entry_id, prompt_id, native_turn);
     let evidence = handoff::Evidence::Unattributed;
-    observe_inner(provider, tmux_session_name, prompts, ids, effect, observed_at, evidence)
+    observe_inner(
+        provider,
+        tmux_session_name,
+        prompts,
+        ids,
+        effect,
+        observed_at,
+        evidence,
+    )
 }
 
 /// `(entry_id, prompt_id, native_turn)` of one observation.
@@ -468,8 +477,10 @@ fn observe_inner(
         };
         (decide_observation(&mut state, &key, &observation), released)
     };
-    if !released.is_empty() {
+    // A record may have settled or ended a reservation; its mirror follows.
+    if record.is_some() {
         handoff::drain_parked(&provider, tmux_session_name, released);
+        handoff::sync_durable(&provider, tmux_session_name);
     }
     let (external_input_lease_generation, ssh_direct_observation_generation) = match decision {
         Decision::Joined { echo, turn } => {
@@ -536,172 +547,9 @@ fn observe_inner(
         steer_echo: false,
     };
     #[cfg(test)]
-    probes::before_owning_publish(&event.prompt);
+    handoff::tests::before_owning_publish(&event.prompt);
     let _ = OBSERVED_PROMPTS.send(event);
     PromptObservation::PublishedSshDirect
-}
-
-/// One observation's inputs to [`decide_observation`].
-struct Observation<'a> {
-    provider: &'a str,
-    tmux: &'a str,
-    candidates: &'a [String],
-    entry_id: Option<&'a str>,
-    native_turn: Option<&'a str>,
-    local_only: bool,
-    /// Not read in file order: an unbound handoff holds it.
-    may_park: bool,
-    effect: PromptObservationEffect,
-    observed_at: DateTime<Utc>,
-}
-
-enum Decision {
-    Joined { echo: bool, turn: String },
-    Parked,
-    SuppressedDiscord,
-    SuppressedRecent,
-    LeaseOnly,
-    Own { lease: u64, observation: u64 },
-}
-
-/// The join, hold, duplicate and owning decisions and every ledger claim they make
-/// happen under one STATE lock, so the Relay slot is visible only for an input that publishes.
-fn decide_observation(
-    state: &mut TuiPromptDedupeState,
-    key: &PromptKey,
-    observation: &Observation<'_>,
-) -> Decision {
-    let Observation {
-        provider,
-        tmux,
-        candidates,
-        entry_id,
-        native_turn,
-        local_only,
-        ..
-    } = *observation;
-    if !local_only {
-        // A steering input joins before any lease is recorded, so the running turn's ownership
-        // stays; only its text is shown, by the same duplicate rules as an input that opens a turn.
-        if let Some(turn) = native_turn.filter(|turn| state.native_turn_open(provider, tmux, turn)) {
-            let discord = state.take_matching_pending(provider, tmux, &candidates[0]);
-            let repeated = state.take_or_record_recent(provider, tmux, &candidates[0]);
-            if let Some(entry_id) = entry_id {
-                state.record_relayed_entry(provider, tmux, entry_id);
-            }
-            let echo = !discord && !repeated;
-            let turn = turn.to_string();
-            return Decision::Joined { echo, turn };
-        }
-        if observation.may_park
-            && state.park_handoff_observation(
-                key,
-                &candidates[0],
-                entry_id,
-                native_turn,
-                observation.observed_at,
-            )
-        {
-            return Decision::Parked;
-        }
-        for prompt in candidates {
-            if state.take_matching_pending(provider, tmux, prompt) {
-                // The Discord turn owns this native turn's answer.
-                if let Some(turn) = native_turn {
-                    let owner = (
-                        SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
-                        NativeTurnOwner::Answer,
-                    );
-                    state.open_native_turn_slot(provider, tmux, turn, owner);
-                }
-                return Decision::SuppressedDiscord;
-            }
-        }
-        for prompt in candidates {
-            if state.take_or_record_recent(provider, tmux, prompt) {
-                return Decision::SuppressedRecent;
-            }
-        }
-        // Generic direct input keeps the eager identity record: it is a real
-        // relay at this point. A local-only note has no durable side effect until
-        // Discord accepts its note, so its id is recorded only by the successful
-        // delivery branch in `tui_prompt_relay`.
-        if let Some(entry_id) = entry_id {
-            state.record_relayed_entry(provider, tmux, entry_id);
-        }
-    }
-    if observation.effect == PromptObservationEffect::RelayLeaseOnly {
-        if !local_only {
-            let lease = ExternalInputRelayLease::unassigned(None);
-            state.insert_external_input_lease(provider, tmux, lease);
-        }
-        return Decision::LeaseOnly;
-    }
-    #[cfg(test)]
-    probes::before_owning_commit(&candidates[0]);
-    if local_only {
-        return Decision::Own {
-            lease: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
-            observation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
-        };
-    }
-    let lease = ExternalInputRelayLease::unassigned(None);
-    let lease = state.insert_external_input_lease(provider, tmux, lease).generation;
-    let observation = state.mark_ssh_direct_observation(provider, tmux);
-    // Reserved until the relay adopts it for a row, hands it to a deferred worker, or withdraws it.
-    if let Some(turn) = native_turn {
-        state.open_native_turn_slot(provider, tmux, turn, (observation, NativeTurnOwner::Relay));
-    }
-    Decision::Own { lease, observation }
-}
-
-/// Test-only pause points around the owning decision.
-#[cfg(test)]
-pub(crate) mod probes {
-    use std::sync::{Arc, Mutex};
-
-    type Probe = Arc<dyn Fn(&str) + Send + Sync>;
-    static BEFORE_COMMIT: Mutex<Option<Probe>> = Mutex::new(None);
-    static BEFORE_PUBLISH: Mutex<Option<Probe>> = Mutex::new(None);
-
-    fn installed(slot: &Mutex<Option<Probe>>) -> Option<Probe> {
-        slot.lock().unwrap_or_else(|error| error.into_inner()).clone()
-    }
-
-    /// Runs under the STATE lock, after the duplicate checks and before the owning commit.
-    pub(super) fn before_owning_commit(prompt: &str) {
-        if let Some(probe) = installed(&BEFORE_COMMIT) {
-            probe(prompt);
-        }
-    }
-
-    /// Runs after the decision released the lock and before the owning event is published.
-    pub(super) fn before_owning_publish(prompt: &str) {
-        if let Some(probe) = installed(&BEFORE_PUBLISH) {
-            probe(prompt);
-        }
-    }
-
-    pub(crate) struct ProbeGuard(&'static Mutex<Option<Probe>>);
-
-    impl Drop for ProbeGuard {
-        fn drop(&mut self) {
-            *self.0.lock().unwrap_or_else(|error| error.into_inner()) = None;
-        }
-    }
-
-    fn install(slot: &'static Mutex<Option<Probe>>, probe: Probe) -> ProbeGuard {
-        *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(probe);
-        ProbeGuard(slot)
-    }
-
-    pub(crate) fn on_owning_commit(probe: impl Fn(&str) + Send + Sync + 'static) -> ProbeGuard {
-        install(&BEFORE_COMMIT, Arc::new(probe))
-    }
-
-    pub(crate) fn on_owning_publish(probe: impl Fn(&str) + Send + Sync + 'static) -> ProbeGuard {
-        install(&BEFORE_PUBLISH, Arc::new(probe))
-    }
 }
 
 pub(crate) fn record_external_input_relay_lease(
@@ -740,45 +588,6 @@ pub(crate) fn record_external_input_turn_lease(
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     state.store_external_input_lease(&provider, tmux_session_name, lease)
-}
-
-impl TuiPromptDedupeState {
-    /// Stamps a fresh generation and stores the lease, under the caller's lock.
-    fn insert_external_input_lease(
-        &mut self,
-        provider: &str,
-        tmux: &str,
-        mut lease: ExternalInputRelayLease,
-    ) -> ExternalInputRelayLease {
-        lease.generation = next_external_input_relay_lease_generation();
-        self.store_external_input_lease(provider, tmux, lease)
-    }
-
-    fn store_external_input_lease(
-        &mut self,
-        provider: &str,
-        tmux: &str,
-        lease: ExternalInputRelayLease,
-    ) -> ExternalInputRelayLease {
-        let value = TimedValue {
-            value: lease.clone(),
-            recorded_at: Instant::now(),
-        };
-        self.external_input_relay_lease_by_tmux
-            .insert(PromptKey::new(provider, tmux), value);
-        lease
-    }
-
-    fn mark_ssh_direct_observation(&mut self, provider: &str, tmux: &str) -> u64 {
-        let generation = next_ssh_direct_observation_generation();
-        let value = TimedValue {
-            value: generation,
-            recorded_at: Instant::now(),
-        };
-        self.ssh_direct_observation_by_tmux
-            .insert(PromptKey::new(provider, tmux), value);
-        generation
-    }
 }
 
 pub(crate) fn external_input_relay_lease(

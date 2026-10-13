@@ -1,6 +1,5 @@
-//! A Discord turn reserves its Codex handoff before its prompt is submitted. An input
-//! observed before the handoff names its native turn is held, then joins that turn or opens its
-//! own once the handoff binds, ends or expires.
+//! A Discord turn reserves its Codex handoff before submit; an input seen before the handoff
+//! names its native turn is held until the handoff binds, ends or expires.
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -143,7 +142,9 @@ pub(crate) fn reserve_discord_handoff(provider: &str, tmux: &str, origin: &str) 
         let previous = state
             .handoff_by_tmux
             .insert(PromptKey::new(&provider, &tmux), value);
-        previous.map(|previous| previous.value.parked).unwrap_or_default()
+        previous
+            .map(|previous| previous.value.parked)
+            .unwrap_or_default()
     };
     drain_parked(&provider, &tmux, replaced);
     sync_durable(&provider, &tmux);
@@ -217,7 +218,10 @@ fn release(provider: &str, tmux: &str, generation: Option<u64>) {
         let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
         state.purge_expired();
         let key = PromptKey::new(provider, tmux);
-        let current = state.handoff_by_tmux.get(&key).map(|entry| entry.value.generation);
+        let current = state
+            .handoff_by_tmux
+            .get(&key)
+            .map(|entry| entry.value.generation);
         if current.is_none() || generation.is_some_and(|generation| current != Some(generation)) {
             return;
         }
@@ -341,7 +345,10 @@ impl TuiPromptDedupeState {
             return (BindOutcome::NoReservation, Vec::new());
         };
         let (turn, at) = match proof {
-            Proof::Live { turn: Some(turn), at } => (turn.to_string(), at),
+            Proof::Live {
+                turn: Some(turn),
+                at,
+            } => (turn.to_string(), at),
             Proof::Record(record) => match record.complete() {
                 Some((turn, at)) => (turn.to_string(), at),
                 None => return self.end_handoff(&key, BindOutcome::NoEvidence),
@@ -361,14 +368,20 @@ impl TuiPromptDedupeState {
         if at < reserved_wall - EVIDENCE_SKEW {
             return (BindOutcome::Stale, Vec::new());
         }
-        let relay_owned = self
-            .native_turn_by_tmux
-            .get(&key)
-            .is_some_and(|slot| slot.value.turn == turn && slot.value.owner != NativeTurnOwner::Answer);
+        let relay_owned = self.native_turn_by_tmux.get(&key).is_some_and(|slot| {
+            slot.value.turn == turn && slot.value.owner != NativeTurnOwner::Answer
+        });
         if relay_owned {
-            tracing::warn!(tmux, turn, "discord handoff joined a turn a direct input owns; its slot is kept");
+            tracing::warn!(
+                tmux,
+                turn,
+                "discord handoff joined a turn a direct input owns; its slot is kept"
+            );
         } else {
-            let answer = (SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED, NativeTurnOwner::Answer);
+            let answer = (
+                SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+                NativeTurnOwner::Answer,
+            );
             self.open_native_turn_slot(provider, tmux, &turn, answer);
         }
         let Some(entry) = self.handoff_by_tmux.get_mut(&key) else {
@@ -424,10 +437,19 @@ struct DurableHandoff {
 fn durable_path(provider: &str, tmux: &str) -> Option<std::path::PathBuf> {
     let stem: String = format!("{provider}-{tmux}")
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    durable_root()
-        .map(|root| root.join("runtime").join("codex_handoff_held").join(format!("{stem}.json")))
+    durable_root().map(|root| {
+        root.join("runtime")
+            .join("codex_handoff_held")
+            .join(format!("{stem}.json"))
+    })
 }
 
 #[cfg(not(test))]
@@ -448,7 +470,9 @@ pub(super) fn sync_durable(provider: &str, tmux: &str) {
     let Some(path) = durable_path(provider, tmux) else {
         return;
     };
-    let _write = DURABLE_WRITE.lock().unwrap_or_else(|error| error.into_inner());
+    let _write = DURABLE_WRITE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let record = {
         let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
         state
@@ -565,4 +589,4 @@ pub(crate) fn durable_handoff_present_for_tests(provider: &str, tmux: &str) -> b
 
 #[cfg(test)]
 #[path = "handoff_tests.rs"]
-mod tests;
+pub(super) mod tests;

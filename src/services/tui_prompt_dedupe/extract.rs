@@ -1,3 +1,4 @@
+use super::observation::PromptObservationEffect;
 use super::*;
 
 pub fn extract_prompt_from_hook_payload(payload: &Value) -> Option<String> {
@@ -469,7 +470,12 @@ impl TuiPromptDedupeState {
         self.native_turn_by_tmux.insert(key, value);
     }
 
-    pub(super) fn take_matching_pending(&mut self, provider: &str, tmux: &str, prompt: &str) -> bool {
+    pub(super) fn take_matching_pending(
+        &mut self,
+        provider: &str,
+        tmux: &str,
+        prompt: &str,
+    ) -> bool {
         let key = PromptKey::new(provider, tmux);
         let Some(queue) = self.pending_by_tmux.get_mut(&key) else {
             return false;
@@ -489,7 +495,12 @@ impl TuiPromptDedupeState {
         matched.is_some()
     }
 
-    pub(super) fn take_or_record_recent(&mut self, provider: &str, tmux: &str, prompt: &str) -> bool {
+    pub(super) fn take_or_record_recent(
+        &mut self,
+        provider: &str,
+        tmux: &str,
+        prompt: &str,
+    ) -> bool {
         let key = PromptKey::new(provider, tmux);
         let queue = self.recent_observed_by_tmux.entry(key).or_default();
         if queue
@@ -517,6 +528,160 @@ impl TuiPromptDedupeState {
         while queue.len() > RELAYED_ENTRY_ID_RING_CAP {
             queue.pop_front();
         }
+    }
+}
+
+/// One observation's inputs to [`decide_observation`].
+pub(super) struct Observation<'a> {
+    pub(super) provider: &'a str,
+    pub(super) tmux: &'a str,
+    pub(super) candidates: &'a [String],
+    pub(super) entry_id: Option<&'a str>,
+    pub(super) native_turn: Option<&'a str>,
+    pub(super) local_only: bool,
+    /// Not read in file order: an unbound handoff holds it.
+    pub(super) may_park: bool,
+    pub(super) effect: PromptObservationEffect,
+    pub(super) observed_at: DateTime<Utc>,
+}
+
+pub(super) enum Decision {
+    Joined { echo: bool, turn: String },
+    Parked,
+    SuppressedDiscord,
+    SuppressedRecent,
+    LeaseOnly,
+    Own { lease: u64, observation: u64 },
+}
+
+/// The join, hold, duplicate and owning decisions and every ledger claim they make
+/// happen under one STATE lock, so the Relay slot is visible only for an input that publishes.
+pub(super) fn decide_observation(
+    state: &mut TuiPromptDedupeState,
+    key: &PromptKey,
+    observation: &Observation<'_>,
+) -> Decision {
+    let Observation {
+        provider,
+        tmux,
+        candidates,
+        entry_id,
+        native_turn,
+        local_only,
+        ..
+    } = *observation;
+    if !local_only {
+        // A steering input joins before any lease is recorded, so the running turn's ownership
+        // stays; only its text is shown, by the same duplicate rules as an input that opens a turn.
+        if let Some(turn) = native_turn.filter(|turn| state.native_turn_open(provider, tmux, turn))
+        {
+            let discord = state.take_matching_pending(provider, tmux, &candidates[0]);
+            let repeated = state.take_or_record_recent(provider, tmux, &candidates[0]);
+            if let Some(entry_id) = entry_id {
+                state.record_relayed_entry(provider, tmux, entry_id);
+            }
+            let echo = !discord && !repeated;
+            let turn = turn.to_string();
+            return Decision::Joined { echo, turn };
+        }
+        if observation.may_park
+            && state.park_handoff_observation(
+                key,
+                &candidates[0],
+                entry_id,
+                native_turn,
+                observation.observed_at,
+            )
+        {
+            return Decision::Parked;
+        }
+        for prompt in candidates {
+            if state.take_matching_pending(provider, tmux, prompt) {
+                // The Discord turn owns this native turn's answer.
+                if let Some(turn) = native_turn {
+                    let owner = (
+                        SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+                        NativeTurnOwner::Answer,
+                    );
+                    state.open_native_turn_slot(provider, tmux, turn, owner);
+                }
+                return Decision::SuppressedDiscord;
+            }
+        }
+        for prompt in candidates {
+            if state.take_or_record_recent(provider, tmux, prompt) {
+                return Decision::SuppressedRecent;
+            }
+        }
+        // A direct input is a real relay here; a local-only note's id waits for its
+        // delivery in `tui_prompt_relay`.
+        if let Some(entry_id) = entry_id {
+            state.record_relayed_entry(provider, tmux, entry_id);
+        }
+    }
+    if observation.effect == PromptObservationEffect::RelayLeaseOnly {
+        if !local_only {
+            let lease = ExternalInputRelayLease::unassigned(None);
+            state.insert_external_input_lease(provider, tmux, lease);
+        }
+        return Decision::LeaseOnly;
+    }
+    #[cfg(test)]
+    super::handoff::tests::before_owning_commit(&candidates[0]);
+    if local_only {
+        return Decision::Own {
+            lease: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+            observation: SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+        };
+    }
+    let lease = ExternalInputRelayLease::unassigned(None);
+    let lease = state
+        .insert_external_input_lease(provider, tmux, lease)
+        .generation;
+    let observation = state.mark_ssh_direct_observation(provider, tmux);
+    // Reserved until the relay adopts it for a row, hands it to a deferred worker, or withdraws it.
+    if let Some(turn) = native_turn {
+        state.open_native_turn_slot(provider, tmux, turn, (observation, NativeTurnOwner::Relay));
+    }
+    Decision::Own { lease, observation }
+}
+
+impl TuiPromptDedupeState {
+    /// Stamps a fresh generation and stores the lease, under the caller's lock.
+    pub(super) fn insert_external_input_lease(
+        &mut self,
+        provider: &str,
+        tmux: &str,
+        mut lease: ExternalInputRelayLease,
+    ) -> ExternalInputRelayLease {
+        lease.generation = next_external_input_relay_lease_generation();
+        self.store_external_input_lease(provider, tmux, lease)
+    }
+
+    pub(super) fn store_external_input_lease(
+        &mut self,
+        provider: &str,
+        tmux: &str,
+        lease: ExternalInputRelayLease,
+    ) -> ExternalInputRelayLease {
+        let value = TimedValue {
+            value: lease.clone(),
+            recorded_at: Instant::now(),
+        };
+        self.external_input_relay_lease_by_tmux
+            .insert(PromptKey::new(provider, tmux), value);
+        lease
+    }
+
+    pub(super) fn mark_ssh_direct_observation(&mut self, provider: &str, tmux: &str) -> u64 {
+        let generation = next_ssh_direct_observation_generation();
+        let value = TimedValue {
+            value: generation,
+            recorded_at: Instant::now(),
+        };
+        self.ssh_direct_observation_by_tmux
+            .insert(PromptKey::new(provider, tmux), value);
+        generation
     }
 }
 

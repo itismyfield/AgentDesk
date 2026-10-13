@@ -313,9 +313,8 @@ esac
         reserved
     };
     let result = std::thread::scope(|scope| {
-        let probed = probe_handoff.then(|| {
-            scope.spawn(|| (reserved_at("geometry"), reserved_at("launch")))
-        });
+        let probed =
+            probe_handoff.then(|| scope.spawn(|| (reserved_at("geometry"), reserved_at("launch"))));
         scope.spawn(|| {
             let deadline = Instant::now() + Duration::from_secs(10);
             while !finished.load(Ordering::Acquire) && Instant::now() < deadline {

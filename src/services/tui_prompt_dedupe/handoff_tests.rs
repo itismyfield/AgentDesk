@@ -3,6 +3,52 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+/// A pause point around the owning decision.
+type Probe = Arc<dyn Fn(&str) + Send + Sync>;
+static BEFORE_COMMIT: Mutex<Option<Probe>> = Mutex::new(None);
+static BEFORE_PUBLISH: Mutex<Option<Probe>> = Mutex::new(None);
+
+fn installed(slot: &Mutex<Option<Probe>>) -> Option<Probe> {
+    slot.lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
+
+/// Runs under the STATE lock, after the duplicate checks and before the owning commit.
+pub(crate) fn before_owning_commit(prompt: &str) {
+    if let Some(probe) = installed(&BEFORE_COMMIT) {
+        probe(prompt);
+    }
+}
+
+/// Runs after the decision released the lock and before the owning event is published.
+pub(crate) fn before_owning_publish(prompt: &str) {
+    if let Some(probe) = installed(&BEFORE_PUBLISH) {
+        probe(prompt);
+    }
+}
+
+pub(crate) struct ProbeGuard(&'static Mutex<Option<Probe>>);
+
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = None;
+    }
+}
+
+fn install(slot: &'static Mutex<Option<Probe>>, probe: Probe) -> ProbeGuard {
+    *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(probe);
+    ProbeGuard(slot)
+}
+
+pub(crate) fn on_owning_commit(probe: impl Fn(&str) + Send + Sync + 'static) -> ProbeGuard {
+    install(&BEFORE_COMMIT, Arc::new(probe))
+}
+
+pub(crate) fn on_owning_publish(probe: impl Fn(&str) + Send + Sync + 'static) -> ProbeGuard {
+    install(&BEFORE_PUBLISH, Arc::new(probe))
+}
+
 const TMUX: &str = "AgentDesk-codex-handoff-unit";
 const ORIGIN: &str = "[User: probe (ID: 5845)] discord prompt";
 const INPUT: &str = "typed while the discord prompt was submitted";
@@ -33,7 +79,10 @@ struct Published {
 impl Published {
     fn new() -> Self {
         let rx = subscribe_observed_prompts();
-        Self { rx, seen: Vec::new() }
+        Self {
+            rx,
+            seen: Vec::new(),
+        }
     }
 
     /// `(steer_echo, source_event_id)` of each event published for `prompt` so far.
@@ -74,15 +123,13 @@ fn a_held_input_is_observed_once_when_its_handoff_ends_unbound() {
 
     let guard = reserve_discord_handoff("codex", TMUX, ORIGIN);
     let now = Utc::now();
-    let seen = |id| observe_codex_prompt_in_turn_at(TMUX, "second input", Some(id), Some("t2"), now);
+    let seen =
+        |id| observe_codex_prompt_in_turn_at(TMUX, "second input", Some(id), Some("t2"), now);
     assert_eq!(seen("e1"), PromptObservation::ParkedForHandoff);
     assert_eq!(seen("e2"), PromptObservation::ParkedForHandoff);
     assert_eq!(held_handoff_inputs_for_tests("codex", TMUX), Some(1));
     drop(guard);
-    assert_eq!(
-        rx.of("second input"),
-        vec![(false, Some("e1".to_string()))]
-    );
+    assert_eq!(rx.of("second input"), vec![(false, Some("e1".to_string()))]);
     assert_eq!(
         observe_prompt_by_tmux_with_entry_id_at("codex", TMUX, "second input", Some("e2"), now),
         PromptObservation::SuppressedReplayedEntry,
@@ -120,7 +167,10 @@ fn a_complete_record_binds_and_settles_held_inputs_by_turn() {
     let mut rx = Published::new();
     let _guard = reserve_discord_handoff("codex", TMUX, ORIGIN);
     assert_eq!(hook(INPUT, "t1"), PromptObservation::ParkedForHandoff);
-    assert_eq!(hook("next turn input", "t2"), PromptObservation::ParkedForHandoff);
+    assert_eq!(
+        hook("next turn input", "t2"),
+        PromptObservation::ParkedForHandoff
+    );
     let line = serde_json::json!({"type": "response_item", "payload": {
         "type": "message", "role": "user", "content": [{"type": "input_text", "text": ORIGIN}],
         "internal_chat_message_metadata_passthrough": {"turn_id": "t1",
@@ -167,8 +217,9 @@ fn a_bind_waits_for_an_owning_decision_in_progress() {
     let (during_tx, during_rx) = mpsc::channel::<bool>();
     let (bound_tx, bound_rx) = mpsc::channel::<BindOutcome>();
     let pending = std::sync::Mutex::new(Some((during_tx, bound_tx)));
-    let _probe = probes::on_owning_commit(move |prompt| {
-        let Some((during_tx, bound_tx)) = pending.lock().unwrap().take().filter(|_| prompt == INPUT)
+    let _probe = on_owning_commit(move |prompt| {
+        let Some((during_tx, bound_tx)) =
+            pending.lock().unwrap().take().filter(|_| prompt == INPUT)
         else {
             return;
         };
@@ -185,11 +236,19 @@ fn a_bind_waits_for_an_owning_decision_in_progress() {
         let _ = during_tx.send(done.load(Ordering::SeqCst));
     });
     assert_eq!(hook(INPUT, "t1"), PromptObservation::PublishedSshDirect);
-    let bound_during = during_rx.recv_timeout(Duration::from_secs(5)).expect("probe ran");
+    let bound_during = during_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("probe ran");
     assert!(!bound_during, "no bind lands inside the owning decision");
-    let outcome = bound_rx.recv_timeout(Duration::from_secs(5)).expect("bind ran");
+    let outcome = bound_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("bind ran");
     assert_eq!(outcome, BindOutcome::Bound);
-    assert_eq!(slot("t1"), Some(NativeTurnOwner::Relay), "the input keeps its turn");
+    assert_eq!(
+        slot("t1"),
+        Some(NativeTurnOwner::Relay),
+        "the input keeps its turn"
+    );
     assert_eq!(rx.of(INPUT), vec![(false, None)]);
 }
 
@@ -201,11 +260,18 @@ fn a_held_input_naming_no_turn_waits_for_its_record() {
         let _lock = locked();
         let mut rx = Published::new();
         let _guard = reserve_discord_handoff("codex", TMUX, ORIGIN);
-        let unnamed = observe_hook_prompt_by_tmux_with_prompt_id_at("codex", TMUX, INPUT, None, Utc::now());
+        let unnamed =
+            observe_hook_prompt_by_tmux_with_prompt_id_at("codex", TMUX, INPUT, None, Utc::now());
         assert_eq!(unnamed, PromptObservation::ParkedForHandoff);
         let origin = record(Some("t1"), Some(Utc::now()));
-        assert_eq!(bind_discord_handoff_record(TMUX, ORIGIN, &origin), BindOutcome::Bound);
-        assert!(rx.of(INPUT).is_empty(), "held until its record names a turn");
+        assert_eq!(
+            bind_discord_handoff_record(TMUX, ORIGIN, &origin),
+            BindOutcome::Bound
+        );
+        assert!(
+            rx.of(INPUT).is_empty(),
+            "held until its record names a turn"
+        );
         let own = record(Some(turn), Some(Utc::now()));
         observe_codex_record_prompt_at(TMUX, INPUT, Some("b"), None, &own, Utc::now());
         assert_eq!(rx.of(INPUT), vec![(echo, Some("b".to_string()))], "{turn}");

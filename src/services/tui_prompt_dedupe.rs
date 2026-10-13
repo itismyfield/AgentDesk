@@ -343,22 +343,24 @@ pub(crate) use shadow_peek::{
     BindingPeekBusy, peek_tmux_runtime_binding, try_peek_tmux_runtime_binding,
 };
 
+#[cfg(test)]
+use extract::native_turn_is_open;
 pub use extract::*;
+use extract::{
+    is_discord_relayed_user_prompt, is_user_prefixed_subagent_notification_machine_event,
+    normalize_line_endings, normalize_provider, open_native_turn, record_relayed_entry_id,
+    relayed_entry_id_already_seen, take_matching_pending_prompt,
+    take_or_record_recent_observed_prompt,
+};
+pub use handoff::RecordEvidence;
+#[cfg(test)]
+pub(crate) use handoff::tests::{on_owning_commit, on_owning_publish};
 pub(crate) use handoff::{
     BindOutcome, HandoffGuard, bind_discord_handoff_record, drain_expired_handoffs,
     rehydrate_held_handoff_floor, reserve_discord_handoff,
 };
 #[cfg(test)]
 pub(crate) use handoff::{durable_handoff_present_for_tests, held_handoff_inputs_for_tests};
-pub use handoff::RecordEvidence;
-use extract::{
-    is_discord_relayed_user_prompt, is_user_prefixed_subagent_notification_machine_event,
-    normalize_line_endings, normalize_provider, open_native_turn,
-    record_relayed_entry_id, relayed_entry_id_already_seen, take_matching_pending_prompt,
-    take_or_record_recent_observed_prompt,
-};
-#[cfg(test)]
-use extract::native_turn_is_open;
 use injected_steer::{Claim, InjectedSteer, claim_injected_steer};
 pub(crate) use injected_steer::{register_injected_steer, withdraw_injected_steer};
 use observation::clear_ssh_direct_observation_pending;
