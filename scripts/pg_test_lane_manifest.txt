@@ -1406,6 +1406,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9w_real_h_post_timeout_and_force_after_f_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_both_restart_only_one_owner_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_releasing_holder_restart_retries_reset_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_worker_holder_restart_rehydrates_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_accepts_rechecks_home_after_ready_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_both_select_branches_make_progress_pg

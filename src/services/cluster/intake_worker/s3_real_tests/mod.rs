@@ -44,6 +44,8 @@ fn s3_node_child() {
             "th7_first_check" => drain_pg::first_check_node(&env).await,
             "th6_restart_first" => holder_pg::first_generation_node(&env).await,
             "th6_restart_second" => holder_pg::second_generation_node(&env).await,
+            "th6_release_first" => holder_pg::release_first_node(&env).await,
+            "th6_release_second" => holder_pg::release_second_node(&env).await,
             "th6_role_holder" => holder_pg::role_holder_node(&env).await,
             "th6_role_gateway" => holder_pg::role_gateway_node(&env).await,
             "th6_both_holder" => holder_pg::both_holder_node(&env).await,

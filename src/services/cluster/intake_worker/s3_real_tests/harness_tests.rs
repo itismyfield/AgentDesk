@@ -72,7 +72,8 @@ pub(super) struct Env {
     pub(super) role: String,
     pub(super) dir: PathBuf,
     pub(super) db: String,
-    spawn: String,
+    /// This process's spawn name, unique within the scene.
+    pub(super) spawn: String,
 }
 
 impl Env {
@@ -1594,6 +1595,227 @@ fn no_reset() -> channel_home_boot::LegacyReset {
     Arc::new(|| Box::pin(async { Err(ResetRefused::NotWired) }))
 }
 
+/// What a scripted reset call answers once its `go` signal comes.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ResetAnswer {
+    Refuse(&'static str),
+    Apply,
+}
+
+/// An injected [`channel_home_boot::LegacyReset`] built inside one child. Call n of `tag` signals
+/// `reset.<tag>.<n>.entered`, holds until `.go`, then records its answer before it returns it.
+/// Applied is only the callback's `Ok(())`: no managed-session reset or process cleanup runs.
+pub(super) struct ScriptedReset {
+    dir: PathBuf,
+    tag: String,
+    script: Vec<ResetAnswer>,
+    calls: Mutex<usize>,
+}
+
+impl ScriptedReset {
+    /// Tagged with the child's spawn, so one generation's calls never stand for another's.
+    pub(super) fn in_child(env: &Env, script: Vec<ResetAnswer>) -> channel_home_boot::LegacyReset {
+        Self::tagged(&env.dir, &env.spawn, script)
+    }
+
+    fn tagged(dir: &Path, tag: &str, script: Vec<ResetAnswer>) -> channel_home_boot::LegacyReset {
+        let reset = Arc::new(Self {
+            dir: dir.to_path_buf(),
+            tag: tag.into(),
+            script,
+            calls: Mutex::new(0),
+        });
+        Arc::new(move || {
+            let reset = Arc::clone(&reset);
+            Box::pin(async move { reset.call().await })
+        })
+    }
+
+    /// A call past the script answers an explicit refusal at once rather than succeeding.
+    async fn call(&self) -> Result<(), ResetRefused> {
+        let (n, scripted) = {
+            let mut calls = locked(&self.calls);
+            *calls += 1;
+            (*calls, self.script.get(*calls - 1).copied())
+        };
+        let key = format!("reset.{}.{n}", self.tag);
+        signal(&self.dir, &format!("{key}.entered"));
+        let answer = match scripted {
+            Some(answer) => {
+                while !signalled(&self.dir, &format!("{key}.go")) {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                answer
+            }
+            None => ResetAnswer::Refuse("unscripted call"),
+        };
+        let (result, record) = match answer {
+            ResetAnswer::Refuse(why) => (
+                Err(ResetRefused::Refused(why.into())),
+                format!("refused: {why}"),
+            ),
+            ResetAnswer::Apply => (Ok(()), "applied".to_string()),
+        };
+        put(&self.dir, &key, record);
+        signal(&self.dir, &format!("{key}.returned"));
+        result
+    }
+}
+
+pub(super) fn reset_entered(dir: &Path, tag: &str, n: usize) -> bool {
+    signalled(dir, &format!("reset.{tag}.{n}.entered"))
+}
+
+/// What call n of `tag` returned, once it recorded that; `None` while held or never called.
+pub(super) fn reset_returned(dir: &Path, tag: &str, n: usize) -> Option<String> {
+    let returned = signalled(dir, &format!("reset.{tag}.{n}.returned"));
+    returned.then(|| get(dir, &format!("reset.{tag}.{n}")).expect("recorded before returned"))
+}
+
+pub(super) fn reset_go(dir: &Path, tag: &str, n: usize) {
+    signal(dir, &format!("reset.{tag}.{n}.go"));
+}
+
+/// How many calls of `tag` entered.
+pub(super) fn reset_calls(dir: &Path, tag: &str) -> usize {
+    (1..).take_while(|n| reset_entered(dir, tag, *n)).count()
+}
+
+/// Each scripted call holds until its `go` and answers as scripted; one past the script refuses
+/// at once, and another tag's calls count apart.
+#[tokio::test(flavor = "current_thread")]
+async fn scripted_reset_holds_each_call_and_never_succeeds_past_its_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let script = vec![ResetAnswer::Refuse("busy"), ResetAnswer::Apply];
+    let reset = ScriptedReset::tagged(dir, "a", script);
+    for (n, expected, record) in [
+        (
+            1,
+            Err(ResetRefused::Refused("busy".into())),
+            "refused: busy",
+        ),
+        (2, Ok(()), "applied"),
+    ] {
+        let call = tokio::spawn(reset());
+        until("the call enters", Duration::from_secs(5), || {
+            reset_entered(dir, "a", n)
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!call.is_finished(), "call {n} returned before its go");
+        assert_eq!(reset_returned(dir, "a", n), None);
+        reset_go(dir, "a", n);
+        assert_eq!(call.await.unwrap(), expected);
+        assert_eq!(reset_returned(dir, "a", n).as_deref(), Some(record));
+    }
+    let past = Err(ResetRefused::Refused("unscripted call".into()));
+    assert_eq!(reset().await, past, "no go was sent for it");
+    assert_eq!(
+        reset_returned(dir, "a", 3).as_deref(),
+        Some("refused: unscripted call")
+    );
+    let other = ScriptedReset::tagged(dir, "b", Vec::new());
+    assert_eq!(other().await, past);
+    assert_eq!((reset_calls(dir, "a"), reset_calls(dir, "b")), (3, 1));
+}
+
+/// The row as a refused reset must leave it; `renewed_at` and `updated_at` are left out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct HomeFacts {
+    pub(super) channel_id: String,
+    pub(super) provider: String,
+    pub(super) state: HomeState,
+    pub(super) holder: Option<String>,
+    pub(super) target: Option<String>,
+    pub(super) epoch: i64,
+    pub(super) detail: Option<String>,
+}
+
+pub(super) async fn home_facts(pool: &PgPool) -> Option<HomeFacts> {
+    let row = o_channel_homes::read_home(pool, &C.to_string())
+        .await
+        .unwrap()?;
+    Some(HomeFacts {
+        channel_id: row.channel_id,
+        provider: row.provider,
+        state: row.state,
+        holder: row.holder,
+        target: row.target,
+        epoch: row.epoch,
+        detail: row.detail,
+    })
+}
+
+/// Intake rows a release must not touch: a terminal one of `C` and a pending one of another channel.
+pub(super) async fn seed_outbox_samples(pool: &PgPool) {
+    let done = seed(pool, "5001", None).await;
+    sqlx::query("UPDATE intake_outbox SET status = 'done', completed_at = NOW() WHERE id = $1")
+        .bind(done)
+        .execute(pool)
+        .await
+        .unwrap();
+    seed_on(pool, C + 1, "5002", None).await;
+}
+
+/// Every intake row, whole, by id: the samples and anything a run added.
+pub(super) async fn outbox_samples(pool: &PgPool) -> Vec<String> {
+    let rows = "SELECT row_to_json(io)::TEXT FROM intake_outbox io ORDER BY id";
+    let rows: Vec<String> = sqlx::query_scalar(rows).fetch_all(pool).await.unwrap();
+    assert_eq!(rows.len(), 2, "the two samples and nothing else: {rows:?}");
+    rows
+}
+
+/// At a reset call's entry the channel has no open intake and the samples are as seeded.
+pub(super) async fn quiet_at_reset(pool: &PgPool, samples: &[String]) {
+    let rows = crate::db::o_channel_activation::activation_rows(pool, &C.to_string(), GW).await;
+    assert_eq!(
+        rows.unwrap().open_intake,
+        0,
+        "no open intake of the channel"
+    );
+    assert_eq!(outbox_samples(pool).await, samples, "the samples moved");
+}
+
+/// How long a holder may be ready before a releasing drain tries its reset: four renewal periods.
+const RESET_WINDOW: Duration = Duration::from_secs(20);
+
+/// Waits for reset call `n` of `tag`, the row still `facts` when it enters. The row moving first
+/// fails at once, and so does a holder `ready` through [`RESET_WINDOW`] with no call.
+pub(super) async fn until_reset_entered(
+    pool: &PgPool,
+    dir: &Path,
+    (tag, n): (&str, usize),
+    facts: &HomeFacts,
+    mut ready: impl FnMut() -> bool,
+) {
+    eprintln!("[s3] until reset call {n} of {tag}");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let mut ready_since = None;
+    loop {
+        let entered = reset_entered(dir, tag, n);
+        let row = home_facts(pool).await;
+        if entered {
+            let moved = format!("the row moved before reset call {n} of {tag} returned");
+            assert_eq!(row.as_ref(), Some(facts), "{moved}");
+            return;
+        }
+        let moved = format!("the row moved with reset call {n} of {tag} never entered");
+        assert_eq!(row.as_ref(), Some(facts), "{moved}");
+        if ready() {
+            let since = *ready_since.get_or_insert_with(tokio::time::Instant::now);
+            assert!(
+                since.elapsed() < RESET_WINDOW,
+                "the holder was ready at epoch {} for {RESET_WINDOW:?} and tried no reset call {n} of {tag}",
+                facts.epoch
+            );
+        }
+        let now = tokio::time::Instant::now();
+        assert!(now < deadline, "never reached: reset call {n} of {tag}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// A node as its provider runtime boots it: the boot snapshot read from its own O store, the
 /// delegated homes its rows name with their watch and lease, and the writer host for them.
 pub(super) struct Booted {
@@ -1650,9 +1872,36 @@ impl Booted {
         Self::boot_with_on(env, reads, Discord::default(), ShadowProvider::Claude, GW).await
     }
 
+    /// As [`Booted::boot_with`], with each drain's port running `reset` as the runtime's would.
+    pub(super) async fn boot_with_reset<R>(
+        env: &Env,
+        reads: impl Fn(u64) -> R,
+        reset: channel_home_boot::LegacyReset,
+    ) -> Self
+    where
+        R: DrainPort + Send + Sync + 'static,
+    {
+        let (discord, provider) = (Discord::default(), ShadowProvider::Claude);
+        Self::boot_reset_on(env, reads, reset, discord, provider, GW).await
+    }
+
     async fn boot_with_on<R>(
         env: &Env,
         reads: impl Fn(u64) -> R,
+        discord: Discord,
+        provider: ShadowProvider,
+        gateway: &str,
+    ) -> Self
+    where
+        R: DrainPort + Send + Sync + 'static,
+    {
+        Self::boot_reset_on(env, reads, no_reset(), discord, provider, gateway).await
+    }
+
+    async fn boot_reset_on<R>(
+        env: &Env,
+        reads: impl Fn(u64) -> R,
+        reset: channel_home_boot::LegacyReset,
         discord: Discord,
         provider: ShadowProvider,
         gateway: &str,
@@ -1668,7 +1917,7 @@ impl Booted {
         let pool = env.pool().await;
         let rows = channel_home_boot::listed(&pool);
         let (local, boot_pool) = (role.clone(), pool.clone());
-        let port = move |id| BootPort::new(reads(id), no_reset());
+        let port = move |id| BootPort::new(reads(id), Arc::clone(&reset));
         let prepare = move || {
             Some(Boot {
                 provider: provider_name(provider).into(),
