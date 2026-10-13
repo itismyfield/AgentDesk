@@ -147,6 +147,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "sample_raw",
     "recent_raw",
     "marker_counts",
+    "clear_refusal",
     "tmux_key_sequences",
     "direct_input_prompts",
     "concurrent_prompt_batches",
@@ -3770,6 +3771,7 @@ def run_one_cell(
 
     last_turn_identity: dict[str, str] | None = None
     last_sent_prompt: str | None = None
+    clear_after: str | None = None
 
     if e36 is not None:
         _prepare_first_prompt_window()
@@ -3811,6 +3813,8 @@ def run_one_cell(
             window.mark_prompt_sent()
             last_sent_prompt = str(step["send_discord_prompt"]).replace("{run_id}", run_id)
             response = client.send(channel_id, last_sent_prompt)
+            if scenario_id == "E-50" and last_sent_prompt.startswith("!clear "):
+                clear_after = str(response.get("message_id") or response.get("id") or "")
             if scenario.get("durable_delivery_probe"):
                 record["durable_record_probe"]["inbound_prompt_id"] = str(
                     response.get("message_id") or response.get("id") or ""
@@ -3984,9 +3988,14 @@ def run_one_cell(
                     )
         elif "wait_for_raw_discord_text" in step:
             needle = step["wait_for_raw_discord_text"]
+            def current_clear_refusal(message):
+                return (scenario_id == "E-50" and bool(clear_after) and clear_after.isdigit()
+                        and not assertions.is_our_send(message)
+                        and herdr.clear_refusal([message], after=int(clear_after), channel=channel_id))
+
             predicate = lambda message: (  # noqa: E731
                 not assertions.is_our_send(message)
-                and needle in (message.get("content") or "")
+                and (current_clear_refusal(message) or needle in (message.get("content") or ""))
             )
             found, observed = client.wait_for_message(
                 channel_id,
@@ -3997,6 +4006,14 @@ def run_one_cell(
             )
             _ingest_observed(observed)
             _record_marker_counts(record, window, marker_targets)
+            refusal_reply = next((m for m in observed if current_clear_refusal(m)), None)
+            if refusal_reply is not None:
+                # Preserve the pending clear boundary so the smoke judge cannot accept an old reply.
+                record["clear_refusal"] = {"stage": "clear_ack", "after_id": clear_after,
+                                           "reply": refusal_reply}
+                _update_record_window_snapshot(record, window)
+                raise ScenarioStepAssertionError(
+                    f"text !clear refused by the server: {refusal_reply['content']}", record=record)
             if not found:
                 diagnostic = _collect_wait_timeout_diagnostics(
                     base_url=client.base_url,

@@ -218,6 +218,10 @@ def load_channel_id_from_config(config_path: Path, cell: str) -> str:
     path = config_path.expanduser()
     with path.open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
+    return _channel_id_from_config(config, cell, path)
+
+
+def _channel_id_from_config(config: Any, cell: str, path: Path) -> str:
     agents = config.get("agents") if isinstance(config, dict) else None
     if not isinstance(agents, list):
         raise SmokeConfigError(f"{path} has no agents list")
@@ -236,6 +240,20 @@ def load_channel_id_from_config(config_path: Path, cell: str) -> str:
             )
         return str(channel_id)
     raise SmokeConfigError(f"{path} agent {agent_id!r} not found")
+
+
+def channel_is_herdr(config_path: Path, cell: str, channel_id: str) -> bool:
+    """Resolve the cell and Herdr mapping from one snapshot; mismatches are unevaluable."""
+    with config_path.expanduser().open(encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+    if _channel_id_from_config(config, cell, config_path) != str(channel_id):
+        raise SmokeConfigError("cell channel changed during smoke")
+    hosts = config.get("session_hosts", {})
+    herdr = hosts.get("herdr", {}) if isinstance(hosts, dict) else None
+    channels = herdr.get("channels", {}) if isinstance(herdr, dict) else None
+    if not isinstance(channels, dict):
+        raise SmokeConfigError("Herdr channels mapping unreadable")
+    return str(channel_id) in {str(key) for key in channels}
 
 
 def resolve_channel_id(args: argparse.Namespace) -> str:

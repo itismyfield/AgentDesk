@@ -21,6 +21,7 @@ extract_function() {
 }
 for fn in _post_deploy_smoke_note _post_deploy_smoke_fail \
     _post_deploy_smoke_log_identity_and_size _post_deploy_smoke_log_head_fingerprint \
+    _post_deploy_smoke_classified_note _post_deploy_smoke_check_relay_round_trip \
     _post_deploy_smoke_run_turn_scenario \
     _post_deploy_smoke_check_turn_scenarios _report_post_deploy_smoke_failure; do
     body=$(extract_function "$fn")
@@ -40,7 +41,7 @@ import yaml
 parser = argparse.ArgumentParser()
 for flag in ("--base-url", "--cell", "--channel-id", "--scenarios", "--filter", "--output",
              "--queue-runtime-root", "--phase-deadline-s", "--required-agent-mode",
-             "--required-coverage-class"):
+             "--required-coverage-class", "--run-id"):
     parser.add_argument(flag)
 parser.add_argument("--no-reset-before-each", action="store_true")
 args = parser.parse_args()
@@ -49,18 +50,30 @@ with open(os.environ["FAKE_ARGV_LOG"], "a", encoding="utf-8") as handle:
 mode = os.environ.get(f"FAKE_MODE_{args.filter.replace('-', '_')}", "clean")
 output = Path(args.output)
 output.mkdir(parents=True, exist_ok=True)
-run_id = output.name
+run_id = args.run_id or output.name
 scenario = next(
     data for path in sorted(Path(args.scenarios).glob("*.yaml"))
     if (data := yaml.safe_load(path.read_text(encoding="utf-8"))).get("id") == args.filter
 )
-counts = {m.replace("{run_id}", run_id): 1 for m in scenario["report_marker_counts"]}
+counts = {m.replace("{run_id}", run_id): 1 for m in scenario.get("report_marker_counts", [])}
 status, reason = "pass", None
 if mode == "withheld":
     counts = {m: (0 if m.endswith(":AFTER_CLEAR]") else 1) for m in counts}
     status, reason = "fail", "assertion: timeout waiting for Discord text"
-row = {"id": args.filter, "status": status, "reason": reason, "marker_counts": counts}
-report = {"run_id": run_id, "scenarios": [row], "totals": {"pass": int(status == "pass")}}
+row = {"cell": args.cell, "channel_id": args.channel_id, "run_id": run_id, "id": args.filter, "status": status, "reason": reason, "marker_counts": counts}
+if mode == "rotation":
+    content = "세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled(59)"
+    row.update(status="fail", reason="assertion: text !clear refused by the server: " + content,
+               marker_counts={m: (0 if m.endswith(":AFTER_CLEAR]") else 1) for m in counts},
+               clear_refusal={"stage": "clear_ack", "after_id": "100", "reply": {
+                   "id": "101", "channel_id": args.channel_id, "author": {"bot": True}, "content": content}})
+    status = "fail"
+if mode in {"e1_gap", "e1_other"}:
+    row.update(status="fail", reason="RuntimeError: turn/start HTTP 422: " + json.dumps({
+        "status": "invalid_target", "error": "herdr turn refused: " + (
+            "executor_not_wired" if mode == "e1_gap" else "other")}))
+    status = "fail"
+report = {"cell": args.cell, "channel_id": args.channel_id, "run_id": run_id, "scenarios": [row], "totals": {"pass": int(status == "pass")}}
 (output / f"report.{args.cell}.json").write_text(json.dumps(report), encoding="utf-8")
 log = Path(os.environ["FAKE_SERVER_LOG"])
 fixture = Path(os.environ["FIXTURES"]) / (
@@ -96,7 +109,8 @@ run_case() {
         POST_DEPLOY_SMOKE_RELAY_CELL=claude-tui; POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID="$relay_channel"
         POST_DEPLOY_SMOKE_CODEX_TURNS_CELL=codex-tui
         POST_DEPLOY_SMOKE_CLAUDE_TURNS_DEADLINE_S=120; POST_DEPLOY_SMOKE_CODEX_TURNS_DEADLINE_S=150
-        POST_DEPLOY_SMOKE_FAILURES=(); POST_DEPLOY_SMOKE_TURN_COVERAGE='not run'
+        POST_DEPLOY_SMOKE_FAILURES=(); POST_DEPLOY_SMOKE_KNOWN_GAPS=(); POST_DEPLOY_SMOKE_UNEXPECTED_PASSES=()
+        POST_DEPLOY_SMOKE_TURN_COVERAGE='not run'
         POST_DEPLOY_SMOKE_CREATE_ISSUE=off
         POST_DEPLOY_SMOKE_WEDGE_COVERAGE=clean; POST_DEPLOY_SMOKE_DURABLE_COVERAGE=evaluated
         : > "$POST_DEPLOY_SMOKE_EVIDENCE"
@@ -109,6 +123,7 @@ run_case() {
                     fi ;;
                 scripts/e2e/run_tui_relay.py) shift; command python3 "$FAKE_DRIVER" "$@"; return ;;
             esac
+            if [ "${1:-}" = - ] && [[ "${2:-}" == http* ]]; then return 1; fi
             command python3 "$@"
         }
         if [ "$name" = no_fingerprint ]; then
@@ -117,7 +132,19 @@ run_case() {
         _notify_channel() { printf '%s\n' "$1" > "$root/alert"; }
         hostname() { echo fixture-node; }
         rc=0
-        _post_deploy_smoke_check_turn_scenarios || rc=$?
+        if [[ "$name" == e1_* ]]; then
+            POST_DEPLOY_SMOKE_READY=true
+            POST_DEPLOY_SMOKE_HEALTH_BODY="$root/health"
+            POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY="$root/detail"
+            POST_DEPLOY_SMOKE_SESSIONS_BODY="$root/sessions"
+            printf '{"mailboxes": []}' > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+            printf '[]' > "$POST_DEPLOY_SMOKE_SESSIONS_BODY"
+            printf '{}' > "$POST_DEPLOY_SMOKE_HEALTH_BODY"
+            _post_deploy_smoke_resolve_cluster_standby() { echo false; }
+            _post_deploy_smoke_check_relay_round_trip || rc=$?
+        else
+            _post_deploy_smoke_check_turn_scenarios || rc=$?
+        fi
         if [ "${#POST_DEPLOY_SMOKE_FAILURES[@]}" -gt 0 ]; then
             _report_post_deploy_smoke_failure > /dev/null
         fi
@@ -143,9 +170,9 @@ grep -q '^COVERAGE=E-50=pass E-51=pass$' "$root/out" || fail_test "clean: covera
 grep -q '^relay E-50 cell=claude-tui result=pass deliveries T1=1 T2=1 AFTER_CLEAR=1 composer_not_detected=0 warm_followup_kill=0 cold_resume=0$' "$root/evidence" \
     || fail_test "clean: E-50 pass line missing"
 grep -q '^relay E-51 cell=codex-tui result=pass ' "$root/evidence" || fail_test "clean: E-51 pass line missing"
-grep -q -- '--cell claude-tui --channel-id 1509350490461180105 .*--filter E-50 --no-reset-before-each --phase-deadline-s 120 ' "$root/argv" \
+grep -q -- '--cell claude-tui --channel-id 1509350490461180105 .*--filter E-50 --run-id fixture-E-50-claude-tui --no-reset-before-each --phase-deadline-s 120 ' "$root/argv" \
     || fail_test "clean: E-50 driver args $(cat "$root/argv")"
-grep -q -- '--cell codex-tui --channel-id 1509350778043895902 .*--filter E-51 --no-reset-before-each --phase-deadline-s 150 ' "$root/argv" \
+grep -q -- '--cell codex-tui --channel-id 1509350778043895902 .*--filter E-51 --run-id fixture-E-51-codex-tui --no-reset-before-each --phase-deadline-s 150 ' "$root/argv" \
     || fail_test "clean: E-51 driver args"
 ! grep -q '^FAIL:' "$root/evidence" || fail_test "clean: unexpected FAIL"
 
@@ -187,6 +214,35 @@ grep -q '^COVERAGE=E-50=skipped E-51=skipped$' "$root/out" || fail_test "standby
 root=$(run_case busy 1509350490461180105 "$two_cells" 1)
 grep -q '^COVERAGE=E-50=skipped E-51=skipped$' "$root/out" || fail_test "busy: coverage $(cat "$root/out")"
 [ ! -s "$root/argv" ] || fail_test "busy: driver ran"
+
+herdr_cells="$two_cells
+session_hosts:
+  herdr:
+    channels: {1509350490461180105: local}"
+root=$(run_case rotation 1509350490461180105 "$herdr_cells" 0 FAKE_MODE_E_50=rotation)
+grep -q '^RC=0$' "$root/out" || fail_test "rotation: rc"
+grep -q '^COVERAGE=E-50=KNOWN_GAP E-51=pass$' "$root/out" || fail_test "rotation: coverage"
+grep -q '^KNOWN_GAP: relay E-50 .*rotation_unsettled(59)$' "$root/evidence" || fail_test "rotation: evidence"
+[ ! -f "$root/alert" ] || fail_test "rotation: false alarm"
+root=$(run_case unexpected 1509350490461180105 "$herdr_cells" 0)
+grep -q '^COVERAGE=E-50=UNEXPECTED_PASS E-51=pass$' "$root/out" || fail_test "unexpected: coverage"
+root=$(run_case mixed 1509350490461180105 "$herdr_cells" 0 FAKE_MODE_E_50=rotation FAKE_MODE_E_51=warm_kill)
+grep -q '^RC=1$' "$root/out" || fail_test "mixed: rc"
+draft="$root/release/logs/post-deploy-smoke-issue-draft-fixture.md"
+grep -A2 '^## Known gaps' "$draft" | grep -q 'KNOWN_GAP: relay E-50' || fail_test "mixed: gap section"
+! sed -n '/## Findings/,/## Known gaps/p' "$draft" | grep -q 'KNOWN_GAP:' || fail_test "mixed: gap in findings"
+root=$(run_case mixed_pass 1509350490461180105 "$herdr_cells" 0 FAKE_MODE_E_51=warm_kill)
+grep -A2 '^## Unexpected passes' "$root/release/logs/post-deploy-smoke-issue-draft-fixture.md" | grep -q 'UNEXPECTED_PASS:' || fail_test "mixed_pass: section"
+for mode in e1_gap e1_other; do
+    root=$(run_case "$mode" 1509350490461180105 "$herdr_cells" 0 "FAKE_MODE_E_1=$mode")
+    if [ "$mode" = e1_gap ]; then
+        grep -q '^RC=0$' "$root/out" || fail_test "e1_gap: rc $(cat "$root/out")"
+        grep -q '^KNOWN_GAP: relay E-1 .*executor_not_wired$' "$root/evidence" || fail_test "e1_gap: evidence"
+    else
+        grep -q '^RC=1$' "$root/out" || fail_test "e1_other: rc"
+        grep -q '^FAIL: relay E-1 round-trip failed' "$root/evidence" || fail_test "e1_other: FAIL"
+    fi
+done
 
 if [ "$failures" -ne 0 ]; then
     printf 'test_deploy_smoke_turn_scenarios_6561: %s assertion(s) failed\n' "$failures" >&2
