@@ -63,39 +63,41 @@ def load_mark(path, args):
     if before.get("surface") != "GET /api/health/detail" or not mark.get("run_id"):
         raise ValueError("restart mark surface/run identity missing")
     observed = parse_time(before["observed_at"])
-    # A mark without completed_at predates completion timing and keeps the observed_at rule.
+    # Older marks without completed_at still load; restart_evidence refuses to confirm with them.
     if "completed_at" in mark and parse_time(mark["completed_at"]) < observed:
         raise ValueError("restart mark time invalid")
-    clock = mark.get("boot_clock")
-    if clock is not None and (not isinstance(clock, dict) or not isinstance(clock.get("clock"), str)
-                              or type(clock.get("seconds")) not in (int, float) or not math.isfinite(clock["seconds"])):
-        raise ValueError("restart mark boot clock invalid")
     herdr.clean_turn(herdr.ready({"herdr": before.get("herdr")}, endpoint=args.herdr_endpoint, channel=args.channel_id))
     herdr.current_row({"executions": [before.get("row")], "other_input_holds": []},
                       channel=args.channel_id, provider=args.cell.split("-", 1)[0])
     return mark
 
 
+def usable_clock(clock):
+    """A supported boot-clock reading with finite, non-negative seconds."""
+    return (isinstance(clock, dict) and clock.get("clock") in BOOT_CLOCKS.values()
+            and type(clock.get("seconds")) in (int, float) and math.isfinite(clock["seconds"]) and clock["seconds"] >= 0)
+
+
 def restart_evidence(after, mark, verify_clock):
     """Prove a restart only when the server started after the mark; otherwise report not_proven."""
+    # Wall time alone cannot rule out a clock step, so no shared boot clock means no confirmation.
+    before_clock = mark.get("boot_clock")
+    problem = ("the mark has no completion time" if "completed_at" not in mark
+               else "the mark has no usable boot clock" if not usable_clock(before_clock)
+               else "this host gives no usable boot clock" if not usable_clock(verify_clock)
+               else "mark and verify boot clocks differ" if before_clock["clock"] != verify_clock["clock"] else None)
+    if problem:
+        raise ValueError(f"restart cannot be confirmed: {problem}; take a new mark")
     uptime = after.get("server_values", {}).get("uptime_secs")
     if type(uptime) is not int or uptime < 0:
         return {"restart_evidence": "not_proven"}
     # From mark completion to the verify request start; the smaller clock wins, so a wall-clock
     # step forward or a host sleep cannot inflate elapsed time.
-    legacy = "completed_at" not in mark
-    reference = mark["observation"]["observed_at"] if legacy else mark["completed_at"]
-    wall = (dt.datetime.fromisoformat(after["observed_at"]) - dt.datetime.fromisoformat(reference)).total_seconds()
+    wall = (dt.datetime.fromisoformat(after["observed_at"]) - dt.datetime.fromisoformat(mark["completed_at"])).total_seconds()
+    boot = verify_clock["seconds"] - before_clock["seconds"]
+    elapsed = min(wall, boot)
     evidence = {"restart_evidence": "server_uptime", "uptime_secs": uptime, "wall_elapsed_secs": wall,
-                "mark_reference": "legacy_observed_at" if legacy else "completed_at",
-                "boot_clock": "monotonic_unavailable"}
-    before_clock = None if legacy else mark.get("boot_clock")
-    elapsed = wall
-    if before_clock and verify_clock and before_clock["clock"] == verify_clock["clock"]:
-        boot = verify_clock["seconds"] - before_clock["seconds"]
-        evidence.update(boot_clock=verify_clock["clock"], boot_clock_elapsed_secs=boot)
-        elapsed = min(wall, boot)
-    evidence["elapsed_secs"] = elapsed
+                "boot_clock": verify_clock["clock"], "boot_clock_elapsed_secs": boot, "elapsed_secs": elapsed}
     if elapsed <= 0 or not uptime < elapsed - UPTIME_MARGIN_S:
         evidence["restart_evidence"] = "not_observed"
     return evidence

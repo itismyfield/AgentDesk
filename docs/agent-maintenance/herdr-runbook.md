@@ -76,7 +76,8 @@ Herdr 로 띄운 Claude 채널(P9 대상: adk-dash-cc)의 운영 절차다. 5a�
 - verify는 일반 실행과 같은 셀 lease를 잡고, reconnect의 published>0, channels=published, withheld/unknown/pending=0, row nonce 연속성, 현재 hold 0, admission open을 확인한 뒤 후속 턴을 보낸다.
 - detail에 `uptime_secs`(0 이상 정수)가 있으면 `uptime_secs < 경과 − 2초`일 때만 재시작으로 보고(`restart_evidence: server_uptime`), 아니면 후속 턴 없이 실패한다(`not_observed`).
   경과(`elapsed_secs`)는 표식 완료 시각부터 verify 요청 직전까지이며 벽시계와 부팅 기준 시계 중 작은 값이다. 부팅 기준 시계는 서버 uptime과 같은 시계(macOS `CLOCK_UPTIME_RAW`, Linux `CLOCK_MONOTONIC`)라 벽시계 보정·잠자기로 경과가 부풀지 않는다.
-  그 시계가 없는 플랫폼이나 표식·verify의 시계가 다르면 벽시계만 쓰고 `boot_clock: monotonic_unavailable`을 남긴다. `completed_at`이 없는 옛 표식은 관측 시각을 기준으로 읽고 `mark_reference: legacy_observed_at`을 남긴다.
+  구형 mark(`completed_at` 없음)나 공유 시계가 없는 mark는 재시작 확인이 되지 않는다 — 다시 mark한다.
+  표식은 읽지만 후속 턴 전에 `take a new mark` 사유로 실패한다. 해당하는 경우: 부팅 시계가 없는 플랫폼, 표식·verify 시계 이름 불일치, 유한한 0 이상 값이 아닌 시계 값.
   `uptime_secs`가 없거나 형식이 다르면 `not_proven`으로 기록하고 나머지 판정만 한다.
 - 기본 후속 턴은 `E-19-observe-only`로 기록한다. `--filter E-1`처럼 재시작 단계가 없는 시나리오를 지정할 수도 있다. 원래 E-19의 비밀값 회상 기준을 충족했다고 주장하지 않는다.
 - mark/verify에는 launchctl·재시작 명령이 없다. `--herdr-isolated-server`·`--restart-script` 병용 및 재시작 단계가 포함된 후속 시나리오는 거부한다.

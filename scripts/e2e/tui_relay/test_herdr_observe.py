@@ -20,6 +20,8 @@ from tui_relay import herdr, herdr_restart, http_auth
 
 real_run_scenario = driver.run_scenario
 real_boot_clock = herdr_restart.boot_clock
+# A supported boot clock name; the restart tests drive its readings through a patched boot_clock.
+CLOCK = "CLOCK_MONOTONIC"
 
 
 def health():
@@ -547,7 +549,7 @@ class RestartObserveOnly(unittest.TestCase):
         self.scenario = self.enterContext(patch.object(driver, "run_scenario", return_value={"id": "E-19-observe-only", "status": "pass"}))
         self.boot_now = 1000.0
         self.clock = self.enterContext(patch.object(herdr_restart, "boot_clock",
-                                                    side_effect=lambda: {"clock": "test_clock", "seconds": self.boot_now}))
+                                                    side_effect=lambda: {"clock": CLOCK, "seconds": self.boot_now}))
 
     def run_mode(self, mode):
         self.args.herdr_restart_observe_only = mode
@@ -570,7 +572,7 @@ class RestartObserveOnly(unittest.TestCase):
         mark["observation"].update(observed_at=moment.isoformat(), **observation)
         mark["completed_at"] = moment.isoformat()
         age = (datetime.now(timezone.utc) - moment).total_seconds() if boot_age is None else boot_age
-        mark["boot_clock"] = {"clock": "test_clock", "seconds": self.boot_now - age}
+        mark["boot_clock"] = {"clock": CLOCK, "seconds": self.boot_now - age}
         self.mark.write_text(json.dumps(mark))
 
     def marked(self, uptime=3):
@@ -638,7 +640,7 @@ class RestartObserveOnly(unittest.TestCase):
         mark = json.loads(self.mark.read_text())
         self.assertGreaterEqual(datetime.fromisoformat(mark["completed_at"]),
                                 datetime.fromisoformat(mark["observation"]["observed_at"]))
-        self.assertEqual(mark["boot_clock"], {"clock": "test_clock", "seconds": 1000.0})
+        self.assertEqual(mark["boot_clock"], {"clock": CLOCK, "seconds": 1000.0})
 
     def test_restart_during_mark_request_is_measured_from_mark_completion(self):
         # Mark request ran 63 s..57 s ago and the server restarted inside it; nothing restarted since.
@@ -648,17 +650,9 @@ class RestartObserveOnly(unittest.TestCase):
         self.edit_mark(completed_at=(now - timedelta(seconds=57)).isoformat())
         self.publishable(59)
         restart = self.assert_refused("restart not observed")["restart_observation"]
-        self.assertEqual((restart["mark_reference"], restart["restart_evidence"]), ("completed_at", "not_observed"))
+        self.assertEqual(restart["restart_evidence"], "not_observed")
         self.assertLess(restart["elapsed_secs"], 58)
-        self.clock.side_effect, self.clock.return_value = None, None
-        self.assertLess(self.assert_refused("restart not observed")["restart_observation"]["wall_elapsed_secs"], 58)
-        # A mark from before completion timing keeps the observed_at rule and says so.
-        self.edit_mark(drop=("completed_at", "boot_clock"))
-        rc, report = self.run_mode("verify")
-        self.assertEqual(rc, 0, report)
-        restart = report["restart_observation"]
-        self.assertEqual((restart["mark_reference"], restart["boot_clock"], restart["restart_evidence"]),
-                         ("legacy_observed_at", "monotonic_unavailable", "server_uptime"))
+        self.assertLess(restart["wall_elapsed_secs"], 58)
 
     def test_wall_clock_step_forward_uses_the_smaller_boot_clock_elapsed(self):
         # 60 s really passed, the wall clock stepped 20 s forward, and the server never restarted.
@@ -667,7 +661,7 @@ class RestartObserveOnly(unittest.TestCase):
         self.publishable(72)
         restart = self.assert_refused("restart not observed")["restart_observation"]
         self.assertEqual((restart["boot_clock"], restart["boot_clock_elapsed_secs"], restart["elapsed_secs"]),
-                         ("test_clock", 60.0, 60.0))
+                         (CLOCK, 60.0, 60.0))
         self.assertGreaterEqual(restart["wall_elapsed_secs"], 80)
         self.set_mark(datetime.now(timezone.utc) - timedelta(seconds=40), boot_age=60)
         self.publishable(39)
@@ -675,39 +669,51 @@ class RestartObserveOnly(unittest.TestCase):
         self.publishable(10)
         self.assertEqual(self.run_mode("verify")[0], 0)
 
-    def test_without_a_shared_boot_clock_verify_uses_wall_time_and_says_so(self):
+    def test_restart_is_not_confirmed_without_completion_time_and_one_shared_boot_clock(self):
+        now = datetime.now(timezone.utc)
+        other = "CLOCK_UPTIME_RAW"
+        # (label, mark age, mark boot age, mark edit, dropped mark keys, verify clock, uptime)
+        cases = (("older mark, restart inside its request", 63, 57, {}, ("completed_at", "boot_clock"), CLOCK, 59),
+                 ("no completion time, real restart", 60, 60, {}, ("completed_at",), CLOCK, 3),
+                 ("no mark boot clock", 60, 60, {}, ("boot_clock",), CLOCK, 3),
+                 ("null mark boot clock (unsupported platform)", 60, 60, {"boot_clock": None}, (), CLOCK, 3),
+                 ("clock names differ, wall +20 s", 80, 60, {"boot_clock": {"clock": other, "seconds": 940.0}}, (), CLOCK, 72),
+                 ("verify NaN", 80, 60, {}, (), float("nan"), 72),
+                 ("verify +inf", 80, 60, {}, (), float("inf"), 72),
+                 ("verify -inf", 80, 60, {}, (), float("-inf"), 72),
+                 ("verify negative", 80, 60, {}, (), -1.0, 72),
+                 ("verify bool", 80, 60, {}, (), True, 72),
+                 ("verify unsupported platform", 80, 60, {}, (), None, 72),
+                 ("negative mark", 80, 60, {"boot_clock": {"clock": CLOCK, "seconds": -5.0}}, (), CLOCK, 72),
+                 ("mark bool", 80, 60, {"boot_clock": {"clock": CLOCK, "seconds": True}}, (), CLOCK, 72),
+                 ("mark NaN", 80, 60, {"boot_clock": {"clock": CLOCK, "seconds": float("nan")}}, (), CLOCK, 72),
+                 ("mark unsupported name", 80, 60, {"boot_clock": {"clock": "test_clock", "seconds": 940.0}}, (), CLOCK, 72),
+                 ("mark not an object", 80, 60, {"boot_clock": CLOCK}, (), CLOCK, 72))
         self.marked()
-        # A 1 s boot-clock span would refuse, so these pass only if that span is not used.
-        for mark_clock, verify_clock in (("absent", "test_clock"), (None, "test_clock"), ({"clock": "test_clock", "seconds": 999.0}, None),
-                                         ({"clock": "other", "seconds": 999.0}, "test_clock")):
-            with self.subTest(mark_clock=mark_clock, verify_clock=verify_clock):
-                self.set_mark()
-                self.edit_mark(drop=("boot_clock",)) if mark_clock == "absent" else self.edit_mark(boot_clock=mark_clock)
-                self.clock.side_effect = lambda: verify_clock and {"clock": verify_clock, "seconds": self.boot_now}
-                rc, report = self.run_mode("verify")
-                self.assertEqual(rc, 0, report)
-                restart = report["restart_observation"]
-                self.assertEqual((restart["boot_clock"], restart["mark_reference"]), ("monotonic_unavailable", "completed_at"))
-                self.assertNotIn("boot_clock_elapsed_secs", restart)
-                self.assertEqual(restart["elapsed_secs"], restart["wall_elapsed_secs"])
-        self.clock.side_effect = None
-        self.clock.return_value = None
-        self.mark.unlink()
-        self.assertEqual(self.run_mode("mark")[0], 0)
-        self.assertIsNone(json.loads(self.mark.read_text())["boot_clock"])
+        for label, age, boot_age, edit, drop, verify, uptime in cases:
+            with self.subTest(label=label):
+                self.set_mark(now - timedelta(seconds=age), boot_age=boot_age)
+                self.edit_mark(drop=drop, **edit)
+                self.clock.side_effect = (lambda: None) if verify is None else (
+                    lambda: {"clock": CLOCK, "seconds": self.boot_now if verify == CLOCK else verify})
+                self.publishable(uptime)
+                restart = self.assert_refused("take a new mark")["restart_observation"]
+                self.assertNotIn("restart_evidence", restart)
 
-    def test_malformed_completion_or_boot_clock_refuses_verify(self):
+    def test_malformed_completion_time_refuses_verify(self):
         self.marked()
         now = datetime.now(timezone.utc)
-        for changes in ({"completed_at": (now + timedelta(seconds=30)).isoformat()},
-                        {"completed_at": (now - timedelta(seconds=90)).isoformat()},
-                        {"completed_at": (now - timedelta(seconds=30)).replace(tzinfo=None).isoformat()},
-                        {"boot_clock": {"clock": "test_clock", "seconds": True}}, {"boot_clock": "CLOCK_UPTIME_RAW"},
-                        {"boot_clock": {"clock": "test_clock", "seconds": float("-inf")}}):
-            with self.subTest(changes=changes):
+        for completed in ((now + timedelta(seconds=30)).isoformat(), (now - timedelta(seconds=90)).isoformat(),
+                          (now - timedelta(seconds=30)).replace(tzinfo=None).isoformat()):
+            with self.subTest(completed=completed):
                 self.set_mark()
-                self.edit_mark(**changes)
-                self.assert_refused("restart mark")
+                self.edit_mark(completed_at=completed)
+                self.assert_refused("restart mark time invalid")
+
+    def test_unsupported_platform_marks_without_a_boot_clock(self):
+        self.clock.side_effect, self.clock.return_value = None, None
+        self.assertEqual(self.run_mode("mark")[0], 0)
+        self.assertIsNone(json.loads(self.mark.read_text())["boot_clock"])
 
     def test_boot_clock_follows_the_server_uptime_clock_per_platform(self):
         for platform, expected in (("darwin", "CLOCK_UPTIME_RAW"), ("linux", "CLOCK_MONOTONIC"), ("win32", None)):
