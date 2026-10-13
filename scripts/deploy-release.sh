@@ -230,12 +230,16 @@ DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS="${AGENTDESK_DEPLOY_PEER_VERDICT_POLL_INT
 # Parse flags non-destructively into shell vars + env so that the lock-acquire
 # re-exec (lockf/flock pass-through) and the detached-helper tmux script both
 # see the same configuration without us having to reconstruct $@.
+DEPLOY_STRICT_PROMPTS=0
 PARSED_ARGS=()
 _idx=0
 _args=("$@")
 while [ "$_idx" -lt "${#_args[@]}" ]; do
     case "${_args[$_idx]}" in
         --skip-review|--skip-health)
+            PARSED_ARGS+=("${_args[$_idx]}") ;;
+        --strict-prompts)
+            DEPLOY_STRICT_PROMPTS=1
             PARSED_ARGS+=("${_args[$_idx]}") ;;
         --fast)
             DEPLOY_FAST=1
@@ -2566,7 +2570,18 @@ if [ -d "$OBSIDIAN_AGENTS_SRC" ]; then
     rm -rf "$PROMPTS_STAGED"
     mkdir -p "$PROMPTS_STAGED"
     rsync -a "$OBSIDIAN_AGENTS_SRC/" "$PROMPTS_STAGED/"
-    if ! python3 "$REPO/scripts/check_prompt_api_routes.py" --repo "$REPO" --prompts "$PROMPTS_STAGED"; then echo "⚠ Prompt API route inspection warning; core release deploy will continue."; fi
+    prompt_check_rc=0
+    python3 "$REPO/scripts/check_prompt_api_routes.py" --repo "$REPO" --prompts "$PROMPTS_STAGED" || prompt_check_rc=$?
+    if [ "$prompt_check_rc" -ne 0 ]; then
+        if [ "$DEPLOY_STRICT_PROMPTS" = "1" ]; then
+            case "$prompt_check_rc" in
+                1) echo "✗ Prompt API route check failed: unknown paths (exit=1); --strict-prompts stops release deploy." ;;
+                *) echo "✗ Prompt API route inspection unavailable (exit=$prompt_check_rc); --strict-prompts stops release deploy." ;;
+            esac
+            exit "$prompt_check_rc"
+        fi
+        echo "⚠ Prompt API route inspection warning; core release deploy will continue."
+    fi
 else
     if [ -n "${AGENTDESK_OBSIDIAN_AGENTS_SRC:-}" ]; then
         echo "⚠ Optional connector obsidian_agent_prompts invalid: $OBSIDIAN_AGENTS_SRC"
