@@ -34,6 +34,9 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/tui_o/store/spool_transition_tests.rs",
+        "src/services/tui_o/writer/transition_cleanup_tests.rs",
+        "src/services/tui_o/writer/transition_observe_tests.rs",
         "src/services/discord/queue_io/queued_head_inject_tests.rs",
         "src/services/turn_orchestrator/overflow_s2b_tests.rs",
         "src/services/turn_orchestrator/pending_queue_persistence/queue_exit_debt_tests.rs",
@@ -696,6 +699,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/tui_o/writer/transition_cleanup.rs",
+        "src/services/tui_o/writer/transition_observe.rs",
         "src/services/discord/turn_bridge/replay_policy.rs",
         "src/services/discord/router/intake_dispatch/tests/final_guards.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
