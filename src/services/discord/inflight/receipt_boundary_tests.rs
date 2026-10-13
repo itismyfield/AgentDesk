@@ -440,7 +440,10 @@ fn writer(f: &Fixture, row: &InflightTurnState, op: &str) -> String {
             "clear" => format!("{:?}", clear_inflight_state_if_matches(&ProviderKind::Claude, CHANNEL, row.user_msg_id)),
             "abandon" => format!("{:?}", request_inflight_abandon_if_matches(&ProviderKind::Claude, CHANNEL, row.user_msg_id, "fixture")),
             "offset" => format!("{:?}", refresh_inflight_last_offset_if_matches_identity(&ProviderKind::Claude, CHANNEL, &id, row.turn_start_offset, "/tmp/relay", Some(row.current_msg_id), 9, RelayOwnerKind::None)),
-            _ => format!("{:?}", set_inflight_restart_mode_under_lock(&f.path, InflightRestartMode::DrainRestart)),
+            _ => match set_inflight_restart_mode_under_lock(&f.path, InflightRestartMode::DrainRestart) {
+                restart_mark::MarkOutcome::Marked => "true".into(),
+                other => format!("{other:?}"),
+            },
     }
 }
 
@@ -457,7 +460,6 @@ async fn s3act_b3b_writer_matrix_carries_raw_receipt_pg() {
             "anchor_repost",
             "budget",
             "offset",
-            "restart",
         ] {
             f.seed(Some(shape.clone()));
             let row = f.loaded();
@@ -469,6 +471,15 @@ async fn s3act_b3b_writer_matrix_carries_raw_receipt_pg() {
             let saved: serde_json::Value = serde_json::from_slice(&f.bytes().unwrap()).unwrap();
             assert_eq!(saved[FIELD], shape, "writer {op} preserved subtree");
         }
+        // Restart marking leaves a receipt row byte-identical instead of carrying the receipt.
+        let before = f.seed(Some(shape.clone()));
+        let result = writer(&f, &f.loaded(), "restart");
+        assert_eq!(result, "SkippedPolicyReceipt", "restart on {shape}");
+        assert_eq!(
+            f.bytes(),
+            Some(before),
+            "restart left {shape} byte-identical"
+        );
     }
     pool.close().await;
 }
@@ -848,4 +859,196 @@ async fn s3act_b3b_clear_and_boot_recovery_observe_fresh_receipt_pg() {
     assert!(!clear.join().unwrap());
     assert_eq!(f.bytes(), Some(before));
     pool.close().await;
+}
+
+/// A receipt row refuses the stream-loop restart patch and is served by load without a backfill
+/// write, byte-identical; a receipt-free row still takes both.
+#[test]
+fn receipt_row_refuses_stream_loop_marker_and_load_backfill_write() {
+    let f = Fixture::new();
+    let old_format = |f: &Fixture| {
+        let mut raw: serde_json::Value = serde_json::from_slice(&f.bytes().unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("finalizer_turn_id");
+        fs::write(&f.path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+        f.bytes().unwrap()
+    };
+    for shape in [
+        Some(receipt("pending")),
+        Some(serde_json::json!({"protocol": 9})),
+        Some(serde_json::Value::Null),
+        None,
+    ] {
+        let protected = shape.is_some();
+        let before = f.seed(shape.clone());
+        let row = f.loaded();
+        let mut marked = row.clone();
+        marked.set_restart_mode(InflightRestartMode::DrainRestart);
+        let patched = patch_restart_mode_if_matches_identity(
+            &marked,
+            &InflightTurnIdentity::from_state(&row),
+            None,
+            None,
+            "receipt_boundary_tests",
+        );
+        if protected {
+            assert_eq!(patched, GuardedSaveOutcome::AuthorityPinned, "{shape:?}");
+            assert_eq!(
+                f.bytes(),
+                Some(before),
+                "patch left {shape:?} byte-identical"
+            );
+        } else {
+            assert_eq!(patched, GuardedSaveOutcome::Saved);
+            assert!(f.loaded().restart_mode.is_some());
+        }
+        let old = old_format(&f);
+        let served = load_inflight_state(&ProviderKind::Claude, CHANNEL).unwrap();
+        assert_ne!(served.finalizer_turn_id, 0, "{shape:?} served backfilled");
+        assert_eq!(
+            f.bytes() == Some(old),
+            protected,
+            "only a receipt-free row is rewritten: {shape:?}"
+        );
+    }
+}
+
+/// Status metadata writers keep every raw receipt shape and the episode and destination anchor;
+/// a malformed receipt row is never rewritten. Clearing the placeholder may zero the anchor, which
+/// the settlement checks refuse rather than this writer.
+#[test]
+fn status_writers_preserve_receipt_subtree_and_anchor() {
+    let f = Fixture::new();
+    let pinned = |row: &InflightTurnState| {
+        (
+            row.turn_nonce.clone(),
+            row.born_generation,
+            row.started_at.clone(),
+        )
+    };
+    for shape in shapes() {
+        let mut outcomes = Vec::new();
+        for writer in [
+            "bind",
+            "singleton",
+            "bridge_entry",
+            "stream_tick",
+            "clear_panel",
+            "clear_current",
+        ] {
+            f.seed(Some(shape.clone()));
+            let row = f.loaded();
+            let ok = match writer {
+                "bind" => matches!(
+                    bind_status_panel_in_root(
+                        &f.dir,
+                        &ProviderKind::Claude,
+                        CHANNEL,
+                        77_001,
+                        &StatusPanelBindGuard {
+                            bump_status_panel_generation: true,
+                            ..StatusPanelBindGuard::default()
+                        }
+                    ),
+                    StatusPanelBindOutcome::Bound { .. }
+                ),
+                "singleton" => {
+                    let mut bound = row.clone();
+                    bound.status_message_id = Some(77_002);
+                    save_inflight_state(&bound).unwrap();
+                    crate::services::discord::status_panel_singleton_store::bind_if_owned(
+                        &ProviderKind::Claude,
+                        "receipt-boundary",
+                        CHANNEL,
+                        77_002,
+                        Some(row.status_panel_generation + 5),
+                    )
+                    .is_ok()
+                }
+                "bridge_entry" => {
+                    let mut after = row.clone();
+                    after.status_message_id = Some(77_003);
+                    patch_bridge_entry_state_if_identity_unchanged(
+                        &row,
+                        &mut after,
+                        "receipt_boundary_tests",
+                    ) == GuardedSaveOutcome::Saved
+                }
+                "stream_tick" => {
+                    let (mut baseline, mut state) = (row.clone(), row.clone());
+                    state.status_message_id = Some(77_004);
+                    save_stream_tick_state_preserving_current_message_races(
+                        &mut baseline,
+                        &mut state,
+                        &InflightTurnIdentity::from_state(&row),
+                        row.current_msg_id,
+                        row.current_msg_len,
+                        "receipt_boundary_tests",
+                    ) == GuardedSaveOutcome::Saved
+                }
+                "clear_panel" => {
+                    let mut bound = row.clone();
+                    bound.status_message_id = Some(77_005);
+                    save_inflight_state(&bound).unwrap();
+                    clear_status_panel_if_current_in_root(
+                        &f.dir,
+                        &ProviderKind::Claude,
+                        CHANNEL,
+                        77_005,
+                        &StatusPanelClearGuard {
+                            require_user_msg_id: None,
+                            require_current_msg_id: None,
+                            require_tmux_session_name: None,
+                        },
+                    )
+                }
+                _ => clear_current_msg_if_matches_in_root(
+                    &f.dir,
+                    &ProviderKind::Claude,
+                    CHANNEL,
+                    row.current_msg_id,
+                    None,
+                ),
+            };
+            let saved = f.loaded();
+            let raw: serde_json::Value = serde_json::from_slice(&f.bytes().unwrap()).unwrap();
+            assert_eq!(raw[FIELD], shape, "{writer} kept {shape}");
+            assert_eq!(pinned(&saved), pinned(&row), "{writer} kept the episode");
+            if writer != "clear_current" {
+                assert_eq!(
+                    saved.current_msg_id, row.current_msg_id,
+                    "{writer} kept the anchor"
+                );
+            }
+            outcomes.push((writer, ok));
+        }
+        assert!(
+            outcomes.iter().all(|(_, ok)| *ok),
+            "every writer wrote: {outcomes:?}"
+        );
+    }
+    let mut raw: serde_json::Value =
+        serde_json::from_slice(&f.seed(Some(receipt("pending")))).unwrap();
+    raw["user_msg_id"] = "broken".into();
+    let malformed = serde_json::to_vec_pretty(&raw).unwrap();
+    fs::write(&f.path, &malformed).unwrap();
+    let guard = StatusPanelBindGuard::default();
+    assert!(!matches!(
+        bind_status_panel_in_root(&f.dir, &ProviderKind::Claude, CHANNEL, 77_006, &guard),
+        StatusPanelBindOutcome::Bound { .. }
+    ));
+    assert!(
+        crate::services::discord::status_panel_singleton_store::bind_if_owned(
+            &ProviderKind::Claude,
+            "receipt-boundary",
+            CHANNEL,
+            77_006,
+            Some(99),
+        )
+        .is_err()
+    );
+    assert_eq!(
+        f.bytes(),
+        Some(malformed),
+        "malformed receipt row untouched"
+    );
 }

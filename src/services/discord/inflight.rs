@@ -560,6 +560,69 @@ pub(in crate::services::discord) fn delete_inflight_state_file_checked(
     result.into_inner()
 }
 
+/// The JS `agentdesk.inflight.remove` result; only `Removed` means the row was unlinked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PolicyOpRemoveOutcome {
+    Removed,
+    Missing,
+    ProtectedReceipt,
+    Busy,
+    Io(String),
+}
+/// Unlinks one row for the JS policy op: under the row lock a fresh read refuses a receipt row.
+pub(crate) fn remove_inflight_row_for_policy_op(path: &Path) -> PolicyOpRemoveOutcome {
+    use PolicyOpRemoveOutcome as Outcome;
+    if !path.exists() {
+        return Outcome::Missing;
+    }
+    let _lock = match store::try_lock_unfenced_inflight_state_path(path) {
+        Ok(lock) => lock,
+        Err(store::TryLockRefusal::Failed(error)) => return Outcome::Io(error),
+        Err(_) => return Outcome::Busy,
+    };
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Outcome::Missing,
+        Err(error) => return Outcome::Io(error.to_string()),
+    };
+    if raw_before_start_receipt(&String::from_utf8_lossy(&bytes)) {
+        return Outcome::ProtectedReceipt;
+    }
+    #[cfg(test)]
+    policy_op_unlink_hook::before(path);
+    match fs::remove_file(path) {
+        Ok(()) => Outcome::Removed,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Outcome::Missing,
+        Err(error) => Outcome::Io(error.to_string()),
+    }
+}
+#[cfg(test)]
+pub(crate) mod policy_op_unlink_hook {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Box<dyn Fn(&Path)>>> = RefCell::new(None);
+        static ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    /// Runs `hook` on this thread right before the unlink, and counts the attempts.
+    pub(crate) fn install(hook: impl Fn(&Path) + 'static) {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        ATTEMPTS.with(|count| count.set(0));
+    }
+    pub(crate) fn attempts() -> usize {
+        ATTEMPTS.with(|count| count.get())
+    }
+    pub(super) fn before(path: &Path) {
+        ATTEMPTS.with(|count| count.set(count.get() + 1));
+        HOOK.with(|slot| {
+            if let Some(hook) = slot.borrow().as_ref() {
+                hook(path);
+            }
+        });
+    }
+}
+
 fn bump_save_generation_for_write(
     path: &Path,
     state: &mut InflightTurnState,
@@ -713,29 +776,36 @@ pub(super) fn mark_all_inflight_states_restart_mode_checked(
 /// draining watcher advanced between the unlocked enumeration and this write is
 /// preserved) and persists it with only `restart_mode` / `restart_generation`
 /// changed, under the same lock-then-read pattern as the other row clears.
-/// Returns whether the row was rewritten. Deliberately does NOT route through
+/// A row holding a policy receipt is left byte-identical. Deliberately does NOT route through
 /// `save_inflight_state_in_root` (which writes the *caller's* snapshot): the
 /// whole point is to keep the on-disk frontier rather than carry a stale one.
-fn set_inflight_restart_mode_under_lock(path: &Path, restart_mode: InflightRestartMode) -> bool {
+fn set_inflight_restart_mode_under_lock(
+    path: &Path,
+    restart_mode: InflightRestartMode,
+) -> restart_mark::MarkOutcome {
+    use restart_mark::MarkOutcome::{Failed, Marked, SkippedPolicyReceipt};
     let Ok(_lock) = lock_inflight_state_path(path) else {
-        return false;
+        return Failed;
     };
+    if receipt_protected_path(path) {
+        return SkippedPolicyReceipt;
+    }
     #[cfg(test)]
     if restart_mark::write_fault_for_test(path) {
-        return false;
+        return Failed;
     }
     let Some(mut state) = read_inflight_state_content(path) else {
-        return false;
+        return Failed;
     };
     state.set_restart_mode(restart_mode);
     state.ensure_finalizer_turn_id();
     state.updated_at = now_string();
     if bump_save_generation_for_write(path, &mut state).is_err() {
-        return false;
+        return Failed;
     }
     match serde_json::to_string_pretty(&state) {
-        Ok(json) => atomic_write(path, &json).is_ok(),
-        Err(_) => false,
+        Ok(json) if atomic_write(path, &json).is_ok() => Marked,
+        _ => Failed,
     }
 }
 
@@ -6034,9 +6104,9 @@ mod recovery_relay_attempts_tests {
 
         // The marker writes LAST (the regression-prone ordering). RMW re-reads
         // the on-disk frontier (40) rather than carrying the stale rso=10.
-        assert!(super::set_inflight_restart_mode_under_lock(
-            &path,
-            InflightRestartMode::DrainRestart
+        assert!(matches!(
+            super::set_inflight_restart_mode_under_lock(&path, InflightRestartMode::DrainRestart),
+            super::restart_mark::MarkOutcome::Marked
         ));
 
         let loaded = load_inflight_states_from_root(temp.path(), &provider);
@@ -6110,9 +6180,9 @@ mod recovery_relay_attempts_tests {
         save_inflight_state_in_root(temp.path(), &reset).unwrap();
         let path = inflight_state_path(temp.path(), &provider, 556);
 
-        assert!(super::set_inflight_restart_mode_under_lock(
-            &path,
-            InflightRestartMode::DrainRestart
+        assert!(matches!(
+            super::set_inflight_restart_mode_under_lock(&path, InflightRestartMode::DrainRestart),
+            super::restart_mark::MarkOutcome::Marked
         ));
 
         let loaded = load_inflight_states_from_root(temp.path(), &provider);
@@ -6150,7 +6220,13 @@ mod recovery_relay_attempts_tests {
         std::fs::remove_file(&path).unwrap();
 
         assert!(
-            !super::set_inflight_restart_mode_under_lock(&path, InflightRestartMode::DrainRestart),
+            !matches!(
+                super::set_inflight_restart_mode_under_lock(
+                    &path,
+                    InflightRestartMode::DrainRestart
+                ),
+                super::restart_mark::MarkOutcome::Marked
+            ),
             "a deleted row must report no write"
         );
         assert!(
@@ -6181,7 +6257,13 @@ mod recovery_relay_attempts_tests {
         std::fs::write(&path, corrupt).unwrap();
 
         assert!(
-            !super::set_inflight_restart_mode_under_lock(&path, InflightRestartMode::DrainRestart),
+            !matches!(
+                super::set_inflight_restart_mode_under_lock(
+                    &path,
+                    InflightRestartMode::DrainRestart
+                ),
+                super::restart_mark::MarkOutcome::Marked
+            ),
             "an unparseable row must report no write (graceful skip, no panic)"
         );
         assert_eq!(

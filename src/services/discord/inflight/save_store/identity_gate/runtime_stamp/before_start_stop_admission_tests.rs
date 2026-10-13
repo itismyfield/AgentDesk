@@ -280,15 +280,16 @@ async fn the_durable_receipt_survives_stale_writes() {
     fixture.overwrite(&unknown);
     inflight::save_inflight_state(&admitted).unwrap();
     assert_eq!(fixture.receipt().unwrap().0["notice"], "shown_v2");
-    // The restart marker rewrite reads the durable row, so it keeps the receipt too.
-    inflight::mark_restart_mode_blocking(ProviderKind::Claude, InflightRestartMode::DrainRestart)
-        .await;
-    let marked = fixture.durable().unwrap();
-    assert!(marked.restart_mode.is_some());
-    assert_eq!(
-        marked.herdr_before_start_stop.unwrap().0["notice"],
-        "shown_v2"
-    );
+    // Restart marking skips a receipt row, leaving it byte-identical, and is no failure.
+    let before = fixture.bytes();
+    let report = inflight::mark_restart_mode_blocking(
+        ProviderKind::Claude,
+        InflightRestartMode::DrainRestart,
+    )
+    .await;
+    assert!(report.skipped_receipt.contains(&fixture.row.channel_id));
+    assert!(!report.failed.contains(&fixture.row.channel_id));
+    assert_eq!(fixture.bytes(), before);
     // A create-only write never replaces an existing row.
     assert!(inflight::save_inflight_state_create_new(&fixture.row).is_err());
     let mut successor = fixture.row.clone();
