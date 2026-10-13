@@ -52,6 +52,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/input_runtime/runtime/ports_tests.rs",
         "src/services/discord/input_runtime/supervisor/g2b_entry_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/pending_admission_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs",
