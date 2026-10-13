@@ -202,6 +202,16 @@ async fn own_worker_row_holds_without_an_open_unexpired_local_lease() {
         unstamped(A, &row, Some(&other_holder), now),
         Hold(Why::LocalSampleMismatch)
     );
+    // Holder, epoch and intake match; only the sample's channel or provider differs.
+    for other in [("codex", CH + 1), ("claude", CH)] {
+        let mut elsewhere = sample(A, owned(4, 1, HomeIntake::Open), now);
+        elsewhere.key = IngressKey::parse(other.0, other.1).unwrap();
+        assert_eq!(
+            unstamped(A, &row, Some(&elsewhere), now),
+            Hold(Why::LocalSampleMismatch),
+            "{other:?}"
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]

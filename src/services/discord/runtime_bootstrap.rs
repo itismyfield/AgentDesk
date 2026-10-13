@@ -45,12 +45,15 @@ mod spawns;
 mod startup_doctor;
 mod voice;
 
-use self::framework_setup::{run_bot_build_slash_commands, run_bot_framework_setup};
+pub(in crate::services::discord) use self::framework_setup::run_bot_build_slash_commands;
+use self::framework_setup::run_bot_framework_setup;
 use self::gateway_handback_breaker::GatewayHandbackBreaker;
 use self::gateway_lease::{
     GatewayLeaseOutcome, run_bot_acquire_gateway_lease, run_bot_spawn_gateway_lease_keepalive,
 };
 use self::gateway_lease_recovery::spawn_standby_gateway_retry;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use self::gateway_runtime::run_bot_framework_options;
 use self::gateway_runtime::run_bot_start_gateway_runtime;
 use self::intake::run_bot_maybe_spawn_intake_worker;
 #[allow(unused_imports)]
@@ -214,6 +217,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let homes = HomeSettings::of(&boot_config);
     // Records the boot judgement before delegation effects start.
     let home_availability = install_home_availability(&provider, &homes, pg_pool.is_some());
+    let ingress_shadow = super::ingress_shadow::ShadowConfig::of(&boot_config);
     let modules = boot_config.cluster.runtime_profile.modules();
     let voice_config = boot_config.voice;
     let voice_barge_in = Arc::new(if modules.voice {
@@ -464,6 +468,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         handback_breaker,
         &restored_model_overrides,
         &restored_fast_mode_channels,
+        ingress_shadow,
     )
     .await;
 }

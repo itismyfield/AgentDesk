@@ -1,5 +1,5 @@
 //! Whether this node may take a channel's own ingress, from its home row and its own confirmed gate.
-//! An observation, never a permit: execution still passes the gate's admission; no caller reads it.
+//! An observation, never a permit: the ingress shadow only logs it; execution passes the gate.
 
 use std::num::NonZeroU64;
 use std::time::Duration;
@@ -26,6 +26,10 @@ impl IngressKey {
             channel: NonZeroU64::new(channel)?,
         })
     }
+
+    pub(crate) fn new(provider: HomeProvider, channel: NonZeroU64) -> Self {
+        Self { provider, channel }
+    }
 }
 
 /// Where the input came from. A forwarded input keeps the home epoch its route stamped, `None` for
@@ -33,6 +37,8 @@ impl IngressKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SourceEpoch {
     UnstampedSource,
+    /// No runtime caller observes a forwarded input yet, so only tests build one.
+    #[cfg(test)]
     Routed(Option<i64>),
 }
 
@@ -85,8 +91,10 @@ pub(crate) enum IngressHoldReason {
     ProviderMismatch,
     /// The row breaks the table's own constraints.
     InvalidHome,
+    #[cfg(test)]
     StaleSourceEpoch,
     /// Forwarded before the channel had a home; the claim fence never runs it on a home channel.
+    #[cfg(test)]
     RouteWithoutHomeEpoch,
     HomeNotTakingIngress(HomeState),
     TimeUnknown,
@@ -152,6 +160,7 @@ fn judge(
         None => return Err(Why::InvalidHome),
     }
     let (holder, renewed_at) = well_formed(row).ok_or(Why::InvalidHome)?;
+    #[cfg(test)]
     match source {
         SourceEpoch::Routed(Some(routed)) if routed != row.epoch => {
             return Err(Why::StaleSourceEpoch);
@@ -159,6 +168,8 @@ fn judge(
         SourceEpoch::Routed(None) => return Err(Why::RouteWithoutHomeEpoch),
         SourceEpoch::Routed(Some(_)) | SourceEpoch::UnstampedSource => {}
     }
+    #[cfg(not(test))]
+    let SourceEpoch::UnstampedSource = source;
     let (HomeState::Worker, Some(holder), Some(renewed_at)) = (row.state, holder, renewed_at)
     else {
         return Err(Why::HomeNotTakingIngress(row.state));

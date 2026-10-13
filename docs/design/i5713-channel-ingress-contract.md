@@ -1,23 +1,23 @@
-# 채널 소유 ingress 판정 계약 (휴면)
+# 채널 소유 ingress 판정 계약 (관측 shadow)
 
-기준: `itismyfield/AgentDesk@070157faf`. 좌표는 모두 이 SHA 기준이다.
+기준: `itismyfield/AgentDesk@070157faf`. §1–§8의 좌표는 이 SHA 기준이다. §9의 관측 연결은 `b0062777a` 위에 얹었고 좌표 대신 심볼로 적는다.
 
 이 문서는 채널 home 권위를 읽어 "이 노드가 채널 ingress의 실행 후보인가"를 판정하는 계약을 고정한다.
 구현은 `src/services/cluster/channel_ingress.rs`의 순수 판정 함수 `observe`다.
-런타임 호출자는 없다. 모듈은 `#[cfg(test)]`로만 컴파일되므로 운영 바이너리에는 들어가지 않는다.
+런타임 호출자는 §9의 ingress shadow 하나다. 기본값은 꺼짐이고, 켜도 판정을 구조화 로그로만 남기며 실행·forwarding·ack를 바꾸지 않는다.
 채널 ingress 전환, 자동 takeover, forwarding 제거는 이 문서의 착지 범위가 아니다.
 
 ## 1. 착지 형태
 
 | 항목 | 내용 |
 |---|---|
-| 운영 코드 | `src/services/cluster/mod.rs`에 `#[cfg(test)] pub(crate) mod channel_ingress;` 한 줄. 운영 빌드의 컴파일 단위는 기준 SHA와 같다 |
+| 운영 코드 | `src/services/cluster/mod.rs`의 `pub(crate) mod channel_ingress;`. 호출자는 §9 shadow worker뿐이다 |
 | 판정 모듈 | `src/services/cluster/channel_ingress.rs`. DB·gate·registry·queue·HTTP 핸들을 받지 않는다 |
 | 시험 | `src/services/cluster/channel_ingress/tests.rs` |
-| 활성화 | 호출자를 붙이는 조각이 `#[cfg(test)]`를 푼다. 그 조각이 시간·로컬 gate 표본 공급자(U6·U7)를 함께 검증한다 |
+| 관측 연결 | §9. 시간(PG `statement_timestamp`)과 로컬 gate 표본(`channel_home::ingress_snapshot`) 공급자를 함께 붙였다 |
 
-설계 초안은 휴면 모듈의 dead-code allow 계수를 올리는 안이었다. 캠페인 규칙상 새 `#[allow]`와 baseline 인상은 금지라서 test-only 선언으로 바꿨다.
-그래서 "런타임 호출자 0"은 컴파일러가 강제한다. test가 아닌 빌드에서 이 모듈을 참조하면 경로 해석 오류로 컴파일이 실패한다.
+운영 호출자가 만들지 않는 `SourceEpoch::Routed`와 그 두 보류 사유(`StaleSourceEpoch`, `RouteWithoutHomeEpoch`)는 `#[cfg(test)]`로 둔다.
+새 `#[allow]`와 baseline 인상은 금지라서, 전달 입력을 관측하는 호출자가 생길 때 그 조각이 이 표시를 푼다.
 
 ## 2. 판정 계약
 
@@ -40,7 +40,7 @@
 |---|---|
 | `IngressKey::parse(provider, channel)` | `HomeProvider::parse` 정규화. 모르는 provider와 채널 0은 `None` |
 | `SourceEpoch::UnstampedSource` | 새로 관측한 원천 이벤트에만 쓴다 |
-| `SourceEpoch::Routed(Option<i64>)` | 전달된 입력. `intake_outbox.home_epoch`를 그대로 담는다. `None`은 gateway 규칙으로 이미 전달된 입력이다 |
+| `SourceEpoch::Routed(Option<i64>)` | 전달된 입력. `intake_outbox.home_epoch`를 그대로 담는다. `None`은 gateway 규칙으로 이미 전달된 입력이다. 운영 호출자가 없어 test 빌드 전용이다 |
 | `HomeRead::{Missing, Unreadable, Row(&ChannelHome, ReadClock)}` | 조회 실패를 부재로 접지 않는다 |
 | `ReadClock { pg_now, started }` | PG의 읽기 시각과 조회 시작 로컬 monotonic 시각. 하나라도 없으면 시간 불명 |
 | `LocalLeaseSample` | key, holder, 기존 `HomeOwnership`, 표본 시각, 마지막 renewal이 정한 만료시각. gate 핸들·callback이 없다 |
@@ -97,7 +97,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 ### 4.1 신규 관측값
 
 신규 상태는 메모리에 반환되는 `IngressObservation` 하나다. 저장·갱신·재수화되는 durable 상태는 없다.
-생산자는 `observe` 하나, 소비자는 시험뿐이다. 운영 빌드에는 모듈이 없다.
+생산자는 `observe` 하나, 운영 소비자는 §9 shadow worker 하나이며 그 결과는 로그로만 나간다.
 
 ### 4.2 입력 권위의 생성·변경 경계 (이번에 바꾸지 않음)
 
@@ -129,11 +129,11 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 `src/` 아래 시험 파일이 아닌 파일 중 `o_channel_homes`, `channel_home::`, `channel_home_boot`, `channel_home_drain`, `home_fence`, `home_availability`를 직접 참조하는 파일 전부다.
 `home_authority_inventory_lists_every_direct_consumer` 시험이 이 표와 소스를 대조한다. 새 직접 소비자를 추가하면 여기에 분류해야 시험이 통과한다.
 
-구분: 생성(권위·epoch·gate 개방) / 변경(조건부 전이·철회) / admission(실행·명령·출력 직전 거절) / 라우팅(배치·전달 결정) / readiness(위임 가능 여부, 소유 발급 아님) / 진단 / 배선 / 시험 / 휴면.
+구분: 생성(권위·epoch·gate 개방) / 변경(조건부 전이·철회) / admission(실행·명령·출력 직전 거절) / 라우팅(배치·전달 결정) / readiness(위임 가능 여부, 소유 발급 아님) / 진단 / 배선 / 시험 / 관측(읽어서 로그만 남김).
 
 | 파일 | 구분 | 직접 소비 지점 |
 |---|---|---|
-| `src/db/o_channel_homes.rs` | 생성·변경 | `delegate` :234, `adopt` :307, `renew` :373(유일한 `HeldHome` 생성자), `force_orphan` :403, 진단 `list_homes` :439·`open_intake_by_epoch` :460 |
+| `src/db/o_channel_homes.rs` | 생성·변경·관측 | `delegate` :234, `adopt` :307, `renew` :373(유일한 `HeldHome` 생성자), `force_orphan` :403, 진단 `list_homes` :439·`open_intake_by_epoch` :460, 관측 `read_home_at`(row와 PG 시각을 한 SELECT로) |
 | `src/db/intake_outbox.rs` | 라우팅 | claim SQL :674–683. epoch 없는 행은 row 없는 채널에서만, epoch 행은 같은 epoch row에서만 |
 | `src/db/mod.rs` | 배선 | 모듈 선언 :32 |
 | `src/cli/channel_home.rs` | 변경·진단 | 운영자 `delegate` :168, `begin_reclaim` :182, `force_orphan` :197, 진단 `list_homes` :120, `read_home` :138 |
@@ -141,14 +141,17 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/cli/run.rs` | 배선 | CLI 실행 :712 |
 | `src/lib.rs` | readiness | `home_availability::{Availability, Unavailable, state}` 재노출 :291 |
 | `src/services/cluster/mod.rs` | 배선 | 모듈 선언 |
-| `src/services/cluster/channel_home.rs` | 생성·변경·admission | gate `confirm` :340, `admit_unattributed` :182, `admit_command` :195, `HomeGate::admit*` :498–590, `refusal` :592·:759, `register`·`unregister`·`registered` :671–749, `intake_hold` :819, `boot_home` :858, `run_lease` :916 |
+| `src/services/cluster/channel_home.rs` | 생성·변경·admission | 관측 표본 child 모듈 선언, gate `confirm` :340, `admit_unattributed` :182, `admit_command` :195, `HomeGate::admit*` :498–590, `refusal` :592·:759, `register`·`unregister`·`registered` :671–749, `intake_hold` :819, `boot_home` :858, `run_lease` :916 |
 | `src/services/cluster/channel_home_boot.rs` | 생성·변경 | `start` :97(registry 등록 :133, lease :188), `listed` :77, `delegated_boot_ownership` :288 |
 | `src/services/cluster/channel_home_drain.rs` | 변경 | `drain_round` :133(renew :117, read :138), `run_drain` :212, `finish_return` :235 |
 | `src/services/cluster/channel_home_port.rs` | 변경 | drain 의무 포트 :12 |
 | `src/services/cluster/home_availability.rs` | readiness | `preflight` :56, `install_enabled` :94, `refusal` :173. 소유권을 발급하지 않는 별도 가드 |
-| `src/services/cluster/channel_ingress.rs` | 휴면 | 이 계약. test 빌드 전용 |
+| `src/services/cluster/channel_home/ingress_snapshot.rs` | 관측 | `try_sample`·`sample_gate`: registry·local·inner gate를 `try_lock` 한 번씩 읽어 복사만 한다. expire·prune·close·초기화 없음 |
+| `src/services/cluster/channel_ingress.rs` | 관측 | 이 계약. 호출자는 shadow worker뿐 |
 | `src/services/cluster/intake_router_hook.rs` | readiness·라우팅 | `home_availability::refusal` :130, `read_home` :135 → `route_to_home` :162 |
 | `src/services/cluster/intake_worker.rs` | admission | accept 전 `intake_hold` :558 |
+| `src/services/discord/ingress_shadow.rs` | 관측 | 설정·descriptor·bounded 제출. `HomeProvider::parse`로 provider만 정규화 |
+| `src/services/discord/ingress_shadow/worker.rs` | 관측 | `read_home_at` → `ingress_snapshot::try_sample` → `observe` → 로그. 쓰기 없음 |
 | `src/services/discord/commands/control.rs` | admission | `home_fence::admit` :354·:641, `home_fence::refused` :582·:637 |
 | `src/services/discord/commands/control/home_fence.rs` | admission | `admit` :27 → `channel_home::admit_command`, `check` :36, `refused` :41(거절 시 사용자 응답) |
 | `src/services/discord/commands/control/provider_reset.rs` | admission | `home_fence::admit` :27 |
@@ -217,9 +220,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 비간섭 시험이 실제로 부르는 진입점: `admit_unattributed`, `admit_command`, `refusal`, `turn_host::refusal_before_turn`, `intake_hold`(epoch 있음·없음), `HomeGate::{admit, admit_post, ownership, expiry, commands_in_flight}`, `intake_held_channels`, `health`.
 열린 gate, drain 중 gate, 한 번도 잡지 않은 gate, 미등록 채널 네 경우를 모두 부르고, 기대값(열린 채널 permit, drain 거절, 미등록 Legacy)을 먼저 단언해 빈 기록끼리의 비교를 막는다.
 
-비간섭 증명의 경계: Discord 앞단 `handle_event`(`pub(in crate::services::discord)`)와 Poise 명령 경로는 cluster 시험에서 부를 수 없다.
-이 착지는 test가 아닌 빌드에 모듈을 넣지 않으므로 그 경로의 소스와 컴파일 결과는 기준 SHA와 같다.
-앞단 바이트 비교 하네스(`handle_event` 일반·thread·DM 회신·첨부·component·Poise)는 호출자를 붙이는 활성화 조각의 필수 시험이다.
+Discord 앞단 `handle_event`와 Poise 명령 경로의 비간섭은 §9.4의 바이트 비교 하네스(`ingress_shadow_compat_tests`)가 증명한다.
 
 ## 7. 미확보 항목 [U]
 
@@ -240,11 +241,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 
 ## 8. 활성화와 롤백
 
-이 착지의 롤백은 모듈 선언 한 줄을 지우는 것이다. DB·cursor·queue 이전이 없다.
-
-관측 연결 조각: 시간·로컬 gate 표본 공급을 먼저 검증하고, 관측 실패·지연이 기존 실행·ack를 지연시키지 않게 한다.
-로그에는 key, 원본 이벤트 ID, 관측 노드, row epoch, 로컬 epoch, 판정·사유만 남긴다. 원문·첨부 bytes·interaction token은 넣지 않는다.
-이 단계에서도 판정으로 기존 흐름을 return·enqueue·drop·forward·ack하지 않는다.
+관측 연결은 §9에 착지했다. 롤백은 설정을 끄고 재시작하는 것이며 DB·cursor·queue 이전이 없다.
 
 실제 ingress 전환 전 필요한 것:
 
@@ -261,3 +258,66 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 활성화 뒤 롤백은 routing env를 바꾸거나 singleton gateway를 다시 여는 것으로 하지 않는다.
 새 admission 중지 → 진행 중 실행·ack·출력의 종료 또는 불명 상태 보존 → 채널 gate 철회 → 기존 경로가 보존된 source·cursor를 이해하는지 확인 → singleton 경로 재개 순서다.
 이전 바이너리가 새 custody를 이해하지 못하면 자동 롤백하지 않고 보류한다. `intake_outbox` forwarding 제거는 잔여 OPEN 작업의 귀속을 확인한 뒤의 별도 단계다.
+
+## 9. 관측 연결 (ingress shadow)
+
+판정을 실제 gateway 이벤트에 붙이되, 결과는 구조화 로그로만 남긴다. 기존 실행·forwarding·ack의 결정, 효과 순서, payload bytes, 호출 횟수는 바꾸지 않는다.
+
+### 9.1 켜는 조건과 수명
+
+| 항목 | 내용 |
+|---|---|
+| 설정 | `runtime.channel_ingress_shadow_enabled: true`와 0이 아닌 채널이 하나 이상 있는 `runtime.channel_ingress_shadow_channels`가 모두 있어야 한다. unset·false·빈 목록은 휴면이고 전체 채널 wildcard는 없다 |
+| 부팅 | `runtime_bootstrap.rs`의 boot config 스냅샷에서 읽는다. 변경 적용은 프로세스 재시작이다. delegation switch와 별개이며 home boot·gateway 역할을 바꾸지 않는다 |
+| 역할 | gateway 역할 분기 뒤 framework setup에서만 시작한다. standby·REST worker는 gateway 이벤트를 받지 않으므로 시작하지 않는다. provider는 claude·codex만 |
+| 소유 | `Data.ingress_shadow`가 handle을 가진다. 꺼져 있으면 `None`이고 `begin`(pool·generation 읽기)도 부르지 않는다. handle drop은 queue를 닫아 worker를 끝내며, drop은 worker를 기다리지 않는다 |
+| identity | 로컬 ID는 trim한 `cluster.instance_id`다. hostname으로 보충하지 않고, 비어 있으면 판정이 `NoLocalIdentity`로 보류된다 |
+
+### 9.2 경로
+
+1. hook: `handle_event`의 기존 cleanup·TUI shadow 호출 직후, `match event` 전에 `ingress_shadow::observe`를 한 번 부른다. 모든 early return 앞이다. Poise `command_check`에는 붙이지 않는다(raw `InteractionCreate`에서 이미 제출한다).
+2. 제출: 원본 이벤트를 빌려 종류·실제 channel·원본 ID·application ID만 복사한다. 채널은 thread parent·policy channel이 아니라 이벤트의 channel이다. allowlist 밖이면 아무것도 하지 않는다. `try_send` 한 번이며 DB·HTTP·lock·`await`·task spawn이 없다. 실행 ingress가 아닌 이벤트(edit·delete·ping·presence 등)는 `excluded`로 센다.
+3. queue: 256개 bounded queue, worker 1개. full·closed면 그 descriptor를 버리고 센다. 버린 것도 sequence를 하나 받으므로 기록에서 빈 번호로 드러난다.
+4. 조회: observer 전용 pool(최대 연결 1, 기존 runtime pool의 연결 옵션 복사, 첫 조회 전 연결 없음)로 `o_channel_homes::read_home_at`을 부른다. row와 PG `statement_timestamp()`를 한 SELECT로 읽는다. `started`는 pool acquire 전에 잡고 acquire+query 전체를 250ms로 자른다. timeout·DB 오류·decode 실패는 `Unreadable`, row 없음은 `Missing`이며 retry·cached row는 없다. worker가 끝나면 pool을 닫는다.
+5. 표본: row가 있을 때만 `channel_home::ingress_snapshot::try_sample(channel, row.provider)`로 이 노드 gate를 읽는다. registry→local→inner를 각각 `try_lock` 한 번으로 읽고, expire·prune·close·registry 초기화를 하지 않는다. 표본 key는 row의 정규 provider와 gate의 실제 channel이다. contention·poison은 표본 없음이며 원인을 `sampler`에 남긴다.
+6. 판정: `observe(key, instance_id, UnstampedSource, home, sample, now)`. key는 shadow의 provider와 이벤트 channel이다.
+
+### 9.3 기록과 분모
+
+| 기록 | 필드 |
+|---|---|
+| `start` | incarnation(UUID), instance_id, build(실행 파일 SHA-256), bot, provider, generation, allowlist |
+| `observed` | incarnation, instance_id, generation, bot, provider, sequence, kind, channel, source_id, application_id, queued/lookup/sample ms, lookup·sampler 상태, row/local epoch, verdict·reason, foreign holder |
+| `close` | incarnation, last_sequence(제출 수), completed, lost(full+closed), unknown, excluded, terminal. 60초마다, 그리고 queue가 닫힐 때 |
+
+원문·첨부 bytes·URL·interaction token·DB 오류 문자열은 남기지 않는다. 카운터에는 source·channel·node ID가 없다.
+`unknown`은 권위 조회 불명, 시간 불명, 로컬 identity 없음, 그리고 표본을 못 읽어 `NoLocalLease`가 된 판정이다.
+
+증거 판정은 순수 함수 `ingress_shadow::telemetry::window::evaluate_window`(시험 빌드 전용, 런타임 reader 없음)로 고정한다.
+PASS는 다음이 모두 참일 때뿐이다. 기대 incarnation마다 start가 하나이고 instance·build·bot·provider·allowlist가 기대와 같다. 마지막 close가 `completed == last_sequence`, `lost == 0`, `unknown == 0`이다. 1..=last_sequence가 빠짐·중복 없이 있고 close 뒤 기록이 없다. 모든 source를 모든 기대 incarnation이 같은 row epoch로 판정했다. paired 분모가 양수다.
+기대 밖 incarnation, epoch가 갈린 source, 한쪽만 본 source는 INCOMPLETE다. 같은 source를 둘 이상의 incarnation이 자기 후보로 판정하면 instance ID·epoch가 같든 다르든 CONFLICT다.
+singleton 운영에서는 paired 분모가 0이므로 결과는 INCOMPLETE이며 "두 노드 후보 0"으로 보고하지 않는다.
+
+### 9.4 수용 기준과 시험
+
+| AC | 계약 | 시험 | 뮤턴트 |
+|---|---|---|---|
+| AC1 | raw 이벤트마다 정확히 1회, 모든 early return 앞에서 제출 | `ingress_shadow_compat_tests`(case별 `submitted == 이벤트 수`), `an_event_is_described_by_its_own_channel_and_ids` | early_return_before_ingress |
+| AC2 | off면 queue·pool·sampler·observe 0, `begin` 미호출 | `only_the_switch_with_listed_channels_starts_an_observer`, compat off 실행 | disabled_still_observes |
+| AC3 | off/on(응답·timeout·full·closed)의 효과 순서·bytes·횟수·결과 동일, 응답 observer는 관측 완료 양수 | `ingress_shadow_compat_tests` | shadow_controls_dispatch, hook 제거 |
+| AC4 | 기대 payload가 비어 있지 않고 off/on이 정확히 같음 | 같은 시험 | drop_payload_byte |
+| AC5 | Poise 허용·거절, `/help` initial callback 1·follow-up 1 | 같은 시험(`HelpAllowed`, `HelpRefused`) | skip_initial_callback |
+| AC6 | 표본 key만 다른 `(codex, CH+1)`·`(claude, CH)`는 `LocalSampleMismatch` | `own_worker_row_holds_without_an_open_unexpired_local_lease` | sample_key_check_removed |
+| AC7 | 한 SELECT의 PG 시각, acquire 전부터의 전체 지연, 20초 경계, 시간 불명 보류 | `freshness_counts_the_whole_lookup_on_pgs_clock`, `a_row_read_carries_pgs_clock_from_the_same_statement_pg` | drop_read_elapsed, expiry_inclusive, clock_error_as_fresh |
+| AC8 | expire·prune·close·초기화 0, registry/local/inner contention·poison에서 표본 없음 | `sampling_expires_prunes_closes_and_initializes_nothing`, `a_taken_or_poisoned_lock_gives_no_sample`, `an_unreadable_gate_holds_and_counts_as_unknown` | sample_via_ownership, sample_via_registered, inner_read_blocks |
+| AC9 | renew·close·lapse와 경쟁해도 한 상태의 epoch·intake·만료만 | `a_sample_never_mixes_two_states_of_one_gate` | split_epoch_and_expiry_reads |
+| AC10 | 양수 분모에서 최대 한 후보, 같은 ID 다른 incarnation·다른 epoch 후보는 충돌 | `two_processes_judging_one_source_their_own_is_a_conflict_across_ids_and_epochs` | dedup_by_instance_only, join_partitioned_by_epoch |
+| AC11 | 손실·불명·미종료·분모 0은 인증 실패 | `a_lost_unknown_or_unfinished_sequence_or_no_pair_never_certifies` | missing_samples_are_zero |
+| P2-1 | 중간·마지막 기록 삭제, close 삭제, 기대 incarnation 누락, allowlist 불일치, 일부 source만 paired는 INCOMPLETE | `a_window_passes_only_when_every_observer_and_source_joined_to_a_finished_close` | ignore_unpaired_tail, ignore_terminal_manifest |
+| AC12 | 새 직접 소비자가 §4.4에 분류됨 | `home_authority_inventory_lists_every_direct_consumer` | worker 행 삭제 |
+| U3 | observer pool은 연결 1개, 첫 조회 전 연결 없음, worker 종료 때 닫힘 | `the_observer_pool_reads_rows_on_one_connection_and_closes_pg` | — |
+
+### 9.5 롤백과 남은 항목
+
+롤백은 설정을 끄고 재시작하는 것이다. source·cursor·outbox 이전이 없다.
+§7의 U4–U15는 그대로 남는다. 추가로 U16: 로그 수집 누락·worker 종료를 포함한 운영 완전성과, 양수 분모 두 노드 기록의 `evaluate_window` PASS(후보 충돌 0)를 운영에서 확보해야 한다.

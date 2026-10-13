@@ -304,6 +304,7 @@ pub(in crate::services::discord) async fn handle_event(
 ) -> Result<(), Error> {
     maybe_cleanup_sessions(&data.shared).await;
     crate::services::tui_o::shadow_host::observe(ctx, event);
+    super::super::ingress_shadow::observe(data.ingress_shadow.as_ref(), event);
     match event {
         serenity::FullEvent::InteractionCreate { interaction } => {
             if let Some(component) = interaction.as_message_component() {
@@ -1731,6 +1732,9 @@ pub(in crate::services::discord) async fn handle_event(
 
 #[cfg(test)]
 pub(super) use queue_effects::queue_pending_reaction_for;
+
+#[cfg(all(test, unix))]
+mod ingress_shadow_compat_tests;
 
 #[cfg(test)]
 mod reply_context_tests {

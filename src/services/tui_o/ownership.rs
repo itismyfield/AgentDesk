@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, TryLockError, TryLockResult};
 
 use tokio::sync::watch;
 
@@ -56,6 +56,17 @@ impl OwnershipGate {
 
     pub fn current(&self) -> GatewayOwnership {
         self.locked().ownership
+    }
+
+    /// [`Self::current`] without waiting: a held lock is `WouldBlock`, a poisoned one `Poisoned`.
+    pub fn try_current(&self) -> TryLockResult<GatewayOwnership> {
+        match self.state.try_lock() {
+            Ok(state) => Ok(state.ownership),
+            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
+            Err(TryLockError::Poisoned(state)) => Err(TryLockError::Poisoned(PoisonError::new(
+                state.into_inner().ownership,
+            ))),
+        }
     }
 
     #[cfg(test)]

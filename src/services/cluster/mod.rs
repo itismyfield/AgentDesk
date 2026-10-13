@@ -15,8 +15,7 @@ pub(crate) mod channel_home;
 pub(crate) mod channel_home_boot;
 pub(crate) mod channel_home_drain;
 pub(crate) mod channel_home_port;
-/// Dormant ingress ownership contract; compiled for tests only until a runtime caller exists.
-#[cfg(test)]
+/// Ingress ownership contract; the gateway ingress shadow only logs its verdicts.
 pub(crate) mod channel_ingress;
 pub(crate) mod execution_capacity;
 pub(crate) mod execution_requirements;

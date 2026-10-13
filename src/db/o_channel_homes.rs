@@ -229,6 +229,23 @@ pub(crate) async fn read_home(
     row.as_ref().map(decode).transpose()
 }
 
+/// [`read_home`] with PG's clock taken by the same statement, for a reader that ages the lease.
+pub(crate) async fn read_home_at(
+    pool: &PgPool,
+    channel_id: &str,
+) -> Result<Option<(ChannelHome, DateTime<Utc>)>, HomeError> {
+    let row = sqlx::query(&format!(
+        "SELECT {COLUMNS}, statement_timestamp() AS read_at FROM o_channel_homes WHERE channel_id = $1"
+    ))
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    Ok(Some((decode(&row)?, row.try_get("read_at")?)))
+}
+
 /// Operator `delegate`: a gateway-owned channel starts releasing to `target` at a fresh epoch.
 /// The provider is stored in its canonical form, the one intake rows carry.
 pub(crate) async fn delegate(
