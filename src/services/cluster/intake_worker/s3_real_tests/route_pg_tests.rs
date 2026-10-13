@@ -331,8 +331,8 @@ async fn th8_candidate_is_not_home_authority_pg() {
         .unwrap();
     let id = seed(&scene.pool, "4001", Some(epoch)).await;
     put(scene.dir(), "phase", 2);
-    let mini = Node::spawn(&scene, "th8_candidate", MINI);
-    wait_signal(scene.dir(), "lost_checked", WITHIN).await;
+    let mut mini = Node::spawn(&scene, "th8_candidate", MINI);
+    mini.wait_signal("lost_checked", WITHIN).await;
     lock.rollback().await.unwrap();
     mini.finish(Duration::from_secs(120)).await;
     let done = ("done".to_string(), Some("o-mini-s3".to_string()), true);

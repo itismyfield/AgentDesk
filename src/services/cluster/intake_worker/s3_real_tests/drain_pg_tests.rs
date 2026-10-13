@@ -57,8 +57,8 @@ async fn reclaim_after(
     if let Some(seed) = seed {
         Node::spawn(&scene, seed, MINI).finish(WITHIN).await;
     }
-    let node = Node::spawn(&scene, scenario, MINI);
-    wait_signal(scene.dir(), "owed_seen", WITHIN).await;
+    let mut node = Node::spawn(&scene, scenario, MINI);
+    node.wait_signal("owed_seen", WITHIN).await;
     let channel = C.to_string();
     applied(o_channel_homes::begin_reclaim(&scene.pool, &channel, epoch, GW).await);
     // The gateway's router takes nothing new for the channel while it drains.

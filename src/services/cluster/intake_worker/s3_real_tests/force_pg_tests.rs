@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::PgPool;
@@ -43,8 +44,8 @@ async fn th9_force_orphan_holds_every_consumer_pg() {
     let channel = C.to_string();
     applied(o_channel_homes::begin_reclaim(&scene.pool, &channel, epoch, GW).await);
     put(scene.dir(), "epoch", epoch);
-    let holder = Node::spawn(&scene, "th9_holder", MINI);
-    wait_signal(scene.dir(), "held", WITHIN).await;
+    let mut holder = Node::spawn(&scene, "th9_holder", MINI);
+    holder.wait_signal("held", WITHIN).await;
     let fresh = force(&scene).await;
     assert!(
         fresh.is_err_and(|e| e.contains("within F")),
@@ -164,8 +165,8 @@ pub(super) async fn consumer_node(env: &Env) {
     node.stop().await;
 }
 
-/// One period of the watch and lease, and a margin: a round the watch surely ran in.
-const ONE_ROUND: Duration = Duration::from_secs(6);
+/// What a target marks its gate with; only the watch's next good read of the row clears it.
+const PROBE: &str = "s3-watch-probe";
 /// Every payload the old holder's root owes or prepared; no target may complete one.
 const OLD_PAYLOADS: [&str; 4] = ["base", "tail-1", "tail-2", PREPARED_ONLY];
 const PREPARED_ONLY: &str = "h9-prepared-only";
@@ -177,8 +178,8 @@ fn epoch_of(env: &Env) -> i64 {
 /// MINI holds a Worker home with an owed tail, then the gateway's reclaim makes its real drain
 /// wait on that tail, so the row stays Reclaiming until the holder dies.
 async fn reclaiming_with_owed_tail(scene: &Scene, epoch: i64) -> Node {
-    let holder = Node::spawn(scene, "th9_owed_holder", MINI);
-    wait_signal(scene.dir(), "tail_spooled", WITHIN).await;
+    let mut holder = Node::spawn(scene, "th9_owed_holder", MINI);
+    holder.wait_signal("tail_spooled", WITHIN).await;
     let row = scene.row().await.unwrap();
     let owing = (row.state, row.holder.as_deref());
     assert_eq!(
@@ -188,7 +189,7 @@ async fn reclaiming_with_owed_tail(scene: &Scene, epoch: i64) -> Node {
     );
     applied(o_channel_homes::begin_reclaim(&scene.pool, &C.to_string(), epoch, GW).await);
     signal(scene.dir(), "reclaim_begun");
-    wait_signal(scene.dir(), "draining", WITHIN).await;
+    holder.wait_signal("draining", WITHIN).await;
     let row = scene.row().await.unwrap();
     let draining = (row.state, row.holder.as_deref(), row.target.as_deref());
     assert_eq!(draining, (HomeState::Reclaiming, Some(MINI), Some(GW)));
@@ -222,8 +223,8 @@ async fn th6_force_live_target_then_reboot_orphan_holds_pg() {
     let epoch = scene.worker_home().await;
     put(scene.dir(), "epoch", epoch);
     let holder = reclaiming_with_owed_tail(&scene, epoch).await;
-    let target = Node::spawn(&scene, "th6_live_target", GW);
-    wait_signal(scene.dir(), "target_alive", WITHIN).await;
+    let mut target = Node::spawn(&scene, "th6_live_target", GW);
+    target.wait_signal("target_alive", WITHIN).await;
     let pid = get(scene.dir(), "target_pid").unwrap();
     assert_eq!(
         pid,
@@ -264,8 +265,8 @@ pub(super) async fn owed_holder_node(env: &Env) {
     std::future::pending::<()>().await;
 }
 
-/// The live target: booted while the holder drains, it watches a round before saying it is alive,
-/// then holds the channel shut through the force in the same process.
+/// The live target: booted while the holder drains, its watch reads the row before it says it is
+/// alive; one sticky observation runs from then through the force to the end in the same process.
 pub(super) async fn live_target_node(env: &Env) {
     let node = Booted::boot(env).await;
     let pid = std::process::id();
@@ -273,11 +274,14 @@ pub(super) async fn live_target_node(env: &Env) {
     let gate = node.gate().expect("the row names GW its target");
     assert_eq!(gate.ownership(), HomeOwnership::Lost);
     assert!(!node.accepts());
-    let before = observe(&node, ONE_ROUND).await;
-    assert_eq!(before.opened, None, "shut while the holder drained");
+    let mut seen = Observed::default();
+    seen.watch_read(&node).await;
+    assert_eq!(seen.opened, None, "shut while the holder drained");
     signal(&env.dir, "target_alive");
-    wait_signal(&env.dir, "force_done", WITHIN).await;
-    holds_orphan(&node, env, "6004").await;
+    let forced = || signalled(&env.dir, "force_done");
+    seen.until(&node, "the force", WITHIN, forced).await;
+    assert_eq!(seen.opened, None, "opened while the force was pending");
+    holds_orphan(&node, env, "6004", seen).await;
     assert_eq!(
         std::process::id(),
         pid,
@@ -286,38 +290,73 @@ pub(super) async fn live_target_node(env: &Env) {
     node.stop().await;
 }
 
-/// What a target showed over a window: how often it was sampled and the first time it opened.
+/// A target's samples since its observation began, and its first opening, which sticks.
+#[derive(Default)]
 struct Observed {
     samples: usize,
     opened: Option<String>,
 }
 
-/// Samples readiness, the gate and the route every 100 ms for `window`; the first opening sticks.
-async fn observe(node: &Booted, window: Duration) -> Observed {
-    let deadline = tokio::time::Instant::now() + window;
-    let (mut samples, mut opened) = (0, None);
-    while tokio::time::Instant::now() < deadline {
-        samples += 1;
+impl Observed {
+    /// Samples readiness, the gate and the route every 100 ms until `done`, failing after `within`.
+    async fn until(
+        &mut self,
+        node: &Booted,
+        what: &str,
+        within: Duration,
+        mut done: impl FnMut() -> bool,
+    ) {
+        let deadline = tokio::time::Instant::now() + within;
+        while !done() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "never reached: {what}"
+            );
+            self.sample(node);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn sample(&mut self, node: &Booted) {
+        self.samples += 1;
         let gate = node.gate().map(|gate| gate.ownership());
         let route = intake_route::route("claude", C);
         let shut = !node.accepts()
             && gate.as_ref().is_none_or(|g| *g == HomeOwnership::Lost)
             && matches!(route, IntakeRoute::Hold(_));
-        if !shut && opened.is_none() {
-            opened = Some(format!(
-                "sample {samples}: accepts {}, gate {gate:?}, route {route:?}",
-                node.accepts()
+        if !shut && self.opened.is_none() {
+            let accepts = node.accepts();
+            let sample = self.samples;
+            self.opened = Some(format!(
+                "sample {sample}: accepts {accepts}, gate {gate:?}, route {route:?}"
             ));
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    Observed { samples, opened }
+
+    /// Marks the registered gate and waits until a good watch read of the row clears the mark on
+    /// that same gate; a read error marks it again and never counts.
+    async fn watch_read(&mut self, node: &Booted) {
+        let gate = node.gate().expect("a registered gate");
+        gate.note_drain(Some(PROBE));
+        let read = || {
+            let same = node.gate().is_some_and(|now| Arc::ptr_eq(&now, &gate));
+            same && node.drain_blocker().is_none()
+        };
+        self.until(node, "a watch read clears the probe", TWO_ROUNDS, read)
+            .await;
+    }
 }
 
-/// After the force: watched for two rounds, the target stays unready with its gate Lost, holds
-/// and blocks intake, leaves the pending row it would own unclaimed and posts nothing.
-async fn holds_orphan(node: &Booted, env: &Env, message: &str) {
-    let seen = observe(node, TWO_ROUNDS).await;
+/// After the force: two good watch reads of the orphaned row and two rounds observed, the target
+/// stays unready with its gate Lost, holds and blocks intake, claims nothing and posts nothing.
+async fn holds_orphan(node: &Booted, env: &Env, message: &str, mut seen: Observed) {
+    let started = tokio::time::Instant::now();
+    // The first clear may finish a read begun before the force; the second began after it.
+    seen.watch_read(node).await;
+    seen.watch_read(node).await;
+    let over = move || started.elapsed() >= TWO_ROUNDS;
+    seen.until(node, "two rounds after the force", TWO_ROUNDS, over)
+        .await;
     assert!(!node.accepts(), "the target took the orphaned channel");
     let gate = node
         .gate()
@@ -341,7 +380,7 @@ async fn holds_orphan(node: &Booted, env: &Env, message: &str) {
     assert_eq!(claim_state(&node.pool, stranded).await, unclaimed());
     assert_eq!(node.discord().seen(), Vec::<Seen>::new(), "no POST started");
     assert!(seen.samples > 50, "sampled {} times", seen.samples);
-    assert_eq!(seen.opened, None, "opened during the watch");
+    assert_eq!(seen.opened, None, "opened after the force");
     eprintln!("[s3] target shut over {} samples", seen.samples);
     put(&env.dir, &format!("samples.{}", env.role), seen.samples);
     drop(registry);
@@ -485,17 +524,28 @@ pub(super) async fn seed_prepared_node(env: &Env) {
     assert_eq!(open.payload, PREPARED_ONLY);
 }
 
-/// A target booted after the force: it watches the orphaned row for two rounds, holds it shut and
-/// completes none of the old root's payloads in its own store.
+/// A target booted after the force: its writer host opened its own store and waits on the Lost
+/// gate, it holds the orphaned row shut and completes none of the old root's payloads.
 pub(super) async fn new_target_node(env: &Env) {
     let node = Booted::boot(env).await;
-    holds_orphan(&node, env, "6005").await;
+    holds_orphan(&node, env, "6005", Observed::default()).await;
+    assert!(
+        node.host.bound(C),
+        "the writer host never reached its binding log"
+    );
+    let writer = node.writers.first().expect("a writer host for the channel");
+    assert!(!writer.is_finished(), "the writer host ended");
+    assert!(!node.halted(), "{:?}", node.raised());
     let ledger = node
         .root
         .join(STORE_DIR_NAME)
         .join(C.to_string())
         .join("ledger.jsonl");
-    let ledger = std::fs::read_to_string(ledger).unwrap_or_default();
+    // A Lost target need not have a ledger yet; any other read failure is not an empty one.
+    let ledger = match std::fs::read_to_string(&ledger) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        read => read.unwrap(),
+    };
     for payload in OLD_PAYLOADS {
         assert!(
             !ledger.contains(payload),

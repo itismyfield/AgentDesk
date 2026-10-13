@@ -18,6 +18,7 @@ use crate::services::tui_o::store::ledger::PieceOutcome;
 use crate::services::tui_o::store::spool::{Cursor, source_key};
 use crate::services::tui_o::store::{CURSOR_DIR, OStore, SPOOL_DIR, STORE_DIR_NAME, StoreConfig};
 use crate::services::tui_o::writer::DiscordPort;
+use crate::services::tui_o::writer::actor::POLL_INTERVAL;
 
 const WITHIN: Duration = Duration::from_secs(60);
 const HISTORY: &str = "discord-history.jsonl";
@@ -37,12 +38,13 @@ fn channel_dir(root: &Path) -> PathBuf {
     root.join(STORE_DIR_NAME).join(C.to_string())
 }
 
-/// Every POST of the node's process ran to its end, `expected` in order and nothing else.
-fn each_once(node: &Booted, expected: &[&str]) {
+/// Every POST of the node's process started at `epoch` and ran to its end, `expected` in order
+/// and nothing else.
+fn each_once(node: &Booted, expected: &[&str], epoch: i64) {
     let once = expected.iter().flat_map(|content| {
         let started = Seen::Started {
             content: content.to_string(),
-            home_epoch: node.home_epoch(),
+            home_epoch: Some(epoch),
         };
         [
             started,
@@ -61,8 +63,8 @@ async fn th6_worker_holder_restart_rehydrates_pg() {
     let epoch = scene.worker_home().await;
     put(scene.dir(), "epoch", epoch);
     let held = (HomeState::Worker, Some(MINI.to_string()), epoch);
-    let first = Node::spawn(&scene, "th6_restart_first", MINI);
-    wait_signal(scene.dir(), "tail_spooled", WITHIN).await;
+    let mut first = Node::spawn(&scene, "th6_restart_first", MINI);
+    first.wait_signal("tail_spooled", WITHIN).await;
     first.kill();
     eprintln!(
         "[s3] first generation {}",
@@ -215,7 +217,7 @@ pub(super) async fn second_generation_node(env: &Env) {
     node.until_posts(&TAIL).await;
     let clear = || async { node.owed().await == Some(Owed::default()) };
     until_async("the rehydrated tail settles", WITHIN, clear).await;
-    each_once(&node, &TAIL);
+    each_once(&node, &TAIL, epoch);
     let history = node.discord().history_after(C, 0).await.unwrap();
     let contents: Vec<_> = history.into_iter().map(|m| m.content).collect();
     assert_eq!(contents, ["base", TAIL[0], TAIL[1]]);
@@ -232,8 +234,8 @@ async fn th6_gateway_role_move_keeps_holder_pg() {
     put(scene.dir(), "epoch", epoch);
     let held = (HomeState::Worker, Some(MINI.to_string()), epoch);
     assert_eq!(home(&scene).await, held);
-    let mini = Node::spawn(&scene, "th6_role_holder", MINI);
-    wait_signal(scene.dir(), "holder_ready", WITHIN).await;
+    let mut mini = Node::spawn(&scene, "th6_role_holder", MINI);
+    mini.wait_signal("holder_ready", WITHIN).await;
     assert_eq!(home(&scene).await, held, "with the gateway role on MINI");
     let gw = Node::spawn(&scene, "th6_role_gateway", GW);
     mini.finish(Duration::from_secs(180)).await;
@@ -283,9 +285,10 @@ pub(super) async fn role_holder_node(env: &Env) {
 }
 
 /// The new gateway: its real boot names it the gateway role, its home boot finds no row for it
-/// and its router forwards the message to MINI; its delegated writer starts no POST.
+/// and its router forwards the message to MINI; a row in its own transcript is never posted.
 pub(super) async fn role_gateway_node(env: &Env) {
     let node = Booted::boot_with_gateway(env, GW).await;
+    append(&node.transcript, &row("g1", "gw-must-not-post"));
     let boot = channel_policy::boot().expect("boot snapshot");
     assert_eq!(boot.site(), &Site::Home, "the boot read GW as the gateway");
     assert!(
@@ -303,6 +306,8 @@ pub(super) async fn role_gateway_node(env: &Env) {
     signal(&env.dir, "gw_routed");
     assert_eq!(tick(&node, &shared, GW).await, TickOutcome::QueueEmpty);
     wait_signal(&env.dir, "holder_done", Duration::from_secs(120)).await;
+    // Past several actor polls since the probe row was written.
+    tokio::time::sleep(POLL_INTERVAL * 3).await;
     assert!(
         !node.accepts(),
         "the new gateway's writer never takes the channel"

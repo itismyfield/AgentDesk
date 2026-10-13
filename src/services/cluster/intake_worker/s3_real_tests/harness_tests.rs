@@ -339,6 +339,29 @@ impl Node {
         assert!(done.exists(), "node {} returned before its end", self.role);
     }
 
+    /// Waits for `name` from this node; its exit before the signal fails at once with its log.
+    pub(super) async fn wait_signal(&mut self, name: &str, within: Duration) {
+        eprintln!("[s3] waiting for signal {name} from {}", self.role);
+        let deadline = tokio::time::Instant::now() + within;
+        while !signalled(&self.dir, name) {
+            let exited = self.child.as_mut().expect("running").try_wait().unwrap();
+            if let Some(status) = exited.filter(|_| !signalled(&self.dir, name)) {
+                let tail = self.log_tail();
+                panic!(
+                    "node {} exited ({status}) before signal {name}\n{tail}",
+                    self.role
+                );
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "signal {name} never came from {}\n{}",
+                self.role,
+                self.log_tail()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     /// The child's process id, for a node that must be the same process across a phase.
     pub(super) fn pid(&self) -> u32 {
         self.child.as_ref().expect("running").id()
@@ -606,6 +629,8 @@ pub(super) struct EventLog {
     notice: watch::Sender<u64>,
     /// The highest seq any read returned.
     served: AtomicU64,
+    /// A seq whose publish waits a moment after it is stored, so a racing commit could pass it.
+    slow_publish: AtomicU64,
 }
 
 impl EventLog {
@@ -615,6 +640,7 @@ impl EventLog {
             events: Mutex::new(events),
             notice: watch::channel(latest).0,
             served: AtomicU64::new(0),
+            slow_publish: AtomicU64::new(0),
         }
     }
 
@@ -636,6 +662,9 @@ impl EventLog {
             committed_at,
             ..first
         });
+        if seq == self.slow_publish.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
         self.notice.send_replace(seq);
         seq
     }
@@ -663,6 +692,7 @@ impl BindingEvents for EventLog {
     }
 }
 
+/// The commits start together and seq 2's publish waits; outside the lock it would end on 2.
 #[test]
 fn racing_commits_publish_the_latest_seq_and_every_event() {
     let source = SourceId {
@@ -676,9 +706,16 @@ fn racing_commits_publish_the_latest_seq_and_every_event() {
     let rejected = |detail: &str| BindingRecord::Rejected {
         detail: detail.into(),
     };
+    log.slow_publish.store(2, Ordering::SeqCst);
+    let start = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
-        scope.spawn(|| log.commit(rejected("a")));
-        scope.spawn(|| log.commit(rejected("b")));
+        for detail in ["a", "b"] {
+            let (log, start, rejected) = (&log, &start, &rejected);
+            scope.spawn(move || {
+                start.wait();
+                log.commit(rejected(detail))
+            });
+        }
     });
     assert_eq!(
         *log.subscribe(C).borrow(),
@@ -696,6 +733,13 @@ pub(super) struct S3Host {
     pub(super) discord: Arc<Discord>,
     pub(super) lease: Lease,
     logs: Mutex<BTreeMap<u64, Arc<EventLog>>>,
+}
+
+impl S3Host {
+    /// Whether the writer host asked for `channel`'s binding log, as it does once its store is open.
+    pub(super) fn bound(&self, channel: u64) -> bool {
+        locked(&self.logs).contains_key(&channel)
+    }
 }
 
 impl HostIo for S3Host {
@@ -914,6 +958,9 @@ impl Booted {
         eprintln!("[s3] until posts {expected:?}");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         while self.discord().posts() != expected && tokio::time::Instant::now() < deadline {
+            if self.stopped_for_good() {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         if self.discord().posts() != expected {
@@ -921,8 +968,9 @@ impl Booted {
             let owed = self.owed().await;
             let transcript = std::fs::read_to_string(&self.transcript).unwrap_or_default();
             panic!(
-                "posts {:?} != {expected:?}\nseen {:?}\nalarms {alarms:?}\nowed {owed:?}\n{transcript}",
+                "posts {:?} != {expected:?}\nhalted for good {}\nseen {:?}\nalarms {alarms:?}\nowed {owed:?}\n{transcript}",
                 self.discord().posts(),
+                self.stopped_for_good(),
                 self.discord().seen()
             );
         }
@@ -956,6 +1004,22 @@ impl Booted {
             *channel == C && matches!(alarm, WriterAlarm::Halted { .. })
         };
         raised.iter().any(|entry| halted(&entry))
+    }
+
+    /// A Halt with every writer host ended: no resume follows, so no later POST can come.
+    fn stopped_for_good(&self) -> bool {
+        self.halted()
+            && self
+                .writers
+                .iter()
+                .all(tokio::task::JoinHandle::is_finished)
+    }
+
+    /// The writer alarms raised for `C`, in order, as the host's sink received them.
+    pub(super) fn raised(&self) -> Vec<WriterAlarm> {
+        let raised = locked(&self.host.inner.alarms.0);
+        let ours = raised.iter().filter(|(channel, _)| *channel == C);
+        ours.map(|(_, alarm)| alarm.clone()).collect()
     }
 
     /// What the drain waits on now, as health shows it.
