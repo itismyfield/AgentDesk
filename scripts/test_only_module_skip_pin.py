@@ -34,6 +34,9 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/db/intake_outbox/owner_fence_pg_tests.rs",
+        "src/db/intake_outbox/postgres_tests.rs",
+        "src/services/cluster/intake_worker/owner_fence_pg_tests.rs",
         "src/services/discord/queue_io/queued_head_inject_tests.rs",
         "src/services/turn_orchestrator/overflow_s2b_tests.rs",
         "src/services/turn_orchestrator/pending_queue_persistence/queue_exit_debt_tests.rs",

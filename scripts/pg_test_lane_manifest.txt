@@ -19,6 +19,8 @@ src/db/dispatches/outbox/delivery.rs
 src/db/idempotency.rs
 src/db/imsg_reply_tests.rs
 src/db/intake_outbox.rs
+src/db/intake_outbox/owner_fence_pg_tests.rs
+src/db/intake_outbox/postgres_tests.rs
 src/db/intake_outbox_delivery_proof.rs
 src/db/intake_outbox_dispatch_stamp/tests.rs
 src/db/intake_outbox_dispatched_audit.rs
@@ -115,6 +117,7 @@ src/services/cluster/intake_worker/home_accept_tests.rs
 src/services/cluster/intake_worker/home_route_tests.rs
 src/services/cluster/intake_worker/input_effect_tests.rs
 src/services/cluster/intake_worker/o_route_tests.rs
+src/services/cluster/intake_worker/owner_fence_pg_tests.rs
 src/services/cluster/intake_worker/replay_hold_tests.rs
 src/services/cluster/intake_worker/s3_real_tests/drain_pg_tests.rs
 src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs
@@ -323,6 +326,7 @@ db::idempotency::tests::pg_integration
 db::imsg_reply::tests
 db::intake_outbox::home_tests
 db::intake_outbox::migration_pg_tests
+db::intake_outbox::owner_fence_pg_tests
 db::intake_outbox::postgres_tests
 db::intake_outbox_delivery_proof::tests
 db::intake_outbox_dispatch_stamp::tests
@@ -428,6 +432,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::force_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg
 services::cluster::intake_worker::input_effect_tests
 services::cluster::intake_worker::o_route_tests
+services::cluster::intake_worker::owner_fence_pg_tests
 services::cluster::intake_worker::replay_hold_tests
 services::cluster::machine_resources::store::tests
 services::discord::admin_host_guard::tests
@@ -843,6 +848,16 @@ db::intake_outbox::migration_pg_tests::intake_outbox_status_check_rejects_unreco
 db::intake_outbox::migration_pg_tests::intake_outbox_touch_updated_at_trigger_advances_on_update
 db::intake_outbox::migration_pg_tests::intake_outbox_unique_message_attempt_blocks_duplicate_attempt_no
 db::intake_outbox::migration_pg_tests::migration_0080_recovers_provider_from_claim_owner_and_fails_closed_by_accept_phase
+db::intake_outbox::owner_fence_pg_tests::owner_fence_all_writers_reject_transferred_and_same_instance_generation_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_capacity_and_replay_projection_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_claim_progress_normalization_and_commit_boundary_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_fresh_snapshot_after_transfer_wait_in_repeatable_read_session_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_legacy_current_partial_and_target_matrix_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_legacy_read_cannot_overwrite_new_stamp_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_lock_survives_replay_trigger_and_two_writers_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_snapshot_cas_and_sweep_token_age_revalidation_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_sweep_transfer_wait_revalidates_in_repeatable_read_session_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_sweeps_and_partial_progress_pg
 db::intake_outbox::postgres_tests::a_claim_holding_no_channel_runs_the_original_two_parameter_statement
 db::intake_outbox::postgres_tests::cancelled_owned_claim_returns_exact_row_to_pending_without_failure_pollution
 db::intake_outbox::postgres_tests::claim_pending_for_target_filters_by_row_provider
@@ -1413,6 +1428,11 @@ services::cluster::intake_worker::o_route_tests::a_canary_row_commits_accept_and
 services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
 services::cluster::intake_worker::o_route_tests::readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_last_check_pg
+services::cluster::intake_worker::owner_fence_pg_tests::owner_fence_tick_after_claim_transfer_never_executes_pg
+services::cluster::intake_worker::owner_fence_pg_tests::owner_fence_tick_final_done_preserves_stale_row_pg
+services::cluster::intake_worker::owner_fence_pg_tests::owner_fence_tick_final_failure_preserves_stale_row_pg
+services::cluster::intake_worker::owner_fence_pg_tests::owner_fence_tick_legacy_and_current_success_failure_restart_hold_pg
+services::cluster::intake_worker::owner_fence_pg_tests::owner_fence_tick_preaccept_transfer_never_executes_pg
 services::cluster::intake_worker::replay_hold_tests::replay_hold_committed_after_worker_claim_blocks_accept_and_provider_pg
 services::cluster::intake_worker::replay_hold_tests::replay_hold_survives_worker_replacement_and_foreign_claim_owners_pg
 services::cluster::intake_worker::replay_hold_tests::replay_schema_preserves_normal_worker_delivery_and_preaccept_attempt_budget_pg
