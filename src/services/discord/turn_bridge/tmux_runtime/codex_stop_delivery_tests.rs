@@ -61,8 +61,9 @@ struct Case {
 }
 impl Case {
     async fn new(pool: &sqlx::PgPool, root: &Path, provider: ProviderKind, n: u64) -> Self {
-        let shared =
+        let mut shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        Arc::get_mut(&mut shared).expect("unshared case").provider = provider.clone();
         let channel = ChannelId::new(5_340_103_000 + n);
         let logical = format!("AgentDesk-{}-p10-stop-{n}", provider.as_str());
         let nonce = format!("{n:032x}");

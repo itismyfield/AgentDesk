@@ -1,6 +1,118 @@
 use super::*;
 use crate::config::load_from_path;
 
+#[test]
+fn cg_d1_boot_env_replaces_yaml_empty_disables_and_invalid_fails_whole_list() {
+    const CELL: &str = "CG_D1_BOOT_CASE";
+    const ENV: &str = "AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS";
+    if let Ok(cell) = std::env::var(CELL) {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let yaml = if cell == "empty-overrides-unsupported-yaml" {
+            42
+        } else {
+            41
+        };
+        let path = root.path().join("cg-d1-fixture.yaml");
+        std::fs::write(&path, format!("server: {{}}\nagents:\n  - id: fixture\n    name: fixture\n    channels:\n      claude: {{id: '41', runtime: tui}}\n      codex: {{id: '42', runtime: tui}}\n  - id: other\n    name: other\n    channels:\n      claude: {{id: '44', runtime: tui}}\nsession_hosts: {{claude_guard_channels: [{yaml}]}}\n")).unwrap();
+        struct Writer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = std::sync::Arc::clone(&log);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || Writer(std::sync::Arc::clone(&writer)))
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, || {
+            load_from_path(&path).and_then(|cfg| BootSessionHosts::from_config(&cfg))
+        });
+        if cell == "bad" {
+            assert!(result.is_err(), "a bad override must fail the whole boot");
+            return;
+        }
+        let boot =
+            result.expect("validate the effective list before rejecting the YAML list it replaces");
+        let wanted: BTreeSet<u64> = match cell.as_str() {
+            "unset" => [41].into(),
+            "replace" => [44].into(),
+            _ => BTreeSet::new(),
+        };
+        assert_eq!(
+            boot.config().claude_guard_channels,
+            wanted,
+            "boot selection follows the winning input"
+        );
+        let source = match cell.as_str() {
+            "unset" => "yaml",
+            "replace" => "env",
+            _ => "env-empty",
+        };
+        let log = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains(&format!("source=\"{source}\"")) && log.contains("policy=\"idle-only\""),
+            "{log}"
+        );
+        assert_eq!(boot.claude_guarded(41), wanted.contains(&41));
+        assert_eq!(boot.claude_guarded(44), wanted.contains(&44));
+        let _changed = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            ENV,
+            "invalid-after-boot".as_ref(),
+        );
+        let frozen = load_from_path(&path)
+            .and_then(|cfg| BootSessionHosts::from_config(&cfg))
+            .expect("boot input never hot reloads; only the next child process sees its new input");
+        assert_eq!(frozen.config().claude_guard_channels, wanted);
+        return;
+    }
+    for (cell, value) in [
+        ("unset", None),
+        ("empty", Some("")),
+        ("replace", Some("44")),
+        ("empty-overrides-unsupported-yaml", Some("")),
+    ] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", "config::session_hosts::tests::cg_d1_boot_env_replaces_yaml_empty_disables_and_invalid_fails_whole_list", "--nocapture"]).env(CELL, cell);
+        if let Some(value) = value {
+            child.env(ENV, value);
+        } else {
+            child.env_remove(ENV);
+        }
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{cell}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    for bad in [
+        "41,0",
+        "41,no",
+        "41,",
+        "41,42",
+        "41,99",
+        "[41]",
+        "  ",
+        "41,18446744073709551616",
+    ] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact", "config::session_hosts::tests::cg_d1_boot_env_replaces_yaml_empty_disables_and_invalid_fails_whole_list", "--nocapture"])
+            .env(CELL, "bad").env(ENV, bad).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{bad:?}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
 const BINDINGS: &str = "claude: {id: '41', runtime: tui}\n      codex: {id: '42', runtime: tui}\n      gemini: {id: '43'}";
 
 /// An endpoint whose paths are written as YAML strings; a temp dir path is absolute everywhere.

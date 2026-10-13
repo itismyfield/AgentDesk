@@ -419,3 +419,300 @@ async fn cg_b2c_intake_bridge_holds_guarded_stop_and_pending_cancel() {
     }
     creator_cells(Creator::Intake, true).await;
 }
+
+type OwnerReport = (
+    u64,
+    std::path::PathBuf,
+    tokio::sync::oneshot::Sender<Option<crate::services::discord::inflight::ManagedSubmission>>,
+);
+pub(super) static D1_OWNER: std::sync::Mutex<Option<OwnerReport>> = std::sync::Mutex::new(None);
+
+pub(super) fn observe_owner(
+    channel: u64,
+    submission: Option<&crate::services::discord::inflight::ManagedSubmission>,
+    prompt: &str,
+) {
+    let mut probe = D1_OWNER.lock().unwrap();
+    if probe.as_ref().is_some_and(|(id, _, _)| *id == channel) {
+        let (_, renderer, sender) = probe.take().unwrap();
+        std::fs::write(renderer.join("expected"), prompt).unwrap();
+        let _ = sender.send(submission.cloned());
+    }
+}
+
+async fn actual_creator(creator: Creator) {
+    use crate::services::claude_tui::host_input::guarded_submission::executor_tests::{
+        d1_execution_proof, d1_fixture_config, install_shim, renderer, screen,
+    };
+    use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture as Tmux;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Tmux::after_shared_test_env_lock();
+    install_shim(&f);
+    let id = match creator {
+        Creator::Headless => 6_809_001,
+        Creator::Intake => 6_809_002,
+    };
+    let channel = ChannelId::new(id);
+    let (_env, config) = d1_fixture_config(&f, &[id]);
+    crate::config::session_hosts::install(&config).unwrap();
+    crate::services::tui_o::channel_policy::install(&config).unwrap();
+    let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+        "http://127.0.0.1:9".into(),
+    );
+    let api = crate::services::discord::admin_host_guard::tests::Recorder::start().await;
+    crate::services::discord::internal_api::init(api.port, None);
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Claude;
+    Arc::get_mut(&mut shared).unwrap().api_port = api.port;
+    let mock = discord_mock::DiscordMockState::new();
+    mock.allow_channel(id);
+    let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
+    let ctx = discord_mock::serenity_context(proxy, gateway).await;
+    let workspace = f.root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let channel_name = format!("cg-d1-real-{id}");
+    let name = ProviderKind::Claude.build_tmux_session_name(&channel_name);
+    const BODY: &str = "cg d1 actual";
+    renderer(&f, &name, BODY, &screen(""), &screen(BODY), &screen(""));
+    let proof = d1_execution_proof(&name, id);
+    let sid = proof.context.expected_native_session_id.as_deref().unwrap();
+    let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        &workspace,
+        sid,
+        Some(f.root.path()),
+    )
+    .unwrap();
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(&transcript, "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n").unwrap();
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        &name,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: transcript.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(sid.into()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    crate::services::discord::host_defer_gate::tests::map_channel(&shared, channel, &channel_name)
+        .await;
+    {
+        let mut core = shared.core.lock().await;
+        let session = core.sessions.get_mut(&channel).unwrap();
+        session.current_path = Some(workspace.display().to_string());
+        session.session_id = Some(sid.into());
+    }
+    let shim = f.root.path().join("tmux");
+    let script = std::fs::read_to_string(&shim).unwrap();
+    let entered = f.root.path().join("d1-payload-barrier");
+    let release = f.root.path().join("d1-payload-release");
+    let quote =
+        |p: &std::path::Path| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
+    let barrier = format!(
+        "if [ \"$payload\" = 1 ]; then\n touch {entered}\n {real} -L {socket} -f /dev/null \"$@\" >/dev/null\n while [ ! -f {release} ]; do sleep .02; done\n exit 0\nfi\n",
+        real = quote(&f.real),
+        socket = f.socket,
+        entered = quote(&entered),
+        release = quote(&release)
+    );
+    let old = format!(
+        "exec {} -L {} -f /dev/null \"$@\"",
+        quote(&f.real),
+        f.socket
+    );
+    assert!(script.contains(&old));
+    std::fs::write(&shim, script.replace(&old, &(barrier + &old))).unwrap();
+    let gate = fence::Gate::protect(ProviderKind::Claude, id).unwrap();
+    let _health = fence::test_health::Clear::new(&gate);
+    let (observed, owner) = tokio::sync::oneshot::channel();
+    *D1_OWNER.lock().unwrap() = Some((id, f.root.path().join(&name), observed));
+    let (finished, bridge) = tokio::sync::oneshot::channel();
+    *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+        .lock()
+        .unwrap() = Some((channel, finished));
+    let timeout = std::time::Duration::from_secs(20);
+    match creator {
+        Creator::Headless => {
+            tokio::time::timeout(
+                timeout,
+                start_reserved_headless_turn_with_owner(
+                    &ctx,
+                    channel,
+                    BODY,
+                    "owner",
+                    UserId::new(7),
+                    &shared,
+                    "",
+                    None,
+                    Some(serde_json::json!({"silent":true})),
+                    None,
+                    None,
+                    Some(true),
+                    reserve_headless_turn(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        Creator::Intake => {
+            let request = IntakeRequest {
+                intake_outbox_id: None,
+                channel_id: channel,
+                user_msg_id: MessageId::new(channel.get() + 1),
+                source_message_ids: Vec::new(),
+                busy_followup_retry_user_msg_id: MessageId::new(channel.get() + 1),
+                request_owner: UserId::new(7),
+                request_owner_name: "owner".into(),
+                user_text: BODY.into(),
+                reply_to_user_message: false,
+                defer_watcher_resume: false,
+                wait_for_completion: false,
+                merge_consecutive: false,
+                reply_context: None,
+                has_reply_boundary: false,
+                dm_hint: Some(false),
+                turn_kind: TurnKind::Foreground,
+                preserve_on_cancel: false,
+            };
+            tokio::time::timeout(
+                timeout,
+                execute_intake_turn_core(&api.http, &shared, "", request, Vec::new()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+    }
+    let cap = tokio::time::timeout(timeout, owner)
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("the actual creator installed a managed capability");
+    let mailbox = shared.mailbox_peek(channel).unwrap();
+    let token = mailbox
+        .snapshot()
+        .await
+        .cancel_token
+        .expect("an active real provider");
+    struct Release {
+        token: Arc<crate::services::provider::CancelToken>,
+        path: std::path::PathBuf,
+    }
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::fs::write(&self.path, "release");
+        }
+    }
+    let release_guard = Release {
+        token: Arc::clone(&token),
+        path: release.clone(),
+    };
+    tokio::time::timeout(timeout, async {
+        while !f.root.path().join(&name).join("payloads").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        entered.exists(),
+        "boot selection must reach the real guarded conditional payload, not Legacy"
+    );
+    assert_eq!(
+        durable_phase(channel),
+        Some(SubmissionPhase::MayHaveSubmitted)
+    );
+    token
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::timeout(timeout, bridge)
+        .await
+        .unwrap()
+        .unwrap();
+    let row = crate::services::discord::inflight::load_inflight_state(&ProviderKind::Claude, id)
+        .expect("the real bridge must preserve the row while executor is Running");
+    assert_eq!(
+        row.managed_submission
+            .as_ref()
+            .map(|record| record.phase.clone()),
+        Some(SubmissionPhase::MayHaveSubmitted)
+    );
+    assert!(matches!(
+        cap.classify_failure(),
+        crate::services::discord::inflight::SubmissionFailure::GuardedRunning
+    ));
+    let mailbox = mailbox.snapshot().await;
+    assert!(mailbox.cancel_token.is_some());
+    assert!(mailbox.intervention_queue.is_empty());
+    assert!(
+        std::fs::read(f.root.path().join("exec-enters"))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        std::fs::read(f.root.path().join(&name).join("frame")).unwrap(),
+        std::fs::read(f.root.path().join(&name).join("expected")).unwrap()
+    );
+    let submitted = std::fs::read_to_string(f.root.path().join(&name).join("expected")).unwrap();
+    assert!(
+        submitted.contains(BODY),
+        "the real creator must preserve the requested body"
+    );
+    let mut writes = mock.written_texts();
+    writes.extend(api.take());
+    assert!(
+        !writes
+            .iter()
+            .any(|write| write.contains("guarded submission") || write.contains("ACK unknown"))
+    );
+    println!(
+        "CG_D1_ACTUAL_CREATOR {creator:?} phase=MayHaveSubmitted owner=Running payload=1 enter=0 requeue=0"
+    );
+    drop(release_guard);
+    tokio::time::timeout(timeout, gate.close().unwrap().drain())
+        .await
+        .unwrap();
+    assert!(matches!(
+        cap.classify_failure(),
+        crate::services::discord::inflight::SubmissionFailure::GuardedStopped(_)
+    ));
+    crate::services::claude_tui::guarded_outcome::forget_test_hold(&name);
+    shared.mailboxes.remove_fixture_for_test(channel);
+    server.abort();
+}
+
+fn guarded_creator_child(test: &str) -> bool {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _guard = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(
+        "AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS",
+    );
+    unsafe { std::env::remove_var("AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS") };
+    crate::services::discord::admin_host_guard::tests::api_child(test)
+}
+
+#[tokio::test]
+async fn cg_d1_headless_actual_begin_preserves_running_cancelled_bridge() {
+    if !guarded_creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::submission_tests::",
+        "cg_d1_headless_actual_begin_preserves_running_cancelled_bridge"
+    )) {
+        return;
+    }
+    actual_creator(Creator::Headless).await;
+}
+#[tokio::test]
+async fn cg_d1_intake_actual_begin_preserves_running_cancelled_bridge() {
+    if !guarded_creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::submission_tests::",
+        "cg_d1_intake_actual_begin_preserves_running_cancelled_bridge"
+    )) {
+        return;
+    }
+    actual_creator(Creator::Intake).await;
+}
