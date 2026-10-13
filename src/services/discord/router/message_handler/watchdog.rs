@@ -465,7 +465,54 @@ mod relay_state_contract_refs {
     //! contract, the CI wiring, and why there are no `// sym:` labels.
     #[test]
     fn contract_symbols_exist() {
-        use super::attach_paused_turn_watcher_inner as _;
+        let _ = super::attach_paused_turn_watcher_inner;
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) async fn incident_attach(
+    shared: &Arc<SharedData>,
+    http: Arc<serenity::Http>,
+    row: &mut InflightTurnState,
+    retry_after_precheck: bool,
+) {
+    let channel = serenity::ChannelId::new(row.channel_id);
+    if retry_after_precheck {
+        let request = PausedTurnWatcherAttachRequest {
+            shared: shared.clone(),
+            http,
+            provider: ProviderKind::Claude,
+            channel_id: channel,
+            tmux_session_name: row.tmux_session_name.clone().unwrap(),
+            output_path: row.output_path.clone().unwrap(),
+            initial_offset: 0,
+            source: "turn_start_headless",
+            thread_parent_channel_id: None,
+            host: Arc::new(HostSnapshot::new(WatchHost::Legacy)),
+        };
+        assert_eq!(
+            attach_paused_turn_watcher_inner(request, false),
+            Ok(channel)
+        );
+    } else {
+        assert_eq!(
+            attach_paused_turn_watcher_for_inflight(
+                shared,
+                http,
+                &ProviderKind::Claude,
+                channel,
+                row.tmux_session_name.clone(),
+                row.output_path.clone(),
+                0,
+                "turn_start_headless",
+                None,
+                row,
+            )
+            .await,
+            Some(channel)
+        );
+        assert!(!shared.tmux_watchers.contains_key(&channel));
+        assert_eq!(pending_paused_watcher_attach_count_for_tests(), 1);
     }
 }
 

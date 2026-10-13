@@ -97,6 +97,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/queue_io/cancel_backstop_tests.rs",
         "src/services/discord/queue_io/idle_queue_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/cold_start_incident_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs",
         "src/services/discord/zombie_foreground_release/cancel_backstop_tests.rs",
         "src/services/discord/health/recovery/legacy_send_tests.rs",
