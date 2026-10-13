@@ -78,7 +78,6 @@ src/
 │   ├── mod.rs
 │   ├── monitoring.rs
 │   ├── o.rs
-│   ├── o_shadow.rs
 │   ├── o_tests.rs
 │   ├── query.rs
 │   ├── restart_terminal_proof.rs
@@ -2701,12 +2700,8 @@ src/
 │   │   │   ├── binding_reader.rs
 │   │   │   ├── capture.rs
 │   │   │   ├── derive.rs
-│   │   │   ├── diff.rs
 │   │   │   ├── identity.rs
-│   │   │   ├── metrics.rs
 │   │   │   ├── mod.rs
-│   │   │   ├── report.rs
-│   │   │   ├── root.rs
 │   │   │   ├── seal.rs
 │   │   │   ├── tap.rs
 │   │   │   └── unit_plan.rs
