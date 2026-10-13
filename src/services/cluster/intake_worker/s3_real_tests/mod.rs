@@ -50,6 +50,10 @@ fn s3_node_child() {
             "th8_home_recheck" => route_pg::home_recheck_node(&env).await,
             "th9_holder" => force_pg::holder_node(&env).await,
             "th9_consumer" => force_pg::consumer_node(&env).await,
+            "th9_owed_holder" => force_pg::owed_holder_node(&env).await,
+            "th6_live_target" => force_pg::live_target_node(&env).await,
+            "th9_seed_prepared" => force_pg::seed_prepared_node(&env).await,
+            "th9_new_target" => force_pg::new_target_node(&env).await,
             other => panic!("unknown S3 scenario {other}"),
         }
     });

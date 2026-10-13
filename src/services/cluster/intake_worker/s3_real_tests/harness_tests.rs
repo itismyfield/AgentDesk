@@ -339,6 +339,11 @@ impl Node {
         assert!(done.exists(), "node {} returned before its end", self.role);
     }
 
+    /// The child's process id, for a node that must be the same process across a phase.
+    pub(super) fn pid(&self) -> u32 {
+        self.child.as_ref().expect("running").id()
+    }
+
     /// Ends the node at once, as a crash would.
     pub(super) fn kill(mut self) {
         if let Some(mut child) = self.child.take() {
@@ -1046,8 +1051,19 @@ pub(super) async fn seed_on(
     message: &str,
     home_epoch: Option<i64>,
 ) -> i64 {
+    seed_for(pool, channel, MINI, message, home_epoch).await
+}
+
+/// As [`seed_on`], routed to `target`.
+pub(super) async fn seed_for(
+    pool: &PgPool,
+    channel: u64,
+    target: &str,
+    message: &str,
+    home_epoch: Option<i64>,
+) -> i64 {
     let payload = crate::db::intake_outbox::InsertPendingPayload {
-        target_instance_id: MINI.into(),
+        target_instance_id: target.into(),
         forwarded_by_instance_id: GW.into(),
         required_labels: serde_json::json!([]),
         execution_requirements: serde_json::json!({}),

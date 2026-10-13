@@ -117,6 +117,15 @@ async fn th6_worker_holder_restart_rehydrates_pg() {
 /// First generation: the baseline goes out, then with the lease withheld the actor spools the
 /// two tail rows and its cursor passes them; the parent kills it before any is prepared.
 pub(super) async fn first_generation_node(env: &Env) {
+    let _node = holder_with_owed_tail(env).await;
+    signal(&env.dir, "tail_spooled");
+    // Killed by the parent from here; it never ends on its own.
+    std::future::pending::<()>().await;
+}
+
+/// The holder at its epoch after the baseline posted: lease withheld, both tail rows spooled past
+/// the cursor and owed, none prepared or posted; the store files are read, never opened.
+pub(super) async fn holder_with_owed_tail(env: &Env) -> Booted {
     let epoch = epoch_of(env);
     let node = Booted::boot_on(env, Discord::kept_in(&env.dir.join(HISTORY))).await;
     until("the lease opens the home", WITHIN, || {
@@ -184,9 +193,7 @@ pub(super) async fn first_generation_node(env: &Env) {
         "spooled",
         format!("{names:?} cursor {key}.json through {length}"),
     );
-    signal(&env.dir, "tail_spooled");
-    // Killed by the parent from here; it never ends on its own.
-    std::future::pending::<()>().await;
+    node
 }
 
 fn deliver_running() -> Option<usize> {
