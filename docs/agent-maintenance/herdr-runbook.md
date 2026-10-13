@@ -69,11 +69,13 @@ Herdr 로 띄운 Claude 채널(P9 대상: adk-dash-cc)의 운영 절차다. 5a�
 - mark·verify도 실행마다 고유한 `--output`을 준다. gate 출력 디렉터리를 쓰면 gate의 `report.claude-herdr.json`을 덮어쓴다.
 - 첫 gate 뒤 정상 row가 있는 상태에서 공통 인자를 유지하고 표식을 만든다(Discord 전송 없음, 기존 표식 덮어쓰기 거부).
   `python3 scripts/e2e/run_tui_relay.py <common-args> --herdr-restart-observe-only mark --herdr-restart-mark <mark.json> --output <mark-output>`
-- 표식에는 실행 run ID·target row/nonce·UTC 관측 시각·detail herdr 요약·서버가 제공한 시각/uptime 값이 저장된다.
+- 표식에는 실행 run ID·target row/nonce·UTC 관측 시각·detail herdr 요약·서버가 제공한 시각/uptime 값과, mark 응답을 받은 뒤의 완료 시각(`completed_at`)·부팅 기준 시계 값(`boot_clock`)이 저장된다.
 - 운영자가 dcserver 재시작을 마친 다음 같은 노드·channel·endpoint와 같은 표식으로 검증한다.
   `python3 scripts/e2e/run_tui_relay.py <common-args> --herdr-restart-observe-only verify --herdr-restart-mark <mark.json> --output <verify-output>`
 - verify는 일반 실행과 같은 셀 lease를 잡고, reconnect의 published>0, channels=published, withheld/unknown/pending=0, row nonce 연속성, 현재 hold 0, admission open을 확인한 뒤 후속 턴을 보낸다.
-- detail에 `uptime_secs`(0 이상 정수)가 있으면 `uptime_secs < (요청 직전 시각 − 표식 시각) − 2초`일 때만 재시작으로 보고(`restart_evidence: server_uptime`), 아니면 후속 턴 없이 실패한다(`not_observed`).
+- detail에 `uptime_secs`(0 이상 정수)가 있으면 `uptime_secs < 경과 − 2초`일 때만 재시작으로 보고(`restart_evidence: server_uptime`), 아니면 후속 턴 없이 실패한다(`not_observed`).
+  경과(`elapsed_secs`)는 표식 완료 시각부터 verify 요청 직전까지이며 벽시계와 부팅 기준 시계 중 작은 값이다. 부팅 기준 시계는 서버 uptime과 같은 시계(macOS `CLOCK_UPTIME_RAW`, Linux `CLOCK_MONOTONIC`)라 벽시계 보정·잠자기로 경과가 부풀지 않는다.
+  그 시계가 없는 플랫폼이나 표식·verify의 시계가 다르면 벽시계만 쓰고 `boot_clock: monotonic_unavailable`을 남긴다. `completed_at`이 없는 옛 표식은 관측 시각을 기준으로 읽고 `mark_reference: legacy_observed_at`을 남긴다.
   `uptime_secs`가 없거나 형식이 다르면 `not_proven`으로 기록하고 나머지 판정만 한다.
 - 기본 후속 턴은 `E-19-observe-only`로 기록한다. `--filter E-1`처럼 재시작 단계가 없는 시나리오를 지정할 수도 있다. 원래 E-19의 비밀값 회상 기준을 충족했다고 주장하지 않는다.
 - mark/verify에는 launchctl·재시작 명령이 없다. `--herdr-isolated-server`·`--restart-script` 병용 및 재시작 단계가 포함된 후속 시나리오는 거부한다.

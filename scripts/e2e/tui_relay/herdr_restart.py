@@ -2,14 +2,20 @@
 
 import datetime as dt
 import json
+import math
+import sys
+import time
 from pathlib import Path
 
 from . import herdr
 
 LIMITATION = "dcserver incarnation change is not proven; operator restart evidence is required"
 UPTIME_NOTE = "restart inferred from server uptime below time since mark; no boot id"
-# Covers whole-second uptime truncation and the mark request's own latency.
+# Whole-second uptime truncation plus 1 s spare for clock skew; elapsed starts after the mark
+# response, so a restart during the mark request is excluded rather than covered by margin.
 UPTIME_MARGIN_S = 2
+# The clock behind the server's uptime (Rust Instant): host-wide since boot, paused while asleep.
+BOOT_CLOCKS = {"darwin": "CLOCK_UPTIME_RAW", "linux": "CLOCK_MONOTONIC"}
 
 
 def add_arguments(parser):
@@ -33,6 +39,20 @@ def target(args):
             "base_url": args.base_url.rstrip("/")}
 
 
+def boot_clock():
+    """Seconds on the host's server-uptime clock, or None where the platform does not offer it."""
+    name = BOOT_CLOCKS.get(sys.platform)
+    clock = getattr(time, name, None) if name else None
+    return None if clock is None else {"clock": name, "seconds": time.clock_gettime(clock)}
+
+
+def parse_time(value):
+    moment = dt.datetime.fromisoformat(value)
+    if moment.tzinfo is None or moment > dt.datetime.now(dt.timezone.utc):
+        raise ValueError("restart mark time invalid")
+    return moment
+
+
 def load_mark(path, args):
     mark = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(mark, dict) or mark.get("version") != 1 or mark.get("target") != target(args):
@@ -42,24 +62,40 @@ def load_mark(path, args):
         raise ValueError("restart mark observation missing")
     if before.get("surface") != "GET /api/health/detail" or not mark.get("run_id"):
         raise ValueError("restart mark surface/run identity missing")
-    timestamp = dt.datetime.fromisoformat(before["observed_at"])
-    if timestamp.tzinfo is None or timestamp > dt.datetime.now(dt.timezone.utc):
+    observed = parse_time(before["observed_at"])
+    # A mark without completed_at predates completion timing and keeps the observed_at rule.
+    if "completed_at" in mark and parse_time(mark["completed_at"]) < observed:
         raise ValueError("restart mark time invalid")
+    clock = mark.get("boot_clock")
+    if clock is not None and (not isinstance(clock, dict) or not isinstance(clock.get("clock"), str)
+                              or type(clock.get("seconds")) not in (int, float) or not math.isfinite(clock["seconds"])):
+        raise ValueError("restart mark boot clock invalid")
     herdr.clean_turn(herdr.ready({"herdr": before.get("herdr")}, endpoint=args.herdr_endpoint, channel=args.channel_id))
     herdr.current_row({"executions": [before.get("row")], "other_input_holds": []},
                       channel=args.channel_id, provider=args.cell.split("-", 1)[0])
     return mark
 
 
-def restart_evidence(after, mark_observed_at):
+def restart_evidence(after, mark, verify_clock):
     """Prove a restart only when the server started after the mark; otherwise report not_proven."""
     uptime = after.get("server_values", {}).get("uptime_secs")
     if type(uptime) is not int or uptime < 0:
         return {"restart_evidence": "not_proven"}
-    # Both observed_at values precede their health requests, so elapsed errs toward refusing.
-    elapsed = (dt.datetime.fromisoformat(after["observed_at"])
-               - dt.datetime.fromisoformat(mark_observed_at)).total_seconds()
-    evidence = {"restart_evidence": "server_uptime", "uptime_secs": uptime, "elapsed_secs": elapsed}
+    # From mark completion to the verify request start; the smaller clock wins, so a wall-clock
+    # step forward or a host sleep cannot inflate elapsed time.
+    legacy = "completed_at" not in mark
+    reference = mark["observation"]["observed_at"] if legacy else mark["completed_at"]
+    wall = (dt.datetime.fromisoformat(after["observed_at"]) - dt.datetime.fromisoformat(reference)).total_seconds()
+    evidence = {"restart_evidence": "server_uptime", "uptime_secs": uptime, "wall_elapsed_secs": wall,
+                "mark_reference": "legacy_observed_at" if legacy else "completed_at",
+                "boot_clock": "monotonic_unavailable"}
+    before_clock = None if legacy else mark.get("boot_clock")
+    elapsed = wall
+    if before_clock and verify_clock and before_clock["clock"] == verify_clock["clock"]:
+        boot = verify_clock["seconds"] - before_clock["seconds"]
+        evidence.update(boot_clock=verify_clock["clock"], boot_clock_elapsed_secs=boot)
+        elapsed = min(wall, boot)
+    evidence["elapsed_secs"] = elapsed
     if elapsed <= 0 or not uptime < elapsed - UPTIME_MARGIN_S:
         evidence["restart_evidence"] = "not_observed"
     return evidence
@@ -98,8 +134,10 @@ def run(driver, args):
             restart["status"] = "dry_run"
         elif args.herdr_restart_observe_only == "mark":
             before = herdr.observe(driver, args)
+            completed = {"completed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "boot_clock": boot_clock()}
             restart["before"] = before
-            mark = {"version": 1, "run_id": run_id, "target": target(args), "observation": before}
+            restart["mark_completed"] = completed
+            mark = {"version": 1, "run_id": run_id, "target": target(args), "observation": before, **completed}
             with Path(args.herdr_restart_mark).open("x", encoding="utf-8") as handle:
                 json.dump(mark, handle, indent=2)
             restart["status"] = "marked"
@@ -109,11 +147,12 @@ def run(driver, args):
             restart["mark_run_id"] = mark["run_id"]
             # Same cell lease key as the driver's normal sweep, so the two never share a channel.
             with driver.lease.acquire(f"{args.cell}-{run_id}", cell=args.cell.replace("-herdr", "-tui")):
+                verify_clock = boot_clock()
                 after = herdr.observe(driver, args, reconnected=True)
                 restart["after"] = after
                 if any(after["row"].get(k) != mark["observation"]["row"].get(k) for k in ("channel", "provider", "nonce")):
                     raise ValueError("restart target row continuity failed")
-                restart.update(restart_evidence(after, mark["observation"]["observed_at"]))
+                restart.update(restart_evidence(after, mark, verify_clock))
                 if restart["restart_evidence"] == "not_observed":
                     raise ValueError(f"server uptime {restart['uptime_secs']}s is not below {restart['elapsed_secs']:.3f}s "
                                      f"since mark minus {UPTIME_MARGIN_S}s; restart not observed")

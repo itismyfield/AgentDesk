@@ -19,6 +19,7 @@ import run_tui_relay as driver
 from tui_relay import herdr, herdr_restart, http_auth
 
 real_run_scenario = driver.run_scenario
+real_boot_clock = herdr_restart.boot_clock
 
 
 def health():
@@ -457,6 +458,9 @@ class RestartObserveOnly(unittest.TestCase):
         self.cli = self.enterContext(patch.object(herdr.subprocess, "run", return_value=Namespace(stdout=json.dumps(status()))))
         self.client = self.enterContext(patch.object(driver.discord, "DiscordClient"))
         self.scenario = self.enterContext(patch.object(driver, "run_scenario", return_value={"id": "E-19-observe-only", "status": "pass"}))
+        self.boot_now = 1000.0
+        self.clock = self.enterContext(patch.object(herdr_restart, "boot_clock",
+                                                    side_effect=lambda: {"clock": "test_clock", "seconds": self.boot_now}))
 
     def run_mode(self, mode):
         self.args.herdr_restart_observe_only = mode
@@ -472,10 +476,14 @@ class RestartObserveOnly(unittest.TestCase):
         payload.update({} if uptime is None else {"uptime_secs": uptime})
         self.http.return_value = (200, payload)
 
-    def set_mark(self, observed_at=None, **observation):
+    def set_mark(self, observed_at=None, *, boot_age=None, **observation):
+        """Age the whole mark: observation, completion and boot clock moved back together."""
         mark = json.loads(self.mark.read_text())
         moment = observed_at or datetime.now(timezone.utc) - timedelta(seconds=60)
         mark["observation"].update(observed_at=moment.isoformat(), **observation)
+        mark["completed_at"] = moment.isoformat()
+        age = (datetime.now(timezone.utc) - moment).total_seconds() if boot_age is None else boot_age
+        mark["boot_clock"] = {"clock": "test_clock", "seconds": self.boot_now - age}
         self.mark.write_text(json.dumps(mark))
 
     def marked(self, uptime=3):
@@ -524,12 +532,102 @@ class RestartObserveOnly(unittest.TestCase):
         with patch.object(herdr, "dt", SimpleNamespace(datetime=clock, timezone=timezone)):
             for mark_age, uptime in ((60, 60), (60, 59), (60, 58), (0, 0), (-10, 0)):
                 with self.subTest(mark_age=mark_age, uptime=uptime):
-                    self.set_mark(now - timedelta(seconds=mark_age))
+                    self.set_mark(now - timedelta(seconds=mark_age), boot_age=mark_age)
                     self.publishable(uptime)
                     self.assert_refused("restart not observed")
-            self.set_mark(now - timedelta(seconds=60))
+            self.set_mark(now - timedelta(seconds=60), boot_age=60)
             self.publishable(57)
             self.assertEqual(self.run_mode("verify")[0], 0)
+
+    def edit_mark(self, drop=(), **changes):
+        mark = json.loads(self.mark.read_text())
+        mark.update(changes)
+        for key in drop:
+            del mark[key]
+        self.mark.write_text(json.dumps(mark))
+
+    def test_mark_records_completion_after_its_response(self):
+        self.assertEqual(self.run_mode("mark")[0], 0)
+        mark = json.loads(self.mark.read_text())
+        self.assertGreaterEqual(datetime.fromisoformat(mark["completed_at"]),
+                                datetime.fromisoformat(mark["observation"]["observed_at"]))
+        self.assertEqual(mark["boot_clock"], {"clock": "test_clock", "seconds": 1000.0})
+
+    def test_restart_during_mark_request_is_measured_from_mark_completion(self):
+        # Mark request ran 63 s..57 s ago and the server restarted inside it; nothing restarted since.
+        now = datetime.now(timezone.utc)
+        self.marked()
+        self.set_mark(now - timedelta(seconds=63), boot_age=57)
+        self.edit_mark(completed_at=(now - timedelta(seconds=57)).isoformat())
+        self.publishable(59)
+        restart = self.assert_refused("restart not observed")["restart_observation"]
+        self.assertEqual((restart["mark_reference"], restart["restart_evidence"]), ("completed_at", "not_observed"))
+        self.assertLess(restart["elapsed_secs"], 58)
+        self.clock.side_effect, self.clock.return_value = None, None
+        self.assertLess(self.assert_refused("restart not observed")["restart_observation"]["wall_elapsed_secs"], 58)
+        # A mark from before completion timing keeps the observed_at rule and says so.
+        self.edit_mark(drop=("completed_at", "boot_clock"))
+        rc, report = self.run_mode("verify")
+        self.assertEqual(rc, 0, report)
+        restart = report["restart_observation"]
+        self.assertEqual((restart["mark_reference"], restart["boot_clock"], restart["restart_evidence"]),
+                         ("legacy_observed_at", "monotonic_unavailable", "server_uptime"))
+
+    def test_wall_clock_step_forward_uses_the_smaller_boot_clock_elapsed(self):
+        # 60 s really passed, the wall clock stepped 20 s forward, and the server never restarted.
+        self.marked()
+        self.set_mark(datetime.now(timezone.utc) - timedelta(seconds=80), boot_age=60)
+        self.publishable(72)
+        restart = self.assert_refused("restart not observed")["restart_observation"]
+        self.assertEqual((restart["boot_clock"], restart["boot_clock_elapsed_secs"], restart["elapsed_secs"]),
+                         ("test_clock", 60.0, 60.0))
+        self.assertGreaterEqual(restart["wall_elapsed_secs"], 80)
+        self.set_mark(datetime.now(timezone.utc) - timedelta(seconds=40), boot_age=60)
+        self.publishable(39)
+        self.assertLess(self.assert_refused("restart not observed")["restart_observation"]["elapsed_secs"], 41)
+        self.publishable(10)
+        self.assertEqual(self.run_mode("verify")[0], 0)
+
+    def test_without_a_shared_boot_clock_verify_uses_wall_time_and_says_so(self):
+        self.marked()
+        # A 1 s boot-clock span would refuse, so these pass only if that span is not used.
+        for mark_clock, verify_clock in (("absent", "test_clock"), (None, "test_clock"), ({"clock": "test_clock", "seconds": 999.0}, None),
+                                         ({"clock": "other", "seconds": 999.0}, "test_clock")):
+            with self.subTest(mark_clock=mark_clock, verify_clock=verify_clock):
+                self.set_mark()
+                self.edit_mark(drop=("boot_clock",)) if mark_clock == "absent" else self.edit_mark(boot_clock=mark_clock)
+                self.clock.side_effect = lambda: verify_clock and {"clock": verify_clock, "seconds": self.boot_now}
+                rc, report = self.run_mode("verify")
+                self.assertEqual(rc, 0, report)
+                restart = report["restart_observation"]
+                self.assertEqual((restart["boot_clock"], restart["mark_reference"]), ("monotonic_unavailable", "completed_at"))
+                self.assertNotIn("boot_clock_elapsed_secs", restart)
+                self.assertEqual(restart["elapsed_secs"], restart["wall_elapsed_secs"])
+        self.clock.side_effect = None
+        self.clock.return_value = None
+        self.mark.unlink()
+        self.assertEqual(self.run_mode("mark")[0], 0)
+        self.assertIsNone(json.loads(self.mark.read_text())["boot_clock"])
+
+    def test_malformed_completion_or_boot_clock_refuses_verify(self):
+        self.marked()
+        now = datetime.now(timezone.utc)
+        for changes in ({"completed_at": (now + timedelta(seconds=30)).isoformat()},
+                        {"completed_at": (now - timedelta(seconds=90)).isoformat()},
+                        {"completed_at": (now - timedelta(seconds=30)).replace(tzinfo=None).isoformat()},
+                        {"boot_clock": {"clock": "test_clock", "seconds": True}}, {"boot_clock": "CLOCK_UPTIME_RAW"},
+                        {"boot_clock": {"clock": "test_clock", "seconds": float("-inf")}}):
+            with self.subTest(changes=changes):
+                self.set_mark()
+                self.edit_mark(**changes)
+                self.assert_refused("restart mark")
+
+    def test_boot_clock_follows_the_server_uptime_clock_per_platform(self):
+        for platform, expected in (("darwin", "CLOCK_UPTIME_RAW"), ("linux", "CLOCK_MONOTONIC"), ("win32", None)):
+            with self.subTest(platform=platform), patch.object(herdr_restart.sys, "platform", platform), \
+                    patch.object(herdr_restart.time, "clock_gettime", return_value=5.0), \
+                    patch.object(herdr_restart.time, "CLOCK_UPTIME_RAW", 8, create=True):
+                self.assertEqual(real_boot_clock(), expected and {"clock": expected, "seconds": 5.0})
 
     def test_unusable_uptime_keeps_unproven_limitation(self):
         self.run_mode("mark")
