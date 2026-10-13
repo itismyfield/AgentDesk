@@ -1403,6 +1403,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_waiti
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th6_force_live_target_then_reboot_orphan_holds_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_orphan_holds_every_consumer_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_preserves_old_durable_debt_pg
+services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9w_real_h_post_timeout_and_force_after_f_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_both_restart_only_one_owner_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_worker_holder_restart_rehydrates_pg

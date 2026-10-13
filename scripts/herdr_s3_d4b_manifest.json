@@ -68,7 +68,8 @@
     {"id": "H9-D", "profile": "now", "piece": 4, "status": "implemented",
      "tests": ["services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_preserves_old_durable_debt_pg"],
      "what": "force keeps the old holder's durable spool and Prepared; the target takes none of it"},
-    {"id": "H9-W", "profile": "slow", "piece": 5, "status": "pending", "tests": [],
+    {"id": "H9-W", "profile": "slow", "piece": 5, "status": "implemented",
+     "tests": ["services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9w_real_h_post_timeout_and_force_after_f_pg"],
      "what": "real H, POST timeout and F: admission ends at H, the POST is joined, force only after F"}
   ],
   "mutants": [

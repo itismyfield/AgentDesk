@@ -2559,6 +2559,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_waiti
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th6_force_live_target_then_reboot_orphan_holds_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_orphan_holds_every_consumer_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_preserves_old_durable_debt_pg
+services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9w_real_h_post_timeout_and_force_after_f_pg
 services::cluster::intake_worker::home_route_tests::s3_real::harness::a_commit_publishes_before_it_unlocks_the_events
 services::cluster::intake_worker::home_route_tests::s3_real::harness::a_watch_with_a_window_long_gap_is_too_thin
 services::cluster::intake_worker::home_route_tests::s3_real::harness::lifecycle_reads_whole_lines_or_fails
