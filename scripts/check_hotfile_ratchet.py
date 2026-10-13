@@ -31,10 +31,13 @@ if sys.version_info < MIN_PYTHON:
 
 import tomllib
 
-from ratchet_admission import audit_repository_admissions, parse_cap_table, _git_text, _run_git
+from ratchet_admission import (
+    HISTORY_REL_PATH, audit_repository_admissions, parse_cap_table, _git_text, _run_git,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = REPO_ROOT / "scripts" / "hotfile_ratchet.toml"
+PIN_POLICY_METADATA = frozenset(("scripts/hotfile_ratchet.toml", HISTORY_REL_PATH))
 REQUIRED_HOTFILES = (
     "src/services/discord/tmux_watcher.rs",
     "src/services/discord/tui_prompt_relay.rs",
@@ -78,8 +81,7 @@ def pin_transfers(base: str, candidate: str, prior_caps: dict[str, int],
             raise ValueError(f"ratcheted hotfile ceiling removed while source remains: {source}")
     rows = changes(base, candidate)
     uncertain_targets = {target for code, _, target in rows if code in "ARC"
-        or (code in "MT" and target not in prior_caps
-            and (target.endswith(".rs") or target.startswith("src/")))}
+        or (code in "MT" and target not in prior_caps and target not in PIN_POLICY_METADATA)}
     candidate_text, exists = _git_text(REPO_ROOT, candidate, "scripts/hotfile_ratchet.toml")
     if not exists:
         raise ValueError("candidate hotfile manifest is missing")

@@ -206,6 +206,28 @@ class HotfileRatchetTest(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertIn("retired hotfile: src/extra.rs", out)
 
+    def test_source_retirement_with_policy_history_edit_passes(self):
+        self.extra_base()
+        self.remove_extra_pin(commit=False)
+        self.history.write_text(self.history.read_text() + "# retired source pin\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "retire source with policy history update")
+        rc, out, err = self.run_check()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("retired hotfile: src/extra.rs", out)
+
+    def test_source_retirement_with_unlisted_metadata_edit_is_uncertain(self):
+        other = self.root / "scripts/retirement_notes.toml"
+        other.write_text('note = "before"\n')
+        self.extra_base()
+        self.remove_extra_pin(commit=False)
+        other.write_text('note = "after"\n')
+        self.git("add", "-A")
+        self.git("commit", "-qm", "retire source with unrelated metadata update")
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 1, err)
+        self.assertIn("uncertain hotfile retirement", err)
+
     def test_committed_pin_only_removal_keeps_file_blocked(self):
         self.extra_base()
         self.remove_extra_pin(delete_source=False)
@@ -386,7 +408,7 @@ class HotfileRatchetTest(unittest.TestCase):
 
     def test_below_similarity_arbitrary_extension_cannot_retire_pin(self):
         for target, status in (("src/renamed.inc", "A"), ("src/existing.inc", "M"),
-                               ("generated/renamed.data", "A")):
+                               ("generated/renamed.data", "A"), ("generated/existing.data", "M")):
             with self.subTest(target=target, status=status):
                 case = HotfileRatchetTest()
                 case.setUp()
@@ -404,12 +426,14 @@ class HotfileRatchetTest(unittest.TestCase):
                     self.assertIn("D\tsrc/extra.rs", statuses)
                     self.assertIn(status + "\t" + target, statuses)
                     print("arbitrary-extension movement statuses:\n" + statuses)
-                    self.assertEqual(case.run_check()[0], 1)
+                    without_pin = case.run_check()
                     case.caps[target] = 100
                     case.write_caps()
                     case.git("add", "-A")
                     case.git("commit", "-qm", "pin uncertain arbitrary-extension target")
-                    self.assertEqual(case.run_check()[0], 1)
+                    for pinned, result in ((False, without_pin), (True, case.run_check())):
+                        with self.subTest(pinned=pinned):
+                            self.assertEqual(result[0], 1, result[2])
                 finally:
                     case.doCleanups()
 
