@@ -3429,6 +3429,21 @@ class FeatureOutcomeContract(_OutcomeFixture, unittest.TestCase):
         path = next((ROOT / "tests/e2e/tui_relay/scenarios").glob(f"{scenario_id}-*.yaml"))
         return driver.yaml.safe_load(path.read_text())
 
+    def test_phase_entry_lease_error_counts_unevaluable(self):
+        self.args.phase_deadline_s = 1
+        with patch.object(driver.lease, "acquire", side_effect=OSError("offline lease unavailable")), patch.object(
+            driver, "run_scenario", wraps=driver.run_scenario
+        ) as run_scenario:
+            rc, report, _ = self.main_result(self.scenario(), self.scenario("E-NEXT"))
+        run_scenario.assert_not_called()
+        self.client.send.assert_not_called()
+        self.client.send_prompt.assert_not_called()
+        self.client.send_control.assert_not_called()
+        self.assertEqual((rc, len(report["scenarios"])), (1, 1))
+        self.assertEqual({key: report["totals"][key] for key in ("fail", "executed", "unevaluable")},
+                         {"fail": 1, "executed": 0, "unevaluable": 1})
+        self.assert_unevaluable(report["scenarios"][0])
+
     def test_disabled_assertion_returns_explicit_skip(self):
         spec = {"requires_feature": "two_message_panel", "single_status_panel": True}
         outcome = driver.run_assertion(spec, window=assertions.Window("100"), enabled_features=frozenset())
@@ -3608,10 +3623,14 @@ class HarnessOutcomeContract(_OutcomeFixture, unittest.TestCase):
         row = report["scenarios"][0]
         self.assertEqual((row["cell"], row["provider"], row["runtime"]), ("claude-tui", "claude", "tui"))
         self.assertIn("E-SELECTED phase unevaluable", row["reason"])
+        self.assertEqual(report["totals"]["unevaluable"], 1)
+        self.assert_unevaluable(row)
         self.assertNotIn("running E-NEXT", output)
         with patch.object(driver.lease, "acquire", side_effect=RuntimeError("inert lease setup failure")):
             rc, report, _ = self.main_result(self.scenario("E-SELECTED"))
         self.assertEqual((rc, [row["id"] for row in report["scenarios"]]), (1, ["E-35"]))
+        self.assertEqual(report["totals"]["unevaluable"], 1)
+        self.assert_unevaluable(report["scenarios"][0])
         self.client.send_control.assert_not_called()
         self.client.send_prompt.assert_not_called()
 
