@@ -280,7 +280,7 @@ fn hm1_external_producer_census_is_zero() {
     // Every production mention of the external producer surface; a call site anywhere else
     // (a route, intake, voice or boot) is an unclassified producer.
     let surface = regex::Regex::new(
-        r"\bexternal::(source|submit)\b|\bexternal::\{|\bSubmitExternal\b|\bexternal_key_v1\b",
+        r"\bexternal::(source|submit)\b|\bexternal::\{|\bSubmitExternal\b|\bexternal_key_v1\b|\.submit_external\b",
     )
     .unwrap();
     let allowed = [
@@ -303,6 +303,14 @@ fn hm1_external_producer_census_is_zero() {
         (
             "src/services/discord/input_runtime/intake/source.rs",
             "slash origin receipt key from external::source; never submits",
+        ),
+        (
+            "src/services/discord/input_runtime/intake/client.rs",
+            "borrowed PreparedSource → existing supervisor mailbox; caller retains original; no runtime start/reservation",
+        ),
+        (
+            "src/services/discord/input_runtime/intake/admit.rs",
+            "validated original slash kind/namespace → borrowed existing Client submit; no receipt or ACK before durable supervisor responsibility",
         ),
     ];
     // Files classified for key derivation only may hold no other part of the surface.

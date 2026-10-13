@@ -660,6 +660,11 @@ fn legacy_reset(
     })
 }
 
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+pub(crate) fn c2b_standby_health_fixture_for_test() {
+    bootstrap_tests::standby_registration_settles_the_reconcile_obligation();
+}
+
 #[cfg(test)]
 mod bootstrap_tests {
     use super::*;
@@ -1075,7 +1080,7 @@ agents:
     /// before `recovery_flush` was spawned and nothing ever called
     /// `mark_reconcile_complete`, so the reason was permanent for the process.
     #[tokio::test]
-    async fn standby_registration_settles_the_reconcile_obligation() {
+    pub(super) async fn standby_registration_settles_the_reconcile_obligation() {
         let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
         let registry = Arc::new(health::HealthRegistry::new());
         let shared = crate::services::discord::make_shared_data_for_tests();

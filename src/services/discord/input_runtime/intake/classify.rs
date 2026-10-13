@@ -1,11 +1,10 @@
 //! Pure policy facts; callers obtain authentication and routing decisions from existing accessors.
 
-#[cfg(test)]
 use super::PreparedSource;
 #[cfg(test)]
+use crate::services::discord::input_runtime::supervisor::mutant;
 use crate::services::provider::ProviderKind;
 
-#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum Protection {
     Unprotected,
@@ -13,14 +12,19 @@ pub(in crate::services::discord) enum Protection {
     Unknown,
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct TargetFacts {
     pub channel_id: u64,
     pub protection: Protection,
 }
 
-#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(in crate::services::discord) enum VoiceTarget {
+    NotApplicable,
+    Unknown,
+    Resolved(TargetFacts),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum InputDisposition {
     Prompt,
@@ -28,12 +32,11 @@ pub(in crate::services::discord) enum InputDisposition {
     Unsupported,
 }
 
-#[cfg(test)]
 pub(in crate::services::discord) struct PolicyFacts {
     pub provider: Option<ProviderKind>,
     pub original: TargetFacts,
     pub execution: TargetFacts,
-    pub voice_target: Option<TargetFacts>,
+    pub voice_target: VoiceTarget,
     pub authorized: Option<bool>,
     pub supported: Option<bool>,
     pub disposition: Option<InputDisposition>,
@@ -41,7 +44,6 @@ pub(in crate::services::discord) struct PolicyFacts {
     pub admission_open: bool,
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum Retry {
     Unknown,
@@ -49,7 +51,6 @@ pub(in crate::services::discord) enum Retry {
     Closed,
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum Refusal {
     Provenance,
@@ -59,7 +60,6 @@ pub(in crate::services::discord) enum Refusal {
     Empty,
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum Classification {
     Legacy,
@@ -70,25 +70,31 @@ pub(in crate::services::discord) enum Classification {
 }
 
 /// A target is receipt-eligible only; this grants neither settlement nor an actor offer.
-#[cfg(test)]
 pub(in crate::services::discord) fn classify(
     facts: &PolicyFacts,
     source: &PreparedSource,
 ) -> Classification {
     let identity = source.identity();
+    let voice_target = match &facts.voice_target {
+        VoiceTarget::Resolved(target) => Some(target),
+        VoiceTarget::NotApplicable | VoiceTarget::Unknown => None,
+    };
     if !identity.validates(source.key())
         || facts.original.channel_id != identity.original_channel_id
         || facts.execution.channel_id != identity.execution_channel_id
-        || facts
-            .voice_target
-            .as_ref()
-            .is_some_and(|target| target.channel_id == 0)
+        || voice_target.is_some_and(|target| target.channel_id == 0)
     {
         return Classification::Rejected(Refusal::Provenance);
     }
+    let voice_unknown = matches!(facts.voice_target, VoiceTarget::Unknown);
+    #[cfg(test)]
+    let voice_unknown = voice_unknown && !mutant("c2_voice_unknown_to_absent");
+    if voice_unknown {
+        return Classification::Retry(Retry::Unknown);
+    }
     let targets = [&facts.original, &facts.execution]
         .into_iter()
-        .chain(facts.voice_target.iter());
+        .chain(voice_target);
     let mut protected = false;
     let mut unknown = false;
     for target in targets {
@@ -107,6 +113,10 @@ pub(in crate::services::discord) fn classify(
             }
         }
     }
+    #[cfg(test)]
+    let unknown = unknown
+        && (!mutant("c2_unknown_terminal_only")
+            || facts.disposition == Some(InputDisposition::Terminal));
     if unknown {
         return Classification::Retry(Retry::Unknown);
     }
@@ -181,7 +191,7 @@ mod tests {
                 channel_id: 9,
                 protection: Protection::Protected(ProviderKind::Claude),
             },
-            voice_target: None,
+            voice_target: VoiceTarget::NotApplicable,
             authorized: Some(true),
             supported: Some(true),
             disposition: Some(InputDisposition::Prompt),
@@ -192,63 +202,150 @@ mod tests {
 
     #[test]
     fn c1_every_protected_target_blocks_legacy_and_foreign_provider_execution() {
-        for index in 0..3 {
-            let mut f = facts();
-            f.execution.protection = Protection::Unprotected;
-            f.voice_target = Some(TargetFacts {
-                channel_id: 12,
-                protection: Protection::Unprotected,
-            });
-            let target = match index {
-                0 => &mut f.original,
-                1 => &mut f.execution,
-                _ => f.voice_target.as_mut().unwrap(),
-            };
-            target.protection = Protection::Protected(ProviderKind::Claude);
-            assert_eq!(classify(&f, &source("hello")), Classification::Target);
-            f.provider = Some(ProviderKind::Codex);
-            assert_eq!(
-                classify(&f, &source("hello")),
-                Classification::Rejected(Refusal::ProviderMismatch)
-            );
-            f.provider = Some(ProviderKind::Claude);
-            f.client_ready = false;
-            assert_eq!(
-                classify(&f, &source("hello")),
-                Classification::Retry(Retry::ClientUnavailable)
-            );
+        for disposition in [InputDisposition::Prompt, InputDisposition::Terminal] {
+            for index in 0..3 {
+                let mut f = facts();
+                f.disposition = Some(disposition);
+                f.execution.protection = Protection::Unprotected;
+                f.voice_target = VoiceTarget::Resolved(TargetFacts {
+                    channel_id: 12,
+                    protection: Protection::Unprotected,
+                });
+                let target = match index {
+                    0 => &mut f.original,
+                    1 => &mut f.execution,
+                    _ => match &mut f.voice_target {
+                        VoiceTarget::Resolved(target) => target,
+                        _ => unreachable!(),
+                    },
+                };
+                target.protection = Protection::Protected(ProviderKind::Claude);
+                assert_eq!(
+                    classify(&f, &source("hello")),
+                    match disposition {
+                        InputDisposition::Prompt => Classification::Target,
+                        _ => Classification::NonTarget,
+                    }
+                );
+                f.provider = Some(ProviderKind::Codex);
+                assert_eq!(
+                    classify(&f, &source("hello")),
+                    Classification::Rejected(Refusal::ProviderMismatch)
+                );
+                f.provider = Some(ProviderKind::Claude);
+                f.client_ready = false;
+                assert_eq!(
+                    classify(&f, &source("hello")),
+                    Classification::Retry(Retry::ClientUnavailable)
+                );
+            }
         }
     }
 
     #[test]
     fn c1_unknown_facts_never_approve_or_settle_and_unprotected_stays_legacy() {
-        for index in 0..7 {
-            let mut f = facts();
-            f.disposition = Some(InputDisposition::Terminal);
-            match index {
-                0 => f.original.protection = Protection::Unknown,
-                1 => f.execution.protection = Protection::Unknown,
-                2 => {
-                    f.voice_target = Some(TargetFacts {
+        for disposition in [InputDisposition::Prompt, InputDisposition::Terminal] {
+            for other_protected in [false, true] {
+                for index in 0..3 {
+                    let mut f = facts();
+                    f.disposition = Some(disposition);
+                    f.execution.protection = Protection::Unprotected;
+                    f.voice_target = VoiceTarget::Resolved(TargetFacts {
                         channel_id: 12,
-                        protection: Protection::Unknown,
-                    })
+                        protection: Protection::Unprotected,
+                    });
+                    match index {
+                        0 => {
+                            f.original.protection = Protection::Unknown;
+                            if other_protected {
+                                f.execution.protection =
+                                    Protection::Protected(ProviderKind::Claude);
+                            }
+                        }
+                        1 => {
+                            f.execution.protection = Protection::Unknown;
+                            if other_protected {
+                                f.original.protection = Protection::Protected(ProviderKind::Claude);
+                            }
+                        }
+                        _ => {
+                            f.voice_target = VoiceTarget::Resolved(TargetFacts {
+                                channel_id: 12,
+                                protection: Protection::Unknown,
+                            });
+                            if other_protected {
+                                f.execution.protection =
+                                    Protection::Protected(ProviderKind::Claude);
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        classify(&f, &source("hello")),
+                        Classification::Retry(Retry::Unknown),
+                        "unknown target {index}, {disposition:?}, other protected {other_protected}"
+                    );
                 }
-                3 => f.provider = None,
-                4 => f.authorized = None,
-                5 => f.supported = None,
-                _ => f.disposition = None,
             }
-            assert_eq!(
-                classify(&f, &source("hello")),
-                Classification::Retry(Retry::Unknown)
-            );
+            let protections = [
+                Protection::Unprotected,
+                Protection::Protected(ProviderKind::Claude),
+                Protection::Unknown,
+                Protection::Protected(ProviderKind::Codex),
+            ];
+            for original in &protections {
+                for execution in &protections {
+                    let mut f = facts();
+                    f.disposition = Some(disposition);
+                    f.original.protection = original.clone();
+                    f.execution.protection = execution.clone();
+                    f.voice_target = VoiceTarget::Unknown;
+                    assert_eq!(
+                        classify(&f, &source("hello")),
+                        Classification::Retry(Retry::Unknown),
+                        "voice unknown, {disposition:?}, original {original:?}, execution {execution:?}"
+                    );
+                }
+            }
+            for index in 0..4 {
+                let mut f = facts();
+                f.disposition = Some(disposition);
+                match index {
+                    0 => f.provider = None,
+                    1 => f.authorized = None,
+                    2 => f.supported = None,
+                    _ => f.disposition = None,
+                }
+                assert_eq!(
+                    classify(&f, &source("hello")),
+                    Classification::Retry(Retry::Unknown)
+                );
+            }
+            for voice_target in [
+                VoiceTarget::NotApplicable,
+                VoiceTarget::Resolved(TargetFacts {
+                    channel_id: 12,
+                    protection: Protection::Unprotected,
+                }),
+            ] {
+                let mut f = facts();
+                f.disposition = Some(disposition);
+                f.voice_target = voice_target;
+                f.execution.protection = Protection::Unprotected;
+                f.client_ready = false;
+                f.admission_open = false;
+                assert_eq!(classify(&f, &source("hello")), Classification::Legacy);
+                f.execution.protection = Protection::Protected(ProviderKind::Claude);
+                f.client_ready = true;
+                f.admission_open = true;
+                assert_eq!(
+                    classify(&f, &source("hello")),
+                    match disposition {
+                        InputDisposition::Prompt => Classification::Target,
+                        _ => Classification::NonTarget,
+                    }
+                );
+            }
         }
-        let mut f = facts();
-        f.execution.protection = Protection::Unprotected;
-        f.client_ready = false;
-        f.admission_open = false;
-        assert_eq!(classify(&f, &source("hello")), Classification::Legacy);
     }
 
     #[test]
@@ -301,6 +398,17 @@ mod tests {
             classify(&f, &source("hello")),
             Classification::Rejected(Refusal::Provenance)
         );
+        for protection in [Protection::Unprotected, Protection::Unknown] {
+            let mut f = facts();
+            f.voice_target = VoiceTarget::Resolved(TargetFacts {
+                channel_id: 0,
+                protection,
+            });
+            assert_eq!(
+                classify(&f, &source("hello")),
+                Classification::Rejected(Refusal::Provenance)
+            );
+        }
     }
 
     #[test]

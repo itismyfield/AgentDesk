@@ -148,7 +148,6 @@ where
     B: BindingEvents,
 {
     let run = || {
-        #[cfg(test)]
         let commands = codex_submission::take_spawn_receiver();
         let projections = (unsettled, owing);
         tokio::spawn(run_publishing(
@@ -158,7 +157,6 @@ where
             (stop, resumed),
             projections,
             (None, readers),
-            #[cfg(test)]
             commands,
         ))
     };
@@ -227,7 +225,6 @@ where
         (stop, resumed),
         projections,
         (None, None),
-        #[cfg(test)]
         None,
     )
     .await
@@ -241,7 +238,7 @@ async fn run_publishing<P, L, A, B>(
     (mut stop, resumed): (watch::Receiver<bool>, watch::Sender<bool>),
     (unsettled, owing): (Unsettled, Owing),
     (utc, readers): (Option<chrono::DateTime<chrono::Utc>>, Option<ReaderConfig>),
-    #[cfg(test)] mut commands: Option<codex_submission::Receiver>,
+    mut commands: Option<codex_submission::Receiver>,
 ) -> Option<StopCause>
 where
     P: DiscordPort,
@@ -249,14 +246,35 @@ where
     A: AlarmSink,
     B: BindingEvents,
 {
-    let writer = writer.with_repost_stop(stop.clone());
+    let mut writer = writer.with_repost_stop(stop.clone());
     let deriver = UnitDeriver::new(writer.channel(), provider);
     let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings));
     if let Some(readers) = readers {
         sources = sources.with_readers(readers);
     }
     let owed = VecDeque::new();
-    let ready = admission::owed_delivery_ready(writer.channel());
+    let ready = admission::owed_delivery_ready(writer.channel())
+        || (commands.is_some()
+            && provider == ShadowProvider::Codex
+            && writer.channel() == crate::services::codex_tui::canary::CANARY_CHANNEL
+            && crate::services::tui_prompt_dedupe::codex_verified_channel_requires_proof(
+                writer.channel(),
+            )
+            && {
+                let channel = writer.channel();
+                let mut cursors = writer
+                    .store()
+                    .cursors()
+                    .filter(|cursor| !cursor.retired)
+                    .peekable();
+                cursors.peek().is_some()
+                    && cursors.all(|cursor| {
+                        crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
+                            channel,
+                            &cursor.source,
+                        )
+                    })
+            });
     let verified = ready.then(|| super::owed::OwedLog::new(writer.channel(), provider));
     let mut actor = Actor {
         writer,
@@ -312,18 +330,19 @@ where
                 owing.published.send_replace(actor.undelivered(asked));
             }
         }
-        #[cfg(test)]
-        if let Some(commands) = &mut commands {
+        if let Some(receiver) = &mut commands {
             tokio::select! {
-                request = commands.next() => {
+                request = receiver.next() => {
                     if let Some(request) = request {
-                        commands.apply(&mut actor.writer, request);
-                    } else { break; }
+                        receiver.apply(&mut actor.writer, request);
+                    } else { commands = None; }
                 }
                 () = tokio::time::sleep(POLL_INTERVAL) => {}
                 changed = stop.changed() => if changed.is_err() { break },
             }
-            continue;
+            if commands.is_some() {
+                continue;
+            }
         }
         tokio::select! {
             () = tokio::time::sleep(POLL_INTERVAL) => {}
@@ -354,20 +373,20 @@ where
         (stop, watch::channel(false).0),
         (watch::channel(None).0, Owing::default()),
         (Some(utc), None),
-        #[cfg(test)]
         None,
     )
     .await
 }
 
-#[cfg(test)]
 pub(crate) mod codex_submission {
     use super::*;
     use crate::services::tui_o::store::StoreError;
     use crate::services::tui_o::store::codex_provenance::submit_floor::{
-        DurableClosedEpisode, SubmitFloor,
+        DurableClosedEpisode, NativeFloor, PreparedLaunch, SubmitFloor,
     };
-    use crate::services::tui_prompt_dedupe::codex_verified::provenance::CodexEpisodeSpan;
+    use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
+        CodexEpisodeSpan, ExecutionProofRef,
+    };
     use tokio::sync::{mpsc, oneshot};
 
     #[derive(Clone, Debug)]
@@ -384,7 +403,9 @@ pub(crate) mod codex_submission {
     }
 
     pub(crate) enum Operation {
+        #[cfg(test)]
         Prepare(SubmitFloor),
+        Capture(Box<(PreparedLaunch, ExecutionProofRef)>),
         Close(Box<CodexEpisodeSpan>),
     }
 
@@ -399,6 +420,19 @@ pub(crate) mod codex_submission {
         generation: u64,
         run: Arc<()>,
         closed: Option<Closed>,
+        prepared: Option<Prepared>,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct Prepared {
+        run: Arc<()>,
+        floor: NativeFloor,
+    }
+
+    impl Prepared {
+        pub(crate) fn floor(&self) -> &NativeFloor {
+            &self.floor
+        }
     }
 
     #[derive(Debug)]
@@ -432,6 +466,7 @@ pub(crate) mod codex_submission {
             )
         }
 
+        #[cfg(test)]
         pub(crate) fn same_run(&self, other: &Self) -> bool {
             Arc::ptr_eq(&self.run, &other.run)
         }
@@ -462,6 +497,21 @@ pub(crate) mod codex_submission {
             }
             Ok(closed)
         }
+
+        pub(crate) fn accepts_prepared(&self, prepared: &Prepared) -> bool {
+            Arc::ptr_eq(&self.run, &prepared.run)
+        }
+
+        pub(crate) fn take_prepared(&self, reply: Reply) -> Result<Prepared, &'static str> {
+            if self.generation != reply.generation || !Arc::ptr_eq(&self.run, &reply.run) {
+                return Err("stale_actor_reply");
+            }
+            let prepared = reply.prepared.ok_or("episode_not_prepared")?;
+            if !Arc::ptr_eq(&self.run, &prepared.run) {
+                return Err("stale_actor_reply");
+            }
+            Ok(prepared)
+        }
     }
 
     impl Receiver {
@@ -474,12 +524,48 @@ pub(crate) mod codex_submission {
             writer: &mut ChannelWriter<P, L, A>,
             request: Request,
         ) {
+            let mut prepared = None;
             let result = if !Arc::ptr_eq(&self.run, &request.run) {
                 Err(StoreError::Rejected("foreign actor command".into()))
             } else {
                 match request.operation {
+                    #[cfg(test)]
                     Operation::Prepare(floor) => {
+                        if let SubmitFloor::NativeFloor(floor) = &floor {
+                            prepared = Some((**floor).clone());
+                        }
                         writer.store().prepare_codex_floor(floor).map(|()| None)
+                    }
+                    Operation::Capture(intent) => {
+                        let (launch, execution) = *intent;
+                        let capture = || -> Result<NativeFloor, StoreError> {
+                            let cursor = writer
+                                .store()
+                                .cursor(&execution.source)
+                                .ok_or_else(|| {
+                                    StoreError::Rejected("canonical cursor unavailable".into())
+                                })?
+                                .clone();
+                            let modified = std::fs::metadata(&execution.source.path)?.modified()?;
+                            let generation = modified
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .ok()
+                                .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+                                .ok_or_else(|| {
+                                    StoreError::Rejected("native generation unavailable".into())
+                                })?;
+                            NativeFloor::capture(launch, execution, &cursor, generation)
+                                .map_err(|reason| StoreError::Rejected(reason.into()))
+                        };
+                        capture().and_then(|floor| {
+                            writer
+                                .store()
+                                .prepare_codex_floor(SubmitFloor::NativeFloor(Box::new(
+                                    floor.clone(),
+                                )))?;
+                            prepared = Some(floor);
+                            Ok(None)
+                        })
                     }
                     Operation::Close(span) => writer.store().close_codex_episode(*span).map(Some),
                 }
@@ -499,8 +585,58 @@ pub(crate) mod codex_submission {
                 generation: self.generation,
                 run: Arc::clone(&self.run),
                 closed,
+                prepared: prepared.map(|floor| Prepared {
+                    run: Arc::clone(&self.run),
+                    floor,
+                }),
             });
             let _ = request.reply.send(reply);
+        }
+    }
+
+    impl crate::services::tui_o::writer::host::Readiness {
+        pub(crate) fn prepared_reply(
+            &self,
+            channel: u64,
+            reply: Reply,
+        ) -> Result<Prepared, &'static str> {
+            self.with_submission(channel, |port| port.take_prepared(reply))
+        }
+
+        /// Rechecks this run under Live through one synchronous source-guarded effect.
+        pub(crate) fn with_current_prepared<T>(
+            &self,
+            channel: u64,
+            prepared: &Prepared,
+            effect: impl FnOnce() -> T,
+        ) -> Result<T, &'static str> {
+            self.with_submission(channel, |port| {
+                if !port.accepts_prepared(prepared) {
+                    return Err("stale_actor_reply");
+                }
+                Ok(effect())
+            })
+        }
+
+        /// Consumers must be bounded and synchronous, without re-entering Readiness.
+        #[cfg(test)]
+        pub(crate) fn with_prepared_reply<T>(
+            &self,
+            channel: u64,
+            reply: Reply,
+            consume: impl FnOnce(&Prepared) -> T,
+        ) -> Result<T, &'static str> {
+            self.with_submission(channel, |port| Ok(consume(&port.take_prepared(reply)?)))
+        }
+
+        /// Consumers must be bounded and synchronous, without re-entering Readiness.
+        pub(crate) fn with_closed_reply<T>(
+            &self,
+            channel: u64,
+            reply: Reply,
+            issue: impl FnOnce(&Closed) -> T,
+        ) -> Result<T, &'static str> {
+            self.with_submission(channel, |port| Ok(issue(&port.take_closed(reply)?)))
         }
     }
 
@@ -653,7 +789,20 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     /// Verified sources are restored apart from delivery permission, which each piece proves.
     fn sources_allowed(&mut self) -> bool {
-        self.verified.is_some() || self.delivery_allowed()
+        if self.verified.is_none() {
+            return self.delivery_allowed();
+        }
+        let channel = self.writer.channel();
+        self.writer
+            .store()
+            .cursors()
+            .filter(|cursor| !cursor.retired)
+            .all(|cursor| {
+                crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
+                    channel,
+                    &cursor.source,
+                )
+            })
     }
 
     async fn deliver_owed(&mut self) {

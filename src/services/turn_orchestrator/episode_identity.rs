@@ -49,6 +49,23 @@ impl ChannelMailboxHandle {
         .map(|committed| *committed)
     }
 
+    /// One policy close on this actor incarnation only; a lost send and a lost reply stay
+    /// apart, and neither is retried on another actor.
+    pub(crate) async fn commit_policy_close(
+        &self,
+        request: policy_close::PolicyCloseRequest,
+    ) -> Result<policy_close::PolicyMailboxOutcome, policy_close::PolicyStage> {
+        let (reply, answer) = oneshot::channel();
+        let request = Box::new(request);
+        let permit = crate::services::discord::input_runtime::fence::effect::current();
+        (self.sender)
+            .send((ChannelMailboxMsg::PolicyClose { request, reply }, permit))
+            .map_err(|_| policy_close::PolicyStage::MailboxSend)?;
+        answer
+            .await
+            .map_err(|_| policy_close::PolicyStage::MailboxReply)
+    }
+
     /// Recovery re-mint: the actor refuses an episode that did not start after
     /// its last exact release in the same step as the claim, so no release can
     /// land between check and mint.

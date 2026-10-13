@@ -104,6 +104,8 @@ def judge(
     log_counts: dict[str, int] | None,
     driver_rc: int,
     launch_options: Iterable[str] = (),
+    cell: str | None = None,
+    channel_id: str | None = None,
 ) -> tuple[bool, str]:
     """Return (passed, detail) for one scenario run; every missing input fails closed."""
 
@@ -136,8 +138,33 @@ def judge(
             findings.append(f"{label} body not delivered")
         elif hits > 1:
             findings.append(f"{label} body duplicated ({hits} deliveries)")
+        elif hits != 1:
+            findings.append(f"{label} invalid delivery count ({hits})")
 
-    if log_counts is None:
+    observed_cell = cell or (result or {}).get("cell") or (report or {}).get("cell", "")
+    if observed_cell.endswith("-herdr"):
+        log_part = "herdr=detail+CLI"
+        if sorted(_label(marker) for marker in markers) != ["AFTER_CLEAR", "T1", "T2"]:
+            findings.append("Herdr smoke requires T1, T2 and AFTER_CLEAR delivery counts")
+        observations = (result or {}).get("herdr_observations")
+        try:
+            if not isinstance(observations, list) or len(observations) < 2:
+                raise ValueError("preflight/post-turn observations missing")
+            expected_channel = channel_id or (report or {}).get("channel_id") or (result or {}).get("channel_id")
+            if not expected_channel:
+                raise ValueError("target channel missing")
+            for evidence in observations:
+                if (evidence.get("surface") != "GET /api/health/detail" or evidence.get("validated") is not True
+                        or evidence.get("status_surface") != "agentdesk herdr status"
+                        or type(evidence.get("current_input_holds")) is not int
+                        or evidence["current_input_holds"] != 0):
+                    raise ValueError("detail/CLI evidence incomplete")
+                cell_driver.herdr.clean_turn(evidence.get("herdr", {}))
+            cell_driver.herdr.current_row({"executions": [observations[-1].get("row")], "other_input_holds": []},
+                                         channel=expected_channel, provider=cell_driver.cell_provider(observed_cell))
+        except (ValueError, TypeError, AttributeError, cell_driver.assertions.AssertionError) as error:
+            findings.append(f"Herdr observation unavailable: {error}")
+    elif log_counts is None:
         log_part = "log=unavailable"
         findings.append("dcserver log excerpt unavailable")
     else:
@@ -165,10 +192,18 @@ def judge(
 
 
 def preflight_busy_reasons(
-    *, base_url: str, cell: str, channel_id: str, runtime_root: Path
+    *, base_url: str, cell: str, channel_id: str, runtime_root: Path | None = None,
+    herdr_endpoint: str | None = None, herdr_status_bin: str = "agentdesk",
 ) -> list[str]:
     """Busy reasons for the cell; an absent mailbox is idle, as the E-1 guard treats it."""
 
+    if cell_driver.cell_runtime(cell) == "herdr":
+        args = argparse.Namespace(base_url=base_url, cell=cell, channel_id=channel_id,
+                                  herdr_endpoint=herdr_endpoint, herdr_status_bin=herdr_status_bin)
+        cell_driver.herdr.observe(cell_driver, args, cold=True)
+        return []
+    if runtime_root is None:
+        raise ValueError("legacy preflight requires --queue-runtime-root")
     provider = cell_driver.cell_provider(cell)
     mailboxes = cell_driver._read_health_detail(base_url).get("mailboxes")  # noqa: SLF001
     if not isinstance(mailboxes, list):
@@ -204,7 +239,9 @@ def main(argv: list[str] | None = None) -> int:
     pre.add_argument("--base-url", required=True)
     pre.add_argument("--cell", required=True, choices=cell_driver.SUPPORTED_CELLS)
     pre.add_argument("--channel-id", required=True)
-    pre.add_argument("--queue-runtime-root", required=True)
+    pre.add_argument("--queue-runtime-root")
+    pre.add_argument("--herdr-endpoint")
+    pre.add_argument("--herdr-status-bin", default="agentdesk")
     jud = sub.add_parser("judge")
     jud.add_argument("--report", required=True)
     jud.add_argument("--scenarios", required=True)
@@ -221,7 +258,8 @@ def main(argv: list[str] | None = None) -> int:
                 base_url=args.base_url,
                 cell=args.cell,
                 channel_id=args.channel_id,
-                runtime_root=Path(args.queue_runtime_root),
+                runtime_root=Path(args.queue_runtime_root) if args.queue_runtime_root else None,
+                herdr_endpoint=args.herdr_endpoint, herdr_status_bin=args.herdr_status_bin,
             )
         except Exception as error:  # noqa: BLE001 - any unreadable snapshot is "not proven idle"
             print(f"unreadable: {type(error).__name__}: {error}")
@@ -237,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     markers = expected_markers(Path(args.scenarios), args.scenario, run_id) if run_id else []
     log_counts = None
     launch_options: list[str] = []
-    if args.log_excerpt:
+    if args.log_excerpt and cell_driver.cell_runtime(args.cell) != "herdr":
         try:
             with open(args.log_excerpt, encoding="utf-8", errors="replace") as handle:
                 log_counts = scan_log(
@@ -255,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
         log_counts=log_counts,
         driver_rc=args.driver_rc,
         launch_options=launch_options,
+        cell=args.cell, channel_id=args.channel_id,
     )
     print(f"relay {args.scenario} cell={args.cell} result={'pass' if passed else 'FAIL'} {detail}")
     return 0 if passed else 1
