@@ -196,8 +196,7 @@ run_non_pg_filter_replay
         script = r'''
 cargo() { if [[ "${!#}" == --list ]]; then cat "$PG_LIST"; else printf '%s\n' "$*" >> "$LOG"; fi; }
 just() {
-  local line
-  while IFS= read -r line; do bash -euo pipefail -c "$line" || return 1; done < "$RECIPES/$1"
+  bash -euo pipefail "$RECIPES/$1"
 }
 export -f cargo just
 bash -euo pipefail -c "$1"
@@ -228,7 +227,9 @@ bash -euo pipefail -c "$1"
             shards = [run(command, shard) for shard in ("0", "1")]
             for shard in ("", "2"):
                 with self.subTest(shard=shard):
-                    self.assertEqual(run(command, shard), (1, []))
+                    rc, calls = run(command, shard)
+                    self.assertNotEqual(rc, 0)
+                    self.assertEqual(calls, [])
         selection = "test --lib -- "
         self.assertTrue(whole[0].startswith(selection) and len(whole) > 1)
         targeted = sorted(whole[1:])

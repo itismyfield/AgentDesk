@@ -197,8 +197,21 @@ test-postgres:
 
 # Both PG matrices run the targeted commands only on shard 0.
 test-postgres-shard:
-    @python3 scripts/check_pg_test_lane_membership.py --validate-pg-shard "${PG_INCLUDE_SHARD:-}"
-    if [ "$PG_INCLUDE_SHARD" = 0 ]; then just test-postgres; else just test-postgres-selection; fi
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 scripts/check_pg_test_lane_membership.py --validate-pg-shard "${PG_INCLUDE_SHARD:-}"
+    test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
+    source scripts/ci/non-pg-test-filter.sh
+    cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
+    if [ "$PG_INCLUDE_SHARD" != 0 ]; then exit 0; fi
+    # The routing test keeps these targets identical to the unsharded recipe.
+    cargo test --lib services::memory::memento::anchor::tests -- --nocapture --test-threads=1
+    cargo test --lib services::discord::prompt_builder::session_anchors::tests -- --nocapture --test-threads=1
+    cargo test --lib tmux_turn_liveness::idle_cleanup_tests -- --nocapture --test-threads=1
+    cargo test --lib frozen_busy_jsonl -- --nocapture --test-threads=1
+    cargo test --lib idle_tmux_snapshot_missing_output_path -- --nocapture --test-threads=1
+    cargo test --lib dispatched_sessions::kill_tmux_resume_tests -- --nocapture --test-threads=1
+    cargo test --lib services::routines::session_control::tests -- --nocapture --test-threads=1
 
 # The first command of test-postgres alone.
 test-postgres-selection:

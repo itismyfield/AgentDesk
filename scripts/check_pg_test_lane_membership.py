@@ -1780,7 +1780,7 @@ def pg_shard_contract_errors(repo_root: Path, jobs: Iterable[Job]) -> list[str]:
             errors.append(f"{rel}: PG_INCLUDE_SHARD is used outside the declared PG shard jobs")
     justfile = repo_root / "justfile"
     if justfile.is_file():
-        # Only the shard recipe main's job runs may read the shard; no recipe may set it.
+        # Only the shard recipe may read the shard; no recipe may set it.
         text = _strip_comments(justfile.read_text("utf-8"))
         try:
             reads = " ".join(coverage.just_recipe_commands(text, PG_SHARD_RECIPE)).count("PG_INCLUDE_SHARD")
