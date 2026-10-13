@@ -1583,6 +1583,8 @@ struct CodexTuiLaunchScript {
     script_path: String,
     owner_path: String,
     rollout_modified_since: std::time::SystemTime,
+    /// The Discord handoff reserved before launch, held until the tail returns.
+    handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
 }
 
 /// Wire the cancel token to the freshly created tmux session: record the
@@ -1629,7 +1631,7 @@ fn dispatch_codex_tui_rollout_tail(
             rollout_modified_since,
             sender,
             cancel_token,
-            || tmux_live_pane_bool(tmux_session_name),
+            || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
             tmux_session_name,
             Some(prompt),
         )
@@ -1639,7 +1641,7 @@ fn dispatch_codex_tui_rollout_tail(
             rollout_modified_since,
             sender,
             cancel_token,
-            || tmux_live_pane_bool(tmux_session_name),
+            || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
             tmux_session_name,
             Some(prompt),
         )
@@ -1841,6 +1843,7 @@ fn execute_streaming_local_tui_tmux(
         script_path,
         owner_path,
         rollout_modified_since,
+        handoff: _handoff,
     } = publish_codex_tui_launch_script(
         tmux_session_name,
         session_id,

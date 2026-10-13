@@ -645,18 +645,46 @@ type Registry = OnceLock<Mutex<HomeRegistry>>;
 static HOMES: Registry = OnceLock::new();
 #[cfg(test)]
 thread_local! {
-    static HOMES: Registry = const { OnceLock::new() };
+    static HOMES: std::cell::RefCell<Arc<Registry>> = std::cell::RefCell::new(Arc::new(OnceLock::new()));
 }
 
 fn with_homes<R>(use_homes: impl FnOnce(&Registry) -> R) -> R {
     #[cfg(not(test))]
     return use_homes(&HOMES);
     #[cfg(test)]
-    HOMES.with(use_homes)
+    HOMES.with(|homes| {
+        let homes = homes.borrow().clone();
+        use_homes(&homes)
+    })
 }
 
 fn lock_homes(homes: &Mutex<HomeRegistry>) -> MutexGuard<'_, HomeRegistry> {
     homes.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Taken only while no Home was ever registered, so the first mount and an unhomed admission
+/// still exclude each other without making this process take part in homes.
+static FIRST_MOUNT: Mutex<()> = Mutex::new(());
+
+fn first_mount(homes: &Registry) -> Option<MutexGuard<'static, ()>> {
+    homes
+        .get()
+        .is_none()
+        .then(|| FIRST_MOUNT.lock().unwrap_or_else(PoisonError::into_inner))
+}
+
+/// Runs `admit` only while `channel` has no Home; no Home can mount until it returns.
+pub(crate) fn admit_unhomed<T>(channel: u64, admit: impl FnOnce() -> T) -> Option<T> {
+    with_homes(|homes| {
+        let _first = first_mount(homes);
+        let Some(homes) = homes.get() else {
+            return Some(admit());
+        };
+        let registry = lock_homes(homes);
+        #[cfg(test)]
+        tests::before_unhomed_poll();
+        (!registry.gates.contains_key(&channel.to_string())).then(admit)
+    })
 }
 
 /// Reads the registered gates; while none was ever registered nothing is locked.
@@ -671,14 +699,16 @@ fn read_homes<R>(read: impl FnOnce(&Homes) -> R) -> Option<R> {
 /// Makes `home` its channel's gate in this process; intake for the channel then follows it.
 /// A gate it replaces is withdrawn after the swap, so its lease ends and it never reopens.
 pub(crate) fn register(home: Arc<HomeGate>) {
-    with_homes(|homes| {
+    let mounted = Arc::clone(&home);
+    let changed = with_homes(|homes| {
+        let _first = first_mount(homes);
         let mut registry = lock_homes(homes.get_or_init(Mutex::default));
         if registry
             .gates
             .get(&home.channel_id)
             .is_some_and(|old| Arc::ptr_eq(old, &home))
         {
-            return;
+            return false;
         }
         registry.prune();
         let mut local = home.locked();
@@ -691,7 +721,7 @@ pub(crate) fn register(home: Arc<HomeGate>) {
             })
         {
             tracing::error!(channel = %home.channel_id, "home registration refused: unrelated command counter already active");
-            return;
+            return false;
         }
         if let Some(old) = registry.gates.get(&home.channel_id) {
             old.withdraw();
@@ -707,23 +737,31 @@ pub(crate) fn register(home: Arc<HomeGate>) {
         local.commands = Arc::clone(count);
         drop(local);
         registry.gates.insert(home.channel_id.clone(), home);
+        true
     });
+    // Outside the registry lock, which a typing first poll may hold.
+    if changed {
+        let withdraw = crate::services::discord::presence_withdraw_unmounted;
+        withdraw(&mounted.channel_id, Some(&mounted), "home_mounted");
+    }
 }
 
 /// Removes the gate immediately; outstanding permits remain visible to a replacement.
 pub(crate) fn unregister(channel_id: &str) -> Option<Arc<HomeGate>> {
-    with_homes(|homes| {
+    let removed = with_homes(|homes| {
         let mut registry = lock_homes(homes.get()?);
         let removed = registry.gates.remove(channel_id)?;
         removed.withdraw();
         registry.prune();
         Some(removed)
-    })
+    })?;
+    crate::services::discord::presence_withdraw_unmounted(channel_id, None, "home_unmounted");
+    Some(removed)
 }
 
 /// A replaced watch may not remove the replacement's gate.
 pub(crate) fn unregister_if_same(home: &HomeGate) -> bool {
-    with_homes(|homes| {
+    let removed = with_homes(|homes| {
         let Some(homes) = homes.get() else {
             return false;
         };
@@ -744,7 +782,12 @@ pub(crate) fn unregister_if_same(home: &HomeGate) -> bool {
         home.withdraw();
         registry.prune();
         true
-    })
+    });
+    if removed {
+        let withdraw = crate::services::discord::presence_withdraw_unmounted;
+        withdraw(&home.channel_id, None, "home_unmounted");
+    }
+    removed
 }
 
 /// The gate of a channel this process takes part in; none means the gateway rules apply.
@@ -939,7 +982,7 @@ pub(crate) async fn run_lease(pool: PgPool, home: Arc<HomeGate>, epoch: i64) {
 
 #[cfg(test)]
 #[path = "channel_home_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "channel_home_claim_tests.rs"]

@@ -6,6 +6,7 @@ import copy
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.error
@@ -18,6 +19,12 @@ TMUX_STEPS = {
     "poison_claude_tui_relay_offset", "send_keys", "send_keys_no_enter",
     "send_keys_sequence", "local_control_then_prompt",
 }
+# Server reasons name a channel only as its raw Discord id; provider and counter aggregates never do.
+AGGREGATE_REASON_PREFIXES = ("provider:", "global_active_counter_", "no_providers_registered")
+CHANNEL_ID = re.compile(r"\d{17,}")
+# Text !clear refusals as worded in commands/control/native.rs and control.rs. A wording change
+# only loses the fail-fast: the acknowledgement wait then times out as before.
+CLEAR_REFUSAL_PREFIXES = ("세션을 초기화하지 못했어요:", "세션 전환 중이라 초기화하지 못했어요")
 
 
 def validate_arguments(parser, args):
@@ -57,12 +64,19 @@ def detail_ready(driver, http_status, payload, *, allowed, channel):
     return reasons
 
 
+def unattributed(reasons):
+    """Waived reasons whose text cannot show they are not the target's; the operator checks those."""
+    return [r for r in reasons if r.startswith(AGGREGATE_REASON_PREFIXES) or not CHANNEL_ID.search(r)]
+
+
 def waiver_summary(args, observations):
     allowed = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
-    ignored = sorted({r for o in observations if isinstance(o, dict)
-                      for r in (o.get("readiness") or {}).get("ignored_degraded_reasons", [])})
+    readiness = [o.get("readiness") or {} for o in observations if isinstance(o, dict)]
+    ignored = sorted({r for item in readiness for r in item.get("ignored_degraded_reasons", [])})
+    # Derived from the union, so observations recorded before the marker existed are still marked.
     return {"degraded_reason_waiver": "applied" if ignored else ("unused" if allowed else "none"),
-            "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": ignored}
+            "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": ignored,
+            "ignored_degraded_reasons_unattributed": unattributed(ignored)}
 
 
 def report_waiver(args, result):
@@ -142,8 +156,15 @@ def current_row(status, *, channel, provider, cold=False):
 
 
 def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
+    # Scenario-declared health steps keep their strict meaning; the waiver is withheld there.
+    operator = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
+    allowed = operator if waivable else []
+    # Waiver metadata precedes the request so refused or failed requests still record it.
     evidence = {"surface": "GET /api/health/detail", "status_surface": "agentdesk herdr status",
-                "observed_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+                "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "readiness": {"degraded_reason_waiver": ("unused" if waivable else "withheld") if operator else "none",
+                              "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": [],
+                              "ignored_degraded_reasons_unattributed": []}}
     try:
         if not http_auth.loopback_origin(args.base_url):
             raise assertions.AssertionError("Herdr observations require target-node loopback API and local CLI")
@@ -151,18 +172,14 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
         evidence["http_status"] = status
         if not isinstance(payload, dict):
             raise assertions.AssertionError("Herdr detail health must be an object")
-        evidence["readiness"] = {k: payload[k] for k in
-                                 ("status", "ok", "fully_recovered", "degraded", "degraded_reasons") if k in payload}
+        evidence["readiness"].update({k: payload[k] for k in
+                                      ("status", "ok", "fully_recovered", "degraded", "degraded_reasons") if k in payload})
         evidence["server_values"] = {k: payload[k] for k in
                                      ("uptime_secs", "started_at", "process_started_at_unix", "incarnation", "boot_id") if k in payload}
-        # Scenario-declared health steps keep their strict meaning; the waiver is withheld there.
-        operator = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
-        allowed = operator if waivable else []
-        evidence["readiness"].update(degraded_reason_waiver=("unused" if waivable else "withheld") if operator else "none",
-                                     allowed_degraded_reasons=allowed, ignored_degraded_reasons=[])
         ignored = detail_ready(driver, status, payload, allowed=allowed, channel=args.channel_id)
         if ignored:
-            evidence["readiness"].update(degraded_reason_waiver="applied", ignored_degraded_reasons=list(ignored))
+            evidence["readiness"].update(degraded_reason_waiver="applied", ignored_degraded_reasons=list(ignored),
+                                         ignored_degraded_reasons_unattributed=unattributed(ignored))
         block = ready(payload, endpoint=getattr(args, "herdr_endpoint", None), channel=args.channel_id)
         evidence["herdr"] = {k: block[k] for k in
                              ("admission", "restart_required", "configured_channels", "endpoints", "input_holds", "reconnect") if k in block}
@@ -181,6 +198,18 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
     except Exception as error:
         error.herdr_observation = evidence
         raise
+
+
+def clear_reply(row, prefixes, *, after, channel):
+    """A bot message in this channel, after the !clear message `after`, starting with one of `prefixes`."""
+    content = row.get("content") or ""
+    return bool((row.get("author") or {}).get("bot") and str(row.get("id", "")).isdigit() and int(row["id"]) > after
+                and str(row.get("channel_id", channel)) == str(channel) and content.startswith(prefixes))
+
+
+def clear_refusal(rows, *, after, channel):
+    """The bot reply refusing the pending text !clear; refusal and completion share one boundary."""
+    return next((r["content"] for r in rows if clear_reply(r, CLEAR_REFUSAL_PREFIXES, after=after, channel=channel)), None)
 
 
 def expected_cancel_refusal(error):
@@ -263,6 +292,14 @@ def run(driver, scenario, args, client, run_id, result):
 
 
 def _run(driver, scenario, args, client, run_id, result):
+    """Every exit, early refusals and skips included, records the waiver summary."""
+    try:
+        return _run_checked(driver, scenario, args, client, run_id, result)
+    finally:
+        report_waiver(args, result)
+
+
+def _run_checked(driver, scenario, args, client, run_id, result):
     result["not_applicable"] = omissions(scenario)
     result["coverage_scope"] = "Discord relay + Herdr health/status; not legacy disk/native evidence"
     profile = known_gap.herdr_profile(scenario["id"], args.cell)
@@ -294,7 +331,6 @@ def _run(driver, scenario, args, client, run_id, result):
             print("[dry-run] Herdr override: HTTP cancel force=false (HostOwned follow-up, not P10-3); P11 force=true is E-12")
         if any("restart_dcserver" in step for step in scenario.get("steps", [])):
             print("[dry-run] restart: isolated-server attestation; read-only status before/after; same nonce; all rows published")
-        report_waiver(args, result)
         result.update(status="dry_run", reason="plan only; no observed passes")
         return result
     if args.hard_reset_session_each:
@@ -320,6 +356,7 @@ def _run(driver, scenario, args, client, run_id, result):
     first_response = False
     phase = "preflight"
     setup_id = None
+    clear_after = None
     result["herdr_observations"] = []
     # Reset/cancel and queue truncation are deliberately never used as Herdr setup.
     result["reset_policy"] = "preserve Herdr session; reset-before-each not executed"
@@ -390,7 +427,8 @@ def _run(driver, scenario, args, client, run_id, result):
                 else:
                     prompt = str(step.get("send_prompt", step.get("send_discord_prompt"))).replace("{run_id}", run_id)
                 gap_token = None
-                if prompt.strip().split(maxsplit=1)[0:1] == ["!clear"]:
+                is_clear = prompt.strip().split(maxsplit=1)[0:1] == ["!clear"]
+                if is_clear:
                     first_response, prompt_count = False, -1
                 elif profile and profile["issue"] == "#5340 P10-2" and prompt_count and first_response:
                     marker = step.get("hold_marker") if step.get("request_key") == "QA" else step.get("body_marker")
@@ -400,12 +438,18 @@ def _run(driver, scenario, args, client, run_id, result):
                 result["real_provider_contacted"] = True
                 result["agent_mode_actual"] = "real_live"
                 try:
-                    client.send(args.channel_id, prompt)
+                    sent = client.send(args.channel_id, prompt)
                     driver.post_send_sleep(step)
                 except Exception:
                     # Transport/auth errors are never an expected product gap.
                     gap_failure = False
                     raise
+                if is_clear:
+                    # Replies to this clear follow its own message id; without one none can be attributed.
+                    raw = (sent.get("message_id") or sent.get("id")) if isinstance(sent, dict) else None
+                    clear_after = raw if type(raw) is int else int(raw) if isinstance(raw, str) and raw.isascii() and raw.isdigit() else 0
+                    if clear_after <= 0:
+                        raise assertions.AssertionError(f"text !clear send returned no message id; its replies cannot be attributed: {sent!r}")
                 if scenario.get("e36_normal_intake"):
                     marker = step.get("hold_marker") if step.get("request_key") == "QA" else step["body_marker"]
                     wait(marker.replace("{run_id}", run_id), 240)
@@ -424,7 +468,12 @@ def _run(driver, scenario, args, client, run_id, result):
                 while True:
                     rows = client.fetch_messages(args.channel_id, after_id=after_id, limit=100)
                     ingest(rows)
-                    if any(marker in r.get("content", "") for r in rows):
+                    refusal = clear_after is not None and clear_refusal(rows, after=clear_after, channel=args.channel_id)
+                    if refusal:
+                        raise assertions.AssertionError(f"text !clear refused by the server: {refusal}")
+                    if any(clear_reply(r, marker, after=clear_after, channel=args.channel_id) if clear_after is not None
+                           else marker in r.get("content", "") for r in rows):
+                        clear_after = None
                         break
                     if time.monotonic() >= deadline:
                         raise assertions.AssertionError(f"Herdr control acknowledgement missing: {marker}")
@@ -554,7 +603,6 @@ def _run(driver, scenario, args, client, run_id, result):
                 driver.send_teardown_marker(client=client, channel_id=args.channel_id, scenario_id=scenario["id"], cell=args.cell, run_id=run_id)
             except Exception as error:
                 result.update(status="fail", reason=f"Herdr teardown failed: {error}")
-        report_waiver(args, result)
         driver._update_record_window_snapshot(result, window)
         driver._record_marker_counts(result, window, [m.replace("{run_id}", run_id) for m in scenario.get("report_marker_counts", [])])
         driver._refresh_agent_mode_record(result, scenario=scenario, declared_agent_mode=result["agent_mode"], dry_run=False)

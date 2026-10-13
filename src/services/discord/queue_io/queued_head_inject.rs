@@ -61,6 +61,11 @@ pub(in crate::services::discord) async fn try_busy(
     let Some(head) = snapshot.intervention_queue.first() else {
         return false;
     };
+    // A parked or unreadable head is never typed into the pane automatically.
+    use crate::services::discord::busy_followup_retry_store::{RetryClass, input_class};
+    if input_class(provider, channel, head) != RetryClass::Ready {
+        return false;
+    }
     let request = health::HumanInputRequest {
         channel_id: channel,
         provider: provider.clone(),
@@ -70,6 +75,8 @@ pub(in crate::services::discord) async fn try_busy(
         metadata: None,
         channel_name_hint: None,
     };
+    #[cfg(all(test, unix))]
+    tests::OFFERED_HEADS.lock().unwrap().push(head.message_id);
     let origin = health::InjectOrigin::QueuedHead {
         expected: QueueIdentity::of(head),
         parent,

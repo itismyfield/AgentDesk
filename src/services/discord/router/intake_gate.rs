@@ -303,7 +303,6 @@ pub(in crate::services::discord) async fn handle_event(
     data: &Data,
 ) -> Result<(), Error> {
     maybe_cleanup_sessions(&data.shared).await;
-    crate::services::tui_o::shadow_host::observe(ctx, event);
     super::super::ingress_shadow::observe(data.ingress_shadow.as_ref(), event);
     match event {
         serenity::FullEvent::InteractionCreate { interaction } => {

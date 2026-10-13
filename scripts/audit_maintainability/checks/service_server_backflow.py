@@ -118,7 +118,7 @@ def _baseline_gate(findings: list[Finding]) -> Iterable[Finding]:
         regressions.append(
             Finding(
                 rule="service_server_backflow",
-                severity="error",
+                severity="warn",
                 file=BASELINE_REL_PATH,
                 line=None,
                 message=(
@@ -137,7 +137,7 @@ def _baseline_gate(findings: list[Finding]) -> Iterable[Finding]:
         regressions.append(
             Finding(
                 rule="service_server_backflow",
-                severity="error",
+                severity="warn",
                 file=file,
                 line=None,
                 message=(

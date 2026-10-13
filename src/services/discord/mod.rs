@@ -5,7 +5,7 @@ pub(crate) mod agent_handoff;
 pub(crate) mod agentdesk_config;
 mod answer_flush_barrier;
 pub(crate) mod bot_role;
-mod busy_followup_retry_store;
+pub(crate) mod busy_followup_retry_store;
 #[cfg(unix)]
 pub(crate) mod herdr_terminate;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
@@ -108,6 +108,10 @@ pub use runtime_bootstrap::boot_retirement;
 pub(in crate::services::discord) mod semantic_boundaries;
 mod skills_scan;
 mod turn_presence;
+pub(crate) use turn_presence::entrypoints::{
+    Lease as PresenceLease, withdraw_target as presence_withdraw_target,
+    withdraw_unmounted as presence_withdraw_unmounted,
+};
 #[cfg(all(test, unix))]
 pub(crate) use turn_presence::lifecycle::Runtime as PresenceRuntime;
 mod turn_teardown_clearance;

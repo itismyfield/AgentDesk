@@ -578,6 +578,17 @@ async fn b2b1_lease_loss_and_yield_withdraw_only_gateway_approvals_pg() {
             let serving = self.0.bot_connected.load(Ordering::SeqCst);
             self.1.lock().unwrap().push(serving);
         }
+        fn withdraw_unmounted(
+            &self,
+            _: u64,
+            _: Option<&Arc<crate::services::cluster::channel_home::HomeGate>>,
+            _: &'static str,
+        ) {
+        }
+        fn generation(&self, _: u64) -> Option<Arc<()>> {
+            None
+        }
+        fn withdraw_generation(&self, _: u64, _: &Arc<()>, _: &'static str) {}
         fn suspend(&self) {}
         fn resume(&self) {}
     }

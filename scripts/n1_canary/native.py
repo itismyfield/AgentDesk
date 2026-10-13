@@ -107,6 +107,7 @@ def codex(row):
         return fact("units", items=[unit(payload.get("id"), "tool", tool_payload(payload, (field,)))])
     if subtype == "tool_search_call":
         require(isinstance(payload.get("execution"), str) and "arguments" in payload)
+        require(payload.get("call_id") is None or isinstance(payload["call_id"], str))
         return fact("units", items=[unit(payload.get("id"), "tool", tool_payload(payload, ("arguments",)))])
     if subtype in ("function_call_output", "custom_tool_call_output"):
         codex_output(payload.get("output"))

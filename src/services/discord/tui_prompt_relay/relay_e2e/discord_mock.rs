@@ -24,6 +24,7 @@ const FIRST_RESPONSE_MESSAGE_ID: u64 = 940_487_400_000_021;
 
 /// Minted message id to `(reply_to, latest content)`.
 type MintedMessages = std::collections::BTreeMap<u64, (Option<u64>, String)>;
+type HeldEdit = Arc<Mutex<Option<(u64, String)>>>;
 
 /// How the mock answers a non-placeholder POST.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,7 +58,11 @@ pub(in crate::services::discord) struct DiscordMockState {
     pub(super) hold_next_note: Arc<AtomicBool>,
     pub(super) note_held: Arc<Notify>,
     pub(super) release_held_note: Arc<Notify>,
+    pub(super) hold_edit: HeldEdit,
+    pub(super) edit_held: Arc<Notify>,
+    pub(super) release_held_edit: Arc<Notify>,
     pub(in crate::services::discord) unhandled: Arc<Mutex<Vec<String>>>,
+    transport_probes: Arc<AtomicUsize>,
     /// Channel history `GET /messages` pages over. Empty until a scenario
     /// seeds it, which is the "nothing to catch up" answer.
     pub(super) history: Arc<Mutex<Vec<Value>>>,
@@ -74,6 +79,7 @@ pub(in crate::services::discord) struct DiscordMockState {
     /// Guild threads the mock answers for, by thread id, with their parent channel.
     threads: Arc<Mutex<std::collections::HashMap<u64, u64>>>,
     next_response_id: Arc<AtomicU64>,
+    pub(super) admission_probe: Arc<Mutex<Option<Arc<super::pending_admission_e2e::EffectProbe>>>>,
 }
 
 impl DiscordMockState {
@@ -88,7 +94,11 @@ impl DiscordMockState {
             hold_next_note: Arc::new(AtomicBool::new(false)),
             note_held: Arc::new(Notify::new()),
             release_held_note: Arc::new(Notify::new()),
+            hold_edit: Arc::new(Mutex::new(None)),
+            edit_held: Arc::new(Notify::new()),
+            release_held_edit: Arc::new(Notify::new()),
             unhandled: Arc::new(Mutex::new(Vec::new())),
+            transport_probes: Arc::new(AtomicUsize::new(0)),
             history: Arc::new(Mutex::new(Vec::new())),
             history_queries: Arc::new(Mutex::new(Vec::new())),
             hold_next_history: Arc::new(AtomicBool::new(false)),
@@ -99,6 +109,7 @@ impl DiscordMockState {
             extra_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
             threads: Arc::new(Mutex::new(std::collections::HashMap::new())),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
+            admission_probe: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -296,7 +307,8 @@ fn history_page_returns_the_ids_nearest_the_cursor_newest_first() {
         )
         .map(|page| page.iter().map(history_message_id).collect::<Vec<u64>>())
     };
-    let cases: [(Option<usize>, Option<u64>, Option<u64>, Option<Vec<u64>>); 12] = [
+    type PageCase = (Option<usize>, Option<u64>, Option<u64>, Option<Vec<u64>>);
+    let cases: [PageCase; 12] = [
         (Some(3), None, None, Some(vec![10, 9, 8])),
         (None, None, None, Some(vec![10, 9, 8, 7, 6, 5, 4, 3, 2, 1])),
         (Some(2), Some(5), None, Some(vec![4, 3])),
@@ -348,6 +360,28 @@ fn mint_message(
 async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Body>) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
+    // Host port discovery sends an unauthenticated Go root probe. Reject and
+    // record it separately so authenticated production misses still fail.
+    if method == Method::GET
+        && request.uri() == "/"
+        && !request.headers().contains_key("authorization")
+        && request
+            .headers()
+            .get("user-agent")
+            .is_some_and(|value| value == "Go-http-client/1.1")
+    {
+        let count = state.transport_probes.fetch_add(1, Ordering::SeqCst) + 1;
+        eprintln!("DISCORD_MOCK_TRANSPORT_PROBE rejected={count}");
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let probe = state
+        .admission_probe
+        .lock()
+        .expect("admission probe")
+        .clone();
+    if let Some(probe) = probe {
+        probe.observe(&method, &path).await;
+    }
     let route_channel = path
         .strip_prefix("/api/v10/channels/")
         .and_then(|rest| rest.split('/').next())
@@ -397,8 +431,10 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
         if content == "..." {
             let index = state.placeholder_posts.fetch_add(1, Ordering::SeqCst);
             if index == 0 && state.park_first_placeholder.load(Ordering::SeqCst) {
+                // Subscribe before announcing arrival so an immediate release is retained.
+                let released = state.release_first_placeholder.notified();
                 state.first_placeholder_arrived.notify_waiters();
-                state.release_first_placeholder.notified().await;
+                released.await;
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"message": "release A", "code": 0})),
@@ -455,6 +491,22 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             .unwrap_or_default();
         let id = path.rsplit('/').next().and_then(|tail| tail.parse().ok());
         let id = id.unwrap_or(FIRST_RESPONSE_MESSAGE_ID);
+        let held = {
+            let mut gate = state.hold_edit.lock().expect("held edit");
+            if gate
+                .as_ref()
+                .is_some_and(|(target, text)| *target == id && content.contains(text))
+            {
+                gate.take();
+                true
+            } else {
+                false
+            }
+        };
+        if held {
+            state.edit_held.notify_one();
+            state.release_held_edit.notified().await;
+        }
         let edited = content.to_string();
         state
             .messages
@@ -503,6 +555,21 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
 #[tokio::test]
 async fn unregistered_channels_are_unhandled_until_explicitly_allowed() {
     let state = DiscordMockState::new();
+    for (user_agent, authenticated, counted) in [
+        ("Go-http-client/1.1", false, false),
+        ("Go-http-client/1.1", true, true),
+        ("DiscordBot", false, true),
+    ] {
+        let mut request = Request::builder().uri("/").header("user-agent", user_agent);
+        if authenticated {
+            request = request.header("authorization", "Bot test-token");
+        }
+        let response =
+            discord_rest(State(state.clone()), request.body(Body::empty()).unwrap()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(state.unhandled.lock().unwrap().pop().is_some(), counted);
+    }
+    assert_eq!(state.transport_probes.load(Ordering::SeqCst), 1);
     state.park_first_placeholder.store(false, Ordering::SeqCst);
     let other = CHANNEL_ID + 1;
     for (method, suffix) in [

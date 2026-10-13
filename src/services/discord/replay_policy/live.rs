@@ -10,8 +10,8 @@ pub(crate) enum Activity {
     Output,
     Tool,
     Unclassified,
-    /// Recorded by the TUI injection path, which is not connected yet.
-    #[cfg(test)]
+    /// A separate busy input protects its existing output owner from automatic reruns.
+    #[cfg(any(unix, test))]
     InjectedInput,
 }
 
@@ -149,7 +149,7 @@ impl RawObservation {
     }
 }
 
-/// The provider's own terminal for one exact attempt, drawn from a complete observation.
+/// A provider terminal from its complete reader or an admitted, pinned TUI source.
 #[derive(Debug)]
 pub(crate) struct TerminalEvidence {
     receipt_id: i64,
@@ -158,6 +158,15 @@ pub(crate) struct TerminalEvidence {
 }
 
 impl TerminalEvidence {
+    #[cfg(unix)]
+    pub(super) fn from_injected(receipt_id: i64, nonce: &str, kind: TerminalKind) -> Self {
+        Self {
+            receipt_id,
+            nonce: nonce.into(),
+            kind,
+        }
+    }
+
     pub(crate) fn names(&self, attempt: &ExactAttempt) -> bool {
         self.receipt_id == attempt.receipt_id() && self.nonce == attempt.nonce()
     }

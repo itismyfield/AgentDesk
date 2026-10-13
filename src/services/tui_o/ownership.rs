@@ -130,6 +130,20 @@ impl OwnershipGate {
             GatewayOwnership::Unknown | GatewayOwnership::Lost => None,
         }
     }
+
+    /// Rejects contention instead of waiting while the caller holds another admission fence.
+    #[cfg(all(test, unix))]
+    pub(crate) fn try_admit<T>(&self, hand_off: impl FnOnce(u64) -> T) -> Option<T> {
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        match state.ownership {
+            GatewayOwnership::Owned { epoch } => Some(hand_off(epoch)),
+            GatewayOwnership::Unknown | GatewayOwnership::Lost => None,
+        }
+    }
 }
 
 static GATES: LazyLock<Mutex<HashMap<String, Arc<OwnershipGate>>>> = LazyLock::new(Mutex::default);

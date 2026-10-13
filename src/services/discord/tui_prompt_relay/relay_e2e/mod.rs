@@ -32,6 +32,8 @@ mod herdr_terminate_e2e;
 mod herdr_terminate_o_e2e;
 #[path = "n1a_turn_mode_tests.rs"]
 mod n1a_turn_mode;
+#[path = "pending_admission_e2e_tests.rs"]
+mod pending_admission_e2e;
 #[path = "prompt_identity_e2e_tests.rs"]
 mod prompt_identity_e2e;
 mod queue_recovery_e2e;
