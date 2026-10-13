@@ -832,7 +832,7 @@ async fn b2b1_watcher_unpair_waits_for_a_first_poll_and_then_withdraws_its_appro
     let fixture = Fixture::new();
     let fence =
         Arc::downgrade(&fixture.runtime) as std::sync::Weak<dyn super::super::entrypoints::Fence>;
-    let _installed = super::super::entrypoints::tests::install(&fixture.shared, fence);
+    let _installed = super::super::entrypoints::install(&fixture.shared, fence);
     let channel = poise::serenity_prelude::ChannelId::new(fixture.identity.channel);
     let first = fixture.approval().await;
     let next = fixture.approval().await;
@@ -999,7 +999,7 @@ async fn b2b2_home_mount_replace_and_unmount_withdraw_the_displaced_owner() {
     let fixture = Fixture::new();
     let fence =
         Arc::downgrade(&fixture.runtime) as std::sync::Weak<dyn super::super::entrypoints::Fence>;
-    let _installed = super::super::entrypoints::tests::install(&fixture.shared, fence);
+    let _installed = super::super::entrypoints::install(&fixture.shared, fence);
     let channel = fixture.identity.channel.to_string();
     let home = |epoch| {
         let home = Arc::new(HomeGate::new(&channel, "b1-worker"));

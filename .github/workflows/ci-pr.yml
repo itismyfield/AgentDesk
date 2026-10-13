@@ -514,6 +514,8 @@ jobs:
               # END generated pg_db source paths
               # Re-post production changes must run the shared-budget tests too.
               - 'src/services/tui_o/repost/**'
+              # Presence hooks run inside the PG entry-point tests that install a runtime.
+              - 'src/services/discord/turn_presence/**'
               - 'src/services/tui_o/writer/**'
               - 'src/services/tui_o/store/ledger.rs'
               - 'src/services/discord/outbound/o_writer*.rs'
