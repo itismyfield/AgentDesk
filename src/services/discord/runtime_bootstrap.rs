@@ -217,7 +217,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let homes = HomeSettings::of(&boot_config);
     // Records the boot judgement before delegation effects start.
     let home_availability = install_home_availability(&provider, &homes, pg_pool.is_some());
-    let ingress_shadow = super::ingress_shadow::ShadowConfig::of(&boot_config);
     let modules = boot_config.cluster.runtime_profile.modules();
     let voice_config = boot_config.voice;
     let voice_barge_in = Arc::new(if modules.voice {
@@ -468,7 +467,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         handback_breaker,
         &restored_model_overrides,
         &restored_fast_mode_channels,
-        ingress_shadow,
     )
     .await;
 }

@@ -268,7 +268,7 @@ Discord 앞단 `handle_event`와 Poise 명령 경로의 비간섭은 §9.4의 �
 | 항목 | 내용 |
 |---|---|
 | 설정 | `runtime.channel_ingress_shadow_enabled: true`와 0이 아닌 채널이 하나 이상 있는 `runtime.channel_ingress_shadow_channels`가 모두 있어야 한다. unset·false·빈 목록은 휴면이고 전체 채널 wildcard는 없다 |
-| 부팅 | `runtime_bootstrap.rs`의 boot config 스냅샷에서 읽는다. 변경 적용은 프로세스 재시작이다. delegation switch와 별개이며 home boot·gateway 역할을 바꾸지 않는다 |
+| 부팅 | gateway runtime 시작(`run_bot_start_gateway_runtime`)에서 설정을 한 번 읽는다. `run_bot` 본문은 B1 boot census가 고정하므로 건드리지 않는다. 변경 적용은 프로세스 재시작이다. delegation switch와 별개이며 home boot·gateway 역할을 바꾸지 않는다 |
 | 역할 | gateway 역할 분기 뒤 framework setup에서만 시작한다. standby·REST worker는 gateway 이벤트를 받지 않으므로 시작하지 않는다. provider는 claude·codex만 |
 | 소유 | `Data.ingress_shadow`가 handle을 가진다. 꺼져 있으면 `None`이고 `begin`(pool·generation 읽기)도 부르지 않는다. handle drop은 queue를 닫아 worker를 끝내며, drop은 worker를 기다리지 않는다 |
 | identity | 로컬 ID는 trim한 `cluster.instance_id`다. hostname으로 보충하지 않고, 비어 있으면 판정이 `NoLocalIdentity`로 보류된다 |
@@ -308,7 +308,7 @@ singleton 운영에서는 paired 분모가 0이므로 결과는 INCOMPLETE이며
 | AC4 | 기대 payload가 비어 있지 않고 off/on이 정확히 같음 | 같은 시험 | drop_payload_byte |
 | AC5 | Poise 허용·거절, `/help` initial callback 1·follow-up 1 | 같은 시험(`HelpAllowed`, `HelpRefused`) | skip_initial_callback |
 | AC6 | 표본 key만 다른 `(codex, CH+1)`·`(claude, CH)`는 `LocalSampleMismatch` | `own_worker_row_holds_without_an_open_unexpired_local_lease` | sample_key_check_removed |
-| AC7 | 한 SELECT의 PG 시각, acquire 전부터의 전체 지연, 20초 경계, 시간 불명 보류 | `freshness_counts_the_whole_lookup_on_pgs_clock`, `a_row_read_carries_pgs_clock_from_the_same_statement_pg` | drop_read_elapsed, expiry_inclusive, clock_error_as_fresh |
+| AC7 | 한 SELECT의 PG 시각, acquire 전부터의 전체 지연, 20초 경계, 시간 불명 보류 | `freshness_counts_the_whole_lookup_on_the_database_clock`, `a_row_read_carries_pgs_clock_from_the_same_statement_pg` | drop_read_elapsed, expiry_inclusive, clock_error_as_fresh |
 | AC8 | expire·prune·close·초기화 0, registry/local/inner contention·poison에서 표본 없음 | `sampling_expires_prunes_closes_and_initializes_nothing`, `a_taken_or_poisoned_lock_gives_no_sample`, `an_unreadable_gate_holds_and_counts_as_unknown` | sample_via_ownership, sample_via_registered, inner_read_blocks |
 | AC9 | renew·close·lapse와 경쟁해도 한 상태의 epoch·intake·만료만 | `a_sample_never_mixes_two_states_of_one_gate` | split_epoch_and_expiry_reads |
 | AC10 | 양수 분모에서 최대 한 후보, 같은 ID 다른 incarnation·다른 epoch 후보는 충돌 | `two_processes_judging_one_source_their_own_is_a_conflict_across_ids_and_epochs` | dedup_by_instance_only, join_partitioned_by_epoch |

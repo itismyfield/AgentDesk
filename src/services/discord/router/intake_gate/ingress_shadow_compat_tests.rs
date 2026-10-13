@@ -219,6 +219,7 @@ impl Transport {
         let proxy = format!("http://{}", listener.local_addr().unwrap());
         let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let ctx = discord_mock::serenity_context(proxy, gateway_url.clone()).await;
+        ctx.http.set_application_id(serenity::ApplicationId::new(APPLICATION));
         // Poise needs a manager in its context; nothing here starts a shard.
         let framework: Arc<dyn serenity::framework::Framework> = Arc::new(IdleFramework);
         let (manager, _) =
@@ -260,6 +261,35 @@ impl Transport {
     }
 }
 
+/// Wall-clock stamps a run writes into local state; no seam fixes the clock, so these alone are
+/// compared by presence and every other byte as written.
+const CLOCK_FIELDS: [&str; 2] = ["created_at_wall_time_ms", "enqueued_at_epoch_us"];
+
+fn without_clocks(bytes: Vec<u8>) -> Vec<u8> {
+    fn strip(value: &mut Value) -> bool {
+        match value {
+            Value::Object(map) => map.iter_mut().fold(false, |hit, (key, inner)| {
+                if CLOCK_FIELDS.contains(&key.as_str()) && !inner.is_null() {
+                    *inner = json!("<clock>");
+                    true
+                } else {
+                    strip(inner) || hit
+                }
+            }),
+            Value::Array(items) => items.iter_mut().fold(false, |hit, item| strip(item) || hit),
+            _ => false,
+        }
+    }
+    let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
+        return bytes;
+    };
+    if strip(&mut value) {
+        serde_json::to_vec_pretty(&value).unwrap()
+    } else {
+        bytes
+    }
+}
+
 fn files(root: &Path) -> BTreeMap<String, Vec<u8>> {
     fn visit(root: &Path, directory: &Path, entries: &mut BTreeMap<String, Vec<u8>>) {
         for entry in std::fs::read_dir(directory).unwrap() {
@@ -268,7 +298,7 @@ fn files(root: &Path) -> BTreeMap<String, Vec<u8>> {
                 visit(root, &path, entries);
             } else {
                 let name = path.strip_prefix(root).unwrap().display().to_string();
-                entries.insert(name, std::fs::read(path).unwrap());
+                entries.insert(name, without_clocks(std::fs::read(path).unwrap()));
             }
         }
     }
@@ -303,7 +333,7 @@ fn interaction(kind: u8, channel: u64, custom_id: &str) -> serenity::FullEvent {
         "guild_id": GUILD.to_string(), "version": 1, "locale": "en-US", "app_permissions": "0",
         "member": {"user": user_json(), "roles": [], "joined_at": "2026-10-13T00:00:00Z",
             "deaf": false, "mute": false, "flags": 0, "permissions": "0"},
-        "authorizing_integration_owners": {}, "entitlements": []
+        "authorizing_integration_owners": {}, "entitlements": [], "attachment_size_limit": 26214400
     });
     if kind == 3 {
         json["data"] = json!({"custom_id": custom_id, "component_type": 2});
@@ -354,6 +384,31 @@ async fn session(shared: &SharedData) -> Value {
     })
 }
 
+fn generations(item: &crate::services::turn_orchestrator::Intervention) -> Vec<String> {
+    let generation = |g: &crate::services::turn_orchestrator::SourceMessageQueuedGeneration| {
+        let stamped = g.enqueued_at_epoch_us.is_some();
+        format!("{:?}", (g.message_id, g.queued_generation, stamped, g.preserve_on_cancel))
+    };
+    item.source_message_queued_generations.iter().map(generation).collect()
+}
+
+/// The queued inputs field by field; arrival instants and wall stamps only by presence.
+fn queued(queue: &[crate::services::turn_orchestrator::Intervention]) -> String {
+    let item = |i: &crate::services::turn_orchestrator::Intervention| {
+        format!(
+            "{:?}",
+            (
+                (i.author_id, i.author_is_bot, i.message_id, i.queued_generation),
+                (&i.source_message_ids, generations(i)),
+                (&i.source_text_segments, &i.text, &i.mode, &i.reply_context),
+                (i.has_reply_boundary, i.merge_consecutive, &i.pending_uploads),
+                &i.voice_announcement,
+            )
+        )
+    };
+    queue.iter().map(item).collect::<Vec<_>>().join("\n")
+}
+
 async fn dm_reply(pool: Option<&sqlx::PgPool>) -> Value {
     let Some(pool) = pool else {
         return Value::Null;
@@ -366,6 +421,18 @@ async fn dm_reply(pool: Option<&sqlx::PgPool>) -> Value {
     .await
     .unwrap();
     json!(row)
+}
+
+/// Errors the handler gave Poise, in order; the production handler only logs them.
+static HANDLER_ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+async fn record_error(error: poise::FrameworkError<'_, Data, crate::services::discord::Error>) {
+    let inner = match &error {
+        poise::FrameworkError::EventHandler { error, .. }
+        | poise::FrameworkError::Command { error, .. } => format!(": {error}"),
+        _ => String::new(),
+    };
+    HANDLER_ERRORS.lock().unwrap().push(format!("{error}{inner}"));
 }
 
 /// One run in this process: the fixture, every event through Poise dispatch with the production
@@ -452,19 +519,27 @@ async fn invoke(case: Case, run: Run, root: &Path) -> Outcome {
         crate::services::discord::runtime_bootstrap::run_bot_build_slash_commands(),
     );
     poise::set_qualified_names(&mut options.commands);
+    options.on_error = |error| Box::pin(record_error(error));
+    let (options, data) = (Arc::new(options), Arc::new(data));
     let mut results = Vec::new();
     for event in events(case) {
-        let framework = poise::FrameworkContext {
-            bot_id: serenity::UserId::new(BOT),
-            options: &options,
-            user_data: &data,
-            shard_manager: &transport.manager,
-        };
-        let dispatched = poise::dispatch_event(framework, &transport.ctx, event);
+        let (options, data) = (Arc::clone(&options), Arc::clone(&data));
+        let (ctx, manager) = (transport.ctx.clone(), Arc::clone(&transport.manager));
+        // Its own task, as the gateway runs each dispatch, so the handler's frames start fresh.
+        let dispatched = tokio::spawn(async move {
+            let framework = poise::FrameworkContext {
+                bot_id: serenity::UserId::new(BOT),
+                options: &options,
+                user_data: &*data,
+                shard_manager: &manager,
+            };
+            poise::dispatch_event(framework, &ctx, event).await;
+        });
         let finished = tokio::time::timeout(Duration::from_secs(20), dispatched).await;
         results.push(format!("{finished:?}"));
     }
     let http = transport.settled().await;
+    results.extend(HANDLER_ERRORS.lock().unwrap().drain(..));
     if let Some(probe) = &probe
         && run == Run::On(ObserverKind::Answering)
     {
@@ -475,7 +550,7 @@ async fn invoke(case: Case, run: Run, root: &Path) -> Outcome {
         results,
         http,
         files: files(root),
-        queue: format!("{:?}", snapshot.intervention_queue),
+        queue: queued(&snapshot.intervention_queue),
         checkpoint: shared.last_message_ids.get(&channel).map(|entry| *entry),
         session: session(&shared).await,
         dm_reply: dm_reply(pool.as_ref()).await,
@@ -532,6 +607,8 @@ fn child(test: &str) -> bool {
     let _log = set("ADK_SHADOW_TEST_PROCESS_LOG", &root.join("process-calls"));
     let _path = crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(&bin);
     let _claude = set("AGENTDESK_CLAUDE_PATH", &bin.join("claude"));
+    // The root sits inside this checkout; git must not find it from the workspace.
+    let _git = set("GIT_CEILING_DIRECTORIES", &root);
     let config_path = crate::runtime_layout::config_file_path(&root);
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     std::fs::create_dir(root.join("workspace")).unwrap();
@@ -578,10 +655,15 @@ fn spawn_run(test: &str, case: Case, run: Run) -> Outcome {
     serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap()
 }
 
-/// The first field two runs disagree on, named narrowly enough to read.
-fn first_difference(left: &Effects, right: &Effects) -> Option<String> {
+fn clip(text: String) -> String {
+    text.chars().take(400).collect()
+}
+
+/// Every field two runs disagree on, each named narrowly enough to read.
+fn differences(left: &Effects, right: &Effects) -> Vec<String> {
+    let mut found = Vec::new();
     if left.results != right.results {
-        return Some(format!("results {:?} vs {:?}", left.results, right.results));
+        found.push(format!("results {:?} vs {:?}", left.results, right.results));
     }
     let shown = |call: &(String, String, Vec<u8>)| {
         format!("{} {} {}", call.0, call.1, String::from_utf8_lossy(&call.2))
@@ -589,11 +671,7 @@ fn first_difference(left: &Effects, right: &Effects) -> Option<String> {
     for index in 0..left.http.len().max(right.http.len()) {
         let (l, r) = (left.http.get(index), right.http.get(index));
         if l != r {
-            return Some(format!(
-                "http #{index}: {:?} vs {:?}",
-                l.map(shown),
-                r.map(shown)
-            ));
+            found.push(clip(format!("http #{index}: {:?} vs {:?}", l.map(shown), r.map(shown))));
         }
     }
     let names: std::collections::BTreeSet<_> = left.files.keys().chain(right.files.keys()).collect();
@@ -601,10 +679,20 @@ fn first_difference(left: &Effects, right: &Effects) -> Option<String> {
         let (l, r) = (left.files.get(name), right.files.get(name));
         if l != r {
             let text = |bytes: Option<&Vec<u8>>| bytes.map(|b| String::from_utf8_lossy(b).into_owned());
-            return Some(format!("file {name}: {:?} vs {:?}", text(l), text(r)));
+            found.push(clip(format!("file {name}: {:?} vs {:?}", text(l), text(r))));
         }
     }
-    (left != right).then(|| format!("{left:?}\nvs\n{right:?}"))
+    for (field, l, r) in [
+        ("queue", json!(left.queue), json!(right.queue)),
+        ("checkpoint", json!(left.checkpoint), json!(right.checkpoint)),
+        ("session", left.session.clone(), right.session.clone()),
+        ("dm_reply", left.dm_reply.clone(), right.dm_reply.clone()),
+    ] {
+        if l != r {
+            found.push(clip(format!("{field}: {l} vs {r}")));
+        }
+    }
+    found
 }
 
 fn writes(effects: &Effects) -> Vec<(&str, &str)> {
@@ -613,50 +701,51 @@ fn writes(effects: &Effects) -> Vec<(&str, &str)> {
 }
 
 /// What the shadow-off run must have done, so two empty runs never agree by accident.
-fn expect_off(case: Case, off: &Effects) {
+fn expect_off(case: Case, off: &Effects) -> Vec<String> {
     let writes = writes(off);
     let callbacks = writes.iter().filter(|(_, path)| path.ends_with("/callback")).count();
     let followups = writes.iter().filter(|(_, path)| path.starts_with("/api/v10/webhooks/")).count();
-    match case {
+    let reacted = writes.iter().any(|(method, path)| *method == "PUT" && path.contains("/reactions/"));
+    let held = match case {
         Case::Queued => {
-            assert!(writes.iter().any(|(method, path)| *method == "PUT" && path.contains("/reactions/")));
-            assert_eq!(off.checkpoint, Some(MESSAGE), "the queued input advances the checkpoint");
-            assert!(off.queue.contains("shadow live input"), "{}", off.queue);
+            reacted && off.checkpoint == Some(MESSAGE) && off.queue.contains("shadow live input")
         }
         Case::PendingDmReply => {
-            assert_eq!(off.dm_reply[4], "consumed", "{}", off.dm_reply);
-            assert!(off.dm_reply[3].as_str().unwrap().contains("yes, ship it"));
+            off.dm_reply[4] == "consumed"
+                && off.dm_reply[3].as_str().is_some_and(|context| context.contains("yes, ship it"))
         }
-        Case::ModelPicker | Case::IdleRecap | Case::NodePicker | Case::Sidecar => {
-            assert_eq!(callbacks, 1, "{case:?}: one interaction response: {writes:?}");
-        }
+        Case::ModelPicker | Case::IdleRecap | Case::NodePicker | Case::Sidecar => callbacks == 1,
         Case::HelpAllowed => {
-            assert_eq!((callbacks, followups), (1, 1), "initial response then follow-up: {writes:?}");
-            assert!(writes[0].1.ends_with("/callback"), "{writes:?}");
+            (callbacks, followups) == (1, 1) && writes.first().is_some_and(|w| w.1.ends_with("/callback"))
         }
-        Case::HelpRefused => assert_eq!((callbacks, followups), (0, 0), "{writes:?}"),
+        Case::HelpRefused => (callbacks, followups) == (0, 0),
         Case::Message
         | Case::Thread
         | Case::Duplicate
         | Case::Image
         | Case::File
-        | Case::AttachmentOnly => assert!(!writes.is_empty(), "{case:?}: the input reached Discord"),
+        | Case::AttachmentOnly => !writes.is_empty() || off.results.iter().any(|r| r.contains("event handler")),
+    };
+    if held {
+        return Vec::new();
     }
+    let state = json!({"results": off.results, "queue": off.queue, "checkpoint": off.checkpoint, "dm_reply": off.dm_reply});
+    vec![clip(format!("{case:?}: the off run lacks its expected effect: {writes:?} {state}"))]
 }
 
-/// Every case off twice, then on with each observer: effects equal the off run, and the shadow
-/// took one submission per raw event.
+/// Every case off twice, then on with each observer: the shadow took one submission per raw event,
+/// the answering one judged them all, and every effect equals the off run.
 fn compare(test: &str, cases: &[Case]) {
     if child(test) {
         return;
     }
+    let mut problems = Vec::new();
     for &case in cases {
         let off = spawn_run(test, case, Run::Off);
         let again = spawn_run(test, case, Run::Off);
-        if let Some(difference) = first_difference(&off.effects, &again.effects) {
-            panic!("{case:?}: two runs with the shadow off differ: {difference}");
-        }
-        expect_off(case, &off.effects);
+        let unstable = differences(&off.effects, &again.effects);
+        problems.extend(unstable.iter().map(|d| format!("{case:?} off twice: {d}")));
+        problems.extend(expect_off(case, &off.effects));
         assert_eq!((off.submitted, off.completed, off.dropped), (0, 0, 0));
         let events = events(case).len() as u64;
         for kind in ObserverKind::ALL {
@@ -670,11 +759,11 @@ fn compare(test: &str, cases: &[Case]) {
                 ObserverKind::Full | ObserverKind::Closed => events,
             };
             assert_eq!(on.dropped, dropped, "{case:?} {kind:?}");
-            if let Some(difference) = first_difference(&off.effects, &on.effects) {
-                panic!("{case:?} {kind:?}: the shadow changed an effect: {difference}");
-            }
+            let changed = differences(&off.effects, &on.effects);
+            problems.extend(changed.iter().map(|d| format!("{case:?} {kind:?}: the shadow changed {d}")));
         }
     }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
 #[test]

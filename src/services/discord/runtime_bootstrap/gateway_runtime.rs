@@ -26,7 +26,6 @@ pub(super) async fn run_bot_start_gateway_runtime(
     handback_breaker: GatewayHandbackBreaker,
     restored_model_overrides: &[(ChannelId, String)],
     restored_fast_mode_channels: &[ChannelId],
-    ingress_shadow: Option<super::super::ingress_shadow::ShadowConfig>,
 ) {
     {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -54,6 +53,9 @@ pub(super) async fn run_bot_start_gateway_runtime(
     let voice_receiver_for_setup = voice_receiver.clone();
 
     let slash_commands = run_bot_build_slash_commands();
+    // Only a gateway reaches here, so standby and REST runtimes never start the ingress shadow.
+    let ingress_shadow =
+        super::super::ingress_shadow::ShadowConfig::of(&crate::config::load_graceful());
 
     let framework = poise::Framework::builder()
         .options(run_bot_framework_options(slash_commands))

@@ -193,7 +193,7 @@ fn interaction(kind: u8, channel: u64, id: u64) -> serenity::FullEvent {
         "id": id.to_string(), "application_id": "77", "type": kind, "token": "secret-token",
         "channel_id": channel.to_string(), "version": 1, "locale": "en-US",
         "user": {"id": "5", "username": "u", "discriminator": "0"}, "authorizing_integration_owners": {},
-        "app_permissions": "0", "entitlements": []
+        "app_permissions": "0", "entitlements": [], "attachment_size_limit": 26214400
     });
     json["data"] = match kind {
         3 => serde_json::json!({"custom_id": "x", "component_type": 2}),
@@ -359,7 +359,7 @@ async fn the_worker_judges_the_real_gate_and_records_every_id() {
 /// Freshness runs on PG's clock from before the pool acquire to the verdict; an unknown clock or a
 /// lookup past its timeout holds and counts as unknown.
 #[tokio::test(start_paused = true)]
-async fn freshness_counts_the_whole_lookup_on_pgs_clock() {
+async fn freshness_counts_the_whole_lookup_on_the_database_clock() {
     let foreign = Some(worker_row(CH, "node-b", 4));
     let ms = Duration::from_millis;
     let cases = [
