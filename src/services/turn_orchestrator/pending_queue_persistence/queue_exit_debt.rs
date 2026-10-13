@@ -401,14 +401,14 @@ pub(crate) fn commit_queue_exit(
         Err(QueueExitCommitError::Indeterminate(error)) => error,
     };
     let new = (
-        identities(&state.intervention_queue),
+        rows(&state.intervention_queue, channel_id, persistence),
         meta_value(&state.queued_head.meta),
     );
     let old = (
-        identities(&previous_queue),
+        rows(&previous_queue, channel_id, persistence),
         state.queued_head.persisted_meta.clone(),
     );
-    read_back_fault::run();
+    read_back_fault::run(channel_id);
     match read_back(persistence, channel_id) {
         Ok(disk) if disk == new => {
             tracing::warn!(channel_id = channel_id.get(), %error, "queue exit commit was published");
@@ -429,21 +429,24 @@ pub(crate) fn commit_queue_exit(
     }
 }
 
-/// Runs a test's file change between a failed save and the commit's re-read of the file.
+/// Runs a test's change between a channel's failed save and the commit's re-read of the file,
+/// on whichever thread runs the commit.
 #[cfg(test)]
 pub(crate) mod read_back_fault {
-    use std::cell::RefCell;
+    use super::ChannelId;
+    type Change = Box<dyn FnOnce() + Send>;
+    static NEXT: std::sync::Mutex<Vec<(ChannelId, Change)>> = std::sync::Mutex::new(Vec::new());
 
-    thread_local! {
-        static NEXT: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    pub(crate) fn before_next(channel: ChannelId, change: impl FnOnce() + Send + 'static) {
+        NEXT.lock().unwrap().push((channel, Box::new(change)));
     }
 
-    pub(crate) fn before_next(change: impl FnOnce() + 'static) {
-        NEXT.with(|next| *next.borrow_mut() = Some(Box::new(change)));
-    }
-
-    pub(super) fn run() {
-        if let Some(change) = NEXT.with(|next| next.borrow_mut().take()) {
+    pub(super) fn run(channel: ChannelId) {
+        let mut next = NEXT.lock().unwrap();
+        let armed = next.iter().position(|(armed, _)| *armed == channel);
+        let change = armed.map(|index| next.remove(index).1);
+        drop(next);
+        if let Some(change) = change {
             change();
         }
     }
@@ -468,12 +471,49 @@ fn identities(queue: &[Intervention]) -> QueueIdentities {
     queue.iter().map(row).collect()
 }
 
-/// The queue identities and set metadata now on disk.
+#[cfg(test)]
+type QueueRows = Vec<serde_json::Value>;
+
+/// An item as the file stores it, less the clock readings each save stamps anew.
+#[cfg(test)]
+fn row(item: &PendingQueueItem) -> serde_json::Value {
+    let mut row = serde_json::to_value(item).expect("queue item serializes");
+    let fields = row.as_object_mut().expect("queue item is an object");
+    fields.remove("created_at_wall_time_ms");
+    let sources = fields.get_mut("source_message_queued_generations");
+    let sources = sources.and_then(serde_json::Value::as_array_mut);
+    for source in sources
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_object_mut)
+    {
+        source.remove("enqueued_at_epoch_us");
+    }
+    row
+}
+
+/// The rows a save of `queue` writes.
+#[cfg(test)]
+fn rows(
+    queue: &[Intervention],
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> QueueRows {
+    let role = persistence.dispatch_role_override;
+    let (wall, now) = (SystemTime::now(), Instant::now());
+    let item = |item| pending_queue_item_from_intervention(item, channel_id, role, wall, now);
+    queue
+        .iter()
+        .map(|intervention| row(&item(intervention)))
+        .collect()
+}
+
+/// The queue rows and set metadata now on disk.
 #[cfg(test)]
 fn read_back(
     persistence: &QueuePersistenceContext,
     channel_id: ChannelId,
-) -> Result<(QueueIdentities, Option<serde_json::Value>), String> {
+) -> Result<(QueueRows, Option<serde_json::Value>), String> {
     let (provider, token_hash) = (&persistence.provider, &persistence.token_hash);
     let path = pending_queue_file_path(provider, token_hash, channel_id)
         .ok_or("pending queue root unavailable")?;
@@ -485,17 +525,9 @@ fn read_back(
         Err(error) => return Err(format!("unreadable {}: {error}", path.display())),
     };
     let (items, meta) = parse_snapshot(&content)?;
-    let row = |item: PendingQueueItem| {
-        let primary = item.message_id;
-        let mut sources = item.source_message_ids;
-        if sources.is_empty() {
-            sources.push(primary);
-        }
-        (primary, item.queued_generation, sources)
-    };
     let meta = meta.filter(SnapshotMeta::is_set);
     Ok((
-        items.into_iter().map(row).collect(),
+        items.iter().map(row).collect(),
         meta.as_ref().and_then(meta_value),
     ))
 }

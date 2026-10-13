@@ -1633,6 +1633,9 @@ struct ChannelMailboxState {
     /// What an actor a scoped claim installed still owes; see `scoped_claim.rs`.
     #[cfg(test)]
     installed_pending: Option<scoped_claim::InstalledPending>,
+    /// Namespaces whose claim left a file holding neither snapshot; scoped claims refuse them.
+    #[cfg(test)]
+    scoped_undecided: Vec<(ProviderKind, String)>,
 }
 
 fn finalize_turn_state(

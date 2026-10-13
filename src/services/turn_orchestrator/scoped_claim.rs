@@ -58,6 +58,8 @@ pub(crate) enum ScopedClaimRefusal {
     Prepare(String),
     NotCommitted(String),
     Indeterminate(String),
+    /// An earlier claim in this namespace left a file holding neither snapshot.
+    Undecided,
 }
 
 impl ScopedClaimRefusal {
@@ -76,7 +78,8 @@ impl ScopedClaimRefusal {
 pub(crate) enum ScopedClaimOutcome {
     /// The actor and its pending debts were installed; the event ids recorded on disk.
     Installed(Vec<String>),
-    /// The exact actor already holds the slot; its pending record follows the newer generation.
+    /// The exact actor already holds the slot; its pending record follows the newer generation
+    /// and keeps the episode its debts were issued under.
     Inherited,
     Refused(ScopedClaimRefusal),
 }
@@ -153,14 +156,14 @@ pub(super) fn step(state: &mut ChannelMailboxState, channel: ChannelId, msg: Sco
     let _ = reply.send(outcome);
 }
 
-/// Same birth, owner and message on the same live token; a new episode needs a newer
-/// generation, and the generation is still the current one.
+/// Same birth, episode, owner and message on the same live token, at a generation no older than
+/// the recorded one that is still the current one.
 fn exact(pending: &InstalledPending, proof: &Installation) -> bool {
     let token = pending.token.upgrade();
     token.is_some_and(|token| Arc::ptr_eq(&token, &proof.token))
         && (pending.birth == proof.birth)
+        && (pending.episode == proof.episode)
         && (pending.owner, pending.message) == (proof.owner, proof.message)
-        && (proof.episode == pending.episode || proof.generation > pending.generation)
         && proof.generation >= pending.generation
         && proof.current.load(Ordering::Acquire) == proof.generation
 }
@@ -176,6 +179,10 @@ fn claim(
     if channel != proof.channel {
         return Err(R::WrongChannel);
     }
+    let namespace = (persistence.provider.clone(), persistence.token_hash.clone());
+    if state.scoped_undecided.contains(&namespace) {
+        return Err(R::Undecided);
+    }
     queued_head::adopt(state, channel, persistence).map_err(R::Adopt)?;
     if let Some(active) = &state.cancel_token {
         let holds = Arc::ptr_eq(active, &proof.token)
@@ -185,7 +192,6 @@ fn claim(
         let Some(pending) = pending.filter(|pending| holds && exact(pending, proof)) else {
             return Err(R::ForeignActor);
         };
-        pending.episode = proof.episode.clone();
         pending.generation = proof.generation;
         pending.current = proof.current.clone();
         return Ok(ScopedClaimOutcome::Inherited);
@@ -217,12 +223,14 @@ fn claim(
         return Err(R::CallerLeft);
     }
     if !transition.exits().is_empty() {
-        commit_queue_exit(state, channel, persistence, &transition).map_err(
-            |error| match error {
-                QueueExitCommitError::NotCommitted(error) => R::NotCommitted(error),
-                QueueExitCommitError::Indeterminate(error) => R::Indeterminate(error),
-            },
-        )?;
+        match commit_queue_exit(state, channel, persistence, &transition) {
+            Ok(()) => {}
+            Err(QueueExitCommitError::NotCommitted(error)) => return Err(R::NotCommitted(error)),
+            Err(QueueExitCommitError::Indeterminate(error)) => {
+                state.scoped_undecided.push(namespace);
+                return Err(R::Indeterminate(error));
+            }
+        }
     }
     install(state, channel, proof);
     let exits = transition.exits().to_vec();

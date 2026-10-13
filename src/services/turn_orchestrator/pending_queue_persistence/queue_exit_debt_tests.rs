@@ -589,6 +589,20 @@ fn event_ids_stay_distinct_for_a_requeued_message_and_a_merged_source() {
     assert!(matches!(twice, Err(QueueExitCommitError::NotCommitted(_))));
     assert_eq!(bytes(channel), before);
     assert_eq!(state.queued_head.meta.queue_exit_debts.len(), 4);
+
+    // Over its original queue again, the same transition is refused for the debt it recorded.
+    state.intervention_queue = vec![x, merged];
+    let (queue, meta) = (ids(&state), meta_value(&state.queued_head.meta));
+    let again = commit_queue_exit(&mut state, channel, &ctx(), &once);
+    let Err(QueueExitCommitError::NotCommitted(error)) = &again else {
+        panic!("a recorded debt is written again: {again:?}");
+    };
+    assert!(error.contains("recorded twice"), "{error}");
+    assert_eq!(
+        (ids(&state), meta_value(&state.queued_head.meta)),
+        (queue, meta)
+    );
+    assert_eq!(bytes(channel), before);
 }
 
 /// The handback reads the queue as a legacy array, so it fails on a debt-bearing snapshot and
@@ -797,7 +811,7 @@ fn a_third_snapshot_after_a_failed_save_is_indeterminate_and_refuses_later_write
         pending_queue_item_from_intervention(&z, channel, None, SystemTime::now(), Instant::now());
     let third = snapshot_json(vec![item], Some(&meta)).unwrap();
     let (target, written) = (path(channel), third.clone());
-    read_back_fault::before_next(move || fs::write(target, written).unwrap());
+    read_back_fault::before_next(channel, move || fs::write(target, written).unwrap());
     post_save_fault::fail_next(channel);
     let transition = prepare(
         &state,

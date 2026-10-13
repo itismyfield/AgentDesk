@@ -1,13 +1,16 @@
 use super::*;
 use crate::services::discord::input_runtime::fence::{self, Gate, Mode};
 use crate::services::turn_orchestrator::pending_queue_persistence::{
-    pending_queue_file_path, post_save_fault, read_back_fault, save_fault,
+    QueueExitDebt, pending_queue_file_path, pending_queue_item_from_intervention, post_save_fault,
+    read_back_fault, save_fault,
 };
 use crate::services::turn_orchestrator::policy_close::{
     PolicyClear, PolicyCloseRequest, PolicyMailboxOutcome, PolicyReceipt, PolicyRetain, test_hooks,
 };
+use crate::services::turn_orchestrator::queued_head::{SnapshotMeta, snapshot_json};
 use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome;
 use std::sync::atomic::AtomicUsize;
+use std::time::SystemTime;
 
 const TOKEN: &str = "b3b1b1-scoped";
 const EPISODE: &str = "episode-b3b1b1";
@@ -82,6 +85,50 @@ async fn actor(registry: &ChannelMailboxRegistry, channel: u64, queued: &[u64]) 
 struct Fixture {
     channel: ChannelId,
     handle: ChannelMailboxHandle,
+}
+
+/// An actor that hydrated `queued` from a file already holding a debt for message 299, and the
+/// snapshot with that same metadata and no items.
+async fn with_debt(
+    registry: &ChannelMailboxRegistry,
+    channel: u64,
+    queued: &[u64],
+) -> (Fixture, Vec<u8>) {
+    let fx = actor(registry, channel, &[]).await;
+    let event = QueueExitEvent {
+        intervention: human(299),
+        kind: QueueExitKind::Superseded,
+    };
+    let meta = SnapshotMeta {
+        queue_exit_debts: vec![QueueExitDebt::new(EPISODE, &event, fx.channel)],
+        ..SnapshotMeta::default()
+    };
+    let (wall, now) = (SystemTime::now(), Instant::now());
+    let item = |id| pending_queue_item_from_intervention(&human(id), fx.channel, None, wall, now);
+    let items = queued.iter().map(|id| item(*id)).collect();
+    let path = pending_queue_file_path(&ProviderKind::Claude, TOKEN, fx.channel).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, snapshot_json(items, Some(&meta)).unwrap()).unwrap();
+    let hydrated = fx.handle.hydrate_pending_queue_from_disk(ctx()).await;
+    assert_eq!(hydrated.absorbed, queued.len());
+    (
+        fx,
+        snapshot_json(Vec::new(), Some(&meta)).unwrap().into_bytes(),
+    )
+}
+
+/// Rewrites the published head's text or its source's generation, leaving its identity.
+fn retouch(path: std::path::PathBuf, field: &'static str) -> impl FnOnce() + Send {
+    move || {
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let head = &mut file["items"][0];
+        match field {
+            "text" => head["text"] = "retouched".into(),
+            _ => head["source_message_queued_generations"][0]["queued_generation"] = 9.into(),
+        }
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+    }
 }
 
 /// Everything a refused claim must leave as it was: file bytes, queue, slot and pending record.
@@ -237,8 +284,53 @@ async fn scoped_claim_with_a_dropped_reply_leaves_no_actor() {
     assert_eq!(fx.seen().await, before);
 }
 
-/// Only the installed actor's exact identity at its current generation inherits; any other claim,
-/// and an idle claim that is stale or over an unreadable file, is refused with nothing changed.
+/// On a protected channel the step runs off the actor task; a caller that leaves after the last
+/// check gets no answer, and the claim changed either nothing or the actor and its record together.
+#[tokio::test(flavor = "current_thread")]
+async fn scoped_claim_whose_caller_leaves_mid_commit_installs_all_or_nothing() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    for (n, committed) in [false, true].into_iter().enumerate() {
+        let fx = actor(&registry, 5_342_161 + n as u64, &[311, 312]).await;
+        let gate = Gate::protect(ProviderKind::Claude, fx.channel.get()).unwrap();
+        let _health = fence::test_health::Clear::new(&gate);
+        let proof = proof(fx.channel, 311);
+        let before = fx.seen().await;
+        let (reply, answer) = oneshot::channel();
+        let (path, old) = (
+            pending_queue_file_path(&ProviderKind::Claude, TOKEN, fx.channel).unwrap(),
+            before.bytes.clone().unwrap(),
+        );
+        post_save_fault::fail_next(fx.channel);
+        read_back_fault::before_next(fx.channel, move || {
+            drop(answer);
+            if !committed {
+                std::fs::write(path, old).unwrap();
+            }
+        });
+        let msg = ScopedMsg::Claim {
+            proof: proof.clone(),
+            persistence: ctx(),
+            reply,
+        };
+        fx.handle
+            .sender
+            .send((ChannelMailboxMsg::ScopedClaim(msg), None))
+            .unwrap_or_else(|_| panic!("actor gone"));
+        let after = fx.seen().await;
+        if !committed {
+            assert_eq!(after, before);
+            continue;
+        }
+        let (_, _, ids, _, _) = after.pending.expect("the actor keeps its pending record");
+        assert_eq!(after.slot, Some(Arc::as_ptr(&proof.token) as usize));
+        assert_eq!(disk_debts(fx.channel), [(ids[0].clone(), 311)]);
+    }
+}
+
+/// Only the installed actor's exact identity and episode at its current generation inherits; any
+/// other claim, another episode at a newer generation included, and an idle claim that is stale or
+/// over an unreadable file, is refused with nothing changed.
 #[tokio::test(flavor = "current_thread")]
 async fn scoped_claim_refuses_foreign_identity_and_stale_generation() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -248,13 +340,19 @@ async fn scoped_claim_refuses_foreign_identity_and_stale_generation() {
     fx.installed(&exact).await;
     let held = fx.seen().await;
     type Tamper = (&'static str, fn(&mut Installation));
-    let tampered: [Tamper; 6] = [
+    let tampered: [Tamper; 8] = [
         ("token", |p| p.token = Arc::new(CancelToken::new())),
+        ("birth", |p| p.birth = "reborn".into()),
         ("episode", |p| p.episode = "another".into()),
         ("owner", |p| p.owner = UserId::new(8)),
         ("message", |p| p.message = MessageId::new(222)),
         ("lower generation", |p| p.generation = 0),
         ("stale generation", |p| p.generation = 2),
+        ("another episode at a newer generation", |p| {
+            p.episode = "newer".into();
+            p.generation = 2;
+            p.current = Arc::new(AtomicU64::new(2));
+        }),
     ];
     for (case, tamper) in tampered {
         let mut other = exact.clone();
@@ -266,20 +364,25 @@ async fn scoped_claim_refuses_foreign_identity_and_stale_generation() {
         );
         assert_eq!(fx.seen().await, held, "{case}");
     }
-    let newer = Installation {
-        episode: "newer".into(),
+    let fresh = Installation {
         generation: 2,
         current: Arc::new(AtomicU64::new(2)),
         ..exact.clone()
     };
     assert!(matches!(
-        fx.claim(&newer).await,
+        fx.claim(&fresh).await,
         ScopedClaimOutcome::Inherited
     ));
-    let inherited = fx.handle.installed_pending().await.unwrap();
-    assert_eq!(
-        (inherited.episode.as_str(), inherited.generation),
-        ("newer", 2)
+    let inherited = fx.seen().await;
+    let (episode, _, ids, feedback, driver) = held.pending.clone().unwrap();
+    assert_eq!(inherited.pending, Some((episode, 2, ids, feedback, driver)));
+    assert_eq!((&inherited.bytes, inherited.slot), (&held.bytes, held.slot));
+    let pending = fx.handle.installed_pending().await.unwrap();
+    assert!(
+        pending
+            .exits
+            .iter()
+            .all(|exit| exit.debt.episode == EPISODE)
     );
 
     let idle = actor(&registry, 5_342_302, &[231, 232]).await;
@@ -308,24 +411,45 @@ async fn scoped_claim_refuses_foreign_identity_and_stale_generation() {
 }
 
 /// A save that errors after publishing is settled by re-reading the file: the claim installs
-/// when the file holds its snapshot, and installs nothing when the file holds a third one.
+/// when the file holds its snapshot. A third snapshot, or its own with any payload field changed,
+/// installs nothing and leaves the namespace refusing later claims, whatever metadata it kept.
 #[tokio::test(flavor = "current_thread")]
 async fn scoped_claim_after_an_ambiguous_save_installs_only_its_published_snapshot() {
     const THIRD: &[u8] = br#"{"version":1,"items":[]}"#;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let registry = ChannelMailboxRegistry::default();
-    for (n, third) in [false, true].into_iter().enumerate() {
-        let fx = actor(&registry, 5_342_151 + n as u64, &[301, 302]).await;
+    let cases = [
+        "published",
+        "third",
+        "third over metadata",
+        "text",
+        "source generation",
+    ];
+    for (n, case) in cases.into_iter().enumerate() {
+        let channel = 5_342_151 + n as u64;
+        let (fx, third) = match case {
+            "third over metadata" => with_debt(&registry, channel, &[301, 302]).await,
+            _ => (actor(&registry, channel, &[301, 302]).await, THIRD.to_vec()),
+        };
         let proof = proof(fx.channel, 301);
-        let before = fx.seen().await;
+        let (before, debts) = (fx.seen().await, disk_debts(fx.channel));
         post_save_fault::fail_next(fx.channel);
-        if third {
-            let path = pending_queue_file_path(&ProviderKind::Claude, TOKEN, fx.channel).unwrap();
-            read_back_fault::before_next(move || std::fs::write(path, THIRD).unwrap());
+        let path = pending_queue_file_path(&ProviderKind::Claude, TOKEN, fx.channel).unwrap();
+        match case {
+            "published" => {}
+            "text" | "source generation" => {
+                read_back_fault::before_next(fx.channel, retouch(path, case))
+            }
+            _ => {
+                let third = third.clone();
+                read_back_fault::before_next(fx.channel, move || {
+                    std::fs::write(path, third).unwrap()
+                });
+            }
         }
         let outcome = fx.claim(&proof).await;
         let after = fx.seen().await;
-        if !third {
+        if case == "published" {
             let ScopedClaimOutcome::Installed(ids) = outcome else {
                 panic!("a published claim installs");
             };
@@ -336,14 +460,27 @@ async fn scoped_claim_after_an_ambiguous_save_installs_only_its_published_snapsh
         let refusal = refused(outcome);
         assert!(
             matches!(refusal, ScopedClaimRefusal::Indeterminate(_)),
-            "{refusal:?}"
+            "{case}: {refusal:?}"
         );
-        assert!(refusal.detail().unwrap().contains("neither snapshot"));
+        assert!(
+            refusal.detail().unwrap().contains("neither snapshot"),
+            "{case}"
+        );
         assert_eq!(
-            (after.slot, after.pending, &after.queue),
-            (None, None, &before.queue)
+            (after.slot, &after.pending, &after.queue),
+            (None, &None, &before.queue),
+            "{case}"
         );
-        assert_eq!(after.bytes.as_deref(), Some(THIRD));
+        if !matches!(case, "text" | "source generation") {
+            assert_eq!(after.bytes.as_deref(), Some(third.as_slice()), "{case}");
+            assert_eq!(disk_debts(fx.channel), debts, "{case}");
+        }
+        let again = refused(fx.claim(&proof).await);
+        assert!(
+            matches!(again, ScopedClaimRefusal::Undecided),
+            "{case}: {again:?}"
+        );
+        assert_eq!(fx.seen().await, after, "{case}");
     }
 }
 
