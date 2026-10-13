@@ -586,6 +586,12 @@ fn warm_followup_on(
             .and_then(|marker| marker.rollout_start_offset)
             .unwrap_or(0),
     );
+    // Held until this handoff's tail returns; an input seen first waits for its turn.
+    let _handoff = crate::services::tui_prompt_dedupe::reserve_discord_handoff(
+        ProviderKind::Codex.as_str(),
+        tmux_session_name,
+        prompt,
+    );
     crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
         ProviderKind::Codex.as_str(),
         tmux_session_name,

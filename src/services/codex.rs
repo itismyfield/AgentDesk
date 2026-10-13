@@ -1583,6 +1583,8 @@ struct CodexTuiLaunchScript {
     script_path: String,
     owner_path: String,
     rollout_modified_since: std::time::SystemTime,
+    /// The Discord handoff reserved before launch, held until the tail returns.
+    handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
 }
 
 /// Wire the cancel token to the freshly created tmux session: record the
@@ -1841,6 +1843,7 @@ fn execute_streaming_local_tui_tmux(
         script_path,
         owner_path,
         rollout_modified_since,
+        handoff: _handoff,
     } = publish_codex_tui_launch_script(
         tmux_session_name,
         session_id,

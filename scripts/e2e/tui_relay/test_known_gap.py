@@ -612,6 +612,7 @@ class HerdrScopedGapRepairs(unittest.TestCase):
         def send(channel, text):
             if text.startswith('!clear'):
                 rows.append({'id': '104', 'content': '세션을 초기화했어요.', 'author': {'bot': True}})
+                return {'ok': True, 'message_id': '102'}
         def wait(channel, **kwargs):
             for marker in ('[E2E:E51:run:T1]', '[E2E:E51:run:T2]'):
                 row = {'id': '101' if marker.endswith('T1]') else '103', 'content': marker, 'author': {'bot': True}}

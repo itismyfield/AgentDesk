@@ -56,6 +56,8 @@ pub(in crate::services::discord) mod typing_indicator;
 mod voice_announcement_route;
 mod voice_announcement_scope;
 mod watchdog;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use watchdog::incident_attach;
 
 use self::goal_lifecycle::*;
 #[cfg(test)]
@@ -68,6 +70,11 @@ use self::turn_lifecycle::{
 };
 use self::watchdog::*;
 
+type IntakeClaimContext<'a, 'b, 'c, 'd> = (
+    (Option<&'a str>, &'b ProviderKind, Option<&'c str>),
+    Option<LaunchState<'d>>,
+);
+
 /// Claim an intake turn, healing a stale busy mailbox and retrying once when
 /// its managed tmux session is proven absent. On non-Unix platforms the tmux
 /// self-heal is unavailable, so this preserves the ordinary single claim.
@@ -77,10 +84,7 @@ async fn try_start_turn_with_stale_busy_heal(
     cancel_token: Arc<CancelToken>,
     request_owner: serenity::UserId,
     user_msg_id: serenity::MessageId,
-    context: (
-        (Option<&str>, &ProviderKind, Option<&str>),
-        Option<LaunchState<'_>>,
-    ),
+    context: IntakeClaimContext<'_, '_, '_, '_>,
 ) -> bool {
     let ((session_key, provider, tmux_session_name), mut launch) = context;
     let started = mailbox_try_start_turn_with_terminal_marker_cleanup(
@@ -141,10 +145,7 @@ fn intake_claim_context<'a>(
     session_id: &'a mut Option<String>,
     loaded: &'a mut bool,
     reason: &'a mut &'static str,
-) -> (
-    (Option<&'a str>, &'a ProviderKind, Option<&'a str>),
-    Option<LaunchState<'a>>,
-) {
+) -> IntakeClaimContext<'a, 'a, 'a, 'a> {
     (
         (session_key, provider, tmux_session_name),
         Some(LaunchState::new(path, session_id, loaded, reason)),

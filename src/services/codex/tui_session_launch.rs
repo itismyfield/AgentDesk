@@ -370,6 +370,12 @@ pub(super) fn publish_codex_tui_launch_script(
             launch_options,
         )?;
     }
+    // The launch's tail holds this until it returns.
+    let handoff = crate::services::tui_prompt_dedupe::reserve_discord_handoff(
+        ProviderKind::Codex.as_str(),
+        tmux_session_name,
+        prompt,
+    );
     crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
         ProviderKind::Codex.as_str(),
         tmux_session_name,
@@ -380,6 +386,7 @@ pub(super) fn publish_codex_tui_launch_script(
         script_path,
         owner_path,
         rollout_modified_since,
+        handoff,
     })
 }
 
