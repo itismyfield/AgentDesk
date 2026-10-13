@@ -493,6 +493,7 @@ mod tests {
         const FAKE_TMUX: &str = r#"#!/bin/sh
 printf '%s|%s\n' "$$" "$*" >> '@LOG@'
 query="$3"
+case "$query" in has-session|display-message) ;; *) echo "unexpected tmux command: $*" >&2; exit 3 ;; esac
 if [ "$query" = display-message ]; then target="$6"; else target="$5"; fi
 case "$target" in
 =alive-*) [ "$query" = has-session ] && exit 0; echo 4242; exit 0 ;;
@@ -766,6 +767,25 @@ esac
             let spawned = spawns(runtime.fake_dir());
             assert_eq!(spawned.len(), 1);
             assert!(!alive(spawned[0].0));
+
+            // The owner keeps the deadline even while the request is neither polled nor dropped.
+            let runtime = faked();
+            let idle = runtime.observe(
+                HealthTmuxQuery::HasSession,
+                "hold-idle",
+                Duration::from_millis(100),
+            );
+            let mut idle = Box::pin(idle);
+            assert!(futures::poll!(idle.as_mut()).is_pending());
+            assert!(
+                spawned_at_least(runtime.fake_dir(), 1).await,
+                "fixture: the child must start"
+            );
+            assert!(
+                runtime.settles_within(4, Duration::from_secs(1)).await,
+                "the child waited on its request instead of its own deadline"
+            );
+            drop(idle);
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -815,8 +835,11 @@ esac
                 "{:?}",
                 runtime.gauges()
             );
-            assert!(
-                spawns(runtime.fake_dir()).is_empty(),
+            let spawned = runtime.inner.stats.spawned.load(Ordering::SeqCst);
+            let logged = spawns(runtime.fake_dir()).len();
+            assert_eq!(
+                (spawned, logged),
+                (0, 0),
                 "a dropped request spawned a child"
             );
 
@@ -839,8 +862,11 @@ esac
                 "{:?}",
                 runtime.gauges()
             );
-            assert!(
-                spawns(runtime.fake_dir()).is_empty(),
+            let spawned = runtime.inner.stats.spawned.load(Ordering::SeqCst);
+            let logged = spawns(runtime.fake_dir()).len();
+            assert_eq!(
+                (spawned, logged),
+                (0, 0),
                 "an expired admission spawned a child"
             );
         }
@@ -1163,8 +1189,7 @@ esac
                 "{:?}",
                 runtime.gauges()
             );
-            let pid = i32::try_from(sentinel_pid).expect("pid");
-            let sentinel_alive = alive(pid);
+            let sentinel_alive = sentinel.try_wait().expect("sentinel status").is_none();
             let _ = sentinel.kill();
             let _ = sentinel.wait();
             assert!(
