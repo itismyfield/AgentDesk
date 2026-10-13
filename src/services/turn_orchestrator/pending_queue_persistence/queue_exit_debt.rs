@@ -175,7 +175,8 @@ pub(crate) fn read_queue_exit_debts_checked(
     read_file_debts(&path, channel_id)
 }
 
-/// A scan that met errors: the debts it could read, and what it could not.
+/// A scan that met errors: the debts it could read, and what it could not. `found` is partial
+/// data, never evidence that the scan succeeded, a restore finished or a debt was acknowledged.
 #[cfg(test)]
 pub(crate) struct DebtScanError {
     pub(crate) found: Vec<(ChannelId, Vec<QueueExitDebt>)>,
