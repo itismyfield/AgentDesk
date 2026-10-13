@@ -179,9 +179,8 @@ async fn c2b_failed_protected_marker_write_records_gate_health_until_a_complete_
     assert_eq!(codex_pass(), None, "a complete pass keeps the short pass");
 }
 
-/// Restart marking leaves every receipt row byte-identical and reports it apart from marked and
-/// failed rows, so a complete pass stays complete; a malformed receipt row still leaves the scan
-/// incomplete.
+/// Restart marking leaves receipt rows byte-identical and reports them apart from marked and failed
+/// rows, so the pass stays complete; a malformed receipt row still leaves the scan incomplete.
 #[tokio::test]
 async fn receipt_rows_are_skipped_byte_identical_and_never_counted_as_failed() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();

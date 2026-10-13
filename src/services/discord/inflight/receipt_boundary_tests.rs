@@ -912,9 +912,8 @@ fn receipt_row_refuses_stream_loop_marker_and_load_backfill_write() {
     }
 }
 
-/// Status metadata writers keep every raw receipt shape and the episode and destination anchor;
-/// a malformed receipt row is never rewritten. Clearing the placeholder may zero the anchor, which
-/// the settlement checks refuse rather than this writer.
+/// Status writers keep every raw receipt shape and the episode and anchor (a placeholder clear may
+/// zero the anchor, which settlement refuses); a malformed receipt row is never rewritten.
 #[test]
 fn status_writers_preserve_receipt_subtree_and_anchor() {
     let f = Fixture::new();
