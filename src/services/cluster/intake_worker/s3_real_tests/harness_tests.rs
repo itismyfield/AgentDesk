@@ -1602,9 +1602,8 @@ pub(super) enum ResetAnswer {
     Apply,
 }
 
-/// An injected [`channel_home_boot::LegacyReset`] built inside one child. Call n of `tag` signals
-/// `reset.<tag>.<n>.entered`, holds until `.go`, then records its answer before it returns it.
-/// Applied is only the callback's `Ok(())`: no managed-session reset or process cleanup runs.
+/// An injected `LegacyReset`: call n of `tag` signals `reset.<tag>.<n>.entered`, holds until `.go`,
+/// then records its answer. Applied is its `Ok(())`; no managed-session reset or cleanup runs.
 pub(super) struct ScriptedReset {
     dir: PathBuf,
     tag: String,
@@ -1777,8 +1776,8 @@ pub(super) async fn quiet_at_reset(pool: &PgPool, samples: &[String]) {
     assert_eq!(outbox_samples(pool).await, samples, "the samples moved");
 }
 
-/// How long a holder may be ready before a releasing drain tries its reset: four renewal periods.
-const RESET_WINDOW: Duration = Duration::from_secs(20);
+/// How long a holder may be ready before a releasing drain tries its reset: eight renewal periods.
+const RESET_WINDOW: Duration = Duration::from_secs(40);
 
 /// Waits for reset call `n` of `tag`, the row still `facts` when it enters. The row moving first
 /// fails at once, and so does a holder `ready` through [`RESET_WINDOW`] with no call.

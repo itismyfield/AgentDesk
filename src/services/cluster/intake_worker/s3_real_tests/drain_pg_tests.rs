@@ -1171,11 +1171,8 @@ pub(super) async fn unknown_node(env: &Env) {
     node.stop().await;
 }
 
-/// T-H7 releasing direction, one process generation: the GW holder of a Releasing row posts its
-/// tail at the row's epoch, tries its reset only after, and leaves as `released` through a refusal
-/// and an allowed retry. Applied is the injected `LegacyReset`'s `Ok(())`; no managed-session
-/// reset, provider-session delete or process cleanup runs, so neither those nor their idempotence
-/// are shown here.
+/// T-H7 releasing, one generation: the tail posts at the row's epoch before any reset, then a refusal
+/// and an allowed retry release the row. Applied is the injected `Ok(())`, not a real session reset.
 #[tokio::test(flavor = "current_thread")]
 async fn th7_releasing_tail_posts_before_release_pg() {
     let scene = Scene::new().await;
@@ -1269,6 +1266,7 @@ pub(super) async fn release_node(env: &Env) {
     quiet_at_reset(pool, &samples).await;
     refused_unmoved(&node, (dir, tag), RELEASE_REFUSAL, &releasing).await;
     until_reset_entered(pool, dir, (tag, 2), &releasing, holding).await;
+    quiet_at_reset(pool, &samples).await;
     applied_then_released(&node, dir, tag, &releasing).await;
     assert_eq!(node.discord().seen(), once, "a POST after the final close");
     assert_eq!(outbox_samples(pool).await, samples);

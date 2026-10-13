@@ -568,10 +568,8 @@ async fn finish_generation(env: &Env, node: Booted) {
     node.stop().await;
 }
 
-/// T-H6 releasing restart: the GW holder of a Releasing row dies inside its drain's reset call,
-/// and its next generation on the same root and PG leaves only through a reset it allowed.
-/// Applied is the injected `LegacyReset`'s `Ok(())`; no managed-session reset, provider-session
-/// delete or process cleanup runs, so neither those nor their idempotence are shown here.
+/// T-H6 releasing restart: the GW holder dies inside its reset call; the next generation leaves only
+/// after an allowed retry. Applied is the injected callback's `Ok(())`, not a real session reset.
 #[tokio::test(flavor = "current_thread")]
 async fn th6_releasing_holder_restart_retries_reset_pg() {
     let scene = Scene::new().await;
@@ -678,6 +676,7 @@ pub(super) async fn release_second_node(env: &Env) {
     quiet_at_reset(pool, &samples).await;
     refused_unmoved(&node, (dir, tag), REFUSAL, &releasing).await;
     until_reset_entered(pool, dir, (tag, 2), &releasing, || holding(&node, epoch)).await;
+    quiet_at_reset(pool, &samples).await;
     applied_then_released(&node, dir, tag, &releasing).await;
     assert_eq!(outbox_samples(pool).await, samples);
     node.stop().await;
