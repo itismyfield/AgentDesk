@@ -1660,9 +1660,18 @@ async fn b2b2_close_and_drive_end_withdraw_only_the_presence_the_drive_started_u
         let mut run = Box::pin(supervisor.run(DriveFake(screen), received));
         until(&mut run, || rig.gate.mode() == Mode::LedgerOpen).await;
         let adopted = probe.arm_gateway(rig.channel, gate.clone());
-        let (ack, _closed) = tokio::sync::oneshot::channel();
+        let (ack, closed) = tokio::sync::oneshot::channel();
         commands.send(SupervisorCmd::Close { ack }).await.unwrap();
-        until(&mut run, || !current(&adopted)).await;
+        let closed = async {
+            tokio::select! {
+                () = run.as_mut() => panic!("the live loop ended before Close ACK"),
+                closed = closed => closed.expect("Close ACK sender").expect("Close flushed"),
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), closed)
+            .await
+            .expect("Close completed");
+        assert!(!current(&adopted), "Close withdraws before its ACK");
         let later = probe.arm(rig.channel);
         drop(commands);
         run.await;

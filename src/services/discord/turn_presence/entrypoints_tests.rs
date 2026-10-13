@@ -160,13 +160,20 @@ async fn b2b2_a_removed_cluster_relay_withdraws_only_its_provider_runtime() {
     let relayed = || producers.get_producer(&session).is_some();
     registry.upsert(matched("a"), Some("mac-mini"));
     until(relayed).await;
+    let original = producers.get_producer(&session).unwrap();
     let foreign = other.arm(channel);
     let ticket = probe.arm(channel);
     registry.upsert(matched("b"), Some("mac-mini"));
-    until(|| !Probe::current(&ticket)).await;
+    // Producer shutdown follows removal and withdrawal, independently of presence state.
+    until(|| !original.is_alive()).await;
+    assert!(!Probe::current(&ticket), "the updated relay withdraws");
+    let replacement = producers.get_producer(&session).unwrap();
+    assert!(replacement.is_alive(), "the replacement relay is running");
     let ticket = probe.arm(channel);
     registry.remove(&session);
-    until(|| !Probe::current(&ticket)).await;
+    until(|| !replacement.is_alive()).await;
+    assert!(producers.get_producer(&session).is_none());
+    assert!(!Probe::current(&ticket), "the removed relay withdraws");
     registry.upsert(matched("c"), Some("mac-mini"));
     until(relayed).await;
     let ticket = probe.arm(channel);

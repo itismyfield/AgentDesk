@@ -890,6 +890,107 @@ async fn b2b2_a_gateway_first_poll_holds_off_a_home_mount() {
     gateway.lost();
 }
 
+// Re-post's gate-to-Home wait cannot stall a first poll; a fresh Reading retries after it leaves.
+#[tokio::test(flavor = "current_thread")]
+async fn b2b2_contended_gateway_rejects_without_waiting_and_a_fresh_reading_retries() {
+    use crate::services::cluster::channel_home::tests::{SharedHomes, at_unhomed_poll};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Barrier, mpsc};
+    let homes = SharedHomes::default();
+    let _homes = homes.enter();
+    let fixture = Fixture::new();
+    channel_home::unregister_if_same(&fixture.home);
+    let gateway = ownership::gate("claude");
+    gateway.acquired();
+    assert!(
+        fixture
+            .incarnation
+            .replace(&fixture.ticket(), fixture.identity.clone())
+    );
+    let first = fixture.approval().await;
+    let polls = AtomicUsize::new(0);
+    let mounted = Arc::new(Barrier::new(2));
+    let waiting = Arc::new(Barrier::new(3));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (held, acquired) = mpsc::channel();
+    let (finished, completion) = mpsc::channel();
+    let channel = fixture.identity.channel;
+    let callback = {
+        let (homes, gate) = (homes.clone(), gateway.clone());
+        let (mounted, waiting, cancel) = (mounted.clone(), waiting.clone(), cancel.clone());
+        std::thread::spawn(move || {
+            let _homes = homes.enter();
+            gate.admit(|_| {
+                held.send(()).unwrap();
+                mounted.wait();
+                assert!(!homes.available(), "the live callback waits for HOMES");
+                waiting.wait();
+                // Cancellable Home wait lets the blocking mutant release its gate before assertions.
+                while !homes.available() && !cancel.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                if !cancel.load(Ordering::SeqCst) {
+                    assert!(channel_home::registered_channel(channel).is_none());
+                }
+            })
+        })
+    };
+    acquired.recv().unwrap();
+    let controller = {
+        let (waiting, cancel) = (waiting.clone(), cancel.clone());
+        std::thread::spawn(move || {
+            waiting.wait();
+            let completed = completion.recv_timeout(std::time::Duration::from_secs(1));
+            if completed.is_err() {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            completed == Ok(true)
+        })
+    };
+    at_unhomed_poll(Some(Box::new(move || {
+        mounted.wait();
+        waiting.wait();
+    })));
+    let rejected = first
+        .start(42, channel, || {
+            polls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(())
+        })
+        .await
+        .is_none();
+    at_unhomed_poll(None);
+    let _ = finished.send(rejected);
+    let completed_under_contention = controller.join().unwrap();
+    assert!(
+        callback.join().unwrap().is_some(),
+        "the live callback completes"
+    );
+    assert!(
+        completed_under_contention,
+        "admission completes with rejection while the gate is held"
+    );
+    assert!(rejected, "contention rejects admission");
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        0,
+        "no first poll while contended"
+    );
+    let fresh = fixture
+        .approval()
+        .await
+        .start(42, channel, || {
+            polls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(())
+        })
+        .await;
+    assert!(
+        fresh.is_some(),
+        "a fresh Reading admits after the callback ends"
+    );
+    assert_eq!(polls.load(Ordering::SeqCst), 1);
+    gateway.lost();
+}
+
 // A Home mounting over a Gateway approval, replacing an older Home or leaving withdraws the
 // approval resting on the owner it displaced.
 #[tokio::test(flavor = "current_thread")]

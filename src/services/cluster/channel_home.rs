@@ -643,14 +643,17 @@ type Registry = OnceLock<Mutex<HomeRegistry>>;
 static HOMES: Registry = OnceLock::new();
 #[cfg(test)]
 thread_local! {
-    static HOMES: Registry = const { OnceLock::new() };
+    static HOMES: std::cell::RefCell<Arc<Registry>> = std::cell::RefCell::new(Arc::new(OnceLock::new()));
 }
 
 fn with_homes<R>(use_homes: impl FnOnce(&Registry) -> R) -> R {
     #[cfg(not(test))]
     return use_homes(&HOMES);
     #[cfg(test)]
-    HOMES.with(use_homes)
+    HOMES.with(|homes| {
+        let homes = homes.borrow().clone();
+        use_homes(&homes)
+    })
 }
 
 fn lock_homes(homes: &Mutex<HomeRegistry>) -> MutexGuard<'_, HomeRegistry> {
@@ -676,6 +679,8 @@ pub(crate) fn admit_unhomed<T>(channel: u64, admit: impl FnOnce() -> T) -> Optio
             return Some(admit());
         };
         let registry = lock_homes(homes);
+        #[cfg(test)]
+        tests::before_unhomed_poll();
         (!registry.gates.contains_key(&channel.to_string())).then(admit)
     })
 }

@@ -61,7 +61,7 @@ impl Owner {
                 .flatten(),
             // A Home mounting meanwhile waits on the registry this check holds through the poll.
             (Self::Gateway(gate, expected), None) => channel_home::admit_unhomed(channel, || {
-                gate.admit(|epoch| (epoch == *expected).then(hand_off))
+                gate.try_admit(|epoch| (epoch == *expected).then(hand_off))
                     .flatten()
             })
             .flatten(),

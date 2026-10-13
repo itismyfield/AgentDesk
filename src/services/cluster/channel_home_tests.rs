@@ -808,3 +808,40 @@ pub(crate) fn mount_waits() -> bool {
         None => FIRST_MOUNT.try_lock().is_err(),
     })
 }
+
+#[derive(Clone, Default)]
+pub(crate) struct SharedHomes(Arc<Registry>);
+
+pub(crate) struct HomesScope(Arc<Registry>);
+
+impl SharedHomes {
+    pub(crate) fn enter(&self) -> HomesScope {
+        HomesScope(HOMES.with(|homes| homes.replace(self.0.clone())))
+    }
+
+    pub(crate) fn available(&self) -> bool {
+        self.0.get().is_some_and(|homes| homes.try_lock().is_ok())
+    }
+}
+
+impl Drop for HomesScope {
+    fn drop(&mut self) {
+        HOMES.with(|homes| homes.replace(self.0.clone()));
+    }
+}
+
+thread_local! {
+    static UNHOMED_POLL: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn before_unhomed_poll() {
+    UNHOMED_POLL.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook();
+        }
+    });
+}
+
+pub(crate) fn at_unhomed_poll(hook: Option<Box<dyn Fn()>>) {
+    UNHOMED_POLL.with(|current| current.replace(hook));
+}
