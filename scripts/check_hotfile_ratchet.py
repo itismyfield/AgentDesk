@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -45,6 +46,70 @@ def line_count(path: Path) -> int:
     return len(path.read_text(encoding="utf-8").splitlines())
 
 
+def changes(base: str, candidate: str) -> list[tuple[str, str, str]]:
+    result = _run_git(REPO_ROOT, ["diff-tree", "--no-commit-id", "-r", "-M", "-C",
+        "--find-copies-harder", "--name-status", "-z", base, candidate])
+    if result.returncode or (result.stdout and not result.stdout.endswith("\0")):
+        raise ValueError("hotfile movement query failed: " + result.stderr.strip())
+    fields, rows = iter(result.stdout.split("\0")[:-1]), []
+    for status in fields:
+        if not re.fullmatch(r"[ADMT]|[RC]\d{1,3}", status):
+            raise ValueError(f"uncertain hotfile diff status: {status!r}")
+        source = next(fields)
+        target = next(fields) if status[0] in "RC" else source
+        rows.append((status[0], source, target))
+    return rows
+
+
+def regular_blob(ref: str, path: str) -> None:
+    result = _run_git(REPO_ROOT, ["ls-tree", "-z", ref, "--", path])
+    rows = result.stdout.split("\0")[:-1]
+    if (result.returncode or len(rows) != 1 or not rows[0].endswith("\t" + path)
+            or rows[0].split()[:2] not in (["100644", "blob"], ["100755", "blob"])):
+        raise ValueError(f"hotfile is not a regular candidate blob: {path}")
+
+
+def pin_transfers(base: str, candidate: str, prior_caps: dict[str, int],
+                  ceilings: dict[str, int]) -> dict[str, int]:
+    removed = prior_caps.keys() - ceilings.keys()
+    for source in sorted(removed):
+        _, exists = _git_text(REPO_ROOT, candidate, source)
+        if exists:
+            raise ValueError(f"ratcheted hotfile ceiling removed while source remains: {source}")
+    rows = changes(base, candidate)
+    uncertain_targets = {target for code, _, target in rows if code in "ARC"
+        or (code in "MT" and target not in prior_caps
+            and (target.endswith(".rs") or target.startswith("src/")))}
+    candidate_text, exists = _git_text(REPO_ROOT, candidate, "scripts/hotfile_ratchet.toml")
+    if not exists:
+        raise ValueError("candidate hotfile manifest is missing")
+    candidate_caps = parse_cap_table(candidate_text, "hotfile_ratchet")
+    transferred = {}
+    for source in sorted(removed):
+        targets = [target for code, old, target in rows if old == source and code in "RC"]
+        if not targets:
+            if uncertain_targets or ("D", source, source) not in rows:
+                raise ValueError(f"uncertain hotfile retirement or movement: {source}")
+            print(f"OK: retired hotfile: {source} (candidate {candidate}).")
+            continue
+        if len(targets) != 1:
+            raise ValueError(f"ambiguous hotfile movement targets: {source}")
+        target = targets[0]
+        if (target in prior_caps or target in transferred or target not in ceilings
+                or candidate_caps.get(target) != ceilings[target]
+                or ceilings[target] > prior_caps[source]):
+            raise ValueError(f"hotfile movement lacks a frozen pin transfer: {source} -> {target}")
+        regular_blob(base, source)
+        regular_blob(candidate, target)
+        old_text, old_exists = _git_text(REPO_ROOT, base, source)
+        new_text, new_exists = _git_text(REPO_ROOT, candidate, target)
+        if not old_exists or not new_exists or len(new_text.splitlines()) > len(old_text.splitlines()):
+            raise ValueError(f"hotfile transfer grows beyond base measurement: {source} -> {target}")
+        transferred[target] = len(old_text.splitlines())
+        print(f"OK: transferred hotfile: {source} -> {target} (candidate {candidate}).")
+    return transferred
+
+
 def check() -> int:
     ceilings = parse_cap_table(MANIFEST.read_text(encoding="utf-8"), "hotfile_ratchet")
     if not ceilings or any(rel not in ceilings for rel in REQUIRED_HOTFILES):
@@ -56,6 +121,7 @@ def check() -> int:
         print(warning, file=sys.stderr)
     for error in audit.errors:
         print(f"FAIL: {error}", file=sys.stderr)
+    transferred = {}
     if audit.base_sha:
         prior_text, exists = _git_text(REPO_ROOT, audit.base_sha, "scripts/hotfile_ratchet.toml")
         prior_caps = parse_cap_table(prior_text, "hotfile_ratchet") if exists else {}
@@ -66,15 +132,15 @@ def check() -> int:
             if resolved.returncode or not resolved.stdout.strip():
                 raise ValueError("cannot resolve hotfile retirement candidate object")
             candidate_sha = resolved.stdout.strip()
-            for rel in sorted(removed):
-                _, exists = _git_text(REPO_ROOT, candidate_sha, rel)
-                if exists:
-                    raise ValueError(f"ratcheted hotfile ceiling removed while source remains: {rel}")
-                print(f"OK: retired hotfile: {rel} (candidate {candidate_sha}).")
+            transferred = pin_transfers(audit.base_sha, candidate_sha, prior_caps, ceilings)
     for rel, ceiling in sorted(ceilings.items()):
+        if (REPO_ROOT / rel).is_symlink():
+            raise ValueError(f"ratcheted hotfile is a symlink: {rel}")
         current = line_count(REPO_ROOT / rel)
         limit, label = ceiling, "ceiling"
-        if audit.base_sha:
+        if rel in transferred:
+            limit, label = transferred[rel], f"transferred base {audit.base_sha}"
+        elif audit.base_sha:
             prior, exists = _git_text(REPO_ROOT, audit.base_sha, rel)
             if exists:
                 limit, label = len(prior.splitlines()), f"base {audit.base_sha}"

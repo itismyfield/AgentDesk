@@ -23,7 +23,10 @@ while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
     diff_base="$remote_sha"
   fi
 
-  changed=$(git diff --name-only "$diff_base" "$local_sha" -- src scripts/generate_inventory_docs.py scripts/generate_env_reference.py scripts/generate_cli_reference.py)
+  changed=$(git diff --name-only "$diff_base" "$local_sha" -- src \
+    scripts/generate_inventory_docs.py scripts/generate_env_reference.py scripts/generate_cli_reference.py \
+    ARCHITECTURE.md docs/generated/route-inventory.md docs/generated/worker-inventory.md \
+    docs/generated/env-reference.md docs/generated/cli-reference.md)
   if [ -n "$changed" ]; then
     regen_needed=1
     break

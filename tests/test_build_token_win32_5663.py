@@ -199,6 +199,12 @@ class PortableWin32BuildTokenContractTests(unittest.TestCase):
             self.assertEqual(cancelled.closed, [1]); self.assertEqual(cancelled.released, releases)
 @unittest.skipIf(sys.platform == "win32", "YAML wiring runs in the required Script checks lane")
 class Win32BuildTokenWorkflowContractTests(unittest.TestCase):
+    @staticmethod
+    def _job_condition(value):
+        if isinstance(value, str) and value.startswith("${{") and value.endswith("}}"):
+            return value[3:-2].strip()
+        return value
+
     def _assert_workflow_contract(self, text):
         import yaml
         document = yaml.safe_load(text)
@@ -216,8 +222,9 @@ class Win32BuildTokenWorkflowContractTests(unittest.TestCase):
             "tests/test_build_token_win32_5663.py", ".github/workflows/ci-pr.yml",
         ])
         native = jobs["win32_build_token"]
-        self.assertEqual(native["needs"], "changes")
-        self.assertEqual(native["if"], "needs.changes.outputs.win32_build_token == 'true'")
+        needs = native["needs"]
+        self.assertEqual([needs] if isinstance(needs, str) else needs, ["changes"])
+        self.assertEqual(self._job_condition(native["if"]), "needs.changes.outputs.win32_build_token == 'true'")
         self.assertEqual(native["runs-on"], "windows-latest")
         self.assertIs(native.get("continue-on-error", False), False)
         setup = [step for step in native["steps"] if step.get("uses") == "actions/setup-python@v5"]
@@ -238,7 +245,7 @@ class Win32BuildTokenWorkflowContractTests(unittest.TestCase):
         ])
         mirror = jobs["win32_build_token_required_context"]
         self.assertEqual(mirror["needs"], ["changes", "win32_build_token"])
-        self.assertEqual(mirror["if"], "${{ !cancelled() }}")
+        self.assertEqual(self._job_condition(mirror["if"]), "!cancelled()")
         self.assertEqual(mirror["runs-on"], "ubuntu-latest")
         self.assertIs(mirror.get("continue-on-error", False), False)
         execution = [step for step in mirror["steps"] if "run" in step]
@@ -268,6 +275,40 @@ class Win32BuildTokenWorkflowContractTests(unittest.TestCase):
         document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
         document["on"] = document.pop(True)
         self._assert_workflow_contract(yaml.safe_dump(document, indent=4, width=100))
+
+    def test_equivalent_native_needs_and_if_forms_preserve_required_lane_contract(self):
+        import yaml
+        condition = "needs.changes.outputs.win32_build_token == 'true'"
+        for needs in ("changes", ["changes"]):
+            for expression in (condition, "${{ " + condition + " }}"):
+                with self.subTest(needs=needs, expression=expression):
+                    document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+                    document["jobs"]["win32_build_token"].update({"needs": needs, "if": expression})
+                    self._assert_workflow_contract(yaml.safe_dump(document))
+
+    def test_equivalent_mirror_if_forms_preserve_required_lane_contract(self):
+        import yaml
+        for expression in ("!cancelled()", "${{ !cancelled() }}"):
+            with self.subTest(expression=expression):
+                document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+                document["jobs"]["win32_build_token_required_context"]["if"] = expression
+                self._assert_workflow_contract(yaml.safe_dump(document))
+
+    def test_required_lane_condition_semantics_and_dependencies_cannot_change(self):
+        for expression in ("${{ needs.changes.outputs.win32_build_token == 'false' }}",
+                           "needs.changes.outputs.win32_build_token == 'true' || always()",
+                           "${{ needs.changes.outputs.win32_build_token == 'true' }} || true"):
+            with self.subTest(expression=expression):
+                self._reject_workflow_change(lambda jobs: jobs["win32_build_token"].update({"if": expression}))
+        for needs in ([], "other", ["changes", "other"]):
+            with self.subTest(needs=needs):
+                self._reject_workflow_change(lambda jobs: jobs["win32_build_token"].update({"needs": needs}))
+        for expression in ("${{ cancelled() }}", "${{ !cancelled() || always() }}"):
+            with self.subTest(mirror_expression=expression):
+                self._reject_workflow_change(lambda jobs: jobs["win32_build_token_required_context"].update({"if": expression}))
+        for needs in (["changes"], ["win32_build_token"], []):
+            with self.subTest(mirror_needs=needs):
+                self._reject_workflow_change(lambda jobs: jobs["win32_build_token_required_context"].update({"needs": needs}))
 
     def _reject_workflow_change(self, change):
         import yaml

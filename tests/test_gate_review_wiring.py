@@ -12,11 +12,9 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import generate_inventory_docs as inventory
+from check_generated_doc_drift import GENERATED_DOCS as DOCS
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCS = ("ARCHITECTURE.md", "docs/generated/route-inventory.md",
-        "docs/generated/worker-inventory.md", "docs/generated/env-reference.md",
-        "docs/generated/cli-reference.md")
 
 
 class GateReviewWiring(unittest.TestCase):
@@ -232,6 +230,63 @@ pub enum Commands { Fixture }
 
     def test_weekly_real_generators_write_only_five_docs(self):
         self.assert_real_output_scope(weekly=True)
+
+    def test_document_only_push_warns_for_each_generated_path_without_changing_head(self):
+        self.real_generator_fixture(existing_snapshots=True)
+        env = {**os.environ, "PYTHON": sys.executable, "PYTHONDONTWRITEBYTECODE": "1"}
+        for script, args in (("inventory_docs", ["--review-docs-only"]),
+                             ("env_reference", []), ("cli_reference", [])):
+            subprocess.run([sys.executable, f"scripts/generate_{script}.py", *args],
+                           cwd=self.root, env=env, check=True, capture_output=True, text=True)
+        self.git("add", ".")
+        self.git("commit", "-qm", "synchronized generated docs")
+        for path in DOCS:
+            with self.subTest(path=path):
+                base = self.git("rev-parse", "HEAD").stdout.strip()
+                original = (self.root / path).read_bytes()
+                content = original.decode()
+                if path == "ARCHITECTURE.md":
+                    content = content.replace(inventory.ARCHITECTURE_SRC_TREE_START,
+                                              inventory.ARCHITECTURE_SRC_TREE_START + "\nmanual generated drift", 1)
+                else:
+                    content += "\nmanual generated drift\n"
+                self.write(path, content)
+                self.git("add", path)
+                self.git("commit", "-qm", "document-only change")
+                head = self.git("rev-parse", "HEAD").stdout.strip()
+                self.assertEqual(self.git("diff", "--name-only", base, head).stdout.strip(), path)
+                before = self.all_file_bytes()
+                result = subprocess.run(["bash", str(self.root / ".githooks/pre-push")],
+                                        input=f"refs/heads/topic {head} refs/heads/topic {base}\n",
+                                        cwd=self.root, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertIn("::warning", result.stdout)
+                self.assertIn(head, result.stdout)
+                self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), head)
+                self.assertEqual(self.git("diff", "--cached", "--name-only").stdout, "")
+                self.assertEqual((self.root / path).read_bytes(), original)
+                after = self.all_file_bytes()
+                self.assertEqual({name for name in before.keys() | after.keys()
+                                  if before.get(name) != after.get(name)}, {path})
+                self.git("add", path)
+                self.git("commit", "-qm", "generator correction")
+
+    def test_manual_document_only_push_does_not_trigger_generation(self):
+        self.real_generator_fixture(existing_snapshots=True)
+        base = self.git("rev-parse", "HEAD").stdout.strip()
+        self.write("docs/generated/manual.md", "manual document-only change\n")
+        self.git("add", "docs/generated/manual.md")
+        self.git("commit", "-qm", "manual document-only change")
+        head = self.git("rev-parse", "HEAD").stdout.strip()
+        before = self.all_file_bytes()
+        result = subprocess.run(["bash", str(self.root / ".githooks/pre-push")],
+                                input=f"refs/heads/topic {head} refs/heads/topic {base}\n",
+                                cwd=self.root, env={**os.environ, "PYTHON": sys.executable},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("::warning", result.stdout)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), head)
+        self.assertEqual(self.all_file_bytes(), before)
 
 
 if __name__ == "__main__":

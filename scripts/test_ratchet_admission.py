@@ -252,6 +252,191 @@ class HotfileRatchetTest(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertIn("retired hotfile: src/extra.rs", out)
 
+    def moved_extra(self, target="src/renamed.rs", *, text=None, pin=None, copies=()):
+        self.extra_base()
+        self.git("mv", "src/extra.rs", target)
+        if text is not None:
+            (self.root / target).write_text(text)
+        del self.caps["src/extra.rs"]
+        if pin is not None:
+            self.caps[target] = pin
+        for path in copies:
+            self.write_size(path, 100)
+        self.write_caps()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "move extra source")
+        return self.git("diff-tree", "--no-commit-id", "-r", "-M", "-C",
+                        "--find-copies-harder", "--name-status", self.base, "HEAD")
+
+    def test_nonrequired_renamed_source_cannot_retire_pin(self):
+        statuses = self.moved_extra()
+        self.assertIn("R100\tsrc/extra.rs\tsrc/renamed.rs", statuses)
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 1, err)
+
+    def test_case_only_rename_cannot_retire_pin(self):
+        statuses = self.moved_extra(target="src/Extra.rs")
+        self.assertIn("R100\tsrc/extra.rs\tsrc/Extra.rs", statuses)
+        self.assertEqual(self.run_check()[0], 1)
+
+    def test_below_similarity_move_is_uncertain_with_or_without_new_pin(self):
+        statuses = self.moved_extra(text="changed production line\n" * 100)
+        self.assertIn("D\tsrc/extra.rs", statuses)
+        self.assertIn("A\tsrc/renamed.rs", statuses)
+        print("below-similarity diff statuses:\n" + statuses)
+        self.assertEqual(self.run_check()[0], 1)
+        self.caps["src/renamed.rs"] = 100
+        self.write_caps()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "pin uncertain added source")
+        self.assertEqual(self.run_check()[0], 1)
+
+    def test_detected_move_with_target_pin_is_transfer(self):
+        self.moved_extra(pin=100)
+        rc, out, err = self.run_check()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("transferred hotfile: src/extra.rs -> src/renamed.rs", out)
+        self.assertNotIn("retired hotfile: src/extra.rs", out)
+
+    def test_transfer_cannot_raise_old_cap(self):
+        self.moved_extra(pin=101)
+        self.assertEqual(self.run_check()[0], 1)
+
+    def test_transfer_candidate_growth_cannot_be_hidden_by_dirty_shrink(self):
+        self.moved_extra(text="x\n" * 101, pin=100)
+        self.write_size("src/renamed.rs", 100)
+        self.assertEqual(self.run_check()[0], 1)
+
+    def test_movement_query_object_read_failure_is_not_retirement(self):
+        self.moved_extra(text="changed production line\n" * 100)
+        blob = self.git("rev-parse", f"{self.base}:src/extra.rs")
+        loose_blob = self.root / ".git/objects" / blob[:2] / blob[2:]
+        self.assertTrue(loose_blob.is_file())
+        loose_blob.unlink()
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 1, err)
+        self.assertIn("movement query failed", err)
+
+    def test_transfer_retains_old_base_measurement_and_inherited_overage(self):
+        self.extra_base()
+        self.write_size("src/extra.rs", 90)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "smaller comparison base")
+        self.base = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+        self.git("mv", "src/extra.rs", "src/renamed.rs")
+        self.caps["src/renamed.rs"] = self.caps.pop("src/extra.rs")
+        self.write_caps()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "transfer smaller source")
+        self.write_size("src/renamed.rs", 91)
+        self.assertEqual(self.run_check()[0], 1)
+        self.write_size("src/renamed.rs", 90)
+        self.assertEqual(self.run_check()[0], 0)
+
+    def test_detected_move_inherited_cap_overage_stays_frozen(self):
+        self.extra_base()
+        self.write_size("src/extra.rs", 124)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "inherited overage comparison base")
+        self.base = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+        self.git("mv", "src/extra.rs", "src/renamed.rs")
+        self.caps["src/renamed.rs"] = self.caps.pop("src/extra.rs")
+        self.write_caps()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "transfer inherited overage")
+        self.assertEqual(self.run_check()[0], 0)
+        self.write_size("src/renamed.rs", 125)
+        self.assertEqual(self.run_check()[0], 1)
+
+    def test_multiple_indicated_move_targets_are_ambiguous(self):
+        self.moved_extra(pin=100, copies=("src/copied.rs",))
+        self.caps["src/copied.rs"] = 100
+        self.write_caps()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "pin second indicated copy")
+        self.assertEqual(self.run_check()[0], 1)
+
+    def test_uncertain_new_sources_with_new_pin_do_not_infer_mapping(self):
+        self.moved_extra(text="changed production line\n" * 100, pin=100,
+                         copies=("src/also_added.rs",))
+        self.assertEqual(self.run_check()[0], 1)
+
+    def test_below_similarity_overwrite_is_uncertain_with_or_without_new_pin(self):
+        target = self.root / "src/existing.rs"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("existing destination line\n" * 100)
+        self.extra_base()
+        self.remove_extra_pin(commit=False)
+        target.write_text("replaced production line\n" * 100)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "overwrite existing destination")
+        statuses = self.git("diff-tree", "--no-commit-id", "-r", "-M", "-C",
+                            "--find-copies-harder", "--name-status", self.base, "HEAD")
+        self.assertIn("D\tsrc/extra.rs", statuses)
+        self.assertIn("M\tsrc/existing.rs", statuses)
+        print("below-similarity overwrite statuses:\n" + statuses)
+        self.assertEqual(self.run_check()[0], 1)
+        self.caps["src/existing.rs"] = 100
+        self.write_caps()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "pin uncertain overwritten destination")
+        self.assertEqual(self.run_check()[0], 1)
+
+    def test_below_similarity_arbitrary_extension_cannot_retire_pin(self):
+        for target, status in (("src/renamed.inc", "A"), ("src/existing.inc", "M"),
+                               ("generated/renamed.data", "A")):
+            with self.subTest(target=target, status=status):
+                case = HotfileRatchetTest()
+                case.setUp()
+                try:
+                    destination = case.root / target
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if status == "M":
+                        destination.write_text("existing destination line\n" * 100)
+                    case.extra_base()
+                    case.git("mv", "--force", "src/extra.rs", target)
+                    destination.write_text("changed production line\n" * 100)
+                    case.remove_extra_pin(delete_source=False)
+                    statuses = case.git("diff-tree", "--no-commit-id", "-r", "-M", "-C",
+                                        "--find-copies-harder", "--name-status", case.base, "HEAD")
+                    self.assertIn("D\tsrc/extra.rs", statuses)
+                    self.assertIn(status + "\t" + target, statuses)
+                    print("arbitrary-extension movement statuses:\n" + statuses)
+                    self.assertEqual(case.run_check()[0], 1)
+                    case.caps[target] = 100
+                    case.write_caps()
+                    case.git("add", "-A")
+                    case.git("commit", "-qm", "pin uncertain arbitrary-extension target")
+                    self.assertEqual(case.run_check()[0], 1)
+                finally:
+                    case.doCleanups()
+
+    def test_original_path_recreation_blocks_retirement(self):
+        self.extra_base()
+        self.remove_extra_pin(commit=False)
+        self.write_size("src/extra.rs", 1)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "recreate original path")
+        self.assertEqual(self.run_check()[0], 1)
+
+    def test_original_path_symlink_blocks_retirement(self):
+        self.extra_base()
+        self.remove_extra_pin(commit=False)
+        (self.root / "src/extra.rs").symlink_to(self.root / self.grown)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "replace source with symlink")
+        self.assertEqual(self.run_check()[0], 1)
+
+    def test_original_path_submodule_blocks_retirement(self):
+        self.extra_base()
+        self.remove_extra_pin(commit=False)
+        self.git("add", "-A")
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{self.base},src/extra.rs")
+        self.git("commit", "-qm", "replace source with gitlink")
+        self.assertEqual(self.run_check()[0], 1)
+
     def test_required_pin_retirement_is_still_blocked(self):
         self.init_git()
         del self.caps[self.grown]
