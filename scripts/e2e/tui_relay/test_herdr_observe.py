@@ -476,7 +476,9 @@ class HerdrTextClear(unittest.TestCase):
         after = bot(300, "[E2E:AFTER]")
         self.client.wait_for_message.return_value = (after, [after])
 
-    def run_clear(self, *fetches, before=()):
+    def run_clear(self, *fetches, before=(), sent=None):
+        # The send response shape of POST /api/discord/send; the !clear message id bounds its replies.
+        self.client.send.return_value = sent or {"ok": True, "message_id": "160" if before else "101"}
         steps = [*({"wait_for_raw_discord_text": "READY", "timeout_s": 5} for _ in before),
                  {"send_discord_prompt": "!clear [E2E:CLEAR]"}, {"wait_for_raw_discord_text": CLEARED, "timeout_s": 20},
                  {"send_discord_prompt": "Reply with [E2E:AFTER]"}, {"wait_for_discord_text": "[E2E:AFTER]"}]
@@ -524,6 +526,24 @@ class HerdrTextClear(unittest.TestCase):
             result = self.run_clear([bot(102, REFUSED)])
         self.assertEqual(result["status"], "fail", result)
         self.assertIn(f"acknowledgement missing: {CLEARED}", result["reason"])
+
+    def test_clear_replies_are_bounded_by_the_clear_message_id(self):
+        # Last observed 140, an unseen older refusal 149, this clear 150, then its own reply.
+        old, cleared, refused = bot(149, REFUSED), bot(151, CLEARED), bot(152, REFUSED)
+        with_id, no_id = {"ok": True, "message_id": "150"}, {"ok": True}
+        for label, sent, rows, expected, reason in (
+                ("older refusal, then completion", with_id, [old, cleared], "pass", None),
+                ("older refusal, then completion (id key)", {"id": "150"}, [old, cleared], "pass", None),
+                ("this clear refused", with_id, [old, refused], "fail", "refused by the server: " + REFUSED),
+                ("no send id, refusal-like reply", no_id, [old, cleared], "fail", "cannot be attributed"),
+                ("no send id, completion only", no_id, [cleared], "pass", None)):
+            with self.subTest(label=label):
+                self.client.reset_mock()
+                self.client.send_control.return_value = {"id": "100"}
+                result = self.run_clear([bot(140, "READY"), *rows], before=([bot(140, "READY")],), sent=sent)
+                self.assertEqual(result["status"], expected, (label, result))
+                if reason:
+                    self.assertIn(reason, result["reason"])
 
     def test_refusal_prefixes_match_the_server_wording(self):
         # The server answers a refused text !clear with these error strings; keep them in step.

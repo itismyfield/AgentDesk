@@ -64,7 +64,8 @@ Herdr 로 띄운 Claude 채널(P9 대상: adk-dash-cc)의 운영 절차다. 5a�
   `ignored_degraded_reasons_unattributed`는 허용된 사유 중 채널 id(17자리 이상 숫자)가 없거나 provider·전역 카운터 집계인 것이다. 여기 든 사유는 문자열로 대상과 무관함을 보일 수 없었다는 뜻이며, 위 mailbox 확인 기록과 대조한다.
 - 종료 코드 0만으로 수용하지 않는다. **첫 gate는 시나리오별 `status=pass`를 직접 확인해야 한다**. `known_gap`·`unexpected_pass`·`not_applicable`은 gate 통과가 아니다.
 - E-50 smoke judge는 T1·T2·AFTER_CLEAR가 각각 1회이고 detail/CLI 관측이 있어야 통과한다. Herdr에서는 tmux 로그·legacy queue 파일을 읽지 않는다.
-- E-50의 텍스트 `!clear`가 거부되면(`세션을 초기화하지 못했어요: <사유>`, 예: `rotation_unsettled(59)`) 확인 제한시간을 기다리지 않고 그 사유와 함께 바로 실패한다. 거부 답장을 보내지 않는 서버에서는 지금처럼 확인 제한시간 실패다.
+- E-50의 텍스트 `!clear` 뒤에 지원하는 거부 접두사(`세션을 초기화하지 못했어요:`, `세션 전환 중이라 초기화하지 못했어요`)의 답장을 관측하면 완료 대기를 중단하고 그 사유와 함께 실패한다(예: `rotation_unsettled(59)`). 다른 문구나 무응답은 기존 확인 제한시간 실패다.
+  답장은 `!clear` 송신 응답의 message id 뒤 것만 본다. 송신 응답에 id가 없으면 거부 형태의 답장을 귀속할 수 없어 측정 실패로 끝난다.
 - 재시작(E-8/19)·stop(E-18)·terminate(E-12)·E-35/36 원래 수용 기준은 이 첫 gate 밖이다.
 - 공유 운영 dcserver에는 `--herdr-isolated-server`를 쓰지 않는다. 재시작은 운영자가 수행하고 하네스는 아래 두 관측만 담당한다.
 - mark·verify도 실행마다 고유한 `--output`을 준다. gate 출력 디렉터리를 쓰면 gate의 `report.claude-herdr.json`을 덮어쓴다.
