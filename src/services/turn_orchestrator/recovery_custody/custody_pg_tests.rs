@@ -438,6 +438,29 @@ async fn s3act_b3b4a1_l01_legacy_needs_no_home_and_read_errors_never_mean_unmana
         .await
         .unwrap();
     assert_eq!(fx.raw(&broken).await, None);
+    // So is a home row this build cannot decode, which fails without aborting the transaction.
+    let undecodable = channel(16);
+    sqlx::query("ALTER TABLE o_channel_homes DROP CONSTRAINT o_channel_homes_state_check")
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO o_channel_homes (channel_id, provider, state, target, epoch)
+         VALUES ($1, 'claude', 'moved', 'node-b', 43)",
+    )
+    .bind(&undecodable)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let failed = fx
+        .custody
+        .reserve(
+            fx.admit(&undecodable).await,
+            legacy(&undecodable, seal("q1", None, None)),
+        )
+        .await;
+    assert!(matches!(failed, Err(CustodyError::Store(_))), "{failed:?}");
+    assert_eq!(fx.raw(&undecodable).await, None);
     // A failed custody read is an error too, never an absent row.
     sqlx::query("ALTER TABLE channel_recovery_custody RENAME TO custody_away")
         .execute(&fx.pool)
