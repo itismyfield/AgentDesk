@@ -40613,6 +40613,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/tui_o/repost/projection_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:8bd960ec606a72eddb2c23288b8c85092bf3e6ce9822c5271aa8f7df29c3cb3a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/tui_o/repost/runner.rs",
       "api": "sqlx::query",
       "symbol": "query",

@@ -2293,6 +2293,7 @@ services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_fo
 services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_home_body_before_first_decision_preserves_reservation
 services::tui_o::writer::tests::actor::host_start::late_delegated::late_adopt_off_foreign_standby_legacy_body_releases_before_host_can_adopt
 services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_dormant_host_positive_controls_pg
+services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_legacy_ledger_receipt_overlay_is_read_only_pg
 services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipt_overlay_judges_the_recovered_writer_pg
 services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipted_approval_is_never_owed_pg
 services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_remote_receipt_overrides_local_serial_pg

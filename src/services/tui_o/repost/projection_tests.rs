@@ -16,10 +16,15 @@ use crate::services::tui_o::repost::o_piece_delivery::{
     self, AdmitOutcome, AdmittedBy, NewDelivery, Receipt, ReceiptMethod, ReceiptOutcome,
 };
 use crate::services::tui_o::repost::projection::ReceiptOverlay;
-use crate::services::tui_o::repost::runner::{ChannelTurn, Runner};
+use crate::services::tui_o::repost::runner::{ChannelTurn, Runner, TurnWriter};
 use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::store::ledger::PieceDisposition;
-use crate::services::tui_o::writer::host::FencedFacts;
+use crate::services::tui_o::writer::host::{FencedFacts, start_managed};
+use std::sync::atomic::AtomicBool;
+
+#[path = "pg_statements_tests.rs"]
+mod pg_statements;
+use pg_statements::{Statements, observed_pool};
 
 const PAYLOAD: &str = "receipted payload";
 const BLOCKED: WriterAlarm = WriterAlarm::Blocked { status: 403 };
@@ -136,6 +141,34 @@ fn unreachable_pool() -> PgPool {
         .acquire_timeout(std::time::Duration::from_millis(200))
         .connect_lazy("postgres://agentdesk@127.0.0.1:1/none")
         .unwrap()
+}
+
+/// A pool whose re-post statements are recorded once armed, beside the fixture's own pool.
+struct Observed {
+    pool: PgPool,
+    statements: Arc<Statements>,
+}
+
+impl Observed {
+    async fn over(db: &TestPostgresDb) -> Self {
+        let (pool, statements, _proxy) = observed_pool(&db.database_url).await;
+        Self { pool, statements }
+    }
+
+    fn unreachable() -> Self {
+        let statements = Arc::default();
+        let pool = unreachable_pool();
+        Self { pool, statements }
+    }
+
+    /// The startup receipt reads recorded since the last arm, told apart from other re-post SQL.
+    fn receipt_reads(&self) -> usize {
+        let read = [
+            "FROM o_piece_delivery d WHERE",
+            "FROM o_piece_receipts r WHERE",
+        ];
+        self.statements.matching(&read)
+    }
 }
 
 /// Polls in real time until `done` or about ten seconds.
@@ -357,12 +390,39 @@ async fn d4d_receipted_approval_is_never_owed_pg() {
     db.drop().await;
 }
 
-/// The test host with the production re-post turn over a real pool.
+/// The test host with the production re-post turn over a real pool; `held` holds its receipt
+/// read until released.
 struct ReceiptIo {
     base: Arc<TestIo>,
     pool: PgPool,
     repost: RepostConfig,
     root: PathBuf,
+    held: Option<(Arc<AtomicBool>, watch::Receiver<bool>)>,
+}
+
+/// The production turn whose receipt read, once begun, waits for its release.
+struct HeldRead {
+    turn: ChannelTurn<RepostHttp>,
+    entered: Arc<AtomicBool>,
+    release: watch::Receiver<bool>,
+}
+
+impl<W: TurnWriter> RepostHook<W> for HeldRead {
+    fn turn<'a>(&'a mut self, writer: &'a mut W) -> Turned<'a, ()> {
+        <ChannelTurn<RepostHttp> as RepostHook<W>>::turn(&mut self.turn, writer)
+    }
+
+    fn original(&mut self, serial: u64, record: PieceRecord) -> Turned<'_, OriginalGate> {
+        <ChannelTurn<RepostHttp> as RepostHook<W>>::original(&mut self.turn, serial, record)
+    }
+
+    fn receipts(&mut self) -> Turned<'_, ReceiptOverlay> {
+        Box::pin(async move {
+            self.entered.store(true, Ordering::SeqCst);
+            let _ = self.release.wait_for(|released| *released).await;
+            <ChannelTurn<RepostHttp> as RepostHook<W>>::receipts(&mut self.turn).await
+        })
+    }
 }
 
 impl HostIo for ReceiptIo {
@@ -411,7 +471,14 @@ impl HostIo for ReceiptIo {
     }
     fn repost(&self, _: u64, _: &Arc<FakePort>) -> Option<RepostTurn<Self>> {
         let turn = receipt_turn(&self.root, self.pool.clone(), self.repost.clone());
-        Some(Box::new(turn))
+        let Some((entered, release)) = self.held.clone() else {
+            return Some(Box::new(turn));
+        };
+        Some(Box::new(HeldRead {
+            turn,
+            entered,
+            release,
+        }))
     }
 }
 
@@ -419,25 +486,31 @@ impl HostIo for ReceiptIo {
 /// local serial and whether the approval at serial 0 was consumed.
 type Hosted = (Vec<String>, bool, u64, Option<Option<u64>>);
 
-/// Hosts the switched-over channel through `start` with the real re-post turn, appends the row
-/// `out` once the actor is ready or stopped, and reports what that start came to.
+/// The switched-over channel's startup binding, logged where the host reads it.
+fn log_startup(harness: &Harness, source: &SourceId) {
+    let startup = p5_event(CHANNEL, "claude", p5::BindingTarget::Source(source.clone()));
+    p5_log(harness._runtime.path(), CHANNEL, &startup);
+    p5::set_test_root(Some(harness._runtime.path()));
+}
+
+/// Starts the channel's host with the real turn over `pg`, recording from just before `start`;
+/// appends the row `out` once the actor is ready or stopped and reports what that start came to.
 async fn host_receipts(
     harness: &Harness,
     path: &Path,
     source: &SourceId,
-    pool: PgPool,
+    pg: &Observed,
     repost: RepostConfig,
     out: &str,
 ) -> Hosted {
-    let startup = p5_event(CHANNEL, "claude", p5::BindingTarget::Source(source.clone()));
-    p5_log(harness._runtime.path(), CHANNEL, &startup);
-    p5::set_test_root(Some(harness._runtime.path()));
+    log_startup(harness, source);
     let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
     let io = Arc::new(ReceiptIo {
         base: TestIo::over(harness),
-        pool,
+        pool: pg.pool.clone(),
         repost,
         root: root(harness),
+        held: None,
     });
     let ready = Arc::new(Readiness::default());
     let parts = || HostParts {
@@ -446,6 +519,7 @@ async fn host_receipts(
         gate: Arc::clone(&harness.gate),
         readiness: Arc::clone(&ready),
     };
+    pg.statements.reset();
     let tasks = start(ShadowProvider::Claude, true, parts);
     let stopped = || io.base.alarms.has(CHANNEL, &BLOCKED);
     until(|| ready.is_ready(CHANNEL) || stopped()).await;
@@ -478,7 +552,8 @@ async fn d4d_shared_receipt_settles_local_authorized_pg() {
         .unwrap()
         .push_back(Reply::Refused(403));
     let on = || repost_config(true, &[CHANNEL]);
-    let first = host_receipts(&harness, &path, &source, pool.clone(), on(), "first").await;
+    let pg = Observed::over(&db).await;
+    let first = host_receipts(&harness, &path, &source, &pg, on(), "first").await;
     assert_eq!((first.0, first.1), (vec!["first".to_owned()], true));
     let refused = harness.channel().ledger().piece(0).unwrap().clone();
     let resume = harness
@@ -491,7 +566,8 @@ async fn d4d_shared_receipt_settles_local_authorized_pg() {
     };
     shared(&pool, &refused.unit_key.native_key, elsewhere, 5_001).await;
     let before = std::fs::read(ledger_path(&harness)).unwrap();
-    let hosted = host_receipts(&harness, &path, &source, pool.clone(), on(), "after").await;
+    let hosted = host_receipts(&harness, &path, &source, &pg, on(), "after").await;
+    assert!(pg.receipt_reads() >= 1, "the restart read the receipt");
     let posts = vec!["first".to_owned(), "after".to_owned()];
     let expected = (posts, false, 2, Some(None));
     assert_eq!(
@@ -520,18 +596,18 @@ async fn d4d_startup_blocked_reconciles_before_actor_pg() {
     };
     shared(&pool, "d4d-unreceipted", none, 0).await;
     let cases = [
-        ("d4d-unreceipted", pool.clone()),
-        ("d4d-receipted", unreachable_pool()),
-        ("d4d-receipted", pool.clone()),
+        ("d4d-unreceipted", Observed::over(&db).await),
+        ("d4d-receipted", Observed::unreachable()),
+        ("d4d-receipted", Observed::over(&db).await),
     ];
     let mut observed = Vec::new();
-    for (native, pool) in cases {
+    for (native, pg) in cases {
         let (harness, path, source) = switched_over(b"");
         seed_rejection(&harness, native, 0, false);
         harness.gate.acquired();
         let on = repost_config(true, &[CHANNEL]);
         let (posts, stopped, next, _) =
-            host_receipts(&harness, &path, &source, pool, on, "after").await;
+            host_receipts(&harness, &path, &source, &pg, on, "after").await;
         observed.push((native, posts, stopped, next));
     }
     let after = || vec!["after".to_owned()];
@@ -560,7 +636,8 @@ async fn d4d_remote_receipt_overrides_local_serial_pg() {
         .unwrap()
         .push_back(Reply::Refused(403));
     let on = || repost_config(true, &[CHANNEL]);
-    let first = host_receipts(&harness, &path, &source, pool.clone(), on(), "first").await;
+    let pg = Observed::over(&db).await;
+    let first = host_receipts(&harness, &path, &source, &pg, on(), "first").await;
     let refused = harness.channel().ledger().piece(0).unwrap().clone();
     assert_eq!(refused.outcome, Some(PieceOutcome::Rejected(403)));
     let at_b = Shared {
@@ -568,7 +645,7 @@ async fn d4d_remote_receipt_overrides_local_serial_pg() {
         ..RECEIPTED
     };
     shared(&pool, &refused.unit_key.native_key, at_b, 5_003).await;
-    let restarted = host_receipts(&harness, &path, &source, pool.clone(), on(), "after").await;
+    let restarted = host_receipts(&harness, &path, &source, &pg, on(), "after").await;
     let observed = [(first.0, first.1), (restarted.0, restarted.1)];
     let both = vec!["first".to_owned(), "after".to_owned()];
     let expected = [(vec!["first".to_owned()], true), (both, false)];
@@ -580,35 +657,201 @@ async fn d4d_remote_receipt_overrides_local_serial_pg() {
     db.drop().await;
 }
 
-/// Off, an empty allowlist and an unlisted channel keep the approval's one POST and the fresh
-/// original's one POST over a receipted piece; only the listed channel reads the receipt.
+/// Default, off, empty and unlisted run no re-post SQL or sidecar from the start on and keep both
+/// POSTs over a receipted piece; only the listed channel reads the receipt and settles the approval.
 #[tokio::test]
 async fn d4d_dormant_host_positive_controls_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     shared(&pool, "d4d-dormant", RECEIPTED, 5_004).await;
+    let pg = Observed::over(&db).await;
+    assert_eq!(RepostConfig::default(), repost_config(false, &[]));
     let cases = [
+        ("default", RepostConfig::default()),
         ("off", repost_config(false, &[CHANNEL])),
         ("empty", repost_config(true, &[])),
         ("unlisted", repost_config(true, &[OTHER])),
         ("listed", repost_config(true, &[CHANNEL])),
     ];
+    let rows = repost_rows(&pool).await;
     let mut observed = Vec::new();
     for (case, repost) in cases {
         let (harness, path, source) = switched_over(b"");
         seed_rejection(&harness, "d4d-dormant", 0, true);
         harness.gate.acquired();
-        let hosted = host_receipts(&harness, &path, &source, pool.clone(), repost, "after").await;
-        observed.push((case, hosted));
+        let hosted = host_receipts(&harness, &path, &source, &pg, repost, "after").await;
+        let sidecar = root(&harness).join("repost").exists();
+        let quiet = pg.statements.count() == 0 && !sidecar;
+        let kept = repost_rows(&pool).await == rows;
+        observed.push((case, hosted, quiet, pg.receipt_reads() >= 1, kept));
     }
-    let sent = || vec![PAYLOAD.to_owned(), "after".to_owned()];
+    let sent = || {
+        (
+            vec![PAYLOAD.to_owned(), "after".to_owned()],
+            false,
+            3,
+            Some(Some(1)),
+        )
+    };
+    let settled = (vec!["after".to_owned()], false, 2, Some(None));
     let expected = [
-        ("off", (sent(), false, 3, Some(Some(1)))),
-        ("empty", (sent(), false, 3, Some(Some(1)))),
-        ("unlisted", (sent(), false, 3, Some(Some(1)))),
-        ("listed", (vec!["after".to_owned()], false, 2, Some(None))),
+        ("default", sent(), true, false, true),
+        ("off", sent(), true, false, true),
+        ("empty", sent(), true, false, true),
+        ("unlisted", sent(), true, false, true),
+        ("listed", settled, false, true, true),
     ];
     assert_eq!(observed, expected);
     pool.close().await;
     db.drop().await;
+}
+
+/// A ledger an earlier build wrote: `d4d-legacy` refused 403, then approved by an operator.
+const LEGACY_LEDGER: [&str; 3] = [
+    r#"{"at":"2026-09-01T00:00:00Z","entry":{"type":"prepared","serial":0,"unit_key":{"channel_id":7,"provider":"claude","native_key":"d4d-legacy","kind":"body"},"piece_index":0,"payload":"receipted payload","anchor_id":100,"epoch":1}}"#,
+    r#"{"at":"2026-09-01T00:00:01Z","entry":{"type":"rejected","serial":0,"status":403}}"#,
+    r#"{"at":"2026-09-01T00:05:00Z","entry":{"type":"operator_resume","rejected_serial":0,"approval_id":"6325d408-0000-4000-8000-000000000008","operator":"operator","reason":"legacy approval","at":"2026-09-01T00:05:00Z"}}"#,
+];
+
+/// Every re-post row PostgreSQL holds, as text, in a stable order.
+async fn repost_rows(pool: &PgPool) -> Vec<String> {
+    let sql = "SELECT 'attempt ' || to_jsonb(attempt)::text FROM o_piece_attempts attempt \
+               UNION ALL SELECT 'receipt ' || to_jsonb(receipt)::text FROM o_piece_receipts receipt \
+               UNION ALL SELECT 'delivery ' || to_jsonb(delivery)::text \
+               FROM o_piece_delivery delivery ORDER BY 1";
+    sqlx::query_scalar(sql).fetch_all(pool).await.unwrap()
+}
+
+/// The channel's ledger bytes, its approval at serial 0 and the shared re-post rows.
+async fn persisted(harness: &Harness, pool: &PgPool) -> (Vec<u8>, String, Vec<String>) {
+    let ledger = std::fs::read(ledger_path(harness)).unwrap();
+    let approval = format!("{:?}", harness.channel().ledger().approval(0));
+    (ledger, approval, repost_rows(pool).await)
+}
+
+/// A legacy ledger's receipted approval: building the hosted writer writes nothing local or shared,
+/// fresh output appends only its own piece, and a restart reads the receipt again.
+#[tokio::test]
+async fn d4d_legacy_ledger_receipt_overlay_is_read_only_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    shared(&pool, "d4d-legacy", RECEIPTED, 5_005).await;
+    let (harness, path, source) = switched_over(b"");
+    let mut legacy = LEGACY_LEDGER.join("\n");
+    legacy.push('\n');
+    append(&ledger_path(&harness), legacy.as_bytes());
+    harness.gate.acquired();
+    let pg = Observed::over(&db).await;
+    let on = || repost_config(true, &[CHANNEL]);
+
+    let store = harness.channel();
+    let before = persisted(&harness, &pool).await;
+    pg.statements.reset();
+    let hook = receipt_turn(harness._runtime.path(), pg.pool.clone(), on());
+    let hook: Box<dyn RepostHook<Writer>> = Box::new(hook);
+    let (gate, port) = (Arc::clone(&harness.gate), Arc::clone(&harness.port));
+    let (lease, alarms) = (Arc::clone(&harness.lease), harness.alarms.clone());
+    let writer = ChannelWriter::hosted(store, gate, port, lease, alarms, Some(hook)).await;
+    let applied = (writer.stop_cause().is_none(), writer.resume_pieces().len());
+    drop(writer);
+    let read = pg.receipt_reads();
+    let after = persisted(&harness, &pool).await;
+    assert_eq!((applied, read >= 1), ((true, 0), true));
+    let unchanged = (
+        after.0 == before.0,
+        after.1 == before.1,
+        after.2 == before.2,
+    );
+    assert_eq!(
+        unchanged,
+        (true, true, true),
+        "ledger bytes, approval, shared rows"
+    );
+
+    let fresh = host_receipts(&harness, &path, &source, &pg, on(), "fresh").await;
+    let (ledger, approval, rows) = persisted(&harness, &pool).await;
+    assert_eq!(fresh, (vec!["fresh".to_owned()], false, 2, Some(None)));
+    let appended = ledger.strip_prefix(before.0.as_slice()).unwrap();
+    let serials: Vec<_> = String::from_utf8_lossy(appended)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .map(|line| {
+            (
+                line["entry"]["type"].clone(),
+                line["entry"]["serial"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        serials,
+        [("prepared".into(), 1.into()), ("posted".into(), 1.into())],
+        "fresh output appends only its own piece"
+    );
+    assert_eq!((approval, rows), (before.1.clone(), before.2.clone()));
+
+    let again = host_receipts(&harness, &path, &source, &pg, on(), "again").await;
+    let posts = vec!["fresh".to_owned(), "again".to_owned()];
+    let restarted = (again, pg.receipt_reads() >= 1);
+    assert_eq!(restarted, ((posts, false, 3, Some(None)), true));
+    assert_eq!(repost_rows(&pool).await, before.2);
+    pool.close().await;
+    db.drop().await;
+}
+
+/// A stop while the receipt read is held ends the managed host before any actor exists: it joins
+/// before the read is released, frees its claim, and the approved retry is never sent.
+#[tokio::test]
+async fn d4d_stop_during_receipt_read_starts_no_actor() {
+    let (harness, _, source) = switched_over(b"");
+    seed_rejection(&harness, "d4d-held", 0, true);
+    harness.gate.acquired();
+    log_startup(&harness, &source);
+    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let (release, held) = watch::channel(false);
+    let entered = Arc::new(AtomicBool::new(false));
+    let io = Arc::new(ReceiptIo {
+        base: TestIo::over(&harness),
+        pool: unreachable_pool(),
+        repost: repost_config(true, &[CHANNEL]),
+        root: root(&harness),
+        held: Some((Arc::clone(&entered), held)),
+    });
+    let ready = Arc::new(Readiness::default());
+    let parts = || HostParts {
+        io: Arc::clone(&io),
+        runtime_root: Some(root(&harness)),
+        gate: Arc::clone(&harness.gate),
+        readiness: Arc::clone(&ready),
+    };
+    let owned = cutover::boot_ownership();
+    let mut writers = start_managed(ShadowProvider::Claude, true, owned, parts);
+    assert_eq!(writers.len(), 1);
+    until(|| entered.load(Ordering::SeqCst)).await;
+    let read_began = entered.load(Ordering::SeqCst);
+    let stopping = writers.pop().unwrap().stop_and_join();
+    let bounded = std::time::Duration::from_secs(5);
+    let joined = matches!(tokio::time::timeout(bounded, stopping).await, Ok(Ok(_)));
+    let left = (
+        ready.is_ready(CHANNEL),
+        ready.is_hosted(CHANNEL),
+        ready.accepts(CHANNEL),
+    );
+    let held_posts = harness.port.posts();
+    release.send_replace(true);
+    until(|| !ready.is_hosted(CHANNEL)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let next = harness.channel().ledger().next_serial();
+    let observed = (
+        read_began,
+        joined,
+        left,
+        held_posts,
+        harness.port.posts(),
+        next,
+    );
+    let expected = (true, true, (false, false, false), vec![], vec![], 1);
+    assert_eq!(
+        observed, expected,
+        "the stop ended the start before any actor"
+    );
 }
