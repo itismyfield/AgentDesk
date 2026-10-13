@@ -18,6 +18,15 @@ from tui_relay import assertions  # noqa: E402
 
 
 class MatrixConfig(unittest.TestCase):
+    def test_feature_accounting_keeps_partial_coverage_out_of_pass(self):
+        for totals, expected in (({"pass": 1, "skipped_assertions": 2}, "partial"),
+                                 ({"dormant": 3}, "partial"),
+                                 ({"pass": 1, "unevaluable": 1}, "fail"),
+                                 ({"pass": 1, "skipped_assertions": 0}, "pass"),
+                                 ({"pass": 1}, "pass")):
+            with self.subTest(totals=totals):
+                self.assertEqual(matrix.evidence_status(totals), expected)
+
     def test_load_channel_ids_from_agentdesk_yaml_shape(self):
         yaml = """
 agents:

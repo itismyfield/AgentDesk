@@ -25,7 +25,10 @@ mod legacy_selection;
 mod parser;
 pub(crate) mod provenance;
 
-pub use legacy_selection::{latest_rollout_for_cwd_since, latest_unclaimed_rollout_for_cwd_since};
+pub use legacy_selection::{
+    latest_rollout_for_cwd_since, latest_unclaimed_rollout_for_cwd_since,
+    rollout_candidates_for_cwd_since,
+};
 use legacy_selection::{wait_for_latest_rollout_for_cwd, wait_for_resumed_rollout_for_session};
 #[cfg(unix)]
 pub(crate) use provenance::{submitted_native_span, tail_closed_episode};
