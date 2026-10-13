@@ -6,7 +6,8 @@ use tokio::sync::oneshot;
 
 use super::{
     ChannelMailboxHandle, ChannelMailboxMsg, ClearChannelResult, HydratePendingQueueResult,
-    Intervention, MailboxUnreachable, QueuePersistenceContext, TakeNextSoftResult,
+    Intervention, MailboxUnreachable, QueuePersistenceContext, TakeHeadCondition,
+    TakeNextSoftResult,
 };
 
 /// Why the actor did not carry out a request.
@@ -62,10 +63,12 @@ impl ChannelMailboxHandle {
         &self,
         persistence: QueuePersistenceContext,
         primary_message_id: Option<MessageId>,
+        head_condition: TakeHeadCondition,
     ) -> Result<TakeNextSoftResult, MailboxRefusal> {
         self.request_verdict(|reply| ChannelMailboxMsg::TakeNextSoft {
             persistence,
             primary_message_id,
+            head_condition,
             reply,
         })
         .await

@@ -17,6 +17,9 @@ use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
 use crate::services::tui_o::store::{ChannelStore, InitSource, Initialized, OStore, StoreConfig};
+use crate::services::tui_o::writer::binding::{
+    BindingCause, BindingEvidence, BindingRecord, BindingTarget,
+};
 use crate::services::tui_o::writer::deliver::{self, ChannelWriter, Step};
 use crate::services::tui_o::writer::host::test_io::Alarms;
 use crate::services::tui_o::writer::host::{self, HostIo};
@@ -34,12 +37,17 @@ fn epoch_of(env: &Env) -> i64 {
 /// The parent's side of every reclaiming case: a worker home on MINI, the node's scenario, and
 /// the gateway's reclaim once the node says its responsibility is in place.
 async fn reclaim_while(scenario: &str, within: Duration) -> (Scene, i64) {
-    reclaim_after(None, scenario, within).await
+    reclaim_after(Scene::new().await, None, scenario, within).await
 }
 
-/// As [`reclaim_while`], after `seed` ran to its end as an earlier generation on MINI's root.
-async fn reclaim_after(seed: Option<&str>, scenario: &str, within: Duration) -> (Scene, i64) {
-    let scene = Scene::new().await;
+/// As [`reclaim_while`] on `scene`, after `seed` ran to its end as an earlier generation on
+/// MINI's root.
+async fn reclaim_after(
+    scene: Scene,
+    seed: Option<&str>,
+    scenario: &str,
+    within: Duration,
+) -> (Scene, i64) {
     let epoch = scene.worker_home().await;
     put(scene.dir(), "epoch", epoch);
     if let Some(seed) = seed {
@@ -50,7 +58,7 @@ async fn reclaim_after(seed: Option<&str>, scenario: &str, within: Duration) -> 
     let channel = C.to_string();
     applied(o_channel_homes::begin_reclaim(&scene.pool, &channel, epoch, GW).await);
     // The gateway's router takes nothing new for the channel while it drains.
-    let routed = route(&scene.pool, GW, "2001").await;
+    let routed = route_as(&scene.pool, GW, scene.provider, "2001").await;
     assert!(
         matches!(routed, IntakeRouterDecision::Blocked { .. }),
         "{routed:?}"
@@ -374,8 +382,8 @@ fn activated_store(root: &Path) -> (OStore, ChannelStore) {
 /// source settles it as Posted from the history Discord kept, with no new POST, and only then leaves.
 #[tokio::test(flavor = "current_thread")]
 async fn th7_prepared_alone_blocks_reclaim_pg() {
-    let seed = Some("th7_prepared_seed");
-    let (scene, _) = reclaim_after(seed, "th7_prepared", Duration::from_secs(180)).await;
+    let (scene, seed) = (Scene::new().await, Some("th7_prepared_seed"));
+    let (scene, _) = reclaim_after(scene, seed, "th7_prepared", Duration::from_secs(180)).await;
     let history = std::fs::read_to_string(scene.dir().join(HISTORY)).unwrap();
     let lines: Vec<&str> = history.lines().collect();
     assert_eq!(lines.len(), 1, "Discord accepted no POST after the restart");
@@ -466,6 +474,230 @@ pub(super) async fn prepared_node(env: &Env) {
         "no POST after the restart"
     );
     assert_eq!(node.discord().seen(), Vec::<Seen>::new());
+    node.stop().await;
+}
+
+/// The Codex rollout line announcing `msg_c1` before its text is written, and the one sealing it.
+const ANNOUNCED: &str = r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"msg_c1"}}}"#;
+const SEALED: &str = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_c1","content":[{"type":"output_text","text":"hello"}]}}"#;
+
+/// T-H7 Codex unsealed alone: an announced, unsealed Codex message keeps the reclaim draining;
+/// once it seals, the real actor posts it once and only then the row leaves.
+#[tokio::test(flavor = "current_thread")]
+async fn th7_codex_unsealed_alone_blocks_reclaim_pg() {
+    let scene = Scene::for_provider(ShadowProvider::Codex).await;
+    let (scene, _) = reclaim_after(scene, None, "th7_unsealed", Duration::from_secs(180)).await;
+    let root = scene.dir().join(format!("root-{MINI}"));
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root);
+    let store = store.unwrap().unwrap();
+    let era = store.read_era().unwrap().unwrap();
+    let channel = store.open_channel(&era, C).unwrap().unwrap();
+    let unit = UnitKey {
+        channel_id: C,
+        provider: ShadowProvider::Codex,
+        native_key: "msg_c1".into(),
+        kind: UnitKind::Body,
+    };
+    let (_, piece) = channel
+        .ledger()
+        .latest_piece(&unit, 0)
+        .expect("the sealed piece");
+    let accepted: u64 = get(scene.dir(), "hello_id").unwrap().parse().unwrap();
+    assert_eq!(piece.outcome, Some(PieceOutcome::Posted(accepted)));
+    scene.drop_db().await;
+}
+
+pub(super) async fn unsealed_node(env: &Env) {
+    let epoch = epoch_of(env);
+    let node = Booted::boot_as(env, ShadowProvider::Codex).await;
+    until("the lease opens the home", WITHIN, || {
+        node.home_epoch() == Some(epoch)
+    })
+    .await;
+    until("the writer takes work", WITHIN, || node.accepts()).await;
+    append(&node.transcript, format!("{ANNOUNCED}\n").as_bytes());
+    // Captured through the file's end: a cursor fact the unsealed count does not feed.
+    let captured = || async { node.owed().await.is_some_and(|owed| owed.uncaptured == 0) };
+    until_async("the actor captured the announcement", WITHIN, captured).await;
+    signal(&env.dir, "owed_seen");
+    wait_signal(&env.dir, "reclaim_begun", WITHIN).await;
+    let gate = node.gate().expect("registered");
+    let ran = || node.drain_blocker().is_some() || gate.final_closed(epoch);
+    until("the drain runs a round", WITHIN, ran).await;
+    tokio::time::sleep(TWO_ROUNDS).await;
+    let (blocker, running) = (node.drain_blocker(), deliver::posts_in_flight(C));
+    let owed = node.owed().await;
+    assert_eq!(
+        node.state().await,
+        Some(HomeState::Reclaiming),
+        "the row left while the message was unsealed: blocker {blocker:?}, projection {owed:?}, \
+         in flight {running:?}"
+    );
+    let alone = Owed {
+        unsealed: 1,
+        ..Owed::default()
+    };
+    assert_eq!(
+        owed,
+        Some(alone),
+        "the unsealed message is the only responsibility"
+    );
+    assert_eq!(blocker.as_deref(), Some("owed"));
+    assert_eq!(running, Some(0));
+    assert_eq!(
+        node.discord().seen(),
+        Vec::<Seen>::new(),
+        "nothing posted before the seal"
+    );
+    append(&node.transcript, format!("{SEALED}\n").as_bytes());
+    node.until_posts(&["hello"]).await;
+    let clear = || async { node.owed().await == Some(Owed::default()) };
+    until_async("the sealed message is delivered", WITHIN, clear).await;
+    until_left(&node).await;
+    let posted = node.discord().history_after(C, 0).await.unwrap();
+    assert_eq!(posted.len(), 1);
+    put(&env.dir, "hello_id", posted[0].id);
+    let started = Seen::Started {
+        content: "hello".into(),
+        home_epoch: Some(epoch),
+    };
+    let once = [
+        started,
+        Seen::Accepted("hello".into()),
+        Seen::Ended("hello".into()),
+    ];
+    assert_eq!(node.discord().seen(), once);
+    node.stop().await;
+}
+
+/// T-H7 pending bind alone: a Clear bind whose transcript does not exist yet keeps the reclaim
+/// draining; once it resolves to a file with a row, the real actor posts that row once and leaves.
+#[tokio::test(flavor = "current_thread")]
+async fn th7_pending_bind_alone_blocks_reclaim_pg() {
+    let (scene, _) = reclaim_while("th7_binding", Duration::from_secs(180)).await;
+    let root = scene.dir().join(format!("root-{MINI}"));
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root);
+    let store = store.unwrap().unwrap();
+    let era = store.read_era().unwrap().unwrap();
+    let channel = store.open_channel(&era, C).unwrap().unwrap();
+    let unit = UnitKey {
+        channel_id: C,
+        provider: ShadowProvider::Claude,
+        native_key: "n1:0".into(),
+        kind: UnitKind::Body,
+    };
+    let (_, piece) = channel
+        .ledger()
+        .latest_piece(&unit, 0)
+        .expect("the bound source's piece");
+    let accepted: u64 = get(scene.dir(), "bound_id").unwrap().parse().unwrap();
+    assert_eq!(piece.outcome, Some(PieceOutcome::Posted(accepted)));
+    scene.drop_db().await;
+}
+
+pub(super) async fn binding_node(env: &Env) {
+    let (node, epoch) = holder_with_baseline(env).await;
+    let clear = || async { node.owed().await == Some(Owed::default()) };
+    until_async("the baseline source is drained", WITHIN, clear).await;
+    let log = node.host.bindings(C, ShadowProvider::Claude);
+    let BindingRecord::Bound {
+        new: BindingTarget::Source(first),
+        ..
+    } = log.first().record
+    else {
+        panic!("seq 1 binds the baseline source");
+    };
+    let path = node.root.join("s2.jsonl");
+    assert!(
+        !path.exists(),
+        "the cleared session's transcript is not written yet"
+    );
+    let evidence = BindingEvidence {
+        hook_event: "SessionStart".into(),
+        received_at: chrono::Utc::now(),
+        reclaims: false,
+    };
+    let pending = BindingTarget::Pending {
+        payload_session_id: "s2".into(),
+        payload_transcript_path: path.clone(),
+    };
+    let bound = BindingRecord::Bound {
+        old: Some(first),
+        new: pending,
+        cause: BindingCause::Clear,
+        parent_hint: None,
+        evidence,
+    };
+    assert_eq!(log.commit(bound), 2);
+    // A read of the log returned seq 2: a fact the projection's pending count does not feed.
+    until("the actor read the pending bind", WITHIN, || {
+        log.served() >= 2
+    })
+    .await;
+    signal(&env.dir, "owed_seen");
+    wait_signal(&env.dir, "reclaim_begun", WITHIN).await;
+    let gate = node.gate().expect("registered");
+    let ran = || node.drain_blocker().is_some() || gate.final_closed(epoch);
+    until("the drain runs a round", WITHIN, ran).await;
+    tokio::time::sleep(TWO_ROUNDS).await;
+    let (blocker, running) = (node.drain_blocker(), deliver::posts_in_flight(C));
+    let owed = node.owed().await;
+    assert_eq!(
+        node.state().await,
+        Some(HomeState::Reclaiming),
+        "the row left while the bind was pending: blocker {blocker:?}, projection {owed:?}, \
+         in flight {running:?}, posts {:?}",
+        node.discord().posts()
+    );
+    let alone = Owed {
+        binding_pending: 1,
+        ..Owed::default()
+    };
+    assert_eq!(
+        owed,
+        Some(alone),
+        "the pending bind is the only responsibility"
+    );
+    assert_eq!(blocker.as_deref(), Some("owed"));
+    assert_eq!(running, Some(0));
+    assert_eq!(
+        node.discord().posts(),
+        ["base"],
+        "nothing posted before it resolved"
+    );
+    assert!(!node.halted());
+    // The file comes first: the source id reads its metadata.
+    std::fs::write(&path, row("n1", "bound-new")).unwrap();
+    let source = source_id_for("s2", &path).unwrap();
+    let resolved = BindingRecord::Resolved {
+        resolves_seq: 2,
+        source,
+    };
+    assert_eq!(log.commit(resolved), 3);
+    node.until_posts(&["base", "bound-new"]).await;
+    until_async("the bound row is delivered", WITHIN, clear).await;
+    until_left(&node).await;
+    let posted = node.discord().history_after(C, 0).await.unwrap();
+    let bound: Vec<_> = posted.iter().filter(|m| m.content == "bound-new").collect();
+    assert_eq!(bound.len(), 1);
+    put(&env.dir, "bound_id", bound[0].id);
+    let seen = node.discord().seen();
+    let started = Seen::Started {
+        content: "bound-new".into(),
+        home_epoch: Some(epoch),
+    };
+    let once = [
+        started,
+        Seen::Accepted("bound-new".into()),
+        Seen::Ended("bound-new".into()),
+    ];
+    assert_eq!(seen[seen.len() - 3..], once, "{seen:?}");
+    assert_eq!(
+        seen.len(),
+        6,
+        "base and bound-new, each once, none dropped: {seen:?}"
+    );
+    assert!(!node.halted());
     node.stop().await;
 }
 

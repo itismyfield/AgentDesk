@@ -172,6 +172,7 @@ pub(super) fn holds_order(state: &mut ChannelMailboxState) -> bool {
 pub(super) fn head_withheld(state: &ChannelMailboxState) -> TakeNextSoftResult {
     let queue = &state.intervention_queue;
     TakeNextSoftResult {
+        selection_stale: false,
         intervention: None,
         dispatch_lease: None,
         has_more: queue.iter().any(|item| item.mode == InterventionMode::Soft),

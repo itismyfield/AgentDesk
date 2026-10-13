@@ -1,6 +1,6 @@
 //! Native row identities a forked source shares with the bytes its parent's cursor has consumed.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -58,21 +58,23 @@ pub(super) enum Class {
 /// Identities of the complete lines in the parent's bytes `0..through`.
 pub(super) struct Lineage {
     through: u64,
-    ids: HashSet<Id>,
+    ids: HashMap<Id, u64>,
     /// Bytes after the last newline before `through`, joined to the next read.
     tail: Vec<u8>,
 }
 
 impl Lineage {
     pub(super) fn class(&self, row: &RowIds) -> Class {
+        self.class_from(row, 0)
+    }
+
+    pub(super) fn class_from(&self, row: &RowIds, from: u64) -> Class {
+        let in_range = |id: &Id| self.ids.get(id).is_some_and(|start| *start >= from);
         let held = |id: &Id| match id {
             Id::Unit(key, kind, Seen::Announced) => {
-                self.ids.contains(id)
-                    || self
-                        .ids
-                        .contains(&Id::Unit(key.clone(), *kind, Seen::Sealed))
+                in_range(id) || in_range(&Id::Unit(key.clone(), *kind, Seen::Sealed))
             }
-            id => self.ids.contains(id),
+            id => in_range(id),
         };
         if row.units.is_none() {
             let inherited = row
@@ -96,15 +98,22 @@ impl Lineage {
     }
 
     fn add(&mut self, provider: ShadowProvider, bytes: &[u8]) {
+        let mut start = self.through - self.tail.len() as u64;
         self.tail.extend_from_slice(bytes);
         let Some(last) = self.tail.iter().rposition(|byte| *byte == b'\n') else {
             return;
         };
         let rest = self.tail.split_off(last + 1);
-        for line in self.tail.split(|byte| *byte == b'\n') {
+        for line in self.tail.split_inclusive(|byte| *byte == b'\n') {
             if let Some(row) = RowIds::of(provider, line) {
-                self.ids.extend(row.all());
+                for id in row.all() {
+                    self.ids
+                        .entry(id)
+                        .and_modify(|offset| *offset = (*offset).max(start))
+                        .or_insert(start);
+                }
             }
+            start += line.len() as u64;
         }
         self.tail = rest;
     }
@@ -132,7 +141,7 @@ pub(super) fn sync(
         Some(lineage) if lineage.through <= through => lineage,
         _ => Lineage {
             through: 0,
-            ids: HashSet::new(),
+            ids: HashMap::new(),
             tail: Vec::new(),
         },
     };
@@ -149,3 +158,7 @@ pub(super) fn sync(
     }
     Some(lineage)
 }
+
+#[cfg(all(test, unix))]
+#[path = "fork_lineage_tests.rs"]
+mod tests;
