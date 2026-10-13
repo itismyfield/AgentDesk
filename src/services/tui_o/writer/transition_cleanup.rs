@@ -1,9 +1,10 @@
-//! Dormant judgment of an operator's transition cleanup: which unproven old rotation hops could be
-//! retired with an audit record. It reads only the snapshot it is given, never files, time or store.
+//! Judgment of an operator's transition cleanup: which unproven old rotation hops could be retired
+//! with an audit record. It reads only the snapshot it is given, never files, time or store.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use super::rotation::RETIRE_QUIET;
 use crate::services::tui_o::shadow::capture::Fingerprint;
@@ -49,7 +50,7 @@ pub(crate) struct SourceFacts {
 }
 
 /// Output the channel still owes. The general queue names no source, so any of it holds every hop.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct Obligations {
     pub owed: usize,
     pub prepared: usize,
@@ -79,7 +80,7 @@ pub(crate) struct Snapshot {
 }
 
 /// How the request vouches that the execution writing a source has ended.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) enum Termination {
     /// The operator checked the host and pane and states the basis.
     Confirmed(ExecutionEnd),
@@ -88,7 +89,8 @@ pub(crate) enum Termination {
     Unread(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The operator's request as its route reads it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct Request {
     pub channel: u64,
     /// The last hop seq the transition covers.
@@ -100,7 +102,7 @@ pub(crate) struct Request {
     pub termination: Option<Termination>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum Owed {
     Queue,
     Prepared,
@@ -109,7 +111,7 @@ pub(crate) enum Owed {
     VerifiedWork,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum Refusal {
     OtherChannel,
     IncompleteRequest,
@@ -134,7 +136,7 @@ pub(crate) enum Refusal {
     WitnessNotEligible,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum Unclear {
     HomeUnread(String),
     CursorMissing,
@@ -158,7 +160,7 @@ pub(crate) enum Unclear {
     MissingWithOpenFd,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum Verdict {
     /// Every condition holds; the draft is what the retirement would record.
     Eligible(Box<TransitionCleanup>),
@@ -170,14 +172,14 @@ pub(crate) enum Verdict {
     NotTarget,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct Judged {
     pub key: String,
     pub hop_seq: Option<u64>,
     pub verdict: Verdict,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct Summary {
     /// Old sources whose cursor is not retired, counted as `rotation_unsettled` counts them.
     pub unsettled: usize,
@@ -504,5 +506,6 @@ fn at_end(cursor: &Cursor, present: &Present) -> Result<(), Verdict> {
     Err(Verdict::Refused(refusal))
 }
 
+#[cfg(test)]
 #[path = "transition_cleanup_tests.rs"]
 mod tests;

@@ -13,6 +13,7 @@ use super::binding::BindingEvents;
 use super::deliver::{ChannelWriter, Step, StopCause};
 use super::pieces::{Derived, UnitDeriver};
 use super::rotation::Sources;
+use super::transition_port;
 use super::{AlarmSink, DeliveryLease, DiscordPort, ReaderConfig, WriterAlarm, WriterConfig};
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey};
 use crate::services::tui_o::store::rotation::Boundary;
@@ -149,6 +150,7 @@ where
 {
     let run = || {
         let commands = codex_submission::take_spawn_receiver();
+        let transitions = transition_port::take_spawn_receiver();
         let projections = (unsettled, owing);
         tokio::spawn(run_publishing(
             writer,
@@ -157,7 +159,7 @@ where
             (stop, resumed),
             projections,
             (None, readers),
-            commands,
+            (commands, transitions),
         ))
     };
     config.enabled.then(run)
@@ -171,6 +173,7 @@ struct Actor<P, L, A, B> {
     verified: Option<super::owed::OwedLog>,
     sources: Sources<B>,
     bindings: Arc<B>,
+    transitions: transition::Transitions,
     /// The binding log's latest seq, watched once the channel first publishes what it owes.
     notice: Option<watch::Receiver<u64>>,
     waiting: Waiting,
@@ -225,7 +228,7 @@ where
         (stop, resumed),
         projections,
         (None, None),
-        None,
+        (None, None),
     )
     .await
 }
@@ -238,7 +241,10 @@ async fn run_publishing<P, L, A, B>(
     (mut stop, resumed): (watch::Receiver<bool>, watch::Sender<bool>),
     (unsettled, owing): (Unsettled, Owing),
     (utc, readers): (Option<chrono::DateTime<chrono::Utc>>, Option<ReaderConfig>),
-    mut commands: Option<codex_submission::Receiver>,
+    (mut commands, transitions): (
+        Option<codex_submission::Receiver>,
+        Option<transition_port::Receiver>,
+    ),
 ) -> Option<StopCause>
 where
     P: DiscordPort,
@@ -283,6 +289,7 @@ where
         verified,
         sources,
         bindings,
+        transitions: transition::Transitions::new(transitions),
         notice: None,
         waiting: Waiting::default(),
         clock: (
@@ -316,6 +323,7 @@ where
         }
         actor.collect_settled();
         actor.read_sources();
+        actor.poll_transition(sources_resumed, &unsettled);
         actor.observe_waiting(sources_resumed);
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
         if actor.writer.is_stopped() {
@@ -373,10 +381,13 @@ where
         (stop, watch::channel(false).0),
         (watch::channel(None).0, Owing::default()),
         (Some(utc), None),
-        None,
+        (None, None),
     )
     .await
 }
+
+mod transition;
+mod transition_snapshot;
 
 pub(crate) mod codex_submission {
     use super::*;
@@ -869,6 +880,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     /// Sources rotated away from whose cursor is not retired yet: O still reads each of them.
     fn unsettled(&mut self) -> Option<usize> {
+        if self.transitions.applying() {
+            return None;
+        }
         let store = self.writer.store();
         let rotation = store.rotation().ok()?;
         let retired = store.cursors().filter(|cursor| cursor.retired);
@@ -964,6 +978,7 @@ mod test_support {
             verified: None,
             sources: Sources::new(channel, provider, Arc::clone(&bindings)),
             bindings,
+            transitions: transition::Transitions::new(None),
             notice: None,
             waiting: Waiting::default(),
             clock: (tokio::time::Instant::now(), chrono::Utc::now()),

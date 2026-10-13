@@ -29,6 +29,7 @@ use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::Unsent;
 
 mod recover;
+mod transition;
 use recover::{Recovered, recover};
 /// What the gateway runtime supplies; asked only for channels O owns.
 pub trait HostIo: Send + Sync + 'static {
@@ -151,6 +152,7 @@ struct Live {
     owed: OwedView,
     stopping: watch::Receiver<bool>,
     submission: Option<actor::codex_submission::Port>,
+    transition: Option<super::transition_port::TransitionPort>,
 }
 
 /// The actor's published owed view and the demand that requests a store read.
@@ -212,6 +214,7 @@ impl Readiness {
             owed,
             stopping,
             submission: None,
+            transition: None,
         };
         locked(&self.live).insert(channel, live);
     }
@@ -843,23 +846,12 @@ impl<I: HostIo> Hosted<'_, I> {
             .map(|_| ReaderConfig { dormant: true });
         let spawn =
             || actor::spawn_projecting(&config, readers, writer, self.provider, bindings, watches);
-        let (submission, spawned) = if self.provider == ShadowProvider::Codex {
-            let (submission, receiver) = actor::codex_submission::Port::new(self.claim.generation);
-            (
-                Some(submission),
-                actor::codex_submission::spawning(receiver, spawn),
-            )
-        } else {
-            (None, spawn())
-        };
+        let (ports, spawned) = self.spawn_ports(spawn);
         let actor = spawned?;
         let watched = (resumed.clone(), unsettled, owed, self.stopping.clone());
-        self.claim
-            .readiness
-            .track(channel, Arc::clone(gate), watched);
-        if let Some(live) = locked(&self.claim.readiness.live).get_mut(&channel) {
-            live.submission = submission;
-        }
+        let readiness = &self.claim.readiness;
+        readiness.track(channel, Arc::clone(gate), watched);
+        let port = readiness.register_ports(channel, ports);
         let on_resumed = || {
             if attempt > 0 {
                 self.alarms.resume_pending(channel, false);
@@ -874,6 +866,7 @@ impl<I: HostIo> Hosted<'_, I> {
         let ended = publish(channel, self.claim, watched, (actor, &stop_tx), on_resumed);
         let cause = ended.await;
         drop(stop_tx);
+        readiness.close_transition(channel, port);
         cause
     }
 

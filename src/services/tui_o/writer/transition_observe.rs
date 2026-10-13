@@ -99,6 +99,6 @@ fn read(cursor: &Cursor, path: &Fingerprint) -> io::Result<Present> {
     })
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 #[path = "transition_observe_tests.rs"]
 mod tests;

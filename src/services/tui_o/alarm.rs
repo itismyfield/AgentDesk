@@ -289,6 +289,14 @@ impl AlarmRouter {
             );
             return;
         }
+        // Growth of a source with a cleanup history is told apart from earlier growth here.
+        let incident = incident.or_else(|| match alarm {
+            WriterAlarm::RetiredSourceGrew {
+                cleanup_history: Some(job),
+                ..
+            } => Some(format!("transition_cleanup:{job}")),
+            _ => None,
+        });
         let notification_key = incident
             .as_ref()
             .map_or(reason.clone(), |incident| format!("{reason}:{incident}"));
