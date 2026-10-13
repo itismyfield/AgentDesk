@@ -449,9 +449,8 @@ async fn scoped_claim_refuses_foreign_identity_and_stale_generation() {
     assert_eq!(torn.seen().await, before);
 }
 
-/// A save that errors after publishing is settled by re-reading the file: the claim installs
-/// when the file holds its snapshot. A third snapshot, or its own with any payload field changed,
-/// installs nothing and leaves the namespace refusing later claims, whatever metadata it kept.
+/// A save that errors after publishing is settled by re-reading the file: only its own snapshot
+/// installs; a third one, or its own with a payload field changed, refuses this and later claims.
 #[tokio::test(flavor = "current_thread")]
 async fn scoped_claim_after_an_ambiguous_save_installs_only_its_published_snapshot() {
     const THIRD: &[u8] = br#"{"version":1,"items":[]}"#;
