@@ -545,6 +545,15 @@ async fn unsent_settles(scenario: &str) -> Scene {
         "no Prepared after the seed"
     );
     assert!(channel.ledger().unresolved().is_none());
+    let (_, piece) = channel
+        .ledger()
+        .latest_piece(&maybe_sent_unit(), 0)
+        .unwrap();
+    let took = get(scene.dir(), "settled_after_ms").unwrap();
+    eprintln!(
+        "[s3] serial 0 settled {:?} {took} ms after its row came again",
+        piece.outcome
+    );
     scene
 }
 
