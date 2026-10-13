@@ -1250,8 +1250,6 @@ impl ChannelMailboxRegistry {
 // Once `CloseIfIdle` sets `state.closed`, the exhaustive `registry_purge::gate_closed_arm` passes
 // reads and refuses every other arm; CommitCapturedReadyDelivery refuses closed actors in its own arm.
 pub(crate) mod installed_actor_handoff;
-#[cfg(test)]
-pub(crate) mod recovery_custody;
 mod scoped_claim;
 
 enum ChannelMailboxMsg {
