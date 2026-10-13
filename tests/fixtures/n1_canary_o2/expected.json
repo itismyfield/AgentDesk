@@ -1,0 +1,4 @@
+{
+  "codex": {"completed_native_distinct": 3, "logical_reobservations": 1, "aborted_distinct": 1, "unit_reobservations": 3, "unit_keys": ["b-1", "tool-1", "call-1", "b-2", "b-3", "b-4"], "piece_texts": ["본문", "종료 전", "마지막"], "excluded": ["tool_call_panel", "codex_tool_output", "empty_payload"]},
+  "claude": {"completed_native_distinct": 2, "logical_reobservations": 1, "aborted_distinct": 1, "unit_reobservations": 5, "unit_keys": ["m-1:0", "m-1:1", "m-1:2", "call-1", "call-2", "m-2:0", "m-3:0"], "piece_texts": ["본문", "도구 오류", "종료 전", "자율 완료"], "excluded": ["tool_call_panel", "tool_call_panel", "normal_tool_result"]}
+}

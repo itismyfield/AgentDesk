@@ -9,9 +9,7 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
     CodexEpisodeDeny, CodexEpisodeSpan, ExecutionProofRef, TurnEpisodeRef,
 };
 
-#[cfg(test)]
 mod mutation;
-#[cfg(test)]
 pub(crate) mod submit_floor;
 
 pub(crate) const CODEX_PROVENANCE_FILE: &str = "codex_provenance";
@@ -29,10 +27,7 @@ pub(crate) struct CodexProvenance {
 
 /// A snapshot only this module's validation constructs; an origin is read from nothing else.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ValidatedCodexProvenance(
-    CodexProvenance,
-    #[cfg(test)] Option<submit_floor::Schema2>,
-);
+pub(crate) struct ValidatedCodexProvenance(CodexProvenance, Option<submit_floor::Schema2>);
 
 impl ValidatedCodexProvenance {
     pub(crate) fn spans(&self) -> &[CodexEpisodeSpan] {
@@ -68,12 +63,30 @@ impl ChannelStore {
     pub(crate) fn codex_provenance(&self) -> Sidecar {
         #[cfg(test)]
         SIDECAR_IO.with(|io| io.set((io.get().0 + 1, io.get().1)));
-        #[cfg(test)]
         if let Some(read) = submit_floor::read(self) {
             return read;
         }
+        self.read_codex_schema1()
+    }
+
+    pub(crate) fn read_codex_schema1(&self) -> Sidecar {
         let channel = self.init.channel;
-        match durable::read_json::<CodexProvenance>(&self.dir.join(CODEX_PROVENANCE_FILE)) {
+        let decoded =
+            durable::read_json::<serde_json::Value>(&self.dir.join(CODEX_PROVENANCE_FILE))
+                .and_then(|value| {
+                    value
+                        .map(|value| {
+                            let read: CodexProvenance = serde_json::from_value(value.clone())?;
+                            if !known_fields(&value, &serde_json::to_value(&read)?) {
+                                return Err(super::StoreError::Rejected(
+                                    "unknown Codex provenance field".into(),
+                                ));
+                            }
+                            Ok(read)
+                        })
+                        .transpose()
+                });
+        match decoded {
             Ok(None) => Sidecar::Missing,
             Ok(Some(read)) if read.schema != SCHEMA || read.channel != channel => {
                 Sidecar::Unavailable("codex_provenance_identity")
@@ -81,11 +94,7 @@ impl ChannelStore {
             Ok(Some(read)) if !valid(channel, &read) => {
                 Sidecar::Unavailable("codex_provenance_conflict")
             }
-            Ok(Some(read)) => Sidecar::Present(ValidatedCodexProvenance(
-                read,
-                #[cfg(test)]
-                None,
-            )),
+            Ok(Some(read)) => Sidecar::Present(ValidatedCodexProvenance(read, None)),
             Err(_) => Sidecar::Unavailable("codex_provenance_unreadable"),
         }
     }
@@ -164,3 +173,59 @@ fn valid(channel: u64, next: &CodexProvenance) -> bool {
 #[cfg(all(test, unix))]
 #[path = "codex_provenance_tests.rs"]
 mod tests;
+
+pub(super) fn known_fields(read: &serde_json::Value, model: &serde_json::Value) -> bool {
+    use serde_json::Value::{Array, Object};
+    match (read, model) {
+        (Object(read), Object(model)) => read.iter().all(|(key, value)| {
+            model
+                .get(key)
+                .is_some_and(|expected| known_fields(value, expected))
+        }),
+        (Array(read), Array(model)) => read.iter().zip(model).all(|(a, b)| known_fields(a, b)),
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct ActualCloseFault {
+    parent: std::path::PathBuf,
+    held: std::path::PathBuf,
+}
+
+#[cfg(test)]
+impl ActualCloseFault {
+    pub(crate) fn install(parent: std::path::PathBuf, sync: bool) -> Self {
+        let held = parent.with_extension("actual-sync-held");
+        let (target, parked) = (parent.clone(), held.clone());
+        let mut renamed = 0;
+        mutation::COMMIT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |stage| {
+                if stage == mutation::CommitStage::Renamed {
+                    renamed += 1;
+                    if sync && renamed == 2 {
+                        std::fs::rename(&target, &parked)?;
+                    }
+                }
+                if renamed == 2 && stage == mutation::CommitStage::ParentSynced && parked.exists() {
+                    std::fs::rename(&parked, &target)?;
+                }
+                if !sync && renamed == 2 && stage == mutation::CommitStage::ReadBack {
+                    std::fs::write(target.join(CODEX_PROVENANCE_FILE), b"{corrupt")?;
+                }
+                Ok(())
+            }));
+        });
+        Self { parent, held }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ActualCloseFault {
+    fn drop(&mut self) {
+        mutation::COMMIT_HOOK.with(|hook| hook.borrow_mut().take());
+        if self.held.exists() {
+            std::fs::rename(&self.held, &self.parent).unwrap();
+        }
+    }
+}

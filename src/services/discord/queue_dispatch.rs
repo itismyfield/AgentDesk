@@ -1,10 +1,11 @@
 use super::*;
 use crate::services::turn_orchestrator::registry_purge::retry_while_closed;
+use crate::services::turn_orchestrator::{QueueIdentity, TakeHeadCondition};
 
 pub(super) mod kickoff;
 
 #[cfg(test)]
-mod input_effect_tests;
+pub(in crate::services::discord) mod input_effect_tests;
 
 type DispatchLeaseHandle = Arc<crate::services::turn_orchestrator::DispatchLease>;
 
@@ -175,6 +176,7 @@ pub(super) fn intervention_became_capped(
 
 #[derive(Debug, Default)]
 pub(super) struct MailboxTakeNextSoftOutcome {
+    pub(super) selection_stale: bool,
     pub(super) intervention: Option<Intervention>,
     pub(super) dispatch_lease: Option<DispatchLeaseHandle>,
     pub(super) has_more: bool,
@@ -190,6 +192,7 @@ impl MailboxTakeNextSoftOutcome {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn mailbox_take_next_soft_intervention(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -200,7 +203,13 @@ pub(super) async fn mailbox_take_next_soft_intervention(
     };
     input_runtime::fence::effect::scope(
         permit,
-        mailbox_take_soft_intervention(shared, provider, channel_id, None),
+        mailbox_take_soft_intervention(
+            shared,
+            provider,
+            channel_id,
+            None,
+            TakeHeadCondition::Unchecked,
+        ),
     )
     .await
 }
@@ -247,21 +256,39 @@ async fn mailbox_take_admitted_automatic_intervention(
         }
     }
     let mut excluded_stale_primary_message_ids = std::collections::HashSet::new();
+    let mut previous_observed_head = None;
     loop {
         let mut snapshot = super::mailbox_snapshot(shared, channel_id).await;
+        let observed_head = snapshot.intervention_queue.first().map(QueueIdentity::of);
+        if previous_observed_head.as_ref() != Some(&observed_head) {
+            excluded_stale_primary_message_ids.clear();
+        }
+        previous_observed_head = Some(observed_head.clone());
+        let condition = TakeHeadCondition::Observed(observed_head);
         snapshot.intervention_queue.retain(|intervention| {
             !excluded_stale_primary_message_ids.contains(&intervention.message_id)
         });
         let (selected_message_id, result) =
             match automatic_progression(shared, provider, channel_id, &snapshot) {
-                AutomaticQueueProgression::Eligible(message_id) => (
-                    Some(message_id),
-                    mailbox_take_soft_intervention(shared, provider, channel_id, Some(message_id))
+                AutomaticQueueProgression::Eligible(message_id) => {
+                    #[cfg(test)]
+                    input_effect_tests::before_take(channel_id).await;
+                    (
+                        Some(message_id),
+                        mailbox_take_soft_intervention(
+                            shared,
+                            provider,
+                            channel_id,
+                            Some(message_id),
+                            condition,
+                        )
                         .await,
-                ),
+                    )
+                }
                 AutomaticQueueProgression::Empty => (
                     None,
-                    mailbox_take_soft_intervention(shared, provider, channel_id, None).await,
+                    mailbox_take_soft_intervention(shared, provider, channel_id, None, condition)
+                        .await,
                 ),
                 AutomaticQueueProgression::BlockedByCappedRetries => {
                     tracing::info!(
@@ -272,6 +299,16 @@ async fn mailbox_take_admitted_automatic_intervention(
                     return MailboxTakeNextSoftOutcome::default();
                 }
             };
+        if result.selection_stale {
+            super::arm_slow_idle_queue_backstop_if_queue_nonempty(
+                shared,
+                provider,
+                channel_id,
+                "automatic queue selection stale",
+            )
+            .await;
+            return result;
+        }
         let Some(intervention) = result.intervention.as_ref() else {
             if result.persistence_error.is_none()
                 && result.has_more
@@ -318,6 +355,7 @@ async fn mailbox_take_soft_intervention(
     provider: &ProviderKind,
     channel_id: ChannelId,
     primary_message_id: Option<MessageId>,
+    head_condition: TakeHeadCondition,
 ) -> MailboxTakeNextSoftOutcome {
     loop {
         // A closed actor's refusal spends no catch-up retry.
@@ -326,11 +364,19 @@ async fn mailbox_take_soft_intervention(
             .take_soft_matching_or_refused(
                 super::queue_persistence_context(shared, provider, channel_id),
                 primary_message_id,
+                head_condition.clone(),
             )
             .await
         else {
             return MailboxTakeNextSoftOutcome::default();
         };
+        if result.selection_stale {
+            return MailboxTakeNextSoftOutcome {
+                selection_stale: true,
+                has_more: result.has_more,
+                ..Default::default()
+            };
+        }
         let queue_len_after = result.queue_len_after;
         super::apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
         if let Some(error) = result.persistence_error {
@@ -341,6 +387,7 @@ async fn mailbox_take_soft_intervention(
                 "mailbox dequeue failed durable pending-queue persistence"
             );
             return MailboxTakeNextSoftOutcome {
+                selection_stale: false,
                 intervention: None,
                 dispatch_lease: None,
                 has_more: result.has_more,
@@ -355,6 +402,7 @@ async fn mailbox_take_soft_intervention(
         );
         let Some(intervention) = result.intervention else {
             return MailboxTakeNextSoftOutcome {
+                selection_stale: false,
                 intervention: None,
                 dispatch_lease: None,
                 has_more: result.has_more,
@@ -390,6 +438,7 @@ async fn mailbox_take_soft_intervention(
             drop(result.dispatch_lease);
             if primary_message_id.is_some() {
                 return MailboxTakeNextSoftOutcome {
+                    selection_stale: false,
                     intervention: None,
                     dispatch_lease: None,
                     has_more: result.has_more,
@@ -400,6 +449,7 @@ async fn mailbox_take_soft_intervention(
         }
 
         return MailboxTakeNextSoftOutcome {
+            selection_stale: false,
             intervention: Some(intervention),
             dispatch_lease: result.dispatch_lease,
             has_more: result.has_more,
