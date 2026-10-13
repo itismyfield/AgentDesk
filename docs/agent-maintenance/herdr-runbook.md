@@ -65,7 +65,7 @@ Herdr 로 띄운 Claude 채널(P9 대상: adk-dash-cc)의 운영 절차다. 5a�
 - 종료 코드 0만으로 수용하지 않는다. **첫 gate는 시나리오별 `status=pass`를 직접 확인해야 한다**. `known_gap`·`unexpected_pass`·`not_applicable`은 gate 통과가 아니다.
 - E-50 smoke judge는 T1·T2·AFTER_CLEAR가 각각 1회이고 detail/CLI 관측이 있어야 통과한다. Herdr에서는 tmux 로그·legacy queue 파일을 읽지 않는다.
 - E-50의 텍스트 `!clear` 뒤에 지원하는 거부 접두사(`세션을 초기화하지 못했어요:`, `세션 전환 중이라 초기화하지 못했어요`)의 답장을 관측하면 완료 대기를 중단하고 그 사유와 함께 실패한다(예: `rotation_unsettled(59)`). 다른 문구나 무응답은 기존 확인 제한시간 실패다.
-  답장은 `!clear` 송신 응답의 message id 뒤 것만 본다. 송신 응답에 id가 없으면 거부 형태의 답장을 귀속할 수 없어 측정 실패로 끝난다.
+  거부와 완료 모두 그 `!clear` 송신 응답의 message id 뒤에 같은 채널에 올라온 bot 답장만 본다. 송신 응답에 양의 숫자 id가 없으면 기다리지 않고 측정 실패한다.
 - 재시작(E-8/19)·stop(E-18)·terminate(E-12)·E-35/36 원래 수용 기준은 이 첫 gate 밖이다.
 - 공유 운영 dcserver에는 `--herdr-isolated-server`를 쓰지 않는다. 재시작은 운영자가 수행하고 하네스는 아래 두 관측만 담당한다.
 - mark·verify도 실행마다 고유한 `--output`을 준다. gate 출력 디렉터리를 쓰면 gate의 `report.claude-herdr.json`을 덮어쓴다.
@@ -79,6 +79,7 @@ Herdr 로 띄운 Claude 채널(P9 대상: adk-dash-cc)의 운영 절차다. 5a�
   경과(`elapsed_secs`)는 표식 완료 시각부터 verify 요청 직전까지이며 벽시계와 부팅 기준 시계 중 작은 값이다. 부팅 기준 시계는 서버 uptime과 같은 시계(macOS `CLOCK_UPTIME_RAW`, Linux `CLOCK_MONOTONIC`)라 벽시계 보정·잠자기로 경과가 부풀지 않는다.
   구형 mark(`completed_at` 없음)나 공유 시계가 없는 mark는 재시작 확인이 되지 않는다 — 다시 mark한다.
   표식은 읽지만 후속 턴 전에 `take a new mark` 사유로 실패한다. 해당하는 경우: 부팅 시계가 없는 플랫폼, 표식·verify 시계 이름 불일치, 유한한 0 이상 값이 아닌 시계 값.
+  부팅 기준 시계를 지원하지 않는 플랫폼(macOS·Linux 밖)에서는 다시 mark해도 공유 시계가 생기지 않으므로 observe-only 재시작 확인 자체가 지원되지 않는다.
   `uptime_secs`가 없거나 형식이 다르면 `not_proven`으로 기록하고 나머지 판정만 한다.
 - 기본 후속 턴은 `E-19-observe-only`로 기록한다. `--filter E-1`처럼 재시작 단계가 없는 시나리오를 지정할 수도 있다. 원래 E-19의 비밀값 회상 기준을 충족했다고 주장하지 않는다.
 - mark/verify에는 launchctl·재시작 명령이 없다. `--herdr-isolated-server`·`--restart-script` 병용 및 재시작 단계가 포함된 후속 시나리오는 거부한다.

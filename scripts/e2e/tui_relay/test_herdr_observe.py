@@ -478,7 +478,7 @@ class HerdrTextClear(unittest.TestCase):
 
     def run_clear(self, *fetches, before=(), sent=None):
         # The send response shape of POST /api/discord/send; the !clear message id bounds its replies.
-        self.client.send.return_value = sent or {"ok": True, "message_id": "160" if before else "101"}
+        self.client.send.return_value = sent if sent is not None else {"ok": True, "message_id": "160" if before else "101"}
         steps = [*({"wait_for_raw_discord_text": "READY", "timeout_s": 5} for _ in before),
                  {"send_discord_prompt": "!clear [E2E:CLEAR]"}, {"wait_for_raw_discord_text": CLEARED, "timeout_s": 20},
                  {"send_discord_prompt": "Reply with [E2E:AFTER]"}, {"wait_for_discord_text": "[E2E:AFTER]"}]
@@ -530,13 +530,12 @@ class HerdrTextClear(unittest.TestCase):
     def test_clear_replies_are_bounded_by_the_clear_message_id(self):
         # Last observed 140, an unseen older refusal 149, this clear 150, then its own reply.
         old, cleared, refused = bot(149, REFUSED), bot(151, CLEARED), bot(152, REFUSED)
-        with_id, no_id = {"ok": True, "message_id": "150"}, {"ok": True}
+        with_id = {"ok": True, "message_id": "150"}
         for label, sent, rows, expected, reason in (
                 ("older refusal, then completion", with_id, [old, cleared], "pass", None),
                 ("older refusal, then completion (id key)", {"id": "150"}, [old, cleared], "pass", None),
-                ("this clear refused", with_id, [old, refused], "fail", "refused by the server: " + REFUSED),
-                ("no send id, refusal-like reply", no_id, [old, cleared], "fail", "cannot be attributed"),
-                ("no send id, completion only", no_id, [cleared], "pass", None)):
+                ("older refusal, then completion (integer id)", {"message_id": 150}, [old, cleared], "pass", None),
+                ("this clear refused", with_id, [old, refused], "fail", "refused by the server: " + REFUSED)):
             with self.subTest(label=label):
                 self.client.reset_mock()
                 self.client.send_control.return_value = {"id": "100"}
@@ -544,6 +543,19 @@ class HerdrTextClear(unittest.TestCase):
                 self.assertEqual(result["status"], expected, (label, result))
                 if reason:
                     self.assertIn(reason, result["reason"])
+
+    def test_clear_without_a_usable_send_id_fails_before_waiting(self):
+        responses = ({"ok": True}, {}, "150", {"message_id": 0}, {"message_id": -1}, {"message_id": True},
+                     {"message_id": "abc"}, {"message_id": "0"}, {"message_id": "-5"}, {"id": " 150"}, {"id": "１５０"})
+        for sent in responses:
+            for label, rows in (("completion", [bot(151, CLEARED)]), ("refusal", [bot(152, REFUSED)]), ("silence", [])):
+                with self.subTest(sent=sent, reply=label):
+                    self.client.reset_mock()
+                    self.client.send_control.return_value = {"id": "100"}
+                    result = self.run_clear(rows, sent=sent) if rows else self.run_clear(sent=sent)
+                    self.assertEqual(result["status"], "fail", result)
+                    self.assertIn("send returned no message id", result["reason"])
+                    self.assertEqual((self.client.send.call_count, self.client.fetch_messages.call_count), (1, 0))
 
     def test_clear_completion_shares_the_refusal_boundary(self):
         # This clear is message 150; only a bot reply after it in this channel counts, either way.

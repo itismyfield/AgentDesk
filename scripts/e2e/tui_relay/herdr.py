@@ -445,9 +445,11 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                     gap_failure = False
                     raise
                 if is_clear:
-                    # Replies to this clear follow its own message id; 0 means no id, so none can be attributed.
-                    sent_id = str(sent.get("message_id") or sent.get("id") or "") if isinstance(sent, dict) else ""
-                    clear_after = int(sent_id) if sent_id.isdigit() else 0
+                    # Replies to this clear follow its own message id; without one none can be attributed.
+                    raw = (sent.get("message_id") or sent.get("id")) if isinstance(sent, dict) else None
+                    clear_after = raw if type(raw) is int else int(raw) if isinstance(raw, str) and raw.isascii() and raw.isdigit() else 0
+                    if clear_after <= 0:
+                        raise assertions.AssertionError(f"text !clear send returned no message id; its replies cannot be attributed: {sent!r}")
                 if scenario.get("e36_normal_intake"):
                     marker = step.get("hold_marker") if step.get("request_key") == "QA" else step["body_marker"]
                     wait(marker.replace("{run_id}", run_id), 240)
@@ -467,9 +469,6 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                     rows = client.fetch_messages(args.channel_id, after_id=after_id, limit=100)
                     ingest(rows)
                     refusal = clear_after is not None and clear_refusal(rows, after=clear_after, channel=args.channel_id)
-                    if refusal and not clear_after:
-                        raise assertions.AssertionError(
-                            f"text !clear send returned no message id, so a refusal reply cannot be attributed: {refusal}")
                     if refusal:
                         raise assertions.AssertionError(f"text !clear refused by the server: {refusal}")
                     if any(clear_reply(r, marker, after=clear_after, channel=args.channel_id) if clear_after is not None
