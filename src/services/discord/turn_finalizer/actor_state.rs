@@ -106,6 +106,12 @@ pub(super) enum FinalizeMsg {
         shared: Arc<SharedData>,
         ack: oneshot::Sender<FinalizeOutcome>,
     },
+    PolicyClose {
+        intent: Box<super::episode::PolicyCloseIntent>,
+        input_permit: Option<super::super::input_runtime::fence::Permit>,
+        shared: Arc<SharedData>,
+        ack: oneshot::Sender<PolicyCloseOutcome>,
+    },
     #[allow(dead_code)]
     AcquireDelivery {
         key: DeliveryLeaseKey,

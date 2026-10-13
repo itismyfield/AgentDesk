@@ -251,6 +251,25 @@ mod intake_outbox_state_builder_tests {
     }
 }
 
+use super::super::intake_gate::ledger as live;
+use crate::services::discord::input_runtime::fence::effect;
+
+impl IntakeDeps<'_> {
+    pub(in crate::services::discord) async fn hold_live(
+        shared: &Arc<SharedData>,
+        http: &Arc<serenity::Http>,
+        provider: &crate::services::provider::ProviderKind,
+        message: &serenity::Message,
+        kind: crate::services::discord::input_runtime::intake::admit::SourceKind,
+        prompt: Option<String>,
+    ) -> Result<bool, Error> {
+        Box::pin(live::hold_live(
+            shared, http, provider, message, kind, prompt,
+        ))
+        .await
+    }
+}
+
 pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     preserve_on_cancel: bool,
@@ -259,9 +278,7 @@ pub(super) async fn handle_text_message(
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<IntakeExecution, Error> {
-    use crate::services::discord::input_runtime::fence::effect;
-    let permit = effect::admit(&deps.shared.provider, request.channel_id.get())
-        .map_err(|failure| format!("input admission refused: {failure:?}"))?;
+    let permit = live::legacy_effect(deps, request.channel_id).await?;
     if permit.is_none() && effect::current().is_none() {
         return Box::pin(handle_text_message_admitted(
             deps,
@@ -338,6 +355,7 @@ async fn handle_text_message_admitted(
     let request_owner_name = request_owner_name_owned.as_str();
     let user_text = user_text_owned.as_str();
     let original_channel_id = channel_id;
+    live::legacy_allowed(shared, http, &shared.provider, channel_id).await?;
     let stored_voice_announcement =
         crate::voice::announce_meta::global_store().take_with_acceptance(user_msg_id);
     let has_stored_voice_announcement = stored_voice_announcement.is_some();
@@ -452,12 +470,7 @@ async fn handle_text_message_admitted(
     if voice_route_outcome.bypasses_normal_turn() {
         return Ok(IntakeExecution::Executed);
     }
-    if !is_voice_announcement
-        && shared
-            .voice_barge_in
-            .try_handle_voice_channel_text_reply(http, channel_id, user_text)
-            .await
-    {
+    if !is_voice_announcement && live::try_text_reply(shared, http, channel_id, user_text).await? {
         return Ok(IntakeExecution::Executed);
     }
     let is_dm_channel = matches!(
@@ -799,17 +812,10 @@ async fn handle_text_message_admitted(
                 }
             }
         };
-    let turn_start_attempt = if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
+    let add_turn_pending = should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
         && !(_queued_drain
             && super::super::intake_dispatch::checkpoint_waits_for_admission(channel_id))
-        && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
-    {
-        tv_start_current_with_attempt(shared, http, channel_id, user_msg_id, "intake_start")
-            .await
-            .attempt()
-    } else {
-        None
-    };
+        && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id);
 
     // ── Dispatch thread auto-creation ──────────────────────────────
     // When a dispatch message arrives, create a Discord thread for
@@ -959,7 +965,7 @@ async fn handle_text_message_admitted(
         (
             reply_to_user_message,
             &dispatch_id_for_thread,
-            turn_start_attempt,
+            None,
             preserve_on_cancel,
             _queued_drain,
         ),
@@ -1420,13 +1426,7 @@ async fn handle_text_message_admitted(
         );
     }
 
-    // codex review P1/P2: when this turn lost the race, drive the entire
-    // race-loss path (placeholder POST, mapping insert, enqueue, idle-drain
-    // safety net, queued-card edit) here and return. Splitting into a
-    // dedicated `if !started` block — instead of folding it into the
-    // `placeholder_msg_id` let-binding below — keeps the started==true
-    // path linear and lets us bail out without the post-let main flow ever
-    // running on a non-active turn.
+    // A refused claim owns no start attempt; publish only its durable queue view.
     if !started {
         return race_loss::handle_race_loss_enqueue(
             http,
@@ -1446,12 +1446,21 @@ async fn handle_text_message_admitted(
             &voice_announcement,
             reply_to_user_message,
             &dispatch_id_for_thread,
-            turn_start_attempt,
+            None,
             preserve_on_cancel,
             race_loss::QueuedIntakeCause::RaceLoss,
         )
         .await.map(|_| IntakeExecution::deferred(channel_id));
     }
+
+    // Dispatch redirects keep the reaction on the original Discord message.
+    let _turn_start_attempt = if add_turn_pending {
+        tv_start_current_with_attempt(shared, http, original_channel_id, user_msg_id, "intake_start")
+            .await
+            .attempt()
+    } else {
+        None
+    };
 
     let reusable_busy_notice = placeholder_handoff::reuse_bound_busy_notice(
         http,
@@ -2120,7 +2129,7 @@ async fn handle_text_message_admitted(
                 channel_id,
                 user_msg_id,
                 placeholder_msg_id,
-                turn_start_attempt,
+                turn_start_attempt: _turn_start_attempt,
                 session_retry_context: session_retry_context.as_ref(),
                 feedback_reminder: feedback_reminder.as_deref(),
                 wip_warning: wip_warning.as_deref(),

@@ -122,7 +122,7 @@ fn s2a_existing_owed_reader_decodes_schema2_without_migrating_or_writing() {
     assert_eq!(
         reevaluate(&mut fixture.channel, &mut []).unwrap(),
         Reevaluation::Present { attributed: 0 },
-        "the existing production reader must decode the new envelope"
+        "the gated schema2 reader must decode the new envelope"
     );
     assert_eq!(SIDECAR_IO.with(std::cell::Cell::get), (1, 0));
     assert_eq!(std::fs::read(&path).unwrap(), before);

@@ -330,11 +330,33 @@ class Census(unittest.TestCase):
             self.assertNotIn("redirected_permit=None", compact[start:inserts[index]])
             self.assertNotIn("drop(redirected_permit", compact[start:inserts[index]])
         root = re.sub(r"\s+", "", self.sources[D + "router/message_handler/intake_turn.rs"])
-        admit = root.index("effect::admit(&deps.shared.provider,request.channel_id.get())")
-        run = root.index("effect::run(permit,", admit)
+        helper = re.sub(r"\s+", "", self.sources[D + "router/intake_gate/ledger.rs"])
+        helper_start = helper.index("asyncfnlegacy_effect(")
+        helper_end = helper.index("pub(incrate::services::discord)asyncfntry_text_reply(", helper_start)
+        helper = helper[helper_start:helper_end]
+        policy = "legacy_allowed(deps.shared,deps.http,&deps.shared.provider,channel).await?;"
+        fence_admit = "runtime::fence::effect::admit(&deps.shared.provider,channel.get())"
+        self.assertEqual(helper.count(policy), 1)
+        self.assertEqual(helper.count(fence_admit), 1)
+        self.assertEqual(helper.count("letpermit="), 1)
+        self.assertIn(
+            ")->Result<Option<runtime::fence::Permit>,Error>{letpermit=" + fence_admit + ".map_err(",
+            helper,
+        )
+        self.assertIn(")?;" + policy + "Ok(permit)}", helper)
+        self.assertIn("usesuper::super::intake_gate::ledgeraslive;", root)
+        caller = "letpermit=live::legacy_effect(deps,request.channel_id).await?;"
+        self.assertEqual(root.count(caller), 1)
+        admit = root.index(caller)
+        run_call = "effect::run(permit,"
+        self.assertEqual(root.count(run_call), 1)
+        run = root.index(run_call, admit)
         body = root.index("handle_text_message_admitted", run)
         redirect = root.index("adk_thread::redirect_dispatch(", body)
         self.assertLess(admit, run)
+        self.assertEqual(root[admit:run].count("letpermit="), 1)
+        self.assertNotIn("drop(permit", root[admit:run])
+        self.assertIn("ifpermit.is_none()&&effect::current().is_none(){", root[admit:run])
         self.assertLess(body, redirect)
         self.assertIn("letIntakeRequest{intake_outbox_id,channel_id,", root[body:redirect])
         self.assertIn("letoriginal_channel_id=channel_id;", root[body:redirect])

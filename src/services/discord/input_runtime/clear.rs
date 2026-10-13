@@ -382,4 +382,4 @@ async fn report<H: ClearHost>(host: &mut H, outcome: Outcome) {
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 #[path = "clear_tests.rs"]
-mod tests;
+pub(crate) mod tests;
