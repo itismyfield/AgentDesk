@@ -1148,7 +1148,11 @@ class RunAssertionDispatch(unittest.TestCase):
             "status_panel_after_body": {"body_marker": "[BODY]"},
         }
         empty = _window(_relay_msg(1, "body [BODY]"))
-        self.run_assertion(spec, window=empty)
+        outcome = self.run_assertion(spec, window=empty, enabled_features=frozenset())
+        self.assertEqual(outcome["status"], "skipped")
+        self.assertIsNone(outcome["passed"])
+        with self.assertRaisesRegex(driver.HarnessEvidenceError, "feature evidence unavailable"):
+            self.run_assertion(spec, window=empty)
         with self.assertRaises(assertions.AssertionError):
             self.run_assertion(
                 spec,
@@ -1432,7 +1436,8 @@ class ScenarioFilterFailClosed(unittest.TestCase):
             self.assertFalse(row["ok"])
             self.assertTrue(row["execution_ok"])
             self.assertEqual(row["evidence_status"], "partial")
-            self.assertEqual(row["totals"], dict.fromkeys(("pass", "fail", "skipped", "not_applicable", "known_gap", "unexpected_pass", "dry_run"), 0))
+            self.assertEqual(row["totals"], dict.fromkeys(("pass", "fail", "skipped", "not_applicable", "known_gap", "unexpected_pass", "dry_run",
+                                                        "executed", "dormant", "unevaluable", "skipped_assertions"), 0))
         restart = [row for row in report["results"] if row["kind"] == "foreign_active_restart_guard"]
         self.assertEqual([(row["id"], row["status"], row["ok"]) for row in restart],
                          [("E-17", "pass", False)])
