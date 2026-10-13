@@ -709,7 +709,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         }
         #[rustfmt::skip]
         let (pending_long_running_open_after_state_save, pending_long_running_retarget_after_state_save) = (stream_loop_output.pending_long_running_open_after_state_save, stream_loop_output.pending_long_running_retarget_after_state_save);
-
         let post_loop_finalize_output = post_loop_finalize::run_post_loop_finalize(
             post_loop_finalize::PostLoopFinalizeContext {
                 shared_owned: shared_owned.clone(),
