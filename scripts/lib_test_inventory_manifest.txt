@@ -2552,7 +2552,9 @@ services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_runni
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_tail_posts_before_leave_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_unknown_is_not_empty_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_unreadable_post_count_blocks_leave_pg
+services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th6_force_live_target_then_reboot_orphan_holds_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_orphan_holds_every_consumer_pg
+services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_preserves_old_durable_debt_pg
 services::cluster::intake_worker::home_route_tests::s3_real::harness::racing_commits_publish_the_latest_seq_and_every_event
 services::cluster::intake_worker::home_route_tests::s3_real::harness::route_as_asks_for_the_given_provider
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg
