@@ -134,6 +134,10 @@ class SmokeConfigError(ValueError):
     """Raised when the smoke cannot be configured safely."""
 
 
+class CellAgentMissingError(ValueError):
+    """The cell's agent is absent but its replaced agent is configured: a failure, never a skip."""
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -239,6 +243,12 @@ def _channel_id_from_config(config: Any, cell: str, path: Path) -> str:
                 f"{path} agent {agent_id!r} has no {provider} channel id"
             )
         return str(channel_id)
+    replaced = cell_driver.cell_replaced_agent(cell)
+    if replaced and any(isinstance(agent, dict) and agent.get("id") == replaced for agent in agents):
+        # Resolving the old agent instead would smoke a different runtime under this cell's name.
+        raise CellAgentMissingError(
+            f"{path} agent {agent_id!r} not found; {cell} no longer uses {replaced!r}"
+        )
     raise SmokeConfigError(f"{path} agent {agent_id!r} not found")
 
 
@@ -884,7 +894,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             return run_dry_run(args)
         return run_live(args)
-    except SmokeConfigError as error:
+    except (SmokeConfigError, CellAgentMissingError) as error:
         _json_dump({"ok": False, "error": str(error)})
         return 2
 
