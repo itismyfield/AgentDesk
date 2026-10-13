@@ -4021,7 +4021,7 @@ services::discord::health::session_enrichment::probe_runtime::tests::unix::dropp
 services::discord::health::session_enrichment::probe_runtime::tests::unix::every_non_answer_stays_unwitnessed_and_only_missing_is_absent
 services::discord::health::session_enrichment::probe_runtime::tests::unix::only_the_two_queries_run_and_only_the_spawned_client_is_killed
 services::discord::health::session_enrichment::probe_runtime::tests::unix::the_child_deadline_is_the_remaining_budget_not_three_seconds
-services::discord::health::session_enrichment::probe_runtime::tests::unix::the_detail_pid_probe_runs_after_presence_within_250ms_and_public_spawns_none
+services::discord::health::session_enrichment::probe_runtime::tests::unix::the_detail_pid_probe_runs_after_presence_within_250ms
 services::discord::health::session_enrichment::tests::a_channel_with_no_coordinate_entry_polls_as_absent
 services::discord::health::session_enrichment::tests::a_generation_stamp_moving_under_the_offset_read_witnesses_nothing
 services::discord::health::session_enrichment::tests::a_probe_fault_withholds_the_executor_witness_instead_of_claiming_absence

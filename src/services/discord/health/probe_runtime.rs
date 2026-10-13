@@ -962,11 +962,8 @@ esac
         }
 
         #[test]
-        fn the_detail_pid_probe_runs_after_presence_within_250ms_and_public_spawns_none() {
-            use crate::config::RelayVerdictSource;
-            use crate::services::discord::health::reachability::composite::set_relay_verdict_source_for_tests;
+        fn the_detail_pid_probe_runs_after_presence_within_250ms() {
             let _root = crate::config::TestRuntimeRootGuard::new();
-            let _source = set_relay_verdict_source_for_tests(RelayVerdictSource::Composite);
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -1054,24 +1051,6 @@ esac
                     runtime.settles_within(4, Duration::from_secs(1)).await,
                     "{:?}",
                     runtime.gauges()
-                );
-
-                let runtime = faked();
-                let registry = registry_with(&["alive-public"], 5_736_100_000_000_031).await;
-                let snapshot = health::snapshot::build_health_snapshot_with_options(
-                    &registry,
-                    build(&runtime, false),
-                );
-                let json = serde_json::to_value(snapshot.await).expect("json");
-                assert!(mailboxes(&json).is_empty());
-                let argv: Vec<_> = spawns(runtime.fake_dir())
-                    .into_iter()
-                    .map(|(_, argv)| argv)
-                    .collect();
-                assert_eq!(
-                    argv,
-                    ["-u -N has-session -t =alive-public:"],
-                    "public must observe presence only"
                 );
             });
         }
@@ -1260,10 +1239,11 @@ esac
         }
 
         fn fresh_process_scenario(bin: &Path) {
-            use crate::config::RelayVerdictSource;
-            use crate::services::discord::health::reachability::composite::set_relay_verdict_source_for_tests;
             use crate::services::platform::binary_resolver;
-            let _source = set_relay_verdict_source_for_tests(RelayVerdictSource::Composite);
+            // Composite through the live config, so the public build observes channels as deployed.
+            let mut config = crate::config::Config::default();
+            config.runtime.relay_verdict_source = crate::config::RelayVerdictSource::Composite;
+            crate::config_live_reload::install(config);
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(4)
                 .enable_all()
@@ -1334,6 +1314,28 @@ esac
                 assert_eq!(detail["status"], public["status"]);
                 assert_eq!(relay_reasons(&detail), relay_reasons(&public));
                 assert_eq!((mailboxes(&detail).len(), mailboxes(&public).len()), (1, 0));
+
+                let before = spawns(bin).len();
+                let public_only = registry_with(&["alive-public"], 5_736_200_000_000_013).await;
+                drop(health::build_public_health_snapshot(&public_only).await);
+                let with_pid = registry_with(&["alive-detail"], 5_736_200_000_000_015).await;
+                let json = serde_json::to_value(health::build_health_snapshot(&with_pid).await);
+                let json = json.expect("json");
+                assert_eq!(mailboxes(&json)[0]["process_present"], true);
+                let argv: Vec<_> = spawns(bin)
+                    .split_off(before)
+                    .into_iter()
+                    .map(|(_, argv)| argv)
+                    .collect();
+                assert_eq!(
+                    argv,
+                    [
+                        "-u -N has-session -t =alive-public:",
+                        "-u -N has-session -t =alive-detail:",
+                        "-u -N display-message -p -t =alive-detail: #{pane_pid}",
+                    ],
+                    "only the detail build may spend a PID probe"
+                );
 
                 let before = spawns(bin).len();
                 let saturated_before = shared.inner.stats.saturated.load(Ordering::SeqCst);
