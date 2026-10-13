@@ -589,6 +589,13 @@ class AuditCLI(unittest.TestCase):
         self.refresh_history()
         self.assertIn("native_origin_inventory_incomplete", self.run_cli(2)["reasons"])
 
+    def test_prefix_input_cannot_satisfy_current_human_inventory(self):
+        self.historical_prefix(1)
+        self.inputs[0].update(input_kind="discord", discord_message_id="300")
+        self.messages.append(dict(id="300", channel_id="123", author={"id": "777"}, content="current input claimed by prefix"))
+        self.refresh_history()
+        self.assertIn("native_origin_inventory_incomplete", self.run_cli(2)["reasons"])
+
 
 if __name__ == "__main__":
     unittest.main()
