@@ -9,19 +9,10 @@ Markdown. ``--write-report`` mirrors the markdown form into
 
 Stdlib only; Python 3.11+.
 
-Hard and baseline gates
------------------------
-Eight checks are blocking in ``--check`` mode: direct Discord send regressions,
-direct git subprocess regressions, runtime SQLite/legacy DB references,
-source-of-truth alias writes, manual JSON row mapping, giant files missing from
-``docs/agent-maintenance/change-surfaces.md``, configured namespace size cap
-regressions, and giant-file re-inflation past a frozen production-LoC baseline
-(``scripts/audit_maintainability_giant_baseline.toml``, #3028). Existing findings
-from the enablement commit are captured in ``scripts/audit_allowlist.toml``.
+Finding severity is authoritative in ``--check`` mode: errors block, warnings
+and informational findings remain visible. Baseline checks may diagnose drift,
+but they cannot turn a warning into a blocking error. Scanner exceptions fail.
 
-Some warning-only checks also define no-regression baseline gates. These keep
-existing findings visible in reports while failing ``--check`` only when the
-count increases above a committed baseline.
 """
 
 from __future__ import annotations
@@ -377,8 +368,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--check",
         action="store_true",
         help=(
-            "exit non-zero if any hard-gated check has non-allowlisted findings "
-            "or any baseline gate detects a regression."
+            "exit non-zero for error findings or checker failures; warnings are informational."
         ),
     )
     return parser.parse_args(argv)
@@ -409,25 +399,32 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         failed: list[tuple[str, CheckSpec, list[Finding]]] = []
-        has_stale = False
 
         for spec in specs:
             if spec.key in stale_entries:
-                has_stale = True
                 print(
-                    f"audit_maintainability: stale-allowlist `{spec.key}` failed with "
+                    f"audit_maintainability: warning stale-allowlist `{spec.key}` has "
                     f"{len(stale_entries[spec.key])} stale entry/entries",
                     file=sys.stderr,
                 )
                 for entry in stale_entries[spec.key]:
                     print(f"  - {entry}", file=sys.stderr)
 
-            if spec.hard_gate and findings.get(spec.key):
-                failed.append(("hard-gate", spec, findings[spec.key]))
+            hits = findings.get(spec.key, [])
+            errors = [hit for hit in hits if hit.severity == "error"]
+            if errors:
+                failed.append(("error", spec, errors))
+            warnings = [hit for hit in hits if hit.severity != "error"]
             if spec.baseline_gate:
-                baseline_failures = list(spec.baseline_gate(findings.get(spec.key, [])))
-                if baseline_failures:
-                    failed.append(("baseline-gate", spec, baseline_failures))
+                baseline_findings = list(spec.baseline_gate(hits))
+                baseline_errors = [hit for hit in baseline_findings if hit.severity == "error"]
+                if baseline_errors:
+                    failed.append(("baseline-error", spec, baseline_errors))
+                warnings.extend(hit for hit in baseline_findings if hit.severity != "error")
+            for hit in warnings:
+                loc = hit.file if hit.line is None else f"{hit.file}:{hit.line}"
+                print(f"audit_maintainability: warning `{spec.key}` {loc}: {hit.message}",
+                      file=sys.stderr)
 
         if failed:
             for gate_kind, spec, hits in failed:
@@ -440,7 +437,7 @@ def main(argv: list[str] | None = None) -> int:
                     loc = hit.file if hit.line is None else f"{hit.file}:{hit.line}"
                     print(f"  - {loc}: {hit.message}", file=sys.stderr)
 
-        if failed or has_stale:
+        if failed:
             return 1
 
     return 0

@@ -355,5 +355,18 @@ class ApiDocsCoverageTest(unittest.TestCase):
         self.assertTrue(report.is_clean(), CHECKER.format_report(report))
 
 
+class CliSeverityTest(unittest.TestCase):
+    def test_catalog_drift_is_a_warning(self) -> None:
+        report = CHECKER.build_coverage_report(mounted=[pair("GET", "/api/new")], docs=[], allowlist={})
+        with patch.object(CHECKER, "build_coverage_report", return_value=report), patch("sys.stdout") as stdout:
+            self.assertEqual(CHECKER.main(), 0)
+        self.assertIn("warning", str(stdout.write.call_args_list))
+
+    def test_scanner_exception_cannot_pass(self) -> None:
+        with patch.object(CHECKER, "build_coverage_report", side_effect=RuntimeError("scanner failed")):
+            with self.assertRaisesRegex(RuntimeError, "scanner failed"):
+                CHECKER.main()
+
+
 if __name__ == "__main__":
     unittest.main()

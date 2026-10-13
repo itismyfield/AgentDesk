@@ -1129,5 +1129,9 @@ class SccacheEnvTests(TokenTestCase):
         self.assertEqual(seen["SCCACHE_DIR"], str(wanted), "the caller's value stands")
 
 
+# Linux Script checks provides PyYAML; the native Windows job tests the Win32 API.
+from tests.test_build_token_win32_5663 import Win32BuildTokenWorkflowContractTests
+
+
 if __name__ == "__main__":
     unittest.main()

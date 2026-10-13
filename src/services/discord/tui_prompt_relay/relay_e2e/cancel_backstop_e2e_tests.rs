@@ -2,6 +2,8 @@
 
 #[path = "cancel_backstop_e2e_tests/autoheal.rs"]
 mod autoheal;
+#[path = "cold_start_incident_e2e_tests.rs"]
+mod cold_start_incident;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
