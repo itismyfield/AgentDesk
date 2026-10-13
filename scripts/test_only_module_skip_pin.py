@@ -170,6 +170,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/clear_launch_tests.rs",
         "src/services/tui_o/writer/canary_policy_tests.rs",
         "src/services/codex_tui/verified_tail/diagnostic_tests.rs",
+        "src/services/tui_o/writer/input_facts/observation_tests.rs",
         "src/services/tui_o/writer/input_facts/tests.rs",
         "src/services/tui_o/writer/input_facts/resume_tests.rs",
         "src/services/discord/turn_presence/activity_tests.rs",
@@ -687,6 +688,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_placeholders/tests/n3bc_tests.rs",
+        "src/services/discord/turn_presence/activity/tail_tests.rs",
+        "src/services/tui_o/shadow/capture/observation/observation_tests.rs",
     }
 )
 
@@ -772,6 +775,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/health/recovery/self_watchdog/policy/tests/mod.rs",
         "src/services/discord/health/recovery/self_watchdog/tests/mod.rs",
         "src/services/hang_forensics/tests/mod.rs",
+        "src/services/discord/turn_presence/activity/tail.rs",
     }
 )
 
