@@ -293,6 +293,11 @@ class HerdrDegradedWaiver(unittest.TestCase):
         self.assertEqual(readiness["ignored_degraded_reasons_unattributed"], aggregate)
         self.assertEqual(herdr.waiver_summary(self.args, [{"readiness": readiness}])["ignored_degraded_reasons_unattributed"],
                          sorted(aggregate))
+        # An observation from an older mark carries ignored reasons but no marker field.
+        legacy = {"readiness": {"ignored_degraded_reasons": ["provider:claude:pending_queue_depth:1", other]}}
+        summary = herdr.waiver_summary(self.args, [legacy])
+        self.assertEqual((summary["ignored_degraded_reasons"], summary["ignored_degraded_reasons_unattributed"]),
+                         (sorted(["provider:claude:pending_queue_depth:1", other]), ["provider:claude:pending_queue_depth:1"]))
         for reasons in (["relay_verdict_unknown_codex_41"], ["tui_o:released:herdr"]):
             with self.subTest(reasons=reasons):
                 self.assertEqual(self.refused(degraded(reasons), "never_waived")["readiness"]

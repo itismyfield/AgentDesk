@@ -73,10 +73,10 @@ def waiver_summary(args, observations):
     allowed = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
     readiness = [o.get("readiness") or {} for o in observations if isinstance(o, dict)]
     ignored = sorted({r for item in readiness for r in item.get("ignored_degraded_reasons", [])})
+    # Derived from the union, so observations recorded before the marker existed are still marked.
     return {"degraded_reason_waiver": "applied" if ignored else ("unused" if allowed else "none"),
             "allowed_degraded_reasons": allowed, "ignored_degraded_reasons": ignored,
-            "ignored_degraded_reasons_unattributed":
-                sorted({r for item in readiness for r in item.get("ignored_degraded_reasons_unattributed", [])})}
+            "ignored_degraded_reasons_unattributed": unattributed(ignored)}
 
 
 def report_waiver(args, result):
