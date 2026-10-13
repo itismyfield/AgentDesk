@@ -37,7 +37,9 @@ pub(super) struct ProofPlan {
 enum TurnScan {
     Before,
     /// Inside the selected turn; `opener_run` while only its opening records were read.
-    Selected { opener_run: bool },
+    Selected {
+        opener_run: bool,
+    },
 }
 
 /// The turn a `task_started` or `turn_context` record opens: `Some(None)` when it names none.

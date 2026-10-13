@@ -97,7 +97,9 @@ pub(super) fn classify(
     let coordinate_holds: Vec<&str> = state
         .replay_hold_reasons
         .iter()
-        .filter_map(|reason| reason.strip_prefix(crate::services::discord::inflight::COORDINATE_HOLD_PREFIX))
+        .filter_map(|reason| {
+            reason.strip_prefix(crate::services::discord::inflight::COORDINATE_HOLD_PREFIX)
+        })
         .collect();
     let codex_tui = state.provider == "codex"
         && state.runtime_kind == Some(RuntimeHandoffKind::CodexTui)
@@ -126,14 +128,20 @@ pub(super) fn classify(
             _ => D::NeedsProof,
         };
     }
-    if marker.is_some() || coordinate_holds.iter().any(|slug| matches!(*slug, "pending" | "persist_failed")) {
+    if marker.is_some()
+        || coordinate_holds
+            .iter()
+            .any(|slug| matches!(*slug, "pending" | "persist_failed"))
+    {
         return D::RetryInstall;
     }
     let unnamed = |value: &Option<String>| value.as_deref().is_none_or(|v| v.trim().is_empty());
     if unnamed(&state.native_turn_id)
         || unnamed(&state.session_id)
         || unnamed(&state.turn_nonce)
-        || coordinate_holds.iter().any(|slug| NEEDS_EVIDENCE_SLUGS.contains(slug))
+        || coordinate_holds
+            .iter()
+            .any(|slug| NEEDS_EVIDENCE_SLUGS.contains(slug))
     {
         return D::NeedsEvidence;
     }

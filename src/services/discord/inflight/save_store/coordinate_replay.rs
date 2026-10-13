@@ -40,7 +40,10 @@ pub(in crate::services::discord) struct CoordinateExpectation {
 impl CoordinateExpectation {
     /// `None` when the row has no nonce: an unnamed episode is never replayed.
     pub(in crate::services::discord) fn of(state: &InflightTurnState) -> Option<Self> {
-        let turn_nonce = state.turn_nonce.clone().filter(|nonce| !nonce.trim().is_empty())?;
+        let turn_nonce = state
+            .turn_nonce
+            .clone()
+            .filter(|nonce| !nonce.trim().is_empty())?;
         Some(Self {
             save_generation: state.save_generation,
             turn_nonce,
