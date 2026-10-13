@@ -821,6 +821,35 @@ class RestartObserveOnly(unittest.TestCase):
                 # The report summary is the union over mark and verify, not either moment alone.
                 self.assertEqual(report["herdr_readiness_waiver"]["ignored_degraded_reasons"], sorted(["tui_o:released:a", *after]))
 
+    def test_report_summary_includes_follow_up_turn_observations(self):
+        self.args.herdr_allowed_degraded_reason = WAIVE[1::2]
+        self.marked()
+        client = self.client.return_value
+        client.send_control.return_value = {"id": "100"}
+        marker = f"[E2E:E19:{self.args.run_id}:POST]"
+        message = {"id": "101", "content": marker, "author": {"id": "42", "bot": True}}
+        client.wait_for_message.return_value = (message, [message])
+        client.fetch_messages.return_value = [message]
+
+        def detail(reasons, **block):
+            payload = degraded(reasons, uptime_secs=3) if reasons else {**health(), "uptime_secs": 3}
+            payload["herdr"]["reconnect"].update(channels=1, published=1)
+            payload["herdr"].update(block)
+            return 200, payload
+        # mark and verify are healthy; only the follow-up turn's own observations waive reasons.
+        for later, expected_rc, ignored in (([detail(["tui_o:released:a"])] * 2, 0, ["tui_o:released:a"]),
+                                            ([detail(["tui_o:released:a"]), detail(["provider:claude:pending_queue_depth:1"], input_holds=1)],
+                                             1, ["provider:claude:pending_queue_depth:1", "tui_o:released:a"])):
+            with self.subTest(expected_rc=expected_rc):
+                self.http.side_effect = [detail(None), *later]
+                with patch.object(driver, "run_scenario", real_run_scenario), patch.object(herdr.time, "sleep"):
+                    rc, report = self.run_mode("verify")
+                self.assertEqual(rc, expected_rc, report)
+                self.assertEqual(report["restart_observation"]["after"]["readiness"]["degraded_reason_waiver"], "unused")
+                self.assertEqual(report["herdr_readiness_waiver"]["degraded_reason_waiver"], "applied")
+                self.assertEqual(report["herdr_readiness_waiver"]["ignored_degraded_reasons"], ignored)
+                self.assertIn("herdr readiness waiver", self.stdout)
+
     def test_unpublished_counts_and_restart_scenario_fail_before_input(self):
         self.marked()
         for key in ("withheld", "unknown", "pending", "published"):

@@ -170,8 +170,10 @@ def run(driver, args):
         restart.update(status="fail", reason=f"{type(error).__name__}: {error}")
         if hasattr(error, "herdr_observation"):
             restart["failed_observation"] = error.herdr_observation
-    report["herdr_readiness_waiver"] = herdr.waiver_summary(
-        args, [restart.get(k) for k in ("before", "after", "failed_observation")])
+    # The whole run: mark/verify observations plus every follow-up turn's own observations.
+    observations = [restart.get(k) for k in ("before", "after", "failed_observation")]
+    observations += [o for r in report["scenarios"] if isinstance(r, dict) for o in r.get("herdr_observations") or []]
+    report["herdr_readiness_waiver"] = herdr.waiver_summary(args, observations)
     path = output / f"report.{args.cell}.json"
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"[e2e] observe-only {restart['status']}; {restart['limitation']}; report → {path}")
