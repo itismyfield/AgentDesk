@@ -354,7 +354,7 @@ use extract::{
 };
 pub use handoff::RecordEvidence;
 #[cfg(test)]
-pub(crate) use handoff::tests::{on_owning_commit, on_owning_publish};
+pub(crate) use handoff::tests::on_owning_publish;
 pub(crate) use handoff::{
     BindOutcome, HandoffGuard, bind_discord_handoff_record, codex_rehydrated_scan_offset,
     drain_expired_handoffs, reserve_discord_handoff,
