@@ -12948,8 +12948,11 @@ services::tui_o::writer::transition_cleanup::observe::tests::transition_observe_
 services::tui_o::writer::transition_cleanup::observe::tests::transition_observe_sees_a_torn_tail_growth_and_a_rewritten_prefix
 services::tui_o::writer::transition_cleanup::observe::tests::transition_observe_tells_a_replaced_path_from_a_deleted_one
 services::tui_o::writer::transition_cleanup::tests::operations_shape::transition_cleanup_operations_shaped_store_judges_all_59_hops_eligible
+services::tui_o::writer::transition_cleanup::tests::operations_shape::transition_cleanup_retired_missing_source_retry_reads_its_witness_back_from_the_store
 services::tui_o::writer::transition_cleanup::tests::transition_cleanup_first_version_refuses_codex_moving_homes_and_bad_requests
+services::tui_o::writer::transition_cleanup::tests::transition_cleanup_mapped_seq_and_pane_meet_cutoff_range_and_pane_each
 services::tui_o::writer::transition_cleanup::tests::transition_cleanup_missing_file_needs_a_fresh_witness_bound_to_the_cursor
+services::tui_o::writer::transition_cleanup::tests::transition_cleanup_missing_file_retry_compares_the_retired_cursor_with_its_witness
 services::tui_o::writer::transition_cleanup::tests::transition_cleanup_needs_a_captured_successor_which_the_gc_ledger_may_show
 services::tui_o::writer::transition_cleanup::tests::transition_cleanup_owed_output_holds_every_hop
 services::tui_o::writer::transition_cleanup::tests::transition_cleanup_past_audit_settles_only_its_own_job_on_an_unchanged_snapshot
