@@ -353,6 +353,8 @@ use extract::{
     take_or_record_recent_observed_prompt,
 };
 pub use handoff::RecordEvidence;
+#[cfg(unix)]
+pub(crate) use handoff::codex_replay_restored_handoff_inputs;
 #[cfg(test)]
 pub(crate) use handoff::tests::on_owning_publish;
 pub(crate) use handoff::{

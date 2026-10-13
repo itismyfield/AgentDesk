@@ -74,6 +74,9 @@ pub(super) struct HandoffReservation {
     reserved_wall: DateTime<Utc>,
     bound: Option<String>,
     parked: Vec<ParkedObservation>,
+    #[cfg(unix)]
+    #[serde(skip)]
+    replay_from: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +134,8 @@ pub(crate) fn reserve_discord_handoff(provider: &str, tmux: &str, origin: &str) 
         reserved_wall: Utc::now(),
         bound: None,
         parked: Vec::new(),
+        #[cfg(unix)]
+        replay_from: None,
     };
     let replaced = {
         let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
@@ -432,6 +437,8 @@ struct DurableHandoff {
     provider: String,
     tmux: String,
     reservation: HandoffReservation,
+    #[serde(default)]
+    expires_at: Option<DateTime<Utc>>,
 }
 
 fn durable_path(provider: &str, tmux: &str) -> Option<std::path::PathBuf> {
@@ -465,7 +472,7 @@ fn durable_root() -> Option<std::path::PathBuf> {
     (!root.as_os_str().is_empty() && live.as_ref() != Some(&root)).then_some(root)
 }
 
-/// Mirrors an unbound reservation that holds inputs on disk, so a restart can restore it.
+/// Mirrors every reservation still holding inputs, including a bound one awaiting their records.
 pub(super) fn sync_durable(provider: &str, tmux: &str) {
     let Some(path) = durable_path(provider, tmux) else {
         return;
@@ -478,11 +485,18 @@ pub(super) fn sync_durable(provider: &str, tmux: &str) {
         state
             .handoff_by_tmux
             .get(&PromptKey::new(provider, tmux))
-            .filter(|entry| entry.value.bound.is_none() && !entry.value.parked.is_empty())
+            .filter(|entry| !entry.value.parked.is_empty())
             .map(|entry| DurableHandoff {
                 provider: provider.to_string(),
                 tmux: tmux.to_string(),
                 reservation: entry.value.clone(),
+                expires_at: Some(
+                    Utc::now()
+                        + chrono::TimeDelta::from_std(
+                            PROMPT_ANCHOR_SUBMIT_TTL.saturating_sub(entry.recorded_at.elapsed()),
+                        )
+                        .unwrap_or_default(),
+                ),
             })
     };
     let result = match record {
@@ -515,36 +529,138 @@ pub(crate) fn codex_rehydrated_scan_offset(tmux: &str, rollout_path: &Path) -> u
         .handoff_by_tmux
         .get(&key)
         .map(|entry| {
-            let holds = entry.value.bound.is_none() && !entry.value.parked.is_empty();
+            let holds = !entry.value.parked.is_empty();
             holds.then_some(entry.value.reserved_wall)
         });
     let reserved_wall = match holding {
         Some(Some(reserved_wall)) => reserved_wall,
         Some(None) => return eof,
         None => {
-            let Some(reservation) = durable_path(&provider, tmux)
+            let Some(record) = durable_path(&provider, tmux)
                 .and_then(|path| std::fs::read_to_string(path).ok())
                 .and_then(|text| serde_json::from_str::<DurableHandoff>(&text).ok())
-                .map(|record| record.reservation)
             else {
                 return eof;
             };
+            let reservation = record.reservation;
+            if reservation.parked.is_empty() {
+                return eof;
+            }
             let reserved_wall = reservation.reserved_wall;
             let held = reservation.parked.len();
+            let expires_at = record.expires_at.unwrap_or(
+                reserved_wall
+                    + chrono::TimeDelta::seconds(PROMPT_ANCHOR_SUBMIT_TTL.as_secs() as i64),
+            );
+            let remaining = (expires_at - Utc::now())
+                .to_std()
+                .unwrap_or_default()
+                .min(PROMPT_ANCHOR_SUBMIT_TTL);
+            let age = PROMPT_ANCHOR_SUBMIT_TTL - remaining;
             let value = HandoffReservation {
                 generation: HANDOFF_GENERATION.fetch_add(1, Ordering::Relaxed),
+                // Rebuild the Answer slot from the origin record, rather than the saved turn name.
+                bound: None,
+                #[cfg(unix)]
+                replay_from: Some(
+                    first_user_record_created_since(rollout_path, reserved_wall).unwrap_or(eof),
+                ),
                 ..reservation
             };
             let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
             state.handoff_by_tmux.entry(key).or_insert(TimedValue {
                 value,
-                recorded_at: Instant::now(),
+                recorded_at: Instant::now() - age,
             });
             tracing::info!(tmux, held, "restored a Codex handoff holding inputs");
             reserved_wall
         }
     };
     first_user_record_created_since(rollout_path, reserved_wall).map_or(eof, |floor| floor.min(eof))
+}
+
+/// Rejudges only the restored reservation's origin and held inputs on their own cursor.
+/// A response writer advancing the shared cursor cannot consume these unprocessed records.
+#[cfg(unix)]
+pub(crate) fn codex_replay_restored_handoff_inputs(tmux: &str, rollout_path: &Path) {
+    use std::io::{BufRead, Seek, SeekFrom};
+    let key = PromptKey::new("codex", tmux.trim());
+    let held = STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .handoff_by_tmux
+        .get(&key)
+        .and_then(|entry| {
+            entry
+                .value
+                .replay_from
+                .map(|offset| (entry.value.clone(), offset))
+        });
+    let Some((held, start)) = held else {
+        return;
+    };
+    let Ok(mut file) = std::fs::File::open(rollout_path) else {
+        return;
+    };
+    let Ok(len) = file.metadata().map(|metadata| metadata.len()) else {
+        return;
+    };
+    let mut offset = if start > len { 0 } else { start };
+    if file.seek(SeekFrom::Start(offset)).is_err() {
+        return;
+    }
+    let mut reader = std::io::BufReader::new(file);
+    let (mut line, mut current) = (String::new(), None);
+    loop {
+        line.clear();
+        let Ok(read) = reader.read_line(&mut line) else {
+            break;
+        };
+        if read == 0 || !line.ends_with('\n') {
+            break;
+        }
+        offset += read as u64;
+        let Ok(json) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if json.pointer("/payload/type").and_then(Value::as_str) == Some("task_started")
+            || json.get("type").and_then(Value::as_str) == Some("turn_context")
+        {
+            current = json
+                .pointer("/payload/turn_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        let Some((prompt, entry_id, record)) =
+            extract_codex_rollout_user_prompt_with_evidence(&json)
+        else {
+            continue;
+        };
+        current = record.turn_id.clone().or(current);
+        if prompts_match(&held.origin, &prompt)
+            || held
+                .parked
+                .iter()
+                .any(|input| prompts_match(&input.prompt, &prompt))
+        {
+            observation::observe_codex_record_prompt_at(
+                tmux,
+                &prompt,
+                entry_id.as_deref(),
+                current.as_deref(),
+                &record,
+                Utc::now(),
+            );
+        }
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(entry) = state
+        .handoff_by_tmux
+        .get_mut(&key)
+        .filter(|entry| entry.value.generation == held.generation)
+    {
+        entry.value.replay_from = (!entry.value.parked.is_empty()).then_some(offset);
+    }
 }
 
 fn first_user_record_created_since(rollout_path: &Path, since: DateTime<Utc>) -> Option<u64> {

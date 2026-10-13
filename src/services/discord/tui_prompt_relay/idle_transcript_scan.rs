@@ -496,15 +496,18 @@ pub(super) fn resolve_codex_turn_prompt_end(
             current = opened;
             return false;
         }
-        let Some((prompt, _)) =
-            crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_entry_id(
+        let Some((prompt, _, record)) =
+            crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_evidence(
                 json,
             )
         else {
             return false;
         };
         user_record = true;
-        if current.as_deref() == Some(native_turn) && prompt.trim() == target {
+        named_turn |= record.turn_id.is_some();
+        if record.turn_id.as_deref().or(current.as_deref()) == Some(native_turn)
+            && prompt.trim() == target
+        {
             found = Some(end);
         }
         found.is_some()
@@ -525,6 +528,11 @@ pub(super) fn codex_native_turn_at(rollout_path: &Path, offset: u64) -> Option<S
         }
         if let Some(opened) = codex_record_opened_turn(json) {
             current = opened;
+        }
+        if let Some(turn) =
+            crate::services::tui_prompt_dedupe::RecordEvidence::from_record(json).turn_id
+        {
+            current = Some(turn);
         }
         false
     })

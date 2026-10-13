@@ -1,11 +1,11 @@
 use super::*;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 /// A pause point around the owning decision.
 type Probe = Arc<dyn Fn(&str) + Send + Sync>;
 static BEFORE_COMMIT: Mutex<Option<Probe>> = Mutex::new(None);
+static BEFORE_PARK: Mutex<Option<Probe>> = Mutex::new(None);
 static BEFORE_PUBLISH: Mutex<Option<Probe>> = Mutex::new(None);
 
 fn installed(slot: &Mutex<Option<Probe>>) -> Option<Probe> {
@@ -17,6 +17,13 @@ fn installed(slot: &Mutex<Option<Probe>>) -> Option<Probe> {
 /// Runs under the STATE lock, after the duplicate checks and before the owning commit.
 pub(crate) fn before_owning_commit(prompt: &str) {
     if let Some(probe) = installed(&BEFORE_COMMIT) {
+        probe(prompt);
+    }
+}
+
+/// Runs under the STATE lock before an observation can join the parked inputs.
+pub(crate) fn before_parking_commit(prompt: &str) {
+    if let Some(probe) = installed(&BEFORE_PARK) {
         probe(prompt);
     }
 }
@@ -105,6 +112,48 @@ fn slot(turn: &str) -> Option<NativeTurnOwner> {
         .get(&PromptKey::new("codex", TMUX))
         .filter(|slot| slot.value.turn == turn)
         .map(|slot| slot.value.owner)
+}
+
+fn competing_bind(
+    reserve: bool,
+) -> (
+    Probe,
+    mpsc::Receiver<(bool, BindOutcome)>,
+    std::thread::JoinHandle<()>,
+) {
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (attempted_tx, attempted_rx) = mpsc::channel();
+    let (bound_tx, bound_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("decision probe entered");
+        let blocked = matches!(STATE.try_lock(), Err(std::sync::TryLockError::WouldBlock));
+        attempted_tx.send(()).unwrap();
+        if reserve {
+            std::mem::forget(reserve_discord_handoff("codex", TMUX, ORIGIN));
+        }
+        let evidence = record(Some("t1"), Some(Utc::now()));
+        let outcome = bind_discord_handoff_record(TMUX, ORIGIN, &evidence);
+        bound_tx.send((blocked, outcome)).unwrap();
+    });
+    let entered_tx = Mutex::new(Some(entered_tx));
+    let attempted_rx = Mutex::new(attempted_rx);
+    let probe = Arc::new(move |prompt: &str| {
+        if prompt != INPUT {
+            return;
+        }
+        let Some(entered_tx) = entered_tx.lock().unwrap().take() else {
+            return;
+        };
+        entered_tx.send(()).unwrap();
+        attempted_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("binder attempted STATE acquisition during the decision");
+    });
+    (probe, bound_rx, worker)
 }
 
 /// A hook that names no entry id is held, then observed exactly once with no id when its
@@ -208,41 +257,81 @@ fn an_expired_handoff_publishes_its_held_input_once() {
     assert_eq!(rx.of(INPUT), vec![(false, None)]);
 }
 
+fn restored_remaining_ttl(legacy_snapshot: bool) {
+    let _env = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let _lock = locked();
+    let mut rx = Published::new();
+    std::mem::forget(reserve_discord_handoff("codex", TMUX, ORIGIN));
+    assert_eq!(hook(INPUT, "t1"), PromptObservation::ParkedForHandoff);
+    Instant::advance(Duration::from_secs(230 * 60));
+    sync_durable("codex", TMUX);
+    assert!(durable_handoff_present_for_tests("codex", TMUX));
+    if legacy_snapshot {
+        let path = durable_path("codex", TMUX).unwrap();
+        let mut snapshot: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        snapshot.as_object_mut().unwrap().remove("expires_at");
+        snapshot["reservation"]["reserved_wall"] =
+            serde_json::json!(Utc::now() - chrono::TimeDelta::minutes(230));
+        std::fs::write(path, serde_json::to_string(&snapshot).unwrap()).unwrap();
+    }
+    reset_state_for_tests();
+    let rollout = root.path().join("rollout.jsonl");
+    std::fs::write(&rollout, "").unwrap();
+    codex_rehydrated_scan_offset(TMUX, &rollout);
+    assert_eq!(held_handoff_inputs_for_tests("codex", TMUX), Some(1));
+    drain_expired_handoffs();
+    assert!(
+        rx.of(INPUT).is_empty(),
+        "the remaining ten minutes are preserved"
+    );
+    Instant::advance(Duration::from_secs(11 * 60));
+    drain_expired_handoffs();
+    drain_expired_handoffs();
+    assert_eq!(
+        rx.of(INPUT),
+        vec![(false, None)],
+        "the original four-hour TTL drains once"
+    );
+    assert_eq!(held_handoff_inputs_for_tests("codex", TMUX), None);
+    assert!(!durable_handoff_present_for_tests("codex", TMUX));
+}
+
+#[test]
+fn a_restored_handoff_keeps_only_its_remaining_ttl() {
+    restored_remaining_ttl(false);
+}
+
+#[test]
+fn an_old_handoff_snapshot_keeps_its_original_expiry() {
+    restored_remaining_ttl(true);
+}
+
 /// A handoff reserved and bound while an input's owning decision is in progress waits for
 /// that decision: the input owns its turn and the bind leaves its Relay slot in place.
 #[test]
 fn a_bind_waits_for_an_owning_decision_in_progress() {
     let _lock = locked();
     let mut rx = Published::new();
-    let (during_tx, during_rx) = mpsc::channel::<bool>();
-    let (bound_tx, bound_rx) = mpsc::channel::<BindOutcome>();
-    let pending = std::sync::Mutex::new(Some((during_tx, bound_tx)));
-    let _probe = on_owning_commit(move |prompt| {
-        let Some((during_tx, bound_tx)) =
-            pending.lock().unwrap().take().filter(|_| prompt == INPUT)
-        else {
-            return;
-        };
-        let done = Arc::new(AtomicBool::new(false));
-        let finished = done.clone();
-        std::thread::spawn(move || {
-            std::mem::forget(reserve_discord_handoff("codex", TMUX, ORIGIN));
-            let evidence = record(Some("t1"), Some(Utc::now()));
-            let outcome = bind_discord_handoff_record(TMUX, ORIGIN, &evidence);
-            finished.store(true, Ordering::SeqCst);
-            let _ = bound_tx.send(outcome);
-        });
-        std::thread::sleep(Duration::from_millis(300));
-        let _ = during_tx.send(done.load(Ordering::SeqCst));
-    });
-    assert_eq!(hook(INPUT, "t1"), PromptObservation::PublishedSshDirect);
-    let bound_during = during_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("probe ran");
-    assert!(!bound_during, "no bind lands inside the owning decision");
-    let outcome = bound_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("bind ran");
+    let (probe, bound_rx, worker) = competing_bind(true);
+    let _probe = install(&BEFORE_COMMIT, probe);
+    let observation = hook(INPUT, "t1");
+    let result = bound_rx.recv_timeout(Duration::from_secs(5));
+    let joined = worker.join();
+    let (blocked, outcome) = result.expect("bind ran");
+    joined.expect("binder finished");
+    assert!(
+        blocked,
+        "STATE acquisition is blocked inside the owning decision"
+    );
+    assert_eq!(observation, PromptObservation::PublishedSshDirect);
     assert_eq!(outcome, BindOutcome::Bound);
     assert_eq!(
         slot("t1"),
@@ -250,6 +339,30 @@ fn a_bind_waits_for_an_owning_decision_in_progress() {
         "the input keeps its turn"
     );
     assert_eq!(rx.of(INPUT), vec![(false, None)]);
+}
+
+/// A bind cannot settle a reservation until the concurrent observation has parked its copy.
+#[test]
+fn a_bind_waits_for_a_parking_decision_in_progress() {
+    let _lock = locked();
+    let mut rx = Published::new();
+    let _guard = reserve_discord_handoff("codex", TMUX, ORIGIN);
+    let (probe, bound_rx, worker) = competing_bind(false);
+    let _probe = install(&BEFORE_PARK, probe);
+    let observation = hook(INPUT, "t1");
+    let result = bound_rx.recv_timeout(Duration::from_secs(5));
+    let joined = worker.join();
+    let (blocked, outcome) = result.expect("bind ran");
+    joined.expect("binder finished");
+    assert!(
+        blocked,
+        "STATE acquisition is blocked inside the parking decision"
+    );
+    assert_eq!(observation, PromptObservation::ParkedForHandoff);
+    assert_eq!(outcome, BindOutcome::Bound);
+    assert_eq!(slot("t1"), Some(NativeTurnOwner::Answer));
+    assert_eq!(held_handoff_inputs_for_tests("codex", TMUX), Some(0));
+    assert_eq!(rx.of(INPUT), vec![(true, None)]);
 }
 
 /// A hook that names no turn stays held after the bind until its record names one: an input

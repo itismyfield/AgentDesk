@@ -584,6 +584,10 @@ pub(super) fn decide_observation(
             let turn = turn.to_string();
             return Decision::Joined { echo, turn };
         }
+        #[cfg(test)]
+        if observation.may_park {
+            super::handoff::tests::before_parking_commit(&candidates[0]);
+        }
         if observation.may_park
             && state.park_handoff_observation(
                 key,

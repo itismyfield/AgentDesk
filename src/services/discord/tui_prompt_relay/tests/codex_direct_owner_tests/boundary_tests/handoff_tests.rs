@@ -52,7 +52,11 @@ fn send_captured_hook_on(
         .expect("captured UserPromptSubmit")["payload"]
         .clone();
     payload["prompt"] = prompt.into();
-    payload["turn_id"] = turn.into();
+    if turn.is_empty() {
+        payload.as_object_mut().unwrap().remove("turn_id");
+    } else {
+        payload["turn_id"] = turn.into();
+    }
     hooks
         .send(HookEvent {
             provider: "codex".to_string(),
@@ -187,11 +191,27 @@ async fn assert_echo_only(fx: &Fixture, row: Option<u64>, answers: &[String]) {
 async fn assert_own_answer(fx: &mut Fixture, event: ObservedTuiPrompt, turn: &str) {
     assert!(!event.steer_echo, "the input owns its turn");
     assert_eq!(event.native_turn_id.as_deref(), Some(turn));
-    let end = fx.append(&(opening_record(turn, STEER) + &item_completed_line_for(turn)));
+    let user = user_record(STEER, turn);
+    let started = rollout_line(serde_json::json!({"type": "event_msg", "payload": {
+        "type": "task_started", "turn_id": turn}}));
+    let end = fx.append(
+        &(user + &started + &item_completed_line_for(turn) + &answer_for(turn, STEER_ANSWER)),
+    );
+    assert!(
+        matches!(
+            super::super::super::super::idle_transcript_scan::resolve_codex_turn_prompt_end(
+                &fx.codex.rollout,
+                turn,
+                STEER
+            )
+            .unwrap(),
+            super::super::super::super::idle_transcript_scan::CodexTurnPrompt::Found(_)
+        ),
+        "a user-first record resolves its own turn"
+    );
     fx.scanned_past(end).await;
     super::super::super::super::relay_observed_prompt(&fx.shared, event).await;
     let anchor = fx.codex.row().expect("the input's row").user_msg_id;
-    fx.append(&answer_for(turn, STEER_ANSWER));
     fx.assert_answers_in_order(&[STEER_ANSWER], Some(1)).await;
     assert_eq!(fx.anchor_of(STEER_ANSWER), anchor);
     assert!(
@@ -356,17 +376,33 @@ fn codex_input_scanned_after_a_finished_discord_turn_owns_its_turn() {
                 &ProviderKind::Codex,
                 fx.codex.channel.get()
             ));
-            let end = fx.append(&(opening_record(&t2, PROMPT3) + &item_completed_line_for(&t2)));
-            let mut events = events_for(&mut fx, PROMPT3, Duration::from_secs(5)).await;
-            assert_eq!(events.len(), 1, "{events:?}");
-            let event = events.remove(0);
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let resume = Arc::new(tokio::sync::Notify::new());
+            *super::super::super::super::codex_idle_rollout::SCAN_LEASE_PAUSE
+                .lock()
+                .unwrap() = Some((fx.codex.channel.get(), entered.clone(), resume.clone()));
+            fx.append(
+                &(user_record(PROMPT3, &t2)
+                    + &rollout_line(serde_json::json!({"type":"event_msg", "payload": {
+                    "type":"task_started", "turn_id": t2}}))
+                    + &item_completed_line_for(&t2)),
+            );
+            tokio::time::timeout(Duration::from_secs(5), entered.notified())
+                .await
+                .expect("scanner selected its lease");
+            let event = tokio::time::timeout(Duration::from_secs(5), fx.observed.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.prompt, PROMPT3);
+            assert_eq!(event.tmux_session_name, fx.codex.tmux);
             assert!(!event.steer_echo);
             assert_eq!(event.native_turn_id.as_deref(), Some(t2.as_str()));
-            fx.scanned_past(end).await;
             super::super::super::super::relay_observed_prompt(&fx.shared, event).await;
             let anchor = fx.codex.row().expect("the input's row").user_msg_id;
             fx.append(&answer_for(&t2, RESPONSE3));
-            fx.assert_answers_in_order(&[RESPONSE3], None).await;
+            resume.notify_one();
+            fx.assert_answers_in_order(&[RESPONSE3], Some(1)).await;
             assert_eq!(fx.anchor_of(RESPONSE3), anchor);
             assert!(fx.sent(DISCORD_ANSWER).is_empty());
             fx.finish();
@@ -462,14 +498,34 @@ fn codex_input_scanned_between_its_hook_decision_and_publish_is_published_once()
 
 /// The process stops while a handoff holds an input; the restarted process restores the
 /// binding through the rehydration path, and the scan settles the input from the records.
-async fn restart_with_held_input(root: PathBuf, channel: u64, tmux: &str, same_turn: bool) {
+async fn restart_with_held_input(
+    root: PathBuf,
+    channel: u64,
+    tmux: &str,
+    same_turn: bool,
+    already_bound: bool,
+    records_after_restore: bool,
+) {
+    let _tmux = live_pane_tmux(&root);
     let mut fx = Fixture::start(&root, channel, tmux).await;
     let (t1, t2) = (turn(1), turn(2));
     let steer_turn = if same_turn { &t1 } else { &t2 };
     discord_row(&fx, channel + 1);
     std::mem::forget(reserve(&fx));
-    send_captured_hook(&fx, STEER, steer_turn);
+    send_captured_hook(&fx, STEER, if already_bound { "" } else { steer_turn });
     held(&fx, 1).await;
+    if already_bound {
+        let origin: serde_json::Value = serde_json::from_str(&user_record(ORIGIN, &t1)).unwrap();
+        assert_eq!(
+            dedupe::bind_discord_handoff_record(
+                tmux,
+                ORIGIN,
+                &dedupe::RecordEvidence::from_record(&origin)
+            ),
+            dedupe::BindOutcome::Bound
+        );
+        held(&fx, 1).await;
+    }
     assert!(dedupe::durable_handoff_present_for_tests("codex", tmux));
     let a_start = std::fs::metadata(&fx.codex.rollout).unwrap().len();
     let mut records = opening_record(&t1, ORIGIN);
@@ -477,7 +533,14 @@ async fn restart_with_held_input(root: PathBuf, channel: u64, tmux: &str, same_t
         records += &user_record(STEER, &t1);
     }
     records += &answer_for(&t1, DISCORD_ANSWER);
-    let eof = fx.append(&records);
+    if already_bound && !same_turn {
+        records += &user_record(STEER, &t2);
+    }
+    let eof = if records_after_restore {
+        a_start
+    } else {
+        fx.append(&records)
+    };
 
     // SIGTERM marks the rows and exits without dropping the guard; memory is lost, the mirror stays.
     let mode = crate::services::discord::InflightRestartMode::DrainRestart;
@@ -487,7 +550,11 @@ async fn restart_with_held_input(root: PathBuf, channel: u64, tmux: &str, same_t
     let restore = super::super::super::super::codex_tui_rehydrated_binding_from_rollout_path;
     let binding = restore(tmux, &fx.codex.rollout, Some("s-5704".to_string())).expect("binding");
     assert!(
-        binding.last_offset > a_start && binding.last_offset < eof,
+        if records_after_restore {
+            binding.last_offset == eof
+        } else {
+            binding.last_offset > a_start && binding.last_offset < eof
+        },
         "{}",
         binding.last_offset
     );
@@ -498,22 +565,41 @@ async fn restart_with_held_input(root: PathBuf, channel: u64, tmux: &str, same_t
         "no held handoff keeps the end-of-file cursor"
     );
 
-    // The Discord turn's recovery tail answers it; then its row ends.
-    let (sender, rx) = std::sync::mpsc::channel();
-    crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset(
-        &fx.codex.rollout,
+    let eof = if records_after_restore {
+        fx.append(&records)
+    } else {
+        eof
+    };
+    // The actual recovery writer consumes the response range and advances the shared cursor.
+    let relay = crate::services::discord::recovery_engine::codex_rebind_complete_for_tests(
+        tmux,
+        fx.codex.rollout.to_str().unwrap(),
         a_start,
-        Some("s-5704"),
-        sender,
-        None,
-        || true,
-    )
-    .expect("recovery tail");
-    let answers = terminal_results(rx);
+    );
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            dedupe::runtime_binding_for_tmux_session(tmux)
+                .is_some_and(|binding| binding.last_offset == eof)
+                && crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux)
+                    .is_some_and(|marker| marker.rollout_start_offset == Some(eof))
+        })
+        .await,
+        "recovery writer never advanced its cursor"
+    );
+    let normalized = std::fs::read_to_string(&relay).unwrap();
+    let answers = normalized
+        .lines()
+        .filter_map(|line| {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            (row["type"] == "result").then(|| row["result"].as_str().unwrap().to_string())
+        })
+        .collect::<Vec<_>>();
+    held(&fx, 1).await;
     assert!(crate::services::discord::inflight::clear_inflight_state(
         &ProviderKind::Codex,
         fx.codex.channel.get()
     ));
+    fx.polls(3).await;
     if same_turn {
         assert_eq!(fx.relay_echoes(STEER).await, 1, "one echo");
         assert_echo_only(&fx, None, &answers).await;
@@ -536,6 +622,8 @@ fn codex_input_held_across_a_restart_is_only_echoed() {
             5_845_070,
             "AgentDesk-codex-5845-restart",
             true,
+            false,
+            false,
         ))
     });
 }
@@ -548,6 +636,50 @@ fn codex_input_held_across_a_restart_for_the_next_turn_gets_its_own_answer() {
             5_845_080,
             "AgentDesk-codex-5845-restart-next",
             false,
+            false,
+            false,
+        ))
+    });
+}
+
+#[test]
+fn codex_bound_handoff_keeps_a_turnless_input_across_restart_in_its_turn() {
+    run(|root| {
+        Box::pin(restart_with_held_input(
+            root,
+            5_845_100,
+            "AgentDesk-codex-5845-bound-restart",
+            true,
+            true,
+            false,
+        ))
+    });
+}
+
+#[test]
+fn codex_bound_handoff_keeps_a_turnless_input_across_restart_in_the_next_turn() {
+    run(|root| {
+        Box::pin(restart_with_held_input(
+            root,
+            5_845_110,
+            "AgentDesk-codex-5845-bound-restart-next",
+            false,
+            true,
+            false,
+        ))
+    });
+}
+
+#[test]
+fn codex_held_input_restores_before_its_origin_record_is_written() {
+    run(|root| {
+        Box::pin(restart_with_held_input(
+            root,
+            5_845_120,
+            "AgentDesk-codex-5845-late-origin",
+            true,
+            false,
+            true,
         ))
     });
 }
