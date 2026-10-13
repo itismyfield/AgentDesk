@@ -389,7 +389,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
 
         self.assertEqual(findings, [])
 
-    def test_errors_on_ghost_freeze_entry_below_threshold(self) -> None:
+    def test_warns_on_ghost_freeze_entry_below_threshold(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._setup(
@@ -400,11 +400,11 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
             findings = CHECKER.check_change_surface_line_counts(root)
 
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].severity, "error")
+        self.assertEqual(findings[0].severity, "warning")
         self.assertIn("no longer a giant file", findings[0].message)
 
 
-    def test_warning_only_line_count_gate_hard_fails_ghost_entry(self) -> None:
+    def test_warning_only_line_count_gate_warns_on_ghost_entry(self) -> None:
         with TemporaryDirectory() as tmp, patch.object(
             CHECKER, "check_doc_headers", return_value=[]
         ), patch.object(
@@ -422,7 +422,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
                 ["--repo-root", tmp, "--warning-only", "--line-count-gate"]
             )
 
-        self.assertEqual(result, 1)
+        self.assertEqual(result, 0)
 
     def test_warning_only_line_count_gate_allows_count_free_giant(self) -> None:
         with TemporaryDirectory() as tmp, patch.object(
@@ -444,7 +444,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
 
         self.assertEqual(result, 0)
 
-    def test_gates_count_free_frozen_entry(self) -> None:
+    def test_warns_on_count_free_frozen_entry(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._setup(
@@ -455,7 +455,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
             findings = CHECKER.check_change_surface_line_counts(root)
 
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].severity, "error")
+        self.assertEqual(findings[0].severity, "warning")
         self.assertIn("no longer a giant file", findings[0].message)
 
     def test_count_free_entry_is_not_double_counted(self) -> None:
@@ -469,13 +469,13 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
             findings = CHECKER.check_change_surface_line_counts(root)
 
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].severity, "error")
+        self.assertEqual(findings[0].severity, "warning")
 
-    def test_errors_when_frozen_path_missing_from_disk(self) -> None:
+    def test_warns_when_frozen_path_missing_from_disk(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             # Inventory has an unrelated module; the frozen path does not exist
-            # on disk (deleted/renamed) -> hard error, not a warning.
+            # on disk (deleted/renamed) -> stale document warning.
             self._setup(
                 root,
                 "| `services::bar` | `src/services/bar.rs` | 1500 | 1500 | 0 |  |",
@@ -484,7 +484,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
             findings = CHECKER.check_change_surface_line_counts(root)
 
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].severity, "error")
+        self.assertEqual(findings[0].severity, "warning")
         self.assertIn("missing from disk", findings[0].message)
 
     def test_warns_when_frozen_path_is_test_file(self) -> None:
@@ -502,6 +502,13 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].severity, "warning")
         self.assertIn("test file", findings[0].message)
+
+
+class ScannerFailureTest(unittest.TestCase):
+    def test_warning_only_does_not_hide_inventory_failure(self) -> None:
+        failure = CHECKER.Finding("error", CHECKER.MODULE_INVENTORY_DOC, "scan failed")
+        with TemporaryDirectory() as tmp, patch.object(CHECKER, "ensure_module_inventory", return_value=failure):
+            self.assertEqual(CHECKER.main(["--repo-root", tmp, "--warning-only"]), 1)
 
 
 if __name__ == "__main__":

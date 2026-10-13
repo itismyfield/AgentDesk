@@ -58,7 +58,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
                 findings.append(
                     Finding(
                         rule="source_of_truth_alias_writes",
-                        severity="info",
+                        severity="error",
                         file=rel,
                         line=line,
                         message=f"file writes near alias path `{fragment}`",

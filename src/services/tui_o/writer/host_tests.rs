@@ -111,6 +111,14 @@ impl<W> RepostHook<W> for CountedTurn {
     fn original(&mut self, _: u64, _: PieceRecord) -> Turned<'_, OriginalGate> {
         Box::pin(std::future::ready(OriginalGate::Send))
     }
+
+    fn receipts(
+        &mut self,
+    ) -> Turned<'_, crate::services::tui_o::repost::projection::ReceiptOverlay> {
+        Box::pin(std::future::ready(
+            crate::services::tui_o::repost::projection::ReceiptOverlay::Disabled,
+        ))
+    }
 }
 
 impl TestIo {
@@ -1275,3 +1283,7 @@ mod readers_host;
 #[cfg(unix)]
 #[path = "s2a_actor_tests.rs"]
 mod s2a;
+
+#[cfg(unix)]
+#[path = "../repost/projection_tests.rs"]
+mod receipt_projection;
