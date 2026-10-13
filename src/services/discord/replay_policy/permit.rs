@@ -47,11 +47,13 @@ pub(crate) struct StartPermit {
     attempt: ExactAttempt,
     target_key: String,
     input_hash: String,
+    binding: serde_json::Value,
 }
 
 impl StartPermit {
     /// Seals a committed begin for the target its projection named.
     pub(crate) fn seal(ack: BeginAck, target: &EffectTarget) -> Result<Self, PermitRefusal> {
+        let binding = ack.binding().clone();
         let (attempt, target_key, input_hash) = ack.into_parts();
         if target_key != target.key() {
             return Err(PermitRefusal::TargetMismatch);
@@ -60,6 +62,7 @@ impl StartPermit {
             attempt,
             target_key,
             input_hash,
+            binding,
         })
     }
 
@@ -74,13 +77,25 @@ impl StartPermit {
         input_hash: &str,
         effect: impl FnOnce(ExactAttempt) -> R,
     ) -> Result<R, PermitRefusal> {
+        self.consume_projected(target, input_hash, |attempt, _binding, _hash| {
+            effect(attempt)
+        })
+    }
+
+    /// Moves the acknowledged binding and frame hash with the attempt into one effect callback.
+    pub(crate) fn consume_projected<R>(
+        self,
+        target: &EffectTarget,
+        input_hash: &str,
+        effect: impl FnOnce(ExactAttempt, serde_json::Value, String) -> R,
+    ) -> Result<R, PermitRefusal> {
         if self.target_key != target.key() {
             return Err(PermitRefusal::TargetMismatch);
         }
         if self.input_hash != input_hash {
             return Err(PermitRefusal::InputMismatch);
         }
-        Ok(effect(self.attempt))
+        Ok(effect(self.attempt, self.binding, self.input_hash))
     }
 }
 

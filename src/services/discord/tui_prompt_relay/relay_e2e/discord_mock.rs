@@ -74,6 +74,7 @@ pub(in crate::services::discord) struct DiscordMockState {
     /// Guild threads the mock answers for, by thread id, with their parent channel.
     threads: Arc<Mutex<std::collections::HashMap<u64, u64>>>,
     next_response_id: Arc<AtomicU64>,
+    pub(super) admission_probe: Arc<Mutex<Option<Arc<super::pending_admission_e2e::EffectProbe>>>>,
 }
 
 impl DiscordMockState {
@@ -99,6 +100,7 @@ impl DiscordMockState {
             extra_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
             threads: Arc::new(Mutex::new(std::collections::HashMap::new())),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
+            admission_probe: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -348,6 +350,14 @@ fn mint_message(
 async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Body>) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
+    let probe = state
+        .admission_probe
+        .lock()
+        .expect("admission probe")
+        .clone();
+    if let Some(probe) = probe {
+        probe.observe(&method, &path).await;
+    }
     let route_channel = path
         .strip_prefix("/api/v10/channels/")
         .and_then(|rest| rest.split('/').next())
